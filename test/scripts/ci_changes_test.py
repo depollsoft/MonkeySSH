@@ -81,7 +81,6 @@ class ClassificationTest(unittest.TestCase):
             'pubspec.yaml', 'pubspec.lock', 'assets/version_codenames.json',
             '.github/workflows/ci.yml', 'scripts/ci_changes.py',
             'scripts/cache_sqlite3_native_assets.sh',
-            'third_party/permission_handler_apple/ios/Package.swift',
             'third_party/in_app_purchase_android/android/build.gradle',
         ]:
             with self.subTest(path=path):

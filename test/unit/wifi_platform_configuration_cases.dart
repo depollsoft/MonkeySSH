@@ -27,13 +27,10 @@ void registerWifiPlatformConfigurationTests() {
           infoPlist,
           contains('NSLocationAlwaysAndWhenInUseUsageDescription'),
         );
-        // LocationPermissionStrategy stays compiled in as long as any location
-        // macro is set, and the always-key above already sets PERMISSION_LOCATION,
-        // so dropping this key would not remove the strategy. It would instead
-        // fail at runtime: the PermissionGroupLocationWhenInUse branch reads
-        // NSLocationWhenInUseUsageDescription from the bundle before calling
-        // requestWhenInUseAuthorization, and errors with MISSING_USAGE_DESCRIPTION
-        // when it is absent -- which breaks Wi-Fi SSID lookup.
+        // AppPermissionsPlugin.swift reads NSLocationWhenInUseUsageDescription
+        // from the bundle before calling requestWhenInUseAuthorization and
+        // reports denied without prompting when it is absent, which would
+        // break Wi-Fi SSID lookup.
         expect(infoPlist, contains('NSLocationWhenInUseUsageDescription'));
         expect(infoPlist, contains('current Wi-Fi network name'));
       });
