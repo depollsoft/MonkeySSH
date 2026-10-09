@@ -1460,7 +1460,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    selectedSnippet.command,
+                    snippetLiteralText(selectedSnippet.command),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                     style: FluttyTheme.monoStyle.copyWith(

@@ -53,6 +53,19 @@ void registerSnippetRepositoryTests() {
       });
     });
 
+    group('SnippetRepository - key tokens ready', () {
+      test('is ready only after the upgrade ran, and never runs it', () async {
+        final id = await repository.insert(
+          SnippetsCompanion.insert(name: 'Old', command: 'f({key:1})'),
+        );
+        expect(await repository.keyTokensReady(), isFalse);
+        expect((await repository.getById(id))!.command, 'f({key:1})');
+
+        await repository.escapeLegacyKeyTokens();
+        expect(await repository.keyTokensReady(), isTrue);
+      });
+    });
+
     group('SnippetRepository - Snippets', () {
       test('getAll returns empty list initially', () async {
         final snippets = await repository.getAll();

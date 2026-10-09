@@ -17,6 +17,7 @@ import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_session_manager.dart';
@@ -2845,7 +2846,7 @@ class _SnippetRow extends ConsumerWidget {
   }
 
   void _copySnippet(BuildContext context, WidgetRef ref) {
-    Clipboard.setData(ClipboardData(text: snippet.command));
+    Clipboard.setData(ClipboardData(text: snippetLiteralText(snippet.command)));
     unawaited(ref.read(snippetRepositoryProvider).incrementUsage(snippet.id));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Copied "${snippet.name}" to clipboard')),

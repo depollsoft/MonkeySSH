@@ -6,6 +6,8 @@ import 'snippet_variables.dart';
 /// Longest pause one `{delay:N}` token may ask for.
 const kSnippetMaxDelay = Duration(milliseconds: 5000);
 
+final _lineBreaks = RegExp(r'\r\n|\r|\n');
+
 /// `{key:...}` and `{delay:...}` tokens in a snippet command. The `key` and
 /// `delay` names are lower case only, so code such as `{KEY:1}` stays text.
 final _tokenPattern = RegExp(r'\{(key|delay):([^{}\s]+)\}');
@@ -139,7 +141,16 @@ final class SnippetDelayStep extends SnippetStep {
 @immutable
 class SnippetKeySequence {
   /// Creates a parsed snippet.
-  const SnippetKeySequence(this.steps, {this.errors = const <String>[]});
+  const SnippetKeySequence(
+    this.steps, {
+    this.errors = const <String>[],
+    this.warnings = const <String>[],
+  });
+
+  /// A snippet read as plain text, with no tokens at all: what a snippet is
+  /// while the key-token upgrade of stored snippets has not run.
+  factory SnippetKeySequence.literal(String text) =>
+      SnippetKeySequence([if (text.isNotEmpty) SnippetTextStep(text)]);
 
   /// The steps, in order. Adjacent text is merged into one step.
   final List<SnippetStep> steps;
@@ -147,6 +158,10 @@ class SnippetKeySequence {
   /// Why tokens could not be read, one message per bad token. A snippet with
   /// errors must not be sent.
   final List<String> errors;
+
+  /// Things that are allowed but probably not what was meant, such as a key
+  /// token after `$`, which stays text. They do not stop the snippet.
+  final List<String> warnings;
 
   /// Whether the snippet has key presses or pauses, so it cannot be pasted
   /// as plain text.
@@ -156,6 +171,31 @@ class SnippetKeySequence {
   /// makes sense in a terminal. A chat draft holds text and has nowhere to
   /// press a key.
   bool get needsTerminal => hasActions || errors.isNotEmpty;
+
+  /// Whether text is typed after a line was submitted (by an Enter-like key
+  /// or a line break in the text): a second command line, as opposed to one
+  /// command followed by the key that runs it, or by more keys.
+  bool get typesAfterSubmit {
+    var submitted = false;
+    for (final step in steps) {
+      switch (step) {
+        case SnippetKeyStep(:final chord) when chord.submitsLine:
+          submitted = true;
+        case SnippetTextStep(:final text):
+          for (final (index, line) in text.split(_lineBreaks).indexed) {
+            if (index > 0) {
+              submitted = true;
+            }
+            if (submitted && line.trim().isNotEmpty) {
+              return true;
+            }
+          }
+        default:
+          break;
+      }
+    }
+    return false;
+  }
 
   /// The snippet's text with key and delay tokens left out. For a snippet
   /// without [hasActions] this is the text to paste, with escaped tokens
@@ -185,18 +225,22 @@ class SnippetKeySequence {
     if (values.isEmpty) {
       return this;
     }
-    return SnippetKeySequence([
-      for (final step in steps)
-        if (step is SnippetTextStep)
-          SnippetTextStep(
-            step.text.replaceAllMapped(
-              snippetVariablePattern,
-              (match) => values[match.group(1)] ?? match.group(0)!,
-            ),
-          )
-        else
-          step,
-    ], errors: errors);
+    return SnippetKeySequence(
+      [
+        for (final step in steps)
+          if (step is SnippetTextStep)
+            SnippetTextStep(
+              step.text.replaceAllMapped(
+                snippetVariablePattern,
+                (match) => values[match.group(1)] ?? match.group(0)!,
+              ),
+            )
+          else
+            step,
+      ],
+      errors: errors,
+      warnings: warnings,
+    );
   }
 }
 
@@ -223,6 +267,7 @@ class SnippetKeySequence {
 SnippetKeySequence parseSnippetKeySequence(String command) {
   final steps = <SnippetStep>[];
   final errors = <String>[];
+  final warnings = <String>[];
   final text = StringBuffer();
 
   void flushText() {
@@ -236,6 +281,13 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
   var cursor = 0;
   for (final match in _tokenPattern.allMatches(command)) {
     if (_followsDollar(command, match)) {
+      if (_isValidToken(match)) {
+        final token = match.group(0)!;
+        warnings.add(
+          '\$$token is typed as text, like shell syntax. To type \$ and '
+          'then press the key, write {key:\$}$token.',
+        );
+      }
       continue;
     }
     var backslashes = 0;
@@ -288,7 +340,25 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
   return SnippetKeySequence(
     List.unmodifiable(steps),
     errors: List.unmodifiable(errors),
+    warnings: List.unmodifiable(warnings),
   );
+}
+
+bool _isValidToken(Match match) => match.group(1) == 'delay'
+    ? _parseDelay(match.group(2)!) != null
+    : parseSnippetKeyChord(match.group(2)!) != null;
+
+/// The text a consumer that cannot press keys should use for a snippet:
+/// auto-connect, a cached auto-connect command, or Copy.
+///
+/// A snippet without key or delay tokens returns its text with escaped
+/// tokens turned back into literal text, so a snippet the key-token upgrade
+/// escaped still reads exactly as it did. A snippet with tokens returns its
+/// stored text unchanged; such a snippet only does what it says in a
+/// terminal.
+String snippetLiteralText(String command) {
+  final parsed = parseSnippetKeySequence(command);
+  return parsed.needsTerminal ? command : parsed.plainText;
 }
 
 bool _followsDollar(String command, Match match) =>

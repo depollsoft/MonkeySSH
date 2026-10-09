@@ -236,6 +236,45 @@ void main() {
     );
   });
 
+  group('round 2', () {
+    test('literal text undoes the upgrade escapes but keeps key snippets', () {
+      expect(
+        snippetLiteralText(r"mongosh --eval 'db.c.find(\{key:1})'"),
+        "mongosh --eval 'db.c.find({key:1})'",
+      );
+      expect(snippetLiteralText('plain'), 'plain');
+      expect(snippetLiteralText('claude{key:enter}'), 'claude{key:enter}');
+      expect(snippetLiteralText('{key:nope}'), '{key:nope}');
+    });
+
+    test('warns when a valid token after a dollar sign stays text', () {
+      final parsed = parseSnippetKeySequence(r'/foo${key:enter}');
+      expect(parsed.hasActions, isFalse);
+      expect(parsed.warnings, hasLength(1));
+      expect(
+        parsed.warnings.single,
+        r'${key:enter} is typed as text, like shell syntax. To type $ and '
+        r'then press the key, write {key:$}{key:enter}.',
+      );
+      // Shell syntax that is not a token gets no warning.
+      expect(parseSnippetKeySequence(r'${KEY:-x} ${key:-1}').warnings, isEmpty);
+      // The suggested form works.
+      expect(parseSnippetKeySequence(r'/foo{key:$}{key:enter}').steps, [
+        const SnippetTextStep('/foo'),
+        const SnippetKeyStep(
+          SnippetKeyChord(TerminalKey.digit4, shift: true, character: '4'),
+        ),
+        const SnippetKeyStep(SnippetKeyChord(TerminalKey.enter)),
+      ]);
+    });
+
+    test('a literal sequence has no tokens at all', () {
+      final literal = SnippetKeySequence.literal('{key:esc}');
+      expect(literal.hasActions, isFalse);
+      expect(literal.plainText, '{key:esc}');
+    });
+  });
+
   test('snippets with any key token need a terminal', () {
     expect(parseSnippetKeySequence('echo hi').needsTerminal, isFalse);
     expect(parseSnippetKeySequence(r'echo \{key:esc}').needsTerminal, isFalse);

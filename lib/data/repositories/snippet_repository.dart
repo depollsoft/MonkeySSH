@@ -65,34 +65,26 @@ class SnippetRepository {
   ///
   /// Returns how many snippets changed. Later runs do nothing, so snippets
   /// written with tokens after the upgrade are never touched.
-  Future<int> escapeLegacyKeyTokens() => _db.transaction(() async {
-    final done =
-        await (_db.select(_db.settings)
-              ..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
-            .getSingleOrNull();
-    if (done != null) {
-      return 0;
+  Future<int> escapeLegacyKeyTokens() =>
+      _db.transaction(() => escapeLegacySnippetKeyTokensIn(_db));
+
+  /// Whether stored snippets are safe to read with key tokens: the upgrade
+  /// in [escapeLegacyKeyTokens] has run. Startup runs it. If it failed there,
+  /// this stays false and callers treat every snippet as plain text, so an
+  /// old `{key:esc}` is never pressed. This does not retry the upgrade:
+  /// snippets saved since then were written for key tokens, and escaping
+  /// them would break them. The next launch retries.
+  Future<bool> keyTokensReady() async {
+    try {
+      final done =
+          await (_db.select(_db.settings)
+                ..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
+              .getSingleOrNull();
+      return done != null;
+    } on Object {
+      return false;
     }
-    var changed = 0;
-    for (final snippet in await _db.select(_db.snippets).get()) {
-      final escaped = escapeSnippetKeyTokens(snippet.command);
-      if (escaped == snippet.command) {
-        continue;
-      }
-      await (_db.update(_db.snippets)..where((s) => s.id.equals(snippet.id)))
-          .write(SnippetsCompanion(command: Value(escaped)));
-      changed++;
-    }
-    await _db
-        .into(_db.settings)
-        .insertOnConflictUpdate(
-          SettingsCompanion.insert(
-            key: snippetKeyTokensEscapedSetting,
-            value: 'true',
-          ),
-        );
-    return changed;
-  });
+  }
 
   /// Increment usage count.
   Future<bool> incrementUsage(int id) async {
@@ -169,3 +161,40 @@ class SnippetRepository {
 final snippetRepositoryProvider = Provider<SnippetRepository>(
   (ref) => SnippetRepository(ref.watch(databaseProvider)),
 );
+
+/// The body of [SnippetRepository.escapeLegacyKeyTokens], for callers that
+/// already run inside a transaction on [db], such as a data import. Does
+/// nothing once the setting [snippetKeyTokensEscapedSetting] exists, and
+/// writes it when done.
+Future<int> escapeLegacySnippetKeyTokensIn(AppDatabase db) async {
+  final done =
+      await (db.select(db.settings)
+            ..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
+          .getSingleOrNull();
+  if (done != null) {
+    return 0;
+  }
+  var changed = 0;
+  for (final snippet in await db.select(db.snippets).get()) {
+    final escaped = escapeSnippetKeyTokens(snippet.command);
+    if (escaped == snippet.command) {
+      continue;
+    }
+    await (db.update(db.snippets)..where((s) => s.id.equals(snippet.id))).write(
+      SnippetsCompanion(command: Value(escaped)),
+    );
+    changed++;
+  }
+  await markSnippetKeyTokensEscaped(db);
+  return changed;
+}
+
+/// Records that every stored snippet is already written for key tokens.
+Future<void> markSnippetKeyTokensEscaped(AppDatabase db) => db
+    .into(db.settings)
+    .insertOnConflictUpdate(
+      SettingsCompanion.insert(
+        key: snippetKeyTokensEscapedSetting,
+        value: 'true',
+      ),
+    );

@@ -12,8 +12,10 @@ import 'package:pointycastle/export.dart'
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
+import '../../data/repositories/snippet_repository.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
+import '../models/snippet_key_tokens.dart';
 import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
@@ -541,7 +543,15 @@ class SecureTransferService {
             await _db.customStatement('PRAGMA defer_foreign_keys = ON');
             deferForeignKeysEnabled = true;
             await _clearMigrationTables();
+          } else {
+            // Snippets already here must be upgraded before the flag below
+            // marks every stored snippet as written for key tokens.
+            await escapeLegacySnippetKeyTokensIn(_db);
           }
+          // A payload from a build without key tokens carries no flag: its
+          // `{key:...}` text was literal and must stay literal.
+          final payloadHasKeyTokens = _settingsFromData(data)
+              .containsKey(snippetKeyTokensEscapedSetting);
 
           final groupMapping = await _importGroups(
             _listFromData(data, 'groups'),
@@ -559,6 +569,7 @@ class SecureTransferService {
             _listFromData(data, 'snippets'),
             snippetFolderMapping: snippetFolderMapping,
             autoConnectSnippetIds: importedAutoConnectSnippetIds,
+            escapeLegacyKeyTokens: !payloadHasKeyTokens,
           );
           final hostMapping = await _importHosts(
             rawHosts,
@@ -579,6 +590,10 @@ class SecureTransferService {
             clearExisting: mode == MigrationImportMode.replace,
             hostMapping: hostMapping,
           );
+          // Every snippet is now written for key tokens, whatever the
+          // payload's settings held, so the startup upgrade never runs on
+          // them again.
+          await markSnippetKeyTokensEscaped(_db);
         } finally {
           if (deferForeignKeysEnabled) {
             await _db.customStatement('PRAGMA defer_foreign_keys = OFF');
@@ -919,6 +934,7 @@ class SecureTransferService {
     List<Map<String, dynamic>> rawSnippets, {
     required Map<int, int> snippetFolderMapping,
     required Set<int> autoConnectSnippetIds,
+    required bool escapeLegacyKeyTokens,
   }) async {
     final idMapping = <int, int>{};
     for (final item in rawSnippets) {
@@ -930,7 +946,10 @@ class SecureTransferService {
           'Invalid snippet folder reference in migration payload',
         );
       }
-      final command = _requiredString(item, 'command');
+      final rawCommand = _requiredString(item, 'command');
+      final command = escapeLegacyKeyTokens
+          ? escapeSnippetKeyTokens(rawCommand)
+          : rawCommand;
       if (oldId != null && autoConnectSnippetIds.contains(oldId)) {
         validateImportedAutoConnectCommandText(command);
       }
