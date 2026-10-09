@@ -3,12 +3,19 @@ import 'dart:async';
 import 'package:xterm/xterm.dart';
 
 import '../../domain/models/snippet_key_tokens.dart';
+import '../../domain/services/ssh_service.dart' show TerminalShellStatus;
 import 'terminal_key_input.dart';
 
 /// Pause after a bare Escape byte before the next step, so the remote
 /// program's escape parser times the Escape out instead of reading it and the
 /// next key as one Alt chord. Matches the keyboard toolbar's Esc key.
 const kSnippetEscapeSettle = Duration(milliseconds: 100);
+
+/// Pause after a key that submits a line before the next step, so what
+/// follows reaches the program in a later read. Prompt TUIs read text that
+/// arrives with a Return as a paste: Claude Code above 64 characters, Copilot
+/// CLI above 32, and both then treat the Return as a line break.
+const kSnippetSubmitSettle = TerminalEnterPacer.defaultGap;
 
 /// How sending a snippet sequence ended.
 enum SnippetSendOutcome {
@@ -20,6 +27,24 @@ enum SnippetSendOutcome {
   stopped,
 }
 
+/// Whether a snippet with key tokens should go through the command review
+/// before it is sent.
+///
+/// Only when shell integration reports a prompt on the main screen and no
+/// agent is running: there a submitted line runs as a shell command, which is
+/// what the review is for. Inside an agent, a full-screen program, or a shell
+/// that does not report its prompt, a key snippet is a macro the user wrote
+/// on purpose and goes out in one tap.
+bool shouldReviewSnippetKeySequence({
+  required TerminalShellStatus? shellStatus,
+  required bool isUsingAltBuffer,
+  required bool isAgentToolActive,
+}) =>
+    !isUsingAltBuffer &&
+    !isAgentToolActive &&
+    (shellStatus == TerminalShellStatus.prompt ||
+        shellStatus == TerminalShellStatus.editingCommand);
+
 /// Sends [sequence] to [terminal] one step at a time.
 ///
 /// Text is typed rather than pasted, because a key sequence stands in for
@@ -28,33 +53,54 @@ enum SnippetSendOutcome {
 /// through [sendSnippetKey], which encodes them the way the keyboard toolbar
 /// does in both kitty and legacy keyboard modes.
 ///
+/// [outputIdle] returns a future that completes once output held back by the
+/// terminal's Enter pacer has gone out, or null when nothing is held. Every
+/// pause (an Escape settle, the gap after a submitted line, a `{delay}`) waits
+/// for it first, so the pause separates the bytes on the wire and not just
+/// the calls that queued them.
+///
 /// [canContinue] is checked before every step and after every pause; once it
 /// returns false nothing more is sent. Callers make it false on a disconnect,
-/// a reconnect, a window switch or a newer sequence.
+/// a reconnect, a window switch, typing or a newer sequence.
 Future<SnippetSendOutcome> sendSnippetKeySequence(
   Terminal terminal,
   SnippetKeySequence sequence, {
   required bool Function() canContinue,
+  Future<void>? Function()? outputIdle,
   Future<void> Function(Duration duration) wait = _wait,
 }) async {
-  final steps = sequence.steps;
+  Future<void> drain() async {
+    final idle = outputIdle?.call();
+    if (idle != null) {
+      await idle;
+    }
+  }
+
+  final steps = _expandLineBreaks(sequence.steps);
   for (var index = 0; index < steps.length; index++) {
     if (!canContinue()) {
       return SnippetSendOutcome.stopped;
     }
+    Duration? settle;
     switch (steps[index]) {
       case SnippetTextStep(:final text):
-        _typeText(terminal, text);
+        terminal.textInput(text);
       case SnippetKeyStep(:final chord):
         final sent = _forwardingOutput(
           terminal,
           () => sendSnippetKey(terminal, chord),
         );
-        if (sent == '\x1b' && index + 1 < steps.length) {
-          await wait(kSnippetEscapeSettle);
+        if (chord.submitsLine) {
+          settle = kSnippetSubmitSettle;
+        } else if (sent == '\x1b') {
+          settle = kSnippetEscapeSettle;
         }
       case SnippetDelayStep(:final duration):
-        await wait(duration);
+        settle = duration;
+    }
+    if (settle != null && index + 1 < steps.length) {
+      await drain();
+      await wait(settle);
     }
   }
   return SnippetSendOutcome.completed;
@@ -69,23 +115,22 @@ final _lineBreak = RegExp(r'\r\n|\r|\n');
 // dropped rather than typed.
 final _controlCharacters = RegExp(r'[\x00-\x08\x0B-\x1F\x7F-\x9F]');
 
-void _typeText(Terminal terminal, String text) {
-  final lines = text.split(_lineBreak);
-  for (var index = 0; index < lines.length; index++) {
-    if (index > 0) {
-      sendTerminalEnterInput(
-        terminal,
-        shiftActive: false,
-        altActive: false,
-        ctrlActive: false,
-      );
-    }
-    final line = lines[index].replaceAll(_controlCharacters, '');
-    if (line.isNotEmpty) {
-      terminal.textInput(line);
-    }
-  }
-}
+const _enter = SnippetKeyStep(SnippetKeyChord(TerminalKey.enter));
+
+// Splits text steps at line breaks into text and Enter steps, so a typed
+// line break gets the same pacing as `{key:enter}`.
+List<SnippetStep> _expandLineBreaks(List<SnippetStep> steps) => [
+  for (final step in steps)
+    if (step is SnippetTextStep)
+      for (final (index, line) in step.text.split(_lineBreak).indexed) ...[
+        if (index > 0) _enter,
+        if (line.replaceAll(_controlCharacters, '') case final text
+            when text.isNotEmpty)
+          SnippetTextStep(text),
+      ]
+    else
+      step,
+];
 
 // Runs [send] and returns everything it wrote, while still passing each write
 // on to the terminal's output sink as it happens.
@@ -109,14 +154,18 @@ String _forwardingOutput(Terminal terminal, void Function() send) {
 ///
 /// Enter goes through [sendTerminalEnterInput], like the toolbar's Enter.
 /// When the program has turned on kitty keyboard flags
-/// ([terminalUsesKittyKeyEncoding]) every key goes through
-/// [Terminal.keyInput], which encodes it as CSI u. Otherwise:
-/// - letter, digit, space and punctuation keys are typed, Ctrl turning them
-///   into their control byte and Alt adding an Escape prefix;
-/// - named keys use the terminal's legacy key table, which honours cursor-key
-///   mode and xterm modifier parameters. Alt on a key the table has no Alt
-///   form for becomes an Escape prefix; any other modifier it has no form for
-///   is dropped.
+/// ([terminalUsesKittyKeyEncoding]) keys go through [Terminal.keyInput],
+/// which encodes them as CSI u. Kitty leaves printable keys without Ctrl or
+/// Alt to text input, so those are typed, as the toolbar's text keys are.
+/// Otherwise:
+/// - letter, digit, space and punctuation keys are typed: Shift gives the US
+///   shifted character, Ctrl the control byte, Alt an Escape prefix;
+/// - arrows, Home and End with modifiers send `CSI 1 ; <mod> <final>`, the
+///   xterm form the toolbar uses; without modifiers they use the terminal's
+///   key table, which honours cursor-key mode;
+/// - other named keys use the key table. Alt on a key the table has no Alt
+///   form for becomes an Escape prefix; any other modifier it has no form
+///   for is dropped.
 bool sendSnippetKey(Terminal terminal, SnippetKeyChord chord) {
   final key = chord.key;
   if (key == TerminalKey.enter) {
@@ -127,17 +176,33 @@ bool sendSnippetKey(Terminal terminal, SnippetKeyChord chord) {
       ctrlActive: chord.ctrl,
     );
   }
+  final character = key == TerminalKey.space ? ' ' : chord.character;
   if (terminalUsesKittyKeyEncoding(terminal)) {
-    return terminal.keyInput(
+    if (terminal.keyInput(
       key,
       shift: chord.shift,
       alt: chord.alt,
       ctrl: chord.ctrl,
-    );
+    )) {
+      return true;
+    }
+    if (character == null) {
+      return false;
+    }
+    terminal.textInput(legacySnippetCharacterInput(chord, character));
+    return true;
   }
-  final character = key == TerminalKey.space ? ' ' : chord.character;
   if (character != null) {
     terminal.textInput(legacySnippetCharacterInput(chord, character));
+    return true;
+  }
+
+  final hasModifiers = chord.shift || chord.alt || chord.ctrl;
+  final cursorFinal = _cursorKeyFinals[key];
+  if (hasModifiers && cursorFinal != null) {
+    final modifier =
+        1 + (chord.shift ? 1 : 0) + (chord.alt ? 2 : 0) + (chord.ctrl ? 4 : 0);
+    terminal.textInput('\x1b[1;$modifier$cursorFinal');
     return true;
   }
 
@@ -164,38 +229,26 @@ bool sendSnippetKey(Terminal terminal, SnippetKeyChord chord) {
   return true;
 }
 
-/// Legacy bytes for a character key: Shift upper-cases a letter, Ctrl turns
-/// the character into its control byte when it has one, and Alt adds an
-/// Escape prefix.
+const _cursorKeyFinals = <TerminalKey, String>{
+  TerminalKey.arrowUp: 'A',
+  TerminalKey.arrowDown: 'B',
+  TerminalKey.arrowRight: 'C',
+  TerminalKey.arrowLeft: 'D',
+  TerminalKey.home: 'H',
+  TerminalKey.end: 'F',
+};
+
+/// Legacy bytes for a character key: Shift gives the US shifted character,
+/// Ctrl the control byte ([snippetControlCode]) and Alt an Escape prefix.
 String legacySnippetCharacterInput(SnippetKeyChord chord, String character) {
-  var text = chord.shift ? character.toUpperCase() : character;
+  var text = chord.shift ? snippetShiftedCharacter(character) : character;
   if (chord.ctrl) {
-    final code = _controlCode(character);
+    final code = snippetControlCode(character, shift: chord.shift);
     if (code != null) {
       text = String.fromCharCode(code);
     }
   }
   return chord.alt ? '\x1b$text' : text;
-}
-
-// The control byte a terminal sends for Ctrl plus [character], following
-// xterm: letters map to 1-26 and a few punctuation and digit keys to the
-// remaining C0 codes.
-int? _controlCode(String character) {
-  final unit = character.toLowerCase().codeUnitAt(0);
-  if (unit >= 0x61 && unit <= 0x7A) {
-    return unit - 0x60;
-  }
-  return switch (character) {
-    ' ' || '2' => 0x00,
-    '[' || '3' => 0x1B,
-    r'\' || '4' => 0x1C,
-    ']' || '5' => 0x1D,
-    '6' => 0x1E,
-    '-' || '/' || '7' => 0x1F,
-    '8' => 0x7F,
-    _ => null,
-  };
 }
 
 String? _captureOutput(Terminal terminal, bool Function() send) {

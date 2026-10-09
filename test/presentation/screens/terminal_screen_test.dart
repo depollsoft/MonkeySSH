@@ -68,6 +68,7 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
@@ -2353,16 +2354,40 @@ void main() {
       );
     }
 
-    Future<void> runSnippetFromSheet(WidgetTester tester, String name) async {
+    Future<void> runSnippetFromSheet(
+      WidgetTester tester,
+      String name, {
+      bool expectReview = false,
+    }) async {
       await openTerminalOverflowMenu(tester);
       await tester.tap(terminalMenuItemButton('Snippets'));
       await tester.pumpAndSettle();
       await tester.tap(find.text(name));
-      await tester.pumpAndSettle();
-      if (find.text('Insert command').evaluate().isNotEmpty) {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(
+        find.text('Insert command'),
+        expectReview ? findsOneWidget : findsNothing,
+      );
+      if (expectReview) {
         await tester.tap(find.text('Insert command'));
         await tester.pump();
       }
+    }
+
+    // Records when each shell write happened, on the test's fake clock.
+    List<({Duration at, String data})> timeShellWrites(WidgetTester tester) {
+      final writes = <({Duration at, String data})>[];
+      final start = tester.binding.clock.now();
+      when(() => shellChannel.write(any())).thenAnswer((invocation) {
+        final value = invocation.positionalArguments.single as List<int>;
+        shellWrites.add(List<int>.from(value));
+        writes.add((
+          at: tester.binding.clock.now().difference(start),
+          data: utf8.decode(value),
+        ));
+      });
+      return writes;
     }
 
     String shellOutput() =>
@@ -2381,7 +2406,8 @@ void main() {
           await pumpScreen(tester);
           await tester.pumpAndSettle();
           if (kitty) {
-            // What an agent such as Claude Code pushes on startup.
+            // The kitty disambiguate flag. Claude Code pushes `CSI > 5 u`,
+            // whose Ctrl+letter form is a separate encoder issue.
             session.terminal!.write('\x1b[>1u');
           }
           shellWrites.clear();
@@ -2401,6 +2427,105 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.android),
       );
     }
+
+    for (final atPrompt in [false, true]) {
+      testWidgets(
+        'key snippets are reviewed only at a shell prompt, prompt=$atPrompt',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Status',
+              command: 'git status{key:enter}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (atPrompt) {
+            // Shell integration reports a prompt.
+            session.debugHandlePrivateOsc('133', const ['A']);
+            await tester.pump();
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Status', expectReview: atPrompt);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), 'git status\r');
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets('snippet pauses separate keys on the wire after a held Enter', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Quit vim',
+          command: 'ls{key:enter}{key:esc}{key:esc}:wq{key:enter}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      final writes = timeShellWrites(tester);
+
+      await runSnippetFromSheet(tester, 'Quit vim');
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(writes.map((write) => write.data), [
+        'ls',
+        '\r',
+        '\x1b',
+        '\x1b',
+        ':wq',
+        '\r',
+      ]);
+      Duration gap(int index) => writes[index].at - writes[index - 1].at;
+      // Text after Enter waits for the Enter to go out, then a gap.
+      expect(gap(2), greaterThanOrEqualTo(kSnippetSubmitSettle));
+      // Each bare Escape settles before the next key leaves.
+      expect(gap(3), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      expect(gap(4), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('typing in the terminal stops a running snippet sequence', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      tester
+          .widget<KeyboardToolbar>(find.byType(KeyboardToolbar))
+          .onKeyPressed!();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), isNot(contains('\x1b[Z')));
+      expect(
+        find.text('Snippet stopped: you typed in the terminal.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets('a snippet key sequence stops when the connection drops', (
       tester,

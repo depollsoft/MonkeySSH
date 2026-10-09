@@ -780,6 +780,40 @@ void main() {
       expect(harness.hostRepository.insertedHost, isNull);
     });
 
+    for (final keys in [false, true]) {
+      testWidgets('warns that auto-connect types key tokens, keys=$keys', (
+        tester,
+      ) async {
+        final fixture = HostEditFixture(
+          host: _testHost(
+            id: 1,
+            label: 'Agent Host',
+            autoConnectSnippetId: 7,
+            autoConnectRequiresConfirmation: false,
+          ),
+        );
+        await fixture.setSurfaceSize(tester);
+        await fixture.pump(
+          tester,
+          snippets: [
+            _testSnippet(
+              id: 7,
+              name: 'Start agent',
+              command: keys ? 'claude{key:enter}' : r'echo \{key:enter}',
+            ),
+          ],
+        );
+
+        expect(
+          find.byKey(
+            const ValueKey('auto-connect-key-snippet-warning'),
+            skipOffstage: false,
+          ),
+          keys ? findsOneWidget : findsNothing,
+        );
+      });
+    }
+
     testWidgets(
       'preserves imported auto-connect review when saving unrelated edits',
       (tester) async {

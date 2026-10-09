@@ -16,6 +16,7 @@ import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
@@ -1468,6 +1469,35 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                     ),
                   ),
                 ),
+                if (parseSnippetKeySequence(selectedSnippet.command)
+                    .needsTerminal) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    key: const ValueKey('auto-connect-key-snippet-warning'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Auto-connect sends this snippet as plain text, '
+                          'so its {key:...} and {delay:...} tokens are typed '
+                          'rather than pressed.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ],
           );

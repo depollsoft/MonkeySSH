@@ -16036,20 +16036,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     final sequence = parsedSequence.withVariables(substitution.values);
+    final skipsReview =
+        sequence.hasActions &&
+        !shouldReviewSnippetKeySequence(
+          shellStatus: _shellStatus,
+          isUsingAltBuffer: _isUsingAltBuffer,
+          isAgentToolActive: _isAgentToolActive,
+        );
 
-    final shouldInsert = await _confirmTerminalInsertionIfNeeded(
-      insertedText: sequence.hasActions
-          ? sequence.reviewText
-          : sequence.plainText,
-      buildReview: (commandText) => assessSnippetCommandInsertion(
-        commandText,
-        hadVariableSubstitution: substitution.hadVariableSubstitution,
-      ),
-      title: 'Review snippet command',
-      messageBuilder: (_) =>
-          'Confirm the rendered command before inserting it.',
-      confirmLabel: 'Insert command',
-    );
+    final shouldInsert =
+        skipsReview ||
+        await _confirmTerminalInsertionIfNeeded(
+          insertedText: sequence.hasActions
+              ? sequence.reviewText
+              : sequence.plainText,
+          buildReview: (commandText) => assessSnippetCommandInsertion(
+            commandText,
+            hadVariableSubstitution: substitution.hadVariableSubstitution,
+          ),
+          title: 'Review snippet command',
+          messageBuilder: (_) =>
+              'Confirm the rendered command before inserting it.',
+          confirmLabel: 'Insert command',
+        );
     if (!shouldInsert) {
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       return;
@@ -16075,6 +16084,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _sendSnippetKeySequence(SnippetKeySequence sequence) async {
     final run = ++_snippetSequenceRun;
     final target = _snippetInputTarget;
+    // Typing, a toolbar key or a paste takes over the input line.
+    final inputGeneration = _terminalUserInputGeneration;
     final windowKey = resolveTmuxBarActiveWindowKey(
       _currentTmuxWindowsSnapshot,
     );
@@ -16095,8 +16106,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final outcome = await sendSnippetKeySequence(
         _terminal,
         sequence,
+        outputIdle: () => _terminalEnterPacer?.idle,
         canContinue: () =>
             !connectionDropped &&
+            inputGeneration == _terminalUserInputGeneration &&
             mounted &&
             run == _snippetSequenceRun &&
             terminalAttachmentPasteTargetsCurrentMuxWindow(
@@ -16113,7 +16126,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           mounted &&
           run == _snippetSequenceRun) {
         _showClipboardMessage(
-          'Snippet stopped: the connection or window changed.',
+          inputGeneration == _terminalUserInputGeneration
+              ? 'Snippet stopped: the connection or window changed.'
+              : 'Snippet stopped: you typed in the terminal.',
         );
       }
     } finally {

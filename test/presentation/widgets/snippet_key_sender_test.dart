@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
 import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
@@ -32,6 +34,8 @@ String _hardwareKey(TerminalKey key, {bool alt = false}) {
 }
 
 // Claude Code and Codex push `CSI > 5 u`: disambiguate plus alternate keys.
+// Their Ctrl+letter form (`CSI 99:67;5u`, with the shifted key) is a separate
+// encoder issue, so exact Ctrl bytes are checked with `CSI > 1 u`.
 const _kittyAgent = '\x1b[>5u';
 
 void main() {
@@ -59,9 +63,46 @@ void main() {
 
     test('adds Escape for Alt the key table has no form for', () {
       expect(_send('alt+esc'), '\x1b\x1b');
-      // Keys the table does know with Alt match a hardware keyboard.
-      expect(_send('alt+left'), _hardwareKey(TerminalKey.arrowLeft, alt: true));
+      expect(_send('alt+pageup'), _hardwareKey(TerminalKey.pageUp, alt: true));
     });
+
+    test('sends arrows, Home and End with xterm modifier parameters', () {
+      expect(_send('shift+up'), '\x1b[1;2A');
+      expect(_send('alt+up'), '\x1b[1;3A');
+      expect(_send('shift+down'), '\x1b[1;2B');
+      expect(_send('shift+left'), '\x1b[1;2D');
+      expect(_send('alt+left'), '\x1b[1;3D');
+      expect(_send('ctrl+right'), '\x1b[1;5C');
+      expect(_send('ctrl+shift+home'), '\x1b[1;6H');
+      expect(_send('alt+end'), '\x1b[1;3F');
+    });
+
+    test('types shifted characters the way a US keyboard does', () {
+      expect(_send('shift+1'), '!');
+      expect(_send('shift+/'), '?');
+      expect(_send('shift+='), '+');
+      expect(_send('+'), '+');
+      expect(_send('?'), '?');
+      expect(_send('G'), 'G');
+      expect(_send('shift+;'), ':');
+      expect(_send('alt+?'), '\x1b?');
+      expect(_send('ctrl+_'), '\x1f');
+      expect(_send('ctrl+@'), '\x00');
+    });
+
+    for (final flags in ['\x1b[>1u', _kittyAgent]) {
+      test(
+        'types plain character keys in kitty mode ${flags.substring(2)}',
+        () {
+          expect(_send('a', setup: flags), 'a');
+          expect(_send('space', setup: flags), ' ');
+          expect(_send('1', setup: flags), '1');
+          expect(_send('shift+a', setup: flags), 'A');
+          expect(_send('shift+;', setup: flags), ':');
+          expect(_send('G', setup: flags), 'G');
+        },
+      );
+    }
 
     test('uses CSI u once a program pushes kitty flags', () {
       expect(_send('esc', setup: _kittyAgent), '\x1b[27u');
@@ -78,6 +119,53 @@ void main() {
   });
 
   group('sendSnippetKeySequence', () {
+    test('waits for held output before any pause', () async {
+      final target = _terminal();
+      final drained = Completer<void>();
+      final events = <String>[];
+      final sending = sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('x{key:enter}{key:esc}y{delay:20}z'),
+        canContinue: () => true,
+        outputIdle: () {
+          events.add('idle');
+          return drained.future;
+        },
+        wait: (duration) async => events.add('wait ${duration.inMilliseconds}'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // The Enter may still be held: nothing after it goes out, and the gap
+      // after it has not started.
+      expect(target.writes, ['x', '\r']);
+      expect(events, ['idle']);
+
+      drained.complete();
+      expect(await sending, SnippetSendOutcome.completed);
+      expect(target.writes, ['x', '\r', '\x1b', 'y', 'z']);
+      expect(events, [
+        'idle',
+        'wait ${kSnippetSubmitSettle.inMilliseconds}',
+        'idle',
+        'wait ${kSnippetEscapeSettle.inMilliseconds}',
+        'idle',
+        'wait 20',
+      ]);
+    });
+
+    test('keeps text after a typed line break in a later step', () async {
+      final target = _terminal();
+      final waits = <Duration>[];
+      await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('/clear\nwrite a test{key:enter}'),
+        canContinue: () => true,
+        wait: (duration) async => waits.add(duration),
+      );
+      expect(target.writes, ['/clear', '\r', 'write a test', '\r']);
+      expect(waits, [kSnippetSubmitSettle]);
+    });
+
     test('types text, presses keys and waits', () async {
       final target = _terminal();
       final waits = <Duration>[];
