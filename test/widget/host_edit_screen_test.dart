@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:drift/drift.dart' show InvalidDataException, Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,12 +103,15 @@ MonetizationService _buildProMonetizationService() {
 }
 
 class _FixedWifiNetworkService extends WifiNetworkService {
-  _FixedWifiNetworkService(this.permission);
+  _FixedWifiNetworkService(this.permission, {this.reply});
 
   final WifiPermissionStatus permission;
 
+  /// When set, requestPermission returns this instead of [permission].
+  final Future<WifiPermissionStatus>? reply;
+
   @override
-  Future<WifiPermissionStatus> requestPermission() async => permission;
+  Future<WifiPermissionStatus> requestPermission() async => reply ?? permission;
 
   @override
   Future<String?> getCurrentSsid() async => null;
@@ -1631,5 +1636,56 @@ void main() {
         },
       );
     }
+
+    testWidgets('stops waiting on a location prompt that never answers', (
+      tester,
+    ) async {
+      final jumpHost = _testHost(
+        id: 2,
+        label: 'Bastion',
+        autoConnectRequiresConfirmation: false,
+      );
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Behind Bastion',
+          autoConnectRequiresConfirmation: false,
+        ).copyWith(jumpHostId: const Value(2)),
+      );
+      await fixture.setSurfaceSize(tester);
+      await fixture.pump(
+        tester,
+        overrides: [
+          allHostsProvider.overrideWith(
+            (ref) => Stream.value([fixture.host, jumpHost]),
+          ),
+          wifiNetworkServiceProvider.overrideWithValue(
+            _FixedWifiNetworkService(
+              WifiPermissionStatus.granted,
+              reply: Completer<WifiPermissionStatus>().future,
+            ),
+          ),
+        ],
+      );
+
+      final addCurrent = find.byKey(const Key('skip-jump-add-current-ssid'));
+      await tester.scrollUntilVisible(
+        addCurrent,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(addCurrent);
+      await tester.pump();
+      expect(tester.widget<OutlinedButton>(addCurrent).onPressed, isNull);
+
+      await tester.pump(const Duration(seconds: 61));
+      await tester.pump(const Duration(milliseconds: 750));
+
+      expect(
+        find.textContaining('Location permission is required'),
+        findsOneWidget,
+      );
+      expect(tester.widget<OutlinedButton>(addCurrent).onPressed, isNotNull);
+    });
   });
 }

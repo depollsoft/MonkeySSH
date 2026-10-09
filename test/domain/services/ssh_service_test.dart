@@ -66,6 +66,7 @@ class _CapturingSshService extends SshService {
     required super.keyRepository,
     super.wifiNetworkService,
     super.wifiPermissionTimeout,
+    super.onNonFatalError,
   });
 
   SshConnectionConfig? capturedConfig;
@@ -96,15 +97,15 @@ class _StubWifiNetworkService extends WifiNetworkService {
   final String? ssid;
   final WifiPermissionStatus permissionStatus;
 
-  /// When set, requestPermission waits on this instead of answering at once.
-  final Future<WifiPermissionStatus>? permissionReply;
+  /// When set, requestPermission returns this instead of answering at once.
+  final Future<WifiPermissionStatus> Function()? permissionReply;
   int requestPermissionCallCount = 0;
   int getCurrentSsidCallCount = 0;
 
   @override
   Future<WifiPermissionStatus> requestPermission() async {
     requestPermissionCallCount++;
-    return permissionReply ?? permissionStatus;
+    return permissionReply?.call() ?? permissionStatus;
   }
 
   @override
@@ -8741,7 +8742,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final keyRepo = KeyRepository(db, encryption);
       final wifiNetworkService = _StubWifiNetworkService(
         'home',
-        permissionReply: Completer<WifiPermissionStatus>().future,
+        permissionReply: () => Completer<WifiPermissionStatus>().future,
       );
       final service = _CapturingSshService(
         hostRepository: hostRepo,
@@ -8765,6 +8766,35 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         messages,
         contains('Location permission check timed out. Using jump host…'),
       );
+    });
+
+    test('uses jump host and reports a non-fatal when the permissions channel '
+        'is missing', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final encryption = SecretEncryptionService.forTesting();
+      final hostRepo = HostRepository(db, encryption);
+      final keyRepo = KeyRepository(db, encryption);
+      final wifiNetworkService = _StubWifiNetworkService(
+        'home',
+        permissionReply: () =>
+            Future.error(MissingPluginException('No implementation found')),
+      );
+      final reported = <Object>[];
+      final service = _CapturingSshService(
+        hostRepository: hostRepo,
+        keyRepository: keyRepo,
+        wifiNetworkService: wifiNetworkService,
+        onNonFatalError: (error, _) => reported.add(error),
+      );
+
+      final hostId = await seedHostWithJump(db, skipJumpHostOnSsids: 'home');
+      final result = await service.connectToHost(hostId);
+
+      expect(result.error, 'stubbed');
+      expect(service.capturedConfig?.jumpHost, isNotNull);
+      expect(wifiNetworkService.getCurrentSsidCallCount, 0);
+      expect(reported, [isA<MissingPluginException>()]);
     });
 
     test('uses jump host when only approximate location is allowed', () async {

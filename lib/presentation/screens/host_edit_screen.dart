@@ -2523,6 +2523,10 @@ class _SkipJumpHostOnWifiSection extends ConsumerStatefulWidget {
 
 class _SkipJumpHostOnWifiSectionState
     extends ConsumerState<_SkipJumpHostOnWifiSection> {
+  /// Longer than anyone takes to answer the prompt; a prompt the OS never
+  /// answers must not leave the button spinning.
+  static const _permissionTimeout = Duration(seconds: 60);
+
   bool _detecting = false;
 
   Future<void> _addCurrentSsid() async {
@@ -2532,7 +2536,10 @@ class _SkipJumpHostOnWifiSectionState
     final permissions = ref.read(appPermissionServiceProvider);
     try {
       final wifiService = ref.read(wifiNetworkServiceProvider);
-      final permission = await wifiService.requestPermission();
+      final permission = await wifiService.requestPermission().timeout(
+        _permissionTimeout,
+        onTimeout: () => WifiPermissionStatus.denied,
+      );
       if (!mounted) return;
       if (permission != WifiPermissionStatus.granted) {
         final approximate = permission == WifiPermissionStatus.approximate;

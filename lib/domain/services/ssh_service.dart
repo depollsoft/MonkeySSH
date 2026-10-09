@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
 import 'package:xterm/src/utils/unicode_v11.dart';
@@ -1399,6 +1400,7 @@ class SshService {
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
     this.wifiPermissionTimeout = const Duration(seconds: 15),
+    this.onNonFatalError,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
   }) : wifiNetworkService = wifiNetworkService ?? WifiNetworkService(),
@@ -1435,6 +1437,10 @@ class SshService {
   /// connecting through the jump host. A prompt the user leaves open, or one
   /// the OS never answers, must not hold the connection.
   final Duration wifiPermissionTimeout;
+
+  /// Reports an error the connection recovered from but that points at a bug,
+  /// such as the permissions channel never having been registered.
+  final void Function(Object error, StackTrace stackTrace)? onNonFatalError;
 
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
@@ -1582,15 +1588,24 @@ class SshService {
           );
           preflightPhase = 'check_wifi_bypass';
           var permissionTimedOut = false;
-          final permission = await wifiNetworkService
-              .requestPermission()
-              .timeout(
-                wifiPermissionTimeout,
-                onTimeout: () {
-                  permissionTimedOut = true;
-                  return WifiPermissionStatus.denied;
-                },
-              );
+          var permissionChannelMissing = false;
+          WifiPermissionStatus permission;
+          try {
+            permission = await wifiNetworkService.requestPermission().timeout(
+              wifiPermissionTimeout,
+              onTimeout: () {
+                permissionTimedOut = true;
+                return WifiPermissionStatus.denied;
+              },
+            );
+          } on MissingPluginException catch (error, stackTrace) {
+            // The permissions channel was never registered, a build bug.
+            // Report it, but the jump host still works, so connect through it
+            // instead of failing the connection.
+            permissionChannelMissing = true;
+            onNonFatalError?.call(error, stackTrace);
+            permission = WifiPermissionStatus.denied;
+          }
           String? currentSsid;
           if (permission == WifiPermissionStatus.granted) {
             currentSsid = await wifiNetworkService.getCurrentSsid();
@@ -1617,6 +1632,7 @@ class SshService {
               'hostId': hostId,
               'permissionStatus': permission.name,
               'permissionTimedOut': permissionTimedOut,
+              'permissionChannelMissing': permissionChannelMissing,
               'hasCurrentSsid': currentSsid != null,
               'skipJumpHost': skipJumpHost,
             },
@@ -7627,8 +7643,15 @@ final sshServiceProvider = Provider<SshService>(
       interactiveAuthPromptHandlerProvider,
     ),
     wifiNetworkService: ref.watch(wifiNetworkServiceProvider),
+    onNonFatalError: _nonFatalReporter(ref.read(telemetryServiceProvider)),
   ),
 );
+
+void Function(Object, StackTrace) _nonFatalReporter(
+  TelemetryService telemetry,
+) =>
+    (error, stackTrace) =>
+        unawaited(telemetry.recordError(error, stackTrace, fatal: false));
 
 /// Provider for tracking active SSH sessions.
 final activeSessionsProvider =
