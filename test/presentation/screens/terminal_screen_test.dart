@@ -2983,6 +2983,50 @@ void main() {
       expect(secondOffset, lessThan(firstOffset));
     });
 
+    testWidgets('find searches the scrollback and closes cleanly', (
+      tester,
+    ) async {
+      final terminal = session.terminal!;
+      for (var row = 0; row < 80; row += 1) {
+        terminal.write(
+          row == 5 ? 'needle near the top\r\n' : 'output $row\r\n',
+        );
+      }
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final scrollController = terminalView().scrollController!;
+      scrollController.jumpTo(scrollController.position.maxScrollExtent);
+      await tester.pump();
+      final bottom = scrollController.offset;
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      expect(terminalView().searchHits, isNotNull);
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'NEEDLE',
+      );
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(scrollController.offset, lessThan(bottom));
+
+      await tester.tap(find.byTooltip('Close find'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('terminal-search-bar')),
+        findsNothing,
+      );
+      expect(terminalView().searchHits, isNull);
+    });
+
     for (final (updateAgents, adapters) in [
       (false, false),
       (true, false),

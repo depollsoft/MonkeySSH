@@ -112,6 +112,8 @@ import '../widgets/terminal_paste_upload_strip.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_port_forwards_sheet.dart';
 import '../widgets/terminal_prompt_tail.dart' show scanPromptTail;
+import '../widgets/terminal_scrollback_search.dart';
+import '../widgets/terminal_scrollback_search_bar.dart';
 import '../widgets/terminal_text_input_handler.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
@@ -855,6 +857,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   double _lastTerminalScrollOffset = 0;
   bool _isTerminalScrollToBottomQueued = false;
   bool _isNavigatingCommandMarks = false;
+  TerminalScrollbackSearchController? _scrollbackSearch;
   int? _previousCommandNavigationRow;
   int? _previousCommandNavigationConnectionId;
   int? _previousCommandNavigationMarkCount;
@@ -11128,6 +11131,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _terminalScrollController
       ..removeListener(_handleTerminalScroll)
       ..dispose();
+    _scrollbackSearch?.dispose();
     unawaited(_releaseShellStreams());
     _terminalFocusNode.dispose();
     _systemKeyboardVisibilityController.removeListener(
@@ -11702,6 +11706,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                         : 'Previous Command ($commandMarkCount)',
                     action: 'previous_command',
                   ),
+                if (showsTerminalViewportMenuActions)
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.search_rounded,
+                    label: 'Find',
+                    action: 'find_in_scrollback',
+                  ),
                 if (showsTerminalViewportMenuActions &&
                     _workingDirectoryPath != null)
                   _terminalOverflowMenuItem(
@@ -11764,11 +11775,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 _showKeyboardToolbar &&
                 !showsDisconnectedOverlay &&
                 (!_isNativeSelectionMode || _isMobilePlatform);
-            final terminalArea = _buildTerminalWithTmuxBar(
-              terminalTheme,
-              isMobile,
-              theme,
-              connectionState,
+            final terminalArea = TerminalScrollbackSearchOverlay(
+              search: showsNativeAgent ? null : _scrollbackSearch,
+              scrollController: _terminalScrollController,
+              lineHeight: () => _terminalLineHeight,
+              onClose: _closeScrollbackSearch,
+              child: _buildTerminalWithTmuxBar(
+                terminalTheme,
+                isMobile,
+                theme,
+                connectionState,
+              ),
             );
             return Column(
               children: [
@@ -12548,6 +12565,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ((_observedSession ?? _activeSession())
                 ?.monkeyMuxViewportClippingEnabled ??
             false);
+    _scrollbackSearch?.terminal = _terminal;
     Widget terminalView = MonkeyTerminalView(
       key: _terminalViewKey,
       _terminal,
@@ -12569,6 +12587,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       theme: terminalTheme.toXtermTheme(),
       textStyle: terminalTextStyle,
       inlineUnderlines: inlineUnderlines,
+      searchHits: _scrollbackSearch,
       keyboardAppearance: keyboardAppearance,
       padding: terminalViewportPadding,
       resizeTerminalToViewport: !clipsMonkeyMuxSharedGrid,
@@ -13022,6 +13041,35 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  void _openScrollbackSearch() {
+    if (_scrollbackSearch != null) {
+      return;
+    }
+    setState(() {
+      _scrollbackSearch = TerminalScrollbackSearchController(
+        terminal: _terminal,
+        anchorRow: () => terminalViewportBottomRow(
+          _terminalScrollController,
+          lineHeight: _terminalLineHeight,
+        ),
+      );
+    });
+  }
+
+  void _closeScrollbackSearch() {
+    final search = _scrollbackSearch;
+    if (search == null || !mounted) {
+      return;
+    }
+    setState(() => _scrollbackSearch = null);
+    // The terminal view drops its listener in this frame's build.
+    WidgetsBinding.instance.addPostFrameCallback((_) => search.dispose());
+    _restoreTerminalFocus();
+  }
+
+  double get _terminalLineHeight =>
+      _terminalViewKey.currentState?.renderTerminal.lineHeight ?? 0;
+
   Future<void> _openAgentManagement() async {
     if (!await requireMonetizationFeatureAccess(
           context: context,
@@ -13204,6 +13252,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         break;
       case 'previous_command':
         await _jumpToPreviousCommandMark();
+        break;
+      case 'find_in_scrollback':
+        _openScrollbackSearch();
         break;
       case 'copy_working_directory':
         await _copyWorkingDirectory();
