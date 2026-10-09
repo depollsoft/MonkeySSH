@@ -25,6 +25,7 @@ import '../presentation/screens/settings_screen.dart';
 import '../presentation/screens/sftp_screen.dart';
 import '../presentation/screens/snippet_edit_screen.dart';
 import '../presentation/screens/snippets_screen.dart';
+import '../presentation/screens/ssh_config_import_screen.dart';
 import '../presentation/screens/terminal_screen.dart';
 import '../presentation/screens/upgrade_screen.dart';
 import 'keyboard_dismiss_route_observer.dart';
@@ -163,6 +164,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         name: Routes.hostAdd,
         builder: (context, state) =>
             HostEditScreen(initialSshUrl: state.uri.queryParameters['sshUrl']),
+      ),
+      GoRoute(
+        path: '/hosts/import-ssh-config',
+        name: Routes.hostImportSshConfig,
+        builder: (context, state) => const SshConfigImportScreen(),
       ),
       GoRoute(
         path: '/hosts/edit/:hostId',

@@ -53,8 +53,10 @@ import '../widgets/connection_status_dot.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
+import '../widgets/host_setup_checklist.dart';
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
+import '../widgets/public_key_share_sheet.dart';
 import '../widgets/reorder_helpers.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/tmux_window_navigator.dart' show confirmMuxWindowClose;
@@ -882,6 +884,11 @@ class HostsPanel extends ConsumerWidget {
         PanelHeader(
           title: 'hosts',
           actions: [
+            _SmallIconButton(
+              icon: Icons.upload_file_outlined,
+              tooltip: 'Import ssh_config',
+              onTap: () => context.push('/hosts/import-ssh-config'),
+            ),
             _ActionButton(
               icon: Icons.add,
               label: 'Add Host',
@@ -919,6 +926,11 @@ class HostsPanel extends ConsumerWidget {
       primaryLabel: 'Add Host',
       onPrimary: () => context.push('/hosts/add'),
       secondaryActions: [
+        BrandEmptyAction(
+          icon: Icons.upload_file_outlined,
+          label: 'Import ssh_config',
+          onTap: () => context.push('/hosts/import-ssh-config'),
+        ),
         BrandEmptyAction(
           icon: Icons.content_paste_go_outlined,
           label: 'Paste SSH URL',
@@ -1321,6 +1333,11 @@ class _HostRow extends ConsumerWidget {
                   ),
                 ],
               ),
+              if (!_redactStoreScreenshotIdentities)
+                Padding(
+                  padding: const EdgeInsets.only(left: 20),
+                  child: HostSetupChecklistLine(host: host),
+                ),
               if (previewEntries.isNotEmpty &&
                   !_redactStoreScreenshotIdentities) ...[
                 const SizedBox(height: 8),
@@ -1746,12 +1763,19 @@ class _ConnectionsPanel extends ConsumerWidget {
         Expanded(
           child: connectionIds.isEmpty
               ? const Center(
-                  child: Padding(
+                  child: SingleChildScrollView(
                     padding: EdgeInsets.symmetric(horizontal: 24),
-                    child: BrandEmptyState(
-                      title: 'no active sessions',
-                      message:
-                          'Open a host and your live terminals show up here.',
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        BrandEmptyState(
+                          title: 'no active sessions',
+                          message:
+                              'Open a host and your live terminals show up '
+                              'here.',
+                        ),
+                        HostSetupEmptyStateCard(),
+                      ],
                     ),
                   ),
                 )
@@ -2224,10 +2248,24 @@ class _KeyRow extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () => _copyPublicKey(context),
-                icon: const Icon(Icons.copy, size: 16),
-                label: const Text('Copy Public Key'),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _copyPublicKey(context),
+                      icon: const Icon(Icons.copy, size: 16),
+                      label: const Text('Copy Public Key'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                      icon: const Icon(Icons.qr_code_2, size: 16),
+                      label: const Text('QR & Share'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
