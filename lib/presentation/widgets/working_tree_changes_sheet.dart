@@ -310,15 +310,6 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
         children: [
           _buildHeader(context, selected),
           const Divider(height: 1),
-          if (_snapshot != null && _loadError != null && !_loading)
-            _RefreshFailedBanner(
-              message: _loadError!,
-              shownAt: formatWorkingTreeRefreshTime(
-                _snapshot!.refreshedAt,
-                use24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
-              ),
-              onRetry: _refresh,
-            ),
           Expanded(
             child: selected == null
                 ? _buildFileListBody(context)
@@ -326,6 +317,26 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
           ),
         ],
       ),
+    );
+  }
+
+  /// The "Refresh failed" notice, when a refresh failed after an earlier
+  /// read. It is the first item of whichever body scrolls, so a large text
+  /// size can push it off screen but never squeeze the results out.
+  Widget? _refreshFailedBanner(BuildContext context, EdgeInsets margin) {
+    final snapshot = _snapshot;
+    final error = _loadError;
+    if (snapshot == null || error == null || _loading) {
+      return null;
+    }
+    return _RefreshFailedBanner(
+      message: error,
+      shownAt: formatWorkingTreeRefreshTime(
+        snapshot.refreshedAt,
+        use24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+      ),
+      onRetry: _refresh,
+      margin: margin,
     );
   }
 
@@ -561,7 +572,19 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
         ),
       );
     }
-    final items = <Object>[if (snapshot.truncated) const _TruncatedNotice()];
+    final banner = _refreshFailedBanner(
+      context,
+      const EdgeInsets.fromLTRB(
+        FluttyTheme.spacingMd,
+        FluttyTheme.spacingSm,
+        FluttyTheme.spacingMd,
+        0,
+      ),
+    );
+    final items = <Object>[
+      ?banner,
+      if (snapshot.truncated) const _TruncatedNotice(),
+    ];
     for (final group in GitChangeGroup.values) {
       final files = snapshot.filesIn(group);
       if (files.isNotEmpty) {
@@ -576,7 +599,7 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
       padding: const EdgeInsets.only(bottom: FluttyTheme.spacingLg),
       itemCount: items.length,
       itemBuilder: (context, index) => switch (items[index]) {
-        final _TruncatedNotice notice => notice,
+        final Widget notice => notice,
         (group: final GitChangeGroup group, count: final int count) =>
           _GroupHeader(group: group, count: count),
         final GitChangedFile file => _ChangedFileTile(
@@ -629,6 +652,10 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
       );
     }
     final items = <Widget>[
+      ?_refreshFailedBanner(
+        context,
+        const EdgeInsets.only(bottom: FluttyTheme.spacingSm),
+      ),
       if (meta.isNotEmpty) _DiffMetaLines(lines: meta),
       if (diff.hunks.isEmpty)
         Padding(
@@ -687,20 +714,46 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
     );
   }
 
-  Widget _scrollableState(Widget child) => LayoutBuilder(
-    builder: (context, constraints) => SingleChildScrollView(
-      controller: widget.scrollController,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: constraints.maxHeight),
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(FluttyTheme.spacingLg),
-            child: child,
+  Widget _scrollableState(Widget child) {
+    final banner = _refreshFailedBanner(
+      context,
+      const EdgeInsets.fromLTRB(
+        FluttyTheme.spacingMd,
+        FluttyTheme.spacingSm,
+        FluttyTheme.spacingMd,
+        0,
+      ),
+    );
+    if (banner != null) {
+      return SingleChildScrollView(
+        controller: widget.scrollController,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            banner,
+            Padding(
+              padding: const EdgeInsets.all(FluttyTheme.spacingLg),
+              child: child,
+            ),
+          ],
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        controller: widget.scrollController,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(FluttyTheme.spacingLg),
+              child: child,
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// Untracked entries ending in `/` are directories git did not descend
@@ -785,11 +838,13 @@ class _RefreshFailedBanner extends StatelessWidget {
     required this.message,
     required this.shownAt,
     required this.onRetry,
+    required this.margin,
   });
 
   final String message;
   final String shownAt;
   final VoidCallback onRetry;
+  final EdgeInsets margin;
 
   @override
   Widget build(BuildContext context) {
@@ -799,13 +854,17 @@ class _RefreshFailedBanner extends StatelessWidget {
       liveRegion: true,
       container: true,
       child: Container(
-        width: double.infinity,
-        color: scheme.surfaceContainerHighest,
+        margin: margin,
         padding: const EdgeInsets.fromLTRB(
-          FluttyTheme.spacingMd,
           FluttyTheme.spacingSm,
-          FluttyTheme.spacingSm,
-          FluttyTheme.spacingSm,
+          FluttyTheme.spacingXs,
+          FluttyTheme.spacingXs,
+          FluttyTheme.spacingXs,
+        ),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+          border: Border.all(color: scheme.outlineVariant),
         ),
         child: Row(
           children: [

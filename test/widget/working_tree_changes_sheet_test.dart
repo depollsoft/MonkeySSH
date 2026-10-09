@@ -440,6 +440,47 @@ void main() {
     expect(find.byType(AcpDiffView), findsNWidgets(2));
   });
 
+  testWidgets('a failed refresh fits a small phone at large text sizes', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile, stagedRename, untrackedFile]),
+        const GitWorkingTreeTimeoutException(),
+      ],
+      diffs: {'lib/main.dart': twoHunkDiff()},
+    );
+    tester.view.physicalSize = const Size(320, 568) * 2;
+    tester.view.devicePixelRatio = 2;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: _Host(service: service, directory: '/srv/project'),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Refresh failed'), findsOneWidget);
+    // The retained list is still reachable below the banner.
+    await tester.scrollUntilVisible(
+      find.text('notes.txt'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('notes.txt'), findsOneWidget);
+
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Refresh failed'), findsOneWidget);
+  });
+
   testWidgets('a failed refresh of a clean tree does not claim it is clean', (
     tester,
   ) async {
