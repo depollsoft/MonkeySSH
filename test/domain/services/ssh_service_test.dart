@@ -147,7 +147,7 @@ class _AuthenticationFixture {
   late final SshService service;
   SSHPasswordRequestHandler? capturedPassword;
   SSHUserInfoRequestHandler? capturedUserInfo;
-  List<SSHKeyPair>? capturedIdentities;
+  List<SSHIdentity>? capturedIdentities;
 
   static Future<_AuthenticationFixture> create({
     required String hostname,
@@ -7406,7 +7406,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         );
       }
       final endpoint = _FakeForwardHostKeySocket(hostKey);
-      final identityLists = <List<SSHKeyPair>?>[];
+      final identityLists = <List<SSHIdentity>?>[];
       final service = SshService(
         knownHostsRepository: repository,
         socketConnector: (host, port, {timeout}) async =>
