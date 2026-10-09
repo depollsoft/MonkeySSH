@@ -53,6 +53,12 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- The activity runs a cached engine that never receives the
+                 intent that launched it, so MainActivity forwards app links
+                 over its own channel instead of Flutter's route channel. -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="false" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -63,6 +69,20 @@
                 <data
                     android:scheme="content"
                     android:mimeType="application/x-monkeyssh-transfer"/>
+            </intent-filter>
+            <!-- monkeyssh:// links open hosts, windows and chats; ssh:// URLs
+                 open a saved host or a prefilled add-host form. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="monkeyssh"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="ssh"/>
             </intent-filter>
         </activity>
         <service
