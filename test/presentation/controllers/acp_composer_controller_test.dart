@@ -990,6 +990,48 @@ void main() {
       expect(controller.attachments, isEmpty);
     });
 
+    test('refused prompts with too many attachments together are not '
+        'offered for retry', () async {
+      final manager = RecordingAcpSessionManager();
+      final gate = Completer<void>();
+      manager
+        ..promptGate = gate
+        ..throwOnPrompt = const AcpPromptNotSentException();
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxCount: 1),
+        ),
+        session: _session(embeddedContext: true),
+      );
+      addTearDown(controller.dispose);
+      AcpAttachmentCandidate file(String name) => AcpAttachmentCandidate.memory(
+        name: name,
+        bytes: Uint8List.fromList('notes'.codeUnits),
+        mimeType: 'text/plain',
+      );
+      controller
+        ..setText('A')
+        ..addAttachment(file('a.txt'));
+      expect(await controller.send(), isTrue);
+      controller
+        ..setText('B')
+        ..addAttachment(file('b.txt'));
+      expect(await controller.send(), isTrue);
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+
+      // Each prompt fitted alone; together they do not, so Retry would fail.
+      expect(controller.text, 'A\n\nB');
+      expect(controller.attachments.map((a) => a.name), ['a.txt', 'b.txt']);
+      expect(controller.canRetryFailedPrompt, isFalse);
+      expect(controller.error?.kind, AcpComposerErrorKind.attachment);
+
+      controller.removeAttachment(controller.attachments.last.id);
+      expect(controller.error?.kind, AcpComposerErrorKind.send);
+      expect(controller.canRetryFailedPrompt, isTrue);
+    });
+
     test('editing keeps prompts whose attachments would not fit', () async {
       final manager = RecordingAcpSessionManager()
         ..throwOnPrompt = const AcpConnectionClosedException();

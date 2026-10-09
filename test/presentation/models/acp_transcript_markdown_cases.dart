@@ -205,6 +205,30 @@ void registerAcpTranscriptMarkdownTests() {
       );
     });
 
+    test('never embeds image data or local images pasted into a prompt', () {
+      final payload = 'A' * 80;
+      final export = _export([
+        AcpUserPromptEntry(
+          id: 'u',
+          parts: [
+            AcpTextPart(
+              'See ![log](data:image/png;base64,$payload)\n'
+              '![local](file:///Users/me/shot.png) and '
+              'data:text/plain;base64,$payload\n'
+              '![remote](https://example.com/a.png)',
+            ),
+          ],
+        ),
+      ]);
+      final markdown = export.markdown;
+      expect(markdown, isNot(contains('base64')));
+      expect(markdown, isNot(contains('file:///Users')));
+      expect(markdown, contains('_[image not included: log]_'));
+      expect(markdown, contains('_[image not included: local]_'));
+      expect(markdown, contains('![remote](https://example.com/a.png)'));
+      expect(export.omittedAttachments, 3);
+    });
+
     test('excludes reasoning unless asked', () {
       expect(_export(_conversation()).markdown, isNot(contains('secret')));
       final included = _export(_conversation(), includeReasoning: true);

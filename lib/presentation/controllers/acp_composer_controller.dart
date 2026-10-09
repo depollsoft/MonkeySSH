@@ -253,9 +253,14 @@ class AcpComposerController extends ChangeNotifier {
   AcpTurnRecovery? get turnRecovery => _turnRecovery;
 
   /// Whether the draft restored after a confirmed send failure can be sent
-  /// again as is. A lost answer never qualifies: the agent may have run it.
+  /// again as is. A lost answer never qualifies: the agent may have run it,
+  /// and neither do several restored prompts with too many attachments to
+  /// send together.
   bool get canRetryFailedPrompt =>
-      _retryableFailure && _error?.kind == AcpComposerErrorKind.send && canSend;
+      _retryableFailure &&
+      _error?.kind == AcpComposerErrorKind.send &&
+      canSend &&
+      _attachments.length <= limits.maxCount;
 
   /// The ranked slash-command matches for the active query.
   List<AcpAvailableCommand> get slashCommands => _slashCommands;
@@ -450,6 +455,10 @@ class AcpComposerController extends ChangeNotifier {
     final before = _attachments.length;
     _attachments.removeWhere((attachment) => attachment.id == id);
     if (_attachments.length != before) {
+      if (_error == _restoreOverLimitError &&
+          _attachments.length <= limits.maxCount) {
+        _error = _sendFailedError;
+      }
       notifyListeners();
     }
   }
@@ -711,6 +720,20 @@ class AcpComposerController extends ChangeNotifier {
     'Your message could not be sent. Try again.',
   );
 
+  static const _restoreOverLimitError = AcpComposerError(
+    AcpComposerErrorKind.attachment,
+    'Your messages could not be sent, and together they have too many '
+    'attachments. Remove some to send again.',
+  );
+
+  /// Shows why a restored draft could not be sent: the send error, unless
+  /// several restored prompts together carry too many attachments to resend.
+  void _reportRestore() {
+    _error = _attachments.length > limits.maxCount
+        ? _restoreOverLimitError
+        : (_error ?? _sendFailedError);
+  }
+
   /// Resends the draft restored after a confirmed failure.
   Future<bool> retryFailedPrompt() async =>
       canRetryFailedPrompt && await send();
@@ -775,7 +798,7 @@ class AcpComposerController extends ChangeNotifier {
     List<AcpComposerAttachment> snapshotAttachments,
   ) {
     _mergeDraft(snapshotText, snapshotAttachments);
-    _error ??= _sendFailedError;
+    _reportRestore();
   }
 
   /// The draft right after the last refused prompt was restored, where that
@@ -826,7 +849,7 @@ class AcpComposerController extends ChangeNotifier {
       textEnd = snapshotText.length;
       restoredIds = {for (final attachment in added) attachment.id};
     }
-    _error ??= _sendFailedError;
+    _reportRestore();
     _lastRestore = (text: _text, textEnd: textEnd, attachmentIds: restoredIds);
   }
 

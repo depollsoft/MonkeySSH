@@ -346,7 +346,10 @@ final class _ExportWriter {
     for (final part in entry.parts) {
       switch (part) {
         case AcpTextPart(:final text):
-          final value = _closeOpenFences(text.trimRight());
+          // A prompt can carry pasted image Markdown or data URIs too.
+          final value = _closeOpenFences(
+            _withoutEmbeddedImages(text).trimRight(),
+          );
           if (value.trim().isNotEmpty) lines.add(value);
         case AcpImagePart(:final image):
           omittedAttachments++;
@@ -401,7 +404,12 @@ final class _ExportWriter {
 
   /// Replaces images that would embed or point at device-local data with a
   /// marker, closes any fence a truncated reply left open, and trims.
-  String _sanitizeMarkdown(String markdown) {
+  String _sanitizeMarkdown(String markdown) =>
+      _closeOpenFences(_withoutEmbeddedImages(markdown).trim());
+
+  /// Replaces images that would embed or point at device-local data, and
+  /// inline data URIs, with a marker.
+  String _withoutEmbeddedImages(String markdown) {
     var text = markdown.replaceAllMapped(_markdownImage, (match) {
       var target = (match[2] ?? '').trim();
       if (target.startsWith('<') && target.endsWith('>')) {
@@ -420,7 +428,7 @@ final class _ExportWriter {
         return _omission('inline data');
       });
     }
-    return _closeOpenFences(text.trim());
+    return text;
   }
 
   void _block(String text) {
