@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
 
 import '../../domain/models/acp_attachment.dart';
+import '../../domain/models/acp_composer_draft.dart';
 import '../../domain/models/acp_content.dart';
 import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_session_keys.dart';
@@ -169,6 +170,25 @@ class AcpComposerAttachment {
   );
 }
 
+/// Tells the user the composer holds a draft kept from an earlier run of the
+/// app that has not been sent.
+@immutable
+class AcpRestoredDraftNotice {
+  /// Creates a restored-draft notice.
+  const AcpRestoredDraftNotice({this.unavailableAttachmentCount = 0});
+
+  /// Saved attachments that could not be restored and were removed.
+  final int unavailableAttachmentCount;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AcpRestoredDraftNotice &&
+      other.unavailableAttachmentCount == unavailableAttachmentCount;
+
+  @override
+  int get hashCode => unavailableAttachmentCount.hashCode;
+}
+
 /// Holds and coordinates the multiline text, ordered attachments, preparation
 /// progress, slash-command query, and send/cancel lifecycle for one ACP
 /// session's composer.
@@ -225,6 +245,8 @@ class AcpComposerController extends ChangeNotifier {
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
 
+  AcpRestoredDraftNotice? _restoredDraftNotice;
+
   var _disposed = false;
 
   /// The current multiline composer text.
@@ -239,6 +261,23 @@ class AcpComposerController extends ChangeNotifier {
 
   /// The latest content-free error, if any.
   AcpComposerError? get error => _error;
+
+  /// Set while the draft came back from an earlier run of the app and has
+  /// not yet been sent, emptied, or dismissed.
+  AcpRestoredDraftNotice? get restoredDraftNotice => _restoredDraftNotice;
+
+  /// The current text and attachments, for saving the draft.
+  AcpComposerDraftSnapshot get draftSnapshot => AcpComposerDraftSnapshot(
+    text: _text,
+    caret: _caret,
+    attachments: [
+      for (final attachment in _attachments)
+        AcpAttachmentDraft(
+          candidate: attachment.candidate,
+          fallback: attachment.fallback,
+        ),
+    ],
+  );
 
   /// The ranked slash-command matches for the active query.
   List<AcpAvailableCommand> get slashCommands => _slashCommands;
@@ -305,8 +344,68 @@ class AcpComposerController extends ChangeNotifier {
     }
     _text = value;
     _caret = nextCaret;
+    _clearRestoredNoticeWhenEmpty();
     _recomputeSlash();
     notifyListeners();
+  }
+
+  /// Puts a saved draft back in the composer. It is never sent: the user
+  /// still has to send it.
+  ///
+  /// Saved text goes before anything typed in the meantime, and saved
+  /// attachments before current ones, up to the attachment limit. With a
+  /// [notice], the composer shows that the draft was restored; attachments
+  /// over the limit are added to its unavailable count.
+  ///
+  /// Returns `false`, changing nothing, while a send is being prepared.
+  bool restoreDraft(
+    AcpComposerDraftSnapshot draft, {
+    AcpRestoredDraftNotice? notice,
+  }) {
+    if (!isEditable) {
+      return false;
+    }
+    if (draft.text.trim().isNotEmpty) {
+      final hadText = _text.trim().isNotEmpty;
+      _text = hadText ? '${draft.text}\n\n$_text' : draft.text;
+      _caret = hadText ? _text.length : draft.caret.clamp(0, _text.length);
+    }
+    final room = (limits.maxCount - _attachments.length).clamp(
+      0,
+      draft.attachments.length,
+    );
+    _attachments.insertAll(0, <AcpComposerAttachment>[
+      for (final attachment in draft.attachments.take(room))
+        AcpComposerAttachment(
+          id: 'att-${_nextAttachmentId++}',
+          candidate: attachment.candidate,
+          fallback: attachment.fallback,
+        ),
+    ]);
+    if (notice != null) {
+      _restoredDraftNotice = AcpRestoredDraftNotice(
+        unavailableAttachmentCount:
+            notice.unavailableAttachmentCount + draft.attachments.length - room,
+      );
+    }
+    _recomputeSlash();
+    notifyListeners();
+    return true;
+  }
+
+  /// Hides the restored-draft notice, keeping the draft.
+  void dismissRestoredDraftNotice() {
+    if (_restoredDraftNotice == null) {
+      return;
+    }
+    _restoredDraftNotice = null;
+    notifyListeners();
+  }
+
+  void _clearRestoredNoticeWhenEmpty() {
+    if (!hasContent) {
+      _restoredDraftNotice = null;
+    }
   }
 
   /// Applies the latest session snapshot, refreshing derived state.
@@ -425,6 +524,7 @@ class AcpComposerController extends ChangeNotifier {
     final before = _attachments.length;
     _attachments.removeWhere((attachment) => attachment.id == id);
     if (_attachments.length != before) {
+      _clearRestoredNoticeWhenEmpty();
       notifyListeners();
     }
   }
@@ -586,6 +686,7 @@ class AcpComposerController extends ChangeNotifier {
     _caret = 0;
     _attachments.clear();
     _error = null;
+    _restoredDraftNotice = null;
     _applyPendingRestore();
     _recomputeSlash();
     notifyListeners();
