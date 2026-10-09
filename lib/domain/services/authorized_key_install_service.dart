@@ -7,6 +7,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -87,41 +88,56 @@ String buildAuthorizedKeyLine(String publicKey, {String? comment}) {
       : '$type $blob $trimmedComment';
 }
 
-/// The POSIX script that appends one key line passed as `$1`.
+/// The only command line sent to the server for an install.
 ///
-/// It is one line with no single quotes or backslashes, so it survives
-/// whichever login shell (sh, bash, zsh, fish, csh) passes it to `/bin/sh`.
+/// sshd hands the exec command to the account's login shell, which may be
+/// fish or csh and would misread POSIX quoting. So the command line is this
+/// fixed string with no user-controlled bytes, and the script (including the
+/// key) goes to `/bin/sh` on the channel's stdin.
+const authorizedKeyInstallCommand = 'exec /bin/sh -s';
+
+/// The POSIX script body that appends the key line held in `$key`.
+///
 /// It only appends: an existing file is never rewritten. `~/.ssh` is created
 /// with mode 700 and a new `authorized_keys` with 600 (umask 077); existing
 /// group or world write bits are removed, which `sshd` StrictModes requires.
-/// A line already holding the same key blob (ignoring comments) is left
-/// alone.
-const authorizedKeyInstallScript =
-    r'key="$1"; '
-    'm=$authorizedKeyInstallMarker; '
-    r'if [ -z "$HOME" ] || [ ! -d "$HOME" ]; then echo "$m=no_home"; '
-    'exit 0; fi; '
-    r'umask 077; d="$HOME/.ssh"; f="$d/authorized_keys"; '
-    r'if [ ! -d "$d" ]; then mkdir -p "$d" && chmod 700 "$d" || '
-    r'{ echo "$m=mkdir_failed"; exit 0; }; fi; '
-    r'b=${key#* }; b=${b%% *}; '
-    r'if [ -f "$f" ] && grep -v "^[[:space:]]*#" "$f" | grep -F -q -e "$b"; '
-    'then s=present; else '
-    r'if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then '
-    r'echo >> "$f" || { echo "$m=write_failed"; exit 0; }; fi; '
-    r'echo "$key" >> "$f" || { echo "$m=write_failed"; exit 0; }; '
-    's=added; fi; '
-    r'chmod go-w "$d" "$f" 2>/dev/null; '
-    'if command -v restorecon >/dev/null 2>&1; then '
-    r'restorecon -F "$d" "$f" >/dev/null 2>&1; fi; '
-    r'echo "$m=$s"';
+/// A line already holding the same key blob (ignoring comment lines) is left
+/// alone. No command in it reads stdin, so `sh -s` keeps reading the script.
+const authorizedKeyInstallScriptBody =
+    'm=$authorizedKeyInstallMarker\n'
+    r"""
+if [ -z "$HOME" ] || [ ! -d "$HOME" ]; then echo "$m=no_home"; exit 0; fi
+umask 077
+d="$HOME/.ssh"
+f="$d/authorized_keys"
+if [ ! -d "$d" ]; then
+  mkdir -p "$d" && chmod 700 "$d" || { echo "$m=mkdir_failed"; exit 0; }
+fi
+b=${key#* }
+b=${b%% *}
+if [ -f "$f" ] && grep -v '^[[:space:]]*#' "$f" | grep -F -q -e "$b"; then
+  s=present
+else
+  if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then
+    echo >> "$f" || { echo "$m=write_failed"; exit 0; }
+  fi
+  printf '%s\n' "$key" >> "$f" || { echo "$m=write_failed"; exit 0; }
+  s=added
+fi
+chmod go-w "$d" "$f" 2>/dev/null
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -F "$d" "$f" >/dev/null 2>&1
+fi
+echo "$m=$s"
+exit 0
+""";
 
-/// The exec command that runs [authorizedKeyInstallScript] for [keyLine].
+/// The full script written to stdin for [keyLine].
 ///
-/// [keyLine] must come from [buildAuthorizedKeyLine]; it is still quoted.
-String buildAuthorizedKeyInstallCommand(String keyLine) =>
-    '/bin/sh -c ${shellEscapePosix(authorizedKeyInstallScript)} '
-    'monkeyssh-key-install ${shellEscapePosix(keyLine)}';
+/// Only `/bin/sh` parses it, so POSIX single quoting of the key is reliable.
+/// [keyLine] must come from [buildAuthorizedKeyLine].
+String buildAuthorizedKeyInstallScript(String keyLine) =>
+    'key=${shellEscapePosix(keyLine)}\n$authorizedKeyInstallScriptBody';
 
 /// A short command a person can paste into a terminal on the server to
 /// authorize [keyLine] by hand.
@@ -161,7 +177,7 @@ enum AuthorizedKeyInstallOutcome {
   unexpectedOutput,
 }
 
-/// Parses the marker line printed by [authorizedKeyInstallScript].
+/// Parses the marker line printed by [authorizedKeyInstallScriptBody].
 AuthorizedKeyInstallOutcome parseAuthorizedKeyInstallOutput(String output) {
   final match = RegExp(
     '^$authorizedKeyInstallMarker=([a-z_]+)\\s*\$',
@@ -244,22 +260,27 @@ class AuthorizedKeyInstallService {
       _logOutcome(session, AuthorizedKeyInstallOutcome.unsupportedPlatform);
       return AuthorizedKeyInstallOutcome.unsupportedPlatform;
     }
-    final command = buildAuthorizedKeyInstallCommand(
+    final script = buildAuthorizedKeyInstallScript(
       buildAuthorizedKeyLine(key.publicKey, comment: key.name),
     );
     final output = await session.runQueuedExec(() async {
-      final exec = await openSshExec(session.execute(command), _installTimeout);
+      final exec = await openSshExec(
+        session.execute(authorizedKeyInstallCommand),
+        _installTimeout,
+      );
       var finished = false;
       try {
         final stdout = StringBuffer();
-        await Future.wait<void>([
+        final reading = Future.wait<void>([
           exec.stdout
               .cast<List<int>>()
               .transform(utf8.decoder)
               .forEach(stdout.write),
           exec.stderr.drain<void>(),
-          exec.done,
-        ]).timeout(_installTimeout);
+        ]);
+        exec.stdin.add(Uint8List.fromList(utf8.encode(script)));
+        await Future.wait<void>([reading, exec.stdin.close(), exec.done])
+            .timeout(_installTimeout);
         finished = true;
         return stdout.toString();
       } finally {

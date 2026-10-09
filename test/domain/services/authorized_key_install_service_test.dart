@@ -48,27 +48,46 @@ class _ShellResult {
   int mode(String path) => FileStat.statSync(path).mode & 0x1ff;
 }
 
-Future<_ShellResult> _runInstall(
+/// Runs the install the way sshd does: [shell] stands in for the account's
+/// login shell and parses only the fixed command line, and the script arrives
+/// on stdin.
+Future<({String stdout, String stderr})> _runAsLoginShell(
   String shell,
   String keyLine, {
   required Directory home,
   bool setHome = true,
 }) async {
-  final result = await Process.run(
+  final process = await Process.start(
     shell,
-    ['-c', buildAuthorizedKeyInstallCommand(keyLine)],
+    ['-c', authorizedKeyInstallCommand],
     environment: {
       'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
       if (setHome) 'HOME': home.path,
     },
     includeParentEnvironment: false,
   );
-  expect(
-    result.stderr,
-    isEmpty,
-    reason: 'stderr from $shell: ${result.stderr}',
+  final stdout = process.stdout.transform(utf8.decoder).join();
+  final stderr = process.stderr.transform(utf8.decoder).join();
+  process.stdin.add(utf8.encode(buildAuthorizedKeyInstallScript(keyLine)));
+  await process.stdin.close();
+  await process.exitCode;
+  return (stdout: await stdout, stderr: await stderr);
+}
+
+Future<_ShellResult> _runInstall(
+  String shell,
+  String keyLine, {
+  required Directory home,
+  bool setHome = true,
+}) async {
+  final result = await _runAsLoginShell(
+    shell,
+    keyLine,
+    home: home,
+    setHome: setHome,
   );
-  return _ShellResult(result.stdout as String, home);
+  expect(result.stderr, isEmpty, reason: 'stderr from $shell');
+  return _ShellResult(result.stdout, home);
 }
 
 void main() {
@@ -117,13 +136,20 @@ void main() {
   });
 
   group('install command', () {
-    test('passes the script and key as separately quoted arguments', () {
-      final command = buildAuthorizedKeyInstallCommand('$_ed25519 phone');
-      expect(command, startsWith("/bin/sh -c '"));
-      expect(command, endsWith(" monkeyssh-key-install '$_ed25519 phone'"));
-      expect(authorizedKeyInstallScript, isNot(contains("'")));
-      expect(authorizedKeyInstallScript, isNot(contains(r'\')));
-      expect(authorizedKeyInstallScript, isNot(contains('\n')));
+    test('the login shell only ever sees a fixed command line', () {
+      expect(authorizedKeyInstallCommand, 'exec /bin/sh -s');
+      final keyLine = buildAuthorizedKeyLine(
+        _ed25519,
+        comment: "x'; \$(rm -rf ~) `id` \"q\" \\ #\nssh-rsa AAAA evil",
+      );
+      final script = buildAuthorizedKeyInstallScript(keyLine);
+      // The key travels in the stdin script, quoted for /bin/sh.
+      expect(script, startsWith("key='$keyLine'\n"));
+      expect(script, contains(authorizedKeyInstallScriptBody));
+      expect(
+        authorizedKeyInstallCommand,
+        isNot(contains(_ed25519.split(' ')[1])),
+      );
     });
 
     test('parses the marker after login noise', () {
@@ -291,14 +317,9 @@ void main() {
       final file = File('${ssh.path}/authorized_keys')
         ..writeAsStringSync('$_otherEd25519\n');
       await Process.run('chmod', ['400', file.path]);
-      final result = await Process.run(
-        shells.first,
-        ['-c', buildAuthorizedKeyInstallCommand(keyLine)],
-        environment: {'PATH': '/usr/bin:/bin', 'HOME': home.path},
-        includeParentEnvironment: false,
-      );
+      final result = await _runAsLoginShell(shells.first, keyLine, home: home);
       expect(
-        parseAuthorizedKeyInstallOutput(result.stdout as String),
+        parseAuthorizedKeyInstallOutput(result.stdout),
         AuthorizedKeyInstallOutcome.fileNotWritable,
       );
       await Process.run('chmod', ['600', file.path]);
@@ -354,7 +375,10 @@ void main() {
 
     tearDown(() => db.close());
 
+    final stdinBytes = <int>[];
+
     void stubExec(String stdout, {void Function(String)? onCommand}) {
+      stdinBytes.clear();
       when(() => session.runQueuedExec<String>(any())).thenAnswer((invocation) {
         final operation =
             invocation.positionalArguments.first as Future<String> Function();
@@ -369,6 +393,11 @@ void main() {
         when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
         when(() => exec.done).thenAnswer((_) async {});
         when(exec.close).thenReturn(null);
+        // The service closes stdin itself, which closes this controller.
+        // ignore: close_sinks
+        final stdin = StreamController<Uint8List>();
+        stdin.stream.listen(stdinBytes.addAll);
+        when(() => exec.stdin).thenReturn(stdin.sink);
         return exec;
       });
     }
@@ -379,9 +408,19 @@ void main() {
         'motd\n$authorizedKeyInstallMarker=added\n',
         onCommand: (value) => command = value,
       );
-      final outcome = await service.installKey(session, _key());
+      final outcome = await service.installKey(
+        session,
+        _key(name: r"Phone key'; $(touch /tmp/pwned) `id`"),
+      );
       expect(outcome, AuthorizedKeyInstallOutcome.added);
-      expect(command, contains("'$_ed25519 Phone-key'"));
+      // Nothing user-controlled reaches the login shell's command line.
+      expect(command, authorizedKeyInstallCommand);
+      final script = utf8.decode(stdinBytes);
+      expect(
+        script,
+        startsWith("key='$_ed25519 Phone-key-touch-tmp-pwned-id'\n"),
+      );
+      expect(script, endsWith(authorizedKeyInstallScriptBody));
       final event = diagnostics.events.single;
       expect(event.fields['outcome'], 'added');
       expect(event.searchableText, isNot(contains('AAAA')));
