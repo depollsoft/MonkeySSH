@@ -184,7 +184,7 @@ class HostSetupEmptyStateCard extends ConsumerWidget {
     final candidates =
         hosts.where((host) => host.lastConnectedAt != null).toList()
           ..sort((a, b) => b.lastConnectedAt!.compareTo(a.lastConnectedAt!));
-    for (final host in candidates.take(5)) {
+    for (final host in candidates) {
       final checklist = ref.watch(hostSetupChecklistProvider(host.id));
       final next = checklist?.nextStep;
       if (checklist == null || !checklist.isVisible || next == null) continue;

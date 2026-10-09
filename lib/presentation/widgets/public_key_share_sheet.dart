@@ -73,20 +73,23 @@ class _QrPainter extends CustomPainter {
     final paint = Paint()
       ..color = Colors.black
       ..isAntiAlias = false;
+    // Exact cells: drawing them wider would shrink the light modules beside
+    // them, which matters for dense codes such as RSA-4096 keys.
+    final path = Path();
     for (var row = 0; row < image.moduleCount; row++) {
       for (var column = 0; column < image.moduleCount; column++) {
         if (!image.isDark(row, column)) continue;
-        canvas.drawRect(
+        path.addRect(
           Rect.fromLTWH(
             (column + _quietZoneModules) * moduleSize,
             (row + _quietZoneModules) * moduleSize,
-            moduleSize + 0.5,
-            moduleSize + 0.5,
+            moduleSize,
+            moduleSize,
           ),
-          paint,
         );
       }
     }
+    canvas.drawPath(path, paint);
   }
 
   @override
