@@ -173,6 +173,11 @@ class _TerminalPortForwardsSheetState
           autoForwardPorts: autoForwardPorts,
           hasAutomaticTunnels: automaticGroups.isNotEmpty,
           isConnected: isConnected,
+          // A link-opened connection keeps detection off until the user
+          // starts it, even though the host setting is on.
+          isHeld:
+              (autoForwardPorts ?? false) &&
+              sessions.isAutomaticForwardingHeld(widget.hostId),
         ),
         const Divider(height: 1),
         Expanded(
@@ -223,10 +228,11 @@ class _TerminalPortForwardsSheetState
     required bool? autoForwardPorts,
     required bool hasAutomaticTunnels,
     required bool isConnected,
+    required bool isHeld,
   }) {
     final theme = Theme.of(context);
     final isEnabled = autoForwardPorts ?? false;
-    return SwitchListTile.adaptive(
+    final toggle = SwitchListTile.adaptive(
       key: const Key('terminal-auto-forward-ports-switch'),
       dense: true,
       secondary: _isUpdatingAutoForwardPorts
@@ -235,25 +241,85 @@ class _TerminalPortForwardsSheetState
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : Icon(
-              Icons.radar_rounded,
-              color: isEnabled
+              isHeld ? Icons.pause_circle_outline : Icons.radar_rounded,
+              color: isEnabled && !isHeld
                   ? theme.colorScheme.primary
                   : theme.colorScheme.onSurfaceVariant,
             ),
       title: const Text('Detect open ports'),
-      subtitle: Text(switch ((isEnabled, isConnected, hasAutomaticTunnels)) {
-        (false, _, _) =>
-          'Automatically proxy new remote listeners on this host',
-        (true, false, _) =>
-          'Will watch for new remote listeners once connected',
-        (true, true, true) => 'Proxying new remote listeners while connected',
-        (true, true, false) => 'Watching this host for new remote listeners',
-      }, style: theme.textTheme.bodySmall),
+      subtitle: Text(
+        isHeld
+            ? 'Paused because a link opened this connection'
+            : switch ((isEnabled, isConnected, hasAutomaticTunnels)) {
+                (false, _, _) =>
+                  'Automatically proxy new remote listeners on this host',
+                (true, false, _) =>
+                  'Will watch for new remote listeners once connected',
+                (true, true, true) =>
+                  'Proxying new remote listeners while connected',
+                (true, true, false) =>
+                  'Watching this host for new remote listeners',
+              },
+        style: theme.textTheme.bodySmall,
+      ),
       value: isEnabled,
       onChanged: autoForwardPorts == null || _isUpdatingAutoForwardPorts
           ? null
           : (enabled) => unawaited(_setAutoForwardPorts(enabled: enabled)),
     );
+    if (!isHeld) return toggle;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        toggle,
+        Padding(
+          padding: const EdgeInsets.only(
+            right: FluttyTheme.spacingSm,
+            bottom: FluttyTheme.spacingXs,
+          ),
+          child: TextButton.icon(
+            key: const Key('terminal-auto-forward-ports-resume'),
+            style: TextButton.styleFrom(minimumSize: const Size(64, 44)),
+            onPressed: _isUpdatingAutoForwardPorts
+                ? null
+                : () => unawaited(_resumeAutoForwardPorts()),
+            icon: const Icon(Icons.play_arrow_rounded, size: 18),
+            label: const Text('Start detection'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Ends a link-opened connection's hold so detection runs as configured.
+  Future<void> _resumeAutoForwardPorts() async {
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    setState(() => _isUpdatingAutoForwardPorts = true);
+    try {
+      await sessions.releaseAutomaticForwardingHold(widget.hostId);
+      if (mounted) {
+        _showMessage('Detecting open ports on this host.');
+      }
+    } on Object catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'port forwards',
+          context: ErrorDescription(
+            'while starting held automatic port forwarding for a host',
+          ),
+        ),
+      );
+      if (mounted) {
+        _showMessage('Could not start automatic port detection.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isUpdatingAutoForwardPorts = false);
+      }
+    }
   }
 
   Future<void> _setAutoForwardPorts({required bool enabled}) async {

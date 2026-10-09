@@ -105,6 +105,19 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   final List<SshSession> sessions;
   final SshConnectionState connectionState;
   final List<int> reconfiguredHostIds = [];
+  final Set<int> heldAutomaticForwardHostIds = {};
+  final List<int> releasedHoldHostIds = [];
+
+  @override
+  bool isAutomaticForwardingHeld(int hostId) =>
+      heldAutomaticForwardHostIds.contains(hostId);
+
+  @override
+  Future<void> releaseAutomaticForwardingHold(int hostId) async {
+    heldAutomaticForwardHostIds.remove(hostId);
+    releasedHoldHostIds.add(hostId);
+    await reconfigureAutomaticPortForwardingForHost(hostId);
+  }
 
   @override
   Map<int, SshConnectionState> build() {
@@ -203,6 +216,62 @@ PortForward _portForward() => PortForward(
 
 void registerTerminalPortForwardsSheetTests() {
   group('terminal_port_forwards_sheet', () {
+    testWidgets('a link hold shows detection paused with a start action', (
+      tester,
+    ) async {
+      final portForwardRepository = _MockPortForwardRepository();
+      final hostRepository = MockHostRepository();
+      final session = _LiveTestSession(
+        connectionId: 7,
+        hostId: 10,
+        client: MockSshClient(),
+      );
+      addTearDown(session.changes.close);
+      final notifier = _TestActiveSessionsNotifier([session])
+        ..heldAutomaticForwardHostIds.add(10);
+      when(() => portForwardRepository.watchByHostId(session.hostId))
+          .thenAnswer((_) => Stream.value(const <PortForward>[]));
+
+      await tester.pumpWidget(
+        _buildSheetHost(
+          session: session,
+          notifier: notifier,
+          portForwardRepository: portForwardRepository,
+          hostRepository: hostRepository,
+          hostStream: Stream.value(_host(autoForwardPorts: true)),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+
+      // The setting is on, but nothing is being watched yet.
+      expect(
+        find.text('Watching this host for new remote listeners'),
+        findsNothing,
+      );
+      expect(find.textContaining('Paused'), findsOneWidget);
+      final start = find.byKey(const Key('terminal-auto-forward-ports-resume'));
+      expect(start, findsOneWidget);
+      expect(tester.getSize(start).height, greaterThanOrEqualTo(44));
+
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+
+      expect(notifier.releasedHoldHostIds, [10]);
+      expect(notifier.reconfiguredHostIds, [10]);
+      verifyNever(
+        () => hostRepository.setAutoForwardPorts(
+          any(),
+          enabled: any(named: 'enabled'),
+        ),
+      );
+      expect(start, findsNothing);
+      expect(
+        find.text('Watching this host for new remote listeners'),
+        findsOneWidget,
+      );
+    });
+
     setUpAll(() {
       registerFallbackValue(
         PortForwardsCompanion.insert(
