@@ -59,6 +59,7 @@ import '../../domain/services/app_review_prompt_service.dart';
 import '../../domain/services/clipboard_content_service.dart';
 import '../../domain/services/device_debug_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
+import '../../domain/services/git_working_tree_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
@@ -117,6 +118,7 @@ import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
 import '../widgets/tmux_alert_tracker.dart';
 import '../widgets/tmux_window_navigator.dart';
+import '../widgets/working_tree_changes_sheet.dart';
 import 'agent_chat_screen.dart';
 import 'agent_management_screen.dart';
 import 'port_forward_browser_screen.dart';
@@ -1582,6 +1584,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required bool isMobile,
     required bool nativeAgentActive,
   }) => [
+    _terminalOverflowMenuItem(
+      context: context,
+      icon: Icons.difference_outlined,
+      label: 'Working tree changes',
+      action: 'working_tree_changes',
+    ),
     if (!nativeAgentActive && hasTerminalInfo)
       _terminalOverflowMenuItem(
         context: context,
@@ -13153,6 +13161,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case 'port_forwards':
         await _openPortForwardsFromTerminal();
         break;
+      case 'working_tree_changes':
+        await _openWorkingTreeChanges();
+        break;
       case 'force_monkeymux_reload':
         if (!_forceMonkeyMuxReloadMenuState.enabled) return;
         final sessionName =
@@ -14581,6 +14592,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Opens the read-only git changes sheet for this window's directory. An
+  /// "Ask agent" prompt goes to the native composer, or into the terminal
+  /// through the same review as a clipboard paste.
+  Future<void> _openWorkingTreeChanges() async {
+    final activeSession = _activeSession();
+    final session =
+        activeSession != null &&
+            _sessionsNotifier?.getState(activeSession.connectionId) ==
+                SshConnectionState.connected
+        ? activeSession
+        : null;
+    final nativeKey = _activeNativeAcpSessionKey;
+    var directory = nativeKey == null
+        ? null
+        : ref
+              .read(acpSessionManagerProvider)
+              .state
+              .byKeyValue(nativeKey.value)
+              ?.cwd;
+    if (directory == null && session != null && _isTmuxActive) {
+      directory = await _resolveCurrentTmuxPaneDirectory();
+      if (!mounted) return;
+    }
+    directory ??= _workingDirectoryPath;
+    final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
+    String? prompt;
+    try {
+      prompt = await showWorkingTreeChangesSheet(
+        context: context,
+        service: session == null
+            ? null
+            : ref.read(gitWorkingTreeServiceFactoryProvider)(session),
+        directory: directory,
+        unavailableMessage: workingTreeChangesUnavailableReason(session),
+        canAskAgent: true,
+      );
+    } finally {
+      _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
+    }
+    if (!mounted || prompt == null) return;
+    if (_activeNativeAcpSessionKey != null) {
+      _nativeComposerFocusController
+        ..insertText(prompt)
+        ..requestFocus();
+      return;
+    }
+    await _pasteClipboard(promptText: prompt);
+  }
+
   Future<void> _openPortForwardBrowserOption(
     _PortForwardBrowserOption option,
   ) => _openPortForwardBrowserOptions([option]);
@@ -14887,10 +14947,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return normalizedSnapshot.normalizedToOriginalEnds[normalizedEnd - 1];
   }
 
-  Future<void> _pasteClipboard() async {
+  /// Pastes the clipboard into the terminal. [promptText], when given, is
+  /// pasted instead of the clipboard, through the same review.
+  Future<void> _pasteClipboard({String? promptText}) async {
     final inputGeneration = _terminalUserInputGeneration;
     try {
-      if (_isAndroidPlatform) {
+      if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
           await _pasteClipboardImage(imageBytes);
@@ -14898,13 +14960,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
 
-      final clipboardFiles = await Pasteboard.files();
+      final clipboardFiles = promptText == null
+          ? await Pasteboard.files()
+          : const <String>[];
       if (clipboardFiles.isNotEmpty) {
         await _pasteClipboardFiles(clipboardFiles);
         return;
       }
 
-      if (!_isAndroidPlatform) {
+      if (!_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
           await _pasteClipboardImage(imageBytes);
@@ -14912,7 +14976,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
 
-      final text = await _readSystemClipboardText();
+      final text = promptText ?? await _readSystemClipboardText();
       if (text == null || text.isEmpty) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
         _showClipboardMessage('Clipboard is empty');
@@ -14973,10 +15037,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               commandText,
               bracketedPasteModeEnabled: reviewedBracketedPasteMode,
             ),
-            title: 'Review clipboard paste',
+            title: promptText == null
+                ? 'Review clipboard paste'
+                : 'Review prompt paste',
             messageBuilder: (review) => review.bracketedPasteModeEnabled
-                ? 'This clipboard content looks risky even with bracketed paste enabled.'
-                : 'This clipboard content could execute multiple or reshaped commands.',
+                ? 'This ${promptText == null ? 'clipboard content' : 'prompt'} looks risky even with bracketed paste enabled.'
+                : 'This ${promptText == null ? 'clipboard content' : 'prompt'} could execute multiple or reshaped commands.',
             confirmLabel: 'Paste anyway',
             onReviewShown: () => reviewShown = true,
           );
@@ -15099,7 +15165,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref
             .read(telemetryServiceProvider)
             .logTerminalPasteUsed(
-              source: 'clipboard_text',
+              source: promptText == null
+                  ? 'clipboard_text'
+                  : 'working_tree_hunk',
               requiredReview: requiredReview,
             ),
       );
