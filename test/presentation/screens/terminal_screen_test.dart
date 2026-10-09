@@ -19,6 +19,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -384,6 +385,9 @@ class _MockTmuxService extends Mock implements TmuxService {
     String? extraFlags,
   }) async => detectedVersionValue;
 }
+
+class _MockPortForwardRepository extends Mock
+    implements PortForwardRepository {}
 
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
   _MockMonkeyMuxService() {
@@ -10869,9 +10873,9 @@ void main() {
       ).called(1);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-    testWidgets(
-      'a link attaches a MonkeyMux preset workspace without starting the agent',
-      (tester) async {
+    for (final imported in [false, true]) {
+      testWidgets('a link attaches a preset workspace without its agent, '
+          'imported: $imported', (tester) async {
         final settingsService = SettingsService(db);
         final presetService = AgentLaunchPresetService(settingsService);
         final cliLaunchPreferencesService = HostCliLaunchPreferencesService(
@@ -10886,7 +10890,11 @@ void main() {
           client: sshClient,
           config: session.config,
         );
-        host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'copilot',
+          autoConnectRequiresConfirmation: imported,
+        );
         await presetService.setPresetForHost(
           host.id,
           const AgentLaunchPreset(
@@ -10973,14 +10981,170 @@ void main() {
         expect(attachCommand, isNot(contains('--command')));
         expect(attachCommand, isNot(contains('--name')));
         expect(attachCommand, isNot(contains('copilot --yolo')));
+        // Never create a workspace that would then ignore the preset's agent.
+        expect(attachCommand, contains('--existing'));
+        // An attach alone is not the imported command, so it neither asks
+        // about it nor clears its review flag.
         expect(find.text('Review auto-connect command'), findsNothing);
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        verifyNever(() => hostRepository.updateFields(any(), any()));
         expect(shellWrites.map(utf8.decode).join(), isNot(contains('copilot')));
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.android),
-    );
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    for (final workspaceRunning in [true, false]) {
+      testWidgets('a confirmed preset starts its agent, workspace running: '
+          '$workspaceRunning', (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
+        final monkeyMuxService = _MockMonkeyMuxService()
+          ..runningStatus = workspaceRunning
+              ? const MonkeyMuxServerStatus(
+                  version: '0.1.10',
+                  capabilities: <String>{},
+                )
+              : null;
+        final tmuxService = _MockTmuxService();
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.copilotCli,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          ),
+        );
+        when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+        when(() => monkeyMuxService.clearCache(any())).thenAnswer((_) async {});
+        when(
+          () => monkeyMuxInstallerService.ensureInstalled(
+            session,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer(
+          (_) async => const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          ),
+        );
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => true);
+        when(
+          () => monkeyMuxService.listWindows(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'shell', isActive: true),
+          ],
+        );
+        when(
+          () => monkeyMuxService.watchWindowChanges(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+          session,
+          'agents',
+          command: any(named: 'command'),
+          name: any(named: 'name'),
+          workingDirectory: any(named: 'workingDirectory'),
+          extraFlags: any(named: 'extraFlags'),
+        );
+        when(createAgentWindow).thenAnswer((_) async {});
+        when(
+          () => monkeyMuxService.refreshTerminalTheme(
+            session,
+            'agents',
+            any(),
+            extraFlags: any(named: 'extraFlags'),
+            forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+          ),
+        ).thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        final executedCommands = <String>[];
+        when(
+          () => sshClient.execute(any(), pty: any(named: 'pty')),
+        ).thenAnswer((invocation) async {
+          executedCommands.add(invocation.positionalArguments.single as String);
+          return shellChannel;
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              monkeyMuxInstallerServiceProvider.overrideWithValue(
+                monkeyMuxInstallerService,
+              ),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump();
+
+        final attachCommand = executedCommands.singleWhere(
+          (command) => command.contains(' attach'),
+        );
+        // A new workspace starts the agent itself; a running one ignores
+        // the attach command, so the agent opens in a new window instead.
+        expect(attachCommand, contains('--command'));
+        if (workspaceRunning) {
+          verify(
+            () => monkeyMuxService.createWindow(
+              session,
+              'agents',
+              command: 'copilot',
+              name: 'Copilot CLI',
+              workingDirectory: '/work/project',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).called(1);
+        } else {
+          verifyNever(createAgentWindow);
+        }
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
 
     testWidgets(
       'reconnects a lost MonkeyMux session without launching a new agent',
@@ -11240,13 +11404,21 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
-    for (final runOnce in [true, false]) {
+    for (final (runOnce, imported) in [
+      (true, false),
+      (false, false),
+      (true, true),
+    ]) {
       testWidgets(
         'a link-opened terminal shows its auto-connect command first, '
-        'run once: $runOnce',
+        'run once: $runOnce, imported: $imported',
         (tester) async {
           const command = 'claude --dangerously-skip-permissions';
-          host = _buildHost(id: host.id, autoConnectCommand: command);
+          host = _buildHost(
+            id: host.id,
+            autoConnectCommand: command,
+            autoConnectRequiresConfirmation: imported,
+          );
           session = SshSession(
             connectionId: 7,
             hostId: host.id,
@@ -11283,6 +11455,109 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       );
     }
+
+    for (final withExtraFlags in [true, false]) {
+      testWidgets('a link reviews a tmux attach with raw extra flags, '
+          'flags: $withExtraFlags', (tester) async {
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          tmuxExtraFlags: withExtraFlags ? '-L lab' : null,
+          remoteMuxBackend: RemoteMuxBackend.tmux,
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+
+        await pumpScreen(tester, openedFromLink: true);
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final written = shellWrites.map(utf8.decode).join();
+        if (withExtraFlags) {
+          expect(find.text('Review auto-connect command'), findsOneWidget);
+          expect(find.textContaining('-L lab'), findsOneWidget);
+          expect(written, isNot(contains('new-session')));
+          await tester.tap(find.text('Skip'));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(
+            shellWrites.map(utf8.decode).join(),
+            isNot(contains('new-session')),
+          );
+        } else {
+          expect(find.text('Review auto-connect command'), findsNothing);
+          expect(written, contains('new-session'));
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
+
+    testWidgets('auto-start port forwards wait for a tap after a link', (
+      tester,
+    ) async {
+      final portForwards = _MockPortForwardRepository();
+      when(() => portForwards.getByHostId(host.id)).thenAnswer(
+        (_) async => [
+          PortForward(
+            id: 41,
+            hostId: host.id,
+            name: 'db',
+            localHost: '127.0.0.1',
+            localPort: 5432,
+            remoteHost: 'db.internal',
+            remotePort: 5432,
+            forwardType: 'local',
+            autoStart: true,
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+
+      await tester.pumpWidget(
+        buildScreen(
+          overrides: [
+            portForwardRepositoryProvider.overrideWithValue(portForwards),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              openedFromLink: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.textContaining('auto-start port forward'), findsOneWidget);
+      expect(session.isPortForwardActive(41), isFalse);
+      expect(session.isPortForwardStarting(41), isFalse);
+
+      await tester.tap(find.widgetWithText(SnackBarAction, 'Start'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        session.isPortForwardStarting(41) || session.isPortForwardActive(41),
+        isTrue,
+      );
+      // Let the test's unbound listener time out.
+      await tester.pump(const Duration(seconds: 11));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     for (final disposeWhileSaving in [false, true]) {
       testWidgets(
