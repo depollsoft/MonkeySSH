@@ -7,7 +7,11 @@
 /// with a safe Open Terminal escape hatch), and the free-tier concurrency
 /// choice.
 ///
-/// No prompts, transcripts, or command text are ever logged.
+/// When the host's agent preset asks for it, a new session starts in a fresh
+/// git worktree (rolled back if the launch fails) and sends the preset's
+/// initial prompt exactly once; resuming a recent session does neither.
+///
+/// No prompts, transcripts, paths, or command text are ever logged.
 library;
 
 import 'dart:async';
@@ -21,6 +25,7 @@ import '../../app/notification_navigation.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/models/acp_authentication.dart';
+import '../../domain/models/acp_content.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
@@ -31,6 +36,8 @@ import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
+import '../../domain/services/agent_worktree_launcher.dart';
+import '../../domain/services/agent_worktree_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
@@ -221,6 +228,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   var _defaultsScheduled = false;
   var _hostDefaultsGeneration = 0;
   var _presets = const <int, AgentLaunchPreset>{};
+  var _useWorktree = true;
+  var _sendInitialPrompt = true;
+  var _initialPromptSent = false;
+  AgentWorktreeLaunch? _pendingWorktree;
   String? _error;
   var _authChooserShown = false;
   var _providerCommandRequested = false;
@@ -254,9 +265,104 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
 
   @override
   void dispose() {
+    _abandonPendingWorktree();
     _cwd.dispose();
     _workspace.dispose();
     super.dispose();
+  }
+
+  AgentLaunchPreset? get _selectedPreset =>
+      _hostId == null ? null : _presets[_hostId];
+
+  /// Whether starting now creates a worktree from the host's preset.
+  bool get _startsInWorktree =>
+      _useWorktree &&
+      _selectedRecent == null &&
+      (_selectedPreset?.launchesInNewWorktree ?? false);
+
+  /// The preset prompt a new session sends once, if any.
+  String? get _initialPrompt {
+    final prompt = _selectedPreset?.initialPrompt?.trim();
+    return _sendInitialPrompt &&
+            _selectedRecent == null &&
+            prompt != null &&
+            prompt.isNotEmpty
+        ? prompt
+        : null;
+  }
+
+  void _abandonPendingWorktree() {
+    _pendingWorktree?.abandon();
+    _pendingWorktree = null;
+  }
+
+  /// Creates the launch's worktree, or reuses the one an earlier attempt of
+  /// the same start made (a sign-in or concurrency retry).
+  Future<String?> _launchWorktreeDirectory(
+    int hostId,
+    SshSession? session,
+  ) async {
+    final pending = _pendingWorktree;
+    if (pending != null && pending.record.hostId == hostId) {
+      return pending.record.startDirectory;
+    }
+    _abandonPendingWorktree();
+    final preset = _presets[hostId];
+    if (preset == null || session == null) {
+      setState(() => _error = 'Could not create the worktree on this host.');
+      return null;
+    }
+    try {
+      final launch = await ref
+          .read(agentWorktreeLauncherProvider)
+          .begin(
+            SshAgentWorktreeShell(session),
+            hostId: hostId,
+            preset: preset,
+            windowsHost: session.remoteIsWindows,
+          );
+      if (!mounted) {
+        launch.abandon();
+        return null;
+      }
+      _pendingWorktree = launch;
+      return launch.record.startDirectory;
+    } on AgentWorktreeException catch (error) {
+      if (mounted) {
+        setState(
+          () => _error = 'Could not create the worktree. ${error.message}',
+        );
+      }
+      return null;
+    }
+  }
+
+  /// Sends the preset's initial prompt to a newly started [key], once.
+  void _sendInitialPromptOnce(AcpSessionKey key) {
+    final prompt = _initialPrompt;
+    if (prompt == null || _initialPromptSent) {
+      return;
+    }
+    _initialPromptSent = true;
+    ref
+        .read(acpSessionManagerProvider)
+        .prompt(key, [AcpTextContent(prompt)])
+        .then<void>(
+          (_) {},
+          onError: (Object error) {
+            DiagnosticsLogService.instance.warning(
+              'acp.launch',
+              'initial_prompt_failed',
+              fields: {'errorType': error.runtimeType},
+            );
+          },
+        )
+        .ignore();
+    DiagnosticsLogService.instance.info(
+      'acp.launch',
+      'initial_prompt_sent',
+      fields: {'hostId': key.hostId},
+    );
   }
 
   void _scheduleDefaults(List<Host> hosts, List<AcpProvider> providers) {
@@ -502,6 +608,15 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     );
 
     final recent = _selectedRecent;
+    var launchCwd = cwd;
+    if (recent == null && _startsInWorktree) {
+      final worktreeDirectory = await _launchWorktreeDirectory(
+        hostId,
+        sshSession,
+      );
+      if (!mounted || worktreeDirectory == null) return null;
+      launchCwd = worktreeDirectory;
+    }
     if (recent != null) {
       return manager.reconnectSession(
         hostId: recent.hostId,
@@ -523,7 +638,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     return manager.startNewSession(
       hostId: hostId,
       providerId: providerId,
-      cwd: cwd,
+      cwd: launchCwd,
       confirmInstall: _confirmInstall,
       chooseAuthentication: _chooseAuthentication,
       launchCommandOverride: launchCommandOverride,
@@ -569,6 +684,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       }
       switch (result) {
         case AcpSessionLaunchStarted(:final key):
+          _pendingWorktree?.launched();
+          _pendingWorktree = null;
+          _sendInitialPromptOnce(key);
           Navigator.of(context).pop(key);
         case AcpSessionLaunchFailed(
           :final key,
@@ -615,6 +733,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           _error = 'Could not start the session. Try again.';
         });
       }
+    } finally {
+      // A start that did not launch leaves no worktree behind; a retry
+      // creates a fresh one.
+      _abandonPendingWorktree();
     }
   }
 
@@ -806,14 +928,23 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               const SizedBox(height: FluttyTheme.spacingMd),
               _sectionLabel(context, 'Working directory'),
               TextField(
+                key: const Key('acp-new-session-cwd-field'),
                 controller: _cwd,
-                enabled: !controlsDisabled,
+                enabled: !controlsDisabled && !_startsInWorktree,
                 autocorrect: false,
                 enableSuggestions: false,
                 style: FluttyTheme.monoStyle,
                 onChanged: (_) => _cwdEdited = true,
-                decoration: const InputDecoration(hintText: '~'),
+                decoration: InputDecoration(
+                  hintText: '~',
+                  helperText: _startsInWorktree
+                      ? 'The agent starts in a new worktree of the preset’s '
+                            'repository.'
+                      : null,
+                  helperMaxLines: 2,
+                ),
               ),
+              _buildPresetOptions(context, disabled: controlsDisabled),
               AcpSessionWorkspaceSection(
                 controller: _workspace,
                 enabled: !controlsDisabled,
@@ -863,6 +994,65 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           ),
         ),
       ),
+    );
+  }
+
+  /// Worktree and initial-prompt switches from the host's agent preset,
+  /// shown only when starting a new session.
+  Widget _buildPresetOptions(BuildContext context, {required bool disabled}) {
+    final preset = _selectedPreset;
+    if (preset == null || _selectedRecent != null) {
+      return const SizedBox.shrink();
+    }
+    final worktree = preset.worktree;
+    final prompt = preset.initialPrompt?.trim() ?? '';
+    if (worktree == null && prompt.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final colorScheme = Theme.of(context).colorScheme;
+    final mono = FluttyTheme.monoStyle.copyWith(
+      color: colorScheme.onSurfaceVariant,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: FluttyTheme.spacingMd),
+        _sectionLabel(context, 'Host preset'),
+        if (worktree != null)
+          SwitchListTile(
+            key: const Key('acp-new-session-worktree-switch'),
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.account_tree_outlined),
+            title: const Text('Start in a new git worktree'),
+            subtitle: Text(
+              '${worktree.effectiveBaseRef} · '
+              '${worktree.resolveRepositoryPath(preset.workingDirectory) ?? ''}',
+              style: mono,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            value: _useWorktree,
+            onChanged: disabled
+                ? null
+                : (value) => setState(() => _useWorktree = value),
+          ),
+        if (prompt.isNotEmpty)
+          SwitchListTile(
+            key: const Key('acp-new-session-initial-prompt-switch'),
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.chat_bubble_outline),
+            title: const Text('Send the preset prompt'),
+            subtitle: Text(
+              prompt,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            value: _sendInitialPrompt,
+            onChanged: disabled
+                ? null
+                : (value) => setState(() => _sendInitialPrompt = value),
+          ),
+      ],
     );
   }
 

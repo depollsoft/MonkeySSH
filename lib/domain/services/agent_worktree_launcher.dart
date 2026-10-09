@@ -42,6 +42,46 @@ enum AgentWorktreeLaunchOutcome {
   kept,
 }
 
+/// The worktree created for one launch, settled exactly once.
+///
+/// Holding the launcher and shell lets a screen settle the worktree after it
+/// has been disposed.
+final class AgentWorktreeLaunch {
+  AgentWorktreeLaunch._(this.record, this._launcher, this._shell);
+
+  /// The created worktree.
+  final AgentWorktreeRecord record;
+
+  final AgentWorktreeLauncher _launcher;
+  final AgentWorktreeShell _shell;
+  var _settled = false;
+
+  /// Whether [abandon] or [launched] has already run.
+  bool get isSettled => _settled;
+
+  /// Rolls the worktree back because the launch never started the agent.
+  void abandon() {
+    if (_settled) return;
+    _settled = true;
+    unawaited(_launcher.rollBack(_shell, record));
+  }
+
+  /// Records that the launch reached the host.
+  ///
+  /// When [windowDirectories] can list the session's windows, the worktree is
+  /// rolled back if no window ever runs in it, which covers an attach that
+  /// joined a running session or a session that failed to start.
+  void launched({Future<Iterable<String?>> Function()? windowDirectories}) {
+    if (_settled) return;
+    _settled = true;
+    if (windowDirectories != null) {
+      unawaited(
+        _launcher.confirm(_shell, record, windowDirectories: windowDirectories),
+      );
+    }
+  }
+}
+
 /// Creates worktrees for launches and undoes them when a launch fails.
 class AgentWorktreeLauncher {
   /// Creates a launcher.
@@ -130,6 +170,24 @@ class AgentWorktreeLauncher {
       rethrow;
     }
   }
+
+  /// Creates the worktree for a launch of [preset], returning a handle the
+  /// caller settles once it knows whether the launch started the agent.
+  Future<AgentWorktreeLaunch> begin(
+    AgentWorktreeShell shell, {
+    required int hostId,
+    required AgentLaunchPreset preset,
+    required bool windowsHost,
+  }) async => AgentWorktreeLaunch._(
+    await create(
+      shell,
+      hostId: hostId,
+      preset: preset,
+      windowsHost: windowsHost,
+    ),
+    this,
+    shell,
+  );
 
   /// Removes [record]'s worktree after its launch failed.
   ///

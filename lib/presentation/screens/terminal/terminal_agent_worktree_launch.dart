@@ -13,7 +13,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../domain/models/agent_launch_preset.dart';
-import '../../../domain/models/agent_worktree.dart';
 import '../../../domain/services/agent_worktree_launcher.dart';
 import '../../../domain/services/agent_worktree_service.dart';
 import '../../../domain/services/diagnostics_log_service.dart';
@@ -22,57 +21,23 @@ import '../../../domain/services/ssh_service.dart';
 /// A preset launch, with the worktree created for it when it needed one.
 final class TerminalAgentWorktreeLaunch {
   /// Creates a launch.
-  TerminalAgentWorktreeLaunch({
-    required this.preset,
-    this.worktree,
-    AgentWorktreeLauncher? launcher,
-    AgentWorktreeShell? shell,
-  }) : _launcher = launcher,
-       _shell = shell;
+  const TerminalAgentWorktreeLaunch({required this.preset, this.worktree});
 
   /// Preset to build the launch command from; its working directory is the
   /// new worktree when one was created.
   final AgentLaunchPreset preset;
 
   /// Worktree created for this launch, if any.
-  final AgentWorktreeRecord? worktree;
-
-  final AgentWorktreeLauncher? _launcher;
-  final AgentWorktreeShell? _shell;
-  var _settled = false;
+  final AgentWorktreeLaunch? worktree;
 
   /// Rolls the worktree back because the launch command never reached the
   /// host. Safe to call after the terminal has gone away.
-  void abandon() {
-    final record = worktree;
-    final launcher = _launcher;
-    final shell = _shell;
-    if (_settled || record == null || launcher == null || shell == null) {
-      return;
-    }
-    _settled = true;
-    unawaited(launcher.rollBack(shell, record));
-  }
+  void abandon() => worktree?.abandon();
 
-  /// Records that the launch command reached the host.
-  ///
-  /// When [windowDirectories] can list the session's windows, the worktree is
-  /// rolled back if no window ever runs in it, which covers an attach that
-  /// joined a running session or a session that failed to start.
-  void launched({Future<Iterable<String?>> Function()? windowDirectories}) {
-    final record = worktree;
-    final launcher = _launcher;
-    final shell = _shell;
-    if (_settled || record == null || launcher == null || shell == null) {
-      return;
-    }
-    _settled = true;
-    if (windowDirectories != null) {
-      unawaited(
-        launcher.confirm(shell, record, windowDirectories: windowDirectories),
-      );
-    }
-  }
+  /// Records that the launch command reached the host; see
+  /// [AgentWorktreeLaunch.launched].
+  void launched({Future<Iterable<String?>> Function()? windowDirectories}) =>
+      worktree?.launched(windowDirectories: windowDirectories);
 }
 
 /// Creates the worktree [preset] asks for before its agent starts.
@@ -122,20 +87,18 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
       return TerminalAgentWorktreeLaunch(preset: preset);
     }
   }
-  final launcher = ref.read(agentWorktreeLauncherProvider);
-  final shell = SshAgentWorktreeShell(session);
   try {
-    final record = await launcher.create(
-      shell,
-      hostId: session.hostId,
-      preset: preset,
-      windowsHost: session.remoteIsWindows,
-    );
+    final launch = await ref
+        .read(agentWorktreeLauncherProvider)
+        .begin(
+          SshAgentWorktreeShell(session),
+          hostId: session.hostId,
+          preset: preset,
+          windowsHost: session.remoteIsWindows,
+        );
     return TerminalAgentWorktreeLaunch(
-      preset: preset.launchingIn(record.startDirectory),
-      worktree: record,
-      launcher: launcher,
-      shell: shell,
+      preset: preset.launchingIn(launch.record.startDirectory),
+      worktree: launch,
     );
   } on AgentWorktreeException catch (error) {
     if (context.mounted) {
