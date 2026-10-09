@@ -11,6 +11,7 @@ import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/delete_confirmation_dialog.dart';
+import '../widgets/public_key_share_sheet.dart';
 
 /// Screen displaying list of SSH keys.
 class KeysScreen extends ConsumerWidget {
@@ -258,10 +259,24 @@ class _KeyDetailsSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: () => _copyToClipboard(context, sshKey.publicKey),
-            icon: const Icon(Icons.copy),
-            label: const Text('Copy Public Key'),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _copyToClipboard(context, sshKey.publicKey),
+                  icon: const Icon(Icons.copy),
+                  label: const Text('Copy Public Key'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                  icon: const Icon(Icons.qr_code_2),
+                  label: const Text('QR & Share'),
+                ),
+              ),
+            ],
           ),
           if (sshKey.privateKey.isNotEmpty) ...[
             const SizedBox(height: 24),

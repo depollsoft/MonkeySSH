@@ -261,6 +261,26 @@ void main() {
       );
     });
 
+    for (final shell in shells) {
+      test('$shell runs the manual one-liner idempotently', () async {
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        final file = File('${ssh.path}/authorized_keys')
+          ..writeAsStringSync('$_otherEd25519 laptop\n');
+        final command = buildManualAuthorizedKeyCommand(keyLine);
+        for (var run = 0; run < 2; run++) {
+          final result = await Process.run(
+            shell,
+            ['-c', command],
+            environment: {'PATH': '/usr/bin:/bin', 'HOME': home.path},
+            includeParentEnvironment: false,
+          );
+          expect(result.exitCode, 0, reason: '${result.stderr}');
+        }
+        expect(file.readAsStringSync(), '$_otherEd25519 laptop\n$keyLine\n');
+        expect(FileStat.statSync(file.path).mode & 0x1ff, 0x180);
+      });
+    }
+
     test('reports a read-only authorized_keys', () async {
       final uid = (await Process.run('id', ['-u'])).stdout.toString().trim();
       if (uid == '0') {

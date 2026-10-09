@@ -94,6 +94,7 @@ dependencies:
   firebase_analytics: ^12.6.0
   firebase_crashlytics: ^5.4.0
   mime: ^2.1.0
+  qr: ^3.0.2
 
 dependency_overrides:
   # Play Billing can invoke one callback twice and crash Android while the app

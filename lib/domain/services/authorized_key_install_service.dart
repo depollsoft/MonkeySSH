@@ -123,6 +123,20 @@ String buildAuthorizedKeyInstallCommand(String keyLine) =>
     '/bin/sh -c ${shellEscapePosix(authorizedKeyInstallScript)} '
     'monkeyssh-key-install ${shellEscapePosix(keyLine)}';
 
+/// A short command a person can paste into a terminal on the server to
+/// authorize [keyLine] by hand.
+///
+/// It sticks to `&&`, `||`, `~` and single quotes so bash, zsh, fish and csh
+/// all run it, and skips the append when the key blob is already present.
+/// [keyLine] must come from [buildAuthorizedKeyLine].
+String buildManualAuthorizedKeyCommand(String keyLine) {
+  final blob = keyLine.split(' ')[1];
+  return 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && '
+      'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && '
+      "grep -qF '$blob' ~/.ssh/authorized_keys || "
+      "echo '$keyLine' >> ~/.ssh/authorized_keys";
+}
+
 /// What happened to `authorized_keys`.
 enum AuthorizedKeyInstallOutcome {
   /// The key line was appended.
