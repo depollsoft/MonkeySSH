@@ -27,6 +27,7 @@ class MonkeySshApplication : Application() {
         GeneratedPluginRegistrant.registerWith(engine)
         SshServiceChannelHandler.attachToEngine(engine, applicationContext)
         DeviceDebugChannelHandler.attachToEngine(engine, applicationContext)
+        HardwareKeyChannelHandler.attachToEngine(engine, applicationContext)
         engine.dartExecutor.executeDartEntrypoint(
             DartExecutor.DartEntrypoint.createDefault()
         )

@@ -7,6 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
 import '../../data/repositories/key_repository.dart';
+import '../models/hardware_key.dart';
+import 'diagnostics_log_service.dart';
+import 'hardware_key_service.dart';
 import 'openssh_key_generator.dart';
 
 /// Key type for SSH key generation.
@@ -24,9 +27,11 @@ enum SshKeyType {
 /// Service for SSH key management.
 class KeyService {
   /// Creates a new [KeyService].
-  KeyService(this._keyRepository);
+  KeyService(this._keyRepository, {HardwareKeyService? hardwareKeyService})
+    : _hardwareKeyService = hardwareKeyService ?? HardwareKeyService();
 
   final KeyRepository _keyRepository;
+  final HardwareKeyService _hardwareKeyService;
 
   /// Import a key from PEM content.
   Future<SshKey?> importKey({
@@ -85,6 +90,54 @@ class KeyService {
     );
   }
 
+  /// Generate a non-exportable ECDSA P-256 key in secure hardware.
+  ///
+  /// Only the keystore alias and the public key are stored. When
+  /// [requireUserPresence] is set, every signature needs biometric or
+  /// passcode confirmation, so the key cannot sign in the background.
+  Future<SshKey?> generateHardwareKey({
+    required String name,
+    required bool requireUserPresence,
+  }) async {
+    final generated = await _hardwareKeyService.generate(
+      requireUserPresence: requireUserPresence,
+    );
+    try {
+      return await _insertKey(
+        name: name,
+        privateKeyPem: generated.reference.encode(),
+        publicKeyBlob: generated.publicKeyBlob,
+      );
+    } on Object {
+      await _deleteHardwareKey(generated.reference);
+      rethrow;
+    }
+  }
+
+  /// Delete [key], removing a hardware-backed private key from the device.
+  ///
+  /// The row goes first: a failed hardware delete leaves an unreachable
+  /// keystore entry rather than a row whose key is gone.
+  Future<void> deleteKey(SshKey key) async {
+    final deleted = await _keyRepository.delete(key.id);
+    final reference = key.hardwareKeyReference;
+    if (deleted > 0 && reference != null) {
+      await _deleteHardwareKey(reference);
+    }
+  }
+
+  Future<void> _deleteHardwareKey(HardwareKeyReference reference) async {
+    try {
+      await _hardwareKeyService.delete(reference);
+    } on HardwareKeyException catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'hardware_key',
+        'delete_failed',
+        fields: {'code': error.code.wireName},
+      );
+    }
+  }
+
   Future<SshKey?> _insertKey({
     required String name,
     required String privateKeyPem,
@@ -134,5 +187,8 @@ String computeOpenSshPublicKeyFingerprint(String publicKey) {
 
 /// Provider for [KeyService].
 final keyServiceProvider = Provider<KeyService>(
-  (ref) => KeyService(ref.watch(keyRepositoryProvider)),
+  (ref) => KeyService(
+    ref.watch(keyRepositoryProvider),
+    hardwareKeyService: ref.watch(hardwareKeyServiceProvider),
+  ),
 );
