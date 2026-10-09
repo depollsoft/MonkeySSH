@@ -1398,6 +1398,7 @@ class SshService {
     this.hostKeyPromptHandler,
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
+    this.wifiPermissionTimeout = const Duration(seconds: 15),
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
   }) : wifiNetworkService = wifiNetworkService ?? WifiNetworkService(),
@@ -1429,6 +1430,11 @@ class SshService {
 
   /// Service used to read the current Wi-Fi SSID for jump host bypass.
   final WifiNetworkService wifiNetworkService;
+
+  /// How long the jump host bypass waits for the location permission before
+  /// connecting through the jump host. A prompt the user leaves open, or one
+  /// the OS never answers, must not hold the connection.
+  final Duration wifiPermissionTimeout;
 
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
@@ -1575,7 +1581,16 @@ class SshService {
             ),
           );
           preflightPhase = 'check_wifi_bypass';
-          final permission = await wifiNetworkService.requestPermission();
+          var permissionTimedOut = false;
+          final permission = await wifiNetworkService
+              .requestPermission()
+              .timeout(
+                wifiPermissionTimeout,
+                onTimeout: () {
+                  permissionTimedOut = true;
+                  return WifiPermissionStatus.denied;
+                },
+              );
           String? currentSsid;
           if (permission == WifiPermissionStatus.granted) {
             currentSsid = await wifiNetworkService.getCurrentSsid();
@@ -1585,9 +1600,13 @@ class SshService {
             );
           } else {
             onProgress?.call(
-              const ConnectionProgressUpdate(
+              ConnectionProgressUpdate(
                 state: SshConnectionState.connecting,
-                message: 'Wi-Fi permission denied. Using jump host…',
+                message: permissionTimedOut
+                    ? 'Location permission check timed out. Using jump host…'
+                    : permission == WifiPermissionStatus.approximate
+                    ? 'Precise location is off. Using jump host…'
+                    : 'Wi-Fi permission denied. Using jump host…',
               ),
             );
           }
@@ -1597,6 +1616,7 @@ class SshService {
             fields: {
               'hostId': hostId,
               'permissionStatus': permission.name,
+              'permissionTimedOut': permissionTimedOut,
               'hasCurrentSsid': currentSsid != null,
               'skipJumpHost': skipJumpHost,
             },
