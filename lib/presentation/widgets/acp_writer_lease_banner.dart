@@ -30,6 +30,7 @@ class AcpWriterLeaseBanner extends StatefulWidget {
   const AcpWriterLeaseBanner({
     required this.writer,
     required this.onTakeOver,
+    this.onRefresh,
     this.busy = false,
     this.clock = DateTime.now,
     super.key,
@@ -40,6 +41,10 @@ class AcpWriterLeaseBanner extends StatefulWidget {
 
   /// Moves the input to this device.
   final VoidCallback onTakeOver;
+
+  /// Asks who holds the chat again, about once a minute while shown, so the
+  /// activity time follows the other device's use.
+  final VoidCallback? onRefresh;
 
   /// Whether a take-over is already in progress.
   final bool busy;
@@ -54,12 +59,16 @@ class AcpWriterLeaseBanner extends StatefulWidget {
 class _AcpWriterLeaseBannerState extends State<AcpWriterLeaseBanner> {
   // Keeps "active N min ago" current while the banner stays on screen.
   Timer? _ticker;
+  var _ticks = 0;
 
   @override
   void initState() {
     super.initState();
     _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      _ticks += 1;
+      if (_ticks.isEven) widget.onRefresh?.call();
     });
   }
 

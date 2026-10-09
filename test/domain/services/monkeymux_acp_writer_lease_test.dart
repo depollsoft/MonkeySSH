@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/domain/models/acp_writer_lease.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_device_label.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
@@ -117,6 +118,7 @@ Map<String, Object?> _hello({
   bool takeOver = false,
   List<Duration> reconnectBackoff = const [Duration.zero],
   Duration heartbeatInterval = const Duration(seconds: 30),
+  int lastAcknowledgedSequence = 0,
 }) {
   final channels = <_Channel>[];
   final client = _MockSshClient();
@@ -152,6 +154,7 @@ Map<String, Object?> _hello({
         reconnectBackoff: reconnectBackoff,
         takeOver: takeOver,
         heartbeatInterval: heartbeatInterval,
+        lastAcknowledgedSequence: lastAcknowledgedSequence,
         clock: () => _now,
       );
   addTearDown(transport.close);
@@ -307,6 +310,122 @@ void main() {
     );
     expect(states.last.writer!.leaseLost, isTrue);
   });
+
+  String prompt(int id, String sessionId) =>
+      '{"jsonrpc":"2.0","id":$id,"method":"session/prompt",'
+      '"params":{"sessionId":"$sessionId","prompt":[]}}\n';
+
+  test('a lease frame tells which prompts the bridge accepted', () async {
+    final (:transport, :channels) = _open(
+      answer: (channel, _) => channel.send(_hello(canSend: true)),
+    );
+    await _waitUntil(() => transport.isConnected);
+    await transport.write(utf8.encode(prompt(1, 'kept')));
+    await transport.write(utf8.encode(prompt(2, 'dropped')));
+    expect(channels.single.types, ['hello', 'input', 'input']);
+
+    // The bridge took the first input, then the lease moved and it dropped
+    // the second.
+    channels.single.send({
+      'type': 'lease',
+      'bridgeId': _bridgeId,
+      'writer': {'label': 'iPhone', 'idleSeconds': 0},
+      'acceptedInputs': 1,
+    });
+    await _waitUntil(() => channels.single.closed);
+
+    expect(transport.promptDelivery('kept'), AcpInputDelivery.delivered);
+    expect(transport.promptDelivery('dropped'), AcpInputDelivery.notSent);
+    expect(
+      transport.promptDelivery('never-prompted'),
+      AcpInputDelivery.notSent,
+    );
+  });
+
+  test(
+    'a prompt queued while reconnecting is not sent when the lease moved',
+    () async {
+      var attaches = 0;
+      final (:transport, :channels) = _open(
+        reconnectBackoff: const [Duration(milliseconds: 50)],
+        answer: (channel, _) => channel.send(
+          ++attaches == 1
+              ? _hello(canSend: true)
+              : _hello(
+                  canSend: false,
+                  writer: {'label': 'iPhone', 'idleSeconds': 0},
+                ),
+        ),
+      );
+      final states = <MonkeyMuxAcpTransportState>[];
+      transport.states.listen(states.add);
+      await _waitUntil(() => transport.isConnected);
+      await channels.single.remoteClose();
+      await _waitUntil(
+        () => states.any(
+          (state) => state.status == MonkeyMuxAcpTransportStatus.reconnecting,
+        ),
+      );
+      // The phone wakes and the user sends before the reconnect answers.
+      await transport.write(utf8.encode(prompt(1, 'session')));
+      await _waitUntil(
+        () => states.last.status == MonkeyMuxAcpTransportStatus.heldElsewhere,
+      );
+
+      expect(transport.promptDelivery('session'), AcpInputDelivery.notSent);
+      expect(channels.last.types, ['hello']);
+    },
+  );
+
+  test(
+    'a prompt written to a channel that dropped is of unknown fate',
+    () async {
+      var attaches = 0;
+      final (:transport, :channels) = _open(
+        answer: (channel, _) => channel.send(
+          ++attaches == 1
+              ? _hello(canSend: true)
+              : _hello(
+                  canSend: false,
+                  writer: {'label': 'iPhone', 'idleSeconds': 0},
+                ),
+        ),
+      );
+      final states = <MonkeyMuxAcpTransportState>[];
+      transport.states.listen(states.add);
+      await _waitUntil(() => transport.isConnected);
+      await transport.write(utf8.encode(prompt(1, 'session')));
+      await channels.single.remoteClose();
+      await _waitUntil(
+        () =>
+            states.isNotEmpty &&
+            states.last.status == MonkeyMuxAcpTransportStatus.heldElsewhere,
+      );
+
+      expect(transport.promptDelivery('session'), AcpInputDelivery.unknown);
+    },
+  );
+
+  test(
+    'resuming after another device used the chat offers take back',
+    () async {
+      final (:transport, channels: _) = _open(
+        lastAcknowledgedSequence: 5,
+        answer: (channel, _) => channel.send(
+          _hello(canSend: false, writer: {'label': 'iPhone', 'idleSeconds': 0}),
+        ),
+      );
+      final states = <MonkeyMuxAcpTransportState>[];
+      transport.states.listen(states.add);
+
+      await _waitUntil(
+        () =>
+            states.isNotEmpty &&
+            states.last.status == MonkeyMuxAcpTransportStatus.heldElsewhere,
+      );
+      expect(states.last.writer!.leaseLost, isTrue);
+    },
+  );
 
   test('an older bridge without the lease keeps the writer error', () async {
     final (:transport, channels: _) = _open(

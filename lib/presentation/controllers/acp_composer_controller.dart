@@ -220,7 +220,13 @@ class AcpComposerController extends ChangeNotifier {
   // that send's clear cannot wipe the restored text and attachments.
   /// Rejected drafts waiting for the in-flight send to clear the field,
   /// oldest first; every one of them is merged back once it does.
-  final List<({String text, List<AcpComposerAttachment> attachments})>
+  final List<
+    ({
+      String text,
+      List<AcpComposerAttachment> attachments,
+      AcpComposerError? error,
+    })
+  >
   _pendingRestores = [];
 
   AcpSlashQuery? _slashQuery;
@@ -610,18 +616,22 @@ class AcpComposerController extends ChangeNotifier {
           (error is AcpInputHeldElsewhereException && error.delivered)) {
         return;
       }
+      final reason = error is AcpInputHeldElsewhereException
+          ? (error.delivery == AcpInputDelivery.unknown
+                ? _maybeSentElsewhereError
+                : _heldElsewhereError)
+          : null;
       if (_sendState != _SendState.idle) {
         // A newer send is still preparing and will clear the draft when it
         // finishes; restore after that so the rejected draft survives.
         _pendingRestores.add((
           text: snapshotText,
           attachments: snapshotAttachments,
+          error: reason,
         ));
         return;
       }
-      _error = error is AcpInputHeldElsewhereException
-          ? _heldElsewhereError
-          : null;
+      _error = reason;
       _restoreSnapshot(snapshotText, snapshotAttachments);
       _recomputeSlash();
       notifyListeners();
@@ -631,6 +641,11 @@ class AcpComposerController extends ChangeNotifier {
   static const _heldElsewhereError = AcpComposerError(
     AcpComposerErrorKind.send,
     'Another device took this chat before your message was sent.',
+  );
+
+  static const _maybeSentElsewhereError = AcpComposerError(
+    AcpComposerErrorKind.send,
+    'Another device took this chat. Your message may not have been sent.',
   );
 
   static const _sendFailedError = AcpComposerError(
@@ -667,6 +682,7 @@ class AcpComposerController extends ChangeNotifier {
     final restores = _pendingRestores.reversed.toList();
     _pendingRestores.clear();
     for (final restore in restores) {
+      if (restore.error case final reason?) _error ??= reason;
       _restoreSnapshot(restore.text, restore.attachments);
     }
   }

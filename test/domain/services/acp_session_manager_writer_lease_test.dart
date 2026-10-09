@@ -106,6 +106,9 @@ class _Connector implements AcpBridgeConnector {
 
   /// When set, an attach that does not take over finds this writer.
   MonkeyMuxAcpRemoteWriter? heldBy;
+
+  /// What each attach reports about prompts once the input moved.
+  final promptDeliveries = <String, AcpInputDelivery>{};
   var _bridges = 0;
 
   @override
@@ -122,9 +125,14 @@ class _Connector implements AcpBridgeConnector {
   Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
     int hostId, {
     MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => [
-    MonkeyMuxAcpBridgeMetadata(
-      id: 'bridge-1',
+  }) async => [_metadata('bridge-1')];
+
+  int statusCount = 0;
+
+  MonkeyMuxAcpBridgeMetadata _metadata(String bridgeId) {
+    final writer = heldBy;
+    return MonkeyMuxAcpBridgeMetadata(
+      id: bridgeId,
       provider: 'Copilot CLI',
       commandHash: 'hash',
       state: MonkeyMuxAcpProviderState.running,
@@ -134,8 +142,15 @@ class _Connector implements AcpBridgeConnector {
       lastActivity: DateTime.now(),
       startedAt: DateTime.now(),
       nextSequence: 4,
-    ),
-  ];
+      writer: writer == null
+          ? null
+          : MonkeyMuxAcpLeaseHolder(
+              label: writer.label,
+              lastActiveAt: writer.lastActiveAt,
+              stale: false,
+            ),
+    );
+  }
 
   @override
   Future<String> resolveWorkingDirectory(
@@ -148,7 +163,10 @@ class _Connector implements AcpBridgeConnector {
   Future<MonkeyMuxAcpBridgeMetadata> bridgeStatus(
     int hostId,
     String bridgeId,
-  ) => throw UnimplementedError();
+  ) async {
+    statusCount += 1;
+    return _metadata(bridgeId);
+  }
 
   @override
   Future<void> stopBridge(int hostId, String bridgeId) async {}
@@ -190,6 +208,8 @@ class _Connector implements AcpBridgeConnector {
       client: client,
       transportStates: stateController.stream,
       transportErrors: errors.stream,
+      promptDelivery: (sessionId) =>
+          promptDeliveries[sessionId] ?? AcpInputDelivery.notSent,
       onClose: () async {
         await client.close();
         await stateController.close();
@@ -299,9 +319,69 @@ void main() {
       final result = (await open()) as AcpSessionLaunchStarted;
 
       expect(stateOf(result.key).remoteWriter, later);
-      expect(connector.takeOvers, [false, false]);
+      // The frozen view stays; only who holds it is refreshed.
+      expect(connector.takeOvers, [false]);
     },
   );
+
+  test('a device that lost the chat keeps its transcript on return', () async {
+    final started = (await manager.startNewSession(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      cwd: '/repo',
+    )) as AcpSessionLaunchStarted;
+    final key = started.key;
+    connector.promptDeliveries[key.acpSessionId] = AcpInputDelivery.delivered;
+    final sent = manager.prompt(key, const [AcpTextContent('kept')]);
+    unawaited(sent.then<void>((_) {}, onError: (Object _) {}));
+    await _pump();
+    final iphone = MonkeyMuxAcpRemoteWriter(
+      label: 'iPhone',
+      lastActiveAt: DateTime(2026, 10, 9, 12),
+      leaseLost: true,
+    );
+    connector.states.single.add(
+      MonkeyMuxAcpTransportState(
+        status: MonkeyMuxAcpTransportStatus.heldElsewhere,
+        bridgeId: key.bridgeId,
+        lastDeliveredSequence: 0,
+        writer: iphone,
+      ),
+    );
+    await _pump();
+    connector.heldBy = MonkeyMuxAcpRemoteWriter(
+      label: 'iPhone',
+      lastActiveAt: DateTime(2026, 10, 9, 12, 30),
+      leaseLost: false,
+    );
+
+    final result = await manager.reconnectSession(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      bridgeId: key.bridgeId,
+      acpSessionId: key.acpSessionId,
+      cwd: '/repo',
+    );
+
+    expect(result, isA<AcpSessionLaunchStarted>());
+    final state = stateOf(key);
+    expect(_timelineTexts(state), ['kept']);
+    expect(state.remoteWriter!.leaseLost, isTrue);
+    expect(state.remoteWriter!.lastActiveAt, DateTime(2026, 10, 9, 12, 30));
+    expect(connector.agents, hasLength(1));
+
+    connector.heldBy = MonkeyMuxAcpRemoteWriter(
+      label: 'iPhone',
+      lastActiveAt: DateTime(2026, 10, 9, 12, 45),
+      leaseLost: false,
+    );
+    await manager.refreshHeldSession(key);
+    expect(
+      stateOf(key).remoteWriter!.lastActiveAt,
+      DateTime(2026, 10, 9, 12, 45),
+    );
+    expect(connector.statusCount, 1);
+  });
 
   test(
     'reopening a detached chat another device took stays read-only',
@@ -344,6 +424,46 @@ void main() {
   );
 
   test(
+    'a prompt the bridge dropped leaves the transcript and returns',
+    () async {
+      final started = (await manager.startNewSession(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        cwd: '/repo',
+      )) as AcpSessionLaunchStarted;
+      final key = started.key;
+      // Sent during the takeover round trip: the bridge already dropped it.
+      connector.promptDeliveries[key.acpSessionId] = AcpInputDelivery.notSent;
+      final sent = manager.prompt(key, const [AcpTextContent('late')]);
+      final sentError = expectLater(
+        sent,
+        throwsA(
+          isA<AcpInputHeldElsewhereException>().having(
+            (error) => error.delivery,
+            'delivery',
+            AcpInputDelivery.notSent,
+          ),
+        ),
+      );
+      await _pump();
+      expect(_timelineTexts(stateOf(key)), ['late']);
+
+      connector.states.single.add(
+        MonkeyMuxAcpTransportState(
+          status: MonkeyMuxAcpTransportStatus.heldElsewhere,
+          bridgeId: key.bridgeId,
+          lastDeliveredSequence: 0,
+          writer: ipad,
+        ),
+      );
+      await sentError;
+      await _pump();
+
+      expect(_timelineTexts(stateOf(key)), isEmpty);
+    },
+  );
+
+  test(
     'losing the lease makes the chat read-only and returns unsent prompts',
     () async {
       final started = (await manager.startNewSession(
@@ -353,6 +473,7 @@ void main() {
       )) as AcpSessionLaunchStarted;
       final key = started.key;
       final agent = connector.agents.single;
+      connector.promptDeliveries[key.acpSessionId] = AcpInputDelivery.delivered;
       final delivered = manager.prompt(key, const [AcpTextContent('first')]);
       final queued = manager.prompt(key, const [AcpTextContent('second')]);
       final deliveredError = expectLater(

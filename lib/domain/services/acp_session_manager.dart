@@ -494,6 +494,23 @@ class AcpSessionManager {
     }
 
     final heldElsewhere = existing?.isHeldElsewhere ?? false;
+    final holder = remoteBridge.writer;
+    if (existing != null &&
+        heldElsewhere &&
+        !takeOver &&
+        holder != null &&
+        !holder.stale) {
+      // Still held by a live device: keep the frozen view, with its
+      // transcript and whether this device lost the chat, and refresh only
+      // who holds it.
+      existing.refreshRemoteWriter(holder);
+      if (selectOnSuccess) {
+        _select(key.value);
+      } else {
+        _emit();
+      }
+      return AcpSessionLaunchStarted(key);
+    }
     if (existing != null && heldElsewhere) {
       // Another device held the input. Open afresh like any device joining a
       // live bridge: its pending requests replay to the new attachment, and
@@ -553,6 +570,29 @@ class AcpSessionManager {
       takeOver: takeOver,
     );
   });
+
+  /// Refreshes who holds [key]'s input while this device shows it read-only.
+  ///
+  /// Best effort: without an SSH session, or once the session is no longer
+  /// held elsewhere, nothing changes.
+  Future<void> refreshHeldSession(AcpSessionKey key) async {
+    final controller = _controllers[key.value];
+    if (controller == null || !controller.isHeldElsewhere) return;
+    final MonkeyMuxAcpBridgeMetadata status;
+    try {
+      status = await _connector.bridgeStatus(key.hostId, key.bridgeId);
+    } on Object {
+      return;
+    }
+    final holder = status.writer;
+    if (holder == null ||
+        holder.stale ||
+        !identical(_controllers[key.value], controller) ||
+        !controller.isHeldElsewhere) {
+      return;
+    }
+    controller.refreshRemoteWriter(holder);
+  }
 
   /// Lists safe metadata for remote bridges on [hostId].
   Future<List<MonkeyMuxAcpBridgeMetadata>> listRemoteBridges(int hostId) =>
@@ -1708,6 +1748,8 @@ class _BridgeAttachment {
   AcpInitializeResult? get initialization => _initialization;
   bool get skippedHistoricalReplay => _session.skippedHistoricalReplay;
   int get lastDeliveredSequence => _session.lastDeliveredSequence;
+  AcpInputDelivery promptDelivery(String sessionId) =>
+      _session.promptDelivery(sessionId);
 
   /// The capability service bound to this attachment's client, or `null` when
   /// no same-host filesystem/terminal binding was available at initialize
@@ -1905,6 +1947,28 @@ class _SessionController {
 
   /// Whether another device holds this session's input, leaving it read-only.
   bool get isHeldElsewhere => _state.remoteWriter != null;
+
+  /// Updates who holds this read-only session's input, keeping whether this
+  /// device lost it.
+  void refreshRemoteWriter(MonkeyMuxAcpLeaseHolder holder) {
+    final transportState = _state.transportState;
+    final current = _state.remoteWriter;
+    if (transportState == null || current == null) return;
+    _update(
+      (s) => s.copyWith(
+        transportState: MonkeyMuxAcpTransportState(
+          status: transportState.status,
+          bridgeId: transportState.bridgeId,
+          lastDeliveredSequence: transportState.lastDeliveredSequence,
+          writer: MonkeyMuxAcpRemoteWriter(
+            label: holder.label,
+            lastActiveAt: holder.lastActiveAt,
+            leaseLost: current.leaseLost,
+          ),
+        ),
+      ),
+    );
+  }
 
   void updateWorkingDirectory(String cwd) {
     if (_cwd == cwd) {
@@ -3048,15 +3112,12 @@ class _SessionController {
               'prompt_detached_in_flight',
               fields: {'queuedPromptCount': _promptQueue.length},
             );
+            if (isHeldElsewhere) {
+              _completeHeldElsewherePrompt(queued, promptAttachment);
+              continue;
+            }
             if (!queued.completer.isCompleted) {
-              // The prompt already reached the agent; its turn continues on
-              // the device that took over.
-              queued.completer.completeError(
-                isHeldElsewhere
-                    ? const AcpInputHeldElsewhereException(delivered: true)
-                    : error,
-                stackTrace,
-              );
+              queued.completer.completeError(error, stackTrace);
             }
             continue;
           }
@@ -3632,6 +3693,27 @@ class _SessionController {
     );
   }
 
+  /// Ends a dispatched prompt after another device took the input. One the
+  /// agent received keeps its transcript entry, since its turn continues on
+  /// the other device; any other prompt goes back to the composer.
+  void _completeHeldElsewherePrompt(
+    _QueuedAcpPrompt queued,
+    _BridgeAttachment promptAttachment,
+  ) {
+    final delivery = promptAttachment.promptDelivery(_key.acpSessionId);
+    if (delivery != AcpInputDelivery.delivered) {
+      final timeline = _timelineBuilder.removeLocalUserPrompt(
+        queued.localMessageId,
+      );
+      _update((s) => s.copyWith(timeline: timeline));
+    }
+    if (!queued.completer.isCompleted) {
+      queued.completer.completeError(
+        AcpInputHeldElsewhereException(delivery: delivery),
+      );
+    }
+  }
+
   /// Hands prompts that never left this device back to the composer, since
   /// the device no longer holds the input.
   void _returnQueuedPromptsHeldElsewhere() {
@@ -3646,7 +3728,9 @@ class _SessionController {
     for (final queued in returned) {
       if (!queued.completer.isCompleted) {
         queued.completer.completeError(
-          const AcpInputHeldElsewhereException(delivered: false),
+          const AcpInputHeldElsewhereException(
+            delivery: AcpInputDelivery.notSent,
+          ),
         );
       }
     }

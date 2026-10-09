@@ -144,6 +144,29 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Take back'), findsOneWidget);
   });
 
+  testWidgets('asks who holds the chat about once a minute', (tester) async {
+    var refreshes = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AcpWriterLeaseBanner(
+            writer: _writer(),
+            clock: () => _now,
+            onTakeOver: () {},
+            onRefresh: () => refreshes++,
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump(const Duration(seconds: 59));
+    expect(refreshes, 0);
+    await tester.pump(const Duration(seconds: 2));
+    expect(refreshes, 1);
+    await tester.pump(const Duration(minutes: 1));
+    expect(refreshes, 2);
+  });
+
   testWidgets('a take-over in progress cannot be tapped again', (tester) async {
     var taps = 0;
     await tester.pumpWidget(

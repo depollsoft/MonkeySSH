@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../models/acp_writer_lease.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'acp_client.dart';
 import 'acp_client_capability_service.dart';
@@ -49,9 +50,11 @@ final class AcpBridgeSession {
     required Future<void> Function() onClose,
     bool Function()? skippedHistoricalReplay,
     int Function()? lastDeliveredSequence,
+    AcpInputDelivery Function(String sessionId)? promptDelivery,
   }) : _onClose = onClose,
        _skippedHistoricalReplay = skippedHistoricalReplay,
-       _lastDeliveredSequence = lastDeliveredSequence;
+       _lastDeliveredSequence = lastDeliveredSequence,
+       _promptDelivery = promptDelivery;
 
   /// Typed ACP client bound to the bridge transport.
   final AcpClient client;
@@ -64,6 +67,12 @@ final class AcpBridgeSession {
 
   final bool Function()? _skippedHistoricalReplay;
   final int Function()? _lastDeliveredSequence;
+  final AcpInputDelivery Function(String sessionId)? _promptDelivery;
+
+  /// Whether the newest prompt for [sessionId] reached the agent, once the
+  /// transport found the input held by another device.
+  AcpInputDelivery promptDelivery(String sessionId) =>
+      _promptDelivery?.call(sessionId) ?? AcpInputDelivery.unknown;
 
   /// Latest bridge output sequence delivered by this logical attachment.
   int get lastDeliveredSequence => _lastDeliveredSequence?.call() ?? 0;
@@ -267,6 +276,7 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
       transportErrors: transport.errors,
       skippedHistoricalReplay: transport.didSkipHistoricalReplay,
       lastDeliveredSequence: () => transport.lastDeliveredSequence,
+      promptDelivery: transport.promptDelivery,
       onClose: client.close,
     );
   }

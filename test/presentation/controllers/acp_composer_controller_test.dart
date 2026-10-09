@@ -261,7 +261,9 @@ void main() {
 
   test('returns an unsent prompt when another device takes the chat', () async {
     final manager = RecordingAcpSessionManager()
-      ..throwOnPrompt = const AcpInputHeldElsewhereException(delivered: false);
+      ..throwOnPrompt = const AcpInputHeldElsewhereException(
+        delivery: AcpInputDelivery.notSent,
+      );
     final controller = _controller(manager)..setText('keep me');
     addTearDown(controller.dispose);
 
@@ -275,7 +277,9 @@ void main() {
     'keeps a delivered prompt out of the draft when the chat moves',
     () async {
       final manager = RecordingAcpSessionManager()
-        ..throwOnPrompt = const AcpInputHeldElsewhereException(delivered: true);
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.delivered,
+        );
       final controller = _controller(manager)..setText('already running');
       addTearDown(controller.dispose);
 
@@ -285,6 +289,67 @@ void main() {
       // invite a duplicate.
       expect(controller.text, isEmpty);
       expect(controller.error, isNull);
+    },
+  );
+
+  test(
+    'returns a prompt that may not have been sent with that warning',
+    () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.unknown,
+        );
+      final controller = _controller(manager)..setText('maybe sent');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'maybe sent');
+      expect(controller.error?.message, contains('may not have been sent'));
+    },
+  );
+
+  test(
+    'a parked restore keeps the reason another device took the chat',
+    () async {
+      final manager = RecordingAcpSessionManager();
+      final promptGate = Completer<void>();
+      final uploadGate = Completer<void>();
+      manager
+        ..promptGate = promptGate
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.notSent,
+        );
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+        ),
+        uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+        session: _session(embeddedContext: true),
+      )..setText('first');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      controller
+        ..setText('second')
+        ..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'big.txt',
+            bytes: Uint8List.fromList('hello world'.codeUnits),
+            mimeType: 'text/plain',
+          ),
+        )
+        ..enableRemoteUploadFallback();
+      final second = controller.send();
+      await Future<void>.delayed(Duration.zero);
+      promptGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      uploadGate.complete();
+      expect(await second, isTrue);
+
+      expect(controller.text, 'first');
+      expect(controller.error?.message, contains('Another device took'));
     },
   );
 

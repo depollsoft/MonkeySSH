@@ -56,6 +56,7 @@ final class MonkeyMuxAcpBridgeMetadata {
     this.providerId,
     this.sessionId,
     this.cwd,
+    this.writer,
   });
 
   /// Opaque bridge identifier.
@@ -96,6 +97,30 @@ final class MonkeyMuxAcpBridgeMetadata {
 
   /// Latest sequence allocated by the bridge.
   final int nextSequence;
+
+  /// Client holding the input lease, when a lease-aware helper reports one.
+  final MonkeyMuxAcpLeaseHolder? writer;
+}
+
+/// The client holding a bridge's input lease, as listed by the helper.
+@immutable
+final class MonkeyMuxAcpLeaseHolder {
+  /// Creates a lease holder description.
+  const MonkeyMuxAcpLeaseHolder({
+    required this.lastActiveAt,
+    required this.stale,
+    this.label,
+  });
+
+  /// Short device description that client supplied, if any.
+  final String? label;
+
+  /// Local time of the holder's last input.
+  final DateTime lastActiveAt;
+
+  /// Whether the holder has been silent long enough that the next attach
+  /// takes the lease without asking.
+  final bool stale;
 }
 
 /// Result of starting a persistent bridge.

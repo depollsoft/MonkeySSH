@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_authentication.dart';
 import '../models/acp_json.dart';
 import '../models/acp_provider.dart';
+import '../models/acp_writer_lease.dart';
 import '../models/command_names.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import '../models/remote_multiplexer.dart';
@@ -819,6 +820,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
        _deviceLabel = deviceLabel,
        _clientToken = clientToken,
        _takeOverRequested = takeOver,
+       // Resuming an earlier position means this chat held the lease before.
+       _heldWriterLease = lastAcknowledgedSequence > 0,
        _heartbeatInterval = heartbeatInterval,
        _clock = clock {
     scheduleMicrotask(() {
@@ -841,7 +844,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   // Only the first writer handshake takes the lease over. A later reconnect
   // must not silently take back a lease another device deliberately took.
   bool _takeOverRequested;
-  var _heldWriterLease = false;
+  bool _heldWriterLease;
   Timer? _heartbeatTimer;
   // Both input views share one single-subscription buffer. Outputs received
   // before subscription must remain available to whichever view is chosen.
@@ -858,8 +861,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   static const _maxPendingInputFrames = 32;
   static const _maxPendingInputBytes = monkeyMuxAcpBridgeMaxFrameBytes;
 
-  final _pendingInputFrames = Queue<Uint8List>();
+  final _pendingInputFrames = Queue<_InputFrame>();
   var _pendingInputBytes = 0;
+  // Prompts written to a channel, newest last, so a lost lease can tell
+  // which of them the bridge accepted.
+  final _sentPrompts = Queue<_SentPrompt>();
+  var _channelInputCount = 0;
+  Map<String, AcpInputDelivery>? _promptDeliveries;
   final _pendingReplayFrames = Queue<AcpDecodedFrame>();
 
   SSHSession? _channel;
@@ -961,6 +969,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   Future<void> _openChannel() async {
     if (_closed || _terminalFailure) return;
     final generation = ++_generation;
+    _channelInputCount = 0;
     SshSession? session;
     SSHSession? channel;
     try {
@@ -1651,16 +1660,39 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     if (!_matchesCurrentBridge(message)) return;
     // A lease frame only ever reports a lost lease; a grant arrives as a hello.
     if (message['canSend'] == true) return;
-    _enterHeldElsewhere(message['writer'], leaseLost: true);
+    _enterHeldElsewhere(
+      message['writer'],
+      leaseLost: true,
+      acceptedInputs: _readNonNegativeInt(message['acceptedInputs']) ?? 0,
+    );
+  }
+
+  /// Whether the newest prompt for [sessionId] reached the agent, once this
+  /// transport is [MonkeyMuxAcpTransportStatus.heldElsewhere].
+  ///
+  /// A prompt the transport never received counts as not sent.
+  AcpInputDelivery promptDelivery(String sessionId) {
+    final deliveries = _promptDeliveries;
+    if (deliveries == null) return AcpInputDelivery.unknown;
+    return deliveries[sessionId] ?? AcpInputDelivery.notSent;
   }
 
   /// Ends this transport without failure because another client holds the
   /// input lease. Queued input is dropped unsent, and nothing more is written.
-  void _enterHeldElsewhere(Object? writer, {required bool leaseLost}) {
+  ///
+  /// [acceptedInputs], from a lease frame, counts the input frames the bridge
+  /// took on the current channel before the lease moved; later ones were
+  /// dropped.
+  void _enterHeldElsewhere(
+    Object? writer, {
+    required bool leaseLost,
+    int? acceptedInputs,
+  }) {
     if (_closed || _terminalFailure) return;
     _terminalFailure = true;
     _connected = false;
     _stopHeartbeat();
+    _promptDeliveries = _settlePromptDeliveries(acceptedInputs);
     final remoteWriter = _parseRemoteWriter(writer, leaseLost: leaseLost);
     _emitState(MonkeyMuxAcpTransportStatus.heldElsewhere, writer: remoteWriter);
     _diagnostics.info(
@@ -1691,6 +1723,25 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       ),
       leaseLost: leaseLost,
     );
+  }
+
+  Map<String, AcpInputDelivery> _settlePromptDeliveries(int? acceptedInputs) {
+    final deliveries = <String, AcpInputDelivery>{};
+    for (final sent in _sentPrompts) {
+      deliveries[sent.sessionId] =
+          sent.generation == _generation && acceptedInputs != null
+          ? (sent.index < acceptedInputs
+                ? AcpInputDelivery.delivered
+                : AcpInputDelivery.notSent)
+          // Written to a channel that dropped before its fate was known.
+          : AcpInputDelivery.unknown;
+    }
+    for (final frame in _pendingInputFrames) {
+      if (frame.promptSessionId case final sessionId?) {
+        deliveries[sessionId] = AcpInputDelivery.notSent;
+      }
+    }
+    return deliveries;
   }
 
   void _startHeartbeat() {
@@ -1827,9 +1878,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     }
   }
 
-  void _enqueuePendingInput(Uint8List frame, {bool first = false}) {
+  void _enqueuePendingInput(_InputFrame frame, {bool first = false}) {
     if (_pendingInputFrames.length >= _maxPendingInputFrames ||
-        _pendingInputBytes + frame.length > _maxPendingInputBytes) {
+        _pendingInputBytes + frame.bytes.length > _maxPendingInputBytes) {
       throw const MonkeyMuxAcpBridgeException(
         MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
         'Too much ACP input is waiting for the bridge.',
@@ -1840,12 +1891,12 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     } else {
       _pendingInputFrames.addLast(frame);
     }
-    _pendingInputBytes += frame.length;
+    _pendingInputBytes += frame.bytes.length;
   }
 
-  Uint8List _removePendingInput() {
+  _InputFrame _removePendingInput() {
     final frame = _pendingInputFrames.removeFirst();
-    _pendingInputBytes -= frame.length;
+    _pendingInputBytes -= frame.bytes.length;
     return frame;
   }
 
@@ -1860,12 +1911,21 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     while (_pendingInputFrames.isNotEmpty && _connected) {
       final frame = _removePendingInput();
       try {
-        _channel!.write(frame);
+        _channel!.write(frame.bytes);
       } on Object catch (error) {
         _enqueuePendingInput(frame, first: true);
         _handleChannelLoss(_generation, error);
         return;
       }
+      if (frame.promptSessionId case final sessionId?) {
+        _sentPrompts.addLast((
+          sessionId: sessionId,
+          generation: _generation,
+          index: _channelInputCount,
+        ));
+        if (_sentPrompts.length > _maxSentPrompts) _sentPrompts.removeFirst();
+      }
+      _channelInputCount += 1;
     }
   }
 
@@ -2054,6 +2114,16 @@ String _buildHelperCommand(
   return buildWindowsPowerShellCommand(script);
 }
 
+/// One input frame for the bridge, with the session it prompts, if any.
+typedef _InputFrame = ({Uint8List bytes, String? promptSessionId});
+
+/// A prompt written as input frame [index] of channel [generation].
+typedef _SentPrompt = ({String sessionId, int generation, int index});
+
+// Only the newest prompt per session matters, and each session has at most
+// one in flight.
+const _maxSentPrompts = 32;
+
 typedef _PreparedWireFrame = ({
   Map<String, Object?> message,
   AcpDecodedFrame? output,
@@ -2155,6 +2225,7 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
   final lastActivity = _readNonNegativeInt(map['lastActivityUnix']);
   final startedAt = _readNonNegativeInt(map['startedAtUnix']);
   final nextSequence = _readNonNegativeInt(map['nextSequence']);
+  final writer = map['writer'];
   if (provider is! String ||
       provider.length > 128 ||
       commandHash is! String ||
@@ -2192,6 +2263,19 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
       isUtc: true,
     ),
     nextSequence: nextSequence,
+    writer: writer is Map ? _parseLeaseHolder(writer) : null,
+  );
+}
+
+MonkeyMuxAcpLeaseHolder _parseLeaseHolder(Map<Object?, Object?> writer) {
+  final label = writer['label'];
+  final idle = _readNonNegativeInt(writer['idleSeconds']) ?? 0;
+  return MonkeyMuxAcpLeaseHolder(
+    label: label is String ? _boundedDeviceLabel(label) : null,
+    lastActiveAt: DateTime.now().subtract(
+      Duration(seconds: math.min(idle, _maxReportedIdleSeconds)),
+    ),
+    stale: writer['stale'] == true,
   );
 }
 
@@ -2276,7 +2360,7 @@ void _requireType(Map<String, Object?> message, String expected) {
   }
 }
 
-Uint8List _prepareAcpInputFrame(List<int> frame) {
+_InputFrame _prepareAcpInputFrame(List<int> frame) {
   Object? decoded;
   try {
     decoded = jsonDecode(utf8.decode(frame, allowMalformed: false));
@@ -2292,11 +2376,21 @@ Uint8List _prepareAcpInputFrame(List<int> frame) {
       'ACP input must be a JSON object.',
     );
   }
-  return _encodeWire({
-    'version': monkeyMuxAcpBridgeProtocolVersion,
-    'type': 'input',
-    'data': decoded,
-  });
+  final params = decoded['params'];
+  final sessionId = params is Map ? params['sessionId'] : null;
+  return (
+    bytes: _encodeWire({
+      'version': monkeyMuxAcpBridgeProtocolVersion,
+      'type': 'input',
+      'data': decoded,
+    }),
+    promptSessionId:
+        decoded['method'] == 'session/prompt' &&
+            decoded['id'] != null &&
+            sessionId is String
+        ? sessionId
+        : null,
+  );
 }
 
 Uint8List _encodeWire(Map<String, Object?> message) {
