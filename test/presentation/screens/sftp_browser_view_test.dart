@@ -157,6 +157,18 @@ void main() {
       expect(await store.load(3), const SftpBrowserViewSettings());
     });
 
+    test('keeps the filter per host with its folder', () async {
+      await store.saveFilter(1, (directory: '/srv', query: 'log'));
+      await store.saveFilter(2, (directory: '/tmp', query: 'x'));
+
+      expect(await store.loadFilter(1), (directory: '/srv', query: 'log'));
+      expect(await store.loadFilter(3), isNull);
+
+      await store.saveFilter(1, null);
+      expect(await store.loadFilter(1), isNull);
+      expect(await store.loadFilter(2), (directory: '/tmp', query: 'x'));
+    });
+
     test('drops a host entry when it returns to the defaults', () async {
       await store.save(1, const SftpBrowserViewSettings(descending: true));
       await store.save(1, const SftpBrowserViewSettings());

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
 
 import '../../app/theme.dart';
 import '../../domain/services/remote_file_service.dart';
@@ -279,6 +280,59 @@ String sftpBatchSummary(String pastVerb, SftpBatchReport report) {
   return '$pastVerb $done of $total $noun. $suffix';
 }
 
+final _unsafeLocalNameCharacters = RegExp(r'[\\/:*?"<>|\x00-\x1F]');
+final _reservedWindowsNames = RegExp(
+  r'^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$',
+  caseSensitive: false,
+);
+
+/// A file name for [remoteName] that is a single safe entry on any local
+/// file system.
+///
+/// POSIX file names may hold `\`, `:` and other characters Windows treats as
+/// separators, drive markers or wildcards; those become `_`. Trailing dots
+/// and spaces, `.`/`..` and Windows device names are neutralised too.
+String safeLocalFileName(String remoteName) {
+  var name = remoteName.replaceAll(_unsafeLocalNameCharacters, '_');
+  name = name.replaceAll(RegExp(r'[. ]+$'), '');
+  if (name.isEmpty || name == '.' || name == '..') return 'file';
+  if (_reservedWindowsNames.hasMatch(name)) return '_$name';
+  return name;
+}
+
+/// A path for [remoteName] inside [directory] that does not exist yet:
+/// `name`, then `name (2)` and so on, keeping the extension last.
+///
+/// The name passes through [safeLocalFileName] first, and the result is
+/// checked to stay inside [directory]. [exists] and [context] can be
+/// replaced in tests.
+String freeLocalExportPath(
+  String directory,
+  String remoteName, {
+  bool Function(String path)? exists,
+  path.Context? context,
+}) {
+  final paths = context ?? path.context;
+  final isTaken =
+      exists ??
+      (candidate) =>
+          FileSystemEntity.typeSync(candidate, followLinks: false) !=
+          FileSystemEntityType.notFound;
+  final name = safeLocalFileName(remoteName);
+  final extension = paths.extension(name);
+  final stem = name.substring(0, name.length - extension.length);
+  for (var attempt = 1; ; attempt++) {
+    final candidate = paths.join(
+      directory,
+      attempt == 1 ? name : '$stem ($attempt)$extension',
+    );
+    if (!paths.isWithin(directory, candidate)) {
+      throw FileSystemException('Export name leaves the folder', directory);
+    }
+    if (!isTaken(candidate)) return candidate;
+  }
+}
+
 /// Shows per-file results for a batch.
 Future<void> showSftpBatchResults(
   BuildContext context, {
@@ -400,6 +454,27 @@ class SftpBottomPanel extends StatelessWidget {
   /// Whether [summary] is a file name, set in mono like other machine text.
   final bool summaryIsMachineText;
 
+  /// Lays the actions out in one row, or two per row when large text would
+  /// clip their labels.
+  List<Widget> _actionRows(BuildContext context) {
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 18;
+    final perRow = largeText && actions.length > 2 ? 2 : actions.length;
+    return [
+      for (var start = 0; start < actions.length; start += perRow) ...[
+        if (start > 0) const SizedBox(height: 8),
+        Row(
+          children: [
+            for (final (index, action)
+                in actions.skip(start).take(perRow).indexed) ...[
+              if (index > 0) const SizedBox(width: 8),
+              Expanded(child: action),
+            ],
+          ],
+        ),
+      ],
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -444,14 +519,7 @@ class SftpBottomPanel extends StatelessWidget {
                     child,
                   ],
                   const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      for (final (index, action) in actions.indexed) ...[
-                        if (index > 0) const SizedBox(width: 8),
-                        Expanded(child: action),
-                      ],
-                    ],
-                  ),
+                  ..._actionRows(context),
                 ],
               ),
             ),

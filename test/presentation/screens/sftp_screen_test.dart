@@ -56,6 +56,20 @@ class _MemoryViewStore implements SftpBrowserViewStore {
   Future<void> save(int hostId, SftpBrowserViewSettings settings) async {
     saved[hostId] = settings;
   }
+
+  final filters = <int, SftpBrowserFilter>{};
+
+  @override
+  Future<SftpBrowserFilter?> loadFilter(int hostId) async => filters[hostId];
+
+  @override
+  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) async {
+    if (filter == null) {
+      filters.remove(hostId);
+    } else {
+      filters[hostId] = filter;
+    }
+  }
 }
 
 class _ControlledDownloadService extends RemoteFileService {

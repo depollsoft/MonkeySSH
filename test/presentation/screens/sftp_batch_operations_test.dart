@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/screens/sftp_batch_operations.dart';
+import 'package:path/path.dart' as path;
 
 void main() {
   group('runSftpBatch', () {
@@ -208,5 +209,85 @@ void main() {
     await tester.pumpWidget(build(reduceMotion: true));
     expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(find.text('Cancel'), findsNothing);
+  });
+
+  group('local export names', () {
+    test('POSIX names that Windows reads as paths stay one entry', () {
+      expect(safeLocalFileName(r'..\escaped.txt'), '.._escaped.txt');
+      expect(safeLocalFileName(r'C:\Windows\x.dll'), 'C__Windows_x.dll');
+      expect(safeLocalFileName('a/b'), 'a_b');
+      expect(safeLocalFileName('..'), 'file');
+      expect(safeLocalFileName('notes. '), 'notes');
+      expect(safeLocalFileName('CON.txt'), '_CON.txt');
+      expect(safeLocalFileName('what?.md'), 'what_.md');
+    });
+
+    test('export paths stay inside the chosen Windows folder', () {
+      const directory = r'C:\Users\me\Downloads';
+      for (final name in [
+        r'..\escaped.txt',
+        r'..\..\Windows\system.ini',
+        r'C:\autoexec.bat',
+        r'\\server\share\x',
+        'a:b',
+      ]) {
+        final result = freeLocalExportPath(
+          directory,
+          name,
+          context: path.windows,
+          exists: (_) => false,
+        );
+        expect(
+          path.windows.isWithin(directory, result),
+          isTrue,
+          reason: '$name -> $result',
+        );
+        expect(path.windows.dirname(result), directory, reason: name);
+      }
+    });
+
+    test('export paths never reuse a taken name', () {
+      final taken = {'/out/README.md', '/out/README (2).md'};
+      expect(
+        freeLocalExportPath(
+          '/out',
+          'README.md',
+          context: path.posix,
+          exists: taken.contains,
+        ),
+        '/out/README (3).md',
+      );
+    });
+  });
+
+  testWidgets('large text puts the selection actions on two rows', (
+    tester,
+  ) async {
+    Widget build(double scale) => MediaQuery(
+      data: MediaQueryData(
+        size: const Size(390, 844),
+        textScaler: TextScaler.linear(scale),
+      ),
+      child: MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: SftpBatchSelectionBar(
+            selectedCount: 2,
+            onDone: () {},
+            onDownload: () {},
+            onMove: () {},
+            onDelete: () {},
+          ),
+        ),
+      ),
+    );
+    double rowOf(String label) => tester.getCenter(find.text(label)).dy;
+
+    await tester.pumpWidget(build(1));
+    expect(rowOf('Download'), rowOf('Close'));
+
+    await tester.pumpWidget(build(2));
+    expect(rowOf('Download'), rowOf('Move'));
+    expect(rowOf('Delete'), greaterThan(rowOf('Download')));
+    expect(tester.takeException(), isNull);
   });
 }

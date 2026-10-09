@@ -1,13 +1,18 @@
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_riverpod/legacy.dart';
 
 import '../../app/theme.dart';
 import '../../domain/services/settings_service.dart';
 
 /// Settings key holding each host's SFTP sort and hidden-file choices.
 const sftpBrowserViewsSettingKey = 'sftp_browser_views';
+
+/// Settings key holding each host's SFTP filter and the folder it belongs to.
+const sftpBrowserFiltersSettingKey = 'sftp_browser_filters';
+
+/// A filter typed into the browser for one directory.
+typedef SftpBrowserFilter = ({String directory, String query});
 
 /// What the SFTP browser sorts entries by. Folders always come first.
 enum SftpSortField {
@@ -169,6 +174,12 @@ abstract interface class SftpBrowserViewStore {
 
   /// Saves [settings] for [hostId].
   Future<void> save(int hostId, SftpBrowserViewSettings settings);
+
+  /// Loads the filter last typed for [hostId], with its folder.
+  Future<SftpBrowserFilter?> loadFilter(int hostId);
+
+  /// Saves [filter] for [hostId], or forgets it when null.
+  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter);
 }
 
 /// [SftpBrowserViewStore] kept in the app settings table under
@@ -197,20 +208,40 @@ class SettingsSftpBrowserViewStore implements SftpBrowserViewStore {
         }
         return views.isEmpty ? null : views;
       });
+
+  @override
+  Future<SftpBrowserFilter?> loadFilter(int hostId) async {
+    final saved = await _settings.getJson(sftpBrowserFiltersSettingKey);
+    final entry = saved?[hostId.toString()];
+    if (entry is! Map) return null;
+    final directory = entry['directory'];
+    final query = entry['query'];
+    if (directory is! String || query is! String || query.isEmpty) {
+      return null;
+    }
+    return (directory: directory, query: query);
+  }
+
+  @override
+  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) =>
+      _settings.updateJson(sftpBrowserFiltersSettingKey, (current) {
+        final filters = current ?? <String, dynamic>{};
+        if (filter == null) {
+          filters.remove(hostId.toString());
+        } else {
+          filters[hostId.toString()] = {
+            'directory': filter.directory,
+            'query': filter.query,
+          };
+        }
+        return filters.isEmpty ? null : filters;
+      });
 }
 
 /// Provider for [SftpBrowserViewStore].
 final sftpBrowserViewStoreProvider = Provider<SftpBrowserViewStore>(
   (ref) => SettingsSftpBrowserViewStore(ref.watch(settingsServiceProvider)),
 );
-
-/// A filter typed into the browser for one directory.
-typedef SftpBrowserFilter = ({String directory, String query});
-
-/// Filters kept per host while the app runs, so reopening the browser on the
-/// same directory restores what was typed. Changing directory clears it.
-final StateProvider<Map<int, SftpBrowserFilter>> sftpBrowserFiltersProvider =
-    StateProvider<Map<int, SftpBrowserFilter>>((ref) => const {});
 
 /// Shows sort and hidden-file choices; returns the new settings, or null
 /// when dismissed unchanged.

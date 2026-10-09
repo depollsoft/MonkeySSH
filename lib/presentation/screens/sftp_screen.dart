@@ -258,6 +258,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   final TextEditingController _filterController = TextEditingController();
   String _filterQuery = '';
   String? _filterDirectory;
+  SftpBrowserFilter? _rememberedFilter;
   ({
     List<SftpName> files,
     SftpBrowserViewSettings settings,
@@ -1698,6 +1699,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                 ListTile(
                   leading: const Icon(Icons.edit_outlined),
                   title: const Text('Edit'),
+                  enabled: !_batchRunning,
                   onTap: () {
                     Navigator.pop(context);
                     unawaited(_editTextFile(file));
@@ -1707,6 +1709,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                 ListTile(
                   leading: const Icon(Icons.download),
                   title: const Text('Download'),
+                  enabled: !_batchRunning,
                   onTap: () {
                     Navigator.pop(context);
                     unawaited(_downloadFile(file));
@@ -1733,6 +1736,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               ListTile(
                 leading: const Icon(Icons.drive_file_rename_outline),
                 title: const Text('Rename'),
+                enabled: !_batchRunning,
                 onTap: () {
                   Navigator.pop(context);
                   unawaited(_showRenameDialog(file));
@@ -1741,12 +1745,17 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               ListTile(
                 leading: Icon(
                   Icons.delete_outline,
-                  color: Theme.of(context).colorScheme.error,
+                  color: _batchRunning
+                      ? null
+                      : Theme.of(context).colorScheme.error,
                 ),
                 title: Text(
                   'Delete',
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  style: _batchRunning
+                      ? null
+                      : TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
+                enabled: !_batchRunning,
                 onTap: () {
                   Navigator.pop(context);
                   unawaited(_deleteFile(file));
@@ -1977,7 +1986,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   Future<void> _showUploadDialog() async {
-    if (_sftp == null) {
+    if (_sftp == null || _batchRunning) {
       return;
     }
 
@@ -2073,9 +2082,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               remotePath: remotePath,
               stream: file.readAsByteStream(),
               onProgress: (uploadedBytes) {
-                progress
-                  ..throwIfCancelled()
-                  ..updateBytes(uploadedBytes);
+                // A file whose last byte is written is kept even when Cancel
+                // arrives as it finishes.
+                if (totalBytes == null || uploadedBytes < totalBytes) {
+                  progress.throwIfCancelled();
+                }
+                progress.updateBytes(uploadedBytes);
               },
             );
           } on SftpBatchCancelledException {

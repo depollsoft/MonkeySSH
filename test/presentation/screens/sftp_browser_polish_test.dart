@@ -67,6 +67,20 @@ class _MemoryViewStore implements SftpBrowserViewStore {
   Future<void> save(int hostId, SftpBrowserViewSettings settings) async {
     saved[hostId] = settings;
   }
+
+  final filters = <int, SftpBrowserFilter>{};
+
+  @override
+  Future<SftpBrowserFilter?> loadFilter(int hostId) async => filters[hostId];
+
+  @override
+  Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) async {
+    if (filter == null) {
+      filters.remove(hostId);
+    } else {
+      filters[hostId] = filter;
+    }
+  }
 }
 
 /// Flat host tree: files with sizes and folders, plus per-path failures.
@@ -122,8 +136,11 @@ class _HostSftp extends Fake implements SftpClient {
     ];
   }
 
+  final removeGates = <String, Completer<void>>{};
+
   @override
   Future<void> remove(String filename) async {
+    await removeGates[filename]?.future;
     _failIfAsked(filename);
     if (files.remove(filename) == null) _missing();
     removed.add(filename);
@@ -135,6 +152,19 @@ class _HostSftp extends Fake implements SftpClient {
     final size = files.remove(oldPath) ?? _missing();
     files[newPath] = size;
     renamed.add((oldPath, newPath));
+  }
+
+  @override
+  Future<void> mkdir(String path, [SftpFileAttrs? attrs]) async {
+    directories.add(path);
+  }
+
+  @override
+  Future<void> setStat(String path, SftpFileAttrs attrs) async {}
+
+  @override
+  Future<void> rmdir(String dirname) async {
+    directories.remove(dirname);
   }
 
   @override
@@ -454,7 +484,10 @@ void main() {
   testWidgets('cancelling an upload removes the partial file', (tester) async {
     final picker = _Picker()
       ..files = [
-        AppPlatformFile(name: 'first.txt', bytes: Uint8List.fromList([1])),
+        AppPlatformFile(
+          name: 'first.txt',
+          bytes: Uint8List.fromList([1, 2, 3, 4]),
+        ),
         AppPlatformFile(name: 'second.txt', bytes: Uint8List.fromList([2])),
       ];
     final previous = FilePickerPlatform.instance;
@@ -516,9 +549,12 @@ void main() {
   ) async {
     final commands = <String>[];
     Future<RemoteCommandResult> runner(
-      String command, {
+      String script, {
       required Duration timeout,
+      required int maxOutputBytes,
     }) async {
+      final lines = script.split('\n');
+      final command = lines[lines.indexOf('} </dev/null') - 1];
       commands.add(command);
       if (command.startsWith('unzip -Z1')) {
         return const RemoteCommandResult(
@@ -557,6 +593,198 @@ void main() {
       isEmpty,
     );
     expect(sftp.directories, {_home});
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('android sharing gets one unique file per selection', (
+    tester,
+  ) async {
+    final temp = Directory.systemTemp.createTempSync('sftp-share-test-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+    const share = MethodChannel('dev.fluttercommunity.plus/share');
+    final messenger = tester.binding.defaultBinaryMessenger
+      ..setMockMethodCallHandler(pathProvider, (_) async => temp.path);
+    final shared = <String>[];
+    messenger.setMockMethodCallHandler(share, (call) async {
+      final arguments = call.arguments as Map<Object?, Object?>;
+      shared.addAll((arguments['paths']! as List<Object?>).cast<String>());
+      return 'dev.fluttercommunity.plus/share/success';
+    });
+    addTearDown(() {
+      messenger
+        ..setMockMethodCallHandler(pathProvider, null)
+        ..setMockMethodCallHandler(share, null);
+    });
+    final sftp = _HostSftp(
+      files: {'$_home/README.md': 1, '$_home/docs/README.md': 2},
+      directories: {'$_home/docs'},
+    );
+    final transfers = _TransferService();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await _selectFiles(tester, ['README.md']);
+    await tester.tap(find.text('docs'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('README.md'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(_barAction('Download'));
+      for (var i = 0; i < 200 && shared.isEmpty; i++) {
+        await tester.pump();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pumpAndSettle();
+
+    // share_plus copies attachments into one folder by base name, so equal
+    // names would share the last file twice.
+    expect(shared, hasLength(2));
+    final names = shared.map((file) => file.split('/').last).toSet();
+    expect(names, {'README.md', 'README (2).md'});
+    final contents = await tester.runAsync(
+      () => Future.wait(shared.map((file) => File(file).readAsString())),
+    );
+    expect(contents!.toSet(), {'$_home/README.md', '$_home/docs/README.md'});
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('cancelling after the last chunk keeps the finished file', (
+    tester,
+  ) async {
+    final picker = _Picker()
+      ..files = [
+        AppPlatformFile(name: 'first.txt', bytes: Uint8List.fromList([1, 2])),
+        AppPlatformFile(name: 'second.txt', bytes: Uint8List.fromList([3])),
+      ];
+    final previous = FilePickerPlatform.instance;
+    FilePickerPlatform.instance = picker;
+    addTearDown(() => FilePickerPlatform.instance = previous);
+    final sftp = _HostSftp(files: {'$_home/first.txt': 0});
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(sftp.removed, isEmpty);
+    expect(transfers.uploads, ['$_home/first.txt']);
+    expect(find.text('Upload cancelled. Uploaded 1 of 2 files.'), findsOne);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a failure followed by a cancel still lists every file', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/a.txt': 1, '$_home/b.txt': 2, '$_home/c.txt': 3},
+    );
+    sftp.failures['$_home/a.txt'] = SftpStatusError(
+      SftpStatusCode.permissionDenied,
+      'denied',
+    );
+    final gate = Completer<void>();
+    sftp.removeGates['$_home/b.txt'] = gate;
+    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+
+    await _selectFiles(tester, ['a.txt', 'b.txt', 'c.txt']);
+    await tester.tap(_barAction('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Delete results'), findsOneWidget);
+    expect(find.text('Failed: Permission denied'), findsOneWidget);
+    expect(find.text('Skipped: Cancelled'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('the filter survives a restart for the same folder', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
+      directories: {'/home', '$_home/src'},
+    );
+    final store = _MemoryViewStore();
+    await _pumpBrowser(tester, _container(sftp, store: store));
+    await tester.enterText(
+      find.byKey(const ValueKey('sftpFilterField')),
+      'notes',
+    );
+    await tester.pumpAndSettle();
+    expect(store.filters[1], (directory: _home, query: 'notes'));
+
+    // A fresh provider container stands in for an app restart.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpBrowser(tester, _container(sftp, store: store));
+    expect(find.widgetWithText(TextField, 'notes'), findsOneWidget);
+    expect(find.text('build.log'), findsNothing);
+
+    // Opening another folder clears it for good.
+    await tester.tap(find.text('home'));
+    await tester.pumpAndSettle();
+    expect(store.filters, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('file actions that change things wait for a running batch', (
+    tester,
+  ) async {
+    final picker = _Picker()
+      ..files = [
+        AppPlatformFile(
+          name: 'upload.txt',
+          bytes: Uint8List.fromList([1, 2, 3, 4]),
+        ),
+      ];
+    final previous = FilePickerPlatform.instance;
+    FilePickerPlatform.instance = picker;
+    addTearDown(() => FilePickerPlatform.instance = previous);
+    final sftp = _HostSftp(files: {'$_home/notes.txt': 1});
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('notes.txt'));
+    await tester.pumpAndSettle();
+
+    for (final label in ['Edit', 'Download', 'Rename', 'Delete']) {
+      final tile = tester.widget<ListTile>(
+        find.ancestor(of: find.text(label), matching: find.byType(ListTile)),
+      );
+      expect(tile.enabled, isFalse, reason: label);
+    }
+    expect(find.text('Select'), findsNothing);
+    final info = tester.widget<ListTile>(
+      find.ancestor(of: find.text('Info'), matching: find.byType(ListTile)),
+    );
+    expect(info.enabled, isTrue);
+
+    await tester.tap(find.text('Info'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

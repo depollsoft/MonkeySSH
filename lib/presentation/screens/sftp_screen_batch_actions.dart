@@ -46,12 +46,22 @@ extension _SftpScreenBatchActions on _SftpScreenState {
 
   Future<void> _loadViewSettings() async {
     try {
-      final settings = await ref
-          .read(sftpBrowserViewStoreProvider)
-          .load(widget.hostId);
-      if (mounted && !_viewSettingsChangedLocally) {
-        _update(() => _viewSettings = settings);
-      }
+      final store = ref.read(sftpBrowserViewStoreProvider);
+      final settings = await store.load(widget.hostId);
+      final filter = await store.loadFilter(widget.hostId);
+      if (!mounted) return;
+      _update(() {
+        if (!_viewSettingsChangedLocally) _viewSettings = settings;
+        _rememberedFilter ??= filter;
+        // The folder may have loaded before the saved filter did.
+        if (filter != null &&
+            _filterQuery.isEmpty &&
+            _filterDirectory == _currentPath &&
+            filter.directory == _currentPath) {
+          _filterQuery = filter.query;
+          _filterController.text = filter.query;
+        }
+      });
     } on Exception catch (error) {
       DiagnosticsLogService.instance.warning(
         'sftp.view',
@@ -87,29 +97,41 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       _filterQuery = query;
       _filterDirectory = _currentPath;
     });
-    final filters = ref.read(sftpBrowserFiltersProvider.notifier);
-    final next = Map<int, SftpBrowserFilter>.of(filters.state);
-    if (query.trim().isEmpty) {
-      next.remove(widget.hostId);
-    } else {
-      next[widget.hostId] = (directory: _currentPath, query: query);
-    }
-    filters.state = next;
+    _rememberFilter(
+      query.trim().isEmpty ? null : (directory: _currentPath, query: query),
+    );
   }
 
   /// Keeps the filter scoped to one directory: entering another clears it,
-  /// and returning to the remembered one restores it. Runs inside setState.
+  /// and returning to the remembered one restores it, also after the app
+  /// restarts. Runs inside setState.
   void _syncFilterWithDirectory(String path) {
     if (_filterDirectory == path) return;
     _filterDirectory = path;
-    final remembered = ref.read(sftpBrowserFiltersProvider)[widget.hostId];
+    final remembered = _rememberedFilter;
     final query = remembered?.directory == path ? remembered!.query : '';
     _filterQuery = query;
     if (_filterController.text != query) _filterController.text = query;
-    if (remembered != null && query.isEmpty) {
-      final filters = ref.read(sftpBrowserFiltersProvider.notifier);
-      filters.state = Map.of(filters.state)..remove(widget.hostId);
-    }
+    if (remembered != null && query.isEmpty) _rememberFilter(null);
+  }
+
+  void _rememberFilter(SftpBrowserFilter? filter) {
+    _rememberedFilter = filter;
+    unawaited(
+      ref
+          .read(sftpBrowserViewStoreProvider)
+          .saveFilter(widget.hostId, filter)
+          .then<void>(
+            (_) {},
+            onError: (Object error) {
+              DiagnosticsLogService.instance.warning(
+                'sftp.view',
+                'filter_save_failed',
+                fields: {'errorType': error.runtimeType},
+              );
+            },
+          ),
+    );
   }
 
   void _clearFilter() {
@@ -155,7 +177,10 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   }) {
     if (!mounted) return;
     final summary = message ?? sftpBatchSummary(pastVerb, report);
-    if (!report.allDone && !report.cancelled) {
+    final anyFailed = report.results.any(
+      (result) => result.outcome == SftpBatchOutcome.failed,
+    );
+    if (anyFailed) {
       unawaited(showSftpBatchResults(context, title: title, report: report));
       return;
     }
@@ -311,7 +336,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       'sftp-export-',
     );
     var keepStaging = false;
-    final downloaded = <({String name, File file})>[];
+    final downloaded = <File>[];
     final progress = SftpBatchProgress(
       verb: 'Downloading',
       total: files.length,
@@ -326,16 +351,13 @@ extension _SftpScreenBatchActions on _SftpScreenState {
           progress: progress,
           run: (file, index) async {
             progress.start(index, file.displayName, totalBytes: file.sizeBytes);
-            // One folder per item keeps same-named files from two folders
-            // apart until they are exported.
+            // Unique, platform-safe names in one folder: same-named files
+            // from two remote folders stay apart (Android's share sheet
+            // copies attachments by base name), and names holding `\\` or
+            // `:` cannot point outside it.
             final local = File(
-              path.join(
-                staging.path,
-                '$index',
-                path.basename(file.displayName),
-              ),
+              freeLocalExportPath(staging.path, file.displayName),
             );
-            await local.parent.create();
             final cancelToken = RemoteFileDownloadCancelToken();
             final removeCancel = progress.onCancel(cancelToken.cancel);
             try {
@@ -349,7 +371,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
             } finally {
               removeCancel();
             }
-            downloaded.add((name: file.displayName, file: local));
+            downloaded.add(local);
           },
         );
       } finally {
@@ -406,9 +428,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
 
   /// Hands several downloaded files to the user: the share sheet on phones,
   /// or a chosen folder on desktops, where existing files are never replaced.
-  Future<_LocalFileExport> _exportLocalFiles(
-    List<({String name, File file})> files,
-  ) async {
+  Future<_LocalFileExport> _exportLocalFiles(List<File> files) async {
     final mobile = switch (Theme.of(context).platform) {
       TargetPlatform.android || TargetPlatform.iOS => true,
       _ => false,
@@ -418,11 +438,11 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       final result = await SharePlus.instance.share(
         ShareParams(
           files: [
-            for (final entry in files)
+            for (final file in files)
               XFile(
-                entry.file.path,
-                name: entry.name,
-                mimeType: inferRemoteFileMimeType(entry.name),
+                file.path,
+                name: path.basename(file.path),
+                mimeType: inferRemoteFileMimeType(path.basename(file.path)),
               ),
           ],
           sharePositionOrigin: box != null && box.hasSize
@@ -438,25 +458,10 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       dialogTitle: 'Save ${files.length} files',
     );
     if (directory == null) return _LocalFileExport.cancelled;
-    for (final entry in files) {
-      await entry.file.copy(_freeLocalPath(directory, entry.name));
+    for (final file in files) {
+      await file.copy(freeLocalExportPath(directory, path.basename(file.path)));
     }
     return _LocalFileExport.saved;
-  }
-
-  String _freeLocalPath(String directory, String name) {
-    final extension = path.extension(name);
-    final stem = path.basenameWithoutExtension(name);
-    for (var attempt = 1; ; attempt++) {
-      final candidate = path.join(
-        directory,
-        attempt == 1 ? name : '$stem ($attempt)$extension',
-      );
-      if (FileSystemEntity.typeSync(candidate, followLinks: false) ==
-          FileSystemEntityType.notFound) {
-        return candidate;
-      }
-    }
   }
 
   /// Whether "Extract here" applies to [file] on this host.
