@@ -32,7 +32,6 @@ import java.security.PrivateKey
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -42,20 +41,41 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Only the alias and public key leave this class. It never logs key material,
  * signatures, aliases, or the data being signed.
+ *
+ * Every androidx BiometricPrompt on an activity shares one view model, so a
+ * second prompt would replace the first one's callback and leave that sign
+ * request without a reply. Sign requests are therefore tracked on the main
+ * thread from the moment the channel receives them, and at most one prompt
+ * shows at a time; the Dart side keeps the app lock's prompt out of the way.
  */
 object HardwareKeyChannelHandler {
     private const val CHANNEL = "xyz.depollsoft.monkeyssh/hardware_keys"
     private const val TAG = "HardwareKeyChannel"
     private const val KEYSTORE = "AndroidKeyStore"
-    private const val PROBE_ALIAS = "xyz.depollsoft.monkeyssh.sshkey.capability-probe"
+
+    /** Every alias the app creates starts with this; nothing else is touched. */
+    private const val ALIAS_PREFIX = "xyz.depollsoft.monkeyssh.sshkey."
+    private const val PROBE_ALIAS = "${ALIAS_PREFIX}capability-probe"
     private const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
     private const val COORDINATE_BYTES = 32
 
+    /** Lets a dismissed prompt's fragment finish before the next one shows. */
+    private const val PROMPT_GAP_MS = 300L
+
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val pendingPrompts = ConcurrentHashMap<String, BiometricPrompt>()
     private var methodChannel: MethodChannel? = null
     private var resumedActivityRef = WeakReference<FragmentActivity>(null)
+
+    // Main thread only.
+    private val signRequests = HashMap<String, SignRequest>()
+    private val promptQueue = ArrayDeque<SignRequest>()
+    private var activePrompt: SignRequest? = null
+
+    // Executor thread only: the backing does not change while the app runs,
+    // and probing StrongBox can take seconds.
+    private var backingProbed = false
+    private var probedBacking: String? = null
 
     private class HardwareKeyError(val code: String) : Exception(code)
 
@@ -84,10 +104,26 @@ object HardwareKeyChannelHandler {
         }
     }
 
+    private class SignRequest(
+        val id: String,
+        val alias: String,
+        val data: ByteArray,
+        val reason: String,
+        val reply: Reply,
+    ) {
+        /** Written on the main thread; read when preparation finishes. */
+        @Volatile
+        var cancelled = false
+        var signature: Signature? = null
+        var allowDeviceCredential = false
+        var prompt: BiometricPrompt? = null
+    }
+
     private val activityCallbacks = object : Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(activity: Activity) {
             if (activity is FragmentActivity) {
                 resumedActivityRef = WeakReference(activity)
+                pumpPrompts()
             }
         }
 
@@ -122,12 +158,15 @@ object HardwareKeyChannelHandler {
         }
     }
 
+    private fun isAppAlias(alias: String?): Boolean =
+        alias != null && alias.startsWith(ALIAS_PREFIX) && alias.length > ALIAS_PREFIX.length
+
     private fun handleMethodCall(call: MethodCall, reply: Reply, context: Context) {
         when (call.method) {
             "getCapabilities" -> runAsync(reply) { capabilities(context) }
             "generateKey" -> {
                 val alias = call.argument<String>("alias")
-                if (alias.isNullOrEmpty()) {
+                if (!isAppAlias(alias) || alias == PROBE_ALIAS) {
                     reply.error("invalid_args")
                     return
                 }
@@ -138,7 +177,7 @@ object HardwareKeyChannelHandler {
                     }
                     val generated = try {
                         generateKey(
-                            alias = alias,
+                            alias = alias!!,
                             requireUserPresence = requireUserPresence,
                             preferStrongBox = hasStrongBox(context),
                         )
@@ -161,22 +200,30 @@ object HardwareKeyChannelHandler {
                 val alias = call.argument<String>("alias")
                 val data = call.argument<ByteArray>("data")
                 val requestId = call.argument<String>("requestId")
-                if (alias.isNullOrEmpty() || data == null || requestId.isNullOrEmpty()) {
+                if (!isAppAlias(alias) || data == null || requestId.isNullOrEmpty() ||
+                    signRequests.containsKey(requestId)
+                ) {
                     reply.error("invalid_args")
                     return
                 }
-                val reason = call.argument<String>("reason") ?: "Sign in with your SSH key"
-                sign(alias, data, reason, requestId, reply)
+                val request = SignRequest(
+                    id = requestId,
+                    alias = alias!!,
+                    data = data,
+                    reason = call.argument<String>("reason") ?: "Sign in with your SSH key",
+                    reply = reply,
+                )
+                // Registered before any work, so an early cancel is never lost.
+                signRequests[requestId] = request
+                executor.execute { prepare(request) }
             }
             "cancelSign" -> {
-                call.argument<String>("requestId")?.let { requestId ->
-                    pendingPrompts.remove(requestId)?.cancelAuthentication()
-                }
+                call.argument<String>("requestId")?.let(::cancel)
                 reply.success(null)
             }
             "deleteKey" -> {
                 val alias = call.argument<String>("alias")
-                if (alias.isNullOrEmpty()) {
+                if (!isAppAlias(alias)) {
                     reply.error("invalid_args")
                     return
                 }
@@ -210,8 +257,32 @@ object HardwareKeyChannelHandler {
         }
         val emulator = isProbablyEmulator()
         val strongBox = hasStrongBox(context)
-        // A throwaway key is the only reliable way to learn where the keystore
-        // really puts keys: StrongBox, the TEE, or software.
+        val backing = probeBacking(strongBox)
+        if (backing == null) {
+            return mapOf(
+                "available" to false,
+                "reason" to if (emulator) "emulator" else "softwareKeystoreOnly",
+            )
+        }
+        return mapOf(
+            "available" to true,
+            "backing" to backing,
+            "userPresenceAvailable" to userPresenceAvailable(context),
+            // Before Android 11 a per-use key accepts only a strong biometric.
+            "userPresenceAllowsPasscode" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R),
+            "isEmulator" to emulator,
+            "strongBoxAvailable" to strongBox,
+        )
+    }
+
+    /**
+     * A throwaway key is the only reliable way to learn where the keystore
+     * really puts keys: StrongBox, the TEE, or software. Runs once per process.
+     */
+    private fun probeBacking(strongBox: Boolean): String? {
+        if (backingProbed) {
+            return probedBacking
+        }
         val backing = try {
             generateKey(PROBE_ALIAS, requireUserPresence = false, preferStrongBox = strongBox).backing
         } catch (error: HardwareKeyError) {
@@ -226,32 +297,20 @@ object HardwareKeyChannelHandler {
                 Log.w(TAG, "Probe key cleanup failed: ${error.javaClass.simpleName}")
             }
         }
-        if (backing == null) {
-            return mapOf(
-                "available" to false,
-                "reason" to if (emulator) "emulator" else "softwareKeystoreOnly",
-            )
-        }
-        return mapOf(
-            "available" to true,
-            "backing" to backing,
-            "userPresenceAvailable" to userPresenceAvailable(context),
-            "isEmulator" to emulator,
-            "strongBoxAvailable" to strongBox,
-        )
+        probedBacking = backing
+        backingProbed = true
+        return backing
     }
 
     private fun hasStrongBox(context: Context): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
 
-    private fun allowedAuthenticators(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    private fun authenticators(allowDeviceCredential: Boolean): Int =
+        if (allowDeviceCredential) {
             BiometricManager.Authenticators.BIOMETRIC_STRONG or
                 BiometricManager.Authenticators.DEVICE_CREDENTIAL
         } else {
-            // Before Android 11 a per-use key can only be unlocked by a
-            // strong biometric.
             BiometricManager.Authenticators.BIOMETRIC_STRONG
         }
 
@@ -260,8 +319,10 @@ object HardwareKeyChannelHandler {
         if (keyguard?.isDeviceSecure != true) {
             return false
         }
-        return BiometricManager.from(context).canAuthenticate(allowedAuthenticators()) ==
-            BiometricManager.BIOMETRIC_SUCCESS
+        val allowDeviceCredential = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        return BiometricManager.from(context).canAuthenticate(
+            authenticators(allowDeviceCredential),
+        ) == BiometricManager.BIOMETRIC_SUCCESS
     }
 
     private fun isProbablyEmulator(): Boolean =
@@ -342,7 +403,12 @@ object HardwareKeyChannelHandler {
                     0,
                     KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
                 )
+                // The screen lock already unlocks this key, so a new
+                // fingerprint adds no access; keep the key, as iOS does.
+                builder.setInvalidatedByBiometricEnrollment(false)
             } else {
+                // Biometric only, and invalidated when biometrics are
+                // enrolled; the Generate tab says so on Android 9 and 10.
                 @Suppress("DEPRECATION")
                 builder.setUserAuthenticationValidityDurationSeconds(-1)
             }
@@ -350,10 +416,13 @@ object HardwareKeyChannelHandler {
         return builder.build()
     }
 
+    private fun keyInfo(privateKey: PrivateKey): KeyInfo =
+        KeyFactory.getInstance(privateKey.algorithm, KEYSTORE)
+            .getKeySpec(privateKey, KeyInfo::class.java)
+
     /** Where the keystore actually put [privateKey], or null for software. */
     private fun securityBacking(privateKey: PrivateKey, requestedStrongBox: Boolean): String? {
-        val factory = KeyFactory.getInstance(privateKey.algorithm, KEYSTORE)
-        val info = factory.getKeySpec(privateKey, KeyInfo::class.java)
+        val info = keyInfo(privateKey)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             return when (info.securityLevel) {
                 KeyProperties.SECURITY_LEVEL_STRONGBOX -> "strongBox"
@@ -388,49 +457,90 @@ object HardwareKeyChannelHandler {
 
     // region Signing
 
-    private fun sign(
-        alias: String,
-        data: ByteArray,
-        reason: String,
-        requestId: String,
-        reply: Reply,
-    ) {
-        executor.execute {
-            try {
-                val entry = loadKeyStore().getEntry(alias, null) as? KeyStore.PrivateKeyEntry
-                    ?: throw HardwareKeyError("key_not_found")
-                val privateKey = entry.privateKey
-                val info = KeyFactory.getInstance(privateKey.algorithm, KEYSTORE)
-                    .getKeySpec(privateKey, KeyInfo::class.java)
-                val signature = Signature.getInstance(SIGNATURE_ALGORITHM).apply {
-                    initSign(privateKey)
-                }
-                if (!info.isUserAuthenticationRequired) {
-                    signature.update(data)
-                    reply.success(signature.sign())
-                    return@execute
-                }
-                mainHandler.post { promptAndSign(signature, data, reason, requestId, reply) }
-            } catch (error: HardwareKeyError) {
-                reply.error(error.code)
-            } catch (error: Exception) {
-                Log.w(TAG, "Hardware key signing failed: ${error.javaClass.simpleName}")
-                reply.error(mapException(error))
-            }
+    /** Ends [request]; main thread. */
+    private fun finish(request: SignRequest, signature: ByteArray? = null, error: String? = null) {
+        signRequests.remove(request.id)
+        if (signature != null) {
+            request.reply.success(signature)
+        } else {
+            request.reply.error(error ?: "failed")
         }
     }
 
-    private fun promptAndSign(
-        signature: Signature,
-        data: ByteArray,
-        reason: String,
-        requestId: String,
-        reply: Reply,
-    ) {
-        val activity = resumedActivityRef.get()
-        if (activity == null || activity.isFinishing) {
-            // Background reconnects cannot show a prompt.
-            reply.error("interaction_required")
+    /** Executor thread: loads the key and decides whether a prompt is needed. */
+    private fun prepare(request: SignRequest) {
+        try {
+            if (request.cancelled) {
+                mainHandler.post { finish(request, error = "cancelled") }
+                return
+            }
+            val entry = loadKeyStore().getEntry(request.alias, null) as? KeyStore.PrivateKeyEntry
+                ?: throw HardwareKeyError("key_not_found")
+            val privateKey = entry.privateKey
+            val info = keyInfo(privateKey)
+            val signature = Signature.getInstance(SIGNATURE_ALGORITHM).apply {
+                initSign(privateKey)
+            }
+            if (!info.isUserAuthenticationRequired) {
+                signature.update(request.data)
+                val signed = signature.sign()
+                mainHandler.post { finish(request, signature = signed) }
+                return
+            }
+            request.signature = signature
+            // A key made on Android 9 or 10 stays biometric-only after an
+            // upgrade; offering the screen lock would only fail.
+            request.allowDeviceCredential = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                (info.userAuthenticationType and KeyProperties.AUTH_DEVICE_CREDENTIAL) != 0
+            mainHandler.post {
+                if (request.cancelled) {
+                    finish(request, error = "cancelled")
+                } else {
+                    promptQueue.addLast(request)
+                    pumpPrompts()
+                }
+            }
+        } catch (error: HardwareKeyError) {
+            mainHandler.post { finish(request, error = error.code) }
+        } catch (error: Exception) {
+            Log.w(TAG, "Hardware key signing failed: ${error.javaClass.simpleName}")
+            val code = mapException(error)
+            mainHandler.post { finish(request, error = code) }
+        }
+    }
+
+    /** Main thread: shows the next queued prompt once none is showing. */
+    private fun pumpPrompts() {
+        if (activePrompt != null) {
+            return
+        }
+        while (true) {
+            val request = promptQueue.removeFirstOrNull() ?: return
+            if (request.cancelled) {
+                finish(request, error = "cancelled")
+                continue
+            }
+            val activity = resumedActivityRef.get()
+            if (activity == null || activity.isFinishing) {
+                // Background reconnects cannot show a prompt.
+                finish(request, error = "interaction_required")
+                continue
+            }
+            showPrompt(request, activity)
+            return
+        }
+    }
+
+    private fun promptEnded(request: SignRequest) {
+        if (activePrompt === request) {
+            activePrompt = null
+            mainHandler.postDelayed({ pumpPrompts() }, PROMPT_GAP_MS)
+        }
+    }
+
+    private fun showPrompt(request: SignRequest, activity: FragmentActivity) {
+        val signature = request.signature ?: run {
+            finish(request, error = "failed")
             return
         }
         val prompt = BiometricPrompt(
@@ -438,46 +548,62 @@ object HardwareKeyChannelHandler {
             ContextCompat.getMainExecutor(activity),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    pendingPrompts.remove(requestId)
+                    promptEnded(request)
                     val unlocked = result.cryptoObject?.signature
-                    if (unlocked == null) {
-                        reply.error("failed")
+                    if (unlocked == null || request.cancelled) {
+                        finish(request, error = if (request.cancelled) "cancelled" else "failed")
                         return
                     }
                     executor.execute {
                         try {
-                            unlocked.update(data)
-                            reply.success(unlocked.sign())
+                            unlocked.update(request.data)
+                            val signed = unlocked.sign()
+                            mainHandler.post { finish(request, signature = signed) }
                         } catch (error: Exception) {
                             Log.w(TAG, "Hardware key signing failed: ${error.javaClass.simpleName}")
-                            reply.error(mapException(error))
+                            val code = mapException(error)
+                            mainHandler.post { finish(request, error = code) }
                         }
                     }
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    pendingPrompts.remove(requestId)
-                    reply.error(mapPromptError(errorCode))
+                    promptEnded(request)
+                    finish(request, error = mapPromptError(errorCode))
                 }
             },
         )
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Use SSH key")
-            .setSubtitle(reason)
-            .setAllowedAuthenticators(allowedAuthenticators())
+            .setSubtitle(request.reason)
+            .setAllowedAuthenticators(authenticators(request.allowDeviceCredential))
             .apply {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                if (!request.allowDeviceCredential) {
                     setNegativeButtonText("Cancel")
                 }
             }
             .build()
-        pendingPrompts[requestId] = prompt
+        request.prompt = prompt
+        activePrompt = request
         try {
             prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(signature))
         } catch (error: Exception) {
-            pendingPrompts.remove(requestId)
             Log.w(TAG, "Hardware key prompt failed: ${error.javaClass.simpleName}")
-            reply.error("failed")
+            promptEnded(request)
+            finish(request, error = "failed")
+        }
+    }
+
+    /** Main thread: cancels a request at any stage. */
+    private fun cancel(requestId: String) {
+        val request = signRequests[requestId] ?: return
+        request.cancelled = true
+        when {
+            // The prompt's error callback replies.
+            activePrompt === request -> request.prompt?.cancelAuthentication()
+            promptQueue.remove(request) -> finish(request, error = "cancelled")
+            // Still preparing: prepare() sees the flag before queueing.
+            else -> Unit
         }
     }
 

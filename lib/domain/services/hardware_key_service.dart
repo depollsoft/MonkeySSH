@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
 import '../models/hardware_key.dart';
+import 'biometric_prompt_coordinator.dart';
 import 'diagnostics_log_service.dart';
 import 'ssh_wire.dart';
 
@@ -40,6 +41,12 @@ enum HardwareKeyErrorCode {
 
   /// No biometrics or screen lock is set up for per-use confirmation.
   userPresenceUnavailable('user_presence_unavailable'),
+
+  /// The device has not been unlocked since it restarted.
+  deviceLocked('device_locked'),
+
+  /// The confirmation prompt got no answer in time.
+  timedOut('timed_out'),
 
   /// The keystore produced a software key instead of a hardware one.
   notHardwareBacked('not_hardware_backed'),
@@ -93,7 +100,12 @@ class HardwareKeyException implements Exception {
       'The device invalidated this hardware key after its biometrics or '
           'screen lock changed. Generate a new key.',
     HardwareKeyErrorCode.userPresenceUnavailable =>
-      'Set up biometrics or a screen lock to use per-use confirmation.',
+      'Per-use confirmation needs a screen lock, plus an enrolled fingerprint '
+          'or face on Android 9 and 10.',
+    HardwareKeyErrorCode.deviceLocked =>
+      'Unlock this device once after it restarts; until then the hardware '
+          'key can’t sign.',
+    HardwareKeyErrorCode.timedOut => 'Hardware key confirmation timed out.',
     HardwareKeyErrorCode.notHardwareBacked =>
       HardwareKeyUnavailableReason.softwareKeystoreOnly.message,
     HardwareKeyErrorCode.unavailable =>
@@ -374,8 +386,40 @@ typedef HardwareKeySignGuard = Future<SSHSignature> Function(
   Future<SSHSignature> Function() sign,
 );
 
+class _SignRequest {
+  _SignRequest(this.id);
+
+  final String id;
+  final _cancelled = Completer<void>();
+
+  bool get isCancelled => _cancelled.isCompleted;
+
+  void cancel() {
+    if (!_cancelled.isCompleted) {
+      _cancelled.complete();
+    }
+  }
+
+  /// Completes with [operation], or fails as soon as this request is
+  /// cancelled.
+  Future<T> unlessCancelled<T>(Future<T> operation) {
+    if (isCancelled) {
+      operation.ignore();
+      return Future.error(
+        const HardwareKeyException(HardwareKeyErrorCode.cancelled),
+      );
+    }
+    return Future.any([
+      operation,
+      _cancelled.future.then<T>(
+        (_) => throw const HardwareKeyException(HardwareKeyErrorCode.cancelled),
+      ),
+    ]);
+  }
+}
+
 class _PendingSigns {
-  final ids = <String>{};
+  final requests = <_SignRequest>{};
 }
 
 int _nextSignRequest = 0;
@@ -389,19 +433,34 @@ class HardwareKeyIdentity extends SSHIdentity {
     required HardwareKeyPlatform platform,
     required this.reference,
     required String signReason,
+    required BiometricPromptCoordinator promptCoordinator,
+    required Duration promptTimeout,
     _PendingSigns? pending,
     HardwareKeySignGuard? signGuard,
   }) : _platform = platform,
        _publicKey = _EncodedPublicKey(reference.publicKeyBlob),
        _signReason = signReason,
+       _promptCoordinator = promptCoordinator,
+       _promptTimeout = promptTimeout,
        _pending = pending ?? _PendingSigns(),
        _signGuard = signGuard;
 
   final HardwareKeyPlatform _platform;
   final _EncodedPublicKey _publicKey;
   final String _signReason;
+  final BiometricPromptCoordinator _promptCoordinator;
+  final Duration _promptTimeout;
   final _PendingSigns _pending;
   final HardwareKeySignGuard? _signGuard;
+
+  /// A well-formed signature that cannot verify, for declining to sign.
+  ///
+  /// `r = s = 1` verifies only if the x-coordinate of `u1·G + Q` is 1, which
+  /// has negligible probability.
+  static final unverifiableSignature = EcdsaP256SshSignature(
+    BigInt.one,
+    BigInt.one,
+  );
 
   /// Where the private key lives.
   final HardwareKeyReference reference;
@@ -410,7 +469,7 @@ class HardwareKeyIdentity extends SSHIdentity {
   bool get requiresUserPresence => reference.requiresUserPresence;
 
   /// Whether a signature request is waiting on the hardware.
-  bool get hasPendingSign => _pending.ids.isNotEmpty;
+  bool get hasPendingSign => _pending.requests.isNotEmpty;
 
   @override
   String get type => hardwareKeyAlgorithm;
@@ -428,30 +487,70 @@ class HardwareKeyIdentity extends SSHIdentity {
   }
 
   Future<SSHSignature> _sign(Uint8List data) async {
-    final requestId = 'sign-${_nextSignRequest++}';
-    _pending.ids.add(requestId);
+    final request = _SignRequest('sign-${_nextSignRequest++}');
+    _pending.requests.add(request);
     try {
-      final der = await _platform.sign(
-        alias: reference.alias,
-        data: data,
-        reason: _signReason,
-        requestId: requestId,
-      );
-      return ecdsaP256SignatureFromDer(der);
+      final Uint8List der;
+      if (requiresUserPresence) {
+        // Never stack a key prompt on the app lock or on another prompt.
+        await request.unlessCancelled(
+          _promptCoordinator.waitUntilAppUnlocked(),
+        );
+        der = await request.unlessCancelled(
+          _promptCoordinator.run(() => _signNative(request, data)),
+        );
+      } else {
+        der = await request.unlessCancelled(_signNative(request, data));
+      }
+      try {
+        return ecdsaP256SignatureFromDer(der);
+      } on FormatException {
+        throw const HardwareKeyException(HardwareKeyErrorCode.failed);
+      }
     } on HardwareKeyException catch (error) {
+      // Without per-use confirmation, the only interaction a key can need is
+      // the first unlock after a restart.
+      final reported =
+          error.code == HardwareKeyErrorCode.interactionRequired &&
+              !requiresUserPresence
+          ? const HardwareKeyException(HardwareKeyErrorCode.deviceLocked)
+          : error;
       DiagnosticsLogService.instance.warning(
         'hardware_key',
         'sign_failed',
         fields: {
-          'code': error.code.wireName,
+          'code': reported.code.wireName,
           'backing': reference.backing.wireName,
           'requiresUserPresence': requiresUserPresence,
         },
       );
-      rethrow;
+      throw reported;
     } finally {
-      _pending.ids.remove(requestId);
+      _pending.requests.remove(request);
     }
+  }
+
+  Future<Uint8List> _signNative(_SignRequest request, Uint8List data) {
+    // A request cancelled while queued behind another prompt never shows.
+    if (request.isCancelled) {
+      return Future.error(
+        const HardwareKeyException(HardwareKeyErrorCode.cancelled),
+      );
+    }
+    return _platform
+        .sign(
+          alias: reference.alias,
+          data: data,
+          reason: _signReason,
+          requestId: request.id,
+        )
+        .timeout(
+          _promptTimeout,
+          onTimeout: () {
+            _cancelNative(request.id);
+            throw const HardwareKeyException(HardwareKeyErrorCode.timedOut);
+          },
+        );
   }
 
   /// Returns this identity with every signature run through [guard].
@@ -463,23 +562,31 @@ class HardwareKeyIdentity extends SSHIdentity {
         platform: _platform,
         reference: reference,
         signReason: _signReason,
+        promptCoordinator: _promptCoordinator,
+        promptTimeout: _promptTimeout,
         pending: _pending,
         signGuard: guard,
       );
 
-  /// Dismisses any confirmation prompt still waiting for the user.
+  /// Fails every pending signature and dismisses its prompt, including
+  /// requests still waiting for the app lock or another prompt.
   void cancelPendingSigns() {
-    for (final requestId in _pending.ids.toList(growable: false)) {
-      unawaited(
-        _platform.cancelSign(requestId).catchError((Object error) {
-          DiagnosticsLogService.instance.debug(
-            'hardware_key',
-            'cancel_sign_failed',
-            fields: {'errorType': error.runtimeType},
-          );
-        }),
-      );
+    for (final request in _pending.requests.toList(growable: false)) {
+      request.cancel();
+      _cancelNative(request.id);
     }
+  }
+
+  void _cancelNative(String requestId) {
+    unawaited(
+      _platform.cancelSign(requestId).catchError((Object error) {
+        DiagnosticsLogService.instance.debug(
+          'hardware_key',
+          'cancel_sign_failed',
+          fields: {'errorType': error.runtimeType},
+        );
+      }),
+    );
   }
 }
 
@@ -496,15 +603,26 @@ class HardwareKeyService {
     HardwareKeyPlatform? platform,
     bool? isPlatformSupported,
     Random? random,
+    BiometricPromptCoordinator? promptCoordinator,
+    this.promptTimeout = const Duration(minutes: 3),
   }) : _platform = platform ?? const MethodChannelHardwareKeyPlatform(),
        _isPlatformSupported =
            isPlatformSupported ??
            (!kIsWeb && (Platform.isIOS || Platform.isAndroid)),
-       _random = random ?? Random.secure();
+       _random = random ?? Random.secure(),
+       _promptCoordinator =
+           promptCoordinator ?? BiometricPromptCoordinator.instance;
 
   final HardwareKeyPlatform _platform;
   final bool _isPlatformSupported;
   final Random _random;
+  final BiometricPromptCoordinator _promptCoordinator;
+
+  /// Longest wait for the hardware to answer one signature request.
+  ///
+  /// Bounds the paused authentication timeout if a prompt never reports
+  /// back.
+  final Duration promptTimeout;
 
   /// Reports whether, and where, this device can hold a hardware key.
   Future<HardwareKeyCapabilities> getCapabilities() async {
@@ -586,6 +704,8 @@ class HardwareKeyService {
         platform: _platform,
         reference: reference,
         signReason: 'Sign in with your hardware-backed SSH key',
+        promptCoordinator: _promptCoordinator,
+        promptTimeout: promptTimeout,
       );
 
   /// Deletes the private key from secure hardware.

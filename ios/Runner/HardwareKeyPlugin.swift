@@ -11,13 +11,23 @@ import Security
 /// key. Nothing here logs key material, signatures, aliases, or signed data.
 final class HardwareKeyPlugin: NSObject, FlutterPlugin {
   private static let channelName = "xyz.depollsoft.monkeyssh/hardware_keys"
+  /// Every alias the app creates starts with this; nothing else is touched.
+  private static let aliasPrefix = "xyz.depollsoft.monkeyssh.sshkey."
 
+  /// A sign request from the moment the channel receives it, so a cancel
+  /// that arrives while it waits in [queue] is not lost.
+  private final class PendingSign {
+    let context = LAContext()
+    var cancelled = false
+  }
+
+  /// Serial: one Secure Enclave operation, and so one prompt, at a time.
   private let queue = DispatchQueue(
     label: "xyz.depollsoft.monkeyssh.hardware-keys",
     qos: .userInitiated
   )
   private let lock = NSLock()
-  private var pendingContexts: [String: LAContext] = [:]
+  private var pendingSigns: [String: PendingSign] = [:]
 
   static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(
@@ -33,7 +43,7 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
     case "getCapabilities":
       result(capabilities())
     case "generateKey":
-      guard let alias = arguments["alias"] as? String, !alias.isEmpty else {
+      guard let alias = arguments["alias"] as? String, Self.isAppAlias(alias) else {
         result(Self.error("invalid_args"))
         return
       }
@@ -42,33 +52,42 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
     case "sign":
       guard
         let alias = arguments["alias"] as? String,
+        Self.isAppAlias(alias),
         let data = arguments["data"] as? FlutterStandardTypedData,
         let requestId = arguments["requestId"] as? String
       else {
         result(Self.error("invalid_args"))
         return
       }
-      let reason = arguments["reason"] as? String ?? "Sign in with your SSH key"
+      let pending = PendingSign()
+      pending.context.localizedReason =
+        arguments["reason"] as? String ?? "Sign in with your SSH key"
+      lock.lock()
+      pendingSigns[requestId] = pending
+      lock.unlock()
       run(result) {
-        FlutterStandardTypedData(
-          bytes: try self.sign(
-            alias: alias,
-            data: data.data,
-            reason: reason,
-            requestId: requestId
-          )
+        defer {
+          self.lock.lock()
+          self.pendingSigns.removeValue(forKey: requestId)
+          self.lock.unlock()
+        }
+        return FlutterStandardTypedData(
+          bytes: try self.sign(alias: alias, data: data.data, pending: pending)
         )
       }
     case "cancelSign":
       if let requestId = arguments["requestId"] as? String {
         lock.lock()
-        let context = pendingContexts[requestId]
+        let pending = pendingSigns[requestId]
+        pending?.cancelled = true
         lock.unlock()
-        context?.invalidate()
+        // Dismisses a prompt that is showing; a queued request sees
+        // `cancelled` before it can show one.
+        pending?.context.invalidate()
       }
       result(nil)
     case "deleteKey":
-      guard let alias = arguments["alias"] as? String, !alias.isEmpty else {
+      guard let alias = arguments["alias"] as? String, Self.isAppAlias(alias) else {
         result(Self.error("invalid_args"))
         return
       }
@@ -100,6 +119,8 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
         "available": true,
         "backing": "secureEnclave",
         "userPresenceAvailable": userPresence,
+        // .userPresence accepts the passcode as well as Face ID / Touch ID.
+        "userPresenceAllowsPasscode": true,
       ]
     #endif
   }
@@ -161,24 +182,14 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
     #endif
   }
 
-  private func sign(alias: String, data: Data, reason: String, requestId: String) throws -> Data {
-    let context = LAContext()
-    context.localizedReason = reason
-    lock.lock()
-    pendingContexts[requestId] = context
-    lock.unlock()
-    defer {
-      lock.lock()
-      pendingContexts.removeValue(forKey: requestId)
-      lock.unlock()
-    }
-
+  private func sign(alias: String, data: Data, pending: PendingSign) throws -> Data {
+    try throwIfCancelled(pending)
     let query: [String: Any] = [
       kSecClass as String: kSecClassKey,
       kSecAttrApplicationTag as String: Self.tag(alias),
       kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
       kSecReturnRef as String: true,
-      kSecUseAuthenticationContext as String: context,
+      kSecUseAuthenticationContext as String: pending.context,
     ]
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -191,6 +202,7 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
     guard SecKeyIsAlgorithmSupported(privateKey, .sign, algorithm) else {
       throw HardwareKeyError.failed
     }
+    try throwIfCancelled(pending)
     var error: Unmanaged<CFError>?
     guard
       let signature = SecKeyCreateSignature(
@@ -203,6 +215,15 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
       throw Self.mapError(error?.takeRetainedValue())
     }
     return signature
+  }
+
+  private func throwIfCancelled(_ pending: PendingSign) throws {
+    lock.lock()
+    let cancelled = pending.cancelled
+    lock.unlock()
+    if cancelled {
+      throw HardwareKeyError.cancelled
+    }
   }
 
   private func deleteKey(alias: String) throws {
@@ -231,6 +252,10 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
       }
       DispatchQueue.main.async { result(reply) }
     }
+  }
+
+  private static func isAppAlias(_ alias: String) -> Bool {
+    alias.hasPrefix(aliasPrefix) && alias.count > aliasPrefix.count
   }
 
   private static func tag(_ alias: String) -> Data {
@@ -263,7 +288,7 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
     let nsError = error as Error as NSError
     if nsError.domain == LAErrorDomain {
       switch LAError.Code(rawValue: nsError.code) {
-      case .userCancel, .appCancel, .systemCancel, .userFallback:
+      case .userCancel, .appCancel, .systemCancel, .userFallback, .invalidContext:
         return .cancelled
       case .authenticationFailed, .biometryLockout:
         return .authFailed

@@ -221,6 +221,7 @@ SshKey hardwareSshKeyFixture({
   String name = 'Phone key',
   HardwareKeyBacking backing = HardwareKeyBacking.secureEnclave,
   bool requireUserPresence = false,
+  bool isEmulated = false,
 }) {
   final blob = encodeEcdsaP256PublicKeyBlob(
     Uint8List.fromList([0x04, ...List.filled(64, id)]),
@@ -235,6 +236,7 @@ SshKey hardwareSshKeyFixture({
       backing: backing,
       publicKeyBlob: blob,
       requiresUserPresence: requireUserPresence,
+      isEmulated: isEmulated,
     ).encode(),
     fingerprint: 'SHA256:hardware$id',
     createdAt: DateTime(2026),

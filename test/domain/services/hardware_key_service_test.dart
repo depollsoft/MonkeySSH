@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/hardware_key.dart';
+import 'package:monkeyssh/domain/services/biometric_prompt_coordinator.dart';
 import 'package:monkeyssh/domain/services/hardware_key_service.dart';
 import 'package:monkeyssh/domain/services/ssh_wire.dart';
 
@@ -222,6 +223,17 @@ void main() {
       expect(emulator.isEmulator, isTrue);
       expect(emulator.strongBoxAvailable, isFalse);
 
+      platform.capabilities = const {
+        'available': true,
+        'backing': 'tee',
+        'userPresenceAvailable': true,
+        'userPresenceAllowsPasscode': false,
+      };
+      expect(
+        (await service.getCapabilities()).userPresenceAllowsPasscode,
+        isFalse,
+      );
+
       platform.capabilities = const {'available': false, 'reason': 'simulator'};
       final simulator = await service.getCapabilities();
       expect(simulator.isAvailable, isFalse);
@@ -288,13 +300,147 @@ void main() {
 
   group('HardwareKeyIdentity', () {
     late FakeHardwareKeyPlatform platform;
+    late BiometricPromptCoordinator coordinator;
     late HardwareKeyService service;
 
     setUp(() {
       platform = FakeHardwareKeyPlatform();
+      coordinator = BiometricPromptCoordinator();
       service = HardwareKeyService(
         platform: platform,
         isPlatformSupported: true,
+        promptCoordinator: coordinator,
+      );
+    });
+
+    Future<HardwareKeyIdentity> perUseIdentity() async => service.identityFor(
+      (await service.generate(requireUserPresence: true)).reference,
+    );
+
+    Matcher failsWith(HardwareKeyErrorCode code) => throwsA(
+      isA<HardwareKeyException>().having((error) => error.code, 'code', code),
+    );
+
+    test('per-use prompts show one at a time', () async {
+      platform.holdSigns = true;
+      final first = await perUseIdentity();
+      final second = await perUseIdentity();
+
+      final firstSign = first.sign(Uint8List.fromList([1]));
+      final secondSign = second.sign(Uint8List.fromList([2]));
+      final firstRequest = await platform.waitForPrompt();
+      await pumpEventQueue();
+      // Android shares one prompt view model per activity: a second prompt
+      // would replace the first one's callback.
+      expect(platform.signRequests, hasLength(1));
+
+      platform.approve(firstRequest);
+      await firstSign;
+      final secondRequest = await platform.waitForPrompt();
+      expect(secondRequest, isNot(firstRequest));
+      expect(platform.signRequests, hasLength(2));
+      platform.approve(secondRequest);
+      await secondSign;
+    });
+
+    test('per-use prompts wait for the app lock to go away', () async {
+      platform.holdSigns = true;
+      final identity = await perUseIdentity();
+      coordinator.setAppLocked(locked: true);
+
+      final signing = identity.sign(Uint8List.fromList([1]));
+      await pumpEventQueue();
+      expect(platform.signRequests, isEmpty);
+
+      coordinator.setAppLocked(locked: false);
+      platform.approve(await platform.waitForPrompt());
+      await signing;
+      expect(platform.signRequests, hasLength(1));
+    });
+
+    test('a request cancelled behind the app lock never prompts', () async {
+      final identity = await perUseIdentity();
+      coordinator.setAppLocked(locked: true);
+
+      final signing = identity.sign(Uint8List.fromList([1]));
+      await pumpEventQueue();
+      identity.cancelPendingSigns();
+      await expectLater(signing, failsWith(HardwareKeyErrorCode.cancelled));
+
+      coordinator.setAppLocked(locked: false);
+      await pumpEventQueue();
+      expect(platform.signRequests, isEmpty);
+    });
+
+    test('a request cancelled behind another prompt never shows', () async {
+      platform.holdSigns = true;
+      final first = await perUseIdentity();
+      final second = await perUseIdentity();
+
+      final firstSign = first.sign(Uint8List.fromList([1]));
+      final secondSign = second.sign(Uint8List.fromList([2]));
+      final firstRequest = await platform.waitForPrompt();
+      second.cancelPendingSigns();
+      await expectLater(secondSign, failsWith(HardwareKeyErrorCode.cancelled));
+
+      platform.approve(firstRequest);
+      await firstSign;
+      await pumpEventQueue();
+      expect(platform.signRequests, hasLength(1));
+    });
+
+    test(
+      'an unanswered prompt times out, is dismissed and frees the queue',
+      () async {
+        final quick = HardwareKeyService(
+          platform: platform,
+          isPlatformSupported: true,
+          promptCoordinator: coordinator,
+          promptTimeout: const Duration(milliseconds: 30),
+        );
+        platform.holdSigns = true;
+        final generated = await quick.generate(requireUserPresence: true);
+        final identity = quick.identityFor(generated.reference);
+
+        await expectLater(
+          identity.sign(Uint8List.fromList([1])),
+          failsWith(HardwareKeyErrorCode.timedOut),
+        );
+        expect(platform.cancelledRequests, hasLength(1));
+
+        platform.holdSigns = false;
+        await identity.sign(Uint8List.fromList([2]));
+        expect(platform.signRequests, hasLength(2));
+      },
+    );
+
+    test(
+      'a key without confirmation that needs interaction is locked',
+      () async {
+        final identity = service.identityFor(
+          (await service.generate(requireUserPresence: false)).reference,
+        );
+        platform.signError = const HardwareKeyException(
+          HardwareKeyErrorCode.interactionRequired,
+        );
+
+        await expectLater(
+          identity.sign(Uint8List.fromList([1])),
+          failsWith(HardwareKeyErrorCode.deviceLocked),
+        );
+      },
+    );
+
+    test('the declining signature cannot verify', () async {
+      final generated = await service.generate(requireUserPresence: false);
+      final data = Uint8List.fromList(utf8.encode('challenge'));
+      expect(
+        verifySshSignature(
+          publicKeyBlob: generated.publicKeyBlob,
+          data: data,
+          signature: HardwareKeyIdentity.unverifiableSignature.encode(),
+        ),
+        isFalse,
       );
     });
 

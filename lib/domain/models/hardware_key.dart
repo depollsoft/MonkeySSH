@@ -101,6 +101,7 @@ class HardwareKeyCapabilities {
   const HardwareKeyCapabilities.available({
     required HardwareKeyBacking this.backing,
     required this.userPresenceAvailable,
+    this.userPresenceAllowsPasscode = true,
     this.isEmulator = false,
     this.strongBoxAvailable = false,
   }) : unavailableReason = null;
@@ -110,6 +111,7 @@ class HardwareKeyCapabilities {
     HardwareKeyUnavailableReason this.unavailableReason,
   ) : backing = null,
       userPresenceAvailable = false,
+      userPresenceAllowsPasscode = false,
       isEmulator = false,
       strongBoxAvailable = false;
 
@@ -124,6 +126,7 @@ class HardwareKeyCapabilities {
     return HardwareKeyCapabilities.available(
       backing: backing,
       userPresenceAvailable: map['userPresenceAvailable'] == true,
+      userPresenceAllowsPasscode: map['userPresenceAllowsPasscode'] != false,
       isEmulator: map['isEmulator'] == true,
       strongBoxAvailable: map['strongBoxAvailable'] == true,
     );
@@ -137,6 +140,10 @@ class HardwareKeyCapabilities {
 
   /// Whether per-use biometric or passcode confirmation can be required.
   final bool userPresenceAvailable;
+
+  /// Whether per-use confirmation accepts the screen lock, not only a
+  /// biometric (false on Android 9 and 10).
+  final bool userPresenceAllowsPasscode;
 
   /// Whether the app runs on an emulator whose keystore is itself emulated.
   final bool isEmulator;
