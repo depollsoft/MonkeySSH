@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import '../widgets/keyboard_shortcuts_sheet.dart';
 import 'app_shortcuts.dart';
 
-/// Runs an app shortcut. The intent carries the window slot, if any.
+/// Runs an app shortcut. The intent carries the window number, if any.
 typedef AppShortcutHandler = void Function(AppShortcutIntent intent);
 
 /// Provides app shortcut handlers for its subtree.
@@ -17,9 +17,9 @@ typedef AppShortcutHandler = void Function(AppShortcutIntent intent);
 /// focused, the scopes of the current route answer instead. Scopes under a
 /// route that is not the current one never answer: touch-opened terminal
 /// sheets leave focus on the terminal below them, and a chord must not act
-/// behind the sheet. A null handler
-/// means the action cannot run here; its chord then does nothing (it is still
-/// withheld from the terminal, see `app_shortcuts.dart`).
+/// behind the sheet. A missing or null handler defers to the scopes
+/// further out; when no scope handles the action, its chord does nothing (it
+/// is still withheld from the terminal, see `app_shortcuts.dart`).
 ///
 /// Scopes only work below an [AppShortcutsHost].
 class AppShortcutScope extends StatefulWidget {
@@ -30,7 +30,7 @@ class AppShortcutScope extends StatefulWidget {
     super.key,
   });
 
-  /// Handlers by action. Missing or null entries are unavailable here.
+  /// Handlers by action. Missing or null entries defer to outer scopes.
   final Map<AppShortcutAction, AppShortcutHandler?> handlers;
 
   /// The subtree.
@@ -105,6 +105,7 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
   bool _peekVisible = false;
   // Stays true while the peek fades out.
   bool _peekBuilt = false;
+  bool _reduceMotion = false;
   late final _HostAction _action = _HostAction(this);
 
   TargetPlatform get _platform => defaultTargetPlatform;
@@ -231,14 +232,30 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
     _peekTimer?.cancel();
     _peekTimer = null;
     if (_peekVisible && mounted) {
-      setState(() => _peekVisible = false);
+      setState(() {
+        _peekVisible = false;
+        // Without a fade there is nothing to wait for.
+        if (_reduceMotion) {
+          _peekBuilt = false;
+        }
+      });
     }
+  }
+
+  void _handlePeekFadeEnd() {
+    // A zero-length fade ends inside the build that started it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_peekVisible && _peekBuilt) {
+        setState(() => _peekBuilt = false);
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final bindings = appShortcutBindings(_platform);
-    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final reduceMotion = _reduceMotion =
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     return _AppShortcutsHostScope(
       host: this,
       child: Shortcuts(
@@ -262,11 +279,7 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
                             ? Duration.zero
                             : const Duration(milliseconds: 120),
                         curve: Curves.easeOut,
-                        onEnd: () {
-                          if (!_peekVisible && _peekBuilt && mounted) {
-                            setState(() => _peekBuilt = false);
-                          }
-                        },
+                        onEnd: _handlePeekFadeEnd,
                         child: _peekBuilt
                             ? const KeyboardShortcutsPeek()
                             : const SizedBox.shrink(),

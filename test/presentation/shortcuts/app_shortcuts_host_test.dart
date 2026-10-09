@@ -262,6 +262,8 @@ void main() {
     );
     expect(opacity.opacity, 0);
     await tester.pump(const Duration(milliseconds: 200));
+    // The fade's end removes the panel on the next frame.
+    await tester.pump();
     expect(peek, findsNothing);
 
     // A chord typed before the delay never shows the peek.
@@ -273,6 +275,34 @@ void main() {
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyK);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await tester.pump();
+  }, variant: ios);
+
+  testWidgets('with Reduce Motion the peek hides at once, cleanly', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: AppShortcutsHost(holdToPeekDelay: _peekDelay, child: child!),
+        ),
+        home: const Scaffold(
+          body: Focus(autofocus: true, child: SizedBox.expand()),
+        ),
+      ),
+    );
+    await tester.pump();
+    final peek = find.byKey(const ValueKey('keyboard-shortcuts-peek'));
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump(_peekDelay * 2);
+    expect(peek, findsOneWidget);
+
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.pump();
+    expect(peek, findsNothing);
   }, variant: ios);
 
   testWidgets('Android has no hold-to-peek', (tester) async {

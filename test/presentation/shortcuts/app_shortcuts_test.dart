@@ -231,15 +231,15 @@ void main() {
 
   group('layout handling (review round 1)', () {
     test('shifted digit aliases need Shift', () {
-      // AZERTY types "!" on the US slash key without Shift.
+      // AZERTY types "!" on the US slash key without Shift: not ⌘1.
       expect(
         _match(
           LogicalKeyboardKey.exclamation,
           physical: PhysicalKeyboardKey.slash,
           platform: ios,
           meta: true,
-        ),
-        isNull,
+        )?.action,
+        isNot(AppShortcutAction.goToWindow),
       );
       // UK and German ISO keyboards type "#" without Shift.
       expect(
@@ -269,6 +269,60 @@ void main() {
         _match(
           LogicalKeyboardKey.slash,
           physical: PhysicalKeyboardKey.bracketLeft,
+          platform: ios,
+          meta: true,
+        )?.action,
+        AppShortcutAction.showShortcuts,
+      );
+    });
+
+    test('brackets and slash keep a key on European layouts', () {
+      // German, Italian and Spanish type "+" and "*" on the US "]" key.
+      expect(
+        _match(
+          LogicalKeyboardKey.asterisk,
+          physical: PhysicalKeyboardKey.bracketRight,
+          platform: ios,
+          meta: true,
+          shift: true,
+        )?.action,
+        AppShortcutAction.nextWindow,
+      );
+      expect(
+        _match(
+          LogicalKeyboardKey.add,
+          physical: PhysicalKeyboardKey.bracketRight,
+          platform: android,
+          control: true,
+          shift: true,
+        )?.action,
+        AppShortcutAction.nextWindow,
+      );
+      // German types "ü" on the US "[" key.
+      expect(
+        _match(
+          const LogicalKeyboardKey(0x00fc),
+          physical: PhysicalKeyboardKey.bracketLeft,
+          platform: ios,
+          meta: true,
+          shift: true,
+        )?.action,
+        AppShortcutAction.previousWindow,
+      );
+      // German types "-" and AZERTY types "!" on the US "/" key.
+      expect(
+        _match(
+          LogicalKeyboardKey.minus,
+          physical: PhysicalKeyboardKey.slash,
+          platform: ios,
+          meta: true,
+        )?.action,
+        AppShortcutAction.showShortcuts,
+      );
+      expect(
+        _match(
+          LogicalKeyboardKey.exclamation,
+          physical: PhysicalKeyboardKey.slash,
           platform: ios,
           meta: true,
         )?.action,

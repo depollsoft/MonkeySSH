@@ -90,9 +90,11 @@ enum AppShortcutGroup {
 /// First by logical key, so shortcuts follow the active keyboard layout: the
 /// unshifted character always counts, the US shifted character only while ⇧
 /// is held. Only when no shortcut matches that way does a physical position
-/// count: for digits when the layout types something other than a letter or
-/// digit there (the AZERTY digit row), and for every other key only on
-/// layouts that type no ASCII there at all (Cyrillic, Greek...).
+/// count. Digit, bracket and slash keys fall back when the layout types
+/// something other than an ASCII letter or digit there (the AZERTY digit
+/// row, German "+" on the US "]" key, AZERTY "!" on the US "/" key). Letter
+/// keys fall back only on layouts that type no ASCII there at all
+/// (Cyrillic, Greek...), so Dvorak ⌘, never counts as ⌘W.
 enum AppShortcutKey {
   /// The slash key; ⇧/ types a question mark on US layouts.
   slash(
@@ -128,7 +130,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit0,
     LogicalKeyboardKey.parenthesisRight,
     PhysicalKeyboardKey.digit0,
-    isDigit: true,
   ),
 
   /// Digit 1.
@@ -138,7 +139,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit1,
     LogicalKeyboardKey.exclamation,
     PhysicalKeyboardKey.digit1,
-    isDigit: true,
   ),
 
   /// Digit 2.
@@ -148,7 +148,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit2,
     LogicalKeyboardKey.at,
     PhysicalKeyboardKey.digit2,
-    isDigit: true,
   ),
 
   /// Digit 3.
@@ -158,7 +157,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit3,
     LogicalKeyboardKey.numberSign,
     PhysicalKeyboardKey.digit3,
-    isDigit: true,
   ),
 
   /// Digit 4.
@@ -168,7 +166,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit4,
     LogicalKeyboardKey.dollar,
     PhysicalKeyboardKey.digit4,
-    isDigit: true,
   ),
 
   /// Digit 5.
@@ -178,7 +175,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit5,
     LogicalKeyboardKey.percent,
     PhysicalKeyboardKey.digit5,
-    isDigit: true,
   ),
 
   /// Digit 6.
@@ -188,7 +184,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit6,
     LogicalKeyboardKey.caret,
     PhysicalKeyboardKey.digit6,
-    isDigit: true,
   ),
 
   /// Digit 7.
@@ -198,7 +193,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit7,
     LogicalKeyboardKey.ampersand,
     PhysicalKeyboardKey.digit7,
-    isDigit: true,
   ),
 
   /// Digit 8.
@@ -208,7 +202,6 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit8,
     LogicalKeyboardKey.asterisk,
     PhysicalKeyboardKey.digit8,
-    isDigit: true,
   ),
 
   /// Digit 9.
@@ -218,29 +211,77 @@ enum AppShortcutKey {
     LogicalKeyboardKey.digit9,
     LogicalKeyboardKey.parenthesisLeft,
     PhysicalKeyboardKey.digit9,
-    isDigit: true,
   ),
 
   /// Letter D.
-  keyD('D', 'D', LogicalKeyboardKey.keyD, null, PhysicalKeyboardKey.keyD),
+  keyD(
+    'D',
+    'D',
+    LogicalKeyboardKey.keyD,
+    null,
+    PhysicalKeyboardKey.keyD,
+    isLetter: true,
+  ),
 
   /// Letter F.
-  keyF('F', 'F', LogicalKeyboardKey.keyF, null, PhysicalKeyboardKey.keyF),
+  keyF(
+    'F',
+    'F',
+    LogicalKeyboardKey.keyF,
+    null,
+    PhysicalKeyboardKey.keyF,
+    isLetter: true,
+  ),
 
   /// Letter L.
-  keyL('L', 'L', LogicalKeyboardKey.keyL, null, PhysicalKeyboardKey.keyL),
+  keyL(
+    'L',
+    'L',
+    LogicalKeyboardKey.keyL,
+    null,
+    PhysicalKeyboardKey.keyL,
+    isLetter: true,
+  ),
 
   /// Letter O.
-  keyO('O', 'O', LogicalKeyboardKey.keyO, null, PhysicalKeyboardKey.keyO),
+  keyO(
+    'O',
+    'O',
+    LogicalKeyboardKey.keyO,
+    null,
+    PhysicalKeyboardKey.keyO,
+    isLetter: true,
+  ),
 
   /// Letter S.
-  keyS('S', 'S', LogicalKeyboardKey.keyS, null, PhysicalKeyboardKey.keyS),
+  keyS(
+    'S',
+    'S',
+    LogicalKeyboardKey.keyS,
+    null,
+    PhysicalKeyboardKey.keyS,
+    isLetter: true,
+  ),
 
   /// Letter T.
-  keyT('T', 'T', LogicalKeyboardKey.keyT, null, PhysicalKeyboardKey.keyT),
+  keyT(
+    'T',
+    'T',
+    LogicalKeyboardKey.keyT,
+    null,
+    PhysicalKeyboardKey.keyT,
+    isLetter: true,
+  ),
 
   /// Letter W.
-  keyW('W', 'W', LogicalKeyboardKey.keyW, null, PhysicalKeyboardKey.keyW);
+  keyW(
+    'W',
+    'W',
+    LogicalKeyboardKey.keyW,
+    null,
+    PhysicalKeyboardKey.keyW,
+    isLetter: true,
+  );
 
   const AppShortcutKey(
     this.glyph,
@@ -248,7 +289,7 @@ enum AppShortcutKey {
     this.unshifted,
     this.shifted,
     this.physical, {
-    this.isDigit = false,
+    this.isLetter = false,
   });
 
   /// Character shown on the keycap.
@@ -266,8 +307,8 @@ enum AppShortcutKey {
   /// Physical key used by the fallback pass.
   final PhysicalKeyboardKey physical;
 
-  /// Whether this is a digit-row key.
-  final bool isDigit;
+  /// Whether this is a letter key.
+  final bool isLetter;
 
   /// Whether [event] typed this key's character on the active layout.
   bool matchesLogical(KeyEvent event, {required bool shiftPressed}) =>
@@ -284,7 +325,7 @@ enum AppShortcutKey {
     final isAsciiLetterOrDigit =
         (id >= 0x30 && id <= 0x39) || (id >= 0x61 && id <= 0x7a);
     final isAsciiPrintable = id >= 0x21 && id <= 0x7e;
-    return isDigit ? !isAsciiLetterOrDigit : !isAsciiPrintable;
+    return isLetter ? !isAsciiPrintable : !isAsciiLetterOrDigit;
   }
 }
 
