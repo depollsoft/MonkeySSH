@@ -76,6 +76,9 @@ class AcpToolCallView extends StatefulWidget {
   final AcpToolCall toolCall;
 
   /// Whether the detail section is expanded initially.
+  ///
+  /// Turning it on after the view is built expands the details too, which is
+  /// how transcript search reveals a match inside them.
   final bool initiallyExpanded;
 
   /// Called when a file location is tapped.
@@ -103,6 +106,9 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
     final isActive = _isActive(widget.toolCall);
     if (wasActive != isActive) {
       _expanded = isActive;
+    }
+    if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
+      _expanded = true;
     }
     if (!identical(oldWidget.toolCall, widget.toolCall)) {
       _headerPreview = _buildHeaderPreview();

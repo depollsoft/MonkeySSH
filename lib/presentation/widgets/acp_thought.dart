@@ -24,6 +24,9 @@ class AcpThoughtView extends StatefulWidget {
   final AcpThoughtEntry entry;
 
   /// Whether the thought is expanded initially. Defaults to collapsed.
+  ///
+  /// Turning it on after the view is built expands the thought too, which is
+  /// how transcript search reveals a match inside it.
   final bool initiallyExpanded;
 
   /// Optional custom link handler forwarded to the inner Markdown.
@@ -38,6 +41,14 @@ class AcpThoughtView extends StatefulWidget {
 
 class _AcpThoughtViewState extends State<AcpThoughtView> {
   late bool _expanded = widget.initiallyExpanded;
+
+  @override
+  void didUpdateWidget(covariant AcpThoughtView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
+      _expanded = true;
+    }
+  }
 
   String get _headerLabel {
     if (widget.entry.status == AcpStreamStatus.streaming) {
