@@ -112,6 +112,7 @@ import '../widgets/terminal_paste_upload_strip.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_port_forwards_sheet.dart';
 import '../widgets/terminal_prompt_tail.dart' show scanPromptTail;
+import '../widgets/terminal_scrollback_export.dart';
 import '../widgets/terminal_scrollback_search.dart';
 import '../widgets/terminal_scrollback_search_bar.dart';
 import '../widgets/terminal_text_input_handler.dart';
@@ -11713,6 +11714,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     label: 'Find',
                     action: 'find_in_scrollback',
                   ),
+                if (showsTerminalViewportMenuActions)
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.ios_share_rounded,
+                    label: 'Export Scrollback',
+                    action: 'export_scrollback',
+                  ),
                 if (showsTerminalViewportMenuActions &&
                     _workingDirectoryPath != null)
                   _terminalOverflowMenuItem(
@@ -13070,6 +13078,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   double get _terminalLineHeight =>
       _terminalViewKey.currentState?.renderTerminal.lineHeight ?? 0;
 
+  Future<void> _exportScrollback() async {
+    final anchorContext = _terminalOverflowMenuButtonKey.currentContext;
+    await exportTerminalScrollback(
+      context: context,
+      terminal: _terminal,
+      sharePositionOrigin: anchorContext == null
+          ? null
+          : terminalShareOriginFromContext(anchorContext),
+    );
+  }
+
   Future<void> _openAgentManagement() async {
     if (!await requireMonetizationFeatureAccess(
           context: context,
@@ -13255,6 +13274,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         break;
       case 'find_in_scrollback':
         _openScrollbackSearch();
+        break;
+      case 'export_scrollback':
+        await _exportScrollback();
         break;
       case 'copy_working_directory':
         await _copyWorkingDirectory();

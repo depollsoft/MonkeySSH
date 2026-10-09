@@ -3002,6 +3002,7 @@ void main() {
       final bottom = scrollController.offset;
 
       await openTerminalOverflowMenu(tester);
+      expect(terminalMenuItemButton('Export Scrollback'), findsOneWidget);
       await tester.tap(terminalMenuItemButton('Find'));
       await tester.pumpAndSettle();
       expect(terminalView().searchHits, isNotNull);
