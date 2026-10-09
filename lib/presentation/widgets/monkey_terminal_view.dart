@@ -512,6 +512,7 @@ class MonkeyTerminalView extends StatefulWidget {
     this.onUserInput,
     this.inlineUnderlines = const <TerminalTextUnderline>[],
     this.searchHits,
+    this.bottomScrollClearance = 0,
   });
 
   /// The underlying terminal that this widget renders.
@@ -655,6 +656,12 @@ class MonkeyTerminalView extends StatefulWidget {
 
   /// Search hits to highlight, if a search is open.
   final TerminalSearchHitSource? searchHits;
+
+  /// Extra scroll room below the last row, in pixels, so the bottom rows can
+  /// be scrolled above something that overlays the terminal, such as the
+  /// find bar. It changes neither rows nor columns, so the PTY is not
+  /// resized.
+  final double bottomScrollClearance;
 
   @override
   State<MonkeyTerminalView> createState() => MonkeyTerminalViewState();
@@ -1193,6 +1200,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           theme: widget.theme,
           inlineUnderlines: widget.inlineUnderlines,
           searchHits: widget.searchHits,
+          bottomScrollClearance: widget.bottomScrollClearance,
           focusNode: cursorFocusNode,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
@@ -1894,6 +1902,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.inlineUnderlines,
     required this.focusNode,
     this.searchHits,
+    this.bottomScrollClearance = 0,
     this.onEditableRect,
     this.composingText,
     this.selectionRegistrar,
@@ -1927,6 +1936,8 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final TerminalSearchHitSource? searchHits;
 
+  final double bottomScrollClearance;
+
   final FocusNode focusNode;
 
   final EditableRectCallback? onEditableRect;
@@ -1952,6 +1963,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       theme: theme,
       inlineUnderlines: inlineUnderlines,
       searchHits: searchHits,
+      bottomScrollClearance: bottomScrollClearance,
       focusNode: focusNode,
       onEditableRect: onEditableRect,
       composingText: composingText,
@@ -1979,6 +1991,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..theme = theme
       ..inlineUnderlines = inlineUnderlines
       ..searchHits = searchHits
+      ..bottomScrollClearance = bottomScrollClearance
       ..focusNode = focusNode
       ..onEditableRect = onEditableRect
       ..composingText = composingText
@@ -3004,6 +3017,7 @@ class MonkeyRenderTerminal extends RenderBox
     required List<TerminalTextUnderline> inlineUnderlines,
     required FocusNode focusNode,
     TerminalSearchHitSource? searchHits,
+    double bottomScrollClearance = 0,
     EditableRectCallback? onEditableRect,
     String? composingText,
     SelectionRegistrar? selectionRegistrar,
@@ -3018,6 +3032,7 @@ class MonkeyRenderTerminal extends RenderBox
        _liveOutputAutoScroll = liveOutputAutoScroll,
        _inlineUnderlines = inlineUnderlines,
        _searchHits = searchHits,
+       _bottomScrollClearance = bottomScrollClearance,
        _focusNode = focusNode,
        _onEditableRect = onEditableRect,
        _composingText = composingText,
@@ -3157,6 +3172,13 @@ class MonkeyRenderTerminal extends RenderBox
   }
 
   void _onSearchHitsChanged() => markNeedsPaint();
+
+  double _bottomScrollClearance;
+  set bottomScrollClearance(double value) {
+    if (value == _bottomScrollClearance) return;
+    _bottomScrollClearance = value;
+    markNeedsLayout();
+  }
 
   FocusNode _focusNode;
   set focusNode(FocusNode value) {
@@ -4304,7 +4326,7 @@ class MonkeyRenderTerminal extends RenderBox
   double get _viewportHeight => size.height;
 
   double get _maxScrollExtent =>
-      math.max(_terminalHeight - _viewportHeight, 0.0);
+      math.max(_terminalHeight - _viewportHeight + _bottomScrollClearance, 0.0);
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
 

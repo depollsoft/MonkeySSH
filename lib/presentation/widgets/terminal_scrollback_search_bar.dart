@@ -62,6 +62,11 @@ String? describeTerminalSearchStatusForSemantics(
   }
 }
 
+/// Height the find bar covers at the bottom of the terminal area whose
+/// media query is [data]: the bar plus the bottom safe-area padding it adds.
+double terminalSearchBarObscuredHeight(MediaQueryData data) =>
+    TerminalScrollbackSearchBar.height + data.padding.bottom;
+
 /// Lays the find bar for [search] over the bottom edge of [child], the
 /// terminal area, and scrolls the terminal to each match it reveals. Shows
 /// [child] alone when [search] is null.
@@ -103,7 +108,7 @@ class TerminalScrollbackSearchOverlay extends StatelessWidget {
       currentOffset: position.pixels,
       minScrollExtent: position.minScrollExtent,
       maxScrollExtent: position.maxScrollExtent,
-      obscuredBottom: TerminalScrollbackSearchBar.height,
+      obscuredBottom: terminalSearchBarObscuredHeight(MediaQuery.of(context)),
     );
     if (target == null) {
       return;
@@ -189,6 +194,7 @@ class _TerminalScrollbackSearchBarState
   final _fieldFocusNode = FocusNode(debugLabel: 'terminal-search-field');
   late int _handledRevealRequest = widget.controller.revealRequest;
   late int _handledUserUpdate = widget.controller.userUpdateCount;
+  late int _handledFocusRequest = widget.controller.focusRequest;
   // Announce status changes the user caused (a new search or a step), not the
   // count updates that streaming output brings.
   bool _announceStatus = false;
@@ -197,6 +203,18 @@ class _TerminalScrollbackSearchBarState
   void initState() {
     super.initState();
     widget.controller.addListener(_handleSearchChanged);
+    // Autofocus does nothing while the terminal holds focus, and the menu
+    // that opened the bar hands focus back to the terminal first. Without
+    // this the query, and Enter, would go to the remote shell.
+    _focusFieldAfterFrame();
+  }
+
+  void _focusFieldAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _fieldFocusNode.requestFocus();
+      }
+    });
   }
 
   @override
@@ -231,6 +249,10 @@ class _TerminalScrollbackSearchBarState
       if (row != null) {
         widget.onRevealRow?.call(row);
       }
+    }
+    if (search.focusRequest != _handledFocusRequest) {
+      _handledFocusRequest = search.focusRequest;
+      _focusFieldAfterFrame();
     }
     final userUpdated = search.userUpdateCount != _handledUserUpdate;
     _handledUserUpdate = search.userUpdateCount;
@@ -285,6 +307,11 @@ class _TerminalScrollbackSearchBarState
           color: colorScheme.onSurface,
         ),
         onChanged: search.setQuery,
+        // The keyboard's Search key steps up like Enter and keeps the
+        // keyboard up, instead of closing it (which would also resize the
+        // terminal).
+        onSubmitted: (_) => search.showPrevious(),
+        onEditingComplete: () {},
         decoration: InputDecoration(
           // A bad or runaway pattern turns the field red, with the reason
           // spelled out beside the query.
@@ -297,7 +324,10 @@ class _TerminalScrollbackSearchBarState
           ),
           constraints: const BoxConstraints(minHeight: 48),
           contentPadding: const EdgeInsets.symmetric(vertical: 14),
-          prefixIcon: _SearchOptionsButton(search: search),
+          prefixIcon: _SearchOptionsButton(
+            search: search,
+            onClose: _fieldFocusNode.requestFocus,
+          ),
           prefixIconConstraints: const BoxConstraints.tightFor(
             width: 48,
             height: 48,
@@ -368,13 +398,17 @@ bool _isErrorStatus(TerminalSearchStatus status) => switch (status) {
 };
 
 class _SearchOptionsButton extends StatelessWidget {
-  const _SearchOptionsButton({required this.search});
+  const _SearchOptionsButton({required this.search, required this.onClose});
 
   final TerminalScrollbackSearchController search;
+
+  /// Called when the menu closes, to give focus back to the field.
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) => MenuAnchor(
     style: TerminalMenuStyles.menuStyle(context),
+    onClose: onClose,
     menuChildren: [
       CheckboxMenuButton(
         key: const ValueKey<String>('terminal-search-match-case'),

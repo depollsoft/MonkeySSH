@@ -146,6 +146,94 @@ void main() {
       expect(_statusText(tester), '2/2');
     });
 
+    testWidgets('takes focus even when another field had it', (tester) async {
+      final other = FocusNode();
+      addTearDown(other.dispose);
+      var open = false;
+      late StateSetter setOuterState;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: FluttyTheme.dark,
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                setOuterState = setState;
+                return Column(
+                  children: [
+                    Expanded(child: TextField(focusNode: other)),
+                    if (open)
+                      TerminalScrollbackSearchBar(
+                        controller: search,
+                        onClose: () {},
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      other.requestFocus();
+      await tester.pump();
+      expect(other.hasFocus, isTrue);
+
+      setOuterState(() => open = true);
+      await tester.pump();
+      await tester.pump();
+
+      expect(other.hasFocus, isFalse);
+      // Text from the platform goes to the find field, not the other one.
+      tester.testTextInput.enterText('alpha');
+      await _settle(tester);
+      expect(_statusText(tester), '3/3');
+
+      // Asking again brings focus back after it moved away.
+      other.requestFocus();
+      await tester.pump();
+      search.requestFocus();
+      await tester.pump();
+      await tester.pump();
+      expect(other.hasFocus, isFalse);
+    });
+
+    testWidgets('the keyboard Search key steps and keeps the keyboard up', (
+      tester,
+    ) async {
+      await pumpBar(tester);
+      await tester.enterText(find.byKey(_field), 'alpha');
+      await _settle(tester);
+      expect(_statusText(tester), '3/3');
+
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pump();
+
+      expect(_statusText(tester), '2/3');
+      expect(
+        tester.widget<TextField>(find.byKey(_field)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('the options menu gives focus back to the field', (
+      tester,
+    ) async {
+      await pumpBar(tester);
+      await tester.enterText(find.byKey(_field), 'alpha');
+      await _settle(tester);
+
+      await tester.tap(find.byTooltip('Search options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Match case'));
+      await tester.pumpAndSettle();
+      await _settle(tester);
+
+      expect(search.caseSensitive, isTrue);
+      expect(
+        tester.widget<TextField>(find.byKey(_field)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
     testWidgets('reports an invalid regular expression in text', (
       tester,
     ) async {
@@ -283,6 +371,74 @@ void main() {
       expect(scrollController.offset, lessThanOrEqualTo(4 * lineHeight));
       expect(scrollController.offset, lessThan(bottom));
     });
+
+    for (final bottomPadding in [0.0, 34.0]) {
+      testWidgets(
+        'scrolls a match in the last row above the bar, padding=$bottomPadding',
+        (tester) async {
+          final terminal = Terminal()..resize(40, 10);
+          for (var row = 0; row < 60; row++) {
+            terminal.write('line $row\r\n');
+          }
+          terminal.write('the needle is here');
+          final search = _controller(terminal);
+          addTearDown(search.dispose);
+          final scrollController = ScrollController();
+          addTearDown(scrollController.dispose);
+          final viewKey = GlobalKey<MonkeyTerminalViewState>();
+          final media = const MediaQueryData(size: Size(400, 300))
+              .copyWith(padding: EdgeInsets.only(bottom: bottomPadding));
+          final clearance = terminalSearchBarObscuredHeight(media);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: FluttyTheme.dark,
+              home: MediaQuery(
+                data: media,
+                child: Scaffold(
+                  body: SizedBox(
+                    width: 400,
+                    height: 300,
+                    child: TerminalScrollbackSearchOverlay(
+                      search: search,
+                      scrollController: scrollController,
+                      lineHeight: () =>
+                          viewKey.currentState?.renderTerminal.lineHeight ?? 0,
+                      onClose: () {},
+                      child: MonkeyTerminalView(
+                        terminal,
+                        key: viewKey,
+                        scrollController: scrollController,
+                        autoResize: false,
+                        hardwareKeyboardOnly: true,
+                        searchHits: search,
+                        bottomScrollClearance: clearance,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+
+          await tester.enterText(find.byKey(_field), 'needle');
+          await _settle(tester);
+          await tester.pumpAndSettle();
+
+          final lineHeight = viewKey.currentState!.renderTerminal.lineHeight;
+          final row = search.currentMatchRow!;
+          final position = scrollController.position;
+          final rowBottom = (row + 1) * lineHeight;
+          expect(
+            rowBottom,
+            lessThanOrEqualTo(
+              position.pixels + position.viewportDimension - clearance,
+            ),
+          );
+        },
+      );
+    }
 
     testWidgets('shows only the child without a search', (tester) async {
       final scrollController = ScrollController();

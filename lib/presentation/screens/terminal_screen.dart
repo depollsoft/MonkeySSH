@@ -859,6 +859,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isTerminalScrollToBottomQueued = false;
   bool _isNavigatingCommandMarks = false;
   TerminalScrollbackSearchController? _scrollbackSearch;
+  // Height the find bar covers, so the terminal can scroll its last rows
+  // above it. Set while building the body, before the terminal view.
+  double _scrollbackSearchClearance = 0;
   int? _previousCommandNavigationRow;
   int? _previousCommandNavigationConnectionId;
   int? _previousCommandNavigationMarkCount;
@@ -11783,6 +11786,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 _showKeyboardToolbar &&
                 !showsDisconnectedOverlay &&
                 (!_isNativeSelectionMode || _isMobilePlatform);
+            // The find bar overlays the terminal area; the terminal gets that
+            // much scroll room below its last row. A native chat hides it.
+            _scrollbackSearch?.paused = showsNativeAgent;
+            _scrollbackSearchClearance =
+                _scrollbackSearch == null || showsNativeAgent
+                ? 0
+                : terminalSearchBarObscuredHeight(
+                    showsKeyboardToolbar
+                        ? removeSystemBottomInset(MediaQuery.of(bodyContext))
+                        : MediaQuery.of(bodyContext),
+                  );
             final terminalArea = TerminalScrollbackSearchOverlay(
               search: showsNativeAgent ? null : _scrollbackSearch,
               scrollController: _terminalScrollController,
@@ -12596,6 +12610,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       textStyle: terminalTextStyle,
       inlineUnderlines: inlineUnderlines,
       searchHits: _scrollbackSearch,
+      bottomScrollClearance: _scrollbackSearchClearance,
       keyboardAppearance: keyboardAppearance,
       padding: terminalViewportPadding,
       resizeTerminalToViewport: !clipsMonkeyMuxSharedGrid,
@@ -13050,7 +13065,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _openScrollbackSearch() {
-    if (_scrollbackSearch != null) {
+    if (_scrollbackSearch case final search?) {
+      search.requestFocus();
       return;
     }
     setState(() {
@@ -13059,6 +13075,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         anchorRow: () => terminalViewportBottomRow(
           _terminalScrollController,
           lineHeight: _terminalLineHeight,
+          obscuredBottom: _scrollbackSearchClearance,
         ),
       );
     });
