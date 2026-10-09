@@ -8797,7 +8797,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(config.jumpHost!.jumpHost!.jumpHost, isNull);
     });
 
-    test('stops at a loop instead of recursing', () async {
+    test('a loop through the target keeps the single-hop behaviour', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       final service = buildService(db);
@@ -8813,6 +8813,81 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(config.hostname, 'a.example.com');
       expect(config.jumpHost!.hostname, 'b.example.com');
       expect(config.jumpHost!.jumpHost, isNull);
+    });
+
+    test(
+      'a loop between jump hosts falls back to the first hop only',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db);
+        final j = await insertHost(db, 'j');
+        final k = await insertHost(db, 'k', jumpHostId: j);
+        await (db.update(db.hosts)..where((h) => h.id.equals(j))).write(
+          HostsCompanion(jumpHostId: Value(k)),
+        );
+        final target = await insertHost(db, 'target', jumpHostId: j);
+
+        await service.connectToHost(target);
+
+        // As before chains were followed: T through J, with J dialled directly.
+        final jump = service.capturedConfig!.jumpHost!;
+        expect(jump.hostname, 'j.example.com');
+        expect(jump.jumpHost, isNull);
+      },
+    );
+
+    test('a chain longer than eight hops fails instead of dialling', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      int? previous;
+      for (var i = 9; i >= 1; i--) {
+        previous = await insertHost(db, 'h$i', jumpHostId: previous);
+      }
+      final target = await insertHost(db, 'target', jumpHostId: previous);
+
+      final result = await service.connectToHost(target);
+
+      expect(service.capturedConfig, isNull);
+      expect(result.success, isFalse);
+      expect(result.error, contains('more than 8'));
+    });
+
+    test('exactly eight hops still connect', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      int? previous;
+      for (var i = 8; i >= 1; i--) {
+        previous = await insertHost(db, 'h$i', jumpHostId: previous);
+      }
+      final target = await insertHost(db, 'target', jumpHostId: previous);
+
+      await service.connectToHost(target);
+
+      var hops = 0;
+      for (
+        var c = service.capturedConfig!.jumpHost;
+        c != null;
+        c = c.jumpHost
+      ) {
+        hops++;
+      }
+      expect(hops, 8);
+    });
+
+    test('Test Connection builds the same multi-hop chain', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(db, 'inner', jumpHostId: outer);
+
+      final config = await service.buildJumpHostChainConfig(inner);
+
+      expect(config!.hostname, 'inner.example.com');
+      expect(config.jumpHost!.hostname, 'outer.example.com');
     });
 
     test('a hop’s Wi-Fi skip list bypasses only its own jump', () async {

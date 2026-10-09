@@ -1821,19 +1821,11 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         key = await keyRepo.getById(_selectedKeyId!);
       }
 
-      SshConnectionConfig? jumpHostConfig;
-      if (_selectedJumpHostId != null) {
-        final jumpHost = await ref
-            .read(hostRepositoryProvider)
-            .getById(_selectedJumpHostId!);
-        if (jumpHost != null) {
-          SshKey? jumpKey;
-          if (jumpHost.keyId != null) {
-            jumpKey = await keyRepo.getById(jumpHost.keyId!);
-          }
-          jumpHostConfig = SshConnectionConfig.fromHost(jumpHost, key: jumpKey);
-        }
-      }
+      // The same chain a real connection follows, including the jump
+      // host's own jump hosts.
+      final jumpHostConfig = _selectedJumpHostId == null
+          ? null
+          : await sshService.buildJumpHostChainConfig(_selectedJumpHostId!);
 
       final config = SshConnectionConfig(
         hostname: _hostnameController.text.trim(),
@@ -1884,6 +1876,11 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       messenger.showSnackBar(
         const SnackBar(content: Text('Connection successful')),
       );
+    } on JumpHostChainTooLongException catch (e) {
+      testingSnackBar.close();
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(content: Text(e.message)));
+      }
     } on Exception catch (e) {
       FlutterError.reportError(
         FlutterErrorDetails(
