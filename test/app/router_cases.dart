@@ -1,6 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -8,10 +9,13 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/app/router.dart';
 import 'package:monkeyssh/app/routes.dart';
+import 'package:monkeyssh/domain/models/app_link.dart';
+import 'package:monkeyssh/domain/services/app_link_service.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 
 import '../helpers/mocks.dart';
+import '../helpers/recording_diagnostics_logger.dart';
 
 class _MockBuildContext extends Mock implements BuildContext {}
 
@@ -228,6 +232,63 @@ void registerRouterTests() {
       });
     });
 
+    group('guardExternalLocation', () {
+      late AppLinkService links;
+
+      setUp(() {
+        links = AppLinkService(
+          channel: const MethodChannel('test/app_links'),
+          diagnostics: RecordingDiagnosticsLogger(),
+        );
+      });
+
+      tearDown(() => links.dispose());
+
+      test('allows in-app locations', () {
+        expect(
+          guardExternalLocation(Uri.parse('/terminal/1'), links),
+          isA<Allow>(),
+        );
+        expect(guardExternalLocation(Uri.parse('/'), links), isA<Allow>());
+        expect(links.hasPending, isFalse);
+      });
+
+      test('queues app links and keeps the current route', () {
+        final result = guardExternalLocation(
+          Uri.parse('monkeyssh://open/?host=3&window=1'),
+          links,
+        );
+
+        expect(result, isA<Block>());
+        expect(result.isStop, isTrue);
+        expect(
+          links.takePending(),
+          const OpenHostAppLink(hostId: 3, windowIndex: 1),
+        );
+      });
+
+      test('queues ssh links for review', () {
+        guardExternalLocation(Uri.parse('ssh://root@example.com/'), links);
+
+        expect(
+          links.takePending(),
+          const SshHostAppLink(hostname: 'example.com', username: 'root'),
+        );
+      });
+
+      test('drops other deep links without turning them into routes', () {
+        for (final location in [
+          'https://example.com/terminal/1',
+          'content://provider/document/1',
+          'file:///private/var/mobile/a.txt',
+        ]) {
+          final result = guardExternalLocation(Uri.parse(location), links);
+          expect(result, isA<Block>(), reason: location);
+        }
+        expect(links.hasPending, isFalse);
+      });
+    });
+
     // Intentional routerProvider behavior: it creates a new GoRouter each time
     // authStateProvider changes, which resets the navigation back-stack.
     group('routerProvider', () {
@@ -349,6 +410,30 @@ void registerRouterTests() {
         expect(first.initialNativeAcpSessionKey?.bridgeId, 'bridge-1');
         expect(first.initialNativeAcpSessionKey?.acpSessionId, 'session-1');
         expect(first.key, isNot(repeated.key));
+      });
+
+      test('link-opened terminal routes review automation and refresh', () {
+        final router = container.read(routerProvider);
+        final route = router.configuration.routes
+            .whereType<GoRoute>()
+            .singleWhere((route) => route.name == Routes.terminal);
+        TerminalScreen screen(String query) => _terminalScreenFor(
+          router: router,
+          route: route,
+          uri: Uri.parse('/terminal/3?$query'),
+        );
+
+        final first = screen('tmuxWindow=2&linkTap=first');
+        final repeated = screen('tmuxWindow=2&linkTap=second');
+        final manual = screen('tmuxWindow=2');
+
+        expect(first.openedFromLink, isTrue);
+        expect(first.initialTmuxWindowIndex, 2);
+        expect(first.initialTmuxSessionName, isNull);
+        expect(first.initialTmuxWindowRequiresVisibleSession, isTrue);
+        expect(first.key, isNot(repeated.key));
+        expect(manual.openedFromLink, isFalse);
+        expect(manual.initialTmuxWindowRequiresVisibleSession, isFalse);
       });
 
       test(
