@@ -1,0 +1,387 @@
+/// The "waiting on you" section at the top of the Connections tab.
+///
+/// Lists every native agent session, on any connected host, that is blocked
+/// until the user answers: a permission request, a question, a sign-in, or a
+/// request the host reports for a session with no attached client. Each row
+/// opens that exact session, where the request is shown with its full tool
+/// details. Answers are never given from this list.
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../app/theme.dart';
+import '../../domain/models/acp_session_keys.dart';
+import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/ssh_service.dart';
+import '../providers/connection_attention_provider.dart';
+import 'acp_session_presentation.dart';
+import 'agent_tool_icon.dart';
+import 'attention_presentation.dart';
+
+/// Opens a route for a waiting row.
+typedef WaitingOnYouOpener = void Function(
+  BuildContext context,
+  String location,
+);
+
+void _pushLocation(BuildContext context, String location) {
+  unawaited(GoRouter.of(context).push<void>(location));
+}
+
+/// Section listing native sessions waiting on the user. Renders nothing when
+/// no session is waiting or the surface is offstage.
+class ConnectionsWaitingSection extends ConsumerStatefulWidget {
+  /// Creates the section.
+  const ConnectionsWaitingSection({
+    this.onOpen = _pushLocation,
+    this.now,
+    super.key,
+  });
+
+  /// Navigates to a row's session.
+  final WaitingOnYouOpener onOpen;
+
+  /// Clock override for tests.
+  final DateTime Function()? now;
+
+  @override
+  ConsumerState<ConnectionsWaitingSection> createState() =>
+      _ConnectionsWaitingSectionState();
+}
+
+class _ConnectionsWaitingSectionState
+    extends ConsumerState<ConnectionsWaitingSection> {
+  Timer? _ageTicker;
+  List<WaitingOnYouItem> _items = const <WaitingOnYouItem>[];
+  AcpSessionKey? _opening;
+
+  /// Resolves the destination at tap time, so an untracked session opens in
+  /// the workspace whose window hosts its bridge right now.
+  Future<void> _open(WaitingOnYouItem item) async {
+    if (item.tracked) {
+      widget.onOpen(context, item.chatLocation);
+      return;
+    }
+    if (_opening != null) return;
+    setState(() => _opening = item.key);
+    try {
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final location = await resolveWaitingOnYouLocation(
+        item,
+        sessions: ref
+            .read(activeSessionsProvider)
+            .keys
+            .map(sessions.getSession)
+            .whereType<SshSession>(),
+        listWindows: (session, workspace) =>
+            ref.read(monkeyMuxServiceProvider).listWindows(session, workspace),
+      );
+      // The lookup takes a round trip; if the user moved on meanwhile, do
+      // not push a terminal over wherever they went.
+      if (mounted && attentionSurfaceVisible(context)) {
+        widget.onOpen(context, location);
+      }
+    } finally {
+      if (mounted) setState(() => _opening = null);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ageTicker?.cancel();
+    super.dispose();
+  }
+
+  /// Keeps "5m ago" labels honest while rows are on screen.
+  void _syncAgeTicker({required bool active}) {
+    if (!active) {
+      _ageTicker?.cancel();
+      _ageTicker = null;
+      return;
+    }
+    _ageTicker ??= Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Under a dialog or a covering route, keep the last rows without polling
+    // so nothing moves behind it.
+    final visible = attentionSurfaceVisible(context);
+    if (visible) _items = ref.watch(waitingOnYouProvider).items;
+    final items = _items;
+    _syncAgeTicker(active: visible && items.isNotEmpty);
+    if (items.isEmpty) return const SizedBox.shrink();
+
+    final scheme = Theme.of(context).colorScheme;
+    final now = widget.now?.call() ?? DateTime.now();
+    return Padding(
+      key: const ValueKey('connections-waiting-section'),
+      padding: const EdgeInsets.fromLTRB(
+        FluttyTheme.spacingMd,
+        FluttyTheme.spacingSm,
+        FluttyTheme.spacingMd,
+        FluttyTheme.spacingSm,
+      ),
+      child: Material(
+        color: scheme.surfaceContainerHighest,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+          side: BorderSide(color: scheme.outline),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              container: true,
+              header: true,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        'waiting on you',
+                        style: FluttyTheme.displayMono(
+                          fontSize: 15,
+                          color: scheme.onSurface,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: FluttyTheme.spacingSm),
+                    Text(
+                      '${items.length}',
+                      semanticsLabel: items.length == 1
+                          ? '1 session'
+                          : '${items.length} sessions',
+                      style: FluttyTheme.displayMono(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            for (var index = 0; index < items.length; index++) ...[
+              if (index > 0)
+                Divider(
+                  height: 1,
+                  thickness: 1,
+                  indent: 14,
+                  endIndent: 14,
+                  color: scheme.outline,
+                ),
+              WaitingOnYouRow(
+                key: ValueKey('waiting-on-you-${items[index].key.value}'),
+                item: items[index],
+                now: now,
+                opening: _opening == items[index].key,
+                onOpen: () => unawaited(_open(items[index])),
+              ),
+            ],
+            const SizedBox(height: 4),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One waiting session. The whole row is the Open action.
+class WaitingOnYouRow extends StatelessWidget {
+  /// Creates a row.
+  const WaitingOnYouRow({
+    required this.item,
+    required this.now,
+    required this.onOpen,
+    this.opening = false,
+    super.key,
+  });
+
+  /// Whether Open is resolving this session's workspace.
+  final bool opening;
+
+  /// Session to show.
+  final WaitingOnYouItem item;
+
+  /// Reference time for the age label.
+  final DateTime now;
+
+  /// Opens the session.
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final reason = item.reason;
+    final (reasonForeground, reasonBackground) = attentionToneColors(
+      scheme,
+      reason.tone,
+    );
+    final age = acpRelativeTime(item.since, now: now);
+    // Host and age first: they decide which to open, and long lines elide
+    // from the end.
+    final details = [
+      item.hostLabel,
+      age,
+      if (item.providerLabel != item.title) item.providerLabel,
+      ?item.cwdSummary,
+    ].join(' · ');
+    final reasonPill = DecoratedBox(
+      key: ValueKey('waiting-reason-${reason.name}'),
+      decoration: BoxDecoration(
+        color: reasonBackground,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(reason.icon, size: 12, color: reasonForeground),
+            const SizedBox(width: 3),
+            Flexible(
+              child: Text(
+                reason.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  color: reasonForeground,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          item.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: scheme.onSurface,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 4),
+        // Wraps under large text instead of pushing the row past its width.
+        Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            reasonPill,
+            Text(
+              details,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: FluttyTheme.monoStyle.copyWith(
+                fontSize: 11,
+                height: 1.2,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    final openPill = DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outline),
+        borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Open',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: scheme.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 2),
+            if (opening)
+              const Padding(
+                padding: EdgeInsets.all(2),
+                child: SizedBox.square(
+                  key: ValueKey('waiting-on-you-opening'),
+                  dimension: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
+              Icon(
+                Icons.chevron_right,
+                size: 16,
+                color: scheme.onSurfaceVariant,
+              ),
+          ],
+        ),
+      ),
+    );
+    // Large text gets its own line for Open, so the title keeps its width.
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 14 * 1.3;
+    final icon = AgentToolIcon(tool: item.tool, color: scheme.onSurfaceVariant);
+    return Semantics(
+      container: true,
+      button: true,
+      label:
+          '${opening ? 'Opening' : 'Open'} ${item.title}. ${item.providerLabel} '
+          'on ${item.hostLabel} ${reason.description}, $age.',
+      excludeSemantics: true,
+      onTap: onOpen,
+      child: InkWell(
+        onTap: onOpen,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 56),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+            child: largeText
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          icon,
+                          const SizedBox(width: 12),
+                          Expanded(child: content),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Align(alignment: Alignment.centerRight, child: openPill),
+                    ],
+                  )
+                : Row(
+                    children: [
+                      icon,
+                      const SizedBox(width: 12),
+                      Expanded(child: content),
+                      const SizedBox(width: 8),
+                      openPill,
+                    ],
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
