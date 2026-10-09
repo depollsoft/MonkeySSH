@@ -828,6 +828,21 @@ branch refs/heads/fix/session-resumption
       },
     );
 
+    test('keeps placeholder-like titles of tools without a fallback label', () {
+      for (final title in ['New chat', 'New Agent']) {
+        final normalized = normalizeDiscoveredSessionInfo(
+          ToolSessionInfo(
+            toolName: 'OpenCode',
+            sessionId: 'ses_1',
+            workingDirectory: '/Users/depoll/Code/flutty',
+            summary: title,
+          ),
+          activeWorkingDirectory: '/Users/depoll/Code/flutty',
+        );
+        expect(normalized?.summary, title);
+      }
+    });
+
     test('drops directory fallback when the active working directory already matches', () {
       const info = ToolSessionInfo(
         toolName: 'Claude Code',
@@ -1437,6 +1452,17 @@ cwd: /tmp/demo
       expect(sessions, isEmpty);
     });
 
+    test('keeps a row whose time is past the DateTime range', () {
+      final sessions = parseSeparatedSessionRows(
+        'far\x1fFar future\x1f/tmp\x1f99999999999999999999\n'
+        'near\x1fNear limit\x1f/tmp\x1f9999999999999999999\n',
+        toolName: 'OpenCode',
+      );
+
+      expect(sessions.map((session) => session.sessionId), ['far', 'near']);
+      expect(sessions.map((session) => session.lastActive), [null, null]);
+    });
+
     test('rejects noise and the pieces of a row a line break split', () {
       final sessions = parseSeparatedSessionRows(
         'Error: in prepare, no such table: sessions\n'
@@ -1555,6 +1581,19 @@ cwd: /tmp/demo
       expect(
         parseCursorPromptHistoryTail('of a cut prompt",\n  "Oldest"\n]'),
         'Oldest',
+      );
+    });
+
+    test('keeps prompts that open with a path or markup', () {
+      expect(
+        parseCursorPromptHistoryTail(
+          '[\n  "Newer",\n  "/Users/depoll/app.ts fails to build"\n]',
+        ),
+        '/Users/depoll/app.ts fails to build',
+      );
+      expect(
+        parseCursorPromptHistoryTail('[\n  "<div> is misaligned"\n]'),
+        '<div> is misaligned',
       );
     });
 
@@ -3216,6 +3255,130 @@ branch refs/heads/main
       skip: Platform.isWindows,
     );
 
+    test('Cursor reads prompt history for picker loads only, cached by meta mtime', () async {
+      final client = _MockSshClient();
+      const chatDirectory =
+          '/Users/demo/.cursor/chats/workspace/'
+          '66666666-6666-4666-8666-666666666666';
+      const metaPath = '$chatDirectory/meta.json';
+      const promptPath = '$chatDirectory/prompt_history.json';
+      var metaModifiedAt = 1787302132;
+      var promptReads = 0;
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.cursor/chats')) {
+          return _buildExecSession(
+            stdout: _listedFileLine(metaPath, mtime: metaModifiedAt),
+          );
+        }
+        if (command.contains(promptPath)) {
+          promptReads += 1;
+          return _buildExecSession(
+            stdout:
+                '$promptPath\x1f${base64Encode(utf8.encode('[\n'))}'
+                '\x1f${base64Encode(utf8.encode('  "Explain the build"\n]'))}\n',
+          );
+        }
+        if (command.contains(metaPath)) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              metaPath,
+              jsonEncode({
+                'schemaVersion': 1,
+                'createdAtMs': 1787302131000,
+                'hasConversation': true,
+                'title': 'New Agent',
+                'cwd': '/Users/depoll/Code/MonkeySSH',
+              }),
+            ),
+          );
+        }
+        return _buildExecSession();
+      });
+      var now = DateTime(2026, 10, 9);
+      final discovery = AgentSessionDiscoveryService(now: () => now);
+      final session = _buildDiscoverySession(client);
+      Future<String?> pickerSummary() async =>
+          (await discovery
+                  .discoverSessionsStream(session, toolName: 'Cursor Agent')
+                  .last)
+              .sessions
+              .single
+              .summary;
+
+      // Provider rows show no session names, so they skip the read.
+      final preview = await discovery.discoverSessionsStream(session).last;
+      expect(preview.sessionTools, contains('Cursor Agent'));
+      expect(promptReads, 0);
+
+      expect(await pickerSummary(), 'Explain the build');
+      expect(promptReads, 1);
+
+      // Past the discovery cache, an unchanged meta.json reuses its label.
+      now = now.add(const Duration(minutes: 5));
+      expect(await pickerSummary(), 'Explain the build');
+      expect(promptReads, 1);
+
+      // A new message rewrites meta.json, so the history is read again.
+      now = now.add(const Duration(minutes: 5));
+      metaModifiedAt += 60;
+      expect(await pickerSummary(), 'Explain the build');
+      expect(promptReads, 2);
+    });
+
+    test('Cursor reads the prompt history tail on Windows hosts', () async {
+      final client = _MockSshClient();
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      const chatDirectory =
+          'C:/Users/demo/.cursor/chats/workspace/'
+          '77777777-7777-4777-8777-777777777777';
+      const metaPath = '$chatDirectory/meta.json';
+      const promptPath = '$chatDirectory/prompt_history.json';
+      final snapshotScripts = <String>[];
+      _stubDecodedDiscoveryExec(client, (command) async {
+        if (command.contains('[char]0x1f')) {
+          snapshotScripts.add(command);
+          if (command.contains(promptPath)) {
+            return _buildExecSession(
+              stdout:
+                  '$promptPath\x1f${base64Encode(utf8.encode('[\n'))}'
+                  '\x1f${base64Encode(utf8.encode('  "Port the installer",\n'
+                  '  "/model gpt-5"\n]'))}\n',
+            );
+          }
+          if (command.contains(metaPath)) {
+            return _buildExecSession(
+              stdout: _remoteSnapshotLine(
+                metaPath,
+                '{"schemaVersion":1,"createdAtMs":1787302131000,'
+                '"hasConversation":true,"cwd":"C:/Users/demo/project"}',
+              ),
+            );
+          }
+        }
+        if (command.contains('.cursor')) {
+          return _buildExecSession(
+            stdout: _listedFileLine(metaPath, mtime: 1787302132),
+          );
+        }
+        return _buildExecSession();
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Cursor Agent',
+          )
+          .last;
+
+      expect(result.sessions.single.summary, 'Port the installer');
+      final promptScript = snapshotScripts.singleWhere(
+        (script) => script.contains(promptPath),
+      );
+      // The last 8 lines come from the end of the file, as on POSIX hosts.
+      expect(promptScript, contains(r'if($n -ge 8)'));
+    });
+
     for (final indexTitle in [null, '', 'Renamed session']) {
       test(
         'Muse discovery reads fresh logs with indexTitle=$indexTitle',
@@ -4054,7 +4217,8 @@ HEAD b
       () async {
         final home = await Directory.systemTemp.createTemp('hermes-absent-');
         addTearDown(() => home.delete(recursive: true));
-        // A Hermes home without history, and a sqlite3 that records any call.
+        // A Hermes home without history, and a sqlite3 that records any call
+        // and, like the real one, creates the database file it opens.
         final hermesHome = Directory('${home.path}/.hermes')..createSync();
         final calls = File('${home.path}/sqlite3-calls');
         final fakeSqlite = File('${home.path}/.local/bin/sqlite3')
@@ -4062,6 +4226,8 @@ HEAD b
           ..writeAsStringSync(
             '#!/bin/sh\n'
             'echo "\$@" >> "${calls.path}"\n'
+            r'for arg do case "$arg" in *state.db) : >> "$arg";; esac; done'
+            '\n'
             r'printf "phantom\037Phantom\037/tmp\0371783405351\n"'
             '\n',
           );
@@ -4090,11 +4256,11 @@ HEAD b
                 .last;
 
         final result = await discover();
+        expect(hermesHome.listSync(), isEmpty);
+        expect(calls.existsSync(), isFalse);
         expect(result.sessions, isEmpty);
         expect(result.failedTools, isEmpty);
         expect(result.attemptedTools, contains('Hermes'));
-        expect(calls.existsSync(), isFalse);
-        expect(hermesHome.listSync(), isEmpty);
 
         // Once the database exists, the same command queries it.
         File('${hermesHome.path}/state.db').createSync();
@@ -4103,6 +4269,70 @@ HEAD b
         expect(
           calls.readAsStringSync(),
           contains('${hermesHome.path}/state.db'),
+        );
+      },
+      skip: Platform.isWindows,
+    );
+
+    test(
+      'OpenCode SQLite discovery keeps a multi-line title on one row',
+      () async {
+        try {
+          Process.runSync('sqlite3', ['-version']);
+        } on ProcessException {
+          markTestSkipped(
+            'sqlite3 is required to query a real OpenCode database',
+          );
+          return;
+        }
+        final home = await Directory.systemTemp.createTemp('opencode-db-');
+        addTearDown(() => home.delete(recursive: true));
+        final dataDirectory = Directory('${home.path}/.local/share/opencode')
+          ..createSync(recursive: true);
+        const fixtureSql =
+            'CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT, '
+            'directory TEXT, time_updated INTEGER, parent_id TEXT, '
+            'time_archived INTEGER); '
+            "INSERT INTO session_v2 VALUES ('ses_multi', "
+            "'Fix the build' || char(10) || 'on Linux', "
+            "'/Users/depoll/Code/flutty', 1783405351000, NULL, NULL); "
+            "INSERT INTO session_v2 VALUES ('ses_child', 'Child', "
+            "'/Users/depoll/Code/flutty', 1783405352000, 'ses_multi', NULL);";
+        final schema = await Process.run('sqlite3', [
+          '${dataDirectory.path}/opencode.db',
+          fixtureSql,
+        ]);
+        expect(schema.exitCode, 0, reason: '${schema.stderr}');
+
+        final client = _MockSshClient();
+        _stubDiscoveryExec(client, (command) async {
+          if (!command.contains('opencode.db')) return _buildExecSession();
+          final result = await Process.run(
+            'bash',
+            ['-c', command],
+            environment: {
+              'HOME': home.path,
+              'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+            },
+            includeParentEnvironment: false,
+          );
+          return _buildExecSession(stdout: result.stdout as String);
+        });
+
+        final result = await AgentSessionDiscoveryService()
+            .discoverSessionsStream(
+              _buildDiscoverySession(client),
+              toolName: 'OpenCode',
+            )
+            .last;
+
+        final info = result.sessions.single;
+        expect(info.sessionId, 'ses_multi');
+        expect(info.summary, 'Fix the build on Linux');
+        expect(info.workingDirectory, '/Users/depoll/Code/flutty');
+        expect(
+          info.lastActive,
+          DateTime.fromMillisecondsSinceEpoch(1783405351000),
         );
       },
       skip: Platform.isWindows,

@@ -27,10 +27,14 @@ const _genericSessionSummaries = <String>{
   'new session',
   'empty session',
   'session',
-  'new chat',
-  // Cursor Agent's name for a chat it has not titled yet.
-  'new agent',
 };
+
+/// Names Cursor Agent shows for a chat it has not titled yet. Only Cursor
+/// treats them as untitled: it alone has a fallback label for such a chat.
+const _cursorPlaceholderTitles = <String>{'new agent', 'new chat'};
+
+/// The most Cursor prompt labels kept between discoveries.
+const _cursorPromptLabelCacheMaxEntries = 512;
 
 const _profileSourcingPrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
@@ -1007,7 +1011,8 @@ List<ToolSessionInfo> parseSeparatedSessionRows(
         toolName: toolName,
         sessionId: id,
         workingDirectory: directory.isNotEmpty ? directory : null,
-        lastActive: epoch == null || epoch <= 0
+        // A time past DateTime's range keeps the row, without a time.
+        lastActive: epoch == null || epoch <= 0 || epoch > _maxEpochMillis
             ? null
             : _dateTimeFromEpochValue(epoch),
         summary: title.isNotEmpty ? title : null,
@@ -1153,12 +1158,13 @@ parseCursorSessionMetadata(String raw) {
   );
 }
 
-/// Reads the earliest prompt from the end of a Cursor Agent chat's
+/// Reads the oldest prompt from the end of a Cursor Agent chat's
 /// `prompt_history.json`.
 ///
 /// Cursor keeps that file as a JSON array of the chat's prompts, newest first
-/// and one per line, so its last lines hold the oldest ones. Slash commands
-/// are skipped in favor of the next prompt that reads as a request.
+/// and one per line, so its last lines hold the oldest ones. A prompt sent
+/// again moves to the front, so the oldest listed prompt is the oldest one
+/// never repeated. Slash commands are skipped in favor of the next prompt.
 @visibleForTesting
 String? parseCursorPromptHistoryTail(String raw) {
   final trimmed = raw.trim();
@@ -1187,8 +1193,13 @@ String? parseCursorPromptHistoryTail(String raw) {
           }
         });
   for (final prompt in oldestFirst.whereType<String>()) {
-    final summary = _extractClaudeUserSummary(prompt);
-    if (summary != null) return summary;
+    final trimmedPrompt = prompt.trim();
+    // `/model gpt-5` is a command; `/Users/me/app.ts fails` is a request.
+    if (trimmedPrompt.isEmpty ||
+        RegExp(r'^/[A-Za-z][\w:-]*(\s|$)').hasMatch(trimmedPrompt)) {
+      continue;
+    }
+    return _summarizeSessionText(trimmedPrompt);
   }
   return null;
 }
@@ -1681,6 +1692,14 @@ class AgentSessionDiscoveryService {
   >
   _piLabelCache = {};
 
+  /// Cursor first-prompt labels by remote identity and meta.json path, valid
+  /// while meta.json keeps its mtime. A null label records a chat without one.
+  final Map<
+    (_AgentSessionDiscoveryScopeKey, String),
+    ({DateTime modifiedAt, String? label})
+  >
+  _cursorPromptLabelCache = {};
+
   /// Invalidates cached and in-flight discovery state for [session].
   ///
   /// The next picker load starts fresh without reconnecting the SSH session.
@@ -1697,6 +1716,7 @@ class AgentSessionDiscoveryService {
     _relatedWorkingDirectoriesCache.removeWhere((key, _) => matches(key));
     _inFlightRelatedWorkingDirectories.removeWhere((key, _) => matches(key));
     _piLabelCache.removeWhere((key, _) => matches(key.$1));
+    _cursorPromptLabelCache.removeWhere((key, _) => matches(key.$1));
   }
 
   /// Warms the discovery cache for the given scope without changing UI state.
@@ -2890,16 +2910,9 @@ class AgentSessionDiscoveryService {
         metaFiles.map((file) => file.path),
         maxLines: 20,
       );
-      final chats =
-          <
-            ({
-              String chatId,
-              String metaPath,
-              String? title,
-              String? workingDirectory,
-              DateTime? lastActive,
-            })
-          >[];
+      final sessions = <ToolSessionInfo>[];
+      // Meta files of chats without a usable title, by chat id.
+      final untitledMetaFiles = <String, _ListedFile>{};
       var hadError = false;
 
       for (final file in metaFiles) {
@@ -2931,72 +2944,117 @@ class AgentSessionDiscoveryService {
               metadata.summary,
               sessionId: chatId,
             );
+            if (_cursorPlaceholderTitles.contains(title?.toLowerCase())) {
+              title = null;
+            }
             sessionWorkingDirectory = metadata.workingDirectory;
             lastActive = metadata.updatedAt;
           } on Object {
             hadError = true;
           }
         }
-        chats.add((
-          chatId: chatId,
-          metaPath: file.path,
-          title: title,
-          workingDirectory: sessionWorkingDirectory,
-          lastActive: lastActive ?? file.modifiedAt,
-        ));
-      }
-
-      // Untitled chats are named after their first prompt when they have one.
-      String promptHistoryPath(String metaPath) =>
-          metaPath.replaceFirst(RegExp(r'meta\.json$'), 'prompt_history.json');
-      var promptSnapshots = const <String, _RemoteFileSnapshot>{};
-      try {
-        promptSnapshots = await _readRemoteFileSnapshots(
-          session,
-          chats
-              .where((chat) => chat.title == null)
-              .map((chat) => promptHistoryPath(chat.metaPath)),
-          maxLines: 1,
-          tailLines: 8,
-        );
-      } on Object {
-        // The chats stay listed under their fallback names.
-      }
-      String? firstPrompt(String metaPath) {
-        final snapshot = promptSnapshots[promptHistoryPath(metaPath)];
-        return snapshot == null
-            ? null
-            : parseCursorPromptHistoryTail(
-                snapshot.tailContent ?? snapshot.content,
-              );
-      }
-
-      final sessions = [
-        for (final chat in chats)
+        if (title == null) untitledMetaFiles[chatId] = file;
+        sessions.add(
           ToolSessionInfo(
             toolName: 'Cursor Agent',
-            sessionId: chat.chatId,
-            workingDirectory: chat.workingDirectory,
-            lastActive: chat.lastActive,
+            sessionId: chatId,
+            workingDirectory: sessionWorkingDirectory,
+            lastActive: lastActive ?? file.modifiedAt,
             summary:
-                chat.title ??
-                firstPrompt(chat.metaPath) ??
-                'Cursor session ${_truncateSessionIdValue(chat.chatId)}',
+                title ?? 'Cursor session ${_truncateSessionIdValue(chatId)}',
           ),
-      ];
-      return _ToolDiscoveryResult.success(
-        AgentLaunchTool.cursorAgent,
-        _scopeSessions(
-          sessions,
-          workingDirectory,
-          relatedWorkingDirectories,
-          max,
-        ),
-        hadError: hadError,
+        );
+      }
+
+      final scoped = _scopeSessions(
+        sessions,
+        workingDirectory,
+        relatedWorkingDirectories,
+        max,
       );
+      // Untitled chats the picker will show are named after their first
+      // prompt. Preview rows show no names, so a preview skips the read.
+      final labels = previewOnly
+          ? const <String, String>{}
+          : await _readCursorPromptLabels(session, [
+              for (final info in scoped) ?untitledMetaFiles[info.sessionId],
+            ]);
+      return _ToolDiscoveryResult.success(AgentLaunchTool.cursorAgent, [
+        for (final info in scoped)
+          switch (labels[untitledMetaFiles[info.sessionId]?.path]) {
+            final label? => ToolSessionInfo(
+              toolName: info.toolName,
+              sessionId: info.sessionId,
+              workingDirectory: info.workingDirectory,
+              lastActive: info.lastActive,
+              summary: label,
+            ),
+            null => info,
+          },
+      ], hadError: hadError);
     } on Object {
       return _ToolDiscoveryResult.failure(AgentLaunchTool.cursorAgent);
     }
+  }
+
+  /// Reads the first-prompt labels of untitled Cursor chats from the
+  /// `prompt_history.json` beside each of [metaFiles], keyed by meta path.
+  ///
+  /// Labels are cached while a chat's meta.json keeps its mtime: Cursor
+  /// rewrites that file whenever the chat gains a message.
+  Future<Map<String, String>> _readCursorPromptLabels(
+    SshSession session,
+    List<_ListedFile> metaFiles,
+  ) async {
+    final identity = _AgentSessionDiscoveryScopeKey.fromSession(
+      session,
+      workingDirectory: null,
+    );
+    final labels = <String, String>{};
+    final misses = <_ListedFile>[];
+    for (final file in metaFiles) {
+      final cached = _cursorPromptLabelCache[(identity, file.path)];
+      if (cached != null && cached.modifiedAt == file.modifiedAt) {
+        if (cached.label case final label?) labels[file.path] = label;
+      } else {
+        misses.add(file);
+      }
+    }
+    if (misses.isEmpty) return labels;
+
+    String promptHistoryPath(String metaPath) =>
+        metaPath.replaceFirst(RegExp(r'meta\.json$'), 'prompt_history.json');
+    final Map<String, _RemoteFileSnapshot> snapshots;
+    try {
+      snapshots = await _readRemoteFileSnapshots(
+        session,
+        misses.map((file) => promptHistoryPath(file.path)),
+        maxLines: 1,
+        tailLines: 8,
+      );
+    } on Object {
+      // The chats keep their fallback names until a later load.
+      return labels;
+    }
+    for (final file in misses) {
+      final snapshot = snapshots[promptHistoryPath(file.path)];
+      final label = snapshot == null
+          ? null
+          : parseCursorPromptHistoryTail(
+              snapshot.tailContent ?? snapshot.content,
+            );
+      if (label != null) labels[file.path] = label;
+      final modifiedAt = file.modifiedAt;
+      if (modifiedAt == null) continue;
+      if (_cursorPromptLabelCache.length >= _cursorPromptLabelCacheMaxEntries) {
+        _cursorPromptLabelCache.remove(_cursorPromptLabelCache.keys.first);
+      }
+      _cursorPromptLabelCache[(identity, file.path)] = (
+        modifiedAt: modifiedAt,
+        label: label,
+      );
+    }
+    return labels;
   }
 
   /// Extracts the Cursor chat id (the resume identifier) from the path of a
@@ -5229,6 +5287,9 @@ String windowsFileSnapshotScript(
     ..write('}catch{}}');
   return powerShellUtf8OutputScript(body.toString());
 }
+
+/// The latest time [DateTime] can hold, in epoch milliseconds.
+const _maxEpochMillis = 8640000000000000;
 
 DateTime _dateTimeFromEpochValue(int epoch) =>
     DateTime.fromMillisecondsSinceEpoch(
