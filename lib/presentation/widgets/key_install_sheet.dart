@@ -74,6 +74,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
   final _stages = <KeyInstallStage, _StageState>{};
   String? _error;
   SshKey? _key;
+  AuthorizedKeyInstallOutcome? _outcome;
   var _passwordRemoved = false;
   var _busy = false;
 
@@ -120,6 +121,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
     setState(() {
       _phase = _Phase.working;
       _error = null;
+      _outcome = null;
       _stages
         ..clear()
         ..addAll({
@@ -227,6 +229,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
         );
         return;
       }
+      _outcome = outcome;
       if (!authorizedKeyInstallSucceeded(outcome)) {
         _fail(
           KeyInstallStage.install,
@@ -438,7 +441,18 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
           ],
         ),
         const SizedBox(height: FluttyTheme.spacingMd),
-        if (key != null)
+        // sshd keeps using the first, restricted line for this key, so
+        // adding the same key by hand can't help; a fresh key can.
+        if (_outcome == AuthorizedKeyInstallOutcome.restrictedCopy)
+          OutlinedButton.icon(
+            onPressed: () {
+              setState(() => _selectedKeyId = _generateNewKey);
+              unawaited(_start(const []));
+            },
+            icon: const Icon(Icons.enhanced_encryption_outlined),
+            label: const Text('Generate a New Key'),
+          )
+        else if (key != null)
           OutlinedButton.icon(
             onPressed: () => showPublicKeyShareSheet(context, key),
             icon: const Icon(Icons.qr_code_2),

@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dartssh2/dartssh2.dart' show SSHChannelRequestError;
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -289,6 +290,36 @@ void main() {
     }
 
     test(
+      'a CRLF restricted line without a comment is still restricted',
+      () async {
+        final shell = shells.first;
+        final ssh = Directory('${home.path}/.ssh')..createSync();
+        const original = 'restrict $_ed25519\r\n';
+        final file = File('${ssh.path}/authorized_keys')
+          ..writeAsStringSync(original);
+        final result = await _runInstall(shell, keyLine, home: home);
+        expect(
+          parseAuthorizedKeyInstallOutput(result.output),
+          AuthorizedKeyInstallOutcome.restrictedCopy,
+        );
+        expect(file.readAsStringSync(), original);
+      },
+    );
+
+    test('a CRLF plain line without a comment counts as present', () async {
+      final shell = shells.first;
+      final ssh = Directory('${home.path}/.ssh')..createSync();
+      final file = File('${ssh.path}/authorized_keys')
+        ..writeAsStringSync('$_ed25519\r\n');
+      final result = await _runInstall(shell, keyLine, home: home);
+      expect(
+        parseAuthorizedKeyInstallOutput(result.output),
+        AuthorizedKeyInstallOutcome.alreadyPresent,
+      );
+      expect(file.readAsStringSync(), '$_ed25519\r\n');
+    });
+
+    test(
       'an unrestricted copy with another comment counts as present',
       () async {
         final shell = shells.first;
@@ -521,10 +552,44 @@ void main() {
     MockSshClient connectedClient({required String output}) {
       final client = MockSshClient();
       when(client.close).thenAnswer((_) async {});
-      when(() => client.run(any(), stderr: any(named: 'stderr')))
-          .thenAnswer((_) async => Uint8List.fromList(utf8.encode(output)));
+      when(
+        () => client.run(
+          any(),
+          runInPty: any(named: 'runInPty'),
+          stderr: any(named: 'stderr'),
+        ),
+      ).thenAnswer((_) async => Uint8List.fromList(utf8.encode(output)));
       return client;
     }
+
+    test('a key that refuses a pty fails verification', () async {
+      final client = MockSshClient();
+      when(client.close).thenAnswer((_) async {});
+      when(
+        () => client.run(
+          any(),
+          runInPty: any(named: 'runInPty'),
+          stderr: any(named: 'stderr'),
+        ),
+      ).thenAnswer((invocation) async {
+        // A `restrict` or `no-pty` key still runs plain exec commands.
+        if (invocation.namedArguments[#runInPty] == true) {
+          // dartssh2 reports a refused pty-req with this (non-Exception).
+          // ignore: only_throw_errors
+          throw SSHChannelRequestError('Failed to request a pty');
+        }
+        return Uint8List.fromList(utf8.encode('$keyLoginVerifiedMarker\n'));
+      });
+      nextResult = SshConnectionResult(success: true, client: client);
+      final verification = await service.verifyKeyOnlyLogin(
+        session,
+        _key(),
+        savedHost: _savedHost(),
+      );
+      expect(verification.success, isFalse);
+      expect(verification.error, contains('normal shell'));
+      verify(client.close).called(1);
+    });
 
     test('verifies the saved host with only the key and no password', () async {
       final client = connectedClient(output: '$keyLoginVerifiedMarker\n');
@@ -548,6 +613,7 @@ void main() {
       verify(
         () => client.run(
           'echo $keyLoginVerifiedMarker',
+          runInPty: true,
           stderr: any(named: 'stderr'),
         ),
       ).called(1);

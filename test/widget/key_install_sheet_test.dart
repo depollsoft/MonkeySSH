@@ -236,6 +236,10 @@ void main() {
 
     expect(find.textContaining('with restrictions'), findsOneWidget);
     expect(service.switches, isEmpty);
+    // sshd would keep using the restricted line, so adding the same key by
+    // hand can't help; offer a fresh key instead.
+    expect(find.text('Add the Key by Hand'), findsNothing);
+    expect(find.text('Generate a New Key'), findsOneWidget);
   });
 
   testWidgets('a failed install explains why and stops', (tester) async {

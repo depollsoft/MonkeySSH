@@ -133,6 +133,7 @@ b=${b%% *}
 st=absent
 if [ -f "$f" ]; then
   st=$(awk -v t="$t" -v b="$b" '
+    { sub(/\r$/, "") }
     /^[[:space:]]*#/ { next }
     {
       for (i = 1; i <= NF; i++) {
@@ -402,8 +403,8 @@ class AuthorizedKeyInstallService {
 
   /// Opens a new connection to [savedHost] as it is saved now, with only
   /// [key] and no password, through [session]'s jump hosts. The login must
-  /// also run a fixed `echo` and print [keyLoginVerifiedMarker], which a key
-  /// limited by `command=` or `restrict` can't do.
+  /// also run a fixed `echo` in a pty and print [keyLoginVerifiedMarker],
+  /// which a key limited by `command=`, `restrict` or `no-pty` can't do.
   Future<KeyLoginVerification> verifyKeyOnlyLogin(
     SshSession session,
     SshKey key, {
@@ -439,8 +440,10 @@ class AuthorizedKeyInstallService {
     var shellWorks = false;
     if (authenticated) {
       try {
+        // With a pty, as terminal sessions use, so a key limited by
+        // `restrict` or `no-pty` (which still allows plain exec) fails.
         final output = await client
-            .run('echo $keyLoginVerifiedMarker', stderr: false)
+            .run('echo $keyLoginVerifiedMarker', runInPty: true, stderr: false)
             .timeout(_verifyCommandTimeout);
         shellWorks = const LineSplitter()
             .convert(utf8.decode(output, allowMalformed: true))
