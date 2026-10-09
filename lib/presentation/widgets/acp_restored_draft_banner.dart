@@ -89,7 +89,7 @@ class AcpRestoredDraftBanner extends StatelessWidget {
             ),
             IconButton(
               tooltip: 'Hide notice',
-              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
               icon: Icon(Icons.close, size: 18, color: scheme.onSurfaceVariant),
               onPressed: onDismiss,
             ),

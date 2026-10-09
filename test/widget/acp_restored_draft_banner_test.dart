@@ -99,8 +99,8 @@ void main() {
 
     final dismiss = find.byTooltip('Hide notice');
     final size = tester.getSize(dismiss);
-    expect(size.width, greaterThanOrEqualTo(44));
-    expect(size.height, greaterThanOrEqualTo(44));
+    expect(size.width, greaterThanOrEqualTo(48));
+    expect(size.height, greaterThanOrEqualTo(48));
     await tester.tap(dismiss);
     await tester.pump();
 

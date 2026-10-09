@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -109,14 +111,16 @@ void main() {
     // Switching to another app saves at once; no typing pause is needed.
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.pump();
-    expect(_savedDraftKeys(settings), hasLength(1));
 
-    // Eviction: the process and everything in memory is gone.
+    // Eviction: nothing else runs, not even dispose. The next launch sees
+    // only what was on disk at this moment.
+    final disk = MemorySettingsService(Map.of(settings.values));
+    expect(_savedDraftKeys(disk), hasLength(1));
     await tester.pumpWidget(const SizedBox());
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     final nextRun = _PromptRecordingManager(sessions: [fakeAcpSession()]);
     addTearDown(nextRun.dispose);
-    await tester.pumpWidget(_app(_container(settings, nextRun)));
+    await tester.pumpWidget(_app(_container(disk, nextRun)));
     await tester.pumpAndSettle();
 
     expect(find.text('Check why the deploy failed'), findsOneWidget);
@@ -131,8 +135,75 @@ void main() {
     expect(nextRun.prompts, hasLength(1));
     final text = nextRun.prompts.single.single as AcpTextContent;
     expect(text.text, 'Check why the deploy failed');
-    expect(_savedDraftKeys(settings), isEmpty);
+    expect(_savedDraftKeys(disk), isEmpty);
     expect(find.text('unsent draft restored'), findsNothing);
+  });
+
+  testWidgets('a pasted screenshot lost to eviction is reported, not '
+      'silently dropped', (tester) async {
+    final settings = MemorySettingsService();
+    final firstRun = _PromptRecordingManager(sessions: [fakeAcpSession()]);
+    addTearDown(firstRun.dispose);
+    final focus = AcpComposerFocusController();
+    final key = fakeAcpKey();
+    final container = _container(settings, firstRun);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: AgentChatScreen(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: key.acpSessionId,
+            connectOnMount: false,
+            composerFocusController: focus,
+            attachmentActionsBuilder: (_, _) =>
+                const AcpComposerAttachmentActions(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    focus.pasteImage(Uint8List.fromList(<int>[0x89, 0x50, 0x4E, 0x47]));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    final disk = MemorySettingsService(Map.of(settings.values));
+    await tester.pumpWidget(const SizedBox());
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+
+    final nextRun = _PromptRecordingManager(sessions: [fakeAcpSession()]);
+    addTearDown(nextRun.dispose);
+    await tester.pumpWidget(_app(_container(disk, nextRun)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('unsent draft restored'), findsOneWidget);
+    expect(find.textContaining('1 attachment couldn’t be restored'), findsOne);
+    expect(nextRun.prompts, isEmpty);
+  });
+
+  testWidgets('deleting the session deletes its saved draft', (tester) async {
+    final settings = MemorySettingsService();
+    final manager = _PromptRecordingManager(
+      sessions: [fakeAcpSession(capabilities: fakeAcpForkCapabilities())],
+    );
+    addTearDown(manager.dispose);
+    await tester.pumpWidget(_app(_container(settings, manager)));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Never mind');
+    await tester.pump(const Duration(seconds: 1));
+    expect(_savedDraftKeys(settings), hasLength(1));
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete session'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete session'));
+    await tester.pumpAndSettle();
+
+    expect(manager.deleted, hasLength(1));
+    expect(_savedDraftKeys(settings), isEmpty);
   });
 
   testWidgets('switching away and back in the same run keeps the draft '

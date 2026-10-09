@@ -77,19 +77,35 @@ AcpAttachmentCandidate _image() => AcpAttachmentCandidate.memory(
 );
 
 class _Harness {
-  _Harness(this.settings, {AcpComposerDraftStore? store})
-    : store = store ?? _store(settings);
+  _Harness(
+    this.settings, {
+    AcpComposerDraftStore? store,
+    AcpSessionKey? key,
+    this.uploaderBuilder,
+  }) : store = store ?? _store(settings),
+       key = key ?? _key();
 
   final MemorySettingsService settings;
   final AcpComposerDraftStore store;
+  final AcpSessionKey key;
+  final AcpAttachmentUploader? Function()? uploaderBuilder;
   final manager = RecordingAcpSessionManager();
-  late final AcpComposerController controller = _controller(manager);
+  late final AcpComposerController controller = AcpComposerController(
+    manager: manager,
+    sessionKey: key,
+    uploaderBuilder: uploaderBuilder,
+    initialSession: _session(),
+  );
   late final AcpComposerDraftPersistence persistence =
       AcpComposerDraftPersistence(controller: controller, store: store);
 
   void start() => persistence.start();
 
+  var _disposed = false;
+
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     persistence.dispose();
     controller.dispose();
   }
@@ -254,7 +270,7 @@ void main() {
         settings.values.keys.where(SettingKeys.isAcpComposerDraft),
         isEmpty,
       );
-      expect(harness.store.rememberedDraft(_identity)!.isEmpty, isTrue);
+      expect(harness.store.peek(_identity)!.draft.isEmpty, isTrue);
     });
 
     testWidgets('a rejected send is saved again', (tester) async {
@@ -291,6 +307,216 @@ void main() {
       expect(
         _savedText(settings, AcpComposerDraftIdentity.of(resumed)),
         'follow me',
+      );
+    });
+  });
+
+  group('review round 1', () {
+    testWidgets('edits survive the composer closing before the saved draft '
+        'loads', (tester) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(
+        settings,
+        AcpComposerDraftSnapshot(text: 'Saved earlier'),
+      );
+      final gate = settings.readGate = Completer<void>();
+      final store = _store(settings);
+
+      final first = _Harness(settings, store: store)..start();
+      first.controller.setText('typed meanwhile');
+      first.dispose();
+      gate.complete();
+      await tester.pump();
+
+      expect(_savedText(settings), 'Saved earlier\n\ntyped meanwhile');
+      final reopened = _Harness(settings, store: store)..start();
+      addTearDown(reopened.dispose);
+      expect(reopened.controller.text, 'Saved earlier\n\ntyped meanwhile');
+      expect(reopened.controller.restoredDraftNotice, isNotNull);
+    });
+
+    testWidgets('edits survive an early close with no saved draft', (
+      tester,
+    ) async {
+      final settings = MemorySettingsService();
+      final gate = settings.readGate = Completer<void>();
+
+      final harness = _Harness(settings)..start();
+      harness.controller.setText('first words');
+      harness.dispose();
+      gate.complete();
+      await tester.pump();
+
+      expect(_savedText(settings), 'first words');
+    });
+
+    testWidgets('a draft with only a lost attachment still shows the note', (
+      tester,
+    ) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(
+        settings,
+        AcpComposerDraftSnapshot(
+          text: '',
+          attachments: [AcpAttachmentDraft(candidate: _image())],
+        ),
+      );
+
+      final harness = _Harness(settings)..start();
+      addTearDown(harness.dispose);
+      await tester.pump();
+
+      expect(harness.controller.text, isEmpty);
+      expect(
+        harness.controller.restoredDraftNotice,
+        const AcpRestoredDraftNotice(unavailableAttachmentCount: 1),
+      );
+    });
+
+    testWidgets('the note follows the session to a re-keyed composer until '
+        'it is dismissed', (tester) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(settings, AcpComposerDraftSnapshot(text: 'kept'));
+      final store = _store(settings);
+
+      final provisional = _Harness(settings, store: store)..start();
+      await tester.pump();
+      expect(provisional.controller.restoredDraftNotice, isNotNull);
+      provisional.dispose();
+
+      final recreatedBridge = AcpSessionKey.of(
+        hostId: 1,
+        providerId: 'copilot',
+        bridgeId: 'new-bridge',
+        acpSessionId: 'session',
+      );
+      final rekeyed = _Harness(settings, store: store, key: recreatedBridge)
+        ..start();
+      expect(rekeyed.controller.text, 'kept');
+      expect(rekeyed.controller.restoredDraftNotice, isNotNull);
+      rekeyed.controller.dismissRestoredDraftNotice();
+      rekeyed.dispose();
+
+      final later = _Harness(settings, store: store)..start();
+      addTearDown(later.dispose);
+      expect(later.controller.text, 'kept');
+      expect(later.controller.restoredDraftNotice, isNull);
+    });
+
+    testWidgets('flicking past a session before it loads keeps the note', (
+      tester,
+    ) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(settings, AcpComposerDraftSnapshot(text: 'kept'));
+      final gate = settings.readGate = Completer<void>();
+      final store = _store(settings);
+
+      (_Harness(settings, store: store)..start()).dispose();
+      final second = _Harness(settings, store: store)..start();
+      addTearDown(second.dispose);
+      gate.complete();
+      await tester.pump();
+
+      expect(second.controller.text, 'kept');
+      expect(second.controller.restoredDraftNotice, isNotNull);
+    });
+
+    testWidgets('moving the caret alone is saved', (tester) async {
+      final settings = MemorySettingsService();
+      final harness = _Harness(settings)..start();
+      addTearDown(harness.dispose);
+      await tester.pump();
+      harness.controller.setText('hello world');
+      await tester.pump(kAcpComposerDraftSaveDelay);
+
+      harness.controller.setText('hello world', caret: 5);
+      harness.dispose();
+      await tester.pump();
+
+      final reopened = _Harness(settings)..start();
+      addTearDown(reopened.dispose);
+      await tester.pump();
+      expect(reopened.controller.caret, 5);
+    });
+
+    testWidgets('a failed read keeps the saved draft from being overwritten', (
+      tester,
+    ) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(
+        settings,
+        AcpComposerDraftSnapshot(text: 'precious'),
+      );
+      settings.readError = StateError('disk busy');
+
+      final harness = _Harness(settings)..start();
+      addTearDown(harness.dispose);
+      await tester.pump();
+      harness.controller.setText('typed after a failed read');
+      await tester.pump(kAcpComposerDraftSaveDelay);
+      harness.dispose();
+      await tester.pump();
+
+      expect(_savedText(settings), 'precious');
+    });
+
+    testWidgets('a restore that arrives during a send is applied once the '
+        'send finishes', (tester) async {
+      final settings = MemorySettingsService();
+      await _saveEarlierRun(settings, AcpComposerDraftSnapshot(text: 'saved'));
+      final readGate = settings.readGate = Completer<void>();
+      final uploadGate = Completer<void>();
+      final harness = _Harness(
+        settings,
+        uploaderBuilder: () => _GatedUploader(uploadGate),
+      )..start();
+      addTearDown(harness.dispose);
+      harness.controller
+        ..setText('sent first')
+        ..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'big.bin',
+            bytes: Uint8List(16),
+            mimeType: 'application/octet-stream',
+          ),
+        )
+        ..enableRemoteUploadFallback();
+      final sending = harness.controller.send();
+      await tester.pump();
+      expect(harness.controller.isEditable, isFalse);
+
+      readGate.complete();
+      await tester.pump();
+      expect(harness.controller.text, 'sent first');
+      expect(harness.persistence.isReady, isFalse);
+
+      uploadGate.complete();
+      expect(await sending, isTrue);
+      await tester.pump();
+      expect(harness.manager.prompts, hasLength(1));
+      expect(harness.controller.text, 'saved');
+      expect(harness.persistence.isReady, isTrue);
+      await tester.pump(kAcpComposerDraftSaveDelay);
+      expect(_savedText(settings), 'saved');
+    });
+
+    testWidgets('discarding a deleted session deletes its draft and stops '
+        'saving', (tester) async {
+      final settings = MemorySettingsService();
+      final harness = _Harness(settings)..start();
+      await tester.pump();
+      harness.controller.setText('about to be deleted');
+      await tester.pump(kAcpComposerDraftSaveDelay);
+      expect(_savedText(settings), 'about to be deleted');
+
+      harness.persistence.discard();
+      harness.controller.setText('typed after delete');
+      harness.dispose();
+      await tester.pump(kAcpComposerDraftSaveDelay);
+
+      expect(
+        settings.values.keys.where(SettingKeys.isAcpComposerDraft),
+        isEmpty,
       );
     });
   });

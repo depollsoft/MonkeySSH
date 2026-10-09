@@ -80,12 +80,83 @@ final class AcpComposerDraftSnapshot {
 
   /// Whether there is nothing worth keeping.
   bool get isEmpty => text.trim().isEmpty && attachments.isEmpty;
+
+  /// This draft with [later] appended: text separated by a blank line and
+  /// attachments after this draft's, up to [maxAttachments]. The caret ends
+  /// up at the end.
+  AcpComposerDraftSnapshot followedBy(
+    AcpComposerDraftSnapshot later, {
+    int? maxAttachments,
+  }) {
+    final String merged;
+    if (later.text.trim().isEmpty) {
+      merged = text;
+    } else if (text.trim().isEmpty) {
+      merged = later.text;
+    } else {
+      merged = '$text\n\n${later.text}';
+    }
+    final attachments = [...this.attachments, ...later.attachments];
+    return AcpComposerDraftSnapshot(
+      text: merged,
+      caret: merged.length,
+      attachments: maxAttachments == null
+          ? attachments
+          : attachments.take(maxAttachments),
+    );
+  }
+}
+
+/// Tells the user the composer holds a draft kept from an earlier run of the
+/// app that has not been sent.
+@immutable
+class AcpRestoredDraftNotice {
+  /// Creates a restored-draft notice.
+  const AcpRestoredDraftNotice({this.unavailableAttachmentCount = 0});
+
+  /// Saved attachments that could not be restored and were removed.
+  final int unavailableAttachmentCount;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AcpRestoredDraftNotice &&
+      other.unavailableAttachmentCount == unavailableAttachmentCount;
+
+  @override
+  int get hashCode => unavailableAttachmentCount.hashCode;
+}
+
+/// Size and modification time of a picked local file, used to tell whether a
+/// saved reference still points at the same file.
+@immutable
+final class AcpDraftFileStamp {
+  /// Creates a file stamp.
+  const AcpDraftFileStamp({required this.sizeBytes, required this.modifiedMs});
+
+  /// File size in bytes.
+  final int sizeBytes;
+
+  /// Last modification time, in milliseconds since the epoch.
+  final int modifiedMs;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AcpDraftFileStamp &&
+      other.sizeBytes == sizeBytes &&
+      other.modifiedMs == modifiedMs;
+
+  @override
+  int get hashCode => Object.hash(sizeBytes, modifiedMs);
 }
 
 /// One attachment reference kept in a saved draft.
 @immutable
 sealed class AcpSavedDraftAttachment {
-  const AcpSavedDraftAttachment({required this.name, required this.fallback});
+  const AcpSavedDraftAttachment({
+    required this.name,
+    required this.fallback,
+    required this.addedAt,
+  });
 
   /// User-visible file name.
   final String name;
@@ -93,14 +164,26 @@ sealed class AcpSavedDraftAttachment {
   /// Behaviour when the attachment cannot be embedded inline.
   final AcpAttachmentFallback fallback;
 
+  /// When the attachment was first saved with the draft, in UTC.
+  final DateTime addedAt;
+
   /// JSON form of this reference.
   Map<String, Object?> toJson();
+
+  Map<String, Object?> _common(String kind) => <String, Object?>{
+    'kind': kind,
+    'name': name,
+    'addedAt': addedAt.millisecondsSinceEpoch,
+    if (fallback != AcpAttachmentFallback.reject) 'fallback': fallback.name,
+  };
 
   /// Parses a reference written by [toJson], or returns `null`.
   static AcpSavedDraftAttachment? tryFromJson(Object? json) {
     if (json is! Map) return null;
     final name = json['name'];
-    if (name is! String || name.isEmpty) return null;
+    final addedAtMs = json['addedAt'];
+    if (name is! String || name.isEmpty || addedAtMs is! int) return null;
+    final addedAt = DateTime.fromMillisecondsSinceEpoch(addedAtMs, isUtc: true);
     final fallback = json['fallback'] == AcpAttachmentFallback.remoteUpload.name
         ? AcpAttachmentFallback.remoteUpload
         : AcpAttachmentFallback.reject;
@@ -110,18 +193,21 @@ sealed class AcpSavedDraftAttachment {
     final mime = mimeType is String && mimeType.isNotEmpty ? mimeType : null;
     switch (json['kind']) {
       case AcpSavedPastedText.kind:
-        final text = json['text'];
-        if (text is! String || text.isEmpty) return null;
-        return AcpSavedPastedText(name: name, text: text);
+        final chip = json['chip'];
+        if (chip is! int || chip < 0) return null;
+        return AcpSavedPastedText(name: name, chip: chip, addedAt: addedAt);
       case AcpSavedLocalFile.kind:
         final path = json['path'];
+        final modified = json['modified'];
         if (path is! String || path.isEmpty) return null;
+        if (size == null || modified is! int) return null;
         return AcpSavedLocalFile(
           name: name,
           path: path,
-          sizeBytes: size,
+          stamp: AcpDraftFileStamp(sizeBytes: size, modifiedMs: modified),
           mimeType: mime,
           fallback: fallback,
+          addedAt: addedAt,
         );
       case AcpSavedRemoteFile.kind:
         final remotePath = json['remotePath'];
@@ -132,30 +218,31 @@ sealed class AcpSavedDraftAttachment {
           sizeBytes: size,
           mimeType: mime,
           fallback: fallback,
+          addedAt: addedAt,
         );
     }
     return null;
   }
 }
 
-/// A large paste the composer collapsed into a chip. Its text is kept.
+/// A large paste the composer collapsed into a chip. Its text lives in the
+/// draft's chips row at index [chip].
 final class AcpSavedPastedText extends AcpSavedDraftAttachment {
   /// Creates a saved pasted-text chip.
-  const AcpSavedPastedText({required super.name, required this.text})
-    : super(fallback: AcpAttachmentFallback.reject);
+  const AcpSavedPastedText({
+    required super.name,
+    required this.chip,
+    required super.addedAt,
+  }) : super(fallback: AcpAttachmentFallback.reject);
 
   /// Storage tag.
   static const kind = 'pastedText';
 
-  /// The pasted text.
-  final String text;
+  /// Index of the text in the draft's chips row.
+  final int chip;
 
   @override
-  Map<String, Object?> toJson() => <String, Object?>{
-    'kind': kind,
-    'name': name,
-    'text': text,
-  };
+  Map<String, Object?> toJson() => {..._common(kind), 'chip': chip};
 }
 
 /// A reference to a file picked on this device.
@@ -164,8 +251,9 @@ final class AcpSavedLocalFile extends AcpSavedDraftAttachment {
   const AcpSavedLocalFile({
     required super.name,
     required this.path,
+    required this.stamp,
     required super.fallback,
-    this.sizeBytes,
+    required super.addedAt,
     this.mimeType,
   });
 
@@ -175,30 +263,31 @@ final class AcpSavedLocalFile extends AcpSavedDraftAttachment {
   /// Local file path reported by the picker.
   final String path;
 
-  /// File size when the draft was saved.
-  final int? sizeBytes;
+  /// Size and modification time when the reference was first saved.
+  final AcpDraftFileStamp stamp;
 
   /// Picker-provided MIME type.
   final String? mimeType;
 
   @override
-  Map<String, Object?> toJson() => <String, Object?>{
-    'kind': kind,
-    'name': name,
+  Map<String, Object?> toJson() => {
+    ..._common(kind),
     'path': path,
-    'size': ?sizeBytes,
+    'size': stamp.sizeBytes,
+    'modified': stamp.modifiedMs,
     'mime': ?mimeType,
-    'fallback': fallback.name,
   };
 }
 
-/// A reference to a file selected on the remote host.
+/// A reference to a file selected on the remote host. It is sent as a link
+/// to the remote path, so the agent always reads the file as it is then.
 final class AcpSavedRemoteFile extends AcpSavedDraftAttachment {
   /// Creates a saved remote-file reference.
   const AcpSavedRemoteFile({
     required super.name,
     required this.remotePath,
     required super.fallback,
+    required super.addedAt,
     this.sizeBytes,
     this.mimeType,
   });
@@ -216,21 +305,20 @@ final class AcpSavedRemoteFile extends AcpSavedDraftAttachment {
   final String? mimeType;
 
   @override
-  Map<String, Object?> toJson() => <String, Object?>{
-    'kind': kind,
-    'name': name,
+  Map<String, Object?> toJson() => {
+    ..._common(kind),
     'remotePath': remotePath,
     'size': ?sizeBytes,
     'mime': ?mimeType,
-    'fallback': fallback.name,
   };
 }
 
 /// The stored form of an unsent composer draft.
 ///
-/// Text and pasted-text chips are kept verbatim. Picked files are kept as
-/// references only, and attachments that exist only in memory (a pasted
-/// image) are counted in [unsavedAttachmentCount] rather than stored.
+/// Text is kept verbatim and pasted-text chips by index into a separate
+/// chips row. Picked files are kept as references only. Attachments that
+/// exist only in memory (a pasted image) are counted in
+/// [unsavedAttachmentCount] rather than stored.
 @immutable
 final class AcpSavedComposerDraft {
   /// Creates a saved draft.
@@ -242,71 +330,6 @@ final class AcpSavedComposerDraft {
         const <AcpSavedDraftAttachment>[],
     this.unsavedAttachmentCount = 0,
   }) : attachments = List<AcpSavedDraftAttachment>.unmodifiable(attachments);
-
-  /// Captures [snapshot] for storage.
-  ///
-  /// Pasted-text chips are kept while their combined length stays within
-  /// [pastedTextBudget] UTF-16 code units; the rest count as unsaved.
-  factory AcpSavedComposerDraft.capture(
-    AcpComposerDraftSnapshot snapshot, {
-    required DateTime savedAt,
-    required int pastedTextBudget,
-  }) {
-    final attachments = <AcpSavedDraftAttachment>[];
-    var unsaved = 0;
-    var budget = pastedTextBudget;
-    for (final draft in snapshot.attachments) {
-      final saved = switch (draft.candidate) {
-        final AcpMemoryAttachmentCandidate memory when memory.isPastedText =>
-          _pastedText(memory, budget),
-        AcpMemoryAttachmentCandidate() => null,
-        AcpLocalFileAttachmentCandidate(:final localPath?, :final name) =>
-          AcpSavedLocalFile(
-            name: name,
-            path: localPath,
-            sizeBytes: draft.candidate.sizeBytes,
-            mimeType: draft.candidate.mimeType,
-            fallback: draft.fallback,
-          ),
-        AcpLocalFileAttachmentCandidate() => null,
-        AcpRemoteFileAttachmentCandidate(:final remotePath, :final name) =>
-          AcpSavedRemoteFile(
-            name: name,
-            remotePath: remotePath,
-            sizeBytes: draft.candidate.sizeBytes,
-            mimeType: draft.candidate.mimeType,
-            fallback: draft.fallback,
-          ),
-      };
-      if (saved == null) {
-        unsaved++;
-        continue;
-      }
-      if (saved is AcpSavedPastedText) budget -= saved.text.length;
-      attachments.add(saved);
-    }
-    return AcpSavedComposerDraft(
-      text: snapshot.text,
-      caret: snapshot.caret.clamp(0, snapshot.text.length),
-      savedAt: savedAt.toUtc(),
-      attachments: attachments,
-      unsavedAttachmentCount: unsaved,
-    );
-  }
-
-  static AcpSavedPastedText? _pastedText(
-    AcpMemoryAttachmentCandidate candidate,
-    int budget,
-  ) {
-    final String text;
-    try {
-      text = utf8.decode(candidate.bytes);
-    } on FormatException {
-      return null;
-    }
-    if (text.isEmpty || text.length > budget) return null;
-    return AcpSavedPastedText(name: candidate.name, text: text);
-  }
 
   /// Composer text.
   final String text;
@@ -320,11 +343,11 @@ final class AcpSavedComposerDraft {
   /// Ordered attachment references.
   final List<AcpSavedDraftAttachment> attachments;
 
-  /// Attachments that could not be stored (in-memory images, or pasted text
-  /// beyond the size budget).
+  /// Attachments that could not be stored (in-memory images, pasted text
+  /// beyond the size budget, or files that were already gone).
   final int unsavedAttachmentCount;
 
-  /// JSON form. `savedAt` comes first so pruning can read it cheaply.
+  /// JSON form. `savedAt` comes first so pruning can read it from a prefix.
   Map<String, Object?> toJson() => <String, Object?>{
     'savedAt': savedAt.millisecondsSinceEpoch,
     'v': kAcpSavedComposerDraftVersion,
@@ -367,8 +390,8 @@ final class AcpSavedComposerDraft {
     );
   }
 
-  /// Reads only the save time from an encoded draft, without decoding the
-  /// rest, or returns `null` when it is not where [toJson] puts it.
+  /// Reads only the save time from the start of an encoded draft, or returns
+  /// `null` when it is not where [toJson] puts it.
   static DateTime? peekSavedAt(String encoded) {
     final match = _savedAtPrefix.matchAsPrefix(encoded);
     final millis = match == null ? null : int.tryParse(match.group(1)!);
@@ -377,5 +400,27 @@ final class AcpSavedComposerDraft {
         : DateTime.fromMillisecondsSinceEpoch(millis, isUtc: true);
   }
 
+  /// Characters of an encoded draft that [peekSavedAt] needs.
+  static const peekLength = 32;
+
   static final _savedAtPrefix = RegExp(r'\{"savedAt":(-?\d{1,16})[,}]');
+
+  /// Encodes the texts of a draft's pasted-text chips for the chips row.
+  static String encodeChips(List<String> chips) => jsonEncode(chips);
+
+  /// Decodes a chips row, or returns `null` when it is malformed.
+  static List<String>? decodeChips(String encoded) {
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is! List) return null;
+      final chips = <String>[];
+      for (final chip in decoded) {
+        if (chip is! String) return null;
+        chips.add(chip);
+      }
+      return chips;
+    } on FormatException {
+      return null;
+    }
+  }
 }

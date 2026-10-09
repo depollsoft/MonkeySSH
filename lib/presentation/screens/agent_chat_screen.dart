@@ -1760,6 +1760,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         case _ChatAction.delete:
           if (!await _confirmDeleteSession() || !mounted) return;
           await manager.deleteSession(_key);
+          _draftPersistence.discard();
           if (mounted) _leaveChat();
         case _ChatAction.signOut:
           await _signOut(session);

@@ -18,6 +18,9 @@ import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../models/acp_slash_command.dart';
 
+export '../../domain/models/acp_composer_draft.dart'
+    show AcpRestoredDraftNotice;
+
 /// Minimum insertion size promoted to a compact pasted-text chip.
 const int kAcpLargePasteThresholdChars = 2000;
 
@@ -168,25 +171,6 @@ class AcpComposerAttachment {
     progress: clearProgress ? null : (progress ?? this.progress),
     errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
   );
-}
-
-/// Tells the user the composer holds a draft kept from an earlier run of the
-/// app that has not been sent.
-@immutable
-class AcpRestoredDraftNotice {
-  /// Creates a restored-draft notice.
-  const AcpRestoredDraftNotice({this.unavailableAttachmentCount = 0});
-
-  /// Saved attachments that could not be restored and were removed.
-  final int unavailableAttachmentCount;
-
-  @override
-  bool operator ==(Object other) =>
-      other is AcpRestoredDraftNotice &&
-      other.unavailableAttachmentCount == unavailableAttachmentCount;
-
-  @override
-  int get hashCode => unavailableAttachmentCount.hashCode;
 }
 
 /// Holds and coordinates the multiline text, ordered attachments, preparation
