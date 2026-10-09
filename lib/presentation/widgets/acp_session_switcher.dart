@@ -2,7 +2,9 @@
 ///
 /// Provides a one-handed bottom sheet (mobile app bar) and an inline rail
 /// (wide layouts) that list active, detached, and recent ACP sessions across
-/// hosts and providers. Selecting a session navigates to its chat; a recent,
+/// hosts and providers. Sessions waiting on the user (a permission request,
+/// a question, a sign-in, or a host-reported request) sort first, matching the
+/// Connections tab. Selecting a session navigates to its chat; a recent,
 /// not-yet-live session is reconnected by the chat screen on open. Free users
 /// can switch by replacement; the replacement itself is enforced by the
 /// session manager, not just the UI.
@@ -18,10 +20,13 @@ import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/connection_attention.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/local_notification_service.dart';
+import '../providers/connection_attention_provider.dart';
 import 'acp_new_session_sheet.dart';
 import 'acp_session_presentation.dart';
+import 'attention_presentation.dart';
 
 /// A switcher entry: either a tracked live/detached session or a recent ref.
 @immutable
@@ -49,40 +54,56 @@ class AcpSwitcherEntry {
             : 'Session ${acpCwdSummary(recent!.cwd)}');
 }
 
+/// Why [entry] is waiting on the user, if it is.
+///
+/// A tracked session reads its own state, and its host's [bridges] metadata
+/// while detached. A recent entry has no local state, so only a host-reported
+/// request on its own bridge session counts.
+AttentionReason? acpSwitcherEntryWaitingReason(
+  AcpSwitcherEntry entry, {
+  HostBridgeMetadata? bridges,
+}) {
+  final session = entry.session;
+  if (session != null) {
+    return acpSessionWaitingReason(
+      session,
+      bridge: bridges?.bridge(session.key.hostId, session.key.bridgeId),
+    );
+  }
+  final recent = entry.recent!;
+  final bridge = bridges?.bridge(recent.hostId, recent.bridgeId);
+  if (bridge == null || bridge.sessionId != recent.acpSessionId) return null;
+  return bridgeWaitingReason(bridge);
+}
+
 /// Merges tracked sessions with recent refs (deduped by key) into ordered
-/// switcher entries, most recently active first.
+/// switcher entries: sessions waiting on the user first, then most recently
+/// active first.
 List<AcpSwitcherEntry> buildAcpSwitcherEntries({
   required List<AcpSessionState> sessions,
   required List<AcpRecentSessionRef> recents,
+  HostBridgeMetadata? bridges,
 }) {
   final trackedKeys = {for (final s in sessions) s.key.value};
-  final entries =
-      <AcpSwitcherEntry>[
-        for (final session in sessions) AcpSwitcherEntry.session(session),
-        for (final recent in recents)
-          if (!trackedKeys.contains(recent.key.value))
-            AcpSwitcherEntry.recent(recent),
-      ]..sort((a, b) {
-        final aTime = a.session?.lastActivityAt ?? a.recent!.lastActivityAt;
-        final bTime = b.session?.lastActivityAt ?? b.recent!.lastActivityAt;
-        return bTime.compareTo(aTime);
-      });
-  return entries;
+  final entries = <AcpSwitcherEntry>[
+    for (final session in sessions) AcpSwitcherEntry.session(session),
+    for (final recent in recents)
+      if (!trackedKeys.contains(recent.key.value))
+        AcpSwitcherEntry.recent(recent),
+  ];
+  final waiting = {
+    for (final entry in entries)
+      entry.keyValue: acpSwitcherEntryWaitingReason(entry, bridges: bridges),
+  };
+  return entries..sort((a, b) {
+    final aReason = waiting[a.keyValue]?.index ?? AttentionReason.values.length;
+    final bReason = waiting[b.keyValue]?.index ?? AttentionReason.values.length;
+    if (aReason != bReason) return aReason.compareTo(bReason);
+    final aTime = a.session?.lastActivityAt ?? a.recent!.lastActivityAt;
+    final bTime = b.session?.lastActivityAt ?? b.recent!.lastActivityAt;
+    return bTime.compareTo(aTime);
+  });
 }
-
-/// Orders live native ACP sessions like mux windows, independent of activity.
-///
-/// Window numbers must not reshuffle merely because a background agent emits
-/// output, so creation time and the stable session key are used as tie-breaks.
-List<AcpSwitcherEntry> buildAcpMuxWindowEntries(
-  List<AcpSessionState> sessions,
-) =>
-    <AcpSwitcherEntry>[
-      for (final session in sessions) AcpSwitcherEntry.session(session),
-    ]..sort((a, b) {
-      final created = a.session!.createdAt.compareTo(b.session!.createdAt);
-      return created != 0 ? created : a.keyValue.compareTo(b.keyValue);
-    });
 
 /// Provider, working directory and recency for a switcher row.
 ///
@@ -198,6 +219,9 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
     final sessions =
         ref.watch(acpSessionManagerStateProvider).asData?.value.sessions ??
         const <AcpSessionState>[];
+    final bridges = attentionSurfaceVisible(context)
+        ? ref.watch(connectionBridgeMetadataProvider)
+        : null;
     // A session that ends while the list is open becomes a recent entry.
     if (sessions.length < _trackedCount) _recents = _loadRecents();
     _trackedCount = sessions.length;
@@ -207,6 +231,7 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
         final entries = buildAcpSwitcherEntries(
           sessions: sessions,
           recents: snapshot.data ?? const <AcpRecentSessionRef>[],
+          bridges: bridges,
         );
         return ListView(
           shrinkWrap: widget.shrinkWrap,
@@ -215,6 +240,10 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
               AcpSessionTile(
                 entry: entry,
                 selected: entry.keyValue == widget.currentKey?.value,
+                waitingReason: acpSwitcherEntryWaitingReason(
+                  entry,
+                  bridges: bridges,
+                ),
                 onTap: () =>
                     widget.onOpen(entry.session?.key ?? entry.recent!.key),
               ),
@@ -258,11 +287,15 @@ class AcpSessionTile extends StatelessWidget {
     required this.entry,
     required this.onTap,
     this.selected = false,
+    this.waitingReason,
     super.key,
   });
 
   /// The entry to render.
   final AcpSwitcherEntry entry;
+
+  /// Why the session waits on the user, shown in place of its activity.
+  final AttentionReason? waitingReason;
 
   /// Whether this entry is the current session.
   final bool selected;
@@ -274,7 +307,15 @@ class AcpSessionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final session = entry.session;
-    final status = session != null
+    final reason = waitingReason;
+    final status = reason != null
+        ? AcpStatusDisplay(
+            label: reason.label,
+            icon: reason.icon,
+            tone: reason.tone,
+            needsInput: true,
+          )
+        : session != null
         ? acpSessionActivityDisplay(session)
         : const AcpStatusDisplay(
             label: 'recent',
