@@ -7,17 +7,33 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'agent_management_service.dart' show remoteProfilePathPrefix;
 import 'diagnostics_log_service.dart';
 import 'remote_file_service.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 
+/// The only command line the host's login shell parses for archive work. It
+/// carries no paths or other user data; each script travels on stdin to
+/// `/bin/sh`, so csh, tcsh and fish never parse POSIX quoting.
+const kArchiveHostCommandLine = 'exec /bin/sh -s';
+
+/// Most entries an archive may list before extraction is refused.
+const remoteArchiveMaxEntries = 100000;
+
+/// Most bytes read from one archive listing. Larger listings are refused, so
+/// a huge member list cannot exhaust the app's memory.
+const remoteArchiveMaxListingBytes = 16 * 1024 * 1024;
+
 const _toolMissingMarker = 'MONKEYSSH_ARCHIVE_TOOL_MISSING';
 const _listTimeout = Duration(minutes: 1);
 const _extractTimeout = Duration(minutes: 10);
 const _execOpenTimeout = Duration(seconds: 10);
-const _maxFolderAttempts = 100;
+const _smallOutputBytes = 64 * 1024;
+const _maxNameAttempts = 100;
+const _snapshotName = 'archive';
+const _outputFolderName = 'out';
 
 /// Archive formats "Extract here" understands.
 enum RemoteArchiveKind {
@@ -73,59 +89,124 @@ String remoteArchiveStem(String fileName, RemoteArchiveKind kind) {
   return fileName;
 }
 
-/// Output of a command run on the host.
+/// Output of a script run on the host.
 @immutable
 class RemoteCommandResult {
   /// Creates a result.
   const RemoteCommandResult({
     required this.exitCode,
     required this.stdout,
-    this.stderr = '',
+    this.truncated = false,
   });
 
   /// Exit status, or null when the server did not report one.
   final int? exitCode;
 
-  /// Standard output.
+  /// Standard output, at most the requested number of bytes.
   final String stdout;
 
-  /// Standard error.
-  final String stderr;
+  /// Whether output stopped at the byte limit; the command was then stopped.
+  final bool truncated;
 }
 
-/// Runs a POSIX shell command on the host.
+/// Runs a POSIX `sh` [script] on the host and collects at most
+/// [maxOutputBytes] of its standard output.
 typedef RemoteCommandRunner = Future<RemoteCommandResult> Function(
-  String command, {
+  String script, {
   required Duration timeout,
+  required int maxOutputBytes,
 });
 
-/// Runs commands on [session] through its bounded exec queue.
+/// Runs scripts on [session] through its bounded exec queue.
+///
+/// The exec request carries only [kArchiveHostCommandLine]; the script, with
+/// any quoted paths, is written to the channel's stdin, so no archive name
+/// or path reaches the login shell. Output past the limit stops the command.
 RemoteCommandRunner sshRemoteCommandRunner(SshSession session) =>
-    (command, {required timeout}) => session.runQueuedExec(() async {
-      final exec = await openSshExec(
-        session.execute(command),
-        _execOpenTimeout,
-      );
-      try {
-        final stdout = BytesBuilder(copy: false);
-        final stderr = BytesBuilder(copy: false);
-        await Future.wait<void>([
-          exec.stdout.forEach(stdout.add),
-          exec.stderr.forEach(stderr.add),
-          exec.done,
-        ]).timeout(timeout);
-        return RemoteCommandResult(
-          exitCode: exec.exitCode,
-          stdout: utf8.decode(stdout.takeBytes(), allowMalformed: true),
-          stderr: utf8.decode(stderr.takeBytes(), allowMalformed: true),
-        );
-      } on TimeoutException {
-        exec.channel.destroy();
-        rethrow;
-      } finally {
-        exec.close();
+    (script, {required timeout, required maxOutputBytes}) =>
+        session.runQueuedExec(() async {
+          final exec = await openSshExec(
+            session.execute(kArchiveHostCommandLine),
+            _execOpenTimeout,
+          );
+          return collectRemoteCommandOutput(
+            exec,
+            script: script,
+            timeout: timeout,
+            maxOutputBytes: maxOutputBytes,
+          );
+        });
+
+/// Writes [script] to [exec]'s stdin, then reads at most [maxOutputBytes] of
+/// stdout and discards stderr. Reaching the limit or [timeout] destroys the
+/// channel instead of draining it.
+@visibleForTesting
+Future<RemoteCommandResult> collectRemoteCommandOutput(
+  SSHSession exec, {
+  required String script,
+  required Duration timeout,
+  required int maxOutputBytes,
+}) async {
+  final bytes = BytesBuilder(copy: false);
+  var truncated = false;
+  var finished = false;
+  final capReached = Completer<void>();
+  final stdoutDone = Completer<void>();
+  final stdout = exec.stdout.listen(null, cancelOnError: true)
+    ..onData((chunk) {
+      if (truncated) return;
+      final remaining = maxOutputBytes - bytes.length;
+      if (chunk.length <= remaining) {
+        bytes.add(chunk);
+        return;
       }
+      if (remaining > 0) {
+        bytes.add(Uint8List.sublistView(chunk, 0, remaining));
+      }
+      truncated = true;
+      if (!capReached.isCompleted) capReached.complete();
+    })
+    ..onDone(() {
+      if (!stdoutDone.isCompleted) stdoutDone.complete();
+    })
+    ..onError((Object error, StackTrace stackTrace) {
+      if (!stdoutDone.isCompleted) stdoutDone.completeError(error, stackTrace);
     });
+  final stderr = exec.stderr.listen(
+    (_) {},
+    onError: (Object _) {},
+    cancelOnError: true,
+  );
+  exec.stdin.add(Uint8List.fromList(utf8.encode(script)));
+  unawaited(exec.stdin.close().then<void>((_) {}, onError: (Object _) {}));
+  try {
+    await Future.any<void>([
+      Future.wait<void>([stdoutDone.future, exec.done]),
+      capReached.future,
+    ]).timeout(timeout);
+    finished = !truncated;
+  } finally {
+    await stdout.cancel();
+    await stderr.cancel();
+    if (finished) {
+      exec.close();
+    } else {
+      await closeAbandonedSshExec(exec, grace: Duration.zero);
+    }
+  }
+  return RemoteCommandResult(
+    exitCode: finished ? exec.exitCode : null,
+    stdout: const Utf8Decoder(allowMalformed: true).convert(bytes.takeBytes()),
+    truncated: truncated,
+  );
+}
+
+/// Builds the script sent to `/bin/sh`: the login PATH, then [lines], as one
+/// `{ }` group that reads `/dev/null`, so `/bin/sh` parses it all before
+/// running anything and no command can consume the rest of the script.
+@visibleForTesting
+String remoteArchiveScript(List<String> lines) =>
+    ['{', remoteProfilePathPrefix, ...lines, '} </dev/null', ''].join('\n');
 
 /// Builds the command runner the SFTP browser uses for a session; tests
 /// override it to avoid real exec channels.
@@ -166,19 +247,25 @@ class RemoteArchiveExtraction {
 ///
 /// [names] holds one member name per entry and [types] the matching type
 /// character from the verbose listing (`-` for a file, `d` for a folder).
+/// With [allowUntyped], `?` counts as a plain file: zip entries written
+/// without Unix type bits list that way and can only extract as files.
 /// Returns a reason to refuse, or null when every entry stays inside the
 /// target: no absolute names, no `..` segments, and no links or special
 /// files that a later entry could write through.
 String? validateRemoteArchiveEntries({
   required List<String> names,
   required List<String> types,
+  bool allowUntyped = false,
 }) {
   if (names.isEmpty) return 'The archive is empty.';
+  if (names.length > remoteArchiveMaxEntries) {
+    return 'The archive lists too many entries to extract here.';
+  }
   if (names.length != types.length) {
     return 'The archive listing could not be checked.';
   }
   for (final type in types) {
-    if (type != '-' && type != 'd') {
+    if (type != '-' && type != 'd' && !(allowUntyped && type == '?')) {
       return 'The archive contains links or special files, which are not '
           'extracted here.';
     }
@@ -199,31 +286,37 @@ final _zipEntryLine = RegExp(r'^(\S)\S{6,9}\s+\d+\.\d+\s+\S+\s');
 
 /// Extracts zip and tar archives on the host through its own tools.
 ///
-/// Extraction runs in a new folder beside the archive after the listing
-/// passes [validateRemoteArchiveEntries], so nothing can be written outside
-/// it. A single top-level entry is then moved up when its name is free;
-/// otherwise the folder takes the archive's name. Existing files are never
-/// replaced.
+/// The archive is first copied into a new private (0700) folder beside it,
+/// and only that copy is listed and extracted, so replacing the original
+/// after the check changes nothing. The listing must pass
+/// [validateRemoteArchiveEntries], and extraction writes into an empty
+/// folder inside the private one. A single top-level entry then moves up
+/// beside the archive under a free name; otherwise the extracted folder
+/// takes the archive's name. Existing entries are checked for before each
+/// move. Decompressed size is not limited, so an archive bomb can still fill
+/// the host's disk.
 class RemoteArchiveExtractor {
-  /// Creates an extractor that runs commands with [runCommand].
+  /// Creates an extractor that runs scripts with [runCommand].
   RemoteArchiveExtractor({required this.runCommand, Random? random})
     : _random = random ?? Random.secure();
 
-  /// Runs listing and extraction commands on the host.
+  /// Runs scripts on the host.
   final RemoteCommandRunner runCommand;
 
   final Random _random;
 
-  /// Extracts [archivePath] of [kind] into its own directory.
+  /// Extracts [archivePath] of [kind] beside it.
   Future<RemoteArchiveExtraction> extractHere({
     required SftpClient sftp,
     required String archivePath,
     required RemoteArchiveKind kind,
   }) async {
-    final quotedArchive = shellEscapePosix(archivePath);
     final tool = await runCommand(
-      'command -v ${kind.tool} >/dev/null 2>&1 || echo $_toolMissingMarker',
+      remoteArchiveScript([
+        'command -v ${kind.tool} >/dev/null 2>&1 || echo $_toolMissingMarker',
+      ]),
       timeout: _listTimeout,
+      maxOutputBytes: _smallOutputBytes,
     );
     if (tool.stdout.contains(_toolMissingMarker) || tool.exitCode != 0) {
       throw RemoteArchiveException(
@@ -231,32 +324,61 @@ class RemoteArchiveExtractor {
       );
     }
 
-    final (names, types) = await _list(kind, quotedArchive);
-    final refusal = validateRemoteArchiveEntries(names: names, types: types);
-    DiagnosticsLogService.instance.info(
-      'sftp.archive',
-      'listed',
-      fields: {
-        'kind': kind.name,
-        'entries': names.length,
-        'refused': refusal != null,
-      },
-    );
-    if (refusal != null) throw RemoteArchiveException(refusal);
-
     final directory = parentSftpPath(archivePath);
     final scratch = joinRemotePath(
       directory,
       '.monkeyssh-extract-${_random.nextInt(1 << 32).toRadixString(16)}',
     );
-    await sftp.mkdir(scratch);
+    final private = SftpFileAttrs(mode: remoteUploadDirectoryMode);
+    await sftp.mkdir(scratch, private);
     try {
-      final quotedScratch = shellEscapePosix(scratch);
-      final extract = await runCommand(
-        kind == RemoteArchiveKind.zip
-            ? 'unzip -qq -o $quotedArchive -d $quotedScratch'
-            : 'tar -x${kind.tarFlag}f $quotedArchive -C $quotedScratch',
+      // A server may ignore mkdir's mode; the folder is still empty.
+      await sftp.setStat(scratch, private);
+      final snapshot = joinRemotePath(scratch, _snapshotName);
+      final copy = await runCommand(
+        remoteArchiveScript([
+          'cp ${shellEscapePosix(archivePath)} ${shellEscapePosix(snapshot)}',
+        ]),
         timeout: _extractTimeout,
+        maxOutputBytes: _smallOutputBytes,
+      );
+      if (copy.exitCode != 0) {
+        throw const RemoteArchiveException(
+          'The archive could not be copied for checking. The host may be '
+          'out of space.',
+        );
+      }
+
+      final quotedSnapshot = shellEscapePosix(snapshot);
+      final (names, types) = await _list(kind, quotedSnapshot);
+      final refusal = validateRemoteArchiveEntries(
+        names: names,
+        types: types,
+        allowUntyped: kind == RemoteArchiveKind.zip,
+      );
+      DiagnosticsLogService.instance.info(
+        'sftp.archive',
+        'listed',
+        fields: {
+          'kind': kind.name,
+          'entries': names.length,
+          'refused': refusal != null,
+        },
+      );
+      if (refusal != null) throw RemoteArchiveException(refusal);
+
+      final output = joinRemotePath(scratch, _outputFolderName);
+      await sftp.mkdir(output);
+      final quotedOutput = shellEscapePosix(output);
+      final extract = await runCommand(
+        remoteArchiveScript([
+          if (kind == RemoteArchiveKind.zip)
+            'unzip -qq -o $quotedSnapshot -d $quotedOutput'
+          else
+            'tar -x${kind.tarFlag}f $quotedSnapshot -C $quotedOutput',
+        ]),
+        timeout: _extractTimeout,
+        maxOutputBytes: _smallOutputBytes,
       );
       if (extract.exitCode != 0) {
         DiagnosticsLogService.instance.warning(
@@ -271,36 +393,50 @@ class RemoteArchiveExtractor {
       }
       return await _placeExtracted(
         sftp,
-        scratch: scratch,
+        output: output,
         directory: directory,
         folderName: remoteArchiveStem(
           archivePath.substring(archivePath.lastIndexOf('/') + 1),
           kind,
         ),
       );
-    } on Object {
+    } finally {
       await _removeTreeQuietly(sftp, scratch);
-      rethrow;
     }
   }
 
   Future<(List<String>, List<String>)> _list(
     RemoteArchiveKind kind,
-    String quotedArchive,
+    String quotedSnapshot,
   ) async {
     final isZip = kind == RemoteArchiveKind.zip;
     final namesResult = await runCommand(
-      isZip
-          ? 'unzip -Z1 $quotedArchive'
-          : 'tar -t${kind.tarFlag}f $quotedArchive',
+      remoteArchiveScript([
+        if (isZip)
+          'unzip -Z1 $quotedSnapshot'
+        else
+          'tar -t${kind.tarFlag}f $quotedSnapshot',
+      ]),
       timeout: _listTimeout,
+      maxOutputBytes: remoteArchiveMaxListingBytes,
     );
-    final verboseResult = await runCommand(
-      isZip
-          ? 'unzip -Z $quotedArchive'
-          : 'tar -tv${kind.tarFlag}f $quotedArchive',
-      timeout: _listTimeout,
-    );
+    final verboseResult = namesResult.truncated
+        ? namesResult
+        : await runCommand(
+            remoteArchiveScript([
+              if (isZip)
+                'unzip -Z $quotedSnapshot'
+              else
+                'tar -tv${kind.tarFlag}f $quotedSnapshot',
+            ]),
+            timeout: _listTimeout,
+            maxOutputBytes: remoteArchiveMaxListingBytes,
+          );
+    if (namesResult.truncated || verboseResult.truncated) {
+      throw const RemoteArchiveException(
+        'The archive lists too many entries to extract here.',
+      );
+    }
     if (namesResult.exitCode != 0 || verboseResult.exitCode != 0) {
       throw const RemoteArchiveException(
         'The archive could not be read. It may be damaged, or the host may '
@@ -326,37 +462,65 @@ class RemoteArchiveExtractor {
 
   Future<RemoteArchiveExtraction> _placeExtracted(
     SftpClient sftp, {
-    required String scratch,
+    required String output,
     required String directory,
     required String folderName,
   }) async {
-    final entries = (await sftp.listdir(scratch))
+    final entries = (await sftp.listdir(output))
         .where((entry) => entry.filename != '.' && entry.filename != '..')
         .toList();
     if (entries.isEmpty) {
       throw const RemoteArchiveException('The archive is empty.');
     }
     if (entries.length == 1) {
+      // One top-level entry moves up itself, renamed when its name is taken,
+      // rather than nesting inside another folder.
       final only = entries.single;
-      final destination = joinRemotePath(directory, only.filename);
-      if (!await _exists(sftp, destination)) {
-        await sftp.rename(joinRemotePath(scratch, only.filename), destination);
-        await sftp.rmdir(scratch);
-        return RemoteArchiveExtraction(
-          name: only.filename,
-          isDirectory: only.attr.isDirectory,
-        );
+      final name = await _freeName(
+        sftp,
+        directory,
+        only.filename,
+        keepExtension: !only.attr.isDirectory,
+      );
+      await sftp.rename(
+        joinRemotePath(output, only.filename),
+        joinRemotePath(directory, name),
+      );
+      return RemoteArchiveExtraction(
+        name: name,
+        isDirectory: only.attr.isDirectory,
+      );
+    }
+    final name = await _freeName(
+      sftp,
+      directory,
+      folderName,
+      keepExtension: false,
+    );
+    await sftp.rename(output, joinRemotePath(directory, name));
+    return RemoteArchiveExtraction(name: name, isDirectory: true);
+  }
+
+  /// [name], or `name (2)` and so on, whichever is free in [directory]. A
+  /// file keeps its extension last (`notes (2).txt`).
+  Future<String> _freeName(
+    SftpClient sftp,
+    String directory,
+    String name, {
+    required bool keepExtension,
+  }) async {
+    final dot = keepExtension ? name.lastIndexOf('.') : -1;
+    final hasExtension = dot > 0 && dot < name.length - 1;
+    final stem = hasExtension ? name.substring(0, dot) : name;
+    final extension = hasExtension ? name.substring(dot) : '';
+    for (var attempt = 1; attempt <= _maxNameAttempts; attempt++) {
+      final candidate = attempt == 1 ? name : '$stem ($attempt)$extension';
+      if (!await _exists(sftp, joinRemotePath(directory, candidate))) {
+        return candidate;
       }
     }
-    for (var attempt = 1; attempt <= _maxFolderAttempts; attempt++) {
-      final name = attempt == 1 ? folderName : '$folderName ($attempt)';
-      final destination = joinRemotePath(directory, name);
-      if (await _exists(sftp, destination)) continue;
-      await sftp.rename(scratch, destination);
-      return RemoteArchiveExtraction(name: name, isDirectory: true);
-    }
     throw const RemoteArchiveException(
-      'There is no free folder name for the extracted files.',
+      'There is no free name for the extracted files.',
     );
   }
 
@@ -370,8 +534,8 @@ class RemoteArchiveExtractor {
     }
   }
 
-  /// Removes the scratch folder this extraction created. Links are removed,
-  /// never followed.
+  /// Removes the private folder this extraction created, with the archive
+  /// copy and anything left in it. Links are removed, never followed.
   Future<void> _removeTreeQuietly(SftpClient sftp, String path) async {
     Future<void> remove(String path, int depth) async {
       if (depth > 64) return;

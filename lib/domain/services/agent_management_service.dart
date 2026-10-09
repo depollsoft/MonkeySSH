@@ -142,6 +142,10 @@ const _profilePrefix =
     r'__fl_profile_path=$( set +e; . ~/.profile >/dev/null 2>&1 || true; . ~/.bash_profile >/dev/null 2>&1 || true; . ~/.zprofile >/dev/null 2>&1 || true; if [ "${SHELL##*/}" = zsh ]; then . ~/.zshrc >/dev/null 2>&1 || true; elif [ "${SHELL##*/}" = bash ]; then . ~/.bashrc >/dev/null 2>&1 || true; fi; printf "%s" "$PATH" ) || true; '
     r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path:$PATH"; unset __fl_profile_path; '
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
+
+/// The login PATH setup above, for other host scripts that must find tools
+/// installed through profile files (Homebrew, `~/.local/bin`, nix).
+const remoteProfilePathPrefix = _profilePrefix;
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
