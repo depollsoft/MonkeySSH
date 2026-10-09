@@ -98,6 +98,12 @@ type acpWireMessage struct {
 	ProviderState string          `json:"providerState,omitempty"`
 	ReplayMode    string          `json:"replayMode,omitempty"`
 	ExitCode      *int            `json:"exitCode,omitempty"`
+	// Writer lease fields; see acp_writer_lease.go.
+	Capabilities []string       `json:"capabilities,omitempty"`
+	DeviceLabel  string         `json:"deviceLabel,omitempty"`
+	ClientToken  string         `json:"clientToken,omitempty"`
+	Takeover     bool           `json:"takeover,omitempty"`
+	Writer       *acpWriterInfo `json:"writer,omitempty"`
 }
 
 // acpBridgeInfo contains only bounded bridge/session metadata. It excludes the
@@ -148,6 +154,11 @@ type acpBridgeClient struct {
 	primed      []acpWireMessage
 	replay      []acpReplayEvent
 	replayAfter uint64
+	// Writer lease details from the hello, guarded by the bridge's mu.
+	label      string
+	token      string
+	leaseAware bool
+	lastSeen   time.Time
 }
 
 func (c *acpBridgeClient) cancel() {
@@ -184,6 +195,8 @@ type acpBridge struct {
 	pendingReplayBytes   int
 	clients              map[string]*acpBridgeClient
 	writerClientID       string
+	writerLastInput      time.Time
+	now                  func() time.Time
 	pendingRequests      map[string]struct{}
 	cancelledRequests    map[string]struct{}
 	cancelledOrder       []string
@@ -1458,6 +1471,18 @@ func (b *acpBridge) handleAttach(
 	if err != nil {
 		return
 	}
+	lease := acpLeaseRequestFromHello(hello)
+	now := b.clock()
+	client := &acpBridgeClient{
+		id:         clientID,
+		conn:       conn,
+		send:       make(chan acpWireMessage, acpClientLiveQueueCapacity),
+		done:       make(chan struct{}),
+		label:      lease.label,
+		token:      lease.token,
+		leaseAware: lease.aware,
+		lastSeen:   now,
+	}
 	b.mu.Lock()
 	// A connection accepted before stop may not send its hello until afterward.
 	// Pair registration with stop's state transition under the same lock.
@@ -1465,11 +1490,28 @@ func (b *acpBridge) handleAttach(
 		b.mu.Unlock()
 		return
 	}
-	if b.writerClientID == "" {
-		b.writerClientID = clientID
-	}
+	displaced := b.claimWriterOnAttachLocked(client, lease, now)
 	canSend := b.writerClientID == clientID
 	b.lastActivity = time.Now()
+	if !canSend && lease.aware {
+		snapshot := b.snapshotLocked()
+		probe := acpWireMessage{
+			Version:      acpBridgeProtocolVersion,
+			Type:         "hello",
+			BridgeID:     b.id,
+			ClientID:     clientID,
+			Bridge:       &snapshot,
+			Capabilities: []string{acpWriterLeaseCapability},
+			Writer:       b.writerInfoLocked(now),
+		}
+		b.mu.Unlock()
+		answerLeaseProbe(conn, reader, probe)
+		return
+	}
+	var disconnect *acpBridgeClient
+	if displaced != nil {
+		disconnect = b.displaceWriterLocked(displaced, client)
+	}
 	replay := b.replay
 	retainedFrom := b.nextSequence + 1
 	if len(replay) > 0 {
@@ -1487,13 +1529,14 @@ func (b *acpBridge) handleAttach(
 	)
 	pendingOnly := replayMode == "pending"
 	primed := []acpWireMessage{{
-		Version:    acpBridgeProtocolVersion,
-		Type:       "hello",
-		BridgeID:   b.id,
-		ClientID:   clientID,
-		CanSend:    canSend,
-		Bridge:     &snapshot,
-		ReplayMode: replayMode,
+		Version:      acpBridgeProtocolVersion,
+		Type:         "hello",
+		BridgeID:     b.id,
+		ClientID:     clientID,
+		CanSend:      canSend,
+		Bridge:       &snapshot,
+		ReplayMode:   replayMode,
+		Capabilities: []string{acpWriterLeaseCapability},
 	}}
 	if pendingOnly {
 		// A fresh native view rebuilds transcript history with session/load.
@@ -1530,13 +1573,7 @@ func (b *acpBridge) handleAttach(
 			})
 		}
 	}
-	client := &acpBridgeClient{
-		id:     clientID,
-		conn:   conn,
-		send:   make(chan acpWireMessage, acpClientLiveQueueCapacity),
-		done:   make(chan struct{}),
-		primed: primed,
-	}
+	client.primed = primed
 	if !pendingOnly {
 		// The writer reads the retained events straight from this snapshot:
 		// publish appends only beyond its length, and trimReplayLocked leaves
@@ -1557,6 +1594,9 @@ func (b *acpBridge) handleAttach(
 	}
 	b.clients[clientID] = client
 	b.mu.Unlock()
+	if disconnect != nil {
+		disconnect.cancel()
+	}
 	go b.writeClient(client)
 
 	for {
@@ -1565,6 +1605,7 @@ func (b *acpBridge) handleAttach(
 			b.detachClient(clientID)
 			return
 		}
+		b.touchClient(clientID)
 
 		if message.Version != acpBridgeProtocolVersion {
 			b.enqueue(client, acpWireMessage{
@@ -1704,6 +1745,11 @@ func (b *acpBridge) writeClient(client *acpBridgeClient) {
 			b.detachClient(client.id)
 			return
 		}
+		if message.Type == "lease" {
+			// A displaced writer closes once it reads this. One that is gone
+			// (a sleeping device) is closed here instead of lingering.
+			time.AfterFunc(acpLeaseLinger, client.cancel)
+		}
 	}
 }
 
@@ -1785,9 +1831,13 @@ func (b *acpBridge) clientCanSend(clientID string) bool {
 		return false
 	}
 	if b.writerClientID == "" {
-		b.writerClientID = clientID
+		b.setWriterLocked(clientID, b.clock())
 	}
-	return b.writerClientID == clientID
+	if b.writerClientID != clientID {
+		return false
+	}
+	b.writerLastInput = b.clock()
+	return true
 }
 
 func (b *acpBridge) recordAck(clientID string, sequence uint64) {

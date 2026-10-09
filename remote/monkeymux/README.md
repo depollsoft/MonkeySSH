@@ -111,6 +111,24 @@ writer disconnects. Provider-originated JSON-RPC requests, including permission
 requests, remain pending while no client is attached. MonkeyMux never creates a
 permission response.
 
+The bridge hello advertises `"capabilities":["writer_lease"]`. A client that
+lists the same capability in its own hello may also send a short `deviceLabel`
+(for example `iPad`; never a hostname or user name) and an opaque per-process
+`clientToken`. When such a client cannot write, the bridge answers with a hello
+carrying `canSend:false` and `writer:{"label":...,"idleSeconds":N}`, where
+`idleSeconds` counts from the writer's last input, and then sends nothing else;
+the client closes the connection. Attaching with `"takeover":true` moves the
+lease to the new client. The lease also moves without asking when the
+attaching client presents the writer's own `clientToken` (the same app process
+reconnecting while its old connection is half-open), or when the writer has
+sent no frame for 90 seconds. Lease-aware clients send an `ack` heartbeat well
+inside that bound. The displaced writer stops receiving output at once; a
+lease-aware one receives `{"type":"lease","writer":{"label":...}}` and is
+disconnected shortly after, and any other client is disconnected so it
+reattaches as a reader. Pending provider requests and in-flight turns belong to
+the bridge, so they carry over to the new writer, which receives them through
+the normal attach replay.
+
 The replay buffer is memory-only. Bridge metadata exposed by `list` and
 `status` contains bounded provider/session IDs, working directory, state,
 counts, timing, and a command hash so clients can rediscover native windows; it
