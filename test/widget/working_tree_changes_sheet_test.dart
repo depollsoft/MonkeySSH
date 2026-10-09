@@ -412,6 +412,82 @@ void main() {
     expect(service.statusDirectories, hasLength(3));
   });
 
+  testWidgets('a failed refresh keeps the last result and says so', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile]),
+        const GitWorkingTreeTimeoutException(),
+      ],
+      diffs: {'lib/main.dart': twoHunkDiff()},
+    );
+    await _pumpSheet(tester, service: service);
+
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pumpAndSettle();
+    expect(find.text('unstaged · 1'), findsOneWidget);
+    expect(find.text('Refresh failed'), findsOneWidget);
+    expect(
+      find.textContaining('Showing results from 2:03:07 PM'),
+      findsOneWidget,
+    );
+
+    // The warning follows the user into a file's diff.
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+    expect(find.text('Refresh failed'), findsOneWidget);
+    expect(find.byType(AcpDiffView), findsNWidgets(2));
+  });
+
+  testWidgets('a failed refresh of a clean tree does not claim it is clean', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [readySnapshot(), const GitWorkingTreeTimeoutException()],
+    );
+    await _pumpSheet(tester, service: service);
+    expect(find.text('nothing to commit'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pumpAndSettle();
+    expect(find.text('Refresh failed'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'Retry'));
+    await tester.pumpAndSettle();
+    expect(service.statusDirectories, hasLength(3));
+  });
+
+  testWidgets('keeps leading and trailing spaces in the directory', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(snapshots: [readySnapshot()]);
+    await _pumpSheet(tester, service: service, directory: ' /srv/project ');
+    expect(service.statusDirectories, [' /srv/project ']);
+  });
+
+  testWidgets('an untracked directory explains why it has no diff', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(
+          files: const [
+            GitChangedFile(
+              path: 'vendor/plugin/',
+              group: GitChangeGroup.untracked,
+              kind: GitChangeKind.untracked,
+            ),
+          ],
+        ),
+      ],
+    );
+    await _pumpSheet(tester, service: service);
+    await tester.tap(find.text('plugin'));
+    await tester.pumpAndSettle();
+    expect(find.text('untracked directory'), findsOneWidget);
+    expect(service.diffRequests, isEmpty);
+  });
+
   testWidgets('without a directory or connection it explains why', (
     tester,
   ) async {

@@ -149,7 +149,9 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
       _loadError = null;
     });
     try {
-      final snapshot = await service.loadStatus(widget.directory!.trim());
+      // Trim only to test for emptiness: a real directory name may begin or
+      // end with a space.
+      final snapshot = await service.loadStatus(widget.directory!);
       if (!mounted || generation != _generation) {
         return;
       }
@@ -169,7 +171,7 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
           _selected = stillSelected;
         }
       });
-      if (stillSelected != null) {
+      if (stillSelected != null && !_isUntrackedDirectory(stillSelected)) {
         unawaited(_loadDiff(stillSelected));
       }
       unawaited(_loadUntrackedCounts(snapshot, generation));
@@ -269,7 +271,9 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
       _diff = null;
       _diffError = null;
     });
-    unawaited(_loadDiff(file));
+    if (!_isUntrackedDirectory(file)) {
+      unawaited(_loadDiff(file));
+    }
   }
 
   void _closeFile() {
@@ -306,6 +310,15 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
         children: [
           _buildHeader(context, selected),
           const Divider(height: 1),
+          if (_snapshot != null && _loadError != null && !_loading)
+            _RefreshFailedBanner(
+              message: _loadError!,
+              shownAt: formatWorkingTreeRefreshTime(
+                _snapshot!.refreshedAt,
+                use24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+              ),
+              onRetry: _refresh,
+            ),
           Expanded(
             child: selected == null
                 ? _buildFileListBody(context)
@@ -577,6 +590,17 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
   }
 
   Widget _buildDiffBody(BuildContext context, GitChangedFile file) {
+    if (_isUntrackedDirectory(file)) {
+      return _scrollableState(
+        const BrandErrorState(
+          icon: Icons.folder_outlined,
+          title: 'untracked directory',
+          message:
+              'git lists this directory as a whole, usually because it holds '
+              'its own repository, so it has no diff to show.',
+        ),
+      );
+    }
     final diffError = _diffError;
     if (diffError != null) {
       return _scrollableState(
@@ -679,6 +703,11 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
   );
 }
 
+/// Untracked entries ending in `/` are directories git did not descend
+/// into, such as a nested repository; `git diff --no-index` cannot read them.
+bool _isUntrackedDirectory(GitChangedFile file) =>
+    file.group == GitChangeGroup.untracked && file.path.endsWith('/');
+
 bool _isDescriptiveHeaderLine(String line) =>
     !line.startsWith('diff ') &&
     !line.startsWith('index ') &&
@@ -749,6 +778,70 @@ class _WorkingTreeLoading extends StatelessWidget {
   }
 }
 
+/// Shown when a refresh fails after an earlier read succeeded, so the
+/// retained list is never mistaken for the current state.
+class _RefreshFailedBanner extends StatelessWidget {
+  const _RefreshFailedBanner({
+    required this.message,
+    required this.shownAt,
+    required this.onRetry,
+  });
+
+  final String message;
+  final String shownAt;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Semantics(
+      liveRegion: true,
+      container: true,
+      child: Container(
+        width: double.infinity,
+        color: scheme.surfaceContainerHighest,
+        padding: const EdgeInsets.fromLTRB(
+          FluttyTheme.spacingMd,
+          FluttyTheme.spacingSm,
+          FluttyTheme.spacingSm,
+          FluttyTheme.spacingSm,
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.sync_problem_rounded, size: 20, color: scheme.error),
+            const SizedBox(width: FluttyTheme.spacingSm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Refresh failed',
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                  Text(
+                    '$message Showing results from $shownAt.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: onRetry,
+              style: TextButton.styleFrom(minimumSize: const Size(44, 44)),
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TruncatedNotice extends StatelessWidget {
   const _TruncatedNotice();
 
@@ -779,8 +872,8 @@ class _TruncatedNotice extends StatelessWidget {
           const SizedBox(width: FluttyTheme.spacingSm),
           Expanded(
             child: Text(
-              'Too many changes to list them all, so some files are not '
-              'shown.',
+              'Too many changes to read in full, so some files or line '
+              'counts are missing.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
