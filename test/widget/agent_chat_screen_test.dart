@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
@@ -22,9 +23,11 @@ import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_timeline.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
+import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/acp_concurrency_policy.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
+import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_controller.dart';
@@ -42,6 +45,7 @@ import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handl
 import '../helpers/keyboard_visibility_channel.dart';
 import '../helpers/tap_selectable_text.dart';
 import '../support/fake_acp_session_manager.dart';
+import '../support/fake_git_working_tree_service.dart';
 
 class _MockSshService extends Mock implements SshService {}
 
@@ -74,6 +78,7 @@ Widget _wrap(
   AcpChatAttachmentActionsBuilder? attachmentActionsBuilder,
   EdgeInsets mediaPadding = EdgeInsets.zero,
   EdgeInsets mediaViewInsets = EdgeInsets.zero,
+  List<Override> overrides = const [],
 }) {
   final ssh = _MockSshService();
   final launchPreferences = _MockHostCliLaunchPreferencesService();
@@ -81,6 +86,7 @@ Widget _wrap(
   final sshSession = _MockSshSession();
   when(() => sshSession.connectionId).thenReturn(7);
   when(() => sshSession.hostId).thenReturn(key.hostId);
+  when(() => sshSession.remoteIsWindows).thenReturn(false);
   when(sshSession.sftp)
       .thenAnswer((_) async => sftpClient ?? _FakeSftpClient());
   when(() => ssh.getSessionsForHost(any())).thenReturn(
@@ -95,6 +101,7 @@ Widget _wrap(
       hostCliLaunchPreferencesServiceProvider.overrideWithValue(
         launchPreferences,
       ),
+      ...overrides,
     ],
     child: MaterialApp(
       home: MediaQuery(
@@ -1108,6 +1115,74 @@ void main() {
     await tester.tap(find.text('Decline'));
     await tester.pumpAndSettle();
     expect(manager.declinedElicitations, ['s:elicit-1']);
+  });
+
+  testWidgets('working tree changes quote a hunk into the draft', (
+    tester,
+  ) async {
+    final manager = FakeAcpSessionManager(sessions: [fakeAcpSession()]);
+    addTearDown(manager.dispose);
+    const file = GitChangedFile(
+      path: 'lib/a.dart',
+      group: GitChangeGroup.unstaged,
+      kind: GitChangeKind.modified,
+      counts: GitLineCounts(added: 1, removed: 1),
+    );
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        GitWorkingTreeSnapshot(
+          state: GitWorkingTreeState.ready,
+          refreshedAt: DateTime(2026, 10, 9, 9),
+          repositoryRoot: '/home/dev/project',
+          files: const [file],
+        ),
+      ],
+      diffs: {
+        'lib/a.dart': GitFileDiff(
+          headerLines: const [],
+          hunks: [
+            GitDiffHunk(header: '@@ -1 +1 @@', lines: const ['-old', '+new']),
+          ],
+          binary: false,
+          truncated: false,
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      _wrap(
+        manager,
+        hasActiveSshSession: true,
+        overrides: [
+          gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+            (_) => service,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Working tree changes'));
+    await tester.pumpAndSettle();
+
+    expect(service.statusDirectories, ['/home/dev/project']);
+    await tester.tap(find.text('a.dart'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Ask agent'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(
+      find.descendant(
+        of: find.byType(AcpComposer),
+        matching: find.byType(TextField),
+      ),
+    );
+    expect(
+      field.controller!.text,
+      startsWith('About this hunk in lib/a.dart (an unstaged change'),
+    );
+    expect(field.controller!.text, contains('-old\n+new'));
   });
 
   testWidgets('cancelling delete keeps the remote session', (tester) async {

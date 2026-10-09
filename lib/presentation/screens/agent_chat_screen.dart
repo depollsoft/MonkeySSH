@@ -36,6 +36,7 @@ import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_session_manager.dart';
+import '../../domain/services/git_working_tree_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/pi_model_scope_metadata_service.dart';
@@ -67,6 +68,7 @@ import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
+import '../widgets/working_tree_changes_sheet.dart';
 import 'acp_quick_selectors.dart';
 import 'sftp_screen.dart';
 
@@ -1655,6 +1657,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             ),
           ),
         const PopupMenuItem(
+          value: _ChatAction.workingTreeChanges,
+          child: ListTile(
+            leading: Icon(Icons.difference_outlined),
+            title: Text('Working tree changes'),
+          ),
+        ),
+        const PopupMenuItem(
           value: _ChatAction.detach,
           child: ListTile(
             leading: Icon(Icons.pause_circle_outline),
@@ -1699,6 +1708,29 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         ],
       ],
     );
+  }
+
+  /// Opens the read-only git changes sheet for the session's directory and
+  /// appends an "Ask agent" prompt to the draft.
+  Future<void> _openWorkingTreeChanges(AcpSessionState session) async {
+    final sshSession = ref
+        .read(sshServiceProvider)
+        .getSessionsForHost(widget.hostId)
+        .firstOrNull;
+    final prompt = await showWorkingTreeChangesSheet(
+      context: context,
+      service: sshSession == null
+          ? null
+          : ref.read(gitWorkingTreeServiceFactoryProvider)(sshSession),
+      directory: session.cwd,
+      unavailableMessage: workingTreeChangesUnavailableReason(sshSession),
+      canAskAgent: true,
+    );
+    if (!mounted || prompt == null) return;
+    final draft = _composer.text;
+    final separator = draft.isEmpty || draft.endsWith('\n') ? '' : '\n\n';
+    _composer.setText('$draft$separator$prompt');
+    widget.composerFocusController?.requestFocus();
   }
 
   Future<bool> _confirmDeleteSession() async {
@@ -1755,6 +1787,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           if (mounted) _leaveChat();
         case _ChatAction.signOut:
           await _signOut(session);
+        case _ChatAction.workingTreeChanges:
+          await _openWorkingTreeChanges(session);
       }
     } on Object {
       if (!mounted) return;
@@ -2304,4 +2338,13 @@ class _AgentChatZoomSurfaceState extends State<_AgentChatZoomSurface> {
   }
 }
 
-enum _ChatAction { settings, reconnect, detach, stop, fork, delete, signOut }
+enum _ChatAction {
+  settings,
+  reconnect,
+  detach,
+  stop,
+  fork,
+  delete,
+  signOut,
+  workingTreeChanges,
+}

@@ -29,6 +29,7 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -44,6 +45,7 @@ import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
+import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
@@ -78,6 +80,7 @@ import 'package:xterm/xterm.dart';
 import '../../helpers/fake_wakelock_plus_platform.dart';
 import '../../helpers/terminal_screen_mux_fixture.dart';
 import '../../support/fake_acp_session_manager.dart';
+import '../../support/fake_git_working_tree_service.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 String _trueColorLoginShellCommand(
@@ -1784,6 +1787,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
         buildScreen(
@@ -1791,6 +1795,7 @@ void main() {
           monetizationState: monetizationState,
           loadSharedClipboard: () async => sharedClipboard,
           overrides: [
+            ...overrides,
             if (remoteFileService != null)
               remoteFileServiceProvider.overrideWithValue(remoteFileService),
             themeModeNotifierProvider.overrideWith(
@@ -7433,6 +7438,83 @@ void main() {
         variant: TargetPlatformVariant.only(platform),
       );
     }
+
+    testWidgets(
+      'Options opens working tree changes for the cwd and pastes a hunk',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = FakeGitWorkingTreeService(
+          snapshots: [
+            GitWorkingTreeSnapshot(
+              state: GitWorkingTreeState.ready,
+              refreshedAt: DateTime(2026, 10, 9, 9),
+              repositoryRoot: workingDirectory,
+              files: const [
+                GitChangedFile(
+                  path: 'lib/a.dart',
+                  group: GitChangeGroup.unstaged,
+                  kind: GitChangeKind.modified,
+                ),
+              ],
+            ),
+          ],
+          diffs: {
+            'lib/a.dart': GitFileDiff(
+              headerLines: const [],
+              hunks: [
+                GitDiffHunk(
+                  header: '@@ -1 +1 @@',
+                  lines: const ['-old', '+new'],
+                ),
+              ],
+              binary: false,
+              truncated: false,
+            ),
+          },
+        );
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await openTerminalOverflowSubmenu(tester, 'Options');
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(find.text('Ask agent'));
+        await tester.pumpAndSettle();
+
+        // A multi-line prompt at a shell goes through the paste review.
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Paste anyway'));
+        await tester.pumpAndSettle();
+
+        final pasted = utf8.decode(
+          shellWrites.expand((write) => write).toList(),
+        );
+        expect(pasted, contains('About this hunk in lib/a.dart'));
+        expect(pasted, contains('-old'));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
 
     testWidgets('overflow menu toggles shell completion popups', (
       tester,

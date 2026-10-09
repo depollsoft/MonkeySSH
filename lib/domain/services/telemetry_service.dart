@@ -175,6 +175,7 @@ class TelemetryService {
     'clipboard_text',
     'picked_files',
     'picked_media',
+    'working_tree_hunk',
   };
   static const _allowedSelectionActions = <String>{
     'copy',
