@@ -5,55 +5,122 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
+import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../../helpers/mock_ssh_exec_session.dart';
 
 const _marker = '__MSSH_GIT_test__';
 
-/// Runs the host command with the local `/bin/sh`, against real git, with
-/// global and system git config ignored so the developer's config cannot leak
-/// in.
-GitCommandRunner _localRunner({required String home}) =>
-    (command, {required maxBytes, required timeout}) async {
-      final process = await Process.start(
-        '/bin/sh',
-        ['-c', command],
-        environment: {
-          'HOME': home,
-          'GIT_CONFIG_GLOBAL': '/dev/null',
-          'GIT_CONFIG_NOSYSTEM': '1',
-        },
-      );
-      final bytes = BytesBuilder(copy: false);
-      var truncated = false;
-      final stderr = process.stderr.drain<void>();
-      await for (final chunk in process.stdout) {
-        final remaining = maxBytes - bytes.length;
-        if (chunk.length > remaining) {
-          bytes.add(chunk.sublist(0, remaining));
-          truncated = true;
-          process.kill();
-          break;
-        }
-        bytes.add(chunk);
-      }
-      await process.exitCode.timeout(timeout);
-      await stderr;
-      return GitCommandOutput(
-        stdout: const Utf8Decoder(allowMalformed: true)
-            .convert(bytes.takeBytes()),
-        truncated: truncated,
-      );
-    };
+/// Runs a script the way sshd would: [loginShell] parses only
+/// [kGitHostCommandLine] and the script arrives on stdin. Real git runs with
+/// global and system config ignored so the developer's config cannot leak in.
+GitCommandRunner _localRunner({
+  required String home,
+  String loginShell = '/bin/sh',
+  String? workingDirectory,
+  Map<String, String> environment = const {},
+}) => (script, {required maxBytes, required timeout}) async {
+  final process = await Process.start(
+    loginShell,
+    ['-c', kGitHostCommandLine],
+    workingDirectory: workingDirectory,
+    environment: {
+      'HOME': home,
+      'GIT_CONFIG_GLOBAL': '/dev/null',
+      'GIT_CONFIG_NOSYSTEM': '1',
+      ...environment,
+    },
+  );
+  process.stdin.add(utf8.encode(script));
+  await process.stdin.close();
+  final bytes = BytesBuilder(copy: false);
+  var truncated = false;
+  final stderr = process.stderr.drain<void>();
+  await for (final chunk in process.stdout) {
+    final remaining = maxBytes - bytes.length;
+    if (chunk.length > remaining) {
+      bytes.add(chunk.sublist(0, remaining));
+      truncated = true;
+      process.kill();
+      break;
+    }
+    bytes.add(chunk);
+  }
+  await process.exitCode.timeout(timeout);
+  await stderr;
+  return GitCommandOutput(
+    stdout: const Utf8Decoder(allowMalformed: true).convert(bytes.takeBytes()),
+    truncated: truncated,
+  );
+};
 
-/// Wraps [runner] so every command reads at most [cap] bytes.
+/// Wraps [runner] so every script reads at most [cap] bytes.
 GitCommandRunner _capped(GitCommandRunner runner, int cap) =>
-    (command, {required maxBytes, required timeout}) =>
-        runner(command, maxBytes: cap, timeout: timeout);
+    (script, {required maxBytes, required timeout}) =>
+        runner(script, maxBytes: cap, timeout: timeout);
+
+/// File names built to break out of shell quoting. Each tries to create a
+/// `CANARY*` file through command substitution, a backtick, `;`, or the
+/// backslash-quote sequences fish reads differently from POSIX shells.
+const _hostileNames = [
+  r"q'$(touch CANARY1)'.txt",
+  r"b\'$(touch CANARY2)\'.txt",
+  r'n"$(touch CANARY3)".txt',
+  't`touch CANARY4`.txt',
+  's;touch CANARY5;.txt',
+  r"e\';touch CANARY6;'\.txt",
+];
+
+/// Records what an SSH session was asked to run and what reached stdin.
+class _RecordingSshSession extends Fake implements SshSession {
+  _RecordingSshSession(this.reply);
+
+  /// Builds stdout for a script.
+  final String Function(String script) reply;
+  final commandLines = <String>[];
+  final scripts = <String>[];
+
+  @override
+  Future<T> runQueuedExec<T>(
+    Future<T> Function() operation, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => operation();
+
+  @override
+  Future<SSHSession> execute(String command, {SSHPtyConfig? pty}) async {
+    commandLines.add(command);
+    final exec = MockSessionWithChannel();
+    // Closed by the code under test once the script is written.
+    // ignore: close_sinks
+    final stdin = StreamController<Uint8List>();
+    final stdout = StreamController<Uint8List>();
+    final done = Completer<void>();
+    final received = BytesBuilder();
+    stdin.stream.listen(
+      received.add,
+      onDone: () {
+        final script = utf8.decode(received.takeBytes());
+        scripts.add(script);
+        stdout.add(Uint8List.fromList(utf8.encode(reply(script))));
+        unawaited(stdout.close());
+        done.complete();
+      },
+    );
+    when(() => exec.stdin).thenReturn(stdin.sink);
+    when(() => exec.stdout).thenAnswer((_) => stdout.stream);
+    when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+    when(() => exec.done).thenAnswer((_) => done.future);
+    when(exec.close).thenReturn(null);
+    when(exec.channel.destroy).thenReturn(null);
+    return exec;
+  }
+}
 
 Future<void> _git(Directory repo, List<String> args) async {
   final result = await Process.run(
@@ -366,11 +433,19 @@ void main() {
     late MockSessionWithChannel exec;
     late StreamController<Uint8List> stdout;
     late Completer<void> done;
+    // Closed by the code under test.
+    // ignore: close_sinks
+    late StreamController<Uint8List> stdin;
+    late List<int> stdinBytes;
 
     setUp(() {
       exec = MockSessionWithChannel();
       stdout = StreamController<Uint8List>();
+      stdin = StreamController<Uint8List>();
+      stdinBytes = <int>[];
+      stdin.stream.listen(stdinBytes.addAll);
       done = Completer<void>();
+      when(() => exec.stdin).thenReturn(stdin.sink);
       when(() => exec.stdout).thenAnswer((_) => stdout.stream);
       when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
       when(() => exec.done).thenAnswer((_) => done.future);
@@ -385,9 +460,13 @@ void main() {
     test('returns all output and closes the channel normally', () async {
       final result = collectCappedSshExecOutput(
         exec,
+        stdin: utf8.encode('echo hi\n'),
         maxBytes: 64,
         timeout: const Duration(seconds: 5),
       );
+      await pumpEventQueue();
+      expect(utf8.decode(stdinBytes), 'echo hi\n');
+      expect(stdin.isClosed, isTrue);
       stdout
         ..add(Uint8List.fromList(utf8.encode('hello ')))
         ..add(Uint8List.fromList(utf8.encode('world')));
@@ -423,6 +502,54 @@ void main() {
         throwsA(isA<TimeoutException>()),
       );
       verify(() => exec.channel.destroy()).called(1);
+    });
+  });
+
+  group('GitWorkingTreeService.ssh', () {
+    test('the login shell only ever sees the fixed command line', () async {
+      final session = _RecordingSshSession((script) {
+        final marker = RegExp(
+          r"^m='([^']+)'$",
+          multiLine: true,
+        ).firstMatch(script)!.group(1)!;
+        if (script.contains(':diff')) {
+          return '$marker:diff\n\n$marker:exit:0\n';
+        }
+        if (script.contains(':counts')) {
+          return '$marker:counts\n\n$marker:end\n';
+        }
+        return '$marker:not-repo\n';
+      });
+      final service = GitWorkingTreeService.ssh(session);
+      const directory = r"/srv/x'$(touch CANARY)'\\";
+
+      expect(
+        (await service.loadStatus(directory)).state,
+        GitWorkingTreeState.notRepository,
+      );
+      for (final name in _hostileNames) {
+        await service.loadDiff(
+          directory,
+          GitChangedFile(
+            path: name,
+            group: GitChangeGroup.untracked,
+            kind: GitChangeKind.untracked,
+          ),
+        );
+      }
+      await service.loadUntrackedCounts(directory, _hostileNames);
+
+      // Every exec request is the constant line; paths only travel on stdin.
+      expect(session.commandLines, hasLength(_hostileNames.length + 2));
+      expect(session.commandLines.toSet(), {kGitHostCommandLine});
+      expect(session.scripts, hasLength(session.commandLines.length));
+      for (final script in session.scripts) {
+        expect(script, contains(gitShellPathArgument(directory)));
+      }
+      final scripts = session.scripts.join();
+      for (final name in _hostileNames) {
+        expect(scripts, contains(gitShellPathArgument(name)));
+      }
     });
   });
 
@@ -682,5 +809,150 @@ void main() {
       expect(diff.failed, isFalse);
       expect(diff.hunks, isNotEmpty);
     });
+
+    test('never runs a configured fsmonitor hook', () async {
+      final ran = File('${temp.path}/fsmonitor-ran');
+      final hook = File('${temp.path}/fsmonitor-hook')
+        ..writeAsStringSync('#!/bin/sh\ntouch "${ran.path}"\nexit 1\n');
+      await Process.run('chmod', ['+x', hook.path]);
+      await _git(repo, ['config', 'core.fsmonitor', hook.path]);
+
+      final snapshot = await service.loadStatus(repo.path);
+      await service.loadDiff(
+        snapshot.repositoryRoot!,
+        _file(snapshot, GitChangeGroup.unstaged, 'f1.txt'),
+      );
+      await service.loadDiff(
+        snapshot.repositoryRoot!,
+        _file(snapshot, GitChangeGroup.staged, 'st.txt'),
+      );
+
+      expect(snapshot.state, GitWorkingTreeState.ready);
+      expect(ran.existsSync(), isFalse);
+    });
+
+    test('keeps the file list when line counts overflow the cap', () async {
+      final big = Directory('${temp.path}/big')..createSync();
+      await _git(big, ['init', '-q']);
+      // Long names and both staged and unstaged edits make numstat larger
+      // than status, so a cap between them drops only counts.
+      final names = [for (var i = 0; i < 60; i++) '${'n' * 180}_$i.txt'];
+      for (final name in names) {
+        _write(big, name, 'a\n');
+      }
+      await _git(big, ['add', '.']);
+      await _git(big, ['commit', '-qm', 'base']);
+      for (final name in names) {
+        _write(big, name, 'a\nb\n');
+      }
+      await _git(big, ['add', '.']);
+      for (final name in names) {
+        _write(big, name, 'a\nb\nc\n');
+      }
+
+      final runner = _localRunner(home: temp.path);
+      final full = await runner(
+        buildGitWorkingTreeStatusScript(big.path, marker: _marker),
+        maxBytes: kGitStatusMaxBytes,
+        timeout: const Duration(seconds: 20),
+      );
+      expect(full.truncated, isFalse);
+      final capped = GitWorkingTreeService(
+        _capped(runner, full.stdout.length ~/ 2),
+        markerFactory: () => _marker,
+      );
+
+      final snapshot = await capped.loadStatus(big.path);
+
+      expect(snapshot.state, GitWorkingTreeState.ready);
+      expect(snapshot.truncated, isTrue);
+      expect(snapshot.files, hasLength(names.length * 2));
+      expect(snapshot.files.where((file) => file.counts == null), isNotEmpty);
+    });
+
+    test('recognises an untrusted repository in any locale', () async {
+      final localized = GitWorkingTreeService(
+        _localRunner(
+          home: temp.path,
+          environment: const {
+            'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
+            'LANGUAGE': 'de',
+            'LANG': 'de_DE.UTF-8',
+            'LC_ALL': 'de_DE.UTF-8',
+          },
+        ),
+        markerFactory: () => _marker,
+      );
+      expect(
+        (await localized.loadStatus(repo.path)).state,
+        GitWorkingTreeState.unsafeRepository,
+      );
+    });
+
+    for (final loginShell in [
+      '/bin/sh',
+      '/bin/bash',
+      '/bin/zsh',
+      '/bin/dash',
+      '/bin/csh',
+      '/bin/tcsh',
+      '/usr/bin/fish',
+      '/usr/local/bin/fish',
+      '/opt/homebrew/bin/fish',
+    ]) {
+      test(
+        'hostile file names stay inert under a $loginShell login shell',
+        () async {
+          final hostileRepo = Directory('${temp.path}/hostile')..createSync();
+          await _git(hostileRepo, ['init', '-q']);
+          for (final name in _hostileNames) {
+            _write(hostileRepo, name, 'one\ntwo\n');
+          }
+          final shellService = GitWorkingTreeService(
+            _localRunner(
+              home: temp.path,
+              loginShell: loginShell,
+              workingDirectory: temp.path,
+            ),
+            markerFactory: () => _marker,
+          );
+
+          final snapshot = await shellService.loadStatus(hostileRepo.path);
+          expect(snapshot.state, GitWorkingTreeState.ready);
+          expect(
+            snapshot.files.map((file) => file.path).toSet(),
+            _hostileNames.toSet(),
+          );
+          final counts = await shellService.loadUntrackedCounts(
+            snapshot.repositoryRoot!,
+            _hostileNames,
+          );
+          for (final name in _hostileNames) {
+            expect(counts[name], const GitLineCounts(added: 2, removed: 0));
+            final diff = await shellService.loadDiff(
+              snapshot.repositoryRoot!,
+              _file(snapshot, GitChangeGroup.untracked, name),
+            );
+            expect(diff.failed, isFalse);
+            expect(diff.hunks.single.lines, ['+one', '+two']);
+          }
+          final canaries = [
+            for (final dir in [temp, hostileRepo])
+              ...dir
+                  .listSync()
+                  .map(
+                    (entity) => entity.uri.pathSegments.lastWhere(
+                      (segment) => segment.isNotEmpty,
+                    ),
+                  )
+                  .where((name) => name.startsWith('CANARY')),
+          ];
+          expect(canaries, isEmpty);
+        },
+        skip: File(loginShell).existsSync()
+            ? false
+            : '$loginShell is not installed',
+      );
+    }
   }, skip: Platform.isWindows ? 'Needs /bin/sh and git' : false);
 }

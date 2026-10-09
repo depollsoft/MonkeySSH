@@ -1,13 +1,18 @@
 /// Read-only git status and diffs for a window's working tree, run on the
 /// host over a short-lived SSH exec channel.
 ///
+/// The host's login shell (which may be fish, csh or tcsh) only ever parses
+/// the fixed [kGitHostCommandLine]. Each script, with its quoted paths, goes
+/// to `/bin/sh` on stdin, so no file name reaches a non-POSIX parser.
+///
 /// Every command here is read-only. `GIT_OPTIONAL_LOCKS=0` keeps
 /// `git status` from refreshing the index (and taking `index.lock`) while an
 /// agent works in the same tree. `git diff` ignores that variable and
 /// rewrites the index when it finds stat-only changes, so every diff also
-/// runs with `diff.autoRefreshIndex=false`. `GIT_LITERAL_PATHSPECS=1` keeps
-/// file names with glob characters from matching other paths. Paths and diff text
-/// are user content: callers must never log them.
+/// runs with `diff.autoRefreshIndex=false`. `core.fsmonitor` is cleared so a
+/// configured fsmonitor hook never runs. `GIT_LITERAL_PATHSPECS=1` keeps
+/// file names with glob characters from matching other paths. Paths and diff
+/// text are user content: callers must never log them.
 library;
 
 import 'dart:async';
@@ -24,8 +29,8 @@ import 'remote_file_service.dart' show shellEscapePosix;
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 
-/// Most status output read, in bytes. The numstat sections come first, so a
-/// huge untracked list is what gets cut off.
+/// Most status output read, in bytes. The status section comes first, so a
+/// cap drops line counts before it drops files.
 const int kGitStatusMaxBytes = 2 * 1024 * 1024;
 
 /// Most changed paths parsed from one status read.
@@ -37,15 +42,20 @@ const int kGitDiffMaxBytes = 512 * 1024;
 /// Most untracked files whose line counts are read per refresh.
 const int kGitUntrackedCountLimit = 200;
 
-/// Most characters of quoted paths in one untracked-count command, which
-/// keeps the command well under per-argument limits on the host.
-const int kGitUntrackedCountMaxCommandChars = 48 * 1024;
+/// Most characters of quoted paths in one untracked-count script.
+const int kGitUntrackedCountMaxScriptChars = 48 * 1024;
 
 /// Most bytes read for untracked line counts.
 const int kGitUntrackedCountMaxBytes = 256 * 1024;
 
-/// How long one git command may run before the read gives up.
+/// How long one git read may take, opening the channel included, before it
+/// gives up.
 const Duration kGitCommandTimeout = Duration(seconds: 20);
+
+/// The only command line the host's login shell parses for a git read. It
+/// carries no paths or other user data; the script travels on stdin to
+/// `/bin/sh`, so fish, csh and tcsh never parse POSIX quoting.
+const String kGitHostCommandLine = 'exec /bin/sh -s';
 
 /// Most hunk lines quoted into an "ask the agent" prompt.
 const int kGitHunkPromptMaxLines = 200;
@@ -65,9 +75,11 @@ class GitCommandOutput {
   final bool truncated;
 }
 
-/// Runs [command] on the host and returns at most [maxBytes] of stdout.
+/// Runs [script] with `/bin/sh` on the host and returns at most [maxBytes]
+/// of stdout. The script must reach `/bin/sh` on stdin, behind
+/// [kGitHostCommandLine], never on the login shell's command line.
 typedef GitCommandRunner = Future<GitCommandOutput> Function(
-  String command, {
+  String script, {
   required int maxBytes,
   required Duration timeout,
 });
@@ -99,17 +111,27 @@ class GitWorkingTreeService {
        _markerFactory = markerFactory ?? _randomMarker,
        _clock = clock ?? DateTime.now;
 
-  /// Creates a service that runs commands over [session]'s exec queue.
+  /// Creates a service that runs scripts over [session]'s exec queue.
+  ///
+  /// Opening the channel and reading its output share one [kGitCommandTimeout]
+  /// budget.
   factory GitWorkingTreeService.ssh(SshSession session) =>
       GitWorkingTreeService(
-        (command, {required maxBytes, required timeout}) =>
-            session.runQueuedExec(
-              () async => collectCappedSshExecOutput(
-                await openSshExec(session.execute(command), timeout),
+        (script, {required maxBytes, required timeout}) =>
+            session.runQueuedExec(() async {
+              final elapsed = Stopwatch()..start();
+              final exec = await openSshExec(
+                session.execute(kGitHostCommandLine),
+                timeout,
+              );
+              final remaining = timeout - elapsed.elapsed;
+              return collectCappedSshExecOutput(
+                exec,
+                stdin: utf8.encode(script),
                 maxBytes: maxBytes,
-                timeout: timeout,
-              ),
-            ),
+                timeout: remaining > Duration.zero ? remaining : Duration.zero,
+              );
+            }),
       );
 
   final GitCommandRunner _run;
@@ -120,7 +142,7 @@ class GitWorkingTreeService {
   Future<GitWorkingTreeSnapshot> loadStatus(String directory) async {
     final marker = _markerFactory();
     final output = await _runOrTimeout(
-      buildGitWorkingTreeStatusCommand(directory, marker: marker),
+      buildGitWorkingTreeStatusScript(directory, marker: marker),
       maxBytes: kGitStatusMaxBytes,
     );
     final snapshot = parseGitWorkingTreeOutput(
@@ -148,19 +170,19 @@ class GitWorkingTreeService {
     String repositoryRoot,
     List<String> paths,
   ) async {
-    final command = buildGitUntrackedCountsCommand(
+    final request = buildGitUntrackedCountsScript(
       repositoryRoot: repositoryRoot,
       paths: paths,
       marker: _markerFactory(),
     );
-    if (command == null) {
+    if (request == null) {
       return const <String, GitLineCounts>{};
     }
     final output = await _runOrTimeout(
-      command.command,
+      request.script,
       maxBytes: kGitUntrackedCountMaxBytes,
     );
-    final payload = _gitSections(output.stdout, command.marker)['counts'];
+    final payload = _gitSections(output.stdout, request.marker)['counts'];
     if (payload == null) {
       return const <String, GitLineCounts>{};
     }
@@ -174,7 +196,7 @@ class GitWorkingTreeService {
   ) async {
     final marker = _markerFactory();
     final output = await _runOrTimeout(
-      buildGitFileDiffCommand(
+      buildGitFileDiffScript(
         repositoryRoot: repositoryRoot,
         file: file,
         marker: marker,
@@ -220,12 +242,12 @@ class GitWorkingTreeService {
   }
 
   Future<GitCommandOutput> _runOrTimeout(
-    String command, {
+    String script, {
     required int maxBytes,
   }) async {
     try {
       return await _run(
-        command,
+        script,
         maxBytes: maxBytes,
         timeout: kGitCommandTimeout,
       );
@@ -249,7 +271,8 @@ String _randomMarker() {
   return '__MSSH_GIT_${suffix}__';
 }
 
-/// Reads at most [maxBytes] of [exec]'s stdout, discarding stderr.
+/// Writes [stdin] to [exec] and closes it, then reads at most [maxBytes] of
+/// [exec]'s stdout, discarding stderr.
 ///
 /// Once the cap is reached the channel is destroyed rather than drained, so a
 /// huge diff stops streaming instead of tying up the connection. Throws
@@ -258,6 +281,7 @@ Future<GitCommandOutput> collectCappedSshExecOutput(
   SSHSession exec, {
   required int maxBytes,
   required Duration timeout,
+  List<int>? stdin,
 }) async {
   final bytes = BytesBuilder(copy: false);
   var truncated = false;
@@ -297,6 +321,10 @@ Future<GitCommandOutput> collectCappedSshExecOutput(
     onError: (Object _) {},
     cancelOnError: true,
   );
+  if (stdin != null) {
+    exec.stdin.add(Uint8List.fromList(stdin));
+    unawaited(exec.stdin.close().then<void>((_) {}, onError: (Object _) {}));
+  }
   try {
     await Future.any<void>([
       Future.wait<void>([stdoutDone.future, exec.done]),
@@ -340,33 +368,46 @@ const _gitPrelude = <String>[
   'export PATH GIT_OPTIONAL_LOCKS GIT_LITERAL_PATHSPECS',
 ];
 
+/// git with `core.fsmonitor` cleared, so no fsmonitor hook runs. An empty
+/// value means "off" to every git version.
+const _git = 'git -c core.fsmonitor=';
+
 /// `git diff` with index auto-refresh off, so it never writes the index.
-const _gitDiff = 'git -c diff.autoRefreshIndex=false diff';
+const _gitDiff = '$_git -c diff.autoRefreshIndex=false diff';
 
 const _gitDiffFlags = '--no-color --no-ext-diff --no-textconv';
 
 const _gitStatusCommand =
-    'git -c status.renames=true -c diff.renames=true status '
+    '$_git -c status.renames=true -c diff.renames=true status '
     '--porcelain=v2 -z --branch --untracked-files=all';
 
 const _reportNoDir = r'''{ printf '%s:no-dir\n' "$m"; exit 0; }''';
 
-String _wrapGitScript(String marker, List<String> lines) {
-  final script = [..._gitPrelude, 'm=${shellEscapePosix(marker)}', ...lines];
-  return '/bin/sh -c ${shellEscapePosix(script.join('\n'))}';
-}
+/// Builds a `/bin/sh` script for stdin. The body is one `{ }` group, so
+/// `/bin/sh` parses all of it before running anything, and the group reads
+/// `/dev/null` so no command can consume the rest of the script.
+String _gitScript(String marker, List<String> lines) => [
+  ..._gitPrelude,
+  'm=${shellEscapePosix(marker)}',
+  '{',
+  ...lines,
+  '} </dev/null',
+  '',
+].join('\n');
 
-/// Builds the read-only command that reports the work tree containing
-/// [directory]: its root, per-side numstat, and porcelain v2 status, each in
-/// a section introduced by `<marker>:<name>`.
-String buildGitWorkingTreeStatusCommand(
+/// Builds the read-only `/bin/sh` script that reports the work tree
+/// containing [directory]: its root, porcelain v2 status, then per-side
+/// numstat, each in a section introduced by `<marker>:<name>`. Status comes
+/// before numstat so the byte cap never drops it.
+String buildGitWorkingTreeStatusScript(
   String directory, {
   required String marker,
-}) => _wrapGitScript(marker, [
+}) => _gitScript(marker, [
   r'''command -v git >/dev/null 2>&1 || { printf '%s:no-git\n' "$m"; exit 0; }''',
   'cd ${gitShellPathArgument(directory)} 2>/dev/null || $_reportNoDir',
   r'if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then',
-  r'  case "$(git rev-parse --git-dir 2>&1)" in',
+  // English messages, so the safe.directory refusal is recognisable.
+  r'  case "$(LC_ALL=C git rev-parse --git-dir 2>&1)" in',
   r"""  *dubious*) printf '%s:unsafe\n' "$m" ;;""",
   r"""  *) printf '%s:not-repo\n' "$m" ;;""",
   '  esac',
@@ -375,18 +416,20 @@ String buildGitWorkingTreeStatusCommand(
   r'top=$(git rev-parse --show-toplevel 2>/dev/null)',
   'cd "\$top" 2>/dev/null || $_reportNoDir',
   r"""printf '%s:root\n%s\n' "$m" "$top" """,
+  r"""printf '%s:status\n' "$m" """,
+  '$_gitStatusCommand 2>/dev/null',
+  r"""printf '\n%s:status-exit:%s\n' "$m" "$?" """,
   r"""printf '%s:unstaged\n' "$m" """,
   '$_gitDiff $_gitDiffFlags -M --numstat -z 2>/dev/null',
   r"""printf '\n%s:staged\n' "$m" """,
   '$_gitDiff --cached $_gitDiffFlags -M --numstat -z 2>/dev/null',
-  r"""printf '\n%s:status\n' "$m" """,
-  '$_gitStatusCommand 2>/dev/null',
-  r"""printf '\n%s:status-exit:%s\n' "$m" "$?" """,
+  r"""printf '\n%s:end\n' "$m" """,
 ]);
 
-/// Builds the read-only command that prints [file]'s unified diff from
-/// [repositoryRoot], in a `<marker>:diff` section followed by the exit code.
-String buildGitFileDiffCommand({
+/// Builds the read-only `/bin/sh` script that prints [file]'s unified diff
+/// from [repositoryRoot], in a `<marker>:diff` section followed by the exit
+/// code.
+String buildGitFileDiffScript({
   required String repositoryRoot,
   required GitChangedFile file,
   required String marker,
@@ -404,7 +447,7 @@ String buildGitFileDiffCommand({
     GitChangeGroup.unstaged => '$_gitDiff $_gitDiffFlags -M -- $pathspec',
     GitChangeGroup.conflicted => '$_gitDiff $_gitDiffFlags -- $path',
   };
-  return _wrapGitScript(marker, [
+  return _gitScript(marker, [
     'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || $_reportNoDir',
     r"""printf '%s:diff\n' "$m" """,
     '$diff 2>/dev/null',
@@ -412,12 +455,12 @@ String buildGitFileDiffCommand({
   ]);
 }
 
-/// Builds the read-only command that prints numstat for each untracked path
-/// against `/dev/null`, or null when [paths] is empty.
+/// Builds the read-only `/bin/sh` script that prints numstat for each
+/// untracked path against `/dev/null`, or null when [paths] is empty.
 ///
 /// Reads at most [kGitUntrackedCountLimit] paths and stops adding paths once
-/// the quoted list reaches [kGitUntrackedCountMaxCommandChars].
-({String command, String marker})? buildGitUntrackedCountsCommand({
+/// the quoted list reaches [kGitUntrackedCountMaxScriptChars].
+({String script, String marker})? buildGitUntrackedCountsScript({
   required String repositoryRoot,
   required List<String> paths,
   required String marker,
@@ -433,7 +476,7 @@ String buildGitFileDiffCommand({
       continue;
     }
     final argument = shellEscapePosix(path);
-    if (length + argument.length + 1 > kGitUntrackedCountMaxCommandChars) {
+    if (length + argument.length + 1 > kGitUntrackedCountMaxScriptChars) {
       break;
     }
     quoted.add(argument);
@@ -443,7 +486,7 @@ String buildGitFileDiffCommand({
     return null;
   }
   return (
-    command: _wrapGitScript(marker, [
+    script: _gitScript(marker, [
       'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || exit 0',
       r"""printf '%s:counts\n' "$m" """,
       'for f in ${quoted.join(' ')}; do',
@@ -481,7 +524,7 @@ int? _sectionExitCode(Map<String, String> sections, String prefix) {
   return null;
 }
 
-/// Parses the output of [buildGitWorkingTreeStatusCommand].
+/// Parses the output of [buildGitWorkingTreeStatusScript].
 GitWorkingTreeSnapshot parseGitWorkingTreeOutput(
   String output, {
   required String marker,
