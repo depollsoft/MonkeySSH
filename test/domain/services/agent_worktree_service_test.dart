@@ -1,40 +1,58 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:dartssh2/dartssh2.dart';
+// SSHChannel is only exported from the implementation library.
+// ignore: implementation_imports
+import 'package:dartssh2/src/ssh_channel.dart';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart';
 
-/// Runs worktree scripts with the local POSIX shell, standing in for SSH.
+/// Runs worktree scripts the way the SSH transport does: a fixed `-s`
+/// command line with the script on stdin.
 class _LocalShell implements AgentWorktreeShell {
   _LocalShell(this.executable, {this.home});
 
   final String executable;
   final String? home;
-  final scripts = <String>[];
 
   @override
   Future<AgentWorktreeExecResult> run(
     String script, {
     required Duration timeout,
   }) async {
-    scripts.add(script);
-    final result = await Process.run(
+    final process = await Process.start(
       executable,
-      ['-c', script],
+      ['-s'],
       environment: {'HOME': ?home},
-    ).timeout(timeout);
-    return AgentWorktreeExecResult(
-      stdout: result.stdout as String,
-      exitCode: result.exitCode,
     );
+    final stdout = process.stdout.transform(utf8.decoder).join();
+    final stderr = process.stderr.drain<void>();
+    process.stdin.add(utf8.encode(buildAgentWorktreeStdinPayload(script)));
+    await process.stdin.close();
+    final exitCode = await process.exitCode.timeout(timeout);
+    await stderr;
+    return AgentWorktreeExecResult(stdout: await stdout, exitCode: exitCode);
   }
 }
+
+class _MockSshClient extends Mock implements SSHClient {}
+
+class _MockExecSession extends Mock implements SSHSession {}
+
+class _MockChannel extends Mock implements SSHChannel {}
 
 class _FixedShell implements AgentWorktreeShell {
   _FixedShell(this.stdout);
@@ -93,6 +111,67 @@ void main() {
     );
     expect(quoteAgentWorktreeRemotePath('/srv/a b'), "'/srv/a b'");
   });
+
+  test(
+    'sends user content on stdin, never on the login shell command line',
+    () async {
+      final client = _MockSshClient();
+      final exec = _MockExecSession();
+      final input = StreamController<Uint8List>();
+      final received = <int>[];
+      input.stream.listen(received.addAll);
+      when(() => exec.channel).thenReturn(_MockChannel());
+      when(() => exec.stdin).thenReturn(input.sink);
+      when(() => exec.stdout).thenAnswer(
+        (_) => Stream<Uint8List>.value(
+          utf8.encode(
+            'MSSH_WT\x1fok\x1fbranch\x1f/w\x1f/w\x1fabc\x1f/r\x1f/w\n',
+          ),
+        ),
+      );
+      when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+      when(() => exec.done).thenAnswer((_) async {});
+      when(() => exec.exitCode).thenReturn(0);
+      when(exec.close).thenReturn(null);
+      final commands = <String>[];
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            commands.add(invocation.positionalArguments.first as String);
+            return exec;
+          });
+      final session = SshSession(
+        connectionId: 41,
+        hostId: 7,
+        client: client,
+        config: const SshConnectionConfig(
+          hostname: 'example.com',
+          port: 22,
+          username: 'dev',
+        ),
+      );
+      const hostile = r"x'; rm -rf ~; echo \' $(id) `id`";
+
+      await const AgentWorktreeService().create(
+        SshAgentWorktreeShell(session),
+        hostId: 7,
+        repository: '/srv/$hostile',
+        baseRef: 'main',
+        target: const AgentWorktreeTarget(
+          branch: 'agent/$hostile',
+          path: '/srv/wt/$hostile',
+          pathIsRepositoryRelative: false,
+        ),
+      );
+
+      expect(commands, [agentWorktreeExecCommand]);
+      expect(commands.single, isNot(contains('rm -rf')));
+      final script = utf8.decode(received);
+      expect(script, contains('rm -rf'));
+      expect(script, startsWith('mssh_main() {'));
+      expect(script, endsWith('mssh_main </dev/null\n'));
+      await input.close();
+    },
+  );
 
   test('parses the last marker line and ignores profile noise', () {
     expect(
@@ -295,6 +374,17 @@ void main() {
         expect(marker.existsSync(), isFalse);
         expect(record.branch, r"agent/$(touch-pwned)'x");
         expect(Directory(record.path).existsSync(), isTrue);
+      });
+
+      test('does not run repository hooks while checking out', () async {
+        final marker = File('${root.path}/hook-ran');
+        final hook = File('$repository/.git/hooks/post-checkout');
+        await hook.writeAsString('#!/bin/sh\ntouch "${marker.path}"\n');
+        await Process.run('chmod', ['+x', hook.path]);
+
+        await create();
+
+        expect(marker.existsSync(), isFalse);
       });
 
       test('removes a clean worktree and its untouched branch', () async {

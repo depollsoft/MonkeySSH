@@ -1,10 +1,13 @@
 /// Creates, inspects and removes git worktrees for agent launches over SSH.
 ///
-/// Every command is a fixed POSIX script. User-provided paths, branch names
-/// and refs only ever appear as single-quoted words (a leading `~` becomes a
-/// quoted `"$HOME"`), so the remote shell never evaluates them, and `git`
-/// re-validates each one (`git check-ref-format --branch`, `git rev-parse
-/// --verify`) before anything is created. Nothing here logs those values.
+/// Every operation sends the same fixed command line ([agentWorktreeExecCommand])
+/// and writes a POSIX script to `/bin/sh` on stdin, so the user's login shell
+/// never parses user content. Inside the script, paths, branch names and refs
+/// only appear as single-quoted words (a leading `~` becomes a quoted
+/// `"$HOME"`), and `git` re-validates each one (`git check-ref-format
+/// --branch`, `git rev-parse --verify`) before anything is created. Repository
+/// hooks are skipped when the worktree is checked out: running repository
+/// scripts is a separate trust decision. Nothing here logs those values.
 library;
 
 import 'dart:async';
@@ -41,6 +44,23 @@ abstract interface class AgentWorktreeShell {
   });
 }
 
+/// The only command line a worktree operation sends to the host.
+///
+/// sshd hands the command line to the user's login shell, which may be fish,
+/// csh or another shell whose quoting rules differ from POSIX. The command is
+/// therefore fixed and shell-neutral, and every script, with the paths and
+/// branch names it carries, travels on stdin to `/bin/sh` instead.
+const agentWorktreeExecCommand = 'exec /bin/sh -s';
+
+/// Wraps [script] for `/bin/sh -s`.
+///
+/// The shell parses the whole function before running it, and the function
+/// runs with stdin from `/dev/null`, so no command inside it can read the
+/// rest of the script as input.
+@visibleForTesting
+String buildAgentWorktreeStdinPayload(String script) =>
+    'mssh_main() {\n$script\n}\nmssh_main </dev/null\n';
+
 /// Runs worktree scripts on an SSH connection's short-command exec queue.
 final class SshAgentWorktreeShell implements AgentWorktreeShell {
   /// Creates a shell for [session].
@@ -55,9 +75,10 @@ final class SshAgentWorktreeShell implements AgentWorktreeShell {
     required Duration timeout,
   }) => session.runQueuedExec(() async {
     final exec = await openSshExec(
-      session.execute(script),
+      session.execute(agentWorktreeExecCommand),
       const Duration(seconds: 10),
     );
+    var finished = false;
     try {
       final stdout = StringBuffer();
       final stdoutDone = exec.stdout
@@ -65,17 +86,25 @@ final class SshAgentWorktreeShell implements AgentWorktreeShell {
           .transform(const Utf8Decoder(allowMalformed: true))
           .forEach(stdout.write);
       final stderrDone = exec.stderr.drain<void>();
-      await Future.wait<void>([stdoutDone, stderrDone, exec.done])
-          .timeout(timeout);
+      exec.stdin.add(utf8.encode(buildAgentWorktreeStdinPayload(script)));
+      await Future.wait<void>([
+        stdoutDone,
+        stderrDone,
+        exec.done,
+        exec.stdin.close(),
+      ]).timeout(timeout);
+      finished = true;
       return AgentWorktreeExecResult(
         stdout: stdout.toString(),
         exitCode: exec.exitCode,
       );
-    } on TimeoutException {
-      exec.channel.destroy();
-      rethrow;
     } finally {
-      exec.close();
+      if (finished) {
+        exec.close();
+      } else {
+        // EOF alone does not release a channel whose process ignores stdin.
+        exec.channel.destroy();
+      }
     }
   });
 }
@@ -276,7 +305,7 @@ while git -C "$top" show-ref --verify --quiet "refs/heads/$cand_branch" ||
   cand_wt="$wt-$n"
 done
 git check-ref-format --branch "$cand_branch" >/dev/null 2>&1 || mssh_fail invalid_branch ''
-if ! err=$(git -C "$top" worktree add -b "$cand_branch" -- "$cand_wt" "$commit" 2>&1 >/dev/null); then
+if ! err=$(git -C "$top" -c core.hooksPath=/dev/null worktree add -b "$cand_branch" -- "$cand_wt" "$commit" 2>&1 >/dev/null); then
   mssh_fail add_failed "$(mssh_clean "$err")"
 fi
 phys=$(cd -P -- "$cand_wt" >/dev/null 2>&1 && pwd -P) || phys=$cand_wt
