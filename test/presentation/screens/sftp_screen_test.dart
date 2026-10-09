@@ -15,6 +15,7 @@ import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/models/app_platform_file.dart';
+import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
 import 'package:monkeyssh/presentation/screens/sftp_screen.dart';
 
 const _proMonetizationState = MonetizationState(
@@ -43,6 +44,19 @@ class _MockSftpClient extends Mock implements SftpClient {
 }
 
 class _MockRemoteFileService extends Mock implements RemoteFileService {}
+
+class _MemoryViewStore implements SftpBrowserViewStore {
+  final saved = <int, SftpBrowserViewSettings>{};
+
+  @override
+  Future<SftpBrowserViewSettings> load(int hostId) async =>
+      saved[hostId] ?? const SftpBrowserViewSettings();
+
+  @override
+  Future<void> save(int hostId, SftpBrowserViewSettings settings) async {
+    saved[hostId] = settings;
+  }
+}
 
 class _ControlledDownloadService extends RemoteFileService {
   final started = Completer<void>();
@@ -175,6 +189,7 @@ Widget _buildSftpTestApp({
   NavigatorObserver? observer,
 }) => ProviderScope(
   overrides: [
+    sftpBrowserViewStoreProvider.overrideWithValue(_MemoryViewStore()),
     if (remoteFileService != null)
       remoteFileServiceProvider.overrideWithValue(remoteFileService),
     activeSessionsProvider.overrideWith(
@@ -188,6 +203,12 @@ Widget _buildSftpTestApp({
     ),
   ],
   child: MaterialApp(home: child, navigatorObservers: [?observer]),
+);
+
+/// The text field inside an open dialog, not the browser's filter field.
+final _dialogTextField = find.descendant(
+  of: find.byType(AlertDialog),
+  matching: find.byType(TextField),
 );
 
 SftpFileAttrs _fileAttrs({int? size}) =>
@@ -1149,7 +1170,7 @@ void main() {
         if (action == 'mkdir') {
           await tester.tap(find.byTooltip('New folder'));
           await tester.pumpAndSettle();
-          await tester.enterText(find.byType(TextField), 'new-folder');
+          await tester.enterText(_dialogTextField, 'new-folder');
           await tester.pumpAndSettle();
           await tester.tap(find.widgetWithText(FilledButton, 'Create'));
         } else if (action == 'open') {
@@ -1160,7 +1181,7 @@ void main() {
           await tester.tap(find.text(action == 'rename' ? 'Rename' : 'Delete'));
           await tester.pumpAndSettle();
           if (action == 'rename') {
-            await tester.enterText(find.byType(TextField), 'renamed.txt');
+            await tester.enterText(_dialogTextField, 'renamed.txt');
             await tester.tap(find.widgetWithText(FilledButton, 'Rename'));
           } else {
             await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
@@ -1309,6 +1330,7 @@ void main() {
               sftp: sftp,
               remotePath: any(named: 'remotePath'),
               stream: any(named: 'stream'),
+              onProgress: any(named: 'onProgress'),
             ),
           ).thenAnswer((invocation) async {
             destinations.add(invocation.namedArguments[#remotePath] as String);
