@@ -36,6 +36,11 @@ const _cursorPlaceholderTitles = <String>{'new agent', 'new chat'};
 /// The most Cursor prompt labels kept between discoveries.
 const _cursorPromptLabelCacheMaxEntries = 512;
 
+/// How long a Cursor chat without a prompt label waits before a picker load
+/// reads its prompt history again. The read may have been cut short, and
+/// Cursor records a prompt whose send failed without rewriting meta.json.
+const _cursorPromptLabelMissTtl = Duration(minutes: 2);
+
 const _profileSourcingPrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
     '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
@@ -1164,11 +1169,16 @@ parseCursorSessionMetadata(String raw) {
 /// Cursor keeps that file as a JSON array of the chat's prompts, newest first
 /// and one per line, so its last lines hold the oldest ones. A prompt sent
 /// again moves to the front, so the oldest listed prompt is the oldest one
-/// never repeated. Slash commands are skipped in favor of the next prompt.
+/// never repeated. Slash commands, and summaries [isUsable] rejects, are
+/// skipped in favor of the next prompt. A tail that does not end the array
+/// was cut short and yields nothing.
 @visibleForTesting
-String? parseCursorPromptHistoryTail(String raw) {
+String? parseCursorPromptHistoryTail(
+  String raw, {
+  bool Function(String summary)? isUsable,
+}) {
   final trimmed = raw.trim();
-  if (trimmed.isEmpty) return null;
+  if (!trimmed.endsWith(']')) return null;
   // A short or single-line file arrives whole; a longer one is cut mid-array
   // and read line by line.
   Object? whole;
@@ -1199,7 +1209,8 @@ String? parseCursorPromptHistoryTail(String raw) {
         RegExp(r'^/[A-Za-z][\w:-]*(\s|$)').hasMatch(trimmedPrompt)) {
       continue;
     }
-    return _summarizeSessionText(trimmedPrompt);
+    final summary = _summarizeSessionText(trimmedPrompt);
+    if (isUsable == null || isUsable(summary)) return summary;
   }
   return null;
 }
@@ -1693,10 +1704,11 @@ class AgentSessionDiscoveryService {
   _piLabelCache = {};
 
   /// Cursor first-prompt labels by remote identity and meta.json path, valid
-  /// while meta.json keeps its mtime. A null label records a chat without one.
+  /// while meta.json keeps its mtime. A null label records a chat without one
+  /// for [_cursorPromptLabelMissTtl].
   final Map<
     (_AgentSessionDiscoveryScopeKey, String),
-    ({DateTime modifiedAt, String? label})
+    ({DateTime modifiedAt, String? label, DateTime cachedAt})
   >
   _cursorPromptLabelCache = {};
 
@@ -2940,9 +2952,11 @@ class AgentSessionDiscoveryService {
             // workspace chat. The parent directory remains the authoritative
             // --resume id, so keep metadata-only records instead of returning
             // an empty picker.
+            // A title the picker would drop leaves the chat untitled.
             title = _sanitizeSessionSummary(
               metadata.summary,
               sessionId: chatId,
+              workingDirectory: metadata.workingDirectory,
             );
             if (_cursorPlaceholderTitles.contains(title?.toLowerCase())) {
               title = null;
@@ -2977,7 +2991,9 @@ class AgentSessionDiscoveryService {
       final labels = previewOnly
           ? const <String, String>{}
           : await _readCursorPromptLabels(session, [
-              for (final info in scoped) ?untitledMetaFiles[info.sessionId],
+              for (final info in scoped)
+                if (untitledMetaFiles[info.sessionId] case final metaFile?)
+                  (metaFile: metaFile, info: info),
             ]);
       return _ToolDiscoveryResult.success(AgentLaunchTool.cursorAgent, [
         for (final info in scoped)
@@ -2997,27 +3013,33 @@ class AgentSessionDiscoveryService {
     }
   }
 
-  /// Reads the first-prompt labels of untitled Cursor chats from the
-  /// `prompt_history.json` beside each of [metaFiles], keyed by meta path.
+  /// Reads the first-prompt labels of untitled Cursor [chats] from the
+  /// `prompt_history.json` beside each chat's meta.json, keyed by meta path.
   ///
   /// Labels are cached while a chat's meta.json keeps its mtime: Cursor
-  /// rewrites that file whenever the chat gains a message.
+  /// rewrites that file whenever the chat gains a message. A chat without a
+  /// label is read again after [_cursorPromptLabelMissTtl].
   Future<Map<String, String>> _readCursorPromptLabels(
     SshSession session,
-    List<_ListedFile> metaFiles,
+    List<({_ListedFile metaFile, ToolSessionInfo info})> chats,
   ) async {
     final identity = _AgentSessionDiscoveryScopeKey.fromSession(
       session,
       workingDirectory: null,
     );
+    final now = _now();
     final labels = <String, String>{};
-    final misses = <_ListedFile>[];
-    for (final file in metaFiles) {
+    final misses = <({_ListedFile metaFile, ToolSessionInfo info})>[];
+    for (final chat in chats) {
+      final file = chat.metaFile;
       final cached = _cursorPromptLabelCache[(identity, file.path)];
-      if (cached != null && cached.modifiedAt == file.modifiedAt) {
+      if (cached != null &&
+          cached.modifiedAt == file.modifiedAt &&
+          (cached.label != null ||
+              now.difference(cached.cachedAt) < _cursorPromptLabelMissTtl)) {
         if (cached.label case final label?) labels[file.path] = label;
       } else {
-        misses.add(file);
+        misses.add(chat);
       }
     }
     if (misses.isEmpty) return labels;
@@ -3028,7 +3050,7 @@ class AgentSessionDiscoveryService {
     try {
       snapshots = await _readRemoteFileSnapshots(
         session,
-        misses.map((file) => promptHistoryPath(file.path)),
+        misses.map((chat) => promptHistoryPath(chat.metaFile.path)),
         maxLines: 1,
         tailLines: 8,
       );
@@ -3036,12 +3058,20 @@ class AgentSessionDiscoveryService {
       // The chats keep their fallback names until a later load.
       return labels;
     }
-    for (final file in misses) {
+    for (final (metaFile: file, :info) in misses) {
       final snapshot = snapshots[promptHistoryPath(file.path)];
+      // A label the picker would drop as generic is no label.
       final label = snapshot == null
           ? null
           : parseCursorPromptHistoryTail(
               snapshot.tailContent ?? snapshot.content,
+              isUsable: (summary) =>
+                  _sanitizeSessionSummary(
+                    summary,
+                    sessionId: info.sessionId,
+                    workingDirectory: info.workingDirectory,
+                  ) !=
+                  null,
             );
       if (label != null) labels[file.path] = label;
       final modifiedAt = file.modifiedAt;
@@ -3052,6 +3082,7 @@ class AgentSessionDiscoveryService {
       _cursorPromptLabelCache[(identity, file.path)] = (
         modifiedAt: modifiedAt,
         label: label,
+        cachedAt: now,
       );
     }
     return labels;

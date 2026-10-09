@@ -1597,6 +1597,10 @@ cwd: /tmp/demo
       );
     });
 
+    test('ignores a tail cut short before the end of the array', () {
+      expect(parseCursorPromptHistoryTail('  "Newer",\n  "Older"'), isNull);
+    });
+
     test('returns null without a usable prompt', () {
       expect(parseCursorPromptHistoryTail(''), isNull);
       expect(parseCursorPromptHistoryTail('[]'), isNull);
@@ -3323,6 +3327,154 @@ branch refs/heads/main
       metaModifiedAt += 60;
       expect(await pickerSummary(), 'Explain the build');
       expect(promptReads, 2);
+    });
+
+    test('Cursor retries a chat without a prompt label later', () async {
+      final client = _MockSshClient();
+      const chatDirectory =
+          '/Users/demo/.cursor/chats/workspace/'
+          '88888888-8888-4888-8888-888888888888';
+      const metaPath = '$chatDirectory/meta.json';
+      const promptPath = '$chatDirectory/prompt_history.json';
+      var historyReadable = false;
+      var promptReads = 0;
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.cursor/chats')) {
+          return _buildExecSession(
+            stdout: _listedFileLine(metaPath, mtime: 1787302132),
+          );
+        }
+        if (command.contains(promptPath)) {
+          promptReads += 1;
+          // A cut-short batch returns no line for the file.
+          return _buildExecSession(
+            stdout: historyReadable
+                ? '$promptPath\x1f${base64Encode(utf8.encode('[\n'))}'
+                      '\x1f${base64Encode(utf8.encode('  "Explain the build"\n]'))}\n'
+                : '',
+          );
+        }
+        if (command.contains(metaPath)) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              metaPath,
+              jsonEncode({
+                'schemaVersion': 1,
+                'createdAtMs': 1787302131000,
+                'hasConversation': false,
+                'cwd': '/Users/depoll/Code/MonkeySSH',
+              }),
+            ),
+          );
+        }
+        return _buildExecSession();
+      });
+      var now = DateTime(2026, 10, 9);
+      final discovery = AgentSessionDiscoveryService(now: () => now);
+      final session = _buildDiscoverySession(client);
+      Future<String?> pickerSummary() async =>
+          (await discovery
+                  .discoverSessionsStream(session, toolName: 'Cursor Agent')
+                  .last)
+              .sessions
+              .single
+              .summary;
+
+      expect(await pickerSummary(), 'Cursor session 88888888…');
+      expect(promptReads, 1);
+
+      // A reload soon after reuses the miss.
+      now = now.add(const Duration(seconds: 30));
+      expect(await pickerSummary(), 'Cursor session 88888888…');
+      expect(promptReads, 1);
+
+      // Later, the same unchanged meta.json gets its history read again.
+      now = now.add(const Duration(minutes: 3));
+      historyReadable = true;
+      expect(await pickerSummary(), 'Explain the build');
+      expect(promptReads, 2);
+    });
+
+    test('Cursor never names a chat with a label the picker drops', () async {
+      final client = _MockSshClient();
+      const workspace = '/Users/demo/.cursor/chats/workspace';
+      const folder = '/Users/depoll/Code/MonkeySSH';
+      // Chat id prefix → (meta.json title, prompts newest first).
+      const chats = <String, (String?, List<String>)>{
+        'aaaaaaaa': (null, ['Real request', 'MonkeySSH']),
+        'bbbbbbbb': (null, ['session']),
+        'cccccccc': ('MonkeySSH', ['Fix the folder title']),
+        'dddddddd': (null, ['/']),
+      };
+      String chatId(String prefix) => '$prefix-0000-4000-8000-000000000000';
+      String metaPath(String prefix) =>
+          '$workspace/${chatId(prefix)}/meta.json';
+      String promptPath(String prefix) =>
+          '$workspace/${chatId(prefix)}/prompt_history.json';
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.cursor/chats')) {
+          return _buildExecSession(
+            stdout: [
+              for (final (index, prefix) in chats.keys.indexed)
+                _listedFileLine(metaPath(prefix), mtime: 1787302132 - index),
+            ].join('\n'),
+          );
+        }
+        if (command.contains('prompt_history.json')) {
+          final head = base64Encode(utf8.encode('[\n'));
+          String tail(List<String> prompts) => base64Encode(
+            utf8.encode(const JsonEncoder.withIndent('  ').convert(prompts)),
+          );
+          return _buildExecSession(
+            stdout: [
+              for (final MapEntry(key: prefix, value: (_, prompts))
+                  in chats.entries)
+                if (command.contains(promptPath(prefix)))
+                  '${promptPath(prefix)}\x1f$head\x1f${tail(prompts)}\n',
+            ].join(),
+          );
+        }
+        if (command.contains('meta.json')) {
+          return _buildExecSession(
+            stdout: [
+              for (final MapEntry(key: prefix, value: (title, _))
+                  in chats.entries)
+                _remoteSnapshotLine(
+                  metaPath(prefix),
+                  jsonEncode({
+                    'schemaVersion': 1,
+                    'createdAtMs': 1787302131000,
+                    'hasConversation': true,
+                    'title': ?title,
+                    'cwd': folder,
+                  }),
+                ),
+            ].join(),
+          );
+        }
+        return _buildExecSession();
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            workingDirectory: folder,
+            toolName: 'Cursor Agent',
+          )
+          .last;
+
+      expect(
+        {
+          for (final session in result.sessions)
+            session.sessionId: session.summary,
+        },
+        {
+          chatId('aaaaaaaa'): 'Real request',
+          chatId('bbbbbbbb'): 'Cursor session bbbbbbbb…',
+          chatId('cccccccc'): 'Fix the folder title',
+          chatId('dddddddd'): 'Cursor session dddddddd…',
+        },
+      );
     });
 
     test('Cursor reads the prompt history tail on Windows hosts', () async {
