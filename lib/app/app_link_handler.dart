@@ -292,12 +292,8 @@ class AppLinkHandler {
 
 /// Whether [preset]'s own extra arguments switch on its tool's YOLO mode,
 /// whatever the host's YOLO preference says.
-bool presetArgumentsRequestYolo(AgentLaunchPreset preset) {
-  final arguments = preset.additionalArguments?.trim();
-  if (arguments == null || arguments.isEmpty) return false;
-  final tokens = arguments.split(RegExp(r'\s+')).toSet();
-  return preset.tool.yoloArguments.any(tokens.contains);
-}
+bool presetArgumentsRequestYolo(AgentLaunchPreset preset) =>
+    agentArgumentsEnableYolo(preset.tool, preset.additionalArguments);
 
 /// Builds the terminal route for an open-host link.
 String buildAppLinkTerminalLocation({

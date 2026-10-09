@@ -339,20 +339,27 @@ void main() {
       expect(effects.reviews, hasLength(1));
     });
 
-    test('flag YOLO switches passed as extra arguments', () async {
-      stubPreset(
-        const AgentLaunchPreset(
-          tool: AgentLaunchTool.copilotCli,
-          additionalArguments: '--model gpt-6 --yolo',
-        ),
+    for (final arguments in [
+      '--model gpt-6 --yolo',
+      "'--allow-all-tools'",
+      '--allow-all',
+    ]) {
+      test(
+        'flag YOLO switches passed as extra arguments: $arguments',
+        () async {
+          stubPreset(
+            AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              additionalArguments: arguments,
+            ),
+          );
+
+          await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+          expect(effects.reviews.single.yoloMode, isTrue);
+        },
       );
-
-      await handler.handle(const LaunchPresetAppLink(presetId: 7));
-
-      final review = effects.reviews.single;
-      expect(review.yoloMode, isTrue);
-      expect(review.command, contains('--yolo'));
-    });
+    }
 
     test('never launch when the review is cancelled', () async {
       stubPreset(preset, yolo: true);
