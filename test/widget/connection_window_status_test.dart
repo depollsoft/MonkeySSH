@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/connection_attention.dart';
@@ -96,6 +97,82 @@ void main() {
         native.firstWhere((entry) => entry.session == orphan).index,
         4,
         reason: 'An orphan session numbers after the last server window.',
+      );
+    });
+
+    test('keeps forked sessions that share a server-owned bridge', () {
+      final first = fakeAcpSession(key: fakeAcpKey(acpSessionId: 'first'));
+      final fork = fakeAcpSession(key: fakeAcpKey(acpSessionId: 'fork'));
+      final orphan = fakeAcpSession(key: fakeAcpKey(bridgeId: 'orphan'));
+      final entries = buildConnectionWindowEntries(
+        windows: const [
+          TmuxWindow(
+            index: 2,
+            name: 'agent',
+            isActive: false,
+            nativeAcpBridgeId: 'bridge-1',
+            nativeAcpProviderId: 'builtin:copilot-cli',
+          ),
+        ],
+        sessions: [first, fork, orphan],
+        now: _now,
+      );
+      final byIndex = {
+        for (final entry in entries) entry.index: entry.session?.key,
+      };
+      expect(
+        byIndex,
+        {2: fork.key, 3: orphan.key, 4: first.key},
+        reason:
+            'The navigator binds the window to the last session; the '
+            'orphan keeps its navigator number and the other fork follows.',
+      );
+    });
+
+    test('untracked native windows count toward quota warnings', () {
+      const window = TmuxWindow(
+        index: 1,
+        name: 'agent',
+        isActive: false,
+        nativeAcpBridgeId: 'b1',
+        nativeAcpProviderId: AcpBuiltinProviderIds.claudeAgent,
+      );
+      final identities = connectionWindowQuotaIdentities(
+        windows: const [window],
+        sessions: const [],
+      ).toSet();
+      expect(identities, {(AgentLaunchTool.claudeCode, null)});
+      final entry = buildConnectionWindowEntries(
+        windows: const [window],
+        sessions: const [],
+        lowQuota: identities,
+        now: _now,
+      ).single;
+      expect(entry.reason, AttentionReason.lowQuota);
+    });
+
+    test('schedules a re-sort when an active row will go quiet', () {
+      final entries = buildConnectionWindowEntries(
+        windows: [
+          TmuxWindow(
+            index: 0,
+            name: 'build',
+            isActive: false,
+            lastActivityEpochSeconds: _epochSecondsAgo(10),
+          ),
+          TmuxWindow(
+            index: 1,
+            name: 'old',
+            isActive: false,
+            lastActivityEpochSeconds: _epochSecondsAgo(600),
+          ),
+        ],
+        sessions: const [],
+        now: _now,
+      );
+      expect(
+        connectionWindowsNextResort(entries, now: _now),
+        const Duration(seconds: 6),
       );
     });
 
@@ -289,6 +366,48 @@ void main() {
       );
       expect(find.text('alert'), findsOneWidget);
       expect(find.byIcon(Icons.notifications_active), findsOneWidget);
+    });
+
+    testWidgets('day-old labels keep advancing', (tester) async {
+      var now = _now;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ConnectionWindowStatusChip(
+              entry: _single(
+                TmuxWindow(
+                  index: 0,
+                  name: 'build',
+                  isActive: false,
+                  lastActivityEpochSeconds: _epochSecondsAgo(
+                    const Duration(days: 1, hours: 23).inSeconds,
+                  ),
+                ),
+              ),
+              now: () => now,
+            ),
+          ),
+        ),
+      );
+      expect(find.text('quiet 1d'), findsOneWidget);
+      now = now.add(const Duration(hours: 1));
+      await tester.pump(const Duration(hours: 1));
+      expect(find.text('quiet 2d'), findsOneWidget);
+    });
+
+    testWidgets('a session that has not attached reads starting, not idle', (
+      tester,
+    ) async {
+      await _pumpChip(
+        tester,
+        buildConnectionWindowEntries(
+          windows: const [],
+          sessions: [fakeAcpSession(status: AcpConnectionStatus.idle)],
+          now: _now,
+        ).single,
+      );
+      expect(find.text('starting'), findsOneWidget);
+      expect(find.text('idle'), findsNothing);
     });
 
     testWidgets('a quiet label turns over without new output', (tester) async {

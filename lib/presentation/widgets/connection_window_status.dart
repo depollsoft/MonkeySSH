@@ -7,10 +7,13 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models/acp_provider.dart';
+import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_usage_rings.dart';
@@ -18,10 +21,11 @@ import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/terminal_progress.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/ssh_service.dart';
+import '../providers/connection_attention_provider.dart';
 import 'acp_session_presentation.dart';
 import 'attention_presentation.dart';
 import 'mux_window_status_badge.dart';
-import 'tmux_window_navigator.dart' show MuxWindowProjection;
 
 /// One row of a connection's window list.
 @immutable
@@ -60,14 +64,19 @@ class ConnectionWindowEntry {
 
 /// Agent identities (tool plus Pi's model provider) whose account allowance
 /// can mark rows in [windows] and [sessions] as low on quota.
+///
+/// Native server windows count even when no local session tracks them.
 Iterable<(AgentLaunchTool, String?)> connectionWindowQuotaIdentities({
   required List<TmuxWindow> windows,
   required List<AcpSessionState> sessions,
 }) sync* {
   for (final window in windows) {
-    if (window.isNativeAcp) continue;
-    final tool = window.foregroundAgentTool;
-    if (tool != null) yield (tool, window.agentModelProvider);
+    final tool = window.isNativeAcp
+        ? agentLaunchToolForBuiltinAcpProviderId(window.nativeAcpProviderId!)
+        : window.foregroundAgentTool;
+    if (tool != null) {
+      yield (tool, window.isNativeAcp ? null : window.agentModelProvider);
+    }
   }
   for (final session in sessions) {
     final tool = agentLaunchToolForBuiltinAcpProviderId(session.key.providerId);
@@ -75,12 +84,18 @@ Iterable<(AgentLaunchTool, String?)> connectionWindowQuotaIdentities({
   }
 }
 
+int _byCreation(AcpSessionState a, AcpSessionState b) {
+  final created = a.createdAt.compareTo(b.createdAt);
+  return created != 0 ? created : a.key.value.compareTo(b.key.value);
+}
+
 /// Merges server windows with tracked native sessions and orders them by
 /// attention, then recency, then window number.
 ///
-/// A tracked session bound to a server window is shown once, as that window.
-/// Sessions without a server window get numbers after the last server window,
-/// matching the terminal's window navigator.
+/// Each native server window shows the session the terminal's window
+/// navigator binds to it, once. Sessions whose bridge has no server window
+/// number after the last server window in the navigator's order, and forks
+/// that share a bound bridge follow them, so none is dropped.
 List<ConnectionWindowEntry> buildConnectionWindowEntries({
   required List<TmuxWindow> windows,
   required List<AcpSessionState> sessions,
@@ -90,7 +105,37 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
       const <(AgentLaunchTool, String?)>{},
   DateTime? now,
 }) {
-  final projection = MuxWindowProjection(windows, sessions);
+  final reference = now ?? DateTime.now();
+  final boundByBridge = <(String, String), AcpSessionState>{
+    for (final session in sessions)
+      (session.key.bridgeId, session.key.providerId): session,
+  };
+  final serverBridges = <String>{};
+  final bound = <AcpSessionKey>{};
+  var nextIndex = 0;
+  for (final window in windows) {
+    nextIndex = math.max(nextIndex, window.index + 1);
+    final bridgeId = window.nativeAcpBridgeId;
+    if (bridgeId == null) continue;
+    serverBridges.add(bridgeId);
+    final session = boundByBridge[(bridgeId, window.nativeAcpProviderId ?? '')];
+    if (session != null) bound.add(session.key);
+  }
+  final unbound = [
+    ...sessions
+        .where((session) => !serverBridges.contains(session.key.bridgeId))
+        .toList()
+      ..sort(_byCreation),
+    ...sessions
+        .where(
+          (session) =>
+              serverBridges.contains(session.key.bridgeId) &&
+              !bound.contains(session.key),
+        )
+        .toList()
+      ..sort(_byCreation),
+  ];
+
   ConnectionWindowEntry native({
     required int index,
     required String providerId,
@@ -124,7 +169,8 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
         lastActivity: _latest([
           session?.lastActivityAt,
           bridge?.lastActivity,
-          if (window != null) terminalWindowLastActivity(window),
+          if (window != null)
+            terminalWindowLastActivity(window, now: reference),
         ]),
       ),
     );
@@ -137,7 +183,11 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
           index: window.index,
           providerId: window.nativeAcpProviderId!,
           window: window,
-          session: projection.sessionForWindow(window),
+          session:
+              boundByBridge[(
+                window.nativeAcpBridgeId!,
+                window.nativeAcpProviderId!,
+              )],
           bridge: bridges[window.nativeAcpBridgeId],
         )
       else
@@ -158,13 +208,13 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
             ),
             active:
                 terminalProgressIsRunning(window.terminalProgress) ||
-                terminalWindowRecentlyActive(window, now: now),
-            lastActivity: terminalWindowLastActivity(window),
+                terminalWindowRecentlyActive(window, now: reference),
+            lastActivity: terminalWindowLastActivity(window, now: reference),
           ),
         ),
-    for (final session in projection.orphanSessions)
+    for (final session in unbound)
       native(
-        index: projection.nativeIndices[session.key]!,
+        index: nextIndex++,
         providerId: session.key.providerId,
         session: session,
         bridge: bridges[session.key.bridgeId],
@@ -172,6 +222,95 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
   ];
   return entries
     ..sort((a, b) => compareAttentionSortKeys(a.sortKey, b.sortKey));
+}
+
+/// Attention inputs for one connection's window list.
+///
+/// Reads bridge metadata and quota rings only while the list is on screen,
+/// and keeps the last values otherwise, so a dialog or a covering route does
+/// not reshuffle rows underneath it. Also re-sorts the list when an inferred
+/// "active" terminal row goes quiet, which no window event announces.
+class ConnectionAttentionInputs {
+  /// Creates the inputs; [onResort] rebuilds the owning list.
+  ConnectionAttentionInputs({required this.onResort});
+
+  /// Called when the order may have changed without a new window event.
+  final VoidCallback onResort;
+
+  Map<String, MonkeyMuxAcpBridgeMetadata> _bridges =
+      const <String, MonkeyMuxAcpBridgeMetadata>{};
+  Set<(AgentLaunchTool, String?)> _lowQuota =
+      const <(AgentLaunchTool, String?)>{};
+  Timer? _resort;
+
+  /// Builds the ordered entries for [windows] and [sessions] on [hostId].
+  List<ConnectionWindowEntry> entries(
+    BuildContext context,
+    WidgetRef ref, {
+    required List<TmuxWindow> windows,
+    required List<AcpSessionState> sessions,
+    required int? hostId,
+    required bool usesMonkeyMux,
+    required SshSession? session,
+    DateTime? now,
+  }) {
+    if (attentionSurfaceVisible(context)) {
+      _bridges = hostId != null && usesMonkeyMux
+          ? ref.watch(connectionBridgeMetadataProvider).forHost(hostId)
+          : const <String, MonkeyMuxAcpBridgeMetadata>{};
+      _lowQuota = watchLowQuotaTools(
+        context,
+        ref,
+        session: session,
+        tools: connectionWindowQuotaIdentities(
+          windows: windows,
+          sessions: sessions,
+        ),
+      );
+    }
+    final reference = now ?? DateTime.now();
+    final entries = buildConnectionWindowEntries(
+      windows: windows,
+      sessions: sessions,
+      bridges: _bridges,
+      lowQuota: _lowQuota,
+      now: reference,
+    );
+    _resort?.cancel();
+    final wait = connectionWindowsNextResort(entries, now: reference);
+    _resort = wait == null ? null : Timer(wait, onResort);
+    return entries;
+  }
+
+  /// Cancels the pending re-sort.
+  void dispose() {
+    _resort?.cancel();
+    _resort = null;
+  }
+}
+
+/// When an inferred "active" row in [entries] goes quiet, so the list can
+/// re-sort at that moment rather than at the next window event.
+Duration? connectionWindowsNextResort(
+  List<ConnectionWindowEntry> entries, {
+  required DateTime now,
+}) {
+  Duration? soonest;
+  for (final entry in entries) {
+    final window = entry.window;
+    if (entry.isNative || window == null || entry.reason != null) continue;
+    if (terminalProgressIsRunning(window.terminalProgress)) continue;
+    final epoch = window.lastActivityEpochSeconds;
+    if (epoch == null) continue;
+    final age = now.difference(
+      DateTime.fromMillisecondsSinceEpoch(epoch * 1000),
+    );
+    const quietAfter = Duration(seconds: terminalQuietAfterSeconds + 1);
+    if (age >= quietAfter) continue;
+    final wait = quietAfter - age;
+    if (soonest == null || wait < soonest) soonest = wait;
+  }
+  return soonest;
 }
 
 DateTime? _latest(Iterable<DateTime?> times) {
@@ -273,13 +412,20 @@ ConnectionWindowStatus connectionWindowStatus(
           semanticsLabel: '$kind idle, reported',
         );
       case NativeTurnState.unknown:
-        final display = session == null
-            ? const AcpStatusDisplay(
-                label: 'native',
-                icon: Icons.smart_toy_outlined,
-                tone: AcpStatusTone.neutral,
-              )
-            : acpStatusDisplay(session.status);
+        final display = switch (session?.status) {
+          null => const AcpStatusDisplay(
+            label: 'native',
+            icon: Icons.smart_toy_outlined,
+            tone: AcpStatusTone.neutral,
+          ),
+          // Not the turn's "idle": nothing has attached to the bridge yet.
+          AcpConnectionStatus.idle => const AcpStatusDisplay(
+            label: 'starting',
+            icon: Icons.sync,
+            tone: AcpStatusTone.neutral,
+          ),
+          final AcpConnectionStatus status => acpStatusDisplay(status),
+        };
         return ConnectionWindowStatus(
           label: display.label,
           icon: display.icon,
@@ -311,7 +457,7 @@ ConnectionWindowStatus connectionWindowStatus(
       semanticsLabel: '$kind active, inferred from recent output',
     );
   }
-  final last = terminalWindowLastActivity(window);
+  final last = terminalWindowLastActivity(window, now: now);
   final age = last == null ? null : _coarseAge(now.difference(last));
   return ConnectionWindowStatus(
     label: age == null ? 'quiet' : 'quiet $age',
@@ -336,16 +482,17 @@ Duration? _nextLabelChange(ConnectionWindowEntry entry, DateTime now) {
   if (entry.isNative || entry.reason != null) return null;
   final window = entry.window!;
   if (terminalProgressIsRunning(window.terminalProgress)) return null;
-  final last = terminalWindowLastActivity(window);
-  if (last == null) return null;
-  final age = now.difference(last);
+  // An idle-only snapshot never ages, so only a reported epoch can roll over.
+  final epoch = window.lastActivityEpochSeconds;
+  if (epoch == null) return null;
+  final age = now.difference(DateTime.fromMillisecondsSinceEpoch(epoch * 1000));
   const quietAfter = Duration(seconds: terminalQuietAfterSeconds + 1);
   if (age < quietAfter) return quietAfter - age;
   if (age.inHours < 1) {
     return Duration(minutes: age.inMinutes + 1) - age;
   }
   if (age.inDays < 1) return Duration(hours: age.inHours + 1) - age;
-  return null;
+  return Duration(days: age.inDays + 1) - age;
 }
 
 class _ConnectionWindowStatusChipState

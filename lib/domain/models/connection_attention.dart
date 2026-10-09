@@ -62,9 +62,11 @@ const terminalQuietAfterSeconds = 15;
 
 /// Returns why a tracked native [session] is blocked on the user, if it is.
 ///
-/// Local session state is authoritative while a client is attached. A
-/// detached session cannot see requests that arrived after it detached, so
-/// its host-reported [bridge] metadata fills the gap.
+/// Local session state is authoritative while a client is attached. Once
+/// detached, the session stops hearing about requests, both new ones and
+/// ones another client answers, so fresh host-reported [bridge] metadata
+/// decides whether it still waits. Retained local requests only name the
+/// kind of wait.
 AttentionReason? acpSessionWaitingReason(
   AcpSessionState session, {
   MonkeyMuxAcpBridgeMetadata? bridge,
@@ -87,24 +89,35 @@ AttentionReason? acpSessionWaitingReason(
         AcpConnectionStatus.detached:
       break;
   }
-  if (session.pendingPermissions.isNotEmpty ||
-      session.pendingWrites.isNotEmpty) {
-    return AttentionReason.permission;
+  final hostReported = !session.isLive && bridge != null;
+  if (hostReported && bridge.state != MonkeyMuxAcpProviderState.running) {
+    return null;
   }
-  if (session.pendingElicitations.isNotEmpty) return AttentionReason.input;
+  // Null when the local state is authoritative.
+  final hostPending = hostReported ? bridge.pendingRequestCount > 0 : null;
+  if (hostPending ?? true) {
+    if (session.pendingPermissions.isNotEmpty ||
+        session.pendingWrites.isNotEmpty) {
+      return AttentionReason.permission;
+    }
+    if (session.pendingElicitations.isNotEmpty) return AttentionReason.input;
+  }
   if (session.status == AcpConnectionStatus.authenticationRequired ||
       session.pendingAuthentication ||
       authFailed) {
     return AttentionReason.signIn;
   }
-  if (!session.isLive && bridge != null) return bridgeWaitingReason(bridge);
-  return null;
+  return (hostPending ?? false) ? AttentionReason.hostRequest : null;
 }
 
 /// Returns [AttentionReason.hostRequest] when a running [bridge] holds a
-/// provider request that no client has answered.
+/// provider request and no client is attached to answer it.
+///
+/// An attached client (another device, or a forked sibling) answers its own
+/// file and terminal requests within moments; counting them would flash rows.
 AttentionReason? bridgeWaitingReason(MonkeyMuxAcpBridgeMetadata bridge) =>
     bridge.state == MonkeyMuxAcpProviderState.running &&
+        bridge.clientCount == 0 &&
         bridge.pendingRequestCount > 0
     ? AttentionReason.hostRequest
     : null;
@@ -238,18 +251,22 @@ int compareAttentionSortKeys(AttentionSortKey a, AttentionSortKey b) {
 }
 
 /// Latest output time of a terminal [window], when the multiplexer reports it.
-DateTime? terminalWindowLastActivity(TmuxWindow window) {
+///
+/// Prefers the reported epoch. A snapshot that carries only an idle duration,
+/// such as the App Review demo workspace, is read relative to [now].
+DateTime? terminalWindowLastActivity(TmuxWindow window, {DateTime? now}) {
   final epoch = window.lastActivityEpochSeconds;
-  return epoch == null
-      ? null
-      : DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+  if (epoch != null) return DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+  final idle = window.idleSeconds;
+  if (idle == null) return null;
+  return (now ?? DateTime.now()).subtract(Duration(seconds: idle));
 }
 
 /// Whether a terminal [window] printed within [terminalQuietAfterSeconds] of
 /// [now]. This is inferred from output timing, never reported by the program.
 bool terminalWindowRecentlyActive(TmuxWindow window, {DateTime? now}) {
-  final last = terminalWindowLastActivity(window);
-  if (last == null) return false;
   final reference = now ?? DateTime.now();
+  final last = terminalWindowLastActivity(window, now: reference);
+  if (last == null) return false;
   return reference.difference(last).inSeconds <= terminalQuietAfterSeconds;
 }

@@ -37,7 +37,6 @@ import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/tmux_service.dart';
 import '../../domain/services/transfer_intent_service.dart';
 import '../providers/connection_actions.dart';
-import '../providers/connection_attention_provider.dart';
 import '../providers/entity_list_providers.dart';
 import '../providers/host_row_providers.dart';
 import '../view_models/mux_badge_controller.dart';
@@ -2961,10 +2960,13 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     setState(() {});
   }
 
+  late final _attention = ConnectionAttentionInputs(onResort: _badgeChanged);
+
   @override
   void dispose() {
     _badge.removeListener(_badgeChanged);
     _badge.dispose();
+    _attention.dispose();
     super.dispose();
   }
 
@@ -3171,24 +3173,14 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                 .toList(growable: false);
           }()
         : const <AcpSessionState>[];
-    final entries = buildConnectionWindowEntries(
+    final entries = _attention.entries(
+      context,
+      ref,
       windows: windows,
       sessions: nativeAcpSessions,
-      bridges:
-          hostId != null &&
-              _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
-              attentionSurfaceVisible(context)
-          ? ref.watch(connectionBridgeMetadataProvider).forHost(hostId)
-          : const {},
-      lowQuota: watchLowQuotaTools(
-        context,
-        ref,
-        session: activeSession,
-        tools: connectionWindowQuotaIdentities(
-          windows: windows,
-          sessions: nativeAcpSessions,
-        ),
-      ),
+      hostId: hostId,
+      usesMonkeyMux: _badge.muxBackend == RemoteMuxBackend.monkeyMux,
+      session: activeSession,
     );
     if (entries.isEmpty) {
       return const SizedBox.shrink();
@@ -3232,17 +3224,26 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                   ),
                   if (alertCount > 0) ...[
                     const SizedBox(width: 4),
-                    Icon(
-                      Icons.notifications_active,
-                      size: 12,
-                      color: theme.colorScheme.error,
-                    ),
-                    const SizedBox(width: 2),
-                    Text(
-                      '$alertCount',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.error,
-                        fontWeight: FontWeight.bold,
+                    Semantics(
+                      label: '$alertCount need attention',
+                      excludeSemantics: true,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.notifications_active,
+                            size: 12,
+                            color: theme.colorScheme.error,
+                          ),
+                          const SizedBox(width: 2),
+                          Text(
+                            '$alertCount',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: theme.colorScheme.error,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -3267,6 +3268,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                   AcpSwitcherEntry.session(session),
                   windowIndex: entry.index,
                   status: ConnectionWindowStatusChip(entry: entry),
+                  serverWindow: entry.window,
                 )
               else
                 _buildWindowRow(
@@ -3647,6 +3649,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     AcpSwitcherEntry entry, {
     required int windowIndex,
     required Widget status,
+    TmuxWindow? serverWindow,
   }) {
     final session = entry.session!;
     final key = session.key;
@@ -3763,7 +3766,20 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               child: status,
             ),
             GestureDetector(
+              key: ValueKey('connection-native-acp-close-${key.value}'),
               onTap: () async {
+                // A server-owned window closes like any window, with the
+                // close confirmation; a session without one confirms first.
+                if (serverWindow != null) {
+                  await _closeWindow(serverWindow);
+                  return;
+                }
+                final confirmed = await confirmMuxWindowClose(
+                  context: context,
+                  ref: ref,
+                  title: entry.title,
+                );
+                if (!confirmed || !mounted) return;
                 try {
                   await ref.read(acpSessionManagerProvider).stopSession(key);
                 } on Object {
@@ -3831,16 +3847,6 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               ),
             ),
             const SizedBox(width: 6),
-            // Alert icon.
-            if (window.hasAlert)
-              Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: Icon(
-                  Icons.notifications_active,
-                  size: 12,
-                  color: theme.colorScheme.error,
-                ),
-              ),
             Padding(
               padding: const EdgeInsets.only(right: 6),
               child: AgentToolIcon(

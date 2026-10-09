@@ -14,13 +14,14 @@ MonkeyMuxAcpBridgeMetadata bridge({
   String id = 'bridge-1',
   int pending = 0,
   int inFlight = 0,
+  int clients = 0,
   MonkeyMuxAcpProviderState state = MonkeyMuxAcpProviderState.running,
 }) => MonkeyMuxAcpBridgeMetadata(
   id: id,
   provider: 'Copilot CLI',
   commandHash: 'hash',
   state: state,
-  clientCount: 0,
+  clientCount: clients,
   pendingRequestCount: pending,
   inFlightTurnCount: inFlight,
   lastActivity: DateTime(2026, 1, 1, 12),
@@ -113,6 +114,43 @@ void main() {
         ),
         isNull,
       );
+    });
+
+    test('fresh host counts decide whether a detached session waits', () {
+      final detached = fakeAcpSession(
+        status: AcpConnectionStatus.detached,
+        pendingPermissions: [permission(DateTime(2026))],
+      );
+      expect(
+        acpSessionWaitingReason(detached),
+        AttentionReason.permission,
+        reason: 'Without host data the retained request still counts.',
+      );
+      expect(
+        acpSessionWaitingReason(detached, bridge: bridge(pending: 1)),
+        AttentionReason.permission,
+        reason: 'The retained request names the kind of wait.',
+      );
+      expect(
+        acpSessionWaitingReason(detached, bridge: bridge()),
+        isNull,
+        reason: 'Answered on another device: the host has nothing pending.',
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(pending: 1, state: MonkeyMuxAcpProviderState.stopped),
+        ),
+        isNull,
+      );
+    });
+
+    test('host requests count only with no client attached to answer', () {
+      expect(
+        bridgeWaitingReason(bridge(pending: 1)),
+        AttentionReason.hostRequest,
+      );
+      expect(bridgeWaitingReason(bridge(pending: 1, clients: 1)), isNull);
     });
 
     test('ignores ended sessions', () {
@@ -268,6 +306,28 @@ void main() {
       ]..sort(compareAttentionSortKeys);
       expect(keys.map((key) => key.index), [1, 2]);
     });
+  });
+
+  test('an idle-only snapshot still reads as activity', () {
+    final now = DateTime(2026, 1, 1, 12);
+    const busy = TmuxWindow(
+      index: 0,
+      name: 'a',
+      isActive: false,
+      idleSeconds: 2,
+    );
+    const quiet = TmuxWindow(
+      index: 1,
+      name: 'b',
+      isActive: false,
+      idleSeconds: 600,
+    );
+    expect(terminalWindowRecentlyActive(busy, now: now), isTrue);
+    expect(terminalWindowRecentlyActive(quiet, now: now), isFalse);
+    expect(
+      terminalWindowLastActivity(quiet, now: now),
+      now.subtract(const Duration(minutes: 10)),
+    );
   });
 
   test('terminal activity is recent within the quiet threshold', () {
