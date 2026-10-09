@@ -1831,6 +1831,15 @@ class SshService {
     final dependentClients = <SSHClient>[];
     SSHClient? jumpClient;
     var hardwareIdentities = const <HardwareKeyIdentity>[];
+    final hardwareKeyFailures = <HardwareKeyException>[];
+    var abandoningHardwareSigns = false;
+    void abandonHardwareSigns(List<HardwareKeyIdentity> identities) {
+      abandoningHardwareSigns = true;
+      for (final identity in identities) {
+        identity.cancelPendingSigns();
+      }
+    }
+
     void report(SshConnectionState state, String message) {
       DiagnosticsLogService.instance.info(
         'ssh.connect',
@@ -1879,11 +1888,9 @@ class SshService {
         // Dismiss a biometric prompt the user can no longer act on.
         final pendingIdentities = hardwareIdentities;
         unawaited(
-          cancellationToken.cancelled.then((_) {
-            for (final identity in pendingIdentities) {
-              identity.cancelPendingSigns();
-            }
-          }),
+          cancellationToken.cancelled.then(
+            (_) => abandonHardwareSigns(pendingIdentities),
+          ),
         );
       }
 
@@ -1902,7 +1909,12 @@ class SshService {
           onVerifyHostKey: verify,
           onPasswordRequest: authHandlers.onPasswordRequest,
           onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: _pauseTimeoutWhileConfirming(identities, authGate),
+          identities: _prepareHardwareIdentities(
+            identities,
+            authGate,
+            hardwareKeyFailures,
+            isAbandoned: () => abandoningHardwareSigns,
+          ),
           keepAliveInterval: config.keepAliveInterval,
         );
         client = createdClient;
@@ -2105,6 +2117,9 @@ class SshService {
         FormatException(:final message) => message,
         SSHHostkeyError(:final message) =>
           'Host key verification failed: $message',
+        // Name the hardware key failure rather than "no method worked".
+        SSHAuthFailError() when hardwareKeyFailures.isNotEmpty =>
+          hardwareKeyFailures.last.message,
         SSHAuthFailError(:final message) => 'Authentication failed: $message',
         SSHAuthAbortError(
           reason: SSHInternalError(
@@ -2129,9 +2144,7 @@ class SshService {
       return SshConnectionResult(success: false, error: error);
     } finally {
       if (!connected) {
-        for (final identity in hardwareIdentities) {
-          identity.cancelPendingSigns();
-        }
+        abandonHardwareSigns(hardwareIdentities);
         try {
           unownedSocket?.destroy();
         } finally {
@@ -2141,23 +2154,44 @@ class SshService {
     }
   }
 
-  /// Runs signatures that raise a biometric prompt inside [gate], so the
+  /// Adapts hardware key identities to dartssh2's authentication loop.
+  ///
+  /// Signatures that raise a biometric prompt run inside [gate], so the
   /// authentication timeout waits for the user like it does for a password.
-  List<SSHIdentity>? _pauseTimeoutWhileConfirming(
+  ///
+  /// dartssh2 closes the connection when a signer throws, which would skip
+  /// every remaining key, the saved password and keyboard-interactive. A key
+  /// that cannot sign (prompt dismissed, app in the background, key removed)
+  /// therefore records the failure in [failures] and answers with a
+  /// signature that cannot verify: the server reports an ordinary failure
+  /// and authentication moves on, as OpenSSH's client does. Once the attempt
+  /// is being torn down ([isAbandoned]), nothing more is sent.
+  List<SSHIdentity>? _prepareHardwareIdentities(
     List<SSHIdentity>? identities,
     _InteractiveAuthGate gate,
-  ) {
+    List<HardwareKeyException> failures, {
+    required bool Function() isAbandoned,
+  }) {
     if (identities == null ||
-        !identities.any(
-          (identity) =>
-              identity is HardwareKeyIdentity && identity.requiresUserPresence,
-        )) {
+        !identities.any((i) => i is HardwareKeyIdentity)) {
       return identities;
     }
     return [
       for (final identity in identities)
-        if (identity is HardwareKeyIdentity && identity.requiresUserPresence)
-          identity.guardedBy((sign) => gate.guard(sign))
+        if (identity is HardwareKeyIdentity)
+          identity.guardedBy((sign) async {
+            try {
+              return await (identity.requiresUserPresence
+                  ? gate.guard(sign)
+                  : sign());
+            } on HardwareKeyException catch (error) {
+              if (isAbandoned()) {
+                rethrow;
+              }
+              failures.add(error);
+              return HardwareKeyIdentity.unverifiableSignature;
+            }
+          })
         else
           identity,
     ];

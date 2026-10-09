@@ -77,8 +77,11 @@ Uint8List _hostKeyBlob() {
   return builder.toBytes();
 }
 
-/// Wires an [SshService] to a fake server that, like OpenSSH, verifies the
-/// identity's ECDSA signature over a fresh session challenge.
+/// Wires an [SshService] to a fake server that follows dartssh2's client
+/// flow against an OpenSSH-like server: it answers each probe from its
+/// authorized keys, verifies ECDSA signatures over a fresh challenge, moves
+/// on after a failed signature, and ends with the password. A signer that
+/// throws closes the connection, as dartssh2 does.
 class _Fixture {
   _Fixture._(this.db, this.platform, this.keyService);
 
@@ -93,6 +96,21 @@ class _Fixture {
   final capturedIdentities = <List<SSHIdentity>?>[];
   final challenges = <Uint8List>[];
   final _random = Random(7);
+
+  /// Base64 public-key blobs the server accepts; `null` accepts every key.
+  Set<String>? authorizedKeys;
+
+  /// Password the server accepts.
+  String? acceptedPassword;
+
+  /// Base64 blobs of keys offered without a signature.
+  final probes = <String>[];
+
+  /// Signed public-key requests the server received.
+  final signedAttempts = <({String key, bool valid})>[];
+
+  bool _authorized(Uint8List blob) =>
+      authorizedKeys?.contains(base64Encode(blob)) ?? true;
 
   static Future<_Fixture> create() async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -155,7 +173,8 @@ class _Fixture {
     capturedIdentities.add(identities);
     final client = _MockSshClient();
     clients.add(client);
-    when(client.close).thenAnswer((_) async {});
+    var closed = false;
+    when(client.close).thenAnswer((_) async => closed = true);
     when(() => client.authenticated).thenAnswer((_) async {
       final hostKey = await (socket as HostKeySource).hostKeyBytes;
       await onVerifyHostKey!(
@@ -163,10 +182,13 @@ class _Fixture {
         Uint8List.fromList(utf8.encode(formatSshHostKeyFingerprint(hostKey))),
       );
       for (final identity in identities ?? const <SSHIdentity>[]) {
-        if (identity is! HardwareKeyIdentity) {
-          continue;
+        final blob = identity.toPublicKey().encode();
+        if (identity.shouldProbe) {
+          probes.add(base64Encode(blob));
+          if (!_authorized(blob)) {
+            continue; // USERAUTH_FAILURE: never asked to sign.
+          }
         }
-        expect(identity.shouldProbe, isTrue);
         final challenge = Uint8List.fromList(
           List.generate(48, (_) => _random.nextInt(256)),
         );
@@ -182,11 +204,26 @@ class _Fixture {
             SSHInternalError(error),
           );
         }
-        if (verifySshSignature(
-          publicKeyBlob: identity.toPublicKey().encode(),
-          data: challenge,
-          signature: signature.encode(),
-        )) {
+        if (closed) {
+          // ignore: only_throw_errors, dartssh2 models auth errors this way.
+          throw SSHAuthAbortError('Connection closed before authentication');
+        }
+        // PEM keys sign with dartssh2's own, already-tested code.
+        final valid =
+            identity is! HardwareKeyIdentity ||
+            verifySshSignature(
+              publicKeyBlob: blob,
+              data: challenge,
+              signature: signature.encode(),
+            );
+        signedAttempts.add((key: base64Encode(blob), valid: valid));
+        if (valid && _authorized(blob)) {
+          return;
+        }
+      }
+      if (onPasswordRequest != null) {
+        final password = await onPasswordRequest();
+        if (password != null && password == acceptedPassword) {
           return;
         }
       }
@@ -202,13 +239,14 @@ class _Fixture {
         requireUserPresence: requireUserPresence,
       ))!;
 
-  Host stubHost({int? keyId, int id = 1}) {
+  Host stubHost({int? keyId, int id = 1, String? password}) {
     final host = Host(
       id: id,
       label: 'Hardware host',
       hostname: _hostname,
       port: 22,
       username: 'tester',
+      password: password,
       keyId: keyId,
       isFavorite: false,
       createdAt: DateTime(2026),
@@ -258,7 +296,7 @@ void main() {
 
   test('every reconnect signs a fresh challenge in hardware', () async {
     final fixture = await _Fixture.create();
-    final key = await fixture.hardwareKey();
+    final key = await fixture.hardwareKey(requireUserPresence: true);
     final host = fixture.stubHost(keyId: key.id);
 
     final first = await fixture.service.connectToHost(host.id);
@@ -304,6 +342,8 @@ void main() {
     expect(result.cancelled, isTrue);
     expect(result.success, isFalse);
     expect(fixture.platform.cancelledRequests, contains(requestId));
+    // Tearing down must not send the declining signature.
+    expect(fixture.signedAttempts, isEmpty);
     expect(fixture.platform.heldRequestIds, isEmpty);
     expect(fixture.service.sessions, isEmpty);
     verify(fixture.clients.single.close).called(greaterThanOrEqualTo(1));
@@ -322,6 +362,64 @@ void main() {
 
     expect(await connecting, _hardwareFailure(HardwareKeyErrorCode.cancelled));
     expect(fixture.service.sessions, isEmpty);
+  });
+
+  test('a dismissed prompt falls back to the saved password', () async {
+    final fixture = await _Fixture.create()
+      ..acceptedPassword = 'hunter2';
+    final key = await fixture.hardwareKey(requireUserPresence: true);
+    final host = fixture.stubHost(keyId: key.id, password: 'hunter2');
+    fixture.platform.holdSigns = true;
+
+    final connecting = fixture.service.connectToHost(host.id);
+    await fixture.platform.cancelSign(await fixture.platform.waitForPrompt());
+    final result = await connecting;
+
+    expect(result.success, isTrue, reason: result.error);
+    // The key declined with a signature the server rejected, then the
+    // password ran.
+    expect(fixture.signedAttempts, [
+      (
+        key: base64Encode(key.hardwareKeyReference!.publicKeyBlob),
+        valid: false,
+      ),
+    ]);
+  });
+
+  test('a key missing from the device falls through to the next key', () async {
+    final fixture = await _Fixture.create();
+    final hardwareKey = await fixture.hardwareKey();
+    final pemKey = await fixture.keyService.importKey(
+      name: 'Laptop key',
+      privateKeyPem: sshEd25519PrivateKey,
+    );
+    // A restored backup brings the row back but not the hardware key.
+    fixture.platform.keys.clear();
+    final host = fixture.stubHost();
+
+    final result = await fixture.service.connectToHost(host.id);
+
+    expect(result.success, isTrue, reason: result.error);
+    expect(hardwareKey.id, lessThan(pemKey!.id));
+    expect(fixture.signedAttempts.map((attempt) => attempt.valid), [
+      false,
+      true,
+    ]);
+  });
+
+  test('a key the server does not list is never signed', () async {
+    final fixture = await _Fixture.create()
+      ..authorizedKeys = {}
+      ..acceptedPassword = 'hunter2';
+    final key = await fixture.hardwareKey(requireUserPresence: true);
+    final host = fixture.stubHost(keyId: key.id, password: 'hunter2');
+
+    final result = await fixture.service.connectToHost(host.id);
+
+    expect(result.success, isTrue, reason: result.error);
+    expect(fixture.probes, hasLength(1));
+    expect(fixture.platform.signRequests, isEmpty);
+    expect(fixture.signedAttempts, isEmpty);
   });
 
   test(
