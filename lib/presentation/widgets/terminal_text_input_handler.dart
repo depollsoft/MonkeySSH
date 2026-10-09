@@ -891,6 +891,9 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     if (key == null) {
       return KeyEventResult.ignored;
     }
+    if (key == TerminalKey.space && event is! KeyUpEvent) {
+      _ime.noteSpaceKey();
+    }
     final type = _terminalKeyEventType(event);
     final isNativePhysicalEvent =
         _AndroidTerminalImeKeyBridge.consumePhysicalEvent(key, type);

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
+import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:xterm/xterm.dart';
 
@@ -723,6 +724,54 @@ void main() {
         await disposeTerminalInputHarness(tester, harness);
       },
     );
+
+    testWidgets('marks only the space Gboard adds after punctuation', (
+      tester,
+    ) async {
+      final harness = await pumpTerminalInputHarness(tester);
+      final writes = <(String, bool)>[];
+      harness.terminal.onOutput = (data) =>
+          writes.add((data, isWritingKeyboardSpace));
+      Future<void> commit(String text) async {
+        tester.testTextInput.updateEditingValue(
+          _editingValue(text, selectionOffset: text.length),
+        );
+        await tester.pump();
+      }
+
+      await commit('ok.');
+      // A Space key's space is typed, even right before Enter.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+      await commit('ok. ');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+      await commit('ok. a.');
+      // Gboard commits its space after punctuation as Return is pressed.
+      await commit('ok. a. ');
+      // A space after a letter is the user's, key or not.
+      await commit('ok. a. b');
+      await commit('ok. a. b ');
+      // So are pasted spaces, with or without a line break.
+      await commit('ok. a. b c.');
+      await commit('ok. a. b c.  ');
+      await commit('ok. a. b c.  d.');
+      await commit('ok. a. b c.  d. \n');
+
+      expect(writes, [
+        ('ok.', false),
+        (' ', false),
+        ('a.', false),
+        (' ', true),
+        ('b', false),
+        (' ', false),
+        ('c.', false),
+        ('  ', false),
+        ('d.', false),
+        (' ', false),
+        ('\r', false),
+      ]);
+
+      await disposeTerminalInputHarness(tester, harness);
+    });
 
     testWidgets('hardware Shift+Enter sends legacy LF newline', (tester) async {
       final harness = await pumpTerminalInputHarness(tester);

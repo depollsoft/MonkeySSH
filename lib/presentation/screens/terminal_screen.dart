@@ -4977,7 +4977,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       _clearDetectedSensitiveKeyboardPromptAfterInput(output);
       _handleTerminalOutputForShellCompletion(output);
-      enterPacer.add(output, enter: isWritingTerminalEnterKey);
+      enterPacer.add(
+        output,
+        enter: isWritingTerminalEnterKey,
+        keyboardSpace: isWritingKeyboardSpace,
+      );
     }
 
     _terminalOutputHandler = handleTerminalOutput;
@@ -5144,10 +5148,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  /// Releases the terminal callbacks this screen installed. A Return the
-  /// pacer still holds back goes out on its own once its gap has passed, since
-  /// the session can outlive this screen; [dropHeldInput] discards it instead,
-  /// for a session that is being replaced or has been lost.
+  /// Releases the terminal callbacks this screen installed. Input the pacer
+  /// still holds back goes out on its own once its wait has passed, since the
+  /// session can outlive this screen; [dropHeldInput] discards it instead, for
+  /// a session that is being replaced or has been lost.
   void _clearOwnedTerminalCallbacks({bool dropHeldInput = false}) {
     if (dropHeldInput) {
       _terminalEnterPacer?.dispose();
@@ -10114,7 +10118,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
-    // A Return still held back belongs to the window it was typed in.
+    // Input still held back belongs to the window it was typed in.
     final heldInput = _terminalEnterPacer?.idle;
     if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
