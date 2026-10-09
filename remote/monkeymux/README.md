@@ -133,13 +133,19 @@ the other client already answered; it continues with a fresh attach.
 The displaced writer stops receiving output at once. A lease-aware one is sent
 `{"type":"lease","writer":{"label":...},"acceptedInputs":N}` ahead of any
 queued output, where `acceptedInputs` counts the input frames the bridge took
-from that connection before the lease moved (later ones were dropped), and is
-disconnected 10 seconds later even if it never reads it. Any other client is
+from that connection before the lease moved (later ones were dropped; zero is
+written out), and is disconnected 10 seconds later even if it never reads it.
+The bridge also remembers that count per `clientToken` when a connection ends,
+and reports it as `previousAcceptedInputs` in that token's next hello, so a
+client that reconnects knows which of its prompts the old connection
+delivered. Any other client is
 disconnected so it reattaches as a reader. Pending provider requests and
 in-flight turns belong to the bridge, so they carry over to the new writer,
 which receives them through the normal attach replay. Only one answer to a
 provider request reaches the provider; a second answer from another client is
-dropped.
+dropped without touching the request, so it can still be replayed if the
+first answer cannot be written. A resuming client without a token is always
+sent to a fresh attach, since the bridge cannot tell it wrote last.
 
 The replay buffer is memory-only. Bridge metadata exposed by `list` and
 `status` contains bounded provider/session IDs, working directory, state,

@@ -105,7 +105,10 @@ type acpWireMessage struct {
 	Takeover     bool           `json:"takeover,omitempty"`
 	Writer       *acpWriterInfo `json:"writer,omitempty"`
 	// Input frames the bridge took from a displaced writer, in a lease frame.
-	AcceptedInputs uint64 `json:"acceptedInputs,omitempty"`
+	AcceptedInputs *uint64 `json:"acceptedInputs,omitempty"`
+	// Input frames the bridge took on the previous connection with the same
+	// client token, in a hello.
+	PreviousAcceptedInputs *uint64 `json:"previousAcceptedInputs,omitempty"`
 }
 
 // acpBridgeInfo contains only bounded bridge/session metadata. It excludes the
@@ -205,6 +208,7 @@ type acpBridge struct {
 	clients              map[string]*acpBridgeClient
 	writerClientID       string
 	writerLastInput      time.Time
+	acceptedByToken      map[string]uint64
 	lastWriterLabel      string
 	lastWriterToken      string
 	leaseEverHeld        bool
@@ -1108,24 +1112,38 @@ func (b *acpBridge) observeClientMessage(envelope acpEnvelope) {
 // that resumes from before the cancel replays the request and answers it
 // again. Any other response claims its request before the write, so a racing
 // provider cancellation cannot also answer it.
-func (b *acpBridge) claimClientResponse(envelope acpEnvelope) bool {
+// acpResponseClaim is what may happen to a client frame on its way to the
+// provider.
+type acpResponseClaim int
+
+const (
+	// acpClaimForward sends the frame to the provider.
+	acpClaimForward acpResponseClaim = iota
+	// acpClaimCancelled drops an answer to a request the bridge already
+	// answered as cancelled.
+	acpClaimCancelled
+	// acpClaimDuplicate drops a second answer to a request.
+	acpClaimDuplicate
+)
+
+func (b *acpBridge) claimClientResponse(envelope acpEnvelope) acpResponseClaim {
 	if len(envelope.ID) == 0 || len(envelope.Method) > 0 {
-		return true
+		return acpClaimForward
 	}
 	key := acpRequestKey(envelope.ID)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, cancelled := b.cancelledRequests[key]; cancelled {
-		return false
+		return acpClaimCancelled
 	}
 	// Only one answer per request reaches the provider. A second one comes
 	// from a client that saw the request before another client answered it,
 	// for example across a lease takeover.
 	if _, pending := b.pendingRequests[key]; !pending {
-		return false
+		return acpClaimDuplicate
 	}
 	delete(b.pendingRequests, key)
-	return true
+	return acpClaimForward
 }
 
 // unclaimClientResponse makes a claimed request pending again after its
@@ -1299,6 +1317,7 @@ func (b *acpBridge) publish(
 		if tryEnqueueAcpClient(client, message) {
 			continue
 		}
+		b.rememberAcceptedInputsLocked(client)
 		delete(b.clients, clientID)
 		if b.writerClientID == clientID {
 			b.writerClientID = ""
@@ -1540,6 +1559,9 @@ func (b *acpBridge) handleAttach(
 			Bridge:       &snapshot,
 			Capabilities: []string{acpWriterLeaseCapability},
 			Writer:       b.lastWriterInfoLocked(now),
+			// Read after any displacement above, which records the
+			// same process's old connection.
+			PreviousAcceptedInputs: b.previousAcceptedInputsLocked(lease),
 		}
 		linger := b.leaseLingerDuration()
 		b.mu.Unlock()
@@ -1575,6 +1597,9 @@ func (b *acpBridge) handleAttach(
 		Bridge:       &snapshot,
 		ReplayMode:   replayMode,
 		Capabilities: []string{acpWriterLeaseCapability},
+		// Read after the displacement above, which records the same
+		// process's old connection.
+		PreviousAcceptedInputs: b.previousAcceptedInputsLocked(lease),
 	}}
 	if pendingOnly {
 		// A fresh native view rebuilds transcript history with session/load.
@@ -1684,11 +1709,18 @@ func (b *acpBridge) handleAttach(
 				b.publish("output", response, "", nil)
 				continue
 			}
-			if !b.claimClientResponse(envelope) {
-				// The provider already received -32800 for this request, or
-				// another client already answered it.
+			switch b.claimClientResponse(envelope) {
+			case acpClaimCancelled:
+				// The provider already received -32800 for this request.
 				b.observeClientMessage(envelope)
 				continue
+			case acpClaimDuplicate:
+				// Another client answered first. Leave the request's replay
+				// copy alone: if that answer cannot be written, the request
+				// becomes pending again and must still be replayable.
+				b.noteActivity()
+				continue
+			case acpClaimForward:
 			}
 			requestID, trackedRequest := b.trackClientRequest(envelope)
 			if err := b.writeProvider(message.Data); err != nil {
@@ -1862,6 +1894,7 @@ func (b *acpBridge) detachClient(clientID string) {
 	b.mu.Lock()
 	client, ok := b.clients[clientID]
 	if ok {
+		b.rememberAcceptedInputsLocked(client)
 		delete(b.clients, clientID)
 		if b.writerClientID == clientID {
 			b.writerClientID = ""

@@ -117,8 +117,10 @@ func (b *acpBridge) resumeNeedsFreshAttachLocked(
 	hello acpWireMessage,
 	request acpLeaseRequest,
 ) bool {
+	// Without a token the bridge cannot tell who wrote last, so it assumes
+	// someone else did.
 	return request.aware && hello.LastAck > 0 && b.leaseEverHeld &&
-		request.token != b.lastWriterToken
+		(request.token == "" || request.token != b.lastWriterToken)
 }
 
 // claimWriterOnAttachLocked decides whether an attaching client takes the
@@ -164,16 +166,18 @@ func (b *acpBridge) displaceWriterLocked(
 	old *acpBridgeClient,
 	writer *acpBridgeClient,
 ) *acpBridgeClient {
+	b.rememberAcceptedInputsLocked(old)
 	delete(b.clients, old.id)
 	if !old.leaseAware || old.displaced == nil {
 		return old
 	}
+	accepted := old.acceptedInputs
 	old.leaseNotice = &acpWireMessage{
 		Version:        acpBridgeProtocolVersion,
 		Type:           "lease",
 		BridgeID:       b.id,
 		Writer:         &acpWriterInfo{Label: writer.label},
-		AcceptedInputs: old.acceptedInputs,
+		AcceptedInputs: &accepted,
 	}
 	close(old.displaced)
 	time.AfterFunc(b.leaseLingerDuration(), old.cancel)
@@ -250,4 +254,47 @@ func answerLeaseProbe(
 			return
 		}
 	}
+}
+
+// acpAcceptedInputsMemory bounds the per-token counts kept for reattaching
+// clients; one app process has one token, so few are ever live.
+const acpAcceptedInputsMemory = 64
+
+// rememberAcceptedInputsLocked keeps the input count of a lease-aware
+// client's connection as it leaves, so that client's next hello can tell it
+// which prompts the bridge took before the connection dropped.
+func (b *acpBridge) rememberAcceptedInputsLocked(client *acpBridgeClient) {
+	if !client.leaseAware || client.token == "" {
+		return
+	}
+	if b.acceptedByToken == nil {
+		b.acceptedByToken = map[string]uint64{}
+	}
+	if _, known := b.acceptedByToken[client.token]; !known {
+		for token := range b.acceptedByToken {
+			if len(b.acceptedByToken) < acpAcceptedInputsMemory {
+				break
+			}
+			delete(b.acceptedByToken, token)
+		}
+	}
+	b.acceptedByToken[client.token] = client.acceptedInputs
+}
+
+// previousAcceptedInputsLocked is the count remembered for request's token.
+func (b *acpBridge) previousAcceptedInputsLocked(request acpLeaseRequest) *uint64 {
+	if request.token == "" {
+		return nil
+	}
+	count, known := b.acceptedByToken[request.token]
+	if !known {
+		return nil
+	}
+	return &count
+}
+
+func (b *acpBridge) noteActivity() {
+	b.mu.Lock()
+	b.lastActivity = time.Now()
+	b.mu.Unlock()
 }

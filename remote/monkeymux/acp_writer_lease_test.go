@@ -385,8 +385,8 @@ func TestAcpWriterLeaseNoticeCountsAcceptedInputs(t *testing.T) {
 	assertLeaseLost(t, notice, "iPhone")
 	// The client compares this with the frames it wrote: anything after the
 	// second never reached the provider.
-	if notice.AcceptedInputs != 2 {
-		t.Fatalf("accepted inputs = %d, want 2", notice.AcceptedInputs)
+	if notice.AcceptedInputs == nil || *notice.AcceptedInputs != 2 {
+		t.Fatalf("accepted inputs = %v, want 2", notice.AcceptedInputs)
 	}
 }
 
@@ -397,7 +397,7 @@ func TestAcpAnsweredRequestIsNeitherReplayedNorAnsweredTwice(t *testing.T) {
 
 	// The iPad's answer has been claimed but its write to the provider has
 	// not finished when the iPhone takes over.
-	if !bridge.claimClientResponse(parseAcpEnvelope(json.RawMessage(testAllowAnswer))) {
+	if bridge.claimClientResponse(parseAcpEnvelope(json.RawMessage(testAllowAnswer))) != acpClaimForward {
 		t.Fatal("first answer was not forwarded")
 	}
 	iphone, iphoneReader, hello := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
@@ -588,5 +588,119 @@ func waitForNoWriter(t *testing.T, bridge *acpBridge) {
 			t.Fatal("the writer never detached")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestAcpDuplicateAnswerLeavesTheReplayCopyForARetry(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	publishTestProviderFrame(t, bridge, testPermissionRequest)
+	answer := parseAcpEnvelope(json.RawMessage(testAllowAnswer))
+
+	// The iPhone took over and saw the request; the iPad's answer, read just
+	// before, is claimed and on its way to the provider.
+	iphone, iphoneReader, _ := attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+	_ = readTestAcpFrame(t, iphoneReader, iphone) // pending request
+	_ = readTestAcpFrame(t, iphoneReader, iphone) // replay_end
+	if bridge.claimClientResponse(answer) != acpClaimForward {
+		t.Fatal("first answer was not forwarded")
+	}
+	// The iPhone's answer is a duplicate and must not touch the request.
+	sendTestClientInput(t, iphone, testAllowAnswer)
+	if err := writeAcpWireFrame(iphone, acpWireMessage{
+		Version: acpBridgeProtocolVersion,
+		Type:    "status",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = readTestAcpFrame(t, iphoneReader, iphone) // status: the answer was read
+	expectNoProviderLine(t, lines)
+	// The iPad's write fails, so the request is pending again.
+	bridge.unclaimClientResponse(answer)
+
+	_ = iphone.Close()
+	waitForNoWriter(t, bridge)
+	fresh, freshReader, hello := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	if hello.Bridge == nil || hello.Bridge.PendingRequest != 1 {
+		t.Fatalf("fresh attach hello = %#v, want the request pending", hello.Bridge)
+	}
+	if next := readTestAcpFrame(t, freshReader, fresh); next.Type != "pending" ||
+		!bytes.Contains(next.Data, []byte("permission-1")) {
+		t.Fatalf("fresh attach replayed %#v, want the stranded request", next)
+	}
+}
+
+func TestAcpWriterLeaseNoticeAlwaysCarriesTheCount(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+
+	ipad, ipadReader, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+	_ = ipad.SetReadDeadline(time.Now().Add(time.Second))
+	raw, err := ipadReader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Zero is written out, so a client can tell it from a bridge that does
+	// not count.
+	if !bytes.Contains(raw, []byte(`"type":"lease"`)) ||
+		!bytes.Contains(raw, []byte(`"acceptedInputs":0`)) {
+		t.Fatalf("lease notice = %s, want an explicit zero count", raw)
+	}
+}
+
+func TestAcpWriterLeaseReportsThePreviousConnectionsCount(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+
+	first, _, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	sendTestClientInput(t, first, `{"jsonrpc":"2.0","method":"one"}`)
+	sendTestClientInput(t, first, `{"jsonrpc":"2.0","method":"two"}`)
+	_ = nextProviderLine(t, lines)
+	_ = nextProviderLine(t, lines)
+	// A network switch: the same process reattaches as writer.
+	_, _, hello := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	if !hello.CanSend || hello.PreviousAcceptedInputs == nil ||
+		*hello.PreviousAcceptedInputs != 2 {
+		t.Fatalf("reattach hello = %#v, want the old connection's count 2", hello)
+	}
+}
+
+func TestAcpWriterLeaseProbeReportsThePreviousConnectionsCount(t *testing.T) {
+	bridge, lines := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+
+	ipad, _, _ := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	sendTestClientInput(t, ipad, `{"jsonrpc":"2.0","method":"one"}`)
+	_ = nextProviderLine(t, lines)
+	attachLeaseClient(t, bridge, "iPhone", testTokenIPhone, true)
+
+	// The iPad wakes on a new connection and finds the chat taken.
+	_, _, probe := attachLeaseClient(t, bridge, "iPad", testTokenIPad, false)
+	if probe.CanSend || probe.PreviousAcceptedInputs == nil ||
+		*probe.PreviousAcceptedInputs != 1 {
+		t.Fatalf("probe = %#v, want the old connection's count 1", probe)
+	}
+}
+
+func TestAcpWriterLeaseTokenlessResumeAttachesAfresh(t *testing.T) {
+	bridge, _ := newCancelTestBridge(t)
+	newTestLeaseClock(bridge)
+	publishTestProviderFrame(t, bridge, `{"jsonrpc":"2.0","method":"history"}`)
+
+	attachLeaseClient(t, bridge, "iPad", "", false)
+	other, _, _ := attachLeaseClient(t, bridge, "iPhone", "", true)
+	_ = other.Close()
+	waitForNoWriter(t, bridge)
+
+	// Without tokens the bridge cannot tell the two apart, so it must not
+	// assume the resuming client is the one that wrote last.
+	ipad, ipadReader := attachTestClient(t, bridge, acpWireMessage{
+		Capabilities: []string{acpWriterLeaseCapability},
+		DeviceLabel:  "iPad",
+		LastAck:      1,
+	})
+	if hello := readTestAcpFrame(t, ipadReader, ipad); hello.CanSend {
+		t.Fatalf("tokenless resume = %#v, want a probe", hello)
 	}
 }
