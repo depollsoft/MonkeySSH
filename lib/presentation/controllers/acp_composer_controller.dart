@@ -637,11 +637,17 @@ class AcpComposerController extends ChangeNotifier {
       final result = await promptFuture;
       if (!_disposed &&
           result.stopReason == AcpStopReason.cancelled &&
-          submission == _submissions &&
-          (_turnRecovery?.withdrawnBySend ?? true)) {
+          submission == _submissions) {
+        // An earlier lost or failed prompt still on offer keeps its more
+        // cautious wording, with the stopped prompt added after it.
+        final previous = _turnRecovery;
+        final keepPrevious = previous != null && !previous.withdrawnBySend;
         _turnRecovery = AcpTurnRecovery(
-          kind: AcpTurnRecoveryKind.cancelled,
-          drafts: [(text: snapshotText, attachments: snapshotAttachments)],
+          kind: keepPrevious ? previous.kind : AcpTurnRecoveryKind.cancelled,
+          drafts: [
+            if (keepPrevious) ...previous.drafts,
+            (text: snapshotText, attachments: snapshotAttachments),
+          ],
           submission: _submissions,
         );
         notifyListeners();
@@ -687,6 +693,11 @@ class AcpComposerController extends ChangeNotifier {
     }
   }
 
+  static const _restoreLimitError = AcpComposerError(
+    AcpComposerErrorKind.attachment,
+    'Remove some attachments to restore the rest of the prompt.',
+  );
+
   static const _sendFailedError = AcpComposerError(
     AcpComposerErrorKind.send,
     'Your message could not be sent. Try again.',
@@ -724,10 +735,9 @@ class AcpComposerController extends ChangeNotifier {
             turnResumed: recovery.turnResumed,
           );
     if (kept.isNotEmpty) {
-      _error = const AcpComposerError(
-        AcpComposerErrorKind.attachment,
-        'Remove some attachments to restore the rest of the prompt.',
-      );
+      _error = _restoreLimitError;
+    } else if (_error == _restoreLimitError) {
+      _error = null;
     }
     for (final draft in restored.reversed) {
       _mergeDraft(draft.text, draft.attachments);

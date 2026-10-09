@@ -163,6 +163,20 @@ void registerAcpTranscriptSearchTests() {
       expect(searchAcpTranscript(entries, 'saved').matches, hasLength(1));
     });
 
+    test('matches letters whose lower case is longer', () {
+      final entries = [
+        const AcpAssistantMessageEntry(
+          id: 'a',
+          markdown: 'Flights to İSTANBUL and Ankara',
+        ),
+      ];
+      final istanbul = searchAcpTranscript(entries, 'İstanbul').matches.single;
+      expect(istanbul.snippet.match, 'İSTANBUL');
+      expect(istanbul.snippet.after, ' and Ankara');
+      final ankara = searchAcpTranscript(entries, 'ankara').matches.single;
+      expect(ankara.snippet.match, 'Ankara');
+    });
+
     test('ignores blank queries', () {
       expect(searchAcpTranscript(_transcript(), '   ').matches, isEmpty);
     });

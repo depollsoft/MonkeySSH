@@ -521,6 +521,57 @@ void registerAcpTranscriptToolsTests() {
       expect(second.parent.path, endsWith(kAcpExportFolderName));
     });
 
+    testWidgets('fits a short screen with large text without overflow', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(640, 300)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: FluttyTheme.dark,
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(640, 300),
+              textScaler: TextScaler.linear(2),
+            ),
+            child: Scaffold(
+              body: AcpTranscriptExportSheet(
+                source: _exportSource(),
+                share: (context, markdown, fileName) async {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      final share = tester.getRect(
+        find.byKey(const ValueKey('acp-export-share')),
+      );
+      expect(share.bottom, lessThanOrEqualTo(300));
+    });
+
+    testWidgets('announces a copy or share failure', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pumpSheet(
+        tester,
+        share: (context, markdown, fileName) async =>
+            throw PlatformException(code: 'unavailable'),
+      );
+      await tester.tap(find.byKey(const ValueKey('acp-export-share')));
+      await tester.pump();
+      expect(
+        tester.getSemantics(find.byKey(const ValueKey('acp-export-error'))),
+        matchesSemantics(
+          isLiveRegion: true,
+          label: 'Couldn’t open the share sheet. Copy the Markdown instead.',
+        ),
+      );
+      semantics.dispose();
+    });
+
     testWidgets('explains a share failure', (tester) async {
       await pumpSheet(
         tester,

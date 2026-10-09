@@ -168,13 +168,14 @@ final class AcpTranscriptSearchIndex {
           capped = true;
           break outer;
         }
-        final (text, start) = found[index];
+        final (text, foldedStart) = found[index];
+        final (start, length) = text.originalRange(foldedStart, needle.length);
         newestFirst.add(
           AcpTranscriptMatch._(
             entryIndex: entryIndex,
             text: text,
             start: start,
-            length: needle.length,
+            length: length,
           ),
         );
       }
@@ -197,7 +198,7 @@ final class AcpTranscriptSearchIndex {
     for (final text in _textsFor(entries, entryIndex)) {
       var from = 0;
       while (true) {
-        final index = text.lower.indexOf(needle, from);
+        final index = text.folded.indexOf(needle, from);
         if (index < 0) break;
         found.add((text, index));
         from = index + needle.length;
@@ -237,20 +238,56 @@ final class _EntryMatches {
 /// The whole searchable text of one rendered entry, which the thread may
 /// split across several virtual segments.
 final class _EntryText {
-  _EntryText({
+  factory _EntryText({
+    required String entryId,
+    required AcpTranscriptMatchSource source,
+    required String text,
+    required List<int> segmentStarts,
+    required List<String> segmentKeys,
+  }) {
+    final (folded, toOriginal) = _fold(text);
+    return _EntryText._(
+      entryId: entryId,
+      source: source,
+      text: text,
+      folded: folded,
+      toOriginal: toOriginal,
+      segmentStarts: segmentStarts,
+      segmentKeys: segmentKeys,
+    );
+  }
+
+  _EntryText._({
     required this.entryId,
     required this.source,
     required this.text,
+    required this.folded,
+    required this.toOriginal,
     required this.segmentStarts,
     required this.segmentKeys,
-  }) : lower = _lowerPreservingOffsets(text);
+  });
 
   final String entryId;
   final AcpTranscriptMatchSource source;
   final String text;
-  final String lower;
+
+  /// [text] lower-cased for matching.
+  final String folded;
+
+  /// Maps each offset in [folded] (and its end) to [text], when lower-casing
+  /// changed lengths; `null` when the offsets already line up.
+  final List<int>? toOriginal;
+
   final List<int> segmentStarts;
   final List<String> segmentKeys;
+
+  /// The original-text range of a match found at [foldedStart] in [folded].
+  (int, int) originalRange(int foldedStart, int foldedLength) {
+    final map = toOriginal;
+    if (map == null) return (foldedStart, foldedLength);
+    final start = map[foldedStart];
+    return (start, map[foldedStart + foldedLength] - start);
+  }
 
   /// The key of the segment holding [offset].
   String childKeyAt(int offset) {
@@ -304,20 +341,28 @@ AcpTranscriptMatchSource? _sourceOf(AcpTimelineEntry entry) => switch (entry) {
   AcpSubagentTranscriptEntry() || AcpUsageEntry() => null,
 };
 
-/// Lower-cases [text] while keeping every offset aligned with the original.
+/// Lower-cases [text] for matching against a lower-cased query.
 ///
-/// A few characters (such as `İ`) lower-case to more than one code unit. Those
-/// are kept as-is so a match offset always points at the same original text.
-String _lowerPreservingOffsets(String text) {
+/// A few characters (such as `İ`) lower-case to more than one code unit.
+/// Then a map from every folded offset back to [text] comes with it, so a
+/// match still points at the original characters.
+(String, List<int>?) _fold(String text) {
   final lower = text.toLowerCase();
-  if (lower.length == text.length) return lower;
-  final buffer = StringBuffer();
+  if (lower.length == text.length) return (lower, null);
+  final folded = StringBuffer();
+  final toOriginal = <int>[];
+  var offset = 0;
   for (final rune in text.runes) {
     final original = String.fromCharCode(rune);
     final lowered = original.toLowerCase();
-    buffer.write(lowered.length == original.length ? lowered : original);
+    for (var unit = 0; unit < lowered.length; unit++) {
+      toOriginal.add(offset);
+    }
+    folded.write(lowered);
+    offset += original.length;
   }
-  return buffer.toString();
+  toOriginal.add(offset);
+  return (folded.toString(), toOriginal);
 }
 
 /// The text one rendered segment contributes. Segments of a split entry

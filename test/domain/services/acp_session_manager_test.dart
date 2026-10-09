@@ -1635,6 +1635,30 @@ void main() {
     });
 
     test(
+      'a queued prompt refused after the previous turn tail is a refusal',
+      () async {
+        final key = await startCopilot();
+        final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+        final first = manager.prompt(key, const [AcpTextContent('first')]);
+        await _pump();
+        final queued = manager.prompt(key, const [AcpTextContent('second')]);
+        await _pump();
+        // The first turn's reply lands after the queued prompt's row.
+        server.pushUpdate(key.acpSessionId, {
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': 'first reply'},
+        });
+        await _pump();
+        server.completeNextPrompt();
+        await first;
+        await _pump();
+        server.failNextPrompt('Rate limited');
+
+        await expectLater(queued, throwsA(isA<AcpRemoteException>()));
+      },
+    );
+
+    test(
       'an agent error before any output is a refusal and rolls back',
       () async {
         final key = await startCopilot();

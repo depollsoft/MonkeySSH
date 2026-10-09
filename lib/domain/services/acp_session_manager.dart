@@ -2977,6 +2977,13 @@ class _SessionController {
         _applyReceivedSessionUpdates();
         final dispatchedTimeline = _timelineBuilder
             .markLocalUserPromptDispatched(queued.localMessageId);
+        // Output newer than this belongs to this prompt. A queued prompt's
+        // row was added before the previous turn's tail, so output after
+        // that row is not enough.
+        final dispatchedOrder = dispatchedTimeline.entries.fold<int>(
+          -1,
+          (newest, entry) => entry.order > newest ? entry.order : newest,
+        );
         _update(
           (s) => s.copyWith(
             promptStatus: AcpPromptStatus.streaming,
@@ -3044,7 +3051,7 @@ class _SessionController {
           final midTurn =
               sent &&
               error is AcpRemoteException &&
-              _turnProgressedSince(queued.localMessageId);
+              _turnProgressedSince(dispatchedOrder);
           final rolledBackTimeline = midTurn
               ? _timelineBuilder.snapshot()
               : _timelineBuilder.removeLocalUserPrompt(queued.localMessageId);
@@ -3079,23 +3086,16 @@ class _SessionController {
     }
   }
 
-  /// Whether the agent replied, reasoned or ran a tool after the local prompt
-  /// [localMessageId], counting updates received but not yet applied.
-  bool _turnProgressedSince(String localMessageId) {
+  /// Whether the agent replied, reasoned or started a tool call after
+  /// [dispatchedOrder], counting updates received but not yet applied.
+  bool _turnProgressedSince(int dispatchedOrder) {
     _applyReceivedSessionUpdates();
-    final entries = _timelineBuilder.snapshot().entries;
-    final promptIndex = entries.indexWhere(
-      (entry) => entry is AcpMessageEntry && entry.messageId == localMessageId,
+    return _timelineBuilder.snapshot().entries.any(
+      (entry) =>
+          entry.order > dispatchedOrder &&
+          (entry is AcpToolCallEntry ||
+              (entry is AcpMessageEntry && entry.role != AcpMessageRole.user)),
     );
-    // A prompt trimmed off the bounded timeline had plenty of output after it.
-    if (promptIndex < 0) return true;
-    return entries
-        .skip(promptIndex + 1)
-        .any(
-          (entry) =>
-              entry is AcpToolCallEntry ||
-              (entry is AcpMessageEntry && entry.role != AcpMessageRole.user),
-        );
   }
 
   Future<void> cancelPrompt() async {

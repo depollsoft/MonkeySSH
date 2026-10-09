@@ -275,98 +275,118 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              'Export transcript',
-              style: FluttyTheme.displayMono(
-                fontSize: 18,
-                color: scheme.onSurface,
-              ),
-            ),
-            const SizedBox(height: FluttyTheme.spacingXs),
-            Text(
-              '${_plural(export.prompts, 'prompt')} · '
-              '${_plural(export.replies, 'reply', 'replies')} · '
-              '${_plural(export.toolCalls, 'tool call')} · '
-              '${_formatSize(_exportBytes)}',
-              key: const ValueKey('acp-export-summary'),
-              style: FluttyTheme.monoStyle.copyWith(
-                fontSize: 12,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: FluttyTheme.spacingSm),
-            if (export.historyIncomplete)
-              _Notice(
-                key: const ValueKey('acp-export-history-notice'),
-                icon: Icons.history_toggle_off,
-                color: scheme.tertiary,
-                text:
-                    'Earlier history isn’t loaded. The export says so at '
-                    'the top.',
-              ),
-            if (export.omittedAttachments > 0)
-              _Notice(
-                icon: Icons.attach_file,
-                color: scheme.onSurfaceVariant,
-                text:
-                    'Images, audio and attachments are marked where they '
-                    'appeared, not included.',
-              ),
-            if (widget.source.hasReasoning)
-              SwitchListTile(
-                key: const ValueKey('acp-export-include-reasoning'),
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Include reasoning'),
-                subtitle: Text(
-                  'Agent reasoning is left out unless you add it.',
-                  style: muted,
-                ),
-                value: _includeReasoning,
-                onChanged: _setIncludeReasoning,
-              ),
-            const SizedBox(height: FluttyTheme.spacingSm),
+            // Everything above the actions scrolls as one, so a short
+            // screen or large text never pushes Copy and Share off the sheet.
             Expanded(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
-                  border: Border.all(color: scheme.outlineVariant),
-                ),
-                child: Scrollbar(
-                  child: SingleChildScrollView(
-                    key: const ValueKey('acp-export-preview'),
-                    padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SelectableText(
-                          preview,
-                          style: FluttyTheme.monoStyle.copyWith(
-                            fontSize: 12,
-                            color: scheme.onSurface,
-                          ),
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  key: const ValueKey('acp-export-preview'),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Export transcript',
+                        style: FluttyTheme.displayMono(
+                          fontSize: 18,
+                          color: scheme.onSurface,
                         ),
-                        if (preview.length < markdown.length) ...[
-                          const SizedBox(height: FluttyTheme.spacingSm),
-                          Text(
-                            'Preview ends here. Copy or Share includes all '
-                            '${_formatSize(_exportBytes)}.',
-                            key: const ValueKey('acp-export-preview-truncated'),
+                      ),
+                      const SizedBox(height: FluttyTheme.spacingXs),
+                      Text(
+                        '${_plural(export.prompts, 'prompt')} · '
+                        '${_plural(export.replies, 'reply', 'replies')} · '
+                        '${_plural(export.toolCalls, 'tool call')} · '
+                        '${_formatSize(_exportBytes)}',
+                        key: const ValueKey('acp-export-summary'),
+                        style: FluttyTheme.monoStyle.copyWith(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: FluttyTheme.spacingSm),
+                      if (export.historyIncomplete)
+                        _Notice(
+                          key: const ValueKey('acp-export-history-notice'),
+                          icon: Icons.history_toggle_off,
+                          color: scheme.tertiary,
+                          text:
+                              'Earlier history isn’t loaded. The export says '
+                              'so at the top.',
+                        ),
+                      if (export.omittedAttachments > 0)
+                        _Notice(
+                          icon: Icons.attach_file,
+                          color: scheme.onSurfaceVariant,
+                          text:
+                              'Images, audio and attachments are marked where '
+                              'they appeared, not included.',
+                        ),
+                      if (widget.source.hasReasoning)
+                        SwitchListTile(
+                          key: const ValueKey('acp-export-include-reasoning'),
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Include reasoning'),
+                          subtitle: Text(
+                            'Agent reasoning is left out unless you add it.',
                             style: muted,
                           ),
-                        ],
-                      ],
-                    ),
+                          value: _includeReasoning,
+                          onChanged: _setIncludeReasoning,
+                        ),
+                      const SizedBox(height: FluttyTheme.spacingSm),
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(
+                            FluttyTheme.radiusMd,
+                          ),
+                          border: Border.all(color: scheme.outlineVariant),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(
+                            FluttyTheme.spacingSm + 4,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SelectableText(
+                                preview,
+                                style: FluttyTheme.monoStyle.copyWith(
+                                  fontSize: 12,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                              if (preview.length < markdown.length) ...[
+                                const SizedBox(height: FluttyTheme.spacingSm),
+                                Text(
+                                  'Preview ends here. Copy or Share includes '
+                                  'all ${_formatSize(_exportBytes)}.',
+                                  key: const ValueKey(
+                                    'acp-export-preview-truncated',
+                                  ),
+                                  style: muted,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
             if (_shareError != null) ...[
               const SizedBox(height: FluttyTheme.spacingSm),
-              _Notice(
-                icon: Icons.error_outline,
-                color: scheme.error,
-                text: _shareError!,
+              // Announced, since it appears in answer to a button press.
+              Semantics(
+                liveRegion: true,
+                child: _Notice(
+                  key: const ValueKey('acp-export-error'),
+                  icon: Icons.error_outline,
+                  color: scheme.error,
+                  text: _shareError!,
+                ),
               ),
             ],
             const SizedBox(height: FluttyTheme.spacingMd),

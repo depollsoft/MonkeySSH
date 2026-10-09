@@ -914,6 +914,28 @@ void main() {
       expect(controller.turnRecovery, isNull);
       expect(controller.attachments.map((a) => a.name), ['a.txt', 'b.txt']);
       expect(controller.text, 'with files');
+      expect(controller.error, isNull);
+    });
+
+    test('a stopped prompt joins an earlier lost one on offer', () async {
+      final manager = _StoppingAcpSessionManager([AcpStopReason.cancelled])
+        ..throwOnPrompt = const AcpConnectionClosedException();
+      final controller = _controller(manager)..setText('lost one');
+      addTearDown(controller.dispose);
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      manager.throwOnPrompt = null;
+      controller.setText('stopped one');
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      final recovery = controller.turnRecovery!;
+      expect(recovery.kind, AcpTurnRecoveryKind.unconfirmed);
+      expect(recovery.drafts.map((draft) => draft.text), [
+        'lost one',
+        'stopped one',
+      ]);
     });
   });
 }
