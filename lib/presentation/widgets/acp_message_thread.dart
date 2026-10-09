@@ -31,12 +31,10 @@ const double _unreadDividerTopInset = 44;
 /// Where the "unread since you left" divider sits in a thread.
 @immutable
 final class AcpThreadUnreadDivider {
-  /// Creates a divider above the top-level entry at [entryIndex]. A new
-  /// [jumpSerial] asks the thread to scroll the divider into view.
+  /// Creates a divider above the top-level entry at [entryIndex].
   const AcpThreadUnreadDivider({
     required this.entryIndex,
     required this.earlierHistoryUnavailable,
-    this.jumpSerial = 0,
   });
 
   /// Index of the top-level entry the divider sits above.
@@ -45,9 +43,6 @@ final class AcpThreadUnreadDivider {
   /// Whether the divider marks the start of loaded history because where the
   /// user left off is no longer loaded.
   final bool earlierHistoryUnavailable;
-
-  /// Changes whenever the divider should be scrolled into view.
-  final int jumpSerial;
 }
 
 /// Renders an ordered list of [AcpTimelineEntry]s as a conversation thread.
@@ -79,6 +74,7 @@ class AcpMessageThread extends StatefulWidget {
     this.onOpenLocation,
     this.followTail = false,
     this.unreadDivider,
+    this.unreadJumpSerial = 0,
     this.onLastVisibleEntryChanged,
   });
 
@@ -134,6 +130,11 @@ class AcpMessageThread extends StatefulWidget {
   /// The "unread since you left" divider, when there is unread history.
   final AcpThreadUnreadDivider? unreadDivider;
 
+  /// Grows each time the user asks to jump to [unreadDivider]. It is passed
+  /// apart from the divider so a thread built without one still knows which
+  /// requests were already handled.
+  final int unreadJumpSerial;
+
   /// Reports the index of the last top-level entry at least partly on
   /// screen, as the user scrolls.
   final ValueChanged<int>? onLastVisibleEntryChanged;
@@ -178,8 +179,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _controller.addListener(_scheduleStickyUpdate);
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
-    // A divider mounted with an earlier visit's Jump does not jump again.
-    _handledUnreadJumpSerial = widget.unreadDivider?.jumpSerial ?? 0;
+    // A thread mounted after a Jump does not replay it.
+    _handledUnreadJumpSerial = widget.unreadJumpSerial;
   }
 
   @override
@@ -205,10 +206,10 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   /// comes back never replays one.
   void _jumpToUnreadDividerIfAsked() {
     final divider = widget.unreadDivider;
-    if (divider == null || divider.jumpSerial == _handledUnreadJumpSerial) {
-      return;
-    }
-    _handledUnreadJumpSerial = divider.jumpSerial;
+    final serial = widget.unreadJumpSerial;
+    if (serial == _handledUnreadJumpSerial) return;
+    _handledUnreadJumpSerial = serial;
+    if (divider == null) return;
     // Jumping is the user moving through the transcript, so it suspends
     // live-follow like a drag does.
     _userOwnsScrollPosition = true;

@@ -49,11 +49,14 @@ class AcpUnreadDigestBar extends StatelessWidget {
         FluttyTheme.spacingSm,
         0,
       ),
-      // A live region announces the bar when it appears. Its label stays the
-      // same while counts grow, so streaming output is not re-announced.
+      // A live region announces the bar when it appears. The counts below
+      // are separate nodes (explicitChildNodes), so the live region's label
+      // stays the same while they grow and streaming output is not
+      // re-announced.
       child: Semantics(
         container: true,
         liveRegion: true,
+        explicitChildNodes: true,
         label: known
             ? 'Unread since you left'
             : 'Earlier history not available',
@@ -87,23 +90,26 @@ class AcpUnreadDigestBar extends StatelessWidget {
                     ),
                   ),
                 ),
-                Tooltip(
-                  message: 'Jump to first unread',
-                  child: TextButton.icon(
-                    key: const ValueKey('acp-unread-jump'),
-                    style: TextButton.styleFrom(
-                      minimumSize: const Size(44, 44),
+                // Only rows can be jumped to; a new request or error alone
+                // has none.
+                if (state.dividerEntryIndex != null)
+                  Tooltip(
+                    message: 'Jump to first unread',
+                    child: TextButton.icon(
+                      key: const ValueKey('acp-unread-jump'),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                      ),
+                      onPressed: onJump,
+                      icon: const Icon(Icons.arrow_upward, size: 16),
+                      label: const Text('Jump'),
                     ),
-                    onPressed: onJump,
-                    icon: const Icon(Icons.arrow_upward, size: 16),
-                    label: const Text('Jump'),
                   ),
-                ),
                 IconButton(
                   tooltip: 'Dismiss',
                   constraints: const BoxConstraints(
-                    minWidth: 44,
-                    minHeight: 44,
+                    minWidth: 48,
+                    minHeight: 48,
                   ),
                   icon: Icon(
                     Icons.close,

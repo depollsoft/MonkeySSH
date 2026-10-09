@@ -1051,8 +1051,19 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       onFontSizeCommitted: onFontSizeCommitted,
       child: AcpChatPresence(
         onAway: () => _unread.depart(_seenSnapshot()),
-        onBack: ({required left}) =>
-            setState(() => _unread.arrive(_key, left: left)),
+        // No frames run while the app is hidden, so read the live session
+        // rather than the last one built.
+        onBack: ({required left}) => setState(
+          () => _unread.arrive(
+            _key,
+            left: left,
+            current: acpSeenSnapshot(
+              ref.read(acpSessionManagerProvider).state.byKeyValue(_key.value),
+              null,
+              followingTail: true,
+            ),
+          ),
+        ),
         child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
       ),
     );
@@ -1383,14 +1394,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                   unawaited(_openRemotePath(location.path)),
               onLastVisibleEntryChanged: (index) =>
                   _lastVisibleEntryIndex = index,
-              unreadDivider: unread == null
+              unreadDivider: unread?.dividerEntryIndex == null
                   ? null
                   : AcpThreadUnreadDivider(
-                      entryIndex: unread.dividerEntryIndex,
+                      entryIndex: unread!.dividerEntryIndex!,
                       earlierHistoryUnavailable:
                           unread.earlierHistoryUnavailable,
-                      jumpSerial: _unread.jumpSerial,
                     ),
+              unreadJumpSerial: _unread.jumpSerial,
             ),
           ),
         ),

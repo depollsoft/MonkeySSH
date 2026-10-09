@@ -108,11 +108,11 @@ void registerAcpUnreadWidgetTests() {
         AcpMessageThread(
           entries: entries,
           controller: controller,
-          unreadDivider: AcpThreadUnreadDivider(
+          unreadDivider: const AcpThreadUnreadDivider(
             entryIndex: 5,
             earlierHistoryUnavailable: false,
-            jumpSerial: jumpSerial,
           ),
+          unreadJumpSerial: jumpSerial,
         ),
       );
       await tester.pumpWidget(thread(0));
@@ -180,7 +180,7 @@ void registerAcpUnreadWidgetTests() {
         findsOneWidget,
       );
       final jump = find.byKey(const ValueKey('acp-unread-jump'));
-      expect(tester.getSize(jump).height, greaterThanOrEqualTo(44));
+      expect(tester.getSize(jump).height, greaterThanOrEqualTo(48));
       await tester.tap(jump);
       await tester.tap(find.byTooltip('Dismiss'));
       expect(jumped, isTrue);
@@ -313,32 +313,100 @@ void registerAcpUnreadWidgetTests() {
       ];
       final controller = ScrollController();
       addTearDown(controller.dispose);
-      Widget thread(AcpThreadUnreadDivider? divider) => _app(
-        AcpMessageThread(
-          entries: entries,
-          controller: controller,
-          unreadDivider: divider,
-        ),
-      );
-      const jumped = AcpThreadUnreadDivider(
+      Widget thread(AcpThreadUnreadDivider? divider, int serial, {Key? key}) =>
+          _app(
+            AcpMessageThread(
+              key: key,
+              entries: entries,
+              controller: controller,
+              unreadDivider: divider,
+              unreadJumpSerial: serial,
+            ),
+          );
+      const divider = AcpThreadUnreadDivider(
         entryIndex: 5,
         earlierHistoryUnavailable: false,
-        jumpSerial: 1,
       );
-      await tester.pumpWidget(thread(null));
+      await tester.pumpWidget(thread(null, 0));
       await tester.pumpAndSettle();
-      await tester.pumpWidget(thread(jumped));
+      await tester.pumpWidget(thread(divider, 1));
       await tester.pumpAndSettle();
       // The divider goes away (the user sent a prompt), they scroll to the
       // end, and a later visit brings a divider back.
-      await tester.pumpWidget(thread(null));
+      await tester.pumpWidget(thread(null, 1));
       await tester.pumpAndSettle();
       controller.jumpTo(controller.position.maxScrollExtent);
       await tester.pumpAndSettle();
       final bottom = controller.offset;
-      await tester.pumpWidget(thread(jumped));
+      await tester.pumpWidget(thread(divider, 1));
       await tester.pumpAndSettle();
       expect(controller.offset, bottom);
+
+      // A transcript rebuilt from scratch without a divider (a rotation
+      // across the wide breakpoint, Reconnect) does not replay it either.
+      await tester.pumpWidget(thread(null, 1, key: const ValueKey('remount')));
+      await tester.pumpAndSettle();
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      final remountedBottom = controller.offset;
+      await tester.pumpWidget(
+        thread(divider, 1, key: const ValueKey('remount')),
+      );
+      await tester.pumpAndSettle();
+      expect(controller.offset, remountedBottom);
+    });
+
+    testWidgets('the digest live region keeps one label as counts grow', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      Widget bar(int replies) => _app(
+        AcpUnreadDigestBar(
+          state: AcpUnreadState(
+            dividerEntryIndex: 2,
+            earlierHistoryUnavailable: false,
+            digest: AcpUnreadDigest(replies: replies),
+          ),
+          onJump: () {},
+          onDismiss: () {},
+        ),
+      );
+      await tester.pumpWidget(bar(1));
+      final live = find.byKey(const ValueKey('acp-unread-digest'));
+      final first = tester.getSemantics(live);
+      expect(first.label, 'Unread since you left');
+      expect(first.flagsCollection.isLiveRegion, isTrue);
+      await tester.pumpWidget(bar(2));
+      expect(tester.getSemantics(live).label, 'Unread since you left');
+      // The counts are still readable, in their own node.
+      expect(
+        find.bySemanticsLabel('Since you left: 2 replies'),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('a request with no row to jump to offers no Jump', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _app(
+          AcpUnreadDigestBar(
+            state: const AcpUnreadState(
+              dividerEntryIndex: null,
+              earlierHistoryUnavailable: false,
+              digest: AcpUnreadDigest(pendingRequests: 1),
+            ),
+            onJump: () {},
+            onDismiss: () {},
+          ),
+        ),
+      );
+      expect(find.text('Since you left: 1 request waiting'), findsOneWidget);
+      expect(find.byKey(const ValueKey('acp-unread-jump')), findsNothing);
+      final dismiss = tester.getSize(find.byTooltip('Dismiss'));
+      expect(dismiss.width, greaterThanOrEqualTo(48));
+      expect(dismiss.height, greaterThanOrEqualTo(48));
     });
 
     testWidgets('the divider arriving keeps an expanded tool card open', (

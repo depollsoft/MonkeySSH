@@ -28,13 +28,23 @@ typedef AcpSeenSnapshot = ({
   d.AcpTimeline timeline,
   int? upToOrder,
   bool hadSessionError,
+  int pendingRequests,
 });
+
+/// Requests waiting for an answer in [session].
+int acpPendingRequestCount(AcpSessionState session) =>
+    session.pendingPermissions.length +
+    session.pendingWrites.length +
+    session.pendingElicitations.length;
 
 /// What the user has seen of [session], mapped as [entries].
 ///
 /// When the chat was following the newest output, that is everything.
-/// Otherwise it is up to [lastVisibleEntryIndex], the last top-level entry
-/// on screen, so output the user never scrolled to stays unread.
+/// Otherwise it is what was rendered down to [lastVisibleEntryIndex], the
+/// last top-level entry on screen. Subagent output is nested next to its
+/// launching tool, so rendered order is not timeline order: the boundary is
+/// the newest order below which every entry was rendered, which never marks
+/// an entry the user did not reach as seen.
 AcpSeenSnapshot? acpSeenSnapshot(
   AcpSessionState? session,
   List<AcpTimelineEntry>? entries, {
@@ -47,35 +57,32 @@ AcpSeenSnapshot? acpSeenSnapshot(
       entries != null &&
       lastVisibleEntryIndex != null &&
       lastVisibleEntryIndex < entries.length - 1) {
-    final orders = <String, int>{
-      for (final entry in session.timeline.entries)
-        acpPresentationEntryId(entry): entry.order,
-    };
+    final rendered = <String>{};
+    for (var index = 0; index <= lastVisibleEntryIndex; index++) {
+      _collectIds(entries[index], rendered);
+    }
     upToOrder = -1;
-    for (var index = lastVisibleEntryIndex; index >= 0; index--) {
-      final order = _lastOrderIn(entries[index], orders);
-      if (order != null) {
-        upToOrder = order;
-        break;
-      }
+    for (final entry in session.timeline.entries) {
+      if (!rendered.contains(acpPresentationEntryId(entry))) break;
+      upToOrder = entry.order;
     }
   }
   return (
     timeline: session.timeline,
     upToOrder: upToOrder,
     hadSessionError: session.error != null,
+    pendingRequests: acpPendingRequestCount(session),
   );
 }
 
-int? _lastOrderIn(AcpTimelineEntry entry, Map<String, int> orders) {
+void _collectIds(AcpTimelineEntry entry, Set<String> ids) {
   if (entry case AcpSubagentTranscriptEntry(:final entries)) {
-    for (final child in entries.reversed) {
-      final order = _lastOrderIn(child, orders);
-      if (order != null) return order;
+    for (final child in entries) {
+      _collectIds(child, ids);
     }
-    return null;
+    return;
   }
-  return orders[entry.id];
+  ids.add(entry.id);
 }
 
 /// Where the user left each native chat during this app run.
@@ -104,11 +111,13 @@ class AcpLastSeenRegistry {
     d.AcpTimeline timeline, {
     int? upToOrder,
     bool hadSessionError = false,
+    int pendingRequests = 0,
   }) {
     final marker = AcpLastSeenMarker.of(
       timeline,
       upToOrder: upToOrder,
       hadSessionError: hadSessionError,
+      pendingRequests: pendingRequests,
     );
     if (marker == null) return;
     final id = _id(key);
@@ -170,12 +179,32 @@ class AcpUnreadVisit {
   // ignore: use_setters_to_change_properties
   void depart(AcpSeenSnapshot? seen) => _departure = seen;
 
-  /// The chat is in view again. When [left], what was seen at departure is
-  /// recorded and a new visit compares against it.
-  void arrive(AcpSessionKey key, {required bool left}) {
+  /// The chat is in view again, now showing [current]. When [left] and
+  /// something changed while it was out of view, what was seen at departure
+  /// is recorded and a new visit compares against it. Otherwise the visit,
+  /// and any divider it shows, carries on.
+  void arrive(
+    AcpSessionKey key, {
+    required bool left,
+    required AcpSeenSnapshot? current,
+  }) {
     final departure = _departure;
     _departure = null;
-    if (!left || departure == null) return;
+    if (!left || departure == null || current == null) return;
+    final atDeparture = AcpLastSeenMarker.of(
+      departure.timeline,
+      hadSessionError: departure.hadSessionError,
+      pendingRequests: departure.pendingRequests,
+    );
+    if (atDeparture == null ||
+        !acpChangedSince(
+          atDeparture,
+          current.timeline,
+          pendingRequests: current.pendingRequests,
+          hasSessionError: current.hadSessionError,
+        )) {
+      return;
+    }
     _record(key, departure);
     begin(key);
   }
@@ -192,6 +221,7 @@ class AcpUnreadVisit {
     seen.timeline,
     upToOrder: seen.upToOrder,
     hadSessionError: seen.hadSessionError,
+    pendingRequests: seen.pendingRequests,
   );
 
   /// Asks the transcript to scroll to the divider and hides the digest.
@@ -218,10 +248,7 @@ class AcpUnreadVisit {
       _caughtUp = true;
       return _memo = null;
     }
-    final pending =
-        session.pendingPermissions.length +
-        session.pendingWrites.length +
-        session.pendingElicitations.length;
+    final pending = acpPendingRequestCount(session);
     final hasError = session.error != null;
     if (identical(_memoTimeline, session.timeline) &&
         identical(_memoEntries, entries) &&

@@ -30,26 +30,31 @@ const int _maxRunningTools = 64;
 final class AcpLastSeenMarker {
   AcpLastSeenMarker._({
     required this.order,
+    required this.newestOrder,
     required this.source,
     required this.ordinal,
     required this.hadSessionError,
+    required this.pendingRequests,
     required Set<String> runningToolIds,
     this.toolCallId,
     this.role,
     this.messageId,
     this.textPrefix = '',
+    this.textIsWhole = false,
   }) : runningToolIds = Set<String>.unmodifiable(runningToolIds);
 
   /// The entry of [timeline] the user had seen up to, or `null` when nothing
   /// is loaded.
   ///
   /// That is the newest entry, or the newest at or before [upToOrder] when
-  /// the user had not scrolled to the end. [hadSessionError] records whether
-  /// a session error was already showing, so it is not reported as news.
+  /// the user had not scrolled to the end. [hadSessionError] and
+  /// [pendingRequests] record the session error and requests already showing,
+  /// so they are not reported as news.
   static AcpLastSeenMarker? of(
     d.AcpTimeline timeline, {
     int? upToOrder,
     bool hadSessionError = false,
+    int pendingRequests = 0,
   }) {
     final entries = timeline.entries;
     var index = entries.length - 1;
@@ -78,34 +83,47 @@ final class AcpLastSeenMarker {
     final tracked = running.length <= _maxRunningTools
         ? running
         : running.sublist(running.length - _maxRunningTools);
+    final newestOrder = entries.last.order;
     return switch (seen) {
       d.AcpToolCallEntry(:final order, :final toolCallId) =>
         AcpLastSeenMarker._(
           order: order,
+          newestOrder: newestOrder,
           source: timeline.source,
           ordinal: ordinal,
           hadSessionError: hadSessionError,
+          pendingRequests: pendingRequests,
           runningToolIds: tracked.toSet(),
           toolCallId: toolCallId,
         ),
       d.AcpMessageEntry(:final order, :final role, :final messageId) =>
         AcpLastSeenMarker._(
           order: order,
+          newestOrder: newestOrder,
           source: timeline.source,
           ordinal: ordinal,
           hadSessionError: hadSessionError,
+          pendingRequests: pendingRequests,
           runningToolIds: tracked.toSet(),
           role: role,
           // A user prompt carries a local identifier until the agent echoes
           // it, so only agent and reasoning identifiers identify a message.
           messageId: role == d.AcpMessageRole.user ? null : messageId,
           textPrefix: _leadingText(seen, _markerTextPrefixChars),
+          textIsWhole:
+              _leadingText(seen, _markerTextPrefixChars + 1).length <=
+              _markerTextPrefixChars,
         ),
     };
   }
 
   /// Order of the last seen entry in the timeline it was taken from.
   final int order;
+
+  /// Order of the newest entry in that timeline when the user left, which
+  /// may be below what they had scrolled to. A prompt newer than this was
+  /// sent after they came back.
+  final int newestOrder;
 
   /// The builder of that timeline; orders only compare within one source.
   final Object? source;
@@ -117,6 +135,9 @@ final class AcpLastSeenMarker {
 
   /// Whether a session error was already showing when the user left.
   final bool hadSessionError;
+
+  /// Requests that were already waiting for an answer when the user left.
+  final int pendingRequests;
 
   /// Tool calls that were still running when the user left.
   final Set<String> runningToolIds;
@@ -133,19 +154,25 @@ final class AcpLastSeenMarker {
   /// The start of the last seen message's text.
   final String textPrefix;
 
+  /// Whether [textPrefix] is the message's whole text, as with a short
+  /// prompt such as "continue".
+  final bool textIsWhole;
+
   /// Where the last seen entry is in a rebuilt [entries], or `null` when it
   /// cannot be told apart from other entries.
   ///
   /// A tool call or an agent message with an identifier is found by that
   /// identifier. Otherwise a message is found by role and the start of its
   /// text: an empty start never matches, and a short one only when a single
-  /// message carries it. Of several matches, the one nearest the remembered
-  /// position wins, and the earlier on a tie, which errs towards showing more
-  /// as unread rather than hiding it.
+  /// message carries it, or when it was the whole of a finished message and
+  /// matches other messages' whole text exactly. Of several matches, the one
+  /// nearest the remembered position wins, and the earlier on a tie, which
+  /// errs towards showing more as unread rather than hiding it.
   int? relocateIn(List<d.AcpTimelineEntry> entries) {
     final kind = toolCallId != null ? _toolKind : role!.name;
     final byId = <(int, int)>[];
     final byPrefix = <(int, int)>[];
+    final byWholeText = <(int, int)>[];
     final ordinals = <String, int>{};
     for (final entry in entries) {
       final entryKind = _kindOf(entry);
@@ -166,14 +193,19 @@ final class AcpLastSeenMarker {
           if (textPrefix.isNotEmpty &&
               _leadingText(entry, textPrefix.length) == textPrefix) {
             byPrefix.add((entry.order, entryOrdinal));
+            if (textIsWhole &&
+                _leadingText(entry, textPrefix.length + 1) == textPrefix) {
+              byWholeText.add((entry.order, entryOrdinal));
+            }
           }
       }
     }
-    final candidates = byId.isNotEmpty ? byId : byPrefix;
+    final short = textPrefix.length < _unambiguousPrefixChars;
+    final candidates = byId.isNotEmpty
+        ? byId
+        : (short && byWholeText.isNotEmpty ? byWholeText : byPrefix);
     if (candidates.isEmpty) return null;
-    if (identical(candidates, byPrefix) &&
-        candidates.length > 1 &&
-        textPrefix.length < _unambiguousPrefixChars) {
+    if (identical(candidates, byPrefix) && candidates.length > 1 && short) {
       return null;
     }
     var best = candidates.first;
@@ -189,13 +221,38 @@ final class AcpLastSeenMarker {
 /// Whether a prompt was sent from this device since [marker] was taken from
 /// a timeline: after it in the same timeline, or anywhere in a rebuilt one,
 /// where every local prompt is newer than the rebuild.
+///
+/// It compares with the newest entry when the user left, not with how far
+/// they had scrolled, so a prompt they sent before scrolling up and leaving
+/// does not count.
 bool acpPromptSentSince(AcpLastSeenMarker marker, d.AcpTimeline timeline) {
   final sameSource = identical(marker.source, timeline.source);
   return timeline.entries.any(
     (entry) =>
         entry is d.AcpMessageEntry &&
         entry.isLocalPrompt &&
-        (!sameSource || entry.order > marker.order),
+        (!sameSource || entry.order > marker.newestOrder),
+  );
+}
+
+/// Whether anything changed in [timeline] since the user left at [marker]:
+/// a newer entry, a tracked tool call that finished, a new request or error,
+/// or a rebuilt timeline.
+bool acpChangedSince(
+  AcpLastSeenMarker marker,
+  d.AcpTimeline timeline, {
+  int pendingRequests = 0,
+  bool hasSessionError = false,
+}) {
+  if (!identical(marker.source, timeline.source)) return true;
+  if (pendingRequests > marker.pendingRequests) return true;
+  if (hasSessionError && !marker.hadSessionError) return true;
+  return timeline.entries.any(
+    (entry) =>
+        entry.order > marker.newestOrder ||
+        (entry is d.AcpToolCallEntry &&
+            _isTerminal(entry.status) &&
+            marker.runningToolIds.contains(entry.toolCallId)),
   );
 }
 
@@ -306,8 +363,10 @@ final class AcpUnreadState {
     required this.digest,
   });
 
-  /// Index of the top-level presentation entry the divider sits above.
-  final int dividerEntryIndex;
+  /// Index of the top-level presentation entry the divider sits above, or
+  /// `null` when only state changed (a new request or error) and there is
+  /// no row to mark.
+  final int? dividerEntryIndex;
 
   /// Whether the last seen entry is no longer loaded, so the divider marks
   /// the start of the loaded history rather than where the user left off.
@@ -383,7 +442,20 @@ AcpUnreadState? computeAcpUnreadState({
       finishedIds.add(acpPresentationEntryId(entry));
     }
   }
-  if (newIds.isEmpty && finishedIds.isEmpty) return null;
+  final newError = hasSessionError && !marker.hadSessionError;
+  if (newIds.isEmpty && finishedIds.isEmpty) {
+    // Requests and errors can arrive with no timeline row to mark; they are
+    // still worth a digest.
+    if (pendingRequests <= marker.pendingRequests && !newError) return null;
+    return AcpUnreadState(
+      dividerEntryIndex: null,
+      earlierHistoryUnavailable: false,
+      digest: AcpUnreadDigest(
+        pendingRequests: pendingRequests,
+        errors: newError ? 1 : 0,
+      ),
+    );
+  }
 
   final counter = _DigestCounter(newIds: newIds, finishedIds: finishedIds);
   int? firstNew;
@@ -403,9 +475,7 @@ AcpUnreadState? computeAcpUnreadState({
       toolCalls: Map<AcpToolKind, int>.unmodifiable(counter.toolCalls),
       reportedFileChanges: counter.changedPaths.length,
       pendingRequests: pendingRequests,
-      errors:
-          counter.failedTools +
-          (hasSessionError && !marker.hadSessionError ? 1 : 0),
+      errors: counter.failedTools + (newError ? 1 : 0),
       partial: trimmed,
     ),
   );
@@ -489,7 +559,9 @@ String _kindOf(d.AcpTimelineEntry entry) => switch (entry) {
 };
 
 bool _isTerminal(d.AcpToolStatus? status) =>
-    status == d.AcpToolStatus.completed || status == d.AcpToolStatus.failed;
+    status == d.AcpToolStatus.completed ||
+    status == d.AcpToolStatus.failed ||
+    status == d.AcpToolStatus.cancelled;
 
 String _leadingText(d.AcpTimelineEntry entry, int maxChars) {
   if (entry is! d.AcpMessageEntry || maxChars <= 0) return '';

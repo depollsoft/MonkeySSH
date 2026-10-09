@@ -349,7 +349,7 @@ void registerAcpUnreadTests() {
       final entries = mapAcpSessionTimeline(fakeAcpSession(timeline: timeline));
       final state = _unread(marker, timeline)!;
       expect(
-        entries[state.dividerEntryIndex],
+        entries[state.dividerEntryIndex!],
         isA<AcpSubagentTranscriptEntry>(),
       );
       // Subagent messages are not reply turns; its tool call still counts.
@@ -496,16 +496,29 @@ void registerAcpUnreadTests() {
       final one = session(1);
       expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNotNull);
 
+      final two = session(2);
+      AcpSeenSnapshot? seen(AcpSessionState s) =>
+          acpSeenSnapshot(s, null, followingTail: true);
       visit
-        ..depart(acpSeenSnapshot(one, null, followingTail: true))
-        ..arrive(key, left: false);
+        ..depart(seen(one))
+        ..arrive(key, left: false, current: seen(two));
       expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNotNull);
 
+      // Long enough, but nothing arrived (an elicitation sheet, a picker):
+      // the visit and its divider carry on.
       visit
-        ..depart(acpSeenSnapshot(one, null, followingTail: true))
-        ..arrive(key, left: true);
+        ..depart(seen(one))
+        ..arrive(key, left: true, current: seen(one));
+      expect(
+        visit.evaluate(one, mapAcpSessionTimeline(one))?.dividerEntryIndex,
+        1,
+      );
+
+      // Long enough, and a reply arrived meanwhile: a new visit starts.
+      visit
+        ..depart(seen(one))
+        ..arrive(key, left: true, current: seen(two));
       expect(visit.evaluate(one, mapAcpSessionTimeline(one)), isNull);
-      final two = session(2);
       expect(
         visit.evaluate(two, mapAcpSessionTimeline(two))?.dividerEntryIndex,
         2,
@@ -552,6 +565,139 @@ void registerAcpUnreadTests() {
         lastVisibleEntryIndex: 1,
       );
       expect(scrolledUp!.upToOrder, 1);
+    });
+
+    test(
+      'a prompt sent before scrolling up and leaving is not "sent since"',
+      () {
+        final registry = AcpLastSeenRegistry();
+        final key = fakeAcpKey();
+        final builder = d.AcpTimelineBuilder()
+          ..appendLocalUserPrompt(const [AcpTextContent('Look at the logs')])
+          ..apply(
+            const d.AcpContentChunkUpdate(
+              kind: 'agent_message_chunk',
+              content: AcpTextContent('They show a timeout.'),
+            ),
+          )
+          ..appendLocalUserPrompt(const [AcpTextContent('Now fix the tests')]);
+        final leaving = fakeAcpSession(timeline: builder.snapshot());
+        // Scrolled up to the agent's first reply, above the user's own prompt.
+        final entries = mapAcpSessionTimeline(leaving);
+        registry.record(
+          key,
+          leaving.timeline,
+          upToOrder: acpSeenSnapshot(
+            leaving,
+            entries,
+            followingTail: false,
+            lastVisibleEntryIndex: 1,
+          )!.upToOrder,
+        );
+        builder.apply(
+          const d.AcpContentChunkUpdate(
+            kind: 'agent_message_chunk',
+            messageId: 'reply-2',
+            content: AcpTextContent('Fixed them.'),
+          ),
+        );
+        final back = leaving.copyWith(timeline: builder.snapshot());
+        final state = AcpUnreadVisit(registry)..begin(key);
+        expect(
+          state.evaluate(back, mapAcpSessionTimeline(back))?.digest?.replies,
+          1,
+        );
+      },
+    );
+
+    test('nested subagent output already on screen stays read', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final source = Object();
+      final session = fakeAcpSession(
+        plan: const [
+          d.AcpPlanEntry(
+            content: 'Ship it',
+            priority: d.AcpPlanPriority.high,
+            status: d.AcpPlanStatus.pending,
+          ),
+        ],
+        timeline: _timeline([
+          _user(0, 'Go'),
+          _tool(1, 'helper', kind: d.AcpToolKind.other, subagent: true),
+          _agent(2, 'Parent reply'),
+          _agent(3, 'Nested reply', parent: 'helper'),
+        ], source: source),
+      );
+      final entries = mapAcpSessionTimeline(session);
+      // Rendered: prompt, helper, its nested transcript, the parent reply,
+      // then the plan, which is below the screen.
+      final replyIndex = entries.indexWhere(
+        (entry) =>
+            entry is AcpAssistantMessageEntry &&
+            entry.markdown == 'Parent reply',
+      );
+      expect(entries.last, isA<AcpPlanEntry>());
+      final seen = acpSeenSnapshot(
+        session,
+        entries,
+        followingTail: false,
+        lastVisibleEntryIndex: replyIndex,
+      )!;
+      registry.record(key, seen.timeline, upToOrder: seen.upToOrder);
+      final visit = AcpUnreadVisit(registry)..begin(key);
+      expect(visit.evaluate(session, entries), isNull);
+    });
+
+    test('a request or error with no timeline row still gets a digest', () {
+      final source = Object();
+      final timeline = _timeline([
+        _user(0, 'Go'),
+        _agent(1, 'Ok'),
+      ], source: source);
+      final marker = AcpLastSeenMarker.of(timeline);
+      final state = _unread(marker, timeline, pending: 1)!;
+      expect(state.dividerEntryIndex, isNull);
+      expect(state.digest!.summary, '1 request waiting');
+      expect(_unread(marker, timeline, error: true)!.digest!.errors, 1);
+      // Requests already waiting when the user left are not news.
+      final waiting = AcpLastSeenMarker.of(timeline, pendingRequests: 1);
+      expect(_unread(waiting, timeline, pending: 1), isNull);
+    });
+
+    test('a tool cancelled while away counts as finished', () {
+      final source = Object();
+      final marker = AcpLastSeenMarker.of(
+        _timeline([
+          _user(0, 'Go'),
+          _tool(1, 'run', status: d.AcpToolStatus.inProgress),
+        ], source: source),
+      );
+      final timeline = _timeline([
+        _user(0, 'Go'),
+        _tool(1, 'run', status: d.AcpToolStatus.cancelled),
+      ], source: source);
+      expect(_unread(marker, timeline)?.digest?.toolCallCount, 1);
+    });
+
+    test('a short whole prompt like "continue" is found by position', () {
+      final marker = AcpLastSeenMarker.of(
+        _timeline([
+          _user(0, 'continue'),
+          _agent(1, 'Working.'),
+          _user(2, 'continue'),
+        ], source: Object()),
+      );
+      final rebuilt = _timeline([
+        _user(0, 'continue'),
+        _agent(1, 'Working.'),
+        _user(2, 'continue'),
+        _agent(3, 'Done.'),
+        _user(4, 'continue'),
+      ], source: Object());
+      final state = _unread(marker, rebuilt)!;
+      expect(state.earlierHistoryUnavailable, isFalse);
+      expect(state.dividerEntryIndex, 3);
     });
   });
 }
