@@ -64,6 +64,18 @@ Set<String> sshConfigImportClosure(
   return closure;
 }
 
+/// Thrown when a selected entry cannot be imported yet.
+class SshConfigImportBlockedException implements Exception {
+  /// Creates the exception with the user-facing [reason].
+  const SshConfigImportBlockedException(this.reason);
+
+  /// Why the entry is blocked.
+  final String reason;
+
+  @override
+  String toString() => reason;
+}
+
 /// Result of saving an import.
 class SshConfigImportResult {
   /// Creates a result.
@@ -108,7 +120,8 @@ class SshConfigImportService {
   ///
   /// An entry that matches a saved host (same hostname, port, user, and jump
   /// host) reuses it instead of creating a duplicate. Everything is written in
-  /// one transaction. Throws [StateError] when a selected entry is blocked.
+  /// one transaction. Throws [SshConfigImportBlockedException] when a
+  /// selected entry (or a jump host it needs) is blocked.
   Future<SshConfigImportResult> importEntries(
     SshConfigImportPlan plan, {
     required Set<String> selectedIds,
@@ -121,7 +134,7 @@ class SshConfigImportService {
         plan.entryById(id)!,
         defaultUsername: defaultUsername,
       );
-      if (reason != null) throw StateError(reason);
+      if (reason != null) throw SshConfigImportBlockedException(reason);
     }
 
     final created = <String, int>{};

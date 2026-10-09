@@ -165,7 +165,7 @@ Host web
     );
     await expectLater(
       service.importEntries(plan, selectedIds: {entry.id}, defaultUsername: ''),
-      throwsStateError,
+      throwsA(isA<SshConfigImportBlockedException>()),
     );
     await service.importEntries(
       plan,
