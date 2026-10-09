@@ -19,6 +19,7 @@ AppLinkPresetReview _review({bool yolo = false}) => AppLinkPresetReview(
   tool: _preset.tool,
   command: buildAgentLaunchCommand(_preset, startInYoloMode: yolo),
   yoloMode: yolo,
+  yoloSwitches: yolo ? const ['--dangerously-skip-permissions'] : const [],
   muxSessionName: 'agents',
   muxBackend: RemoteMuxBackend.monkeyMux,
 );

@@ -6253,12 +6253,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         .read(portForwardRepositoryProvider)
         .getByHostId(widget.hostId);
     if (!mounted) return;
-    final heldDetection = ref
-        .read(activeSessionsProvider.notifier)
-        .isAutomaticForwardingHeld(widget.hostId);
-    if (!heldDetection && !forwards.any((forward) => forward.autoStart)) {
-      return;
-    }
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    // Offer only what the link actually held back: detection the host has
+    // switched on, and auto-start forwards not already running.
+    final heldDetection =
+        (_host?.autoForwardPorts ?? false) &&
+        sessions.isAutomaticForwardingHeld(widget.hostId);
+    final idleAutoStart = forwards.any(
+      (forward) =>
+          forward.autoStart &&
+          !isPortForwardActiveOnConnectedSession(
+            sessions: sessions,
+            portForward: forward,
+          ),
+    );
+    if (!heldDetection && !idleAutoStart) return;
     _linkPortForwardOfferShown = true;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

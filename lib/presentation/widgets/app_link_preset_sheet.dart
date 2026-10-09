@@ -14,6 +14,7 @@ class AppLinkPresetReview {
     required this.tool,
     required this.command,
     required this.yoloMode,
+    this.yoloSwitches = const [],
     this.muxSessionName,
     this.muxBackend,
   });
@@ -36,12 +37,8 @@ class AppLinkPresetReview {
   /// Backend for [muxSessionName].
   final RemoteMuxBackend? muxBackend;
 
-  /// What turns YOLO mode on for [tool], as it appears in [command].
-  String get yoloSwitches => [
-    for (final MapEntry(:key, :value) in tool.yoloEnvironment.entries)
-      '$key=$value',
-    ...tool.yoloArguments,
-  ].join(' ');
+  /// The parts of [command] that turn YOLO mode on, as they appear there.
+  final List<String> yoloSwitches;
 }
 
 /// Shows the review sheet for a launch-preset link.
@@ -310,7 +307,7 @@ class _YoloWarning extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final switches = review.yoloSwitches;
+    final switches = review.yoloSwitches.join(' ');
     return Container(
       key: const ValueKey<String>('app-link-preset-yolo'),
       padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),

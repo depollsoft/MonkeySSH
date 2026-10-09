@@ -244,14 +244,17 @@ class AppLinkHandler {
     final muxSessionName = preset.usesMuxSession
         ? preset.tmuxSessionName!.trim()
         : null;
+    final yoloSwitches = presetYoloSwitches(
+      preset,
+      startInYoloMode: startInYoloMode,
+    );
     final confirmed = await _effects.confirmPresetLaunch(
       AppLinkPresetReview(
         hostLabel: host.label,
         tool: preset.tool,
         command: command,
-        yoloMode:
-            (startInYoloMode && preset.tool.supportsYoloMode) ||
-            presetArgumentsRequestYolo(preset),
+        yoloMode: yoloSwitches.isNotEmpty,
+        yoloSwitches: yoloSwitches,
         muxSessionName: muxSessionName,
         muxBackend: muxSessionName == null
             ? null
@@ -290,10 +293,23 @@ class AppLinkHandler {
   }
 }
 
-/// Whether [preset]'s own extra arguments switch on its tool's YOLO mode,
-/// whatever the host's YOLO preference says.
-bool presetArgumentsRequestYolo(AgentLaunchPreset preset) =>
-    agentArgumentsEnableYolo(preset.tool, preset.additionalArguments);
+/// What puts [preset]'s command in YOLO mode, as it appears in that command:
+/// the tool's own YOLO switches when the host prefers YOLO, plus any
+/// permissive switches in the preset's extra arguments.
+List<String> presetYoloSwitches(
+  AgentLaunchPreset preset, {
+  required bool startInYoloMode,
+}) {
+  final tool = preset.tool;
+  return <String>{
+    if (startInYoloMode && tool.supportsYoloMode) ...[
+      for (final MapEntry(:key, :value) in tool.yoloEnvironment.entries)
+        '$key=$value',
+      ...tool.yoloArguments,
+    ],
+    ...agentYoloSwitchesInArguments(tool, preset.additionalArguments),
+  }.toList(growable: false);
+}
 
 /// Builds the terminal route for an open-host link.
 String buildAppLinkTerminalLocation({

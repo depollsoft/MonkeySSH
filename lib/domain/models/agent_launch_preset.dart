@@ -524,20 +524,32 @@ final _yoloSwitches =
 
 /// Whether [arguments], read as shell words, switch [tool] into YOLO mode on
 /// their own, whatever the host's YOLO preference says.
-bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) {
+bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) =>
+    agentYoloSwitchesInArguments(tool, arguments).isNotEmpty;
+
+/// The switches in [arguments], read as shell words, that put [tool] in
+/// YOLO mode, written as they appear (`--sandbox danger-full-access`).
+List<String> agentYoloSwitchesInArguments(
+  AgentLaunchTool tool,
+  String? arguments,
+) {
   final switches = _yoloSwitches[tool];
   if (switches == null || arguments == null || arguments.trim().isEmpty) {
-    return false;
+    return const [];
   }
+  final found = <String>[];
   final words = _splitShellWords(arguments);
   for (var index = 0; index < words.length; index++) {
     final word = words[index];
-    if (switches.flags.contains(word)) return true;
+    if (switches.flags.contains(word)) {
+      found.add(word);
+      continue;
+    }
     final equals = word.indexOf('=');
     if (equals > 0) {
       final allowed = switches.valued[word.substring(0, equals)];
       if (allowed != null && allowed.contains(word.substring(equals + 1))) {
-        return true;
+        found.add(word);
       }
       continue;
     }
@@ -545,10 +557,10 @@ bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) {
     if (allowed != null &&
         index + 1 < words.length &&
         allowed.contains(words[index + 1])) {
-      return true;
+      found.add('$word ${words[++index]}');
     }
   }
-  return false;
+  return found;
 }
 
 /// Splits [value] into words the way a POSIX shell would for plain

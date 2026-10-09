@@ -288,7 +288,7 @@ void main() {
         review.command,
         buildAgentLaunchCommand(preset, startInYoloMode: true),
       );
-      expect(review.yoloSwitches, '--dangerously-skip-permissions');
+      expect(review.yoloSwitches, ['--dangerously-skip-permissions']);
     });
 
     test('report a launch whose connection did not open', () async {
@@ -339,10 +339,10 @@ void main() {
       expect(effects.reviews, hasLength(1));
     });
 
-    for (final arguments in [
-      '--model gpt-6 --yolo',
-      "'--allow-all-tools'",
-      '--allow-all',
+    for (final (arguments, switches) in [
+      ('--model gpt-6 --yolo', ['--yolo']),
+      ("'--allow-all-tools'", ['--allow-all-tools']),
+      ('--allow-all', ['--allow-all']),
     ]) {
       test(
         'flag YOLO switches passed as extra arguments: $arguments',
@@ -356,7 +356,10 @@ void main() {
 
           await handler.handle(const LaunchPresetAppLink(presetId: 7));
 
-          expect(effects.reviews.single.yoloMode, isTrue);
+          final review = effects.reviews.single;
+          expect(review.yoloMode, isTrue);
+          // The warning names the switch the command really carries.
+          expect(review.yoloSwitches, switches);
         },
       );
     }

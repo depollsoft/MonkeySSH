@@ -947,6 +947,7 @@ Host _buildHost({
   String? tmuxExtraFlags,
   RemoteMuxBackend? remoteMuxBackend,
   bool autoConnectRequiresConfirmation = false,
+  bool autoForwardPorts = false,
 }) => Host(
   id: id,
   label: 'Terminal test host',
@@ -961,7 +962,7 @@ Host _buildHost({
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
   autoConnectRequiresConfirmation: autoConnectRequiresConfirmation,
-  autoForwardPorts: false,
+  autoForwardPorts: autoForwardPorts,
   remoteMuxBackend: remoteMuxBackend?.storageValue,
   sortOrder: 0,
 );
@@ -11594,9 +11595,15 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    for (final openedFromLink in [true, false]) {
+    for (final (openedFromLink, detectionOn) in [
+      (true, true),
+      // Nothing to hold back: no offer, even though the hold was placed.
+      (true, false),
+      (false, true),
+    ]) {
       testWidgets('a link holds open-port detection on its new connection, '
-          'link: $openedFromLink', (tester) async {
+          'link: $openedFromLink, detection: $detectionOn', (tester) async {
+        host = _buildHost(id: host.id, autoForwardPorts: detectionOn);
         session = SshSession(
           connectionId: 7,
           hostId: host.id,
@@ -11614,11 +11621,13 @@ void main() {
         await tester.pump(const Duration(milliseconds: 300));
 
         final offer = find.textContaining('port forwarding is off');
-        if (!openedFromLink) {
-          expect(activeSessions.automaticForwardHolds, isEmpty);
+        expect(
+          activeSessions.automaticForwardHolds,
+          openedFromLink ? [host.id] : isEmpty,
+        );
+        if (!openedFromLink || !detectionOn) {
           expect(offer, findsNothing);
         } else {
-          expect(activeSessions.automaticForwardHolds, [host.id]);
           expect(offer, findsOneWidget);
           await tester.tap(find.widgetWithText(SnackBarAction, 'Start'));
           await tester.pump();
