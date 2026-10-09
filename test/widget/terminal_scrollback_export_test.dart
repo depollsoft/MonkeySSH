@@ -15,11 +15,13 @@ void main() {
     );
   });
 
-  test('only Linux and the web save through a dialog', () {
+  test('only iOS and Android use the share sheet', () {
+    // macOS and Windows return from share_plus while the target may still
+    // read the file, which the export then deletes.
     for (final platform in TargetPlatform.values) {
       expect(
         terminalScrollbackExportUsesShareSheet(platform, isWeb: false),
-        platform != TargetPlatform.linux,
+        platform == TargetPlatform.iOS || platform == TargetPlatform.android,
         reason: '$platform',
       );
     }
@@ -27,6 +29,38 @@ void main() {
       terminalScrollbackExportUsesShareSheet(TargetPlatform.iOS, isWeb: true),
       isFalse,
     );
+  });
+
+  test('cleans up exports left from an earlier run', () async {
+    final temp = Directory.systemTemp.createTempSync('scrollback-cleanup-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    final old = DateTime.now().subtract(const Duration(hours: 1));
+    final stale = Directory('${temp.path}/scrollback-old')..createSync();
+    File('${stale.path}/terminal-scrollback-1.txt').writeAsStringSync('x');
+    final sharePlus = Directory('${temp.path}/share_plus')..createSync();
+    final staleCopy = File('${sharePlus.path}/terminal-scrollback-2.txt')
+      ..writeAsStringSync('x')
+      ..setLastModifiedSync(old);
+    final otherShare = File('${sharePlus.path}/photo.jpg')
+      ..writeAsStringSync('x')
+      ..setLastModifiedSync(old);
+    // Everything above is older than this moment; the export below is newer.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    final now = DateTime.now();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    final fresh = Directory('${temp.path}/scrollback-new')..createSync();
+
+    final deleted = await cleanUpTerminalScrollbackExports(
+      temporaryDirectory: temp,
+      maxAge: Duration.zero,
+      now: now,
+    );
+
+    expect(deleted, 2);
+    expect(stale.existsSync(), isFalse);
+    expect(staleCopy.existsSync(), isFalse);
+    expect(fresh.existsSync(), isTrue);
+    expect(otherShare.existsSync(), isTrue);
   });
 
   group('exportTerminalScrollback', () {
