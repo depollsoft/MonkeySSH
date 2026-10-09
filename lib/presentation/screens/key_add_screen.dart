@@ -396,9 +396,13 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
   Future<void> _generateHardwareKey(KeyService keyService) async {
     final SshKey? result;
     try {
+      // The switch shows off when confirmation became unavailable; match it.
+      final capabilities = ref.read(hardwareKeyCapabilitiesProvider).asData;
       result = await keyService.generateHardwareKey(
         name: _nameController.text.trim(),
-        requireUserPresence: _requireUserPresence,
+        requireUserPresence:
+            _requireUserPresence &&
+            (capabilities?.value.userPresenceAvailable ?? false),
       );
     } on HardwareKeyException catch (error) {
       if (mounted) {

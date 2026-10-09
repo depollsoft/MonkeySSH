@@ -204,6 +204,38 @@ void main() {
       semantics.dispose();
     });
 
+    testWidgets('an emulator key does not claim hardware protection', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(
+        backing: HardwareKeyBacking.tee,
+        isEmulated: true,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('non-exportable · TEE (emulator)'), findsOneWidget);
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('simulated in software'), findsOneWidget);
+      expect(find.textContaining('inside this device’s secure'), findsNothing);
+    });
+
     testWidgets('details never reveal or copy the hardware reference', (
       tester,
     ) async {

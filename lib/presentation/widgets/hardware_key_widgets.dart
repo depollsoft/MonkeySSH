@@ -161,6 +161,11 @@ class HardwareKeyPrivateKeyNotice extends StatelessWidget {
               reference == null
                   ? 'This key’s hardware reference is damaged, so it can’t '
                         'sign in. Delete it and generate a new key.'
+                  : reference.isEmulated
+                  ? 'Generated in this emulator’s keystore, which is '
+                        'simulated in software, so it is not hardware '
+                        'protected. The app still never reveals, copies, or '
+                        'exports it.'
                   : 'The private key was generated inside this device’s '
                         'secure hardware and never leaves it. It can’t be '
                         'revealed, copied, exported, or moved to another '
@@ -275,9 +280,14 @@ class _AvailablePanel extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          'Creates an ECDSA P-256 key inside the ${backing.label}. The private '
-          'key never leaves it: it can’t be exported, copied, or moved to '
-          'another device. Servers see a standard ecdsa-sha2-nistp256 key.',
+          capabilities.isEmulator
+              ? 'Creates an ECDSA P-256 key in this emulator’s simulated '
+                    '${backing.label}. The app never exports or copies it. '
+                    'Servers see a standard ecdsa-sha2-nistp256 key.'
+              : 'Creates an ECDSA P-256 key inside the ${backing.label}. The '
+                    'private key never leaves it: it can’t be exported, '
+                    'copied, or moved to another device. Servers see a '
+                    'standard ecdsa-sha2-nistp256 key.',
           style: mutedStyle,
         ),
         if (capabilities.isEmulator) ...[
@@ -306,11 +316,20 @@ class _AvailablePanel extends StatelessWidget {
               ? onRequireUserPresenceChanged
               : null,
           title: const Text('Confirm each use'),
-          subtitle: Text(
-            capabilities.userPresenceAvailable
-                ? 'Biometric or passcode confirmation before every sign-in.'
-                : 'Set up biometrics or a screen lock to turn this on.',
-          ),
+          subtitle: Text(switch ((
+            capabilities.userPresenceAvailable,
+            capabilities.userPresenceAllowsPasscode,
+          )) {
+            (true, true) =>
+              'Biometric or passcode confirmation before every sign-in.',
+            (true, false) =>
+              'Fingerprint or face confirmation before every sign-in. '
+                  'Enrolling new biometrics deletes the key.',
+            (false, true) => 'Set up a screen lock to turn this on.',
+            (false, false) =>
+              'Set up a screen lock and enroll a fingerprint or face to turn '
+                  'this on.',
+          }),
         ),
         if (requireUserPresence && capabilities.userPresenceAvailable)
           _Note(

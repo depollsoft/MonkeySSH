@@ -329,6 +329,89 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('does not submit per-use confirmation that went away', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(360, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = _MockKeyService();
+      when(
+        () => service.generateHardwareKey(
+          name: 'Phone key',
+          requireUserPresence: any(named: 'requireUserPresence'),
+        ),
+      ).thenAnswer((_) async => null);
+      var capabilities = const HardwareKeyCapabilities.available(
+        backing: HardwareKeyBacking.secureEnclave,
+        userPresenceAvailable: true,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            keyServiceProvider.overrideWithValue(service),
+            hardwareKeyCapabilitiesProvider.overrideWith(
+              (ref) async => capabilities,
+            ),
+          ],
+          child: const MaterialApp(home: KeyAddScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hardware'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirm each use'));
+      await tester.pumpAndSettle();
+
+      // The passcode was removed while the screen was open.
+      capabilities = const HardwareKeyCapabilities.available(
+        backing: HardwareKeyBacking.secureEnclave,
+        userPresenceAvailable: false,
+      );
+      ProviderScope.containerOf(tester.element(find.byType(KeyAddScreen)))
+          .invalidate(hardwareKeyCapabilitiesProvider);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isFalse,
+      );
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Key Name'),
+        'Phone key',
+      );
+      final submit = find.text('Generate Key');
+      await tester.ensureVisible(submit);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+
+      verify(
+        () => service.generateHardwareKey(
+          name: 'Phone key',
+          requireUserPresence: false,
+        ),
+      ).called(1);
+    });
+
+    testWidgets('Android 9 and 10 say per-use keys are biometric only', (
+      tester,
+    ) async {
+      await pumpHardwareTab(
+        tester,
+        const HardwareKeyCapabilities.available(
+          backing: HardwareKeyBacking.tee,
+          userPresenceAvailable: true,
+          userPresenceAllowsPasscode: false,
+        ),
+      );
+
+      expect(find.textContaining('Fingerprint or face'), findsOneWidget);
+      expect(find.textContaining('deletes the key'), findsOneWidget);
+      expect(find.textContaining('Biometric or passcode'), findsNothing);
+    });
+
     testWidgets('the simulator explains why it cannot generate', (
       tester,
     ) async {
@@ -362,7 +445,7 @@ void main() {
       expect(find.textContaining('simulated in software'), findsOneWidget);
       final toggle = tester.widget<SwitchListTile>(find.byType(SwitchListTile));
       expect(toggle.onChanged, isNull);
-      expect(find.textContaining('Set up biometrics'), findsOneWidget);
+      expect(find.textContaining('Set up a screen lock'), findsOneWidget);
       expect(generateButton(tester).onPressed, isNotNull);
     });
 
