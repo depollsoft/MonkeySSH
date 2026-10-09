@@ -34,9 +34,15 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
 
   AcpTranscriptSearchController get _search => widget.controller;
 
+  late int _focusRequest = _search.focusRequest;
+  int? _announced;
+  String _announcementLabel = '';
+
   @override
   void initState() {
     super.initState();
+    _focus.addListener(_onFocusChanged);
+    _search.addListener(_onSearchChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focus.requestFocus();
     });
@@ -44,9 +50,38 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
 
   @override
   void dispose() {
+    _search.removeListener(_onSearchChanged);
+    _focus.removeListener(_onFocusChanged);
     _text.dispose();
     _focus.dispose();
     super.dispose();
+  }
+
+  void _onFocusChanged() => _search.fieldFocused = _focus.hasFocus;
+
+  void _onSearchChanged() {
+    if (_search.focusRequest == _focusRequest) return;
+    _focusRequest = _search.focusRequest;
+    _focus.requestFocus();
+  }
+
+  /// The live region's label, updated only when the controller says the
+  /// result should be announced, so output streaming in stays quiet.
+  String _liveLabel({
+    required int count,
+    required int? active,
+    required bool capped,
+  }) {
+    if (_announced != _search.announcement) {
+      _announced = _search.announcement;
+      _announcementLabel = _announcement(
+        count: count,
+        active: active,
+        capped: capped,
+        match: _search.isSettled ? _search.activeMatch : null,
+      );
+    }
+    return _announcementLabel;
   }
 
   KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
@@ -152,13 +187,10 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
                       if (hasQuery)
                         Semantics(
                           liveRegion: true,
-                          label: _announcement(
+                          label: _liveLabel(
                             count: count,
                             active: active,
                             capped: result.capped,
-                            match: _search.isSettled
-                                ? _search.activeMatch
-                                : null,
                           ),
                           child: ExcludeSemantics(
                             child: Padding(

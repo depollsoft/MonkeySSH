@@ -60,6 +60,7 @@ Widget _chat(
   bool embedded = false,
   AcpChatActionsController? chatActions,
   AcpComposerFocusController? composerFocusController,
+  MediaQueryData media = const MediaQueryData(size: Size(390, 800)),
 }) {
   final ssh = _MockSshService();
   final launchPreferences = _MockLaunchPreferences();
@@ -77,7 +78,7 @@ Widget _chat(
     ],
     child: MaterialApp(
       home: MediaQuery(
-        data: const MediaQueryData(size: Size(390, 800)),
+        data: media,
         child: AgentChatScreen(
           hostId: key.hostId,
           providerId: key.providerId,
@@ -116,12 +117,10 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.tap(find.byTooltip('Search chat'));
       await tester.pumpAndSettle();
       expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
-      // The bar sits above the composer, which stays usable.
-      expect(find.byType(AcpComposer), findsOneWidget);
-      expect(
-        tester.getTopLeft(find.byType(AcpTranscriptSearchBar)).dy,
-        lessThan(tester.getTopLeft(find.byType(AcpComposer)).dy),
-      );
+      // While the search field has focus the composer folds away, still
+      // mounted, keeping its draft.
+      expect(find.byType(AcpComposer), findsNothing);
+      expect(find.byType(AcpComposer, skipOffstage: false), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('acp-transcript-search-field')),
         'needle',
@@ -148,6 +147,80 @@ void registerAgentChatTranscriptToolsTests() {
         find.byKey(const ValueKey('acp-search-match-highlight')),
         findsNothing,
       );
+    });
+
+    testWidgets('search fits phone landscape with the keyboard up', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(844, 390)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final composerFocus = AcpComposerFocusController();
+      // Embedded chats have no app bar: the shell opens search.
+      final actions = AcpChatActionsController();
+      await tester.pumpWidget(
+        _chat(
+          FakeAcpSessionManager(sessions: [_session()]),
+          embedded: true,
+          chatActions: actions,
+          composerFocusController: composerFocus,
+          media: const MediaQueryData(
+            size: Size(844, 390),
+            viewInsets: EdgeInsets.only(bottom: 200),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      actions.openSearch();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      // The composer folds away while the search field has focus, but the
+      // shell can still reach it, which brings it back.
+      expect(find.byType(AcpComposer), findsNothing);
+      composerFocus.insertText('typed');
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpComposer), findsOneWidget);
+      expect(find.text('typed'), findsOneWidget);
+    });
+
+    testWidgets('Ctrl+F returns focus to an open search from the composer', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _chat(FakeAcpSessionManager(sessions: [_session()])),
+      );
+      await tester.pumpAndSettle();
+      Future<void> pressFind() async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pumpAndSettle();
+      }
+
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      FocusNode fieldFocus() => tester
+          .widget<TextField>(
+            find.byKey(const ValueKey('acp-transcript-search-field')),
+          )
+          .focusNode!;
+      expect(fieldFocus().hasFocus, isTrue);
+      Future<void> composerFocusFromTap() async {
+        await tester.tap(
+          find.byKey(const ValueKey('acp-composer-field')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+      }
+
+      // Moving to the composer brings it back; the shortcut returns.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      await composerFocusFromTap();
+      expect(fieldFocus().hasFocus, isFalse);
+      await pressFind();
+      expect(fieldFocus().hasFocus, isTrue);
     });
 
     testWidgets('Ctrl+F opens search from the composer', (tester) async {

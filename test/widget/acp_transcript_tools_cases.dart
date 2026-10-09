@@ -2,6 +2,7 @@
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -104,6 +105,43 @@ void registerAcpTranscriptToolsTests() {
       );
       expect(newer.width, greaterThanOrEqualTo(44));
       expect(newer.height, greaterThanOrEqualTo(44));
+    });
+
+    testWidgets('streamed output does not re-announce the result', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final entries = _longTranscript();
+      final search = AcpTranscriptSearchController()
+        ..updateEntries(entries)
+        ..open();
+      addTearDown(search.dispose);
+      await tester.pumpWidget(_app(AcpTranscriptSearchBar(controller: search)));
+      await tester.enterText(
+        find.byKey(const ValueKey('acp-transcript-search-field')),
+        'needle',
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      final count = find.byKey(const ValueKey('acp-transcript-search-count'));
+      String liveLabel() => tester.getSemantics(count).label;
+      final announced = liveLabel();
+      expect(announced, startsWith('Match 2 of 2'));
+
+      search.updateEntries([
+        ...entries,
+        const AcpAssistantMessageEntry(id: 'more', markdown: 'another needle'),
+      ]);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('2/3'), findsOneWidget);
+      expect(liveLabel(), announced);
+
+      // Stepping is announced.
+      await tester.tap(
+        find.byKey(const ValueKey('acp-transcript-search-older')),
+      );
+      await tester.pump();
+      expect(liveLabel(), startsWith('Match 1 of 3'));
+      semantics.dispose();
     });
 
     testWidgets('bar says when nothing matches and Escape closes it', (
@@ -501,6 +539,22 @@ void registerAcpTranscriptToolsTests() {
         );
       },
     );
+
+    test('saves to a file only where sharing a file falls short', () {
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      for (final (platform, saves) in [
+        (TargetPlatform.android, false),
+        (TargetPlatform.iOS, false),
+        // The sandboxed macOS app has no Save-panel entitlement; its share
+        // sheet reads a file private to the app container.
+        (TargetPlatform.macOS, false),
+        (TargetPlatform.linux, true),
+        (TargetPlatform.windows, true),
+      ]) {
+        debugDefaultTargetPlatformOverride = platform;
+        expect(acpExportSavesToFile, saves, reason: '$platform');
+      }
+    });
 
     test('a new export file replaces what earlier exports left', () async {
       final temp = Directory.systemTemp.createTempSync('acp-export-test');

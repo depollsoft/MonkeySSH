@@ -158,6 +158,16 @@ void registerAcpTranscriptMarkdownTests() {
       expect(markdown, contains('Then push.\n\n---\n\n### You'));
     });
 
+    test('closes a fence a reply with Windows line endings left open', () {
+      final markdown = _export([
+        const AcpAssistantMessageEntry(
+          id: 'a',
+          markdown: 'Run this:\r\n```dart\r\nvoid main() {}',
+        ),
+      ]).markdown;
+      expect(markdown, contains('void main() {}\n```'));
+    });
+
     test(
       'omits local images with spaces or parentheses in the destination',
       () {

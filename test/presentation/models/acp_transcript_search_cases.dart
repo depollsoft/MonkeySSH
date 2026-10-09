@@ -177,6 +177,32 @@ void registerAcpTranscriptSearchTests() {
       expect(ankara.snippet.match, 'Ankara');
     });
 
+    test('keeps only the newest occurrences inside one entry', () {
+      final entries = [
+        AcpAssistantMessageEntry(id: 'many', markdown: 'a' * 50),
+      ];
+      final result = searchAcpTranscript(entries, 'a', maxMatches: 10);
+      expect(result.capped, isTrue);
+      expect(result.matches.map((match) => match.start), [
+        for (var i = 40; i < 50; i++) i,
+      ]);
+    });
+
+    test('a long code block split for display has no phantom fences', () {
+      final markdown = '```text\n${'line of code\n' * 1500}```\n';
+      expect(
+        splitAcpMarkdownForVirtualization(markdown).length,
+        greaterThan(1),
+      );
+      final entries = [
+        AcpAssistantMessageEntry(id: 'code', markdown: markdown),
+      ];
+      final result = searchAcpTranscript(entries, '```');
+      expect(result.matches, hasLength(2));
+      expect(result.matches.first.childKey, 'code');
+      expect(result.matches.last.childKey, startsWith('code-markdown-part-'));
+    });
+
     test('ignores blank queries', () {
       expect(searchAcpTranscript(_transcript(), '   ').matches, isEmpty);
     });

@@ -878,6 +878,81 @@ void main() {
       },
     );
 
+    group('when a reattached lost turn ends', () {
+      Future<AcpComposerController> twoLost() async {
+        final manager = RecordingAcpSessionManager()
+          ..throwOnPrompt = const AcpConnectionClosedException();
+        final controller = _controller(
+          manager,
+          session: _session(promptStatus: AcpPromptStatus.streaming),
+        )..setText('older X');
+        addTearDown(controller.dispose);
+        expect(await controller.send(), isTrue);
+        await Future<void>.delayed(Duration.zero);
+        controller.setText('newer A');
+        expect(await controller.send(), isTrue);
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.turnRecovery?.drafts, hasLength(2));
+        // Reattach: the host is still running A's turn.
+        controller
+          ..updateSession(
+            _session(
+              status: AcpConnectionStatus.detached,
+              promptStatus: AcpPromptStatus.streaming,
+            ),
+          )
+          ..updateSession(_session(promptStatus: AcpPromptStatus.streaming));
+        return controller;
+      }
+
+      List<String>? offered(AcpComposerController controller) =>
+          controller.turnRecovery?.drafts.map((draft) => draft.text).toList();
+
+      test('only its own draft is withdrawn', () async {
+        final controller = await twoLost();
+        controller.updateSession(_session());
+        expect(offered(controller), ['older X']);
+      });
+
+      test('stopping it keeps every draft', () async {
+        final controller = await twoLost();
+        controller
+          ..updateSession(_session(promptStatus: AcpPromptStatus.cancelling))
+          ..updateSession(_session());
+        expect(offered(controller), ['older X', 'newer A']);
+      });
+
+      test('a relaunch onto another session keeps every draft', () async {
+        final controller = await twoLost();
+        final relaunched = _session().copyWith(
+          key: AcpSessionKey.of(
+            hostId: 1,
+            providerId: 'copilot',
+            bridgeId: 'new-bridge',
+            acpSessionId: 'session',
+          ),
+        );
+        controller.updateSession(relaunched);
+        expect(offered(controller), ['older X', 'newer A']);
+      });
+    });
+
+    test('several prompts that never left come back in send order', () async {
+      final manager = RecordingAcpSessionManager();
+      final gate = Completer<void>();
+      manager
+        ..promptGate = gate
+        ..throwOnPrompt = const AcpPromptNotSentException();
+      final controller = _controller(manager)..setText('B');
+      addTearDown(controller.dispose);
+      expect(await controller.send(), isTrue);
+      controller.setText('C');
+      expect(await controller.send(), isTrue);
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'B\n\nC');
+    });
+
     test('editing keeps prompts whose attachments would not fit', () async {
       final manager = RecordingAcpSessionManager()
         ..throwOnPrompt = const AcpConnectionClosedException();

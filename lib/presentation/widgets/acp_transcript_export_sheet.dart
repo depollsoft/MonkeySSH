@@ -27,11 +27,13 @@ const int kAcpExportMaxAndroidCopyBytes = 512 * 1024;
 /// Folder under the app's temporary directory that holds shared exports.
 const String kAcpExportFolderName = 'monkeyssh-chat-exports';
 
-/// Whether Share is a Save dialog here: desktop share targets either don't
-/// take files (Linux) or read them from a shared temporary folder.
+/// Whether Share is a Save dialog here. Linux share targets don't take
+/// files, and Windows reads them from the shared temporary folder. macOS
+/// keeps the share sheet: its temporary folder is private to the sandboxed
+/// app, and the sandbox has no entitlement for a Save panel.
 bool get acpExportSavesToFile => switch (defaultTargetPlatform) {
-  TargetPlatform.android || TargetPlatform.iOS => false,
-  _ => true,
+  TargetPlatform.linux || TargetPlatform.windows => true,
+  _ => false,
 };
 
 /// Hands a finished export to another app.

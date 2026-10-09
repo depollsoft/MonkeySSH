@@ -103,7 +103,11 @@ void registerAcpTurnRecoveryTests() {
             recovery: AcpTurnRecovery(
               kind: AcpTurnRecoveryKind.cancelled,
               drafts: const [
-                (text: 'retry me', attachments: <AcpComposerAttachment>[]),
+                (
+                  text: 'retry me',
+                  attachments: <AcpComposerAttachment>[],
+                  submission: 1,
+                ),
               ],
               submission: 1,
             ),
@@ -130,7 +134,11 @@ void registerAcpTurnRecoveryTests() {
             recovery: AcpTurnRecovery(
               kind: AcpTurnRecoveryKind.failedMidTurn,
               drafts: const [
-                (text: 'migrate', attachments: <AcpComposerAttachment>[]),
+                (
+                  text: 'migrate',
+                  attachments: <AcpComposerAttachment>[],
+                  submission: 1,
+                ),
               ],
               submission: 1,
             ),

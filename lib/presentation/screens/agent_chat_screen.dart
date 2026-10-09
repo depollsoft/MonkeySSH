@@ -1272,17 +1272,24 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
                       _buildPendingPanel(session, prompts, toolTitles),
-                    // Search sits just above the composer, in thumb reach. The
-                    // composer stays mounted so the terminal shell's keyboard,
-                    // extra keys and paste keep reaching it.
+                    // Search sits just above the composer, in thumb reach. While
+                    // its field has focus the composer folds away to leave the
+                    // transcript room above the keyboard, but stays mounted
+                    // and focusable: the terminal shell's keyboard, extra keys
+                    // and paste still reach it, and focusing it brings it back.
                     if (_search.isOpen)
                       AcpTranscriptSearchBar(controller: _search),
-                    AcpComposer(
-                      controller: _composer,
-                      attachmentActions: _attachmentActions(session),
-                      focusController: widget.composerFocusController,
-                      controls: _buildQuickConfigControls(session),
-                      useBottomSafeArea: !widget.embedded,
+                    Visibility(
+                      visible: !(_search.isOpen && _search.fieldFocused),
+                      maintainState: true,
+                      maintainFocusability: true,
+                      child: AcpComposer(
+                        controller: _composer,
+                        attachmentActions: _attachmentActions(session),
+                        focusController: widget.composerFocusController,
+                        controls: _buildQuickConfigControls(session),
+                        useBottomSafeArea: !widget.embedded,
+                      ),
                     ),
                   ],
                 ),

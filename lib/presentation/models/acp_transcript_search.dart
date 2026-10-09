@@ -8,6 +8,8 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import '../widgets/acp_markdown_data_images.dart';
+import '../widgets/acp_markdown_virtualization.dart';
 import '../widgets/acp_thread_projection.dart';
 import 'acp_timeline.dart';
 
@@ -162,13 +164,12 @@ final class AcpTranscriptSearchIndex {
     var capped = false;
     outer:
     for (var entryIndex = entries.length - 1; entryIndex >= 0; entryIndex--) {
-      final found = _matchesFor(entries, entryIndex, needle);
-      for (var index = found.length - 1; index >= 0; index--) {
+      final found = _matchesFor(entries, entryIndex, needle, maxMatches);
+      for (final (text, foldedStart) in found.newestFirst) {
         if (newestFirst.length >= maxMatches) {
           capped = true;
           break outer;
         }
-        final (text, foldedStart) = found[index];
         final (start, length) = text.originalRange(foldedStart, needle.length);
         newestFirst.add(
           AcpTranscriptMatch._(
@@ -179,6 +180,10 @@ final class AcpTranscriptSearchIndex {
           ),
         );
       }
+      if (found.overflow) {
+        capped = true;
+        break;
+      }
     }
     return AcpTranscriptSearchResult(
       matches: List<AcpTranscriptMatch>.unmodifiable(newestFirst.reversed),
@@ -186,26 +191,44 @@ final class AcpTranscriptSearchIndex {
     );
   }
 
-  List<(_EntryText, int)> _matchesFor(
+  /// The newest occurrences of [needle] in one entry, at most [limit],
+  /// scanning backwards so a frequent query never records more than it can
+  /// show.
+  _EntryMatches _matchesFor(
     List<AcpTimelineEntry> entries,
     int entryIndex,
     String needle,
+    int limit,
   ) {
     final entry = entries[entryIndex];
     final cached = _matches[entry];
-    if (cached != null && cached.needle == needle) return cached.found;
-    final found = <(_EntryText, int)>[];
-    for (final text in _textsFor(entries, entryIndex)) {
-      var from = 0;
-      while (true) {
-        final index = text.folded.indexOf(needle, from);
+    if (cached != null && cached.needle == needle && cached.limit == limit) {
+      return cached;
+    }
+    final newestFirst = <(_EntryText, int)>[];
+    var overflow = false;
+    final texts = _textsFor(entries, entryIndex);
+    scan:
+    for (var textIndex = texts.length - 1; textIndex >= 0; textIndex--) {
+      final text = texts[textIndex];
+      var before = text.folded.length - needle.length;
+      while (before >= 0) {
+        final index = text.folded.lastIndexOf(needle, before);
         if (index < 0) break;
-        found.add((text, index));
-        from = index + needle.length;
+        if (newestFirst.length >= limit) {
+          overflow = true;
+          break scan;
+        }
+        newestFirst.add((text, index));
+        before = index - needle.length;
       }
     }
-    _matches[entry] = _EntryMatches(needle, found);
-    return found;
+    return _matches[entry] = _EntryMatches(
+      needle,
+      limit,
+      newestFirst,
+      overflow: overflow,
+    );
   }
 
   List<_EntryText> _textsFor(List<AcpTimelineEntry> entries, int entryIndex) {
@@ -229,10 +252,21 @@ AcpTranscriptSearchResult searchAcpTranscript(
 }) => AcpTranscriptSearchIndex().search(entries, query, maxMatches: maxMatches);
 
 final class _EntryMatches {
-  const _EntryMatches(this.needle, this.found);
+  const _EntryMatches(
+    this.needle,
+    this.limit,
+    this.newestFirst, {
+    required this.overflow,
+  });
 
   final String needle;
-  final List<(_EntryText, int)> found;
+  final int limit;
+
+  /// Occurrences, newest first, at most [limit].
+  final List<(_EntryText, int)> newestFirst;
+
+  /// Whether older occurrences exist beyond [newestFirst].
+  final bool overflow;
 }
 
 /// The whole searchable text of one rendered entry, which the thread may
@@ -282,11 +316,17 @@ final class _EntryText {
   final List<String> segmentKeys;
 
   /// The original-text range of a match found at [foldedStart] in [folded].
+  /// A match that ends inside a character that lower-cased to several code
+  /// units covers that whole character.
   (int, int) originalRange(int foldedStart, int foldedLength) {
     final map = toOriginal;
     if (map == null) return (foldedStart, foldedLength);
     final start = map[foldedStart];
-    return (start, map[foldedStart + foldedLength] - start);
+    var endIndex = foldedStart + foldedLength;
+    while (endIndex < map.length - 1 && map[endIndex] == map[endIndex - 1]) {
+      endIndex++;
+    }
+    return (start, map[endIndex] - start);
   }
 
   /// The key of the segment holding [offset].
@@ -306,21 +346,35 @@ List<_EntryText> _buildEntryTexts(List<AcpThreadChild> children) {
   while (index < children.length) {
     final entry = children[index].entry;
     final buffer = StringBuffer();
-    final starts = <int>[];
+    var starts = <int>[];
     final keys = <String>[];
+    final first = index;
     while (index < children.length && identical(children[index].entry, entry)) {
       starts.add(buffer.length);
       keys.add(children[index].keyValue);
       buffer.write(_withoutDataUris(_segmentText(children[index])));
       index++;
     }
+    var text = buffer.toString();
+    // A long reply's segments repeat fence lines to stay valid on their own.
+    // Match its own text instead and place matches by where each segment
+    // starts in it.
+    if (entry case AcpAssistantMessageEntry(:final markdown)
+        when children[first].markdown != null) {
+      final sourceStarts = <int>[];
+      splitAcpMarkdownForVirtualization(markdown, sourceStarts: sourceStarts);
+      if (sourceStarts.length == keys.length) {
+        text = _withoutDataUris(normalizeAcpMarkdownDataImages(markdown));
+        starts = sourceStarts;
+      }
+    }
     final source = _sourceOf(entry);
-    if (source == null || buffer.isEmpty) continue;
+    if (source == null || text.isEmpty) continue;
     texts.add(
       _EntryText(
         entryId: entry.id,
         source: source,
-        text: buffer.toString(),
+        text: text,
         segmentStarts: starts,
         segmentKeys: keys,
       ),
@@ -414,8 +468,14 @@ String _toolText(AcpToolCall call) => _joinNonEmpty([
   ],
 ]);
 
-String _withoutDataUris(String text) =>
-    text.contains('data:') ? text.replaceAll(_dataUriPattern, 'data:…') : text;
+/// Masks inline payloads with spaces of the same length, so offsets into the
+/// text still line up with the rendered segments.
+String _withoutDataUris(String text) => text.contains('data:')
+    ? text.replaceAllMapped(_dataUriPattern, (match) {
+        final payload = match[0]!;
+        return 'data:${' ' * (payload.length - 5)}';
+      })
+    : text;
 
 String _joinNonEmpty(Iterable<String?> values) =>
     values.whereType<String>().where((value) => value.isNotEmpty).join('\n');

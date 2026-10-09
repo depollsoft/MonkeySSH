@@ -646,7 +646,11 @@ class AcpComposerController extends ChangeNotifier {
           kind: keepPrevious ? previous.kind : AcpTurnRecoveryKind.cancelled,
           drafts: [
             if (keepPrevious) ...previous.drafts,
-            (text: snapshotText, attachments: snapshotAttachments),
+            (
+              text: snapshotText,
+              attachments: snapshotAttachments,
+              submission: submission,
+            ),
           ],
           submission: _submissions,
         );
@@ -669,7 +673,11 @@ class AcpComposerController extends ChangeNotifier {
           drafts: [
             if (previous != null && !previous.withdrawnBySend)
               ...previous.drafts,
-            (text: snapshotText, attachments: snapshotAttachments),
+            (
+              text: snapshotText,
+              attachments: snapshotAttachments,
+              submission: submission,
+            ),
           ],
           submission: _submissions,
         );
@@ -687,7 +695,7 @@ class AcpComposerController extends ChangeNotifier {
         return;
       }
       _error = null;
-      _restoreSnapshot(snapshotText, snapshotAttachments);
+      _restoreInSendOrder(snapshotText, snapshotAttachments);
       _recomputeSlash();
       notifyListeners();
     }
@@ -732,7 +740,12 @@ class AcpComposerController extends ChangeNotifier {
             kind: recovery.kind,
             drafts: kept,
             submission: recovery.submission,
-            turnResumed: recovery.turnResumed,
+            resumedSubmission:
+                kept.any(
+                  (draft) => draft.submission == recovery.resumedSubmission,
+                )
+                ? recovery.resumedSubmission
+                : null,
           );
     if (kept.isNotEmpty) {
       _error = _restoreLimitError;
@@ -763,6 +776,51 @@ class AcpComposerController extends ChangeNotifier {
   ) {
     _mergeDraft(snapshotText, snapshotAttachments);
     _error ??= _sendFailedError;
+  }
+
+  /// The draft right after the last refused prompt was restored, and where
+  /// that restored block ends in it.
+  ({String text, int textEnd, int attachmentEnd})? _lastRestore;
+
+  /// Restores a refused prompt like [_restoreSnapshot], but after any refused
+  /// prompt restored just before it (with no edit since), so several queued
+  /// prompts that never left come back in the order they were sent.
+  void _restoreInSendOrder(
+    String snapshotText,
+    List<AcpComposerAttachment> snapshotAttachments,
+  ) {
+    final last = _lastRestore;
+    final currentIds = _attachments.map((attachment) => attachment.id).toSet();
+    final added = [
+      for (final attachment in snapshotAttachments)
+        if (!currentIds.contains(attachment.id)) attachment,
+    ];
+    int textEnd;
+    int attachmentEnd;
+    if (last != null && last.text == _text) {
+      final before = _text.substring(0, last.textEnd);
+      textEnd = last.textEnd;
+      if (snapshotText.isNotEmpty) {
+        final joined = before.trim().isEmpty
+            ? snapshotText
+            : '$before\n\n$snapshotText';
+        _text = '$joined${_text.substring(last.textEnd)}';
+        _caret = _text.length;
+        textEnd = joined.length;
+      }
+      _attachments.insertAll(last.attachmentEnd, added);
+      attachmentEnd = last.attachmentEnd + added.length;
+    } else {
+      _mergeDraft(snapshotText, snapshotAttachments);
+      textEnd = snapshotText.length;
+      attachmentEnd = added.length;
+    }
+    _error ??= _sendFailedError;
+    _lastRestore = (
+      text: _text,
+      textEnd: textEnd,
+      attachmentEnd: attachmentEnd,
+    );
   }
 
   void _mergeDraft(

@@ -474,7 +474,8 @@ final RegExp _inlineDataUri = RegExp(
   'data:[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]{64,}',
 );
 
-final RegExp _fenceLine = RegExp(r'^ {0,3}(`{3,}|~{3,})(.*)$');
+// `[^\n]` rather than `.` so a CRLF line's trailing `\r` still matches.
+final RegExp _fenceLine = RegExp(r'^ {0,3}(`{3,}|~{3,})([^\n]*)$');
 
 /// Appends a closing fence when [text] ends inside a fenced code block, so
 /// a reply cut off mid-block cannot swallow the rest of the export.

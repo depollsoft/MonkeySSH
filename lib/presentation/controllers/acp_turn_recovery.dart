@@ -46,10 +46,12 @@ enum AcpTurnRecoveryKind {
   cancelled,
 }
 
-/// A prompt the user sent, kept so it can be edited and sent again.
+/// A prompt the user sent, kept so it can be edited and sent again, with the
+/// composer's send count when it was sent.
 typedef AcpSubmittedDraft = ({
   String text,
   List<AcpComposerAttachment> attachments,
+  int submission,
 });
 
 /// Prompts the composer can restore after a turn ended without a reply.
@@ -60,7 +62,7 @@ final class AcpTurnRecovery {
     required this.kind,
     required List<AcpSubmittedDraft> drafts,
     required this.submission,
-    this.turnResumed = false,
+    this.resumedSubmission,
   }) : drafts = List<AcpSubmittedDraft>.unmodifiable(drafts);
 
   /// Why the prompts can be restored.
@@ -72,8 +74,8 @@ final class AcpTurnRecovery {
   /// The composer's send count when this offer was made.
   final int submission;
 
-  /// Whether a reattach showed the lost turn still running on the host.
-  final bool turnResumed;
+  /// The draft whose lost turn a reattach showed still running on the host.
+  final int? resumedSubmission;
 
   /// Whether sending another prompt withdraws the offer. Only a stopped
   /// turn's prompt is: a lost or failed prompt stays until the user edits or
@@ -82,9 +84,12 @@ final class AcpTurnRecovery {
 
   /// This offer after the session moved from [previous] to [session].
   ///
-  /// A lost answer is withdrawn once a reattach shows the turn running on the
-  /// host and it then finishes, because the reply is in the transcript. Any
-  /// newer send ([latestSubmission]) stops that tracking.
+  /// When a reattach shows the newest lost prompt's turn running on the host
+  /// and that turn then finishes on the same session, its reply is in the
+  /// transcript, so that draft alone is withdrawn; older drafts stay. A
+  /// relaunch onto another session, or the user stopping the resumed turn,
+  /// says nothing about whether the prompt ran, so every draft stays. Any
+  /// newer send ([latestSubmission]) stops the tracking.
   AcpTurnRecovery? afterSessionUpdate({
     required AcpSessionState? previous,
     required AcpSessionState? session,
@@ -95,20 +100,44 @@ final class AcpTurnRecovery {
         session == null) {
       return this;
     }
-    if (!turnResumed) {
+    final resumed = resumedSubmission;
+    if (resumed == null) {
       final reattachedMidTurn =
           previous?.status != AcpConnectionStatus.ready &&
           session.status == AcpConnectionStatus.ready &&
           session.promptStatus == AcpPromptStatus.streaming;
       return reattachedMidTurn
-          ? AcpTurnRecovery(
-              kind: kind,
-              drafts: drafts,
-              submission: submission,
-              turnResumed: true,
-            )
+          ? _with(drafts, resumedSubmission: drafts.last.submission)
           : this;
     }
-    return session.promptStatus == AcpPromptStatus.idle ? null : this;
+    final sameSession = previous != null && previous.key == session.key;
+    final finished =
+        sameSession &&
+        session.status == AcpConnectionStatus.ready &&
+        previous.promptStatus == AcpPromptStatus.streaming &&
+        session.promptStatus == AcpPromptStatus.idle;
+    if (finished) {
+      final remaining = [
+        for (final draft in drafts)
+          if (draft.submission != resumed) draft,
+      ];
+      return remaining.isEmpty ? null : _with(remaining);
+    }
+    if (!sameSession || session.promptStatus == AcpPromptStatus.idle) {
+      return _with(drafts);
+    }
+    return this;
   }
+
+  /// This offer with only [kept] drafts, no longer tracking a resumed turn
+  /// unless [resumedSubmission] is given.
+  AcpTurnRecovery _with(
+    List<AcpSubmittedDraft> kept, {
+    int? resumedSubmission,
+  }) => AcpTurnRecovery(
+    kind: kind,
+    drafts: kept,
+    submission: submission,
+    resumedSubmission: resumedSubmission,
+  );
 }

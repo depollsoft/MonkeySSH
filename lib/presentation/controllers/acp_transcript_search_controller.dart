@@ -38,6 +38,9 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   Timer? _queryTimer;
   Timer? _refreshTimer;
   var _index = AcpTranscriptSearchIndex();
+  var _focusRequest = 0;
+  var _fieldFocused = false;
+  var _announcement = 0;
   var _disposed = false;
 
   /// Whether the search bar is showing.
@@ -78,9 +81,29 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     );
   }
 
-  /// Shows the search bar.
+  /// Grows when the search field should take focus again, for example when
+  /// search is opened while it is already showing.
+  int get focusRequest => _focusRequest;
+
+  /// Whether the search field has keyboard focus.
+  bool get fieldFocused => _fieldFocused;
+
+  set fieldFocused(bool value) {
+    if (value == _fieldFocused) return;
+    _fieldFocused = value;
+    _notify();
+  }
+
+  /// Grows when the result should be announced: a new search or a step.
+  /// Re-searching streamed output keeps the active match and stays quiet.
+  int get announcement => _announcement;
+
+  /// Shows the search bar, or returns focus to its field when it is already
+  /// showing.
   void open() {
-    if (_open) return;
+    if (_open) {
+      _focusRequest++;
+    }
     _open = true;
     _notify();
   }
@@ -95,6 +118,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     // Drop the lower-cased copies of the transcript held for searching.
     _index = AcpTranscriptSearchIndex();
     _open = false;
+    _fieldFocused = false;
     _query = '';
     _resultQuery = null;
     _result = AcpTranscriptSearchResult.empty;
@@ -153,6 +177,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     final current = _activeIndex ?? (delta > 0 ? -1 : count);
     _activeIndex = (current + delta) % count;
     _serial++;
+    _announcement++;
     _notify();
   }
 
@@ -162,6 +187,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     final previous = activeMatch;
     _result = _index.search(_entries, trimmed);
     _resultQuery = trimmed;
+    if (resetActive) _announcement++;
     final matches = _result.matches;
     if (matches.isEmpty) {
       _activeIndex = null;
