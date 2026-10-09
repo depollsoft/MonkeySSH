@@ -1,4 +1,5 @@
 import '../services/windows_remote_powershell.dart';
+import 'agent_worktree.dart';
 import 'command_names.dart';
 import 'remote_multiplexer.dart';
 import 'tmux_state.dart';
@@ -284,6 +285,8 @@ class AgentLaunchPreset {
     this.tmuxExtraFlags,
     this.tmuxDisableStatusBar = false,
     this.additionalArguments,
+    this.worktree,
+    this.initialPrompt,
   });
 
   /// Decodes an [AgentLaunchPreset] from JSON, or `null` when invalid.
@@ -304,6 +307,8 @@ class AgentLaunchPreset {
       tmuxExtraFlags: _readTrimmedString(json['tmuxExtraFlags']),
       tmuxDisableStatusBar: json['tmuxDisableStatusBar'] == true,
       additionalArguments: _readTrimmedString(json['additionalArguments']),
+      worktree: AgentWorktreeLaunchOptions.tryFromJson(json['worktree']),
+      initialPrompt: _readTrimmedString(json['initialPrompt']),
     );
   }
 
@@ -329,6 +334,36 @@ class AgentLaunchPreset {
 
   /// Optional extra arguments passed to the CLI.
   final String? additionalArguments;
+
+  /// Git worktree settings; when set, each launch starts the agent in a new
+  /// worktree on a new branch instead of in [workingDirectory].
+  final AgentWorktreeLaunchOptions? worktree;
+
+  /// Prompt sent once when a native session started from this preset begins.
+  ///
+  /// Terminal launches ignore it, and resuming or reconnecting a session never
+  /// sends it again.
+  final String? initialPrompt;
+
+  /// Whether each launch creates a new git worktree first.
+  bool get launchesInNewWorktree => worktree != null;
+
+  /// Whether a native session started from this preset sends a prompt.
+  bool get hasInitialPrompt =>
+      initialPrompt != null && initialPrompt!.trim().isNotEmpty;
+
+  /// This preset launching in [directory] without creating a worktree, used
+  /// once the worktree for a launch exists.
+  AgentLaunchPreset launchingIn(String directory) => AgentLaunchPreset(
+    tool: tool,
+    workingDirectory: directory,
+    tmuxSessionName: tmuxSessionName,
+    remoteMuxBackend: remoteMuxBackend,
+    tmuxExtraFlags: tmuxExtraFlags,
+    tmuxDisableStatusBar: tmuxDisableStatusBar,
+    additionalArguments: additionalArguments,
+    initialPrompt: initialPrompt,
+  );
 
   /// Whether this preset uses a remote window session.
   bool get usesMuxSession =>
@@ -365,6 +400,9 @@ class AgentLaunchPreset {
     if (tmuxDisableStatusBar) 'tmuxDisableStatusBar': true,
     if (additionalArguments case final value? when value.trim().isNotEmpty)
       'additionalArguments': value.trim(),
+    if (worktree case final value?) 'worktree': value.toJson(),
+    if (initialPrompt case final value? when value.trim().isNotEmpty)
+      'initialPrompt': value.trim(),
   };
 }
 

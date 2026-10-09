@@ -88,6 +88,9 @@ abstract final class SettingKeys {
   /// Saved host-scoped coding-agent launch presets.
   static const agentLaunchPresets = 'agent_launch_presets';
 
+  /// Git worktrees MonkeySSH created for agent launches, keyed by host.
+  static const agentWorktrees = 'agent_worktrees';
+
   /// Show update prompts for agent CLIs and ACP adapters.
   static const agentUpdateNotifications = 'agent_update_notifications';
 
