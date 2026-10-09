@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/remote_file_edit_session.dart';
+import '../../domain/services/remote_file_service.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/unsaved_changes_guard.dart';
@@ -131,6 +132,9 @@ String describeRemoteEditorWriteFailure(
   Object error, {
   required String action,
 }) {
+  if (error is RemoteFileRefusedException) {
+    return 'Could not $action. ${error.message}';
+  }
   final connectionLost =
       error is SSHError ||
       (error is SftpError && error is! SftpStatusError) ||
@@ -430,31 +434,35 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
     String text,
   ) async {
     for (var attempt = 1; ; attempt++) {
-      var change = await handler.checkForChanges();
+      // After repeated moves under the save, stop re-checking and ask.
+      final change = attempt > 3
+          ? RemoteFileChange.modified
+          : await handler.checkForChanges();
       if (!mounted) {
         return false;
       }
-      if (change == RemoteFileChange.unchanged) {
-        try {
+      try {
+        if (change == RemoteFileChange.unchanged) {
           await widget.onSave(text);
           return true;
-        } on RemoteFileChangedDuringSaveException {
-          if (!mounted) {
-            return false;
-          }
-          // The file moved between the check and the write. Check again so
-          // an identical rewrite still saves without a prompt.
-          if (attempt < 3) {
-            continue;
-          }
-          change = RemoteFileChange.modified;
+        }
+        if (!await _resolveRemoteChange(handler, change, text)) {
+          return false;
+        }
+        if (change == RemoteFileChange.deleted) {
+          await handler.recreate(text);
+        } else {
+          await handler.overwrite(text);
+        }
+        return true;
+      } on RemoteFileChangedDuringSaveException {
+        // The file moved between the check and the write, or a deleted file
+        // came back. Check again so an identical rewrite still saves without
+        // a prompt and a real change gets the dialog.
+        if (!mounted) {
+          return false;
         }
       }
-      if (!await _resolveRemoteChange(handler, change, text)) {
-        return false;
-      }
-      await handler.overwrite(text);
-      return true;
     }
   }
 

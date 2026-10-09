@@ -2,6 +2,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/remote_file_edit_session.dart';
+import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/presentation/screens/remote_text_editor_conflict.dart';
 import 'package:monkeyssh/presentation/screens/remote_text_editor_screen.dart';
 
@@ -20,6 +21,10 @@ class _FakeHost {
   int changesDuringSave = 0;
   final saved = <String>[];
   final overwritten = <String>[];
+  final recreated = <String>[];
+
+  /// How many recreates find the file back on the host.
+  int recreateConflicts = 0;
   final copies = <String>[];
   int reloads = 0;
   int checks = 0;
@@ -40,6 +45,13 @@ class _FakeHost {
       return queuedChanges.isEmpty ? change : queuedChanges.removeAt(0);
     },
     overwrite: (text) async => overwritten.add(text),
+    recreate: (text) async {
+      if (recreateConflicts > 0) {
+        recreateConflicts--;
+        throw const RemoteFileChangedDuringSaveException();
+      }
+      recreated.add(text);
+    },
     reload: () async {
       reloads++;
       if (reloadError case final error?) throw error;
@@ -304,8 +316,47 @@ void main() {
       await tester.tap(find.text('Recreate file'));
       await tester.pumpAndSettle();
 
-      expect(host.overwritten, ['phone version']);
+      // Recreate is create-only; it never goes through overwrite.
+      expect(host.recreated, ['phone version']);
+      expect(host.overwritten, isEmpty);
       expect(harness.result, isTrue);
+    });
+
+    testWidgets('a file that came back before Recreate asks again', (
+      tester,
+    ) async {
+      final host = _FakeHost()
+        ..recreateConflicts = 1
+        ..queuedChanges.addAll([
+          RemoteFileChange.deleted,
+          RemoteFileChange.modified,
+        ]);
+      await _openEditor(tester, host);
+
+      await _save(tester);
+      await tester.tap(find.text('Recreate file'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('File changed on the host'), findsOneWidget);
+      expect(host.recreated, isEmpty);
+      expect(host.overwritten, isEmpty);
+    });
+
+    testWidgets('a refusal by the save says why', (tester) async {
+      final host = _FakeHost()
+        ..checkError = const RemoteFileRefusedException(
+          'The path is now a folder on the host.',
+        );
+      await _openEditor(tester, host);
+
+      await _save(tester);
+
+      expect(
+        find.text(
+          'Could not save changes. The path is now a folder on the host.',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a folder at the path only offers a copy', (tester) async {

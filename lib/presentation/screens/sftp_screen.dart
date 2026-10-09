@@ -2399,6 +2399,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                 utf8.encode(text),
                 force: true,
               ),
+              recreate: (text) =>
+                  editSession.recreate(_requireSftp(), utf8.encode(text)),
               reload: () => _reloadEditedFile(editSession),
               saveCopy: (text) async => path.posix.basename(
                 await editSession.saveCopy(_requireSftp(), utf8.encode(text)),

@@ -11,6 +11,7 @@ class RemoteEditorConflictHandler {
   const RemoteEditorConflictHandler({
     required this.checkForChanges,
     required this.overwrite,
+    required this.recreate,
     required this.reload,
     required this.saveCopy,
   });
@@ -22,6 +23,11 @@ class RemoteEditorConflictHandler {
   /// Writes [text] over the host's file without comparing versions, after
   /// the user chose to overwrite or recreate it.
   final Future<void> Function(String text) overwrite;
+
+  /// Writes [text] to the path of a file that was deleted on the host.
+  /// Throws [RemoteFileChangedDuringSaveException] instead of replacing a
+  /// file that reappeared meanwhile.
+  final Future<void> Function(String text) recreate;
 
   /// Reads the host's current text and makes it the new base version.
   ///
