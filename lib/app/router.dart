@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../domain/models/acp_session_keys.dart';
 import '../domain/models/monetization.dart';
+import '../domain/models/port_forward_type.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/local_notification_service.dart';
 import '../domain/services/port_forward_browser_service.dart';
@@ -315,6 +316,17 @@ final routerProvider = Provider<GoRouter>((ref) {
                 body: Center(
                   child: Text('In-app browser is not supported here.'),
                 ),
+              ),
+            );
+          }
+          final extra = state.extra;
+          if (extra is PortForwardBrowserSocksLaunch &&
+              isDynamicPortForwardType(extra.portForward.forwardType)) {
+            return _buildSlideUpPage<String>(
+              state: state,
+              child: PortForwardBrowserScreen.socks(
+                socksForward: extra.portForward,
+                socksHostLabel: extra.hostLabel,
               ),
             );
           }

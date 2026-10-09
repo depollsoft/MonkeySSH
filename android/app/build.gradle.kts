@@ -158,4 +158,6 @@ kotlin {
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     implementation("eu.simonbinder:sqlite3-native-library:3.52.0")
+    // SOCKS routing for the in-app browser; same version webview_flutter_android uses.
+    implementation("androidx.webkit:webkit:1.15.0")
 }
