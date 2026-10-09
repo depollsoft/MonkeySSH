@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -728,6 +729,74 @@ void main() {
       await tester.pump();
 
       verify(() => hostRepository.reorderByIds([2, 1])).called(1);
+    });
+
+    testWidgets('Copy command copies an upgraded snippet as it reads', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final copied = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied.add((call.arguments as Map)['text'] as String);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.watchAll).thenAnswer(
+        (_) => Stream.value([
+          Snippet(
+            id: 1,
+            name: 'Index',
+            command: r'db.c.createIndex(\{key:1})',
+            autoExecute: false,
+            createdAt: DateTime(2026),
+            usageCount: 0,
+            sortOrder: 0,
+          ),
+        ]),
+      );
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(() => snippetRepository.incrementUsage(any()))
+          .thenAnswer((_) async => true);
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value(const <Host>[]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Snippets').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byTooltip('Snippet actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy command'));
+      await tester.pumpAndSettle();
+
+      expect(copied, ['db.c.createIndex({key:1})']);
     });
 
     testWidgets('shows reorder handles and persists snippet order on mobile', (

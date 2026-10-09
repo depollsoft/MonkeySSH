@@ -1,0 +1,284 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/auto_connect_command.dart';
+import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart'
+    show TerminalShellStatus;
+import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
+import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
+import 'package:xterm/xterm.dart';
+
+({Terminal terminal, List<String> writes, List<bool> enterFlags}) _terminal({
+  String setup = '',
+}) {
+  final writes = <String>[];
+  final enterFlags = <bool>[];
+  final terminal = Terminal()
+    ..write(setup)
+    ..onOutput = (data) {
+      writes.add(data);
+      enterFlags.add(isWritingTerminalEnterKey);
+    };
+  return (terminal: terminal, writes: writes, enterFlags: enterFlags);
+}
+
+String _send(String token, {String setup = ''}) {
+  final target = _terminal(setup: setup);
+  final chord = parseSnippetKeyChord(token)!;
+  expect(sendSnippetKey(target.terminal, chord), isTrue, reason: token);
+  return target.writes.join();
+}
+
+String _hardwareKey(TerminalKey key, {bool alt = false}) {
+  final target = _terminal();
+  target.terminal.keyInput(key, alt: alt);
+  return target.writes.join();
+}
+
+// Claude Code and Codex push `CSI > 5 u`: disambiguate plus alternate keys.
+// Their Ctrl+letter form (`CSI 99:67;5u`, with the shifted key) is a separate
+// encoder issue, so exact Ctrl bytes are checked with `CSI > 1 u`.
+const _kittyAgent = '\x1b[>5u';
+
+void main() {
+  group('sendSnippetKey', () {
+    test('uses legacy encodings when no kitty flags are set', () {
+      expect(_send('esc'), '\x1b');
+      expect(_send('shift+tab'), '\x1b[Z');
+      expect(_send('tab'), '\t');
+      expect(_send('enter'), '\r');
+      expect(_send('ctrl+c'), '\x03');
+      expect(_send('ctrl+shift+c'), '\x03');
+      expect(_send('alt+b'), '\x1bb');
+      expect(_send('alt+shift+b'), '\x1bB');
+      expect(_send('ctrl+['), '\x1b');
+      expect(_send('ctrl+space'), '\x00');
+      expect(_send('up'), '\x1b[A');
+      expect(_send('ctrl+left'), '\x1b[1;5D');
+      expect(_send('f5'), '\x1b[15~');
+      expect(_send('backspace'), '\x7f');
+    });
+
+    test('follows cursor-key application mode', () {
+      expect(_send('up', setup: '\x1b[?1h'), '\x1bOA');
+    });
+
+    test('adds Escape for Alt the key table has no form for', () {
+      expect(_send('alt+esc'), '\x1b\x1b');
+      expect(_send('alt+pageup'), _hardwareKey(TerminalKey.pageUp, alt: true));
+    });
+
+    test('sends arrows, Home and End with xterm modifier parameters', () {
+      expect(_send('shift+up'), '\x1b[1;2A');
+      expect(_send('alt+up'), '\x1b[1;3A');
+      expect(_send('shift+down'), '\x1b[1;2B');
+      expect(_send('shift+left'), '\x1b[1;2D');
+      expect(_send('alt+left'), '\x1b[1;3D');
+      expect(_send('ctrl+right'), '\x1b[1;5C');
+      expect(_send('ctrl+shift+home'), '\x1b[1;6H');
+      expect(_send('alt+end'), '\x1b[1;3F');
+    });
+
+    test('types shifted characters the way a US keyboard does', () {
+      expect(_send('shift+1'), '!');
+      expect(_send('shift+/'), '?');
+      expect(_send('shift+='), '+');
+      expect(_send('+'), '+');
+      expect(_send('?'), '?');
+      expect(_send('G'), 'G');
+      expect(_send('shift+;'), ':');
+      expect(_send('alt+?'), '\x1b?');
+      expect(_send('ctrl+_'), '\x1f');
+      expect(_send('ctrl+@'), '\x00');
+    });
+
+    for (final flags in ['\x1b[>1u', _kittyAgent]) {
+      test(
+        'types plain character keys in kitty mode ${flags.substring(2)}',
+        () {
+          expect(_send('a', setup: flags), 'a');
+          expect(_send('space', setup: flags), ' ');
+          expect(_send('1', setup: flags), '1');
+          expect(_send('shift+a', setup: flags), 'A');
+          expect(_send('shift+;', setup: flags), ':');
+          expect(_send('G', setup: flags), 'G');
+        },
+      );
+    }
+
+    test('uses CSI u once a program pushes kitty flags', () {
+      expect(_send('esc', setup: _kittyAgent), '\x1b[27u');
+      expect(_send('shift+tab', setup: _kittyAgent), '\x1b[9;2u');
+      expect(_send('ctrl+c', setup: '\x1b[>1u'), '\x1b[99;5u');
+      expect(_send('enter', setup: _kittyAgent), '\r');
+    });
+
+    test('marks Enter so the pacer keeps it apart from text', () {
+      final target = _terminal();
+      sendSnippetKey(target.terminal, parseSnippetKeyChord('enter')!);
+      expect(target.enterFlags, [true]);
+    });
+  });
+
+  group('snippetKeySequenceReviewMode', () {
+    test('reviews fully at a reported prompt and not inside programs', () {
+      SnippetReviewMode mode({
+        TerminalShellStatus? shell,
+        bool alt = false,
+        bool agent = false,
+      }) => snippetKeySequenceReviewMode(
+        shellStatus: shell,
+        isUsingAltBuffer: alt,
+        isAgentToolActive: agent,
+      );
+      expect(mode(shell: TerminalShellStatus.prompt), SnippetReviewMode.full);
+      expect(
+        mode(shell: TerminalShellStatus.editingCommand),
+        SnippetReviewMode.full,
+      );
+      expect(mode(), SnippetReviewMode.suspiciousOnly);
+      expect(mode(alt: true), SnippetReviewMode.none);
+      expect(mode(agent: true), SnippetReviewMode.none);
+      expect(
+        mode(shell: TerminalShellStatus.runningCommand),
+        SnippetReviewMode.none,
+      );
+    });
+
+    test('with an unknown prompt only suspicious text asks', () {
+      bool asks(String snippet) {
+        final sequence = parseSnippetKeySequence(snippet);
+        return reviewForSnippetMode(
+          assessSnippetCommandInsertion(
+            sequence.reviewText,
+            hadVariableSubstitution: false,
+          ),
+          SnippetReviewMode.suspiciousOnly,
+          typesAfterSubmit: sequence.typesAfterSubmit,
+        ).requiresReview;
+      }
+
+      // One command and the key that runs it, or more keys after it.
+      expect(asks('/clear{key:enter}'), isFalse);
+      expect(asks('rm -rf build{key:enter}'), isFalse);
+      expect(asks('ls{key:enter}{key:shift+tab}{key:ctrl+c}'), isFalse);
+      // Chaining, or a second command line, still asks.
+      expect(asks('rm a && rm b{key:enter}'), isTrue);
+      expect(asks('rm a{key:enter}rm b{key:enter}'), isTrue);
+      expect(asks('rm a\nrm b{key:enter}'), isTrue);
+    });
+  });
+
+  group('sendSnippetKeySequence', () {
+    test('waits for held output before any pause', () async {
+      final target = _terminal();
+      final drained = Completer<void>();
+      final events = <String>[];
+      final sending = sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('x{key:enter}{key:esc}y{delay:20}z'),
+        canContinue: () => true,
+        outputIdle: () {
+          events.add('idle');
+          return drained.future;
+        },
+        wait: (duration) async => events.add('wait ${duration.inMilliseconds}'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // The Enter may still be held: nothing after it goes out, and the gap
+      // after it has not started.
+      expect(target.writes, ['x', '\r']);
+      expect(events, ['idle']);
+
+      drained.complete();
+      expect(await sending, SnippetSendOutcome.completed);
+      expect(target.writes, ['x', '\r', '\x1b', 'y', 'z']);
+      expect(events, [
+        'idle',
+        'wait ${kSnippetSubmitSettle.inMilliseconds}',
+        'idle',
+        'wait ${kSnippetEscapeSettle.inMilliseconds}',
+        'idle',
+        'wait 20',
+      ]);
+    });
+
+    test('keeps text after a typed line break in a later step', () async {
+      final target = _terminal();
+      final waits = <Duration>[];
+      await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('/clear\nwrite a test{key:enter}'),
+        canContinue: () => true,
+        wait: (duration) async => waits.add(duration),
+      );
+      expect(target.writes, ['/clear', '\r', 'write a test', '\r']);
+      expect(waits, [kSnippetSubmitSettle]);
+    });
+
+    test('types text, presses keys and waits', () async {
+      final target = _terminal();
+      final waits = <Duration>[];
+      final outcome = await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('{key:esc}{key:esc}:wq{delay:40}{key:enter}'),
+        canContinue: () => true,
+        wait: (duration) async => waits.add(duration),
+      );
+
+      expect(outcome, SnippetSendOutcome.completed);
+      expect(target.writes, ['\x1b', '\x1b', ':wq', '\r']);
+      expect(target.enterFlags, [false, false, false, true]);
+      // A bare Escape settles before the next key; the explicit delay follows.
+      expect(waits, [
+        kSnippetEscapeSettle,
+        kSnippetEscapeSettle,
+        const Duration(milliseconds: 40),
+      ]);
+    });
+
+    test('sends line breaks as Enter and drops control characters', () async {
+      final target = _terminal();
+      await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('one\x07\ntwo{key:enter}')
+            .withVariables(const {}),
+        canContinue: () => true,
+        wait: (_) async {},
+      );
+      expect(target.writes, ['one', '\r', 'two', '\r']);
+      expect(target.enterFlags, [false, true, false, true]);
+    });
+
+    test('never sends a step after it is told to stop', () async {
+      final target = _terminal();
+      var allowed = true;
+      final outcome = await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('{key:ctrl+c}{delay:500}{key:shift+tab}'),
+        canContinue: () => allowed,
+        wait: (_) async {
+          // The connection drops, or the window switches, during the pause.
+          allowed = false;
+        },
+      );
+
+      expect(outcome, SnippetSendOutcome.stopped);
+      expect(target.writes, ['\x03']);
+    });
+
+    test('a bare Escape at the end needs no settle time', () async {
+      final target = _terminal();
+      final waits = <Duration>[];
+      await sendSnippetKeySequence(
+        target.terminal,
+        parseSnippetKeySequence('x{key:esc}'),
+        canContinue: () => true,
+        wait: (duration) async => waits.add(duration),
+      );
+      expect(waits, isEmpty);
+    });
+  });
+}

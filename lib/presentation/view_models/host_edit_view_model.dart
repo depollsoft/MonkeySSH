@@ -9,6 +9,7 @@ import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
@@ -536,7 +537,11 @@ class HostEditViewModel extends Notifier<HostEditState> {
           null,
         ),
         HostStartupMode.snippet => (
-          selectedSnippet?.command ?? draft.autoConnectCommand,
+          // The cached command is what auto-connect sends, which cannot
+          // press keys: the snippet as it reads.
+          selectedSnippet == null
+              ? draft.autoConnectCommand
+              : snippetLiteralText(selectedSnippet.command),
           selectedSnippet?.id,
         ),
         _ => (null, null),

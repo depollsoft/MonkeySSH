@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/key_repository.dart';
+import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
@@ -1130,6 +1131,79 @@ void main() {
       },
     );
 
+    group('key token upgrade on import', () {
+      Future<String?> flag() async =>
+          (await (db.select(
+                    db.settings,
+                  )..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
+                  .getSingleOrNull())
+              ?.value;
+
+      Future<List<String>> commands() async => [
+        for (final snippet in await (db.select(
+          db.snippets,
+        )..orderBy([(s) => OrderingTerm.asc(s.name)])).get())
+          snippet.command,
+      ];
+
+      for (final mode in MigrationImportMode.values) {
+        test(
+          'escapes snippets from a build without key tokens, $mode',
+          () async {
+            // A snippet already here, saved before the upgrade ran.
+            await db
+                .into(db.snippets)
+                .insert(
+                  SnippetsCompanion.insert(
+                    name: 'A local',
+                    command: 'f({key:1})',
+                  ),
+                );
+
+            await transferService.importMigrationData(
+              data: {
+                'snippets': [
+                  {'id': 1, 'name': 'B old', 'command': r'echo {key:esc} \{x'},
+                ],
+                'settings': {'theme_mode': 'dark'},
+              },
+              mode: mode,
+            );
+
+            expect(await commands(), [
+              if (mode == MigrationImportMode.merge) r'f(\{key:1})',
+              r'echo \{key:esc} \{x',
+            ]);
+            expect(await flag(), 'true');
+
+            // A snippet written with tokens afterwards survives a later
+            // upgrade check.
+            final repository = SnippetRepository(db);
+            final keysId = await repository.insert(
+              SnippetsCompanion.insert(name: 'C keys', command: '{key:esc}'),
+            );
+            expect(await repository.escapeLegacyKeyTokens(), 0);
+            expect((await repository.getById(keysId))!.command, '{key:esc}');
+          },
+        );
+      }
+
+      test('keeps snippets from a build with key tokens as written', () async {
+        await transferService.importMigrationData(
+          data: {
+            'snippets': [
+              {'id': 1, 'name': 'Keys', 'command': '{key:esc}{key:esc}'},
+            ],
+            'settings': {snippetKeyTokensEscapedSetting: 'true'},
+          },
+          mode: MigrationImportMode.replace,
+        );
+
+        expect(await commands(), ['{key:esc}{key:esc}']);
+        expect(await flag(), 'true');
+      });
+    });
+
     test('rejects invalid passphrase', () async {
       final hostId = await db
           .into(db.hosts)
@@ -1413,7 +1487,14 @@ void main() {
           (await db.select(db.knownHosts).get()).single.hostname,
           'example.com',
         );
-        expect((await db.select(db.settings).get()).single.value, 'dark');
+        // Besides the imported setting, only the key-token upgrade marker.
+        expect(
+          {
+            for (final setting in await db.select(db.settings).get())
+              setting.key: setting.value,
+          },
+          {'theme_mode': 'dark', snippetKeyTokensEscapedSetting: 'true'},
+        );
       },
     );
 
@@ -1438,7 +1519,12 @@ void main() {
         final settings = await db.select(db.settings).get();
         expect(
           {for (final setting in settings) setting.key: setting.value},
-          {'theme_mode': 'dark', 'incoming': 'new', 'extra': '1'},
+          {
+            'theme_mode': 'dark',
+            'incoming': 'new',
+            'extra': '1',
+            snippetKeyTokensEscapedSetting: 'true',
+          },
         );
       },
     );

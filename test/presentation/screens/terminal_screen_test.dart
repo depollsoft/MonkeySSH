@@ -33,6 +33,7 @@ import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
@@ -68,6 +69,7 @@ import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
@@ -923,6 +925,7 @@ class _TestThemeModeNotifier extends ThemeModeNotifier {
 Host _buildHost({
   required int id,
   String? autoConnectCommand,
+  int? autoConnectSnippetId,
   String? tmuxSessionName,
   String? tmuxWorkingDirectory,
   String? tmuxExtraFlags,
@@ -935,6 +938,7 @@ Host _buildHost({
   port: 22,
   username: 'root',
   autoConnectCommand: autoConnectCommand,
+  autoConnectSnippetId: autoConnectSnippetId,
   tmuxSessionName: tmuxSessionName,
   tmuxWorkingDirectory: tmuxWorkingDirectory,
   tmuxExtraFlags: tmuxExtraFlags,
@@ -1153,6 +1157,17 @@ void main() {
       );
 
       expect(items.where((item) => item.label == 'Create Snippet'), isEmpty);
+    });
+
+    test('keeps key-token text from a selection literal in the snippet', () {
+      final prefill = buildSnippetPrefillFromTerminalSelection(
+        r'db.c.createIndex({key:1}) \{x',
+      );
+      expect(prefill.command, r'db.c.createIndex(\{key:1}) \{x');
+      expect(
+        parseSnippetKeySequence(prefill.command!).plainText,
+        r'db.c.createIndex({key:1}) \{x',
+      );
     });
 
     test('builds snippet name from selected terminal text', () {
@@ -2352,6 +2367,282 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.android),
       );
     }
+
+    Future<void> runSnippetFromSheet(
+      WidgetTester tester,
+      String name, {
+      bool expectReview = false,
+      bool keyTokensReady = true,
+    }) async {
+      // Startup records that stored snippets are written for key tokens.
+      if (keyTokensReady) {
+        await markSnippetKeyTokensEscaped(db);
+      }
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(
+        find.text('Insert command'),
+        expectReview ? findsOneWidget : findsNothing,
+      );
+      if (expectReview) {
+        await tester.tap(find.text('Insert command'));
+        await tester.pump();
+      }
+    }
+
+    // Records when each shell write happened, on the test's fake clock.
+    List<({Duration at, String data})> timeShellWrites(WidgetTester tester) {
+      final writes = <({Duration at, String data})>[];
+      final start = tester.binding.clock.now();
+      when(() => shellChannel.write(any())).thenAnswer((invocation) {
+        final value = invocation.positionalArguments.single as List<int>;
+        shellWrites.add(List<int>.from(value));
+        writes.add((
+          at: tester.binding.clock.now().difference(start),
+          data: utf8.decode(value),
+        ));
+      });
+      return writes;
+    }
+
+    String shellOutput() =>
+        utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+
+    for (final kitty in [false, true]) {
+      testWidgets(
+        'snippet key tokens press keys through the key encoder, kitty=$kitty',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Mode toggle',
+              command: 'ls{key:enter}{key:shift+tab}{key:ctrl+c}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (kitty) {
+            // The kitty disambiguate flag. Claude Code pushes `CSI > 5 u`,
+            // whose Ctrl+letter form is a separate encoder issue.
+            session.terminal!.write('\x1b[>1u');
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Mode toggle');
+          // The Enter pacer holds Return apart from the text before it.
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(
+            shellOutput(),
+            kitty ? 'ls\r\x1b[9;2u\x1b[99;5u' : 'ls\r\x1b[Z\x03',
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    for (final atPrompt in [false, true]) {
+      testWidgets(
+        'key snippets are reviewed only at a shell prompt, prompt=$atPrompt',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Status',
+              command: 'git status{key:enter}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (atPrompt) {
+            // Shell integration reports a prompt.
+            session.debugHandlePrivateOsc('133', const ['A']);
+            await tester.pump();
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Status', expectReview: atPrompt);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), 'git status\r');
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    for (final (command, reviewed) in [
+      ('rm -rf a && rm -rf b{key:enter}', true),
+      ('/clear{key:enter}', false),
+    ]) {
+      testWidgets(
+        'without prompt reporting only suspicious key snippets are reviewed, '
+        'reviewed=$reviewed',
+        (tester) async {
+          await SnippetRepository(db)
+              .insert(SnippetsCompanion.insert(name: 'Keys', command: command));
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Keys', expectReview: reviewed);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), endsWith('\r'));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets('snippet pauses separate keys on the wire after a held Enter', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Quit vim',
+          command: 'ls{key:enter}{key:esc}{key:esc}:wq{key:enter}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      final writes = timeShellWrites(tester);
+
+      // `:wq` is typed after a submitted line, so it asks first.
+      await runSnippetFromSheet(tester, 'Quit vim', expectReview: true);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(writes.map((write) => write.data), [
+        'ls',
+        '\r',
+        '\x1b',
+        '\x1b',
+        ':wq',
+        '\r',
+      ]);
+      Duration gap(int index) => writes[index].at - writes[index - 1].at;
+      // Text after Enter waits for the Enter to go out, then a gap.
+      expect(gap(2), greaterThanOrEqualTo(kSnippetSubmitSettle));
+      // Each bare Escape settles before the next key leaves.
+      expect(gap(3), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      expect(gap(4), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('typing in the terminal stops a running snippet sequence', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      tester
+          .widget<KeyboardToolbar>(find.byType(KeyboardToolbar))
+          .onKeyPressed!();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), isNot(contains('\x1b[Z')));
+      expect(
+        find.text('Snippet stopped: other input went to the terminal.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets(
+      'until stored snippets are upgraded, key tokens paste as text',
+      (tester) async {
+        await SnippetRepository(db).insert(
+          SnippetsCompanion.insert(name: 'Old', command: 'ls{key:enter}'),
+        );
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+
+        await runSnippetFromSheet(tester, 'Old', keyTokensReady: false);
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+
+        expect(shellOutput(), 'ls{key:enter}');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('a snippet key sequence stops when the connection drops', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      final activeSessions = _TestActiveSessionsNotifier(session);
+      await pumpScreen(tester, activeSessions: activeSessions);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), '\x03');
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('a snippet with an unknown key token sends nothing', (
+      tester,
+    ) async {
+      await SnippetRepository(
+        db,
+      ).insert(SnippetsCompanion.insert(name: 'Typo', command: 'ls{key:entr}'));
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Typo');
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(shellOutput(), isEmpty);
+      expect(find.text('Unknown key: {key:entr}'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     void enablePlainTuiSignals() {
       session.terminal!.write('\x1b[?1004h');
@@ -4467,6 +4758,55 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
     }
+
+    testWidgets('a snippet key sequence stops when the mux window changes', (
+      tester,
+    ) async {
+      final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+      addTearDown(events.close);
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(
+        tester,
+        _MockTmuxService(),
+        windowEvents: events.stream,
+      );
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      events.add(
+        const TmuxWindowListEvent([
+          TmuxWindow(index: 0, name: 'shell', isActive: false),
+          TmuxWindow(index: 1, name: 'agent', isActive: true),
+        ]),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     for (final interruption in ['none', 'typing', 'window', 'partial']) {
       testWidgets('clipboard content URI upload handles $interruption', (
@@ -11003,6 +11343,34 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
+
+    testWidgets('auto-connect sends an upgraded snippet as it reads', (
+      tester,
+    ) async {
+      final snippetId = await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Index',
+          command: r"mongosh --eval 'db.c.find(\{key:1})'",
+        ),
+      );
+      host = _buildHost(id: host.id, autoConnectSnippetId: snippetId);
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+
+      await pumpScreen(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        shellWrites.map(utf8.decode).join(),
+        contains("mongosh --eval 'db.c.find({key:1})'\r"),
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
       'still reviews an imported resume command before executing it',

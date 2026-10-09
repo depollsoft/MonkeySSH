@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
@@ -260,6 +261,56 @@ void main() {
           expect(host.remoteMuxBackend, isNull);
         },
       );
+
+      test('caches an upgraded snippet as auto-connect sends it', () async {
+        final database = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(database.close);
+        final repository = HostRepository(
+          database,
+          SecretEncryptionService.forTesting(),
+        );
+        final snippetId = await SnippetRepository(database).insert(
+          SnippetsCompanion.insert(
+            name: 'Index',
+            command: r"mongosh --eval 'db.c.find(\{key:1})'",
+          ),
+        );
+        final id = await repository.insert(
+          HostsCompanion.insert(
+            label: 'Host',
+            hostname: 'example.com',
+            username: 'root',
+          ),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWithValue(database),
+            hostRepositoryProvider.overrideWithValue(repository),
+          ],
+        );
+        addTearDown(container.dispose);
+        final viewModel = container.read(
+          hostEditViewModelProvider(id).notifier,
+        );
+        await viewModel.loadHost();
+        viewModel.markInitialDraft(_draft());
+
+        await viewModel.save(
+          HostEditSaveRequest(
+            draft: _draft(
+              startupMode: HostStartupMode.snippet,
+              autoConnectMode: AutoConnectCommandMode.snippet,
+              snippetId: snippetId,
+            ),
+            hasAutomationAccess: true,
+            hasAgentPresetAccess: true,
+          ),
+        );
+
+        final host = (await repository.getById(id))!;
+        expect(host.autoConnectSnippetId, snippetId);
+        expect(host.autoConnectCommand, "mongosh --eval 'db.c.find({key:1})'");
+      });
 
       test('reports stable validation targets and messages', () {
         final container = ProviderContainer();

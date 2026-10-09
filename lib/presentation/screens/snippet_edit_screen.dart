@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/snippet_repository.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/snippet_variables.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
@@ -153,7 +154,7 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
             IconButton(
               icon: const Icon(Icons.help_outline),
               onPressed: _showVariablesHelp,
-              tooltip: 'Variable syntax',
+              tooltip: 'Snippet syntax',
             ),
           ],
         ),
@@ -243,17 +244,49 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a command';
                         }
-                        return null;
+                        final errors = parseSnippetKeySequence(value).errors;
+                        return errors.isEmpty ? null : errors.first;
                       },
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Use {{variable}} placeholders. Examples: '
-                      '{{container}}, {{branch}}, {{log_file}}.',
+                      'Use {{variable}} placeholders, such as {{container}}. '
+                      'Press keys with {key:esc}, {key:ctrl+c} or '
+                      '{key:shift+tab}, and pause with {delay:100}.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: Theme.of(context).colorScheme.outline,
                       ),
                     ),
+                    for (final warning in parseSnippetKeySequence(
+                      _contentController.text,
+                    ).warnings) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        key: const ValueKey('snippet-key-token-warning'),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.info_outline_rounded,
+                            size: 16,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              warning,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 24),
 
                     // Variable preview
@@ -460,7 +493,7 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Variable Substitution'),
+        title: const Text('Snippet Syntax'),
         content: const SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -476,6 +509,39 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
               Text('• git pull && {{restart_command}}'),
               SizedBox(height: 16),
               Text('When executing, you\'ll be prompted to fill in values.'),
+              SizedBox(height: 16),
+              Text(
+                'Keys and pauses',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'In the terminal, {key:...} presses a key and {delay:N} '
+                'waits N milliseconds (up to 5000).',
+              ),
+              SizedBox(height: 8),
+              Text('• {key:esc}{key:esc}'),
+              Text('• {key:ctrl+c}'),
+              Text('• {key:shift+tab}'),
+              Text('• {key:esc}:wq{key:enter}'),
+              SizedBox(height: 8),
+              Text(
+                'Keys: esc, tab, enter, backspace, delete, space, up, down, '
+                'left, right, home, end, pageup, pagedown, f1-f12, or one '
+                'character. Add ctrl+, alt+ or shift+ in front. A shifted '
+                'symbol such as ? or + adds Shift itself, and so does a '
+                'capital letter on its own.',
+              ),
+              SizedBox(height: 8),
+              Text(
+                r'Write \{key:esc} to type a token as text. A token right '
+                r'after $, as in ${key:1}, is always text.',
+              ),
+              SizedBox(height: 8),
+              Text(
+                'A sequence stops if the connection drops or you switch '
+                'windows. Snippets with keys do not work in native chat.',
+              ),
             ],
           ),
         ),

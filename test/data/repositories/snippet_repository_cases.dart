@@ -21,6 +21,51 @@ void registerSnippetRepositoryTests() {
       await db.close();
     });
 
+    group('SnippetRepository - key token upgrade', () {
+      test('escapes old snippets once so they send the same text', () async {
+        final indexId = await repository.insert(
+          SnippetsCompanion.insert(
+            name: 'Index',
+            command: 'db.c.createIndex({key:1})',
+          ),
+        );
+        final plainId = await repository.insert(
+          SnippetsCompanion.insert(name: 'Plain', command: r'echo ${key:1}'),
+        );
+
+        expect(await repository.escapeLegacyKeyTokens(), 1);
+        expect(
+          (await repository.getById(indexId))!.command,
+          r'db.c.createIndex(\{key:1})',
+        );
+        expect((await repository.getById(plainId))!.command, r'echo ${key:1}');
+
+        // Snippets written with tokens after the upgrade stay as written.
+        final keysId = await repository.insert(
+          SnippetsCompanion.insert(name: 'Keys', command: '{key:esc}'),
+        );
+        expect(await repository.escapeLegacyKeyTokens(), 0);
+        expect((await repository.getById(keysId))!.command, '{key:esc}');
+        expect(
+          (await repository.getById(indexId))!.command,
+          r'db.c.createIndex(\{key:1})',
+        );
+      });
+    });
+
+    group('SnippetRepository - key tokens ready', () {
+      test('is ready only after the upgrade ran, and never runs it', () async {
+        final id = await repository.insert(
+          SnippetsCompanion.insert(name: 'Old', command: 'f({key:1})'),
+        );
+        expect(await repository.keyTokensReady(), isFalse);
+        expect((await repository.getById(id))!.command, 'f({key:1})');
+
+        await repository.escapeLegacyKeyTokens();
+        expect(await repository.keyTokensReady(), isTrue);
+      });
+    });
+
     group('SnippetRepository - Snippets', () {
       test('getAll returns empty list initially', () async {
         final snippets = await repository.getAll();
