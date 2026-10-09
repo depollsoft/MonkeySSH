@@ -29,6 +29,18 @@ const _genericSessionSummaries = <String>{
   'session',
 };
 
+/// Names Cursor Agent shows for a chat it has not titled yet. Only Cursor
+/// treats them as untitled: it alone has a fallback label for such a chat.
+const _cursorPlaceholderTitles = <String>{'new agent', 'new chat'};
+
+/// The most Cursor prompt labels kept between discoveries.
+const _cursorPromptLabelCacheMaxEntries = 512;
+
+/// How long a Cursor chat without a prompt label waits before a picker load
+/// reads its prompt history again. The read may have been cut short, and
+/// Cursor records a prompt whose send failed without rewriting meta.json.
+const _cursorPromptLabelMissTtl = Duration(minutes: 2);
+
 const _profileSourcingPrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
     '{ . ~/.profile; . ~/.bash_profile; . ~/.zprofile; } >/dev/null 2>&1; '
@@ -280,6 +292,13 @@ bool shouldSurfaceDiscoveryFailure({
   required bool hadError,
   required int loadedSessionCount,
 }) => hadError && loadedSessionCount == 0;
+
+/// Replaces line breaks and Unit Separators in a text [expression] with spaces,
+/// so each `sqlite3 -separator` row stays one line that
+/// [parseSeparatedSessionRows] can split.
+String _sqlSingleLineText(String expression) =>
+    'REPLACE(REPLACE(REPLACE($expression, '
+    "char(10), ' '), char(13), ' '), char(31), ' ')";
 
 /// Builds the SQL predicate used to scope session directories to the active
 /// project root or its descendants without relying on `LIKE` wildcards.
@@ -966,7 +985,10 @@ String? piEncodedSessionDirectoryName(String? workingDirectory) {
 /// Parses `sqlite3`-separated session rows (Hermes, OpenCode) into metadata.
 ///
 /// Columns are id, title, cwd, and the epoch last-activity time, delimited by
-/// ASCII Unit Separator so titles may contain any printable text.
+/// ASCII Unit Separator so titles may contain any printable text. A line that
+/// does not have exactly those four columns, a single-token id, and an empty
+/// or numeric time is not a row: it is shell or sqlite3 noise, or part of a
+/// row that a line break split.
 @visibleForTesting
 List<ToolSessionInfo> parseSeparatedSessionRows(
   String output, {
@@ -976,20 +998,26 @@ List<ToolSessionInfo> parseSeparatedSessionRows(
   for (final line in output.trim().split('\n')) {
     if (line.trim().isEmpty) continue;
     final parts = line.split('\x1f');
-    if (parts.length < 3) continue;
+    if (parts.length != 4) continue;
 
     final id = parts[0].trim();
-    if (id.isEmpty) continue;
+    if (id.isEmpty || id.contains(RegExp(r'\s'))) continue;
     final title = parts[1].trim();
     final directory = parts[2].trim();
-    final epoch = parts.length < 4 ? null : int.tryParse(parts[3].trim());
+    final rawEpoch = parts[3].trim();
+    final parsedEpoch = num.tryParse(rawEpoch);
+    final epoch = parsedEpoch != null && parsedEpoch.isFinite
+        ? parsedEpoch.toInt()
+        : null;
+    if (rawEpoch.isNotEmpty && epoch == null) continue;
 
     sessions.add(
       ToolSessionInfo(
         toolName: toolName,
         sessionId: id,
         workingDirectory: directory.isNotEmpty ? directory : null,
-        lastActive: epoch == null || epoch <= 0
+        // A time past DateTime's range keeps the row, without a time.
+        lastActive: epoch == null || epoch <= 0 || epoch > _maxEpochMillis
             ? null
             : _dateTimeFromEpochValue(epoch),
         summary: title.isNotEmpty ? title : null,
@@ -1099,6 +1127,7 @@ List<ToolSessionInfo> parseMuseSessionIndex(String output) {
   String? workingDirectory,
   DateTime? updatedAt,
   bool hasConversation,
+  bool isSubagent,
   bool parsedAny,
 })
 parseCursorSessionMetadata(String raw) {
@@ -1109,6 +1138,7 @@ parseCursorSessionMetadata(String raw) {
       workingDirectory: null,
       updatedAt: null,
       hasConversation: true,
+      isSubagent: false,
       parsedAny: false,
     );
   }
@@ -1128,8 +1158,61 @@ parseCursorSessionMetadata(String raw) {
     workingDirectory: workingDirectory,
     updatedAt: updatedAt,
     hasConversation: hasConversation,
+    isSubagent: decoded['isSubagent'] == true,
     parsedAny: parsedAny,
   );
+}
+
+/// Reads the oldest prompt from the end of a Cursor Agent chat's
+/// `prompt_history.json`.
+///
+/// Cursor keeps that file as a JSON array of the chat's prompts, newest first
+/// and one per line, so its last lines hold the oldest ones. A prompt sent
+/// again moves to the front, so the oldest listed prompt is the oldest one
+/// never repeated. Slash commands, and summaries [isUsable] rejects, are
+/// skipped in favor of the next prompt. A tail that does not end the array
+/// was cut short and yields nothing.
+@visibleForTesting
+String? parseCursorPromptHistoryTail(
+  String raw, {
+  bool Function(String summary)? isUsable,
+}) {
+  final trimmed = raw.trim();
+  if (!trimmed.endsWith(']')) return null;
+  // A short or single-line file arrives whole; a longer one is cut mid-array
+  // and read line by line.
+  Object? whole;
+  try {
+    whole = jsonDecode(trimmed);
+  } on FormatException {
+    whole = null;
+  }
+  final oldestFirst = whole is List
+      ? whole.reversed
+      : trimmed.split('\n').reversed.map((line) {
+          final entry = line.trim();
+          if (!entry.startsWith('"')) return null;
+          try {
+            return jsonDecode(
+              entry.endsWith(',')
+                  ? entry.substring(0, entry.length - 1)
+                  : entry,
+            );
+          } on FormatException {
+            return null;
+          }
+        });
+  for (final prompt in oldestFirst.whereType<String>()) {
+    final trimmedPrompt = prompt.trim();
+    // `/model gpt-5` is a command; `/Users/me/app.ts fails` is a request.
+    if (trimmedPrompt.isEmpty ||
+        RegExp(r'^/[A-Za-z][\w:-]*(\s|$)').hasMatch(trimmedPrompt)) {
+      continue;
+    }
+    final summary = _summarizeSessionText(trimmedPrompt);
+    if (isUsable == null || isUsable(summary)) return summary;
+  }
+  return null;
 }
 
 /// Parses Antigravity session metadata from a saved session JSON file.
@@ -1620,6 +1703,15 @@ class AgentSessionDiscoveryService {
   >
   _piLabelCache = {};
 
+  /// Cursor first-prompt labels by remote identity and meta.json path, valid
+  /// while meta.json keeps its mtime. A null label records a chat without one
+  /// for [_cursorPromptLabelMissTtl].
+  final Map<
+    (_AgentSessionDiscoveryScopeKey, String),
+    ({DateTime modifiedAt, String? label, DateTime cachedAt})
+  >
+  _cursorPromptLabelCache = {};
+
   /// Invalidates cached and in-flight discovery state for [session].
   ///
   /// The next picker load starts fresh without reconnecting the SSH session.
@@ -1636,6 +1728,7 @@ class AgentSessionDiscoveryService {
     _relatedWorkingDirectoriesCache.removeWhere((key, _) => matches(key));
     _inFlightRelatedWorkingDirectories.removeWhere((key, _) => matches(key));
     _piLabelCache.removeWhere((key, _) => matches(key.$1));
+    _cursorPromptLabelCache.removeWhere((key, _) => matches(key.$1));
   }
 
   /// Warms the discovery cache for the given scope without changing UI state.
@@ -2781,7 +2874,10 @@ class AgentSessionDiscoveryService {
 
   // ── Cursor Agent ─────────────────────────────────────────────────────────
   // Sessions: ~/.cursor/chats/<workspaceHash>/<chatId>/meta.json
-  // meta.json: {title, createdAtMs, updatedAtMs, cwd, hasConversation}.
+  // meta.json: {title, createdAtMs, updatedAtMs, cwd, hasConversation,
+  // isSubagent}. The title mirrors the chat's name, which stays unset or
+  // "New Agent" until Cursor titles the chat; prompt_history.json beside it
+  // then supplies the first prompt instead.
   // The chat id (used with `cursor-agent --resume <id>`) is the directory name
   // that contains meta.json.
 
@@ -2827,13 +2923,15 @@ class AgentSessionDiscoveryService {
         maxLines: 20,
       );
       final sessions = <ToolSessionInfo>[];
+      // Meta files of chats without a usable title, by chat id.
+      final untitledMetaFiles = <String, _ListedFile>{};
       var hadError = false;
 
       for (final file in metaFiles) {
         final chatId = _cursorChatIdFromMetaPath(file.path);
         if (chatId == null) continue;
 
-        String? summary;
+        String? title;
         String? sessionWorkingDirectory;
         DateTime? lastActive;
 
@@ -2846,44 +2944,148 @@ class AgentSessionDiscoveryService {
             if (snapshot.content.trim().isNotEmpty && !metadata.parsedAny) {
               hadError = true;
             }
+            // A subagent's chat belongs to its parent; Cursor's own session
+            // list leaves it out too.
+            if (metadata.isSubagent) continue;
             // Current Cursor Agent persists the active resumable chat id with
             // hasConversation=false, including after the TUI has created its
             // workspace chat. The parent directory remains the authoritative
             // --resume id, so keep metadata-only records instead of returning
             // an empty picker.
-            summary = metadata.summary;
+            // A title the picker would drop leaves the chat untitled.
+            title = _sanitizeSessionSummary(
+              metadata.summary,
+              sessionId: chatId,
+              workingDirectory: metadata.workingDirectory,
+            );
+            if (_cursorPlaceholderTitles.contains(title?.toLowerCase())) {
+              title = null;
+            }
             sessionWorkingDirectory = metadata.workingDirectory;
             lastActive = metadata.updatedAt;
           } on Object {
             hadError = true;
           }
         }
-        lastActive ??= file.modifiedAt;
-
+        if (title == null) untitledMetaFiles[chatId] = file;
         sessions.add(
           ToolSessionInfo(
             toolName: 'Cursor Agent',
             sessionId: chatId,
             workingDirectory: sessionWorkingDirectory,
-            lastActive: lastActive,
+            lastActive: lastActive ?? file.modifiedAt,
             summary:
-                summary ?? 'Cursor session ${_truncateSessionIdValue(chatId)}',
+                title ?? 'Cursor session ${_truncateSessionIdValue(chatId)}',
           ),
         );
       }
-      return _ToolDiscoveryResult.success(
-        AgentLaunchTool.cursorAgent,
-        _scopeSessions(
-          sessions,
-          workingDirectory,
-          relatedWorkingDirectories,
-          max,
-        ),
-        hadError: hadError,
+
+      final scoped = _scopeSessions(
+        sessions,
+        workingDirectory,
+        relatedWorkingDirectories,
+        max,
       );
+      // Untitled chats the picker will show are named after their first
+      // prompt. Preview rows show no names, so a preview skips the read.
+      final labels = previewOnly
+          ? const <String, String>{}
+          : await _readCursorPromptLabels(session, [
+              for (final info in scoped)
+                if (untitledMetaFiles[info.sessionId] case final metaFile?)
+                  (metaFile: metaFile, info: info),
+            ]);
+      return _ToolDiscoveryResult.success(AgentLaunchTool.cursorAgent, [
+        for (final info in scoped)
+          switch (labels[untitledMetaFiles[info.sessionId]?.path]) {
+            final label? => ToolSessionInfo(
+              toolName: info.toolName,
+              sessionId: info.sessionId,
+              workingDirectory: info.workingDirectory,
+              lastActive: info.lastActive,
+              summary: label,
+            ),
+            null => info,
+          },
+      ], hadError: hadError);
     } on Object {
       return _ToolDiscoveryResult.failure(AgentLaunchTool.cursorAgent);
     }
+  }
+
+  /// Reads the first-prompt labels of untitled Cursor [chats] from the
+  /// `prompt_history.json` beside each chat's meta.json, keyed by meta path.
+  ///
+  /// Labels are cached while a chat's meta.json keeps its mtime: Cursor
+  /// rewrites that file whenever the chat gains a message. A chat without a
+  /// label is read again after [_cursorPromptLabelMissTtl].
+  Future<Map<String, String>> _readCursorPromptLabels(
+    SshSession session,
+    List<({_ListedFile metaFile, ToolSessionInfo info})> chats,
+  ) async {
+    final identity = _AgentSessionDiscoveryScopeKey.fromSession(
+      session,
+      workingDirectory: null,
+    );
+    final now = _now();
+    final labels = <String, String>{};
+    final misses = <({_ListedFile metaFile, ToolSessionInfo info})>[];
+    for (final chat in chats) {
+      final file = chat.metaFile;
+      final cached = _cursorPromptLabelCache[(identity, file.path)];
+      if (cached != null &&
+          cached.modifiedAt == file.modifiedAt &&
+          (cached.label != null ||
+              now.difference(cached.cachedAt) < _cursorPromptLabelMissTtl)) {
+        if (cached.label case final label?) labels[file.path] = label;
+      } else {
+        misses.add(chat);
+      }
+    }
+    if (misses.isEmpty) return labels;
+
+    String promptHistoryPath(String metaPath) =>
+        metaPath.replaceFirst(RegExp(r'meta\.json$'), 'prompt_history.json');
+    final Map<String, _RemoteFileSnapshot> snapshots;
+    try {
+      snapshots = await _readRemoteFileSnapshots(
+        session,
+        misses.map((chat) => promptHistoryPath(chat.metaFile.path)),
+        maxLines: 1,
+        tailLines: 8,
+      );
+    } on Object {
+      // The chats keep their fallback names until a later load.
+      return labels;
+    }
+    for (final (metaFile: file, :info) in misses) {
+      final snapshot = snapshots[promptHistoryPath(file.path)];
+      // A label the picker would drop as generic is no label.
+      final label = snapshot == null
+          ? null
+          : parseCursorPromptHistoryTail(
+              snapshot.tailContent ?? snapshot.content,
+              isUsable: (summary) =>
+                  _sanitizeSessionSummary(
+                    summary,
+                    sessionId: info.sessionId,
+                    workingDirectory: info.workingDirectory,
+                  ) !=
+                  null,
+            );
+      if (label != null) labels[file.path] = label;
+      final modifiedAt = file.modifiedAt;
+      if (modifiedAt == null) continue;
+      if (_cursorPromptLabelCache.length >= _cursorPromptLabelCacheMaxEntries) {
+        _cursorPromptLabelCache.remove(_cursorPromptLabelCache.keys.first);
+      }
+      _cursorPromptLabelCache[(identity, file.path)] = (
+        modifiedAt: modifiedAt,
+        label: label,
+        cachedAt: now,
+      );
+    }
+    return labels;
   }
 
   /// Extracts the Cursor chat id (the resume identifier) from the path of a
@@ -3452,8 +3654,9 @@ class AgentSessionDiscoveryService {
     );
     final sql = StringBuffer()
       ..write(
-        "SELECT id, COALESCE(NULLIF(title, ''), display_name, ''), "
-        "COALESCE(cwd, ''), "
+        'SELECT id, '
+        "${_sqlSingleLineText("COALESCE(NULLIF(title, ''), display_name, '')")}, "
+        "${_sqlSingleLineText("COALESCE(cwd, '')")}, "
         'CAST(COALESCE(ended_at, started_at) AS INTEGER) ',
       )
       ..write('FROM sessions ')
@@ -3467,11 +3670,14 @@ class AgentSessionDiscoveryService {
       ..write('ORDER BY COALESCE(ended_at, started_at) DESC ')
       ..write('LIMIT $scanLimit;');
 
+    // sqlite3 creates a missing database file when its directory exists, so
+    // a host without Hermes history must not reach it.
     return _exec(
       session,
-      r'SEP=$(printf "\037"); sqlite3 -separator "$SEP" '
-      r'"${HERMES_HOME:-$HOME/.hermes}/state.db" '
-      '${shellEscapePosix(sql.toString())} 2>/dev/null',
+      r'__fl_hermes_db="${HERMES_HOME:-$HOME/.hermes}/state.db"; '
+      r'if [ -f "$__fl_hermes_db" ]; then SEP=$(printf "\037"); '
+      r'sqlite3 -separator "$SEP" "$__fl_hermes_db" '
+      '${shellEscapePosix(sql.toString())} 2>/dev/null; fi',
     );
   }
 
@@ -3787,7 +3993,10 @@ class AgentSessionDiscoveryService {
       columnName: 'directory',
     );
     final sql = StringBuffer()
-      ..write('SELECT id, title, directory, time_updated ')
+      ..write(
+        'SELECT id, ${_sqlSingleLineText('title')}, '
+        '${_sqlSingleLineText('directory')}, time_updated ',
+      )
       ..write('FROM __OPENCODE_SESSION_TABLE__ ')
       ..write('WHERE parent_id IS NULL ')
       ..write('AND time_archived IS NULL ');
@@ -5109,6 +5318,9 @@ String windowsFileSnapshotScript(
     ..write('}catch{}}');
   return powerShellUtf8OutputScript(body.toString());
 }
+
+/// The latest time [DateTime] can hold, in epoch milliseconds.
+const _maxEpochMillis = 8640000000000000;
 
 DateTime _dateTimeFromEpochValue(int epoch) =>
     DateTime.fromMillisecondsSinceEpoch(
