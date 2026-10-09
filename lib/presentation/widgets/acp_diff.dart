@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/terminal_theme.dart' show contrastRatio;
 import '../models/acp_timeline.dart';
 import 'acp_chat_typography.dart';
 
@@ -18,6 +19,27 @@ const int kAcpDiffInitialLineCap = 200;
 const int kAcpDiffMaxSourceChars = 256 * 1024; // 256K characters
 
 enum _DiffLineKind { addition, deletion, hunk, meta, context }
+
+/// Returns [color] moved toward [ink] just far enough to reach a 4.5:1 WCAG
+/// contrast against [background], so red and green diff text stays legible
+/// on light themes where the raw status hue is too pale.
+Color legibleDiffColor(
+  Color color, {
+  required Color background,
+  required Color ink,
+}) {
+  const minimumContrast = 4.5;
+  if (contrastRatio(color, background) >= minimumContrast) {
+    return color;
+  }
+  for (var step = 1; step < 10; step++) {
+    final candidate = Color.lerp(color, ink, step / 10)!;
+    if (contrastRatio(candidate, background) >= minimumContrast) {
+      return candidate;
+    }
+  }
+  return ink;
+}
 
 _DiffLineKind _classifyDiffLine(String line) {
   if (line.startsWith('@@')) {
@@ -54,6 +76,8 @@ class AcpDiffView extends StatefulWidget {
     super.key,
     this.initialLineCap = kAcpDiffInitialLineCap,
     this.maxSourceChars = kAcpDiffMaxSourceChars,
+    this.headerTrailing,
+    this.semanticsLabel,
   });
 
   /// The diff to render.
@@ -65,6 +89,13 @@ class AcpDiffView extends StatefulWidget {
   /// Maximum number of source characters split into lines; longer source is
   /// truncated to this bounded prefix with a visible truncation notice.
   final int maxSourceChars;
+
+  /// Optional action shown at the end of the header row, such as a per-hunk
+  /// button. The header keeps its compact padding when this is null.
+  final Widget? headerTrailing;
+
+  /// Overrides the default `Diff for <path>, N lines` screen-reader label.
+  final String? semanticsLabel;
 
   @override
   State<AcpDiffView> createState() => _AcpDiffViewState();
@@ -123,6 +154,18 @@ class _AcpDiffViewState extends State<AcpDiffView> {
         ? const Color(0xFF3FB950)
         : const Color(0xFF1A7F37);
     final deletionColor = scheme.error;
+    final additionTint = additionColor.withValues(alpha: 0.14);
+    final deletionTint = deletionColor.withValues(alpha: 0.14);
+    final additionText = legibleDiffColor(
+      additionColor,
+      background: Color.alphaBlend(additionTint, scheme.surface),
+      ink: scheme.onSurface,
+    );
+    final deletionText = legibleDiffColor(
+      deletionColor,
+      background: Color.alphaBlend(deletionTint, scheme.surface),
+      ink: scheme.onSurface,
+    );
     final monoBase = AcpChatTypography.monoStyleOf(context)
         .copyWith(fontSize: 12, height: 1.4);
 
@@ -135,11 +178,11 @@ class _AcpDiffViewState extends State<AcpDiffView> {
       final Color color;
       switch (kind) {
         case _DiffLineKind.addition:
-          background = additionColor.withValues(alpha: 0.14);
-          color = additionColor;
+          background = additionTint;
+          color = additionText;
         case _DiffLineKind.deletion:
-          background = deletionColor.withValues(alpha: 0.14);
-          color = deletionColor;
+          background = deletionTint;
+          color = deletionText;
         case _DiffLineKind.hunk:
           background = null;
           color = scheme.primary;
@@ -168,10 +211,23 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     final remaining = _lines.length - visible;
     final truncated = _lines.length > _cap;
 
-    final semanticsLabel = _sourceTruncated
-        ? 'Diff for ${widget.diff.path}, truncated, '
-              'first ${_lines.length} lines'
-        : 'Diff for ${widget.diff.path}, ${_lines.length} lines';
+    final semanticsLabel =
+        widget.semanticsLabel ??
+        (_sourceTruncated
+            ? 'Diff for ${widget.diff.path}, truncated, '
+                  'first ${_lines.length} lines'
+            : 'Diff for ${widget.diff.path}, ${_lines.length} lines');
+    final headerTrailing = widget.headerTrailing;
+    final headerText = Text(
+      widget.diff.path,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: AcpChatTypography.monoStyleOf(context).copyWith(
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+      ),
+    );
 
     return Semantics(
       label: semanticsLabel,
@@ -190,28 +246,37 @@ class _AcpDiffViewState extends State<AcpDiffView> {
               Container(
                 width: double.infinity,
                 color: scheme.surfaceContainerHighest,
-                padding: const EdgeInsets.symmetric(
+                padding: EdgeInsets.symmetric(
                   horizontal: FluttyTheme.spacingSm,
-                  vertical: 6,
+                  vertical: headerTrailing == null ? 6 : 0,
                 ),
-                child: Text(
-                  widget.diff.path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AcpChatTypography.monoStyleOf(context).copyWith(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: scheme.onSurface,
-                  ),
-                ),
+                child: headerTrailing == null
+                    ? headerText
+                    : Row(
+                        children: [
+                          Expanded(child: headerText),
+                          headerTrailing,
+                        ],
+                      ),
               ),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: IntrinsicWidth(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: rows,
+              // Rows span at least the visible width so each line's tint
+              // reads as a full bar, and scroll sideways when a line is wider.
+              LayoutBuilder(
+                builder: (context, constraints) => SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: constraints.hasBoundedWidth
+                          ? constraints.maxWidth
+                          : 0,
+                    ),
+                    child: IntrinsicWidth(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisSize: MainAxisSize.min,
+                        children: rows,
+                      ),
+                    ),
                   ),
                 ),
               ),
