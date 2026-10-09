@@ -601,19 +601,23 @@ final class MonkeyMuxAcpBridgeService {
   }
 
   /// Lists running bridges using only the helper's safe metadata schema.
+  ///
+  /// Background refreshes pass [SshExecPriority.low] so they queue behind
+  /// user-visible work on the connection.
   Future<List<MonkeyMuxAcpBridgeMetadata>> list(
     SshSession session, {
     MonkeyMuxInstallConfirmation? confirmInstall,
+    SshExecPriority priority = SshExecPriority.normal,
   }) async {
     final installation = await _installer.ensureInstalled(
       session,
-      priority: SshExecPriority.normal,
+      priority: priority,
       confirmInstall: confirmInstall,
     );
     final message = await _runHelper(session, installation, const [
       'acp',
       'list',
-    ]);
+    ], priority: priority);
     _requireType(message, 'list');
     final rawBridges = message['bridges'];
     if (rawBridges is! List || rawBridges.length > _maxBridgeListEntries) {
@@ -720,8 +724,9 @@ final class MonkeyMuxAcpBridgeService {
   Future<Map<String, Object?>> _runHelper(
     SshSession session,
     MonkeyMuxInstallation installation,
-    List<String> arguments,
-  ) => session.runQueuedExec(() async {
+    List<String> arguments, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => session.runQueuedExec(priority: priority, () async {
     SSHSession? channel;
     StreamSubscription<Uint8List>? stderrSubscription;
     try {

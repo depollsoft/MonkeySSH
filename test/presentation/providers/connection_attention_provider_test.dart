@@ -1,7 +1,10 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -10,6 +13,7 @@ import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/connection_attention.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/connection_attention_provider.dart';
@@ -66,12 +70,37 @@ class _Sessions extends ActiveSessionsNotifier {
   void dropAll() => state = const {};
 }
 
+TmuxWindow _nativeWindow(String bridgeId) => TmuxWindow(
+  index: 3,
+  name: 'agent',
+  isActive: false,
+  nativeAcpBridgeId: bridgeId,
+  nativeAcpProviderId: 'builtin:copilot-cli',
+);
+
+ProviderContainer _container({
+  required _Sessions sessions,
+  required FakeAcpSessionManager manager,
+  required ConnectionBridgeLister lister,
+}) => ProviderContainer(
+  overrides: [
+    activeSessionsProvider.overrideWith(() => sessions),
+    acpSessionManagerProvider.overrideWithValue(manager),
+    allHostsProvider.overrideWith((ref) => Stream.value(const [])),
+    connectionBridgeListerProvider.overrideWithValue(lister),
+  ],
+);
+
+HostBridgeMetadata _read(ProviderContainer container) =>
+    container.read(connectionBridgeMetadataProvider);
+
 MonkeyMuxAcpBridgeMetadata _bridge({
   String id = 'bridge-1',
   String? providerId = 'builtin:copilot-cli',
   String? sessionId = 'session-1',
   int pending = 0,
   int inFlight = 0,
+  int clients = 0,
   DateTime? lastActivity,
 }) => MonkeyMuxAcpBridgeMetadata(
   id: id,
@@ -81,7 +110,7 @@ MonkeyMuxAcpBridgeMetadata _bridge({
   provider: 'Copilot CLI',
   commandHash: 'hash',
   state: MonkeyMuxAcpProviderState.running,
-  clientCount: 0,
+  clientCount: clients,
   pendingRequestCount: pending,
   inFlightTurnCount: inFlight,
   lastActivity: lastActivity ?? DateTime(2026, 1, 1, 12),
@@ -116,7 +145,7 @@ void main() {
       final items = buildWaitingOnYouItems(
         sessions: [idle, onB, disconnected],
         bridges: HostBridgeMetadata.empty,
-        connectedHosts: const {1: 10, 2: 20},
+        connectedHosts: const {1, 2},
         hostLabels: const {2: 'Beta'},
       );
 
@@ -128,9 +157,9 @@ void main() {
       expect(item.title, 'Fix the flaky test');
       expect(item.since, DateTime(2026, 1, 1, 11));
       expect(item.tracked, isTrue);
-      expect(item.location, startsWith('/agents/chat?'));
-      expect(Uri.parse(item.location).queryParameters['b'], 'b2');
-      expect(Uri.parse(item.location).queryParameters['s'], 'session-1');
+      expect(item.chatLocation, startsWith('/agents/chat?'));
+      expect(Uri.parse(item.chatLocation).queryParameters['b'], 'b2');
+      expect(Uri.parse(item.chatLocation).queryParameters['s'], 'session-1');
     });
 
     test('adds host-reported requests for detached and untracked bridges', () {
@@ -152,6 +181,13 @@ void main() {
             ),
             _bridge(id: 'no-session', sessionId: null, pending: 1),
             _bridge(id: 'quiet', sessionId: 'quiet-session'),
+            // Another client is attached and answers its own requests.
+            _bridge(
+              id: 'attached',
+              sessionId: 'elsewhere',
+              pending: 1,
+              clients: 1,
+            ),
           ],
         ),
       );
@@ -159,7 +195,7 @@ void main() {
       final items = buildWaitingOnYouItems(
         sessions: [detached],
         bridges: bridges,
-        connectedHosts: const {1: 10},
+        connectedHosts: const {1},
         hostLabels: const {1: 'Alpha'},
       );
 
@@ -168,14 +204,30 @@ void main() {
         items.map((item) => item.reason),
         everyElement(AttentionReason.hostRequest),
       );
-      final untracked = items.first;
-      expect(untracked.tracked, isFalse);
-      final location = Uri.parse(untracked.location);
-      expect(location.path, '/terminal/1');
-      expect(location.queryParameters['connectionId'], '10');
-      expect(location.queryParameters['b'], 'untracked');
-      expect(location.queryParameters['s'], 'remote-session');
-      expect(location.queryParameters['p'], 'builtin:copilot-cli');
+      expect(items.first.tracked, isFalse);
+      expect(items.first.key.acpSessionId, 'remote-session');
+    });
+
+    test('a detached request answered elsewhere leaves the list', () {
+      final detached = fakeAcpSession(
+        key: fakeAcpKey(bridgeId: 'b1'),
+        status: AcpConnectionStatus.detached,
+        pendingPermissions: [_permission(DateTime(2026))],
+      );
+      List<WaitingOnYouItem> items(int pending) => buildWaitingOnYouItems(
+        sessions: [detached],
+        bridges: HostBridgeMetadata(const {}).withHost(
+          1,
+          HostBridges(
+            connectionId: 10,
+            bridges: [_bridge(id: 'b1', pending: pending)],
+          ),
+        ),
+        connectedHosts: const {1},
+        hostLabels: const {},
+      );
+      expect(items(1).single.reason, AttentionReason.permission);
+      expect(items(0), isEmpty);
     });
 
     test('orders permission before sign-in, then most recent first', () {
@@ -195,7 +247,7 @@ void main() {
           waiting('newer', DateTime(2026, 6)),
         ],
         bridges: HostBridgeMetadata.empty,
-        connectedHosts: const {1: 10},
+        connectedHosts: const {1},
         hostLabels: const {},
       );
       expect(items.map((item) => item.key.bridgeId), [
@@ -208,6 +260,68 @@ void main() {
     });
   });
 
+  group('resolveWaitingOnYouLocation', () {
+    WaitingOnYouItem untracked() => buildWaitingOnYouItems(
+      sessions: const [],
+      bridges: HostBridgeMetadata(const {}).withHost(
+        1,
+        HostBridges(connectionId: 10, bridges: [_bridge(pending: 1)]),
+      ),
+      connectedHosts: const {1},
+      hostLabels: const {},
+    ).single;
+
+    test('opens the workspace whose window hosts the bridge', () async {
+      final polled = _session(connectionId: 10, hostId: 1)
+        ..remoteMuxSessionName = 'a';
+      final owner = _session(connectionId: 11, hostId: 1)
+        ..remoteMuxSessionName = 'b';
+      final location = Uri.parse(
+        await resolveWaitingOnYouLocation(
+          untracked(),
+          sessions: [polled, owner],
+          listWindows: (session, workspace) async =>
+              workspace == 'b' ? [_nativeWindow('bridge-1')] : const [],
+        ),
+      );
+      expect(location.path, '/terminal/1');
+      expect(location.queryParameters, {
+        'connectionId': '11',
+        'p': 'builtin:copilot-cli',
+        'b': 'bridge-1',
+        's': 'session-1',
+      });
+    });
+
+    test('falls back to the chat when no window hosts the bridge', () async {
+      final location = await resolveWaitingOnYouLocation(
+        untracked(),
+        sessions: [
+          _session(connectionId: 10, hostId: 1)..remoteMuxSessionName = 'a',
+        ],
+        listWindows: (session, workspace) async => const [],
+      );
+      expect(location, untracked().chatLocation);
+    });
+
+    test('a tracked session opens its chat without listing windows', () async {
+      final item = buildWaitingOnYouItems(
+        sessions: [
+          fakeAcpSession(pendingPermissions: [_permission(DateTime(2026))]),
+        ],
+        bridges: HostBridgeMetadata.empty,
+        connectedHosts: const {1},
+        hostLabels: const {},
+      ).single;
+      final location = await resolveWaitingOnYouLocation(
+        item,
+        sessions: [_session(connectionId: 10, hostId: 1)],
+        listWindows: (session, workspace) => throw StateError('not expected'),
+      );
+      expect(location, item.chatLocation);
+    });
+  });
+
   group('connectionBridgeMetadataProvider', () {
     test('polls connected MonkeyMux hosts once per interval', () {
       fakeAsync((async) {
@@ -217,15 +331,13 @@ void main() {
         final manager = FakeAcpSessionManager();
         final polled = <int>[];
         var pending = 1;
-        final container = ProviderContainer(
-          overrides: [
-            activeSessionsProvider.overrideWith(() => sessions),
-            acpSessionManagerProvider.overrideWithValue(manager),
-            connectionBridgeListerProvider.overrideWithValue((session) async {
-              polled.add(session.connectionId);
-              return [_bridge(pending: pending)];
-            }),
-          ],
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            polled.add(session.connectionId);
+            return [_bridge(pending: pending)];
+          },
         );
         final subscription = container.listen(
           connectionBridgeMetadataProvider,
@@ -234,71 +346,238 @@ void main() {
         async.flushMicrotasks();
 
         expect(polled, [10], reason: 'Plain shells are never probed.');
-        expect(
-          container
-              .read(connectionBridgeMetadataProvider)
-              .bridge(1, 'bridge-1')
-              ?.pendingRequestCount,
-          1,
-        );
+        expect(_read(container).bridge(1, 'bridge-1')?.pendingRequestCount, 1);
 
         pending = 0;
         async.elapse(connectionAttentionPollInterval);
         expect(polled, [10, 10]);
-        expect(
-          container
-              .read(connectionBridgeMetadataProvider)
-              .bridge(1, 'bridge-1')
-              ?.pendingRequestCount,
-          0,
-        );
+        expect(_read(container).bridge(1, 'bridge-1')?.pendingRequestCount, 0);
 
         sessions.dropAll();
         async.elapse(connectionAttentionPollInterval);
         expect(polled, [10, 10], reason: 'Disconnected hosts drop out.');
-        expect(container.read(connectionBridgeMetadataProvider).hosts, isEmpty);
+        expect(_read(container).hosts, isEmpty);
 
         subscription.close();
         async.elapse(connectionAttentionPollInterval * 3);
         expect(polled, [10, 10], reason: 'Polling stops with its watchers.');
         container.dispose();
-        manager.dispose();
+        unawaited(manager.dispose());
       });
     });
 
-    test('drops a host whose bridge list fails', () {
+    test('a watcher rebuilt by each result does not trigger extra polls', () {
+      fakeAsync((async) {
+        final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
+        final manager = FakeAcpSessionManager();
+        var calls = 0;
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            calls++;
+            if (calls > 20) throw StateError('poll loop');
+            // A running agent's activity time moves on every read.
+            return [
+              _bridge(lastActivity: DateTime.fromMillisecondsSinceEpoch(calls)),
+            ];
+          },
+        );
+        final subscription = container.listen(waitingOnYouProvider, (_, _) {});
+        for (var tick = 0; tick < 50; tick++) {
+          async
+            ..flushMicrotasks()
+            ..elapse(const Duration(milliseconds: 20));
+        }
+        expect(calls, 1);
+        async.elapse(connectionAttentionPollInterval);
+        expect(calls, 2);
+
+        subscription.close();
+        container.dispose();
+        unawaited(manager.dispose());
+      });
+    });
+
+    test('stops polling without watchers but keeps the snapshot briefly', () {
+      fakeAsync((async) {
+        final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
+        final manager = FakeAcpSessionManager();
+        var calls = 0;
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            calls++;
+            return [_bridge(pending: 1)];
+          },
+        );
+        var subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        async.flushMicrotasks();
+        expect(calls, 1);
+
+        subscription.close();
+        async.elapse(connectionAttentionPollInterval * 2);
+        expect(calls, 1);
+        expect(_read(container).hosts, contains(1));
+
+        subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        async.flushMicrotasks();
+        expect(calls, 2, reason: 'A returning watcher refreshes at once.');
+
+        subscription.close();
+        async
+          ..elapse(
+            connectionAttentionRetainAfterHidden + const Duration(seconds: 2),
+          )
+          ..flushMicrotasks();
+        subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        expect(
+          subscription.read().hosts,
+          isEmpty,
+          reason: 'The snapshot is dropped after the grace period.',
+        );
+        subscription.close();
+        container.dispose();
+        unawaited(manager.dispose());
+      });
+    });
+
+    test('drops a failing host and backs off its retries', () {
       fakeAsync((async) {
         final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
         final manager = FakeAcpSessionManager();
         var fail = false;
-        final container = ProviderContainer(
-          overrides: [
-            activeSessionsProvider.overrideWith(() => sessions),
-            acpSessionManagerProvider.overrideWithValue(manager),
-            connectionBridgeListerProvider.overrideWithValue((session) async {
-              if (fail) throw StateError('channel closed');
-              return [_bridge(pending: 1)];
-            }),
-          ],
+        var calls = 0;
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            calls++;
+            if (fail) throw StateError('channel closed');
+            return [_bridge(pending: 1)];
+          },
         );
         final subscription = container.listen(
           connectionBridgeMetadataProvider,
           (_, _) {},
         );
         async.flushMicrotasks();
-        expect(container.read(connectionBridgeMetadataProvider).hosts, {
-          1: isA<HostBridges>(),
-        });
+        expect(_read(container).hosts, contains(1));
 
         fail = true;
+        // Failed attempts at 5 s, 10 s, 20 s and 40 s: retries wait 1, 2 and
+        // 4 intervals rather than reopening a channel every five seconds.
         async.elapse(connectionAttentionPollInterval);
-        expect(container.read(connectionBridgeMetadataProvider).hosts, isEmpty);
+        expect(_read(container).hosts, isEmpty);
+        expect(calls, 2);
+        async.elapse(connectionAttentionPollInterval * 6);
+        expect(calls, 4);
+        async.elapse(connectionAttentionPollInterval);
+        expect(calls, 5);
 
         subscription.close();
         container.dispose();
-        manager.dispose();
+        unawaited(manager.dispose());
       });
     });
+
+    test('a list that finishes after its host disconnects is dropped', () {
+      fakeAsync((async) {
+        final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
+        final manager = FakeAcpSessionManager();
+        final pendingList = Completer<List<MonkeyMuxAcpBridgeMetadata>>();
+        var calls = 0;
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) {
+            calls++;
+            return pendingList.future;
+          },
+        );
+        final subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        async
+          ..flushMicrotasks()
+          ..elapse(connectionAttentionPollInterval * 2);
+        expect(calls, 1, reason: 'Overlapping polls share one request.');
+
+        sessions.dropAll();
+        pendingList.complete([_bridge(pending: 1)]);
+        async.flushMicrotasks();
+        expect(_read(container).hosts, isEmpty);
+
+        subscription.close();
+        container.dispose();
+        unawaited(manager.dispose());
+      });
+    });
+  });
+
+  testWidgets('polling follows the app lifecycle, not window focus', (
+    tester,
+  ) async {
+    final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
+    final manager = FakeAcpSessionManager();
+    var calls = 0;
+    final container = _container(
+      sessions: sessions,
+      manager: manager,
+      lister: (session) async {
+        calls++;
+        return [_bridge(pending: 1)];
+      },
+    );
+    final subscription = container.listen(
+      connectionBridgeMetadataProvider,
+      (_, _) {},
+    );
+    await tester.pump();
+    expect(calls, 1);
+
+    // An unfocused desktop or split-screen window is still on screen.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump(connectionAttentionPollInterval);
+    expect(calls, 2);
+
+    for (final state in [AppLifecycleState.hidden, AppLifecycleState.paused]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+    expect(
+      _read(container).hosts,
+      isEmpty,
+      reason: 'Stale counts are dropped.',
+    );
+    await tester.pump(connectionAttentionPollInterval * 3);
+    expect(calls, 2);
+
+    for (final state in [
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+    expect(calls, 3, reason: 'Returning to the foreground refreshes at once.');
+    expect(_read(container).hosts, contains(1));
+
+    subscription.close();
+    container.dispose();
+    await manager.dispose();
   });
 
   test('waitingOnYouProvider surfaces a request within one poll', () {
@@ -306,15 +585,10 @@ void main() {
       final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
       final manager = FakeAcpSessionManager();
       var pending = 0;
-      final container = ProviderContainer(
-        overrides: [
-          activeSessionsProvider.overrideWith(() => sessions),
-          acpSessionManagerProvider.overrideWithValue(manager),
-          allHostsProvider.overrideWith((ref) => Stream.value(const [])),
-          connectionBridgeListerProvider.overrideWithValue(
-            (session) async => [_bridge(pending: pending)],
-          ),
-        ],
+      final container = _container(
+        sessions: sessions,
+        manager: manager,
+        lister: (session) async => [_bridge(pending: pending)],
       );
       final subscription = container.listen(waitingOnYouProvider, (_, _) {});
       async.flushMicrotasks();
@@ -336,7 +610,7 @@ void main() {
 
       subscription.close();
       container.dispose();
-      manager.dispose();
+      unawaited(manager.dispose());
     });
   });
 }

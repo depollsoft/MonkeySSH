@@ -1,12 +1,14 @@
 /// Attention data for the Connections tab and the native session switcher.
 ///
 /// Polls safe MonkeyMux bridge metadata for connected hosts while a surface
-/// that shows it is visible, and merges it with tracked native session state
+/// that shows it is on screen, and merges it with tracked native session state
 /// into a "waiting on you" list. Nothing here is persisted: disconnected hosts
-/// drop out on the next poll, and no window title or path is stored or logged.
+/// drop out on the next poll, the last snapshot is kept in memory for a short
+/// grace period only, and no window title or path is stored or logged.
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -21,10 +23,13 @@ import '../../domain/models/agent_usage_rings.dart';
 import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/tmux_state.dart';
+import '../../domain/services/acp_notification_target.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monkeymux_acp_bridge_service.dart';
+import '../../domain/services/ssh_exec_queue.dart';
 import '../../domain/services/ssh_service.dart';
 import '../widgets/acp_session_presentation.dart';
 import 'agent_usage_rings_provider.dart';
@@ -42,18 +47,25 @@ typedef ConnectionBridgeLister =
     Future<List<MonkeyMuxAcpBridgeMetadata>> Function(SshSession session);
 
 /// Reads bridge metadata without ever prompting to install MonkeyMux.
+///
+/// Runs at low exec priority, behind user-visible work on the connection, and
+/// without the routine debug entries a five-second poll would otherwise add
+/// to the diagnostics ring buffer.
 final connectionBridgeListerProvider = Provider<ConnectionBridgeLister>((ref) {
-  // Passive: the tear-off never passes an install confirmation.
   final service = ref.watch(monkeyMuxAcpBridgeServiceProvider);
-  return service.list;
+  return (session) => DiagnosticsLogService.runWithoutDebugEntries(
+    () => service.list(session, priority: SshExecPriority.low),
+  );
 });
 
 /// Whether attention surfaces under [context] are on screen.
 ///
-/// Offstage routes (such as Home under an open terminal) disable tickers, so
-/// polling stops while the user cannot see the result.
+/// Both checks are needed. An opaque route above disables tickers, but the
+/// terminal route is not opaque (predictive back reveals Home), so Home keeps
+/// its tickers under it; it is only the current route while nothing covers it.
 bool attentionSurfaceVisible(BuildContext context) =>
-    TickerMode.valuesOf(context).enabled;
+    TickerMode.valuesOf(context).enabled &&
+    (ModalRoute.isCurrentOf(context) ?? true);
 
 /// Bridges reported by one connected host.
 @immutable
@@ -146,34 +158,93 @@ final class HostBridgeMetadata {
 
 /// Polls bridge metadata for connected MonkeyMux hosts while watched.
 ///
-/// Watch it only from visible surfaces (see [attentionSurfaceVisible]); it
-/// stops when the last watcher leaves.
+/// Watch it only from visible surfaces (see [attentionSurfaceVisible]).
+/// Polling stops as soon as the last watcher leaves; the snapshot is kept for
+/// [connectionAttentionRetainAfterHidden] so a closing dialog does not flash
+/// rows, then dropped.
 final connectionBridgeMetadataProvider =
     NotifierProvider.autoDispose<
       ConnectionBridgeMetadataNotifier,
       HostBridgeMetadata
     >(ConnectionBridgeMetadataNotifier.new);
 
+/// How long an unwatched snapshot stays in memory before it is dropped.
+const connectionAttentionRetainAfterHidden = Duration(seconds: 30);
+
+/// How long polling continues after the last watcher leaves.
+const _pauseAfterUnwatched = Duration(seconds: 1);
+
+/// Longest wait, in poll intervals, before retrying a host whose list failed.
+const _maxFailureBackoffIntervals = 12;
+
 /// Refreshes [HostBridgeMetadata] every [connectionAttentionPollInterval].
 class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
   Timer? _timer;
+  Timer? _pause;
+  Timer? _release;
+  AppLifecycleListener? _lifecycle;
+  bool _backgrounded = false;
   final _inFlight = <int>{};
-  final _failingHosts = <int>{};
+  final _failures = <int, int>{};
+  final _skipPolls = <int, int>{};
 
   @override
   HostBridgeMetadata build() {
-    ref.onDispose(() {
-      _timer?.cancel();
-      _timer = null;
-    });
+    final link = ref.keepAlive();
+    ref
+      ..onCancel(() {
+        // A dependent provider that rebuilds (for example on each new poll
+        // result) unsubscribes and resubscribes a scheduler tick later.
+        // Pausing and polling again at once would loop, so wait a moment for
+        // a watcher to come back before pausing.
+        _pause?.cancel();
+        _pause = Timer(_pauseAfterUnwatched, () {
+          _pause = null;
+          _stopTimer();
+          _release?.cancel();
+          _release = Timer(connectionAttentionRetainAfterHidden, link.close);
+        });
+      })
+      ..onResume(() {
+        if (_pause != null) {
+          _pause!.cancel();
+          _pause = null;
+          return;
+        }
+        _release?.cancel();
+        _release = null;
+        _startTimer();
+        // Lifecycle callbacks may not read other providers; poll right after.
+        _scheduleImmediatePoll();
+      })
+      ..onDispose(() {
+        _stopTimer();
+        _pause?.cancel();
+        _release?.cancel();
+        _lifecycle?.dispose();
+      });
+    _lifecycle = AppLifecycleListener(onStateChange: _onLifecycle);
+    _backgrounded = !_appVisible(WidgetsBinding.instance.lifecycleState);
+    _startTimer();
+    _scheduleImmediatePoll();
+    return HostBridgeMetadata.empty;
+  }
+
+  void _scheduleImmediatePoll() => scheduleMicrotask(() {
+    if (ref.mounted) unawaited(poll());
+  });
+
+  void _startTimer() {
+    _timer?.cancel();
     _timer = Timer.periodic(
       connectionAttentionPollInterval,
       (_) => unawaited(poll()),
     );
-    scheduleMicrotask(() {
-      if (ref.mounted) unawaited(poll());
-    });
-    return HostBridgeMetadata.empty;
+  }
+
+  void _stopTimer() {
+    _timer?.cancel();
+    _timer = null;
   }
 
   @override
@@ -182,9 +253,27 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
     HostBridgeMetadata next,
   ) => previous != next;
 
-  static bool _appInForeground() {
-    final lifecycle = WidgetsBinding.instance.lifecycleState;
-    return lifecycle == null || lifecycle == AppLifecycleState.resumed;
+  /// Desktop and split-screen windows stay visible while `inactive`, so only
+  /// hidden, paused and detached apps stop polling.
+  static bool _appVisible(AppLifecycleState? lifecycle) => switch (lifecycle) {
+    null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+    AppLifecycleState.hidden ||
+    AppLifecycleState.paused ||
+    AppLifecycleState.detached => false,
+  };
+
+  void _onLifecycle(AppLifecycleState lifecycle) {
+    if (!ref.mounted) return;
+    if (!_appVisible(lifecycle)) {
+      _backgrounded = true;
+      // Counts read before backgrounding are stale by the time anyone looks.
+      state = HostBridgeMetadata.empty;
+      return;
+    }
+    if (_backgrounded) {
+      _backgrounded = false;
+      unawaited(poll());
+    }
   }
 
   /// Picks one connected session per host: a MonkeyMux workspace connection
@@ -218,20 +307,32 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
   /// Polls every target host once. Exposed for tests.
   @visibleForTesting
   Future<void> poll() async {
-    if (!ref.mounted || !_appInForeground()) return;
+    if (!ref.mounted || _backgrounded) return;
     final targets = _targets();
     var next = state;
     for (final hostId in state.hosts.keys) {
       if (!targets.containsKey(hostId)) next = next.withHost(hostId, null);
     }
-    _failingHosts.removeWhere((hostId) => !targets.containsKey(hostId));
+    _failures.removeWhere((hostId, _) => !targets.containsKey(hostId));
+    _skipPolls.removeWhere((hostId, _) => !targets.containsKey(hostId));
     state = next;
     final lister = ref.read(connectionBridgeListerProvider);
     await Future.wait([
       for (final MapEntry(key: hostId, value: session) in targets.entries)
-        _pollHost(lister, hostId, session),
+        if (!_backingOff(hostId)) _pollHost(lister, hostId, session),
     ]);
   }
+
+  bool _backingOff(int hostId) {
+    final skip = _skipPolls[hostId] ?? 0;
+    if (skip <= 0) return false;
+    _skipPolls[hostId] = skip - 1;
+    return true;
+  }
+
+  /// Whether [session] is still the connection polled for [hostId].
+  bool _stillTarget(int hostId, SshSession session) =>
+      ref.mounted && !_backgrounded && identical(_targets()[hostId], session);
 
   Future<void> _pollHost(
     ConnectionBridgeLister lister,
@@ -241,8 +342,11 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
     if (!_inFlight.add(hostId)) return;
     try {
       final bridges = await lister(session);
-      if (!ref.mounted) return;
-      _failingHosts.remove(hostId);
+      // The host may have disconnected, or the app gone to the background,
+      // while the list was in flight; never resurrect it.
+      if (!_stillTarget(hostId, session)) return;
+      _failures.remove(hostId);
+      _skipPolls.remove(hostId);
       state = state.withHost(
         hostId,
         HostBridges(connectionId: session.connectionId, bridges: bridges),
@@ -251,8 +355,17 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
       if (!ref.mounted) return;
       // Stale counts would claim an agent is waiting when it may not be.
       state = state.withHost(hostId, null);
-      if (_failingHosts.add(hostId)) {
-        DiagnosticsLogService.instance.debug(
+      final failures = (_failures[hostId] ?? 0) + 1;
+      _failures[hostId] = failures;
+      // An older helper without these fields fails every time; back off
+      // 1, 2, 4 ... intervals up to a minute instead of opening a channel
+      // every five seconds.
+      _skipPolls[hostId] = math.min(
+        (1 << math.min(failures - 1, 4)) - 1,
+        _maxFailureBackoffIntervals - 1,
+      );
+      if (failures == 1) {
+        DiagnosticsLogService.instance.info(
           'connections.attention',
           'bridge_poll_failed',
           fields: {
@@ -280,7 +393,6 @@ final class WaitingOnYouItem {
     required this.providerLabel,
     required this.since,
     required this.tracked,
-    this.connectionId,
     this.cwdSummary,
   });
 
@@ -289,10 +401,6 @@ final class WaitingOnYouItem {
 
   /// Exact native session to open.
   final AcpSessionKey key;
-
-  /// Connected SSH connection for the host, used to open untracked sessions
-  /// inside their MonkeyMux window.
-  final int? connectionId;
 
   /// Saved host label, shown so the user knows which machine is waiting.
   final String hostLabel;
@@ -309,34 +417,33 @@ final class WaitingOnYouItem {
   /// When the session started waiting, or its last reported activity.
   final DateTime since;
 
-  /// Whether the app tracks this session. Untracked sessions are opened
-  /// through their MonkeyMux window, which knows how to reattach them.
+  /// Whether the app tracks this session. Untracked sessions open through
+  /// the MonkeyMux window that hosts their bridge, which can reattach them.
   final bool tracked;
 
   /// Terminal identity used for the row's agent icon.
   AgentLaunchTool? get tool =>
       agentLaunchToolForBuiltinAcpProviderId(key.providerId);
 
-  /// Route that lands on this session, where its pending request is shown.
-  String get location {
-    if (tracked || connectionId == null) {
-      return buildAgentChatLocation(
-        hostId: key.hostId,
-        providerId: key.providerId,
-        bridgeId: key.bridgeId,
-        acpSessionId: key.acpSessionId,
-      );
-    }
-    return Uri(
-      path: '/terminal/${key.hostId}',
-      queryParameters: <String, String>{
-        'connectionId': '$connectionId',
-        acpAgentChatProviderQueryKey: key.providerId,
-        acpAgentChatBridgeQueryKey: key.bridgeId,
-        acpAgentChatSessionQueryKey: key.acpSessionId,
-      },
-    ).toString();
-  }
+  /// The session's chat, where its pending request is shown.
+  String get chatLocation => buildAgentChatLocation(
+    hostId: key.hostId,
+    providerId: key.providerId,
+    bridgeId: key.bridgeId,
+    acpSessionId: key.acpSessionId,
+  );
+
+  /// The session inside the MonkeyMux window on [connectionId] that hosts its
+  /// bridge, the same destination a notification tap resolves to.
+  String terminalLocation(int connectionId) => Uri(
+    path: '/terminal/${key.hostId}',
+    queryParameters: <String, String>{
+      'connectionId': '$connectionId',
+      acpAgentChatProviderQueryKey: key.providerId,
+      acpAgentChatBridgeQueryKey: key.bridgeId,
+      acpAgentChatSessionQueryKey: key.acpSessionId,
+    },
+  ).toString();
 
   @override
   bool operator ==(Object other) =>
@@ -344,7 +451,6 @@ final class WaitingOnYouItem {
       other is WaitingOnYouItem &&
           reason == other.reason &&
           key == other.key &&
-          connectionId == other.connectionId &&
           hostLabel == other.hostLabel &&
           title == other.title &&
           providerLabel == other.providerLabel &&
@@ -356,7 +462,6 @@ final class WaitingOnYouItem {
   int get hashCode => Object.hash(
     reason,
     key,
-    connectionId,
     hostLabel,
     title,
     providerLabel,
@@ -389,7 +494,7 @@ final class WaitingOnYouSnapshot {
 }
 
 /// Builds the "waiting on you" list from tracked sessions and host-reported
-/// bridges on [connectedHosts] (host id to a connected connection id).
+/// bridges on [connectedHosts].
 ///
 /// Tracked sessions use their own state, falling back to bridge counts only
 /// while detached. A host-reported request on an untracked bridge is listed
@@ -397,7 +502,7 @@ final class WaitingOnYouSnapshot {
 List<WaitingOnYouItem> buildWaitingOnYouItems({
   required List<AcpSessionState> sessions,
   required HostBridgeMetadata bridges,
-  required Map<int, int> connectedHosts,
+  required Set<int> connectedHosts,
   required Map<int, String> hostLabels,
 }) {
   String hostLabel(int hostId) => hostLabels[hostId] ?? 'Host $hostId';
@@ -406,7 +511,7 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
   for (final session in sessions) {
     final hostId = session.key.hostId;
     trackedBridges.add((hostId, session.key.bridgeId));
-    if (!connectedHosts.containsKey(hostId)) continue;
+    if (!connectedHosts.contains(hostId)) continue;
     final bridge = bridges.bridge(hostId, session.key.bridgeId);
     final reason = acpSessionWaitingReason(session, bridge: bridge);
     if (reason == null) continue;
@@ -414,7 +519,6 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
       WaitingOnYouItem(
         reason: reason,
         key: session.key,
-        connectionId: connectedHosts[hostId],
         hostLabel: hostLabel(hostId),
         title: acpSessionDisplayTitle(session),
         providerLabel: session.providerLabel,
@@ -427,7 +531,7 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
     );
   }
   for (final MapEntry(key: hostId, value: host) in bridges.hosts.entries) {
-    if (!connectedHosts.containsKey(hostId)) continue;
+    if (!connectedHosts.contains(hostId)) continue;
     for (final bridge in host.byId.values) {
       if (trackedBridges.contains((hostId, bridge.id))) continue;
       final reason = bridgeWaitingReason(bridge);
@@ -452,7 +556,6 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
             bridgeId: bridge.id,
             acpSessionId: sessionId,
           ),
-          connectionId: host.connectionId,
           hostLabel: hostLabel(hostId),
           title: label,
           providerLabel: label,
@@ -484,18 +587,11 @@ final waitingOnYouProvider = Provider.autoDispose<WaitingOnYouSnapshot>((ref) {
   final bridges = ref.watch(connectionBridgeMetadataProvider);
   final states = ref.watch(activeSessionsProvider);
   final activeSessions = ref.read(activeSessionsProvider.notifier);
-  final connectedHosts = <int, int>{};
-  for (final entry in states.entries) {
-    if (entry.value != SshConnectionState.connected) continue;
-    final connection = activeSessions.getActiveConnection(entry.key);
-    if (connection == null) continue;
-    connectedHosts.putIfAbsent(connection.hostId, () => entry.key);
-  }
-  for (final MapEntry(key: hostId, value: host) in bridges.hosts.entries) {
-    if (connectedHosts.containsKey(hostId)) {
-      connectedHosts[hostId] = host.connectionId;
-    }
-  }
+  final connectedHosts = <int>{
+    for (final entry in states.entries)
+      if (entry.value == SshConnectionState.connected)
+        ?activeSessions.getActiveConnection(entry.key)?.hostId,
+  };
   final hosts = ref.watch(allHostsProvider).asData?.value ?? const <Host>[];
   final items = buildWaitingOnYouItems(
     sessions: sessions,
@@ -507,6 +603,28 @@ final waitingOnYouProvider = Provider.autoDispose<WaitingOnYouSnapshot>((ref) {
       ? WaitingOnYouSnapshot.empty
       : WaitingOnYouSnapshot(items);
 });
+
+/// Resolves where Open should land for [item].
+///
+/// A tracked session opens its chat. An untracked one opens inside the
+/// connected MonkeyMux workspace whose window hosts its bridge, found with the
+/// same lookup a notification tap uses; with no such window (a bridge started
+/// outside a workspace), its chat reattaches it directly.
+Future<String> resolveWaitingOnYouLocation(
+  WaitingOnYouItem item, {
+  required Iterable<SshSession> sessions,
+  required Future<List<TmuxWindow>> Function(SshSession, String) listWindows,
+}) async {
+  if (item.tracked) return item.chatLocation;
+  final connectionId = await resolveAcpNotificationConnection(
+    target: item.key,
+    sessions: sessions,
+    listWindows: listWindows,
+  );
+  return connectionId == null
+      ? item.chatLocation
+      : item.terminalLocation(connectionId);
+}
 
 /// Agent identities on [session]'s host whose reported allowance is low.
 ///

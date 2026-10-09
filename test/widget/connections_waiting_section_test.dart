@@ -22,7 +22,6 @@ WaitingOnYouItem _item({
     bridgeId: bridgeId,
     acpSessionId: 'session-$bridgeId',
   ),
-  connectionId: 20,
   hostLabel: 'Beta',
   title: title,
   providerLabel: 'Claude Code',
@@ -92,9 +91,9 @@ void main() {
     expect(find.text('Open'), findsNWidgets(2));
 
     await tester.tap(find.text('Fix the flaky test'));
-    expect(opened, [permission.location]);
+    expect(opened, [permission.chatLocation]);
     await tester.tap(find.text('Open').last);
-    expect(opened, [permission.location, signIn.location]);
+    expect(opened, [permission.chatLocation, signIn.chatLocation]);
   });
 
   testWidgets('each row is one accessible Open button at least 44pt tall', (

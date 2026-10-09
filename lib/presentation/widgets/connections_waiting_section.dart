@@ -14,6 +14,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
+import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/ssh_service.dart';
 import '../providers/connection_attention_provider.dart';
 import 'acp_session_presentation.dart';
 import 'agent_tool_icon.dart';
@@ -53,6 +55,35 @@ class ConnectionsWaitingSection extends ConsumerStatefulWidget {
 class _ConnectionsWaitingSectionState
     extends ConsumerState<ConnectionsWaitingSection> {
   Timer? _ageTicker;
+  List<WaitingOnYouItem> _items = const <WaitingOnYouItem>[];
+  bool _opening = false;
+
+  /// Resolves the destination at tap time, so an untracked session opens in
+  /// the workspace whose window hosts its bridge right now.
+  Future<void> _open(WaitingOnYouItem item) async {
+    if (item.tracked) {
+      widget.onOpen(context, item.chatLocation);
+      return;
+    }
+    if (_opening) return;
+    _opening = true;
+    try {
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final location = await resolveWaitingOnYouLocation(
+        item,
+        sessions: ref
+            .read(activeSessionsProvider)
+            .keys
+            .map(sessions.getSession)
+            .whereType<SshSession>(),
+        listWindows: (session, workspace) =>
+            ref.read(monkeyMuxServiceProvider).listWindows(session, workspace),
+      );
+      if (mounted) widget.onOpen(context, location);
+    } finally {
+      _opening = false;
+    }
+  }
 
   @override
   void dispose() {
@@ -74,12 +105,12 @@ class _ConnectionsWaitingSectionState
 
   @override
   Widget build(BuildContext context) {
-    if (!attentionSurfaceVisible(context)) {
-      _syncAgeTicker(active: false);
-      return const SizedBox.shrink();
-    }
-    final items = ref.watch(waitingOnYouProvider).items;
-    _syncAgeTicker(active: items.isNotEmpty);
+    // Under a dialog or a covering route, keep the last rows without polling
+    // so nothing moves behind it.
+    final visible = attentionSurfaceVisible(context);
+    if (visible) _items = ref.watch(waitingOnYouProvider).items;
+    final items = _items;
+    _syncAgeTicker(active: visible && items.isNotEmpty);
     if (items.isEmpty) return const SizedBox.shrink();
 
     final scheme = Theme.of(context).colorScheme;
@@ -145,7 +176,7 @@ class _ConnectionsWaitingSectionState
                 key: ValueKey('waiting-on-you-${items[index].key.value}'),
                 item: items[index],
                 now: now,
-                onOpen: () => widget.onOpen(context, items[index].location),
+                onOpen: () => unawaited(_open(items[index])),
               ),
             ],
             const SizedBox(height: 4),

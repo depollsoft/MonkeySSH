@@ -159,6 +159,16 @@ class DiagnosticsLogService extends ChangeNotifier
     enabled: isDiagnosticsLoggingEnabled,
   );
 
+  static final _quietDebugZoneKey = Object();
+
+  /// Runs [body] with the debug entries of its call chain dropped.
+  ///
+  /// For background polls that repeat every few seconds, whose routine
+  /// install-cache, exec-queue and channel entries would otherwise evict
+  /// useful history from the ring buffer. Info, warnings and errors are kept.
+  static R runWithoutDebugEntries<R>(R Function() body) =>
+      runZoned(body, zoneValues: {_quietDebugZoneKey: true});
+
   static const _redacted = '[redacted]';
   static const _maxStringLength = 160;
   static const _notifyDebounce = Duration(milliseconds: 250);
@@ -311,6 +321,10 @@ class DiagnosticsLogService extends ChangeNotifier
     Map<String, Object?> fields,
   ) {
     if (!enabled) return;
+    if (level == DiagnosticsLogLevel.debug &&
+        Zone.current[_quietDebugZoneKey] == true) {
+      return;
+    }
     final sanitizedFields = <String, Object?>{};
     for (final entry in fields.entries) {
       final key = _sanitizeKey(entry.key);

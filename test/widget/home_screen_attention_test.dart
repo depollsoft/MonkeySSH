@@ -101,7 +101,7 @@ class _Sessions extends ActiveSessionsNotifier {
       createdAt: DateTime(2026),
       config: session.config,
       remoteMuxBackend: RemoteMuxBackend.monkeyMux,
-      remoteMuxSessionName: _workspace,
+      remoteMuxSessionName: session.remoteMuxSessionName,
     );
   }
 
@@ -111,7 +111,11 @@ class _Sessions extends ActiveSessionsNotifier {
   ];
 }
 
-SshSession _session(int connectionId, int hostId) =>
+SshSession _session(
+  int connectionId,
+  int hostId, {
+  String workspace = _workspace,
+}) =>
     SshSession(
         connectionId: connectionId,
         hostId: hostId,
@@ -123,7 +127,17 @@ SshSession _session(int connectionId, int hostId) =>
         ),
       )
       ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
-      ..remoteMuxSessionName = _workspace;
+      ..remoteMuxSessionName = workspace;
+
+const _shell = TmuxWindow(index: 0, name: 'shell', isActive: true);
+
+TmuxWindow _nativeWindow(String bridgeId, String providerId) => TmuxWindow(
+  index: 1,
+  name: 'agent',
+  isActive: false,
+  nativeAcpBridgeId: bridgeId,
+  nativeAcpProviderId: providerId,
+);
 
 Host _host(int id, String label) => Host(
   id: id,
@@ -164,8 +178,16 @@ void main() {
   late FakeAcpSessionManager manager;
   late List<String> opened;
   late GoRouter router;
+  late Map<int, List<TmuxWindow>> windows;
   var hostBPending = 0;
-  final sessions = [_session(7, 1), _session(8, 2)];
+  var listCalls = 0;
+  // Host 2 has two MonkeyMux workspaces; its waiting bridge lives in the
+  // second, which is not the connection the poller happens to use.
+  final sessions = [
+    _session(7, 1),
+    _session(8, 2),
+    _session(9, 2, workspace: 'side'),
+  ];
 
   setUp(() {
     db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -173,11 +195,18 @@ void main() {
     manager = FakeAcpSessionManager();
     opened = [];
     hostBPending = 0;
+    listCalls = 0;
+    windows = {
+      7: const [_shell],
+      8: const [_shell],
+      9: [_shell, _nativeWindow('bridge-b', 'builtin:claude-code')],
+    };
     for (final session in sessions) {
+      final workspace = session.remoteMuxSessionName!;
       when(
         () => monkeyMux.watchWindowChanges(
           session,
-          _workspace,
+          workspace,
           extraFlags: any(named: 'extraFlags'),
         ),
       ).thenAnswer((_) {
@@ -190,14 +219,19 @@ void main() {
       when(
         () => monkeyMux.listWindows(
           session,
-          _workspace,
+          workspace,
           extraFlags: any(named: 'extraFlags'),
         ),
-      ).thenAnswer(
-        (_) async => const [
-          TmuxWindow(index: 0, name: 'shell', isActive: true),
-        ],
-      );
+      ).thenAnswer((_) async => windows[session.connectionId]!);
+      when(
+        () => monkeyMux.killWindow(
+          session,
+          workspace,
+          any(),
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) async {});
     }
     Widget record(GoRouterState state) {
       opened.add(state.uri.toString());
@@ -211,9 +245,17 @@ void main() {
           builder: (context, state) =>
               const HomeScreen(initialTab: HomeScreenTab.connections),
         ),
+        // Like the app's terminal route: not opaque, so Home keeps its
+        // tickers underneath it.
         GoRoute(
           path: '/terminal/:hostId',
-          builder: (context, state) => record(state),
+          pageBuilder: (context, state) => CustomTransitionPage<void>(
+            opaque: false,
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            transitionsBuilder: (context, animation, secondary, child) => child,
+            child: record(state),
+          ),
         ),
         GoRoute(
           path: '/agents/chat',
@@ -230,6 +272,11 @@ void main() {
   });
 
   Future<void> pumpHome(WidgetTester tester) async {
+    // Tall enough that every connection row is built.
+    tester.view
+      ..physicalSize = const Size(1200, 6000)
+      ..devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -253,15 +300,12 @@ void main() {
           tmuxServiceProvider.overrideWithValue(_MockTmuxService()),
           monkeyMuxServiceProvider.overrideWithValue(monkeyMux),
           acpSessionManagerProvider.overrideWithValue(manager),
-          connectionBridgeListerProvider.overrideWithValue(
-            (session) async =>
-                session.hostId == 2 ? [_bridge(pending: hostBPending)] : [],
-          ),
+          connectionBridgeListerProvider.overrideWithValue((session) async {
+            listCalls++;
+            return session.hostId == 2 ? [_bridge(pending: hostBPending)] : [];
+          }),
         ],
-        child: MediaQuery(
-          data: const MediaQueryData(size: Size(400, 800)),
-          child: MaterialApp.router(routerConfig: router),
-        ),
+        child: MaterialApp.router(routerConfig: router),
       ),
     );
     await tester.pump();
@@ -269,8 +313,10 @@ void main() {
   }
 
   testWidgets(
-    'a request on another host reaches the top within one poll and opens it',
+    'a request on another host reaches the top within one poll and opens '
+    'the workspace that hosts it',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       await pumpHome(tester);
       expect(find.text('waiting on you'), findsNothing);
       expect(find.text('Alpha'), findsOneWidget);
@@ -286,17 +332,20 @@ void main() {
         lessThan(tester.getTopLeft(find.text('Alpha')).dy),
         reason: 'The section sits above every connection.',
       );
+      expect(find.bySemanticsLabel(RegExp('1 need attention')), findsOneWidget);
 
       await tester.tap(find.text('Open'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
       final location = Uri.parse(opened.single);
       expect(location.path, '/terminal/2');
       expect(location.queryParameters, {
-        'connectionId': '8',
+        'connectionId': '9',
         'p': 'builtin:claude-code',
         'b': 'bridge-b',
         's': 'remote-session',
       });
+      semantics.dispose();
     },
   );
 
@@ -321,10 +370,10 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Ship the fix'), findsOneWidget);
-    expect(find.text('permission'), findsOneWidget);
+    expect(find.text('Ship the fix'), findsWidgets);
+    expect(find.text('permission'), findsWidgets);
 
-    await tester.tap(find.text('Ship the fix'));
+    await tester.tap(find.text('Ship the fix').first);
     await tester.pumpAndSettle();
     final location = Uri.parse(opened.single);
     expect(location.path, '/agents/chat');
@@ -334,5 +383,65 @@ void main() {
       'b': 'bridge-b',
       's': 'session-1',
     });
+  });
+
+  testWidgets('polling stops while a terminal covers Connections', (
+    tester,
+  ) async {
+    await pumpHome(tester);
+    await tester.pump(connectionAttentionPollInterval);
+    expect(listCalls, greaterThan(0));
+
+    await tester.tap(find.text('Alpha'));
+    // Home's cursor keeps blinking under a non-opaque route, so this cannot
+    // settle; pump the push explicitly.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(opened.single, '/terminal/1?connectionId=7');
+    final callsUnderTerminal = listCalls;
+    await tester.pump(connectionAttentionPollInterval * 4);
+    expect(listCalls, callsUnderTerminal);
+
+    router.pop();
+    await tester.pump();
+    await tester.pump();
+    expect(
+      listCalls,
+      greaterThan(callsUnderTerminal),
+      reason: 'Back on Connections, it refreshes at once.',
+    );
+  });
+
+  testWidgets('closing a bound native window asks first and closes the '
+      'window instead of stopping the agent', (tester) async {
+    windows[7] = [_shell, _nativeWindow('bridge-a', 'builtin:copilot-cli')];
+    final bound = fakeAcpSession(key: fakeAcpKey(bridgeId: 'bridge-a'));
+    manager.emit(AcpSessionManagerState(sessions: [bound]));
+    await pumpHome(tester);
+
+    await tester.tap(find.text('$_workspace · 2 windows').first);
+    await tester.pump();
+    await tester.tap(
+      find.byKey(ValueKey('connection-native-acp-close-${bound.key.value}')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Close window?'), findsOneWidget);
+    expect(manager.stopped, isEmpty);
+
+    await tester.tap(find.text('Close window'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    verify(
+      () => monkeyMux.killWindow(
+        sessions.first,
+        _workspace,
+        1,
+        windowId: any(named: 'windowId'),
+        extraFlags: any(named: 'extraFlags'),
+      ),
+    ).called(1);
+    expect(manager.releasedMuxBridges, [(hostId: 1, bridgeId: 'bridge-a')]);
+    expect(manager.stopped, isEmpty);
   });
 }

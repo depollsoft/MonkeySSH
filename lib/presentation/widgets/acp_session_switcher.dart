@@ -198,6 +198,7 @@ class _SessionEntriesList extends ConsumerStatefulWidget {
 class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
   late Future<List<AcpRecentSessionRef>> _recents;
   int _trackedCount = 0;
+  HostBridgeMetadata? _bridges;
 
   @override
   void initState() {
@@ -219,9 +220,11 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
     final sessions =
         ref.watch(acpSessionManagerStateProvider).asData?.value.sessions ??
         const <AcpSessionState>[];
-    final bridges = attentionSurfaceVisible(context)
-        ? ref.watch(connectionBridgeMetadataProvider)
-        : null;
+    // Under a dialog or a covering route, keep the last order without polling.
+    if (attentionSurfaceVisible(context)) {
+      _bridges = ref.watch(connectionBridgeMetadataProvider);
+    }
+    final bridges = _bridges;
     // A session that ends while the list is open becomes a recent entry.
     if (sessions.length < _trackedCount) _recents = _loadRecents();
     _trackedCount = sessions.length;
