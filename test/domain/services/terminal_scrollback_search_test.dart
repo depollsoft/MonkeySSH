@@ -138,6 +138,64 @@ void main() {
       },
     );
 
+    test(
+      'chunked scan matches a self-overlapping query like one pass',
+      () async {
+        final pattern = buildTerminalSearchPattern(
+          'aaa',
+          caseSensitive: true,
+          regex: false,
+        );
+        for (final text in ['a' * 20, '${'x' * 13}${'a' * 12}']) {
+          final whole = (await findTerminalLiteralMatches(
+            [_line(text)],
+            pattern,
+            literalLength: 3,
+          ))!;
+          final chunked = (await findTerminalLiteralMatches(
+            [_line(text)],
+            pattern,
+            literalLength: 3,
+            scanChunk: 8,
+          ))!;
+          expect(chunked.matches, whole.matches, reason: text);
+        }
+      },
+    );
+
+    test('centres the cap on a position inside one long line', () async {
+      final text = 'hit ' * 20;
+      final pattern = buildTerminalSearchPattern(
+        'hit',
+        caseSensitive: false,
+        regex: false,
+      );
+      final literal = (await findTerminalLiteralMatches(
+        [_line(text)],
+        pattern,
+        literalLength: 3,
+        anchorLine: 0,
+        anchorOffset: 70,
+        maxMatches: 4,
+      ))!;
+      expect(literal.matches.map((match) => match.start), [64, 68, 72, 76]);
+
+      final regex = await findTerminalRegexMatches(
+        [text],
+        'hit',
+        caseSensitive: false,
+        anchorLine: 0,
+        anchorOffset: 70,
+        maxMatches: 4,
+      );
+      expect(regex.matches!.matches.map((match) => match.start), [
+        64,
+        68,
+        72,
+        76,
+      ]);
+    });
+
     test('returns null once cancelled', () async {
       final found = await findTerminalLiteralMatches(
         lines,

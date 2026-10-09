@@ -145,9 +145,10 @@ bool _neverCancelled() => false;
 /// The rows are captured up front, which is cheap, and their text is read in
 /// slices that yield to the event loop, so reading a full 10,000-row buffer
 /// does not drop frames. The slices are checked per row, so one hard line
-/// that wraps across thousands of rows does not block either. Output that arrives between slices may change a row
-/// that has not been read yet; the reader returns what each row held when it
-/// was read. Returns null if [isCancelled] reports true between slices.
+/// that wraps across thousands of rows does not block either. Output that
+/// arrives between slices may change a row that has not been read yet; the
+/// reader returns what each row held when it was read. Returns null if
+/// [isCancelled] reports true between slices.
 Future<List<TerminalTextLine>?> readTerminalTextLines(
   Buffer buffer, {
   bool Function() isCancelled = _neverCancelled,

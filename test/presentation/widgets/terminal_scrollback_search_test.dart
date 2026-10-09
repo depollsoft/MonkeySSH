@@ -275,6 +275,29 @@ void main() {
       expect(updates, 0);
     });
 
+    test(
+      'a screen switch while typing keeps the jump to the first match',
+      () async {
+        final terminal = Terminal()
+          ..resize(20, 4)
+          ..write('needle\r\n');
+        final search = TerminalScrollbackSearchController(
+          terminal: terminal,
+          typingDebounce: const Duration(milliseconds: 50),
+          refreshDelay: const Duration(milliseconds: 10),
+        )..setQuery('needle');
+        addTearDown(search.dispose);
+        // A program switches screens before the typing pause ends.
+        terminal.write('\x1b[?1049h\x1b[Hneedle on screen');
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        await _settle(search);
+
+        expect(search.matchCount, 1);
+        expect(search.revealRequest, 1);
+        expect(search.userUpdateCount, 1);
+      },
+    );
+
     test('knows it searches the screen before the first result', () {
       final terminal = Terminal()
         ..resize(20, 3)

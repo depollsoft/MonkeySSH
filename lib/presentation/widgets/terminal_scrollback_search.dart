@@ -132,6 +132,15 @@ class TerminalScrollbackSearchController extends ChangeNotifier
   bool _paused = false;
   bool _changedWhilePaused = false;
   int _focusRequest = 0;
+  // A search the user asked for that has not shown its result yet. A screen
+  // switch that restarts the search in the meantime must not drop the jump
+  // to the first match or its announcement.
+  bool _revealPending = false;
+
+  /// Whether the bar has taken focus for this search. It does so once, when
+  /// find opens; coming back from a native chat must not take focus from the
+  /// terminal again.
+  bool initialFocusDone = false;
 
   List<TerminalSearchMatch> _matches = const <TerminalSearchMatch>[];
   bool _capped = false;
@@ -380,7 +389,13 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _refreshTimer?.cancel();
     _refreshTimer = null;
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(delay, () => unawaited(_search(reveal: reveal)));
+    if (reveal) {
+      _revealPending = true;
+    }
+    _debounceTimer = Timer(
+      delay,
+      () => unawaited(_search(reveal: _revealPending)),
+    );
   }
 
   void _cancelInFlight() {
@@ -404,6 +419,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     bool isStale() => _disposed || generation != _generation;
     final query = _query;
     if (query.isEmpty) {
+      _revealPending = false;
       _applyResults(
         const <TerminalSearchMatch>[],
         capped: false,
@@ -448,7 +464,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
         return;
       }
       _searchesAlternateScreen = usingAltBuffer;
-      final anchorLine = _lineIndexForRow(lines, _anchorRowIndex(previous));
+      final anchor = _anchorInLines(lines, _anchorRowIndex(previous));
 
       TerminalTextMatches? found;
       var status = TerminalSearchStatus.ready;
@@ -459,7 +475,8 @@ class TerminalScrollbackSearchController extends ChangeNotifier
           [for (final line in lines) line.text],
           query,
           caseSensitive: _caseSensitive,
-          anchorLine: anchorLine,
+          anchorLine: anchor.line,
+          anchorOffset: anchor.offset,
           maxMatches: maxMatches,
           budget: regexBudget,
           cancel: cancel.future,
@@ -485,7 +502,8 @@ class TerminalScrollbackSearchController extends ChangeNotifier
           lines,
           pattern,
           literalLength: query.length,
-          anchorLine: anchorLine,
+          anchorLine: anchor.line,
+          anchorOffset: anchor.offset,
           maxMatches: maxMatches,
           isCancelled: isStale,
           sliceBudget: sliceBudget,
@@ -548,6 +566,9 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _capped = capped;
     _rowHits = rowHits;
     _status = status;
+    if (reveal) {
+      _revealPending = false;
+    }
     _currentIndex = reveal
         ? _indexNearAnchor(previous)
         : _indexKeeping(previous);
@@ -603,15 +624,22 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     return anchorRow?.call() ?? math.max(0, _terminal.buffer.lines.length - 1);
   }
 
-  static int _lineIndexForRow(List<TerminalTextLine> lines, int row) {
+  // The hard line holding buffer row [row], and where that row starts in
+  // the line's text, so a capped search can centre on the row even inside a
+  // line that wraps across most of the buffer.
+  static ({int line, int offset}) _anchorInLines(
+    List<TerminalTextLine> lines,
+    int row,
+  ) {
     var firstRow = 0;
     for (var index = 0; index < lines.length; index++) {
-      firstRow += lines[index].rows.length;
-      if (row < firstRow) {
-        return index;
+      final line = lines[index];
+      if (row < firstRow + line.rows.length) {
+        return (line: index, offset: line.rowStarts[row - firstRow]);
       }
+      firstRow += line.rows.length;
     }
-    return math.max(0, lines.length - 1);
+    return (line: math.max(0, lines.length - 1), offset: 1 << 30);
   }
 
   // The last match at or above the anchor: the previous current match while

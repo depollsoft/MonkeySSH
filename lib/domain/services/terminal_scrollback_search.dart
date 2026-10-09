@@ -40,15 +40,17 @@ RegExp buildTerminalSearchPattern(
 bool _neverCancelled() => false;
 
 /// Collects matches in line order and keeps at most `maxMatches` of them
-/// around `anchorLine`: up to half before it (the newest of those), and the
-/// rest at or after it. When one side has fewer, the other side gets the
-/// room. A search with too many matches thus still covers the part of the
-/// buffer the user is looking at.
+/// around a position: `anchorOffset` in line `anchorLine`. Up to half come
+/// before it (the newest of those), the rest at or after it, and when one
+/// side has fewer the other side gets the room. A search with too many
+/// matches thus still covers the part of the buffer the user is looking at,
+/// even inside one hard line that wraps across most of the buffer.
 class _MatchWindow {
-  _MatchWindow(this.maxMatches, this.anchorLine);
+  _MatchWindow(this.maxMatches, this.anchorLine, this.anchorOffset);
 
   final int maxMatches;
   final int anchorLine;
+  final int anchorOffset;
   final _before = ListQueue<TerminalTextMatch>();
   final _after = <TerminalTextMatch>[];
   var _dropped = false;
@@ -57,7 +59,8 @@ class _MatchWindow {
   bool get isComplete => _after.length > maxMatches;
 
   void add(TerminalTextMatch match) {
-    if (match.line < anchorLine) {
+    if (match.line < anchorLine ||
+        (match.line == anchorLine && match.start < anchorOffset)) {
       _before.add(match);
       if (_before.length > maxMatches) {
         _before.removeFirst();
@@ -95,24 +98,26 @@ class _MatchWindow {
 ///
 /// A hard line longer than [scanChunk] is scanned in chunks
 /// that overlap by [literalLength] - 1 characters, so a single wrapped line
-/// filling the buffer cannot block a frame. Matches never span hard lines,
-/// never overlap, and zero-length matches are skipped. At most [maxMatches]
-/// are kept, centred on [anchorLine] (the last line when null).
+/// filling the buffer cannot block a frame. Each chunk resumes where the
+/// last match ended, so the matches are exactly those of one scan of the
+/// whole line. Matches never span hard lines, never overlap, and zero-length
+/// matches are skipped. At most [maxMatches] are kept, centred on
+/// [anchorOffset] in [anchorLine] (the end of the last line when null).
 Future<TerminalTextMatches?> findTerminalLiteralMatches(
   List<TerminalTextLine> lines,
   RegExp literalPattern, {
   required int literalLength,
   int? anchorLine,
+  int anchorOffset = 0,
   int maxMatches = kTerminalSearchMaxMatches,
   int scanChunk = kTerminalLiteralScanChunk,
   bool Function() isCancelled = _neverCancelled,
   Duration sliceBudget = kTerminalTextSliceBudget,
 }) async {
   final slicer = TerminalWorkSlicer(budget: sliceBudget);
-  final window = _MatchWindow(
-    maxMatches,
-    anchorLine ?? math.max(0, lines.length - 1),
-  );
+  final window = anchorLine == null
+      ? _MatchWindow(maxMatches, math.max(0, lines.length - 1), 1 << 30)
+      : _MatchWindow(maxMatches, anchorLine, anchorOffset);
   final overlap = math.max(0, literalLength - 1);
   for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     if (!await slicer.maybeYield(isCancelled)) {
@@ -136,7 +141,11 @@ Future<TerminalTextMatches?> findTerminalLiteralMatches(
       final chunk = chunkStart == 0 && scanEnd == text.length
           ? text
           : text.substring(chunkStart, scanEnd);
-      for (final match in literalPattern.allMatches(chunk)) {
+      // Resume after the last match, which may reach into this chunk, so a
+      // query that can overlap itself (`aaa` in a run of `a`) matches as it
+      // would in one pass.
+      final resume = math.min(chunk.length, math.max(0, lastEnd - chunkStart));
+      for (final match in literalPattern.allMatches(chunk, resume)) {
         final start = chunkStart + match.start;
         final end = chunkStart + match.end;
         if (start >= chunkEnd) {
@@ -191,6 +200,7 @@ Future<TerminalRegexSearchResult> findTerminalRegexMatches(
   String pattern, {
   required bool caseSensitive,
   int? anchorLine,
+  int anchorOffset = 0,
   int maxMatches = kTerminalSearchMaxMatches,
   Duration budget = kTerminalRegexSearchBudget,
   Future<void>? cancel,
@@ -227,6 +237,7 @@ Future<TerminalRegexSearchResult> findTerminalRegexMatches(
         caseSensitive,
         maxMatches,
         anchorLine ?? math.max(0, lines.length - 1),
+        anchorLine == null ? 1 << 30 : anchorOffset,
       ),
       // A crashed worker exits with `null`, which reads as a failure.
       onExit: replies.sendPort,
@@ -269,12 +280,19 @@ TerminalTextMatches _decodeMatches(Int32List encoded) {
 }
 
 void _findRegexMatches(
-  (SendPort, List<String>, String, bool, int, int) message,
+  (SendPort, List<String>, String, bool, int, int, int) message,
 ) {
-  final (replies, lines, pattern, caseSensitive, maxMatches, anchorLine) =
-      message;
+  final (
+    replies,
+    lines,
+    pattern,
+    caseSensitive,
+    maxMatches,
+    anchorLine,
+    anchorOffset,
+  ) = message;
   final regex = RegExp(pattern, caseSensitive: caseSensitive);
-  final window = _MatchWindow(maxMatches, anchorLine);
+  final window = _MatchWindow(maxMatches, anchorLine, anchorOffset);
   search:
   for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     for (final match in regex.allMatches(lines[lineIndex])) {
