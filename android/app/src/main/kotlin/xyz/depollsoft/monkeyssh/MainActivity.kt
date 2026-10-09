@@ -469,6 +469,11 @@ class MainActivity : FlutterFragmentActivity() {
         if (linkIntent.action != Intent.ACTION_VIEW) {
             return
         }
+        // Reopening the task from Recents replays the intent that first
+        // launched it; that link was already handled.
+        if ((linkIntent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+            return
+        }
         val link = linkIntent.data ?: return
         val scheme = link.scheme?.lowercase(Locale.ROOT) ?: return
         if (scheme !in APP_LINK_SCHEMES) {
