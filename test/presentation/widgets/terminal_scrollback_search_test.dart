@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_scrollback_search.dart';
 import 'package:xterm/xterm.dart';
@@ -212,6 +214,117 @@ void main() {
       await _settle(search);
       expect(search.status, TerminalSearchStatus.idle);
       expect(search.currentIndex, isNull);
+    });
+    test('leaving the alternate screen keeps the view where it was', () async {
+      final terminal = Terminal()..resize(20, 5);
+      for (var row = 0; row < 200; row++) {
+        terminal.write(row % 20 == 0 ? 'needle $row\r\n' : 'line $row\r\n');
+      }
+      final search = _search(
+        terminal,
+        anchorRow: () => terminal.buffer.lines.length - 1,
+      )..setQuery('needle');
+      addTearDown(search.dispose);
+      await _settle(search);
+      final mainRow = search.currentMatchRow;
+      expect(mainRow, 180);
+
+      terminal.write('\x1b[?1049h\x1b[H\r\n\r\nneedle on alt');
+      await _until(() => search.searchesAlternateScreen);
+      await _settle(search);
+      final reveal = search.revealRequest;
+
+      terminal.write('\x1b[?1049l');
+      await _until(() => !search.searchesAlternateScreen);
+      await _settle(search);
+
+      // The alternate screen's rows (0-4) must not be compared with the
+      // main buffer's, and a program switching screens is not a user step.
+      expect(search.currentMatchRow, mainRow);
+      expect(search.revealRequest, reveal);
+    });
+
+    test('a timed-out regex is not retried while output streams', () async {
+      final terminal = Terminal()
+        ..resize(80, 10)
+        ..write('${'a' * 40}b\r\n');
+      final search = TerminalScrollbackSearchController(
+        terminal: terminal,
+        typingDebounce: Duration.zero,
+        refreshDelay: const Duration(milliseconds: 20),
+        regexBudget: const Duration(milliseconds: 150),
+      );
+      addTearDown(search.dispose);
+      search
+        ..setRegex(value: true)
+        ..setQuery(r'(a+)+$');
+      final writer = Timer.periodic(
+        const Duration(milliseconds: 10),
+        (_) => terminal.write('x'),
+      );
+      addTearDown(writer.cancel);
+      await _until(() => search.status == TerminalSearchStatus.tooSlow);
+
+      // Each retried search would report again.
+      var updates = 0;
+      search.addListener(() => updates++);
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      writer.cancel();
+
+      expect(search.status, TerminalSearchStatus.tooSlow);
+      expect(updates, 0);
+    });
+
+    test('knows it searches the screen before the first result', () {
+      final terminal = Terminal()
+        ..resize(20, 3)
+        ..write('\x1b[?1049h');
+      final search = _search(terminal);
+      addTearDown(search.dispose);
+      expect(search.searchesAlternateScreen, isTrue);
+    });
+
+    test('a refresh for new output does not flicker to searching', () async {
+      final terminal = Terminal()
+        ..resize(20, 6)
+        ..write('nothing here\r\n');
+      final search = _search(terminal)..setQuery('needle');
+      addTearDown(search.dispose);
+      await _settle(search);
+      final statuses = <TerminalSearchStatus>[];
+      search.addListener(() => statuses.add(search.status));
+
+      terminal.write('more output\r\n');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await _settle(search);
+
+      expect(statuses, isNot(contains(TerminalSearchStatus.searching)));
+    });
+
+    test('does not refresh while paused, then catches up', () async {
+      final terminal = Terminal()
+        ..resize(30, 6)
+        ..write('needle one\r\n');
+      final search = _search(terminal)..setQuery('needle');
+      addTearDown(search.dispose);
+      await _settle(search);
+      expect(search.matchCount, 1);
+
+      search.paused = true;
+      terminal.write('needle two\r\n');
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(search.matchCount, 1);
+
+      search.paused = false;
+      await _until(() => search.matchCount == 2);
+    });
+
+    test('asks the bar to focus its field again', () {
+      final search = _search(Terminal());
+      addTearDown(search.dispose);
+      final before = search.focusRequest;
+      search.requestFocus();
+      expect(search.focusRequest, before + 1);
     });
   });
 

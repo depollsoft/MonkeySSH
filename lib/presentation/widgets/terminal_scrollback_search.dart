@@ -31,10 +31,9 @@ enum TerminalSearchStatus {
 }
 
 /// One search match: a range of a hard line's text.
-@immutable
 class TerminalSearchMatch {
   /// Creates a match of `[start, end)` in [line].
-  const TerminalSearchMatch(this.line, this.start, this.end);
+  TerminalSearchMatch(this.line, this.start, this.end);
 
   /// The hard line the match is in.
   final TerminalTextLine line;
@@ -45,12 +44,13 @@ class TerminalSearchMatch {
   /// UTF-16 offset just past the match.
   final int end;
 
+  late final int _startRowIndex = line.rowIndexForOffset(start);
+
   /// The buffer row the match starts on.
-  BufferLine get startRow => line.rows[line.rowIndexForOffset(start)];
+  BufferLine get startRow => line.rows[_startRowIndex];
 
   /// Offset of the match within the text of [startRow].
-  int get startOffsetInRow =>
-      start - line.rowStarts[line.rowIndexForOffset(start)];
+  int get startOffsetInRow => start - line.rowStarts[_startRowIndex];
 }
 
 class _RowHits {
@@ -97,7 +97,8 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     this.maxMatches = kTerminalSearchMaxMatches,
     this.sliceBudget = kTerminalTextSliceBudget,
   }) : _terminal = terminal,
-       _wasUsingAltBuffer = terminal.isUsingAltBuffer {
+       _wasUsingAltBuffer = terminal.isUsingAltBuffer,
+       _searchesAlternateScreen = terminal.isUsingAltBuffer {
     _terminal.addListener(_handleTerminalChanged);
   }
 
@@ -127,7 +128,10 @@ class TerminalScrollbackSearchController extends ChangeNotifier
   bool _caseSensitive = false;
   bool _regex = false;
   TerminalSearchStatus _status = TerminalSearchStatus.idle;
-  bool _searchesAlternateScreen = false;
+  bool _searchesAlternateScreen;
+  bool _paused = false;
+  bool _changedWhilePaused = false;
+  int _focusRequest = 0;
 
   List<TerminalSearchMatch> _matches = const <TerminalSearchMatch>[];
   bool _capped = false;
@@ -156,8 +160,35 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _terminal.removeListener(_handleTerminalChanged);
     _terminal = value;
     _wasUsingAltBuffer = value.isUsingAltBuffer;
+    _searchesAlternateScreen = value.isUsingAltBuffer;
     value.addListener(_handleTerminalChanged);
-    _scheduleSearch(Duration.zero, reveal: true);
+    // Not a user action, so the view stays where it is.
+    _scheduleSearch(Duration.zero, reveal: false);
+  }
+
+  /// Whether output is ignored, for example while a native chat covers the
+  /// terminal. Unpausing refreshes the results if output arrived meanwhile.
+  bool get paused => _paused;
+
+  set paused(bool value) {
+    if (value == _paused) {
+      return;
+    }
+    _paused = value;
+    if (!value && _changedWhilePaused) {
+      _changedWhilePaused = false;
+      _handleTerminalChanged();
+    }
+  }
+
+  /// Bumped by [requestFocus], so the bar can move focus to its field.
+  int get focusRequest => _focusRequest;
+
+  /// Asks the find bar to focus its field again, for example when Find is
+  /// chosen while the bar is already open.
+  void requestFocus() {
+    _focusRequest++;
+    notifyListeners();
   }
 
   /// The current query.
@@ -204,7 +235,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
       return null;
     }
     final row = _matches[_currentIndex].startRow;
-    return row.attached ? row.index : null;
+    return _rowInCurrentBuffer(row) ? row.index : null;
   }
 
   /// Sets the query and searches after [typingDebounce].
@@ -250,7 +281,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
         : _currentIndex + direction;
     for (var tries = 0; tries < count; tries++) {
       index = (index + count) % count;
-      if (_matches[index].startRow.attached) {
+      if (_rowInCurrentBuffer(_matches[index].startRow)) {
         _currentIndex = index;
         _revealRequest++;
         _userUpdateCount++;
@@ -311,10 +342,17 @@ class TerminalScrollbackSearchController extends ChangeNotifier
 
   void _handleTerminalChanged() {
     _terminalChangeStamp++;
+    if (_paused) {
+      _changedWhilePaused = true;
+      return;
+    }
     final usingAltBuffer = _terminal.isUsingAltBuffer;
     if (usingAltBuffer != _wasUsingAltBuffer) {
       _wasUsingAltBuffer = usingAltBuffer;
-      _scheduleSearch(Duration.zero, reveal: true);
+      _searchesAlternateScreen = usingAltBuffer;
+      // A program entering or leaving the alternate screen is not a user
+      // action, so the view stays where it is.
+      _scheduleSearch(Duration.zero, reveal: false);
       return;
     }
     // Errors wait for the user to change the query: a pattern that timed out
@@ -392,10 +430,13 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     }
 
     _running = true;
-    if (_status != TerminalSearchStatus.searching) {
+    // A refresh for new output keeps showing the last result until the new
+    // one is ready, so the count does not flicker.
+    if (reveal && _status != TerminalSearchStatus.searching) {
       _status = TerminalSearchStatus.searching;
       notifyListeners();
     }
+    final previous = _currentIndex < 0 ? null : _matches[_currentIndex];
     try {
       final usingAltBuffer = _terminal.isUsingAltBuffer;
       final lines = await readTerminalTextLines(
@@ -407,6 +448,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
         return;
       }
       _searchesAlternateScreen = usingAltBuffer;
+      final anchorLine = _lineIndexForRow(lines, _anchorRowIndex(previous));
 
       TerminalTextMatches? found;
       var status = TerminalSearchStatus.ready;
@@ -417,6 +459,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
           [for (final line in lines) line.text],
           query,
           caseSensitive: _caseSensitive,
+          anchorLine: anchorLine,
           maxMatches: maxMatches,
           budget: regexBudget,
           cancel: cancel.future,
@@ -441,6 +484,8 @@ class TerminalScrollbackSearchController extends ChangeNotifier
         found = await findTerminalLiteralMatches(
           lines,
           pattern,
+          literalLength: query.length,
+          anchorLine: anchorLine,
           maxMatches: maxMatches,
           isCancelled: isStale,
           sliceBudget: sliceBudget,
@@ -462,8 +507,11 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     } finally {
       if (generation == _generation) {
         _running = false;
-        if (_refreshPending && !_disposed) {
-          _refreshPending = false;
+        final refresh = _refreshPending;
+        _refreshPending = false;
+        // A pattern that timed out or failed waits for the user to change
+        // it: refreshing would only burn its budget again.
+        if (refresh && !_disposed && _status == TerminalSearchStatus.ready) {
           _refreshTimer ??= Timer(refreshDelay, () {
             _refreshTimer = null;
             unawaited(_search(reveal: false));
@@ -533,6 +581,39 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     return _indexNearAnchor(previous);
   }
 
+  // Whether [row] is still a row of the buffer being shown. Leaving the
+  // alternate screen does not clear it, so its rows stay attached to their
+  // own buffer, with indices that mean nothing in the main one.
+  bool _rowInCurrentBuffer(BufferLine row) {
+    if (!row.attached) {
+      return false;
+    }
+    final lines = _terminal.buffer.lines;
+    final index = row.index;
+    return index >= 0 && index < lines.length && identical(lines[index], row);
+  }
+
+  // The row a search is centred on: the current match while the query is
+  // being refined, otherwise the bottom of what the user can see.
+  int _anchorRowIndex(TerminalSearchMatch? previous) {
+    final previousRow = previous?.startRow;
+    if (previousRow != null && _rowInCurrentBuffer(previousRow)) {
+      return previousRow.index;
+    }
+    return anchorRow?.call() ?? math.max(0, _terminal.buffer.lines.length - 1);
+  }
+
+  static int _lineIndexForRow(List<TerminalTextLine> lines, int row) {
+    var firstRow = 0;
+    for (var index = 0; index < lines.length; index++) {
+      firstRow += lines[index].rows.length;
+      if (row < firstRow) {
+        return index;
+      }
+    }
+    return math.max(0, lines.length - 1);
+  }
+
   // The last match at or above the anchor: the previous current match while
   // the query is being refined, otherwise the bottom of the viewport. Falls
   // back to the first match below it.
@@ -541,26 +622,20 @@ class TerminalScrollbackSearchController extends ChangeNotifier
       return -1;
     }
     final previousRow = previous?.startRow;
-    final int anchorRowIndex;
-    final int anchorColumn;
-    if (previousRow != null && previousRow.attached) {
-      anchorRowIndex = previousRow.index;
-      anchorColumn = previous!.startOffsetInRow;
-    } else {
-      anchorRowIndex =
-          anchorRow?.call() ?? math.max(0, _terminal.buffer.lines.length - 1);
-      anchorColumn = 1 << 30;
-    }
+    final anchorRowIndex = _anchorRowIndex(previous);
+    final anchorColumn = previousRow != null && _rowInCurrentBuffer(previousRow)
+        ? previous!.startOffsetInRow
+        : 1 << 30;
     var best = -1;
-    var firstAttached = -1;
+    var firstShown = -1;
     for (var index = 0; index < _matches.length; index++) {
       final match = _matches[index];
       final row = match.startRow;
-      if (!row.attached) {
+      if (!_rowInCurrentBuffer(row)) {
         continue;
       }
-      if (firstAttached < 0) {
-        firstAttached = index;
+      if (firstShown < 0) {
+        firstShown = index;
       }
       final rowIndex = row.index;
       if (rowIndex < anchorRowIndex ||
@@ -571,7 +646,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
         break;
       }
     }
-    return best >= 0 ? best : firstAttached;
+    return best >= 0 ? best : firstShown;
   }
 
   @override
@@ -617,18 +692,20 @@ double? resolveTerminalSearchRevealOffset({
   return target == currentOffset ? null : target;
 }
 
-/// Buffer row at the bottom of the viewport of [controller], or null when it
-/// has no position yet.
+/// Buffer row at the bottom of what is visible in [controller]'s viewport,
+/// above [obscuredBottom] pixels covered by the find bar, or null when it has
+/// no position yet.
 int? terminalViewportBottomRow(
   ScrollController controller, {
   required double lineHeight,
+  double obscuredBottom = 0,
 }) {
   if (!controller.hasClients || !lineHeight.isFinite || lineHeight <= 0) {
     return null;
   }
   final position = controller.position;
-  return math.max(
-    0,
-    ((position.pixels + position.viewportDimension) / lineHeight).floor() - 1,
-  );
+  final visibleBottom =
+      position.pixels +
+      math.max(lineHeight, position.viewportDimension - obscuredBottom);
+  return math.max(0, (visibleBottom / lineHeight).floor() - 1);
 }

@@ -32,12 +32,21 @@ final class TerminalTextLine {
       rowIndex + 1 < rows.length ? rowStarts[rowIndex + 1] : text.length;
 
   /// Index into [rows] of the row that holds the code unit at [offset].
+  ///
+  /// A binary search: one hard line can wrap across the whole 10,000-row
+  /// buffer.
   int rowIndexForOffset(int offset) {
-    var index = 0;
-    while (index + 1 < rows.length && rowStarts[index + 1] <= offset) {
-      index++;
+    var low = 0;
+    var high = rows.length - 1;
+    while (low < high) {
+      final middle = (low + high + 1) >> 1;
+      if (rowStarts[middle] <= offset) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
     }
-    return index;
+    return low;
   }
 }
 
@@ -135,7 +144,8 @@ bool _neverCancelled() => false;
 ///
 /// The rows are captured up front, which is cheap, and their text is read in
 /// slices that yield to the event loop, so reading a full 10,000-row buffer
-/// does not drop frames. Output that arrives between slices may change a row
+/// does not drop frames. The slices are checked per row, so one hard line
+/// that wraps across thousands of rows does not block either. Output that arrives between slices may change a row
 /// that has not been read yet; the reader returns what each row held when it
 /// was read. Returns null if [isCancelled] reports true between slices.
 Future<List<TerminalTextLine>?> readTerminalTextLines(
@@ -182,6 +192,9 @@ Future<List<TerminalTextLine>?> readTerminalTextLines(
       final lineRows = rows.sublist(index, end);
       final rowStarts = List<int>.filled(lineRows.length, 0);
       for (var rowIndex = 0; rowIndex < lineRows.length; rowIndex++) {
+        if (rowIndex > 0 && !await slicer.maybeYield(isCancelled)) {
+          return null;
+        }
         rowStarts[rowIndex] = out.length;
         _writeRowText(lineRows[rowIndex], out, null);
       }

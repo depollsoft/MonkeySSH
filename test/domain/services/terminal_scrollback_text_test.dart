@@ -62,6 +62,35 @@ void main() {
       expect(lines.first.text, 'abcd漢x');
     });
 
+    test('yields inside one hard line that wraps across many rows', () async {
+      final terminal = Terminal(maxLines: 500)
+        ..resize(10, 5)
+        ..write('x' * 2000);
+      var checks = 0;
+      final lines = (await readTerminalTextLines(
+        terminal.buffer,
+        sliceBudget: Duration.zero,
+        isCancelled: () {
+          checks++;
+          return false;
+        },
+      ))!;
+      expect(lines.first.rows, hasLength(200));
+      expect(checks, greaterThanOrEqualTo(200));
+    });
+
+    test('finds the row of an offset in a long wrapped line', () async {
+      final terminal = Terminal(maxLines: 500)
+        ..resize(10, 5)
+        ..write('x' * 2000);
+      final line = (await readTerminalTextLines(terminal.buffer))!.first;
+      expect(line.rowIndexForOffset(0), 0);
+      expect(line.rowIndexForOffset(9), 0);
+      expect(line.rowIndexForOffset(10), 1);
+      expect(line.rowIndexForOffset(1234), 123);
+      expect(line.rowIndexForOffset(1999), 199);
+    });
+
     test(
       'reads a full scrollback across slices and can be cancelled',
       () async {

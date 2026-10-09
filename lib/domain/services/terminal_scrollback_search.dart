@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'terminal_scrollback_text.dart';
 
 /// Most matches a search reports. Past this the count reads as "5000+".
 const kTerminalSearchMaxMatches = 5000;
+
+/// Longest stretch of one hard line a literal search scans before it may
+/// yield. A line that wraps across the whole buffer is about 1.2 million
+/// characters.
+const kTerminalLiteralScanChunk = 32 * 1024;
 
 /// Longest a regular-expression search may run before it is abandoned.
 const kTerminalRegexSearchBudget = Duration(seconds: 2);
@@ -32,6 +39,52 @@ RegExp buildTerminalSearchPattern(
 
 bool _neverCancelled() => false;
 
+/// Collects matches in line order and keeps at most `maxMatches` of them
+/// around `anchorLine`: up to half before it (the newest of those), and the
+/// rest at or after it. When one side has fewer, the other side gets the
+/// room. A search with too many matches thus still covers the part of the
+/// buffer the user is looking at.
+class _MatchWindow {
+  _MatchWindow(this.maxMatches, this.anchorLine);
+
+  final int maxMatches;
+  final int anchorLine;
+  final _before = ListQueue<TerminalTextMatch>();
+  final _after = <TerminalTextMatch>[];
+  var _dropped = false;
+
+  /// Whether the window is full past the anchor, so scanning can stop.
+  bool get isComplete => _after.length > maxMatches;
+
+  void add(TerminalTextMatch match) {
+    if (match.line < anchorLine) {
+      _before.add(match);
+      if (_before.length > maxMatches) {
+        _before.removeFirst();
+        _dropped = true;
+      }
+    } else if (!isComplete) {
+      _after.add(match);
+    }
+  }
+
+  TerminalTextMatches result() {
+    final int keepAfter = math.min(
+      _after.length,
+      maxMatches - math.min<int>(_before.length, maxMatches ~/ 2),
+    );
+    final int keepBefore = math.min(_before.length, maxMatches - keepAfter);
+    return (
+      matches: [
+        ..._before.skip(_before.length - keepBefore),
+        ..._after.take(keepAfter),
+      ],
+      capped:
+          _dropped || keepBefore < _before.length || keepAfter < _after.length,
+    );
+  }
+}
+
 /// Finds a literal pattern in [lines] on the calling isolate, yielding to the
 /// event loop between slices of work. Returns null if [isCancelled] reports
 /// true between slices.
@@ -40,16 +93,27 @@ bool _neverCancelled() => false;
 /// `regex: false`. A user regex can backtrack catastrophically and a Dart
 /// [RegExp] match cannot be interrupted; use [findTerminalRegexMatches].
 ///
-/// Matches never span hard lines. Zero-length matches are skipped.
+/// A hard line longer than [scanChunk] is scanned in chunks
+/// that overlap by [literalLength] - 1 characters, so a single wrapped line
+/// filling the buffer cannot block a frame. Matches never span hard lines,
+/// never overlap, and zero-length matches are skipped. At most [maxMatches]
+/// are kept, centred on [anchorLine] (the last line when null).
 Future<TerminalTextMatches?> findTerminalLiteralMatches(
   List<TerminalTextLine> lines,
   RegExp literalPattern, {
+  required int literalLength,
+  int? anchorLine,
   int maxMatches = kTerminalSearchMaxMatches,
+  int scanChunk = kTerminalLiteralScanChunk,
   bool Function() isCancelled = _neverCancelled,
   Duration sliceBudget = kTerminalTextSliceBudget,
 }) async {
   final slicer = TerminalWorkSlicer(budget: sliceBudget);
-  final matches = <TerminalTextMatch>[];
+  final window = _MatchWindow(
+    maxMatches,
+    anchorLine ?? math.max(0, lines.length - 1),
+  );
+  final overlap = math.max(0, literalLength - 1);
   for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     if (!await slicer.maybeYield(isCancelled)) {
       return null;
@@ -58,17 +122,38 @@ Future<TerminalTextMatches?> findTerminalLiteralMatches(
     if (text.isEmpty) {
       continue;
     }
-    for (final match in literalPattern.allMatches(text)) {
-      if (match.end == match.start) {
-        continue;
+    var lastEnd = 0;
+    for (
+      var chunkStart = 0;
+      chunkStart < text.length;
+      chunkStart += scanChunk
+    ) {
+      if (chunkStart > 0 && !await slicer.maybeYield(isCancelled)) {
+        return null;
       }
-      if (matches.length == maxMatches) {
-        return (matches: matches, capped: true);
+      final chunkEnd = math.min(text.length, chunkStart + scanChunk);
+      final scanEnd = math.min(text.length, chunkEnd + overlap);
+      final chunk = chunkStart == 0 && scanEnd == text.length
+          ? text
+          : text.substring(chunkStart, scanEnd);
+      for (final match in literalPattern.allMatches(chunk)) {
+        final start = chunkStart + match.start;
+        final end = chunkStart + match.end;
+        if (start >= chunkEnd) {
+          break;
+        }
+        if (end == start || start < lastEnd) {
+          continue;
+        }
+        lastEnd = end;
+        window.add((line: lineIndex, start: start, end: end));
       }
-      matches.add((line: lineIndex, start: match.start, end: match.end));
+      if (window.isComplete) {
+        return window.result();
+      }
     }
   }
-  return (matches: matches, capped: false);
+  return window.result();
 }
 
 /// How a regular-expression search ended.
@@ -105,6 +190,7 @@ Future<TerminalRegexSearchResult> findTerminalRegexMatches(
   List<String> lines,
   String pattern, {
   required bool caseSensitive,
+  int? anchorLine,
   int maxMatches = kTerminalSearchMaxMatches,
   Duration budget = kTerminalRegexSearchBudget,
   Future<void>? cancel,
@@ -134,7 +220,14 @@ Future<TerminalRegexSearchResult> findTerminalRegexMatches(
   try {
     isolate = await Isolate.spawn(
       _findRegexMatches,
-      (replies.sendPort, lines, pattern, caseSensitive, maxMatches),
+      (
+        replies.sendPort,
+        lines,
+        pattern,
+        caseSensitive,
+        maxMatches,
+        anchorLine ?? math.max(0, lines.length - 1),
+      ),
       // A crashed worker exits with `null`, which reads as a failure.
       onExit: replies.sendPort,
     );
@@ -175,28 +268,32 @@ TerminalTextMatches _decodeMatches(Int32List encoded) {
   return (matches: matches, capped: encoded.isNotEmpty && encoded[0] != 0);
 }
 
-void _findRegexMatches((SendPort, List<String>, String, bool, int) message) {
-  final (replies, lines, pattern, caseSensitive, maxMatches) = message;
+void _findRegexMatches(
+  (SendPort, List<String>, String, bool, int, int) message,
+) {
+  final (replies, lines, pattern, caseSensitive, maxMatches, anchorLine) =
+      message;
   final regex = RegExp(pattern, caseSensitive: caseSensitive);
-  final encoded = <int>[0];
-  var count = 0;
+  final window = _MatchWindow(maxMatches, anchorLine);
   search:
   for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    final text = lines[lineIndex];
-    for (final match in regex.allMatches(text)) {
+    for (final match in regex.allMatches(lines[lineIndex])) {
       if (match.end == match.start) {
         continue;
       }
-      if (count == maxMatches) {
-        encoded[0] = 1;
+      window.add((line: lineIndex, start: match.start, end: match.end));
+      if (window.isComplete) {
         break search;
       }
-      encoded
-        ..add(lineIndex)
-        ..add(match.start)
-        ..add(match.end);
-      count++;
     }
+  }
+  final found = window.result();
+  final encoded = <int>[if (found.capped) 1 else 0];
+  for (final match in found.matches) {
+    encoded
+      ..add(match.line)
+      ..add(match.start)
+      ..add(match.end);
   }
   Isolate.exit(replies, Int32List.fromList(encoded));
 }

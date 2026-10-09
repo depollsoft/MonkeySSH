@@ -46,6 +46,7 @@ void main() {
       final found = (await findTerminalLiteralMatches(
         lines,
         buildTerminalSearchPattern('error', caseSensitive: false, regex: false),
+        literalLength: 5,
       ))!;
       expect(found.capped, isFalse);
       expect(found.matches, [
@@ -59,6 +60,7 @@ void main() {
       final found = (await findTerminalLiteralMatches(
         lines,
         buildTerminalSearchPattern('ERROR', caseSensitive: true, regex: false),
+        literalLength: 5,
       ))!;
       expect(found.matches, [(line: 2, start: 15, end: 20)]);
     });
@@ -67,16 +69,80 @@ void main() {
       final found = (await findTerminalLiteralMatches(
         [_line('aaaaaa')],
         buildTerminalSearchPattern('a', caseSensitive: false, regex: false),
+        literalLength: 1,
+        anchorLine: 0,
         maxMatches: 4,
       ))!;
       expect(found.matches, hasLength(4));
       expect(found.capped, isTrue);
     });
 
+    test('keeps the capped matches around the anchor', () async {
+      final many = [for (var index = 0; index < 20; index++) _line('hit')];
+      final pattern = buildTerminalSearchPattern(
+        'hit',
+        caseSensitive: false,
+        regex: false,
+      );
+      final nearEnd = (await findTerminalLiteralMatches(
+        many,
+        pattern,
+        literalLength: 3,
+        anchorLine: 18,
+        maxMatches: 4,
+      ))!;
+      expect(nearEnd.matches.map((match) => match.line), [16, 17, 18, 19]);
+      expect(nearEnd.capped, isTrue);
+
+      final middle = (await findTerminalLiteralMatches(
+        many,
+        pattern,
+        literalLength: 3,
+        anchorLine: 10,
+        maxMatches: 4,
+      ))!;
+      expect(middle.matches.map((match) => match.line), [8, 9, 10, 11]);
+    });
+
+    test(
+      'scans a long line in chunks and keeps matches across chunk edges',
+      () async {
+        const chunk = 16;
+        // `NEEDLE` straddles the first chunk edge, `needle` sits in the fourth
+        // chunk, and `needleneedle` must not overlap itself.
+        final text = '${'a' * 14}NEEDLE${'b' * 30}needle${'c' * 6}needleneedle';
+        var checks = 0;
+        final found = (await findTerminalLiteralMatches(
+          [_line(text)],
+          buildTerminalSearchPattern(
+            'needle',
+            caseSensitive: false,
+            regex: false,
+          ),
+          literalLength: 6,
+          scanChunk: chunk,
+          sliceBudget: Duration.zero,
+          isCancelled: () {
+            checks++;
+            return false;
+          },
+        ))!;
+        expect(found.matches, [
+          (line: 0, start: 14, end: 20),
+          (line: 0, start: 50, end: 56),
+          (line: 0, start: 62, end: 68),
+          (line: 0, start: 68, end: 74),
+        ]);
+        // Once for the line and once per further chunk.
+        expect(checks, (text.length / chunk).ceil());
+      },
+    );
+
     test('returns null once cancelled', () async {
       final found = await findTerminalLiteralMatches(
         lines,
         buildTerminalSearchPattern('e', caseSensitive: false, regex: false),
+        literalLength: 1,
         sliceBudget: Duration.zero,
         isCancelled: () => true,
       );
@@ -103,6 +169,7 @@ void main() {
         ['ok one', 'fail two', 'ok three', 'ok four'],
         '^ok',
         caseSensitive: true,
+        anchorLine: 0,
         maxMatches: 2,
       );
       expect(result.outcome, TerminalRegexSearchOutcome.completed);
