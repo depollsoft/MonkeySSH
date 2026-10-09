@@ -8750,6 +8750,94 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
   });
 
+  group('connectToHost jump host chains', () {
+    Future<int> insertHost(
+      AppDatabase db,
+      String name, {
+      int? jumpHostId,
+      String? skipJumpHostOnSsids,
+    }) => db
+        .into(db.hosts)
+        .insert(
+          HostsCompanion.insert(
+            label: name,
+            hostname: '$name.example.com',
+            username: name,
+            jumpHostId: Value(jumpHostId),
+            skipJumpHostOnSsids: Value(skipJumpHostOnSsids),
+          ),
+        );
+
+    _CapturingSshService buildService(
+      AppDatabase db, {
+      _StubWifiNetworkService? wifi,
+    }) {
+      final encryption = SecretEncryptionService.forTesting();
+      return _CapturingSshService(
+        hostRepository: HostRepository(db, encryption),
+        keyRepository: KeyRepository(db, encryption),
+        wifiNetworkService: wifi ?? _StubWifiNetworkService('cafe'),
+      );
+    }
+
+    test('follows a jump host’s own jump host', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(db, 'inner', jumpHostId: outer);
+      final target = await insertHost(db, 'target', jumpHostId: inner);
+
+      await service.connectToHost(target);
+
+      final config = service.capturedConfig!;
+      expect(config.hostname, 'target.example.com');
+      expect(config.jumpHost!.hostname, 'inner.example.com');
+      expect(config.jumpHost!.jumpHost!.hostname, 'outer.example.com');
+      expect(config.jumpHost!.jumpHost!.jumpHost, isNull);
+    });
+
+    test('stops at a loop instead of recursing', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final a = await insertHost(db, 'a');
+      final b = await insertHost(db, 'b', jumpHostId: a);
+      await (db.update(db.hosts)..where((h) => h.id.equals(a))).write(
+        HostsCompanion(jumpHostId: Value(b)),
+      );
+
+      await service.connectToHost(a);
+
+      final config = service.capturedConfig!;
+      expect(config.hostname, 'a.example.com');
+      expect(config.jumpHost!.hostname, 'b.example.com');
+      expect(config.jumpHost!.jumpHost, isNull);
+    });
+
+    test('a hop’s Wi-Fi skip list bypasses only its own jump', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final wifi = _StubWifiNetworkService('home');
+      final service = buildService(db, wifi: wifi);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(
+        db,
+        'inner',
+        jumpHostId: outer,
+        skipJumpHostOnSsids: 'home',
+      );
+      final target = await insertHost(db, 'target', jumpHostId: inner);
+
+      await service.connectToHost(target);
+
+      final jump = service.capturedConfig!.jumpHost!;
+      expect(jump.hostname, 'inner.example.com');
+      expect(jump.jumpHost, isNull);
+      expect(wifi.requestPermissionCallCount, 1);
+    });
+  });
+
   group('connection cancellation', () {
     test('cancels a stalled socket connection without waiting', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());

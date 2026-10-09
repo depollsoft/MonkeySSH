@@ -1409,6 +1409,10 @@ class SshService {
   /// Keeping this below common server `MaxAuthTries` defaults avoids
   /// "too many authentication failures" disconnects in Auto mode.
   static const _maxAutoKeysPerAttempt = 5;
+
+  /// Most jump hosts followed for one connection, so a saved loop or a
+  /// runaway chain cannot recurse forever.
+  static const _maxJumpHostChainLength = 8;
   static const _hostKeyProbeSettleTimeout = Duration(seconds: 1);
 
   /// Host repository for looking up hosts.
@@ -1562,12 +1566,34 @@ class SshService {
 
       // Get jump host config if specified, unless the device is currently
       // connected to a Wi-Fi network on the host's skip list (in which case
-      // the host is reachable directly).
-      SshConnectionConfig? jumpHostConfig;
-      if (host.jumpHostId != null) {
+      // the host is reachable directly). A jump host's own jump host is
+      // followed as well, so a ProxyJump chain connects hop by hop; a loop or
+      // an overly deep chain stops at the last unvisited hop.
+      ({WifiPermissionStatus permission, String? ssid})? wifiState;
+      Future<SshConnectionConfig?> resolveJumpHostConfig(
+        Host from,
+        Set<int> visited,
+      ) async {
+        final jumpHostId = from.jumpHostId;
+        if (jumpHostId == null) {
+          return null;
+        }
+        if (visited.contains(jumpHostId) ||
+            visited.length > _maxJumpHostChainLength) {
+          DiagnosticsLogService.instance.warning(
+            'ssh.connect',
+            'jump_host_chain_stopped',
+            fields: {
+              'hostId': hostId,
+              'depth': visited.length,
+              'reason': visited.contains(jumpHostId) ? 'loop' : 'depth',
+            },
+          );
+          return null;
+        }
         var skipJumpHost = false;
-        if (host.skipJumpHostOnSsids != null &&
-            host.skipJumpHostOnSsids!.isNotEmpty) {
+        if (from.skipJumpHostOnSsids != null &&
+            from.skipJumpHostOnSsids!.isNotEmpty) {
           onProgress?.call(
             const ConnectionProgressUpdate(
               state: SshConnectionState.connecting,
@@ -1575,13 +1601,20 @@ class SshService {
             ),
           );
           preflightPhase = 'check_wifi_bypass';
-          final permission = await wifiNetworkService.requestPermission();
-          String? currentSsid;
-          if (permission == WifiPermissionStatus.granted) {
-            currentSsid = await wifiNetworkService.getCurrentSsid();
+          var state = wifiState;
+          if (state == null) {
+            final permission = await wifiNetworkService.requestPermission();
+            state = wifiState = (
+              permission: permission,
+              ssid: permission == WifiPermissionStatus.granted
+                  ? await wifiNetworkService.getCurrentSsid()
+                  : null,
+            );
+          }
+          if (state.permission == WifiPermissionStatus.granted) {
             skipJumpHost = shouldSkipJumpHostForSsid(
-              currentSsid: currentSsid,
-              skipJumpHostOnSsids: host.skipJumpHostOnSsids,
+              currentSsid: state.ssid,
+              skipJumpHostOnSsids: from.skipJumpHostOnSsids,
             );
           } else {
             onProgress?.call(
@@ -1595,40 +1628,49 @@ class SshService {
             'ssh.connect',
             'jump_host_ssid_check',
             fields: {
-              'hostId': hostId,
-              'permissionStatus': permission.name,
-              'hasCurrentSsid': currentSsid != null,
+              'hostId': from.id,
+              'permissionStatus': state.permission.name,
+              'hasCurrentSsid': state.ssid != null,
               'skipJumpHost': skipJumpHost,
             },
           );
         }
-        if (!skipJumpHost) {
-          preflightPhase = 'load_jump_host';
-          final jumpHost = await hostRepository!.getById(host.jumpHostId!);
-          if (jumpHost != null) {
-            SshKey? jumpKey;
-            List<SshKey>? jumpIdentityKeys;
-            if (jumpHost.keyId != null && keyRepository != null) {
-              preflightPhase = 'load_jump_host_key';
-              jumpKey = await keyRepository!.getById(jumpHost.keyId!);
-              if (keyRepository!.hasUnreadablePrivateKey(jumpHost.keyId!) ||
-                  keyRepository!.hasUnreadablePassphrase(jumpHost.keyId!)) {
-                throw const FormatException('Unreadable SSH key secret');
-              }
-              if (jumpKey == null && jumpHost.password == null) {
-                jumpIdentityKeys = await loadAutoKeys();
-              }
-            } else if (jumpHost.password == null) {
-              jumpIdentityKeys = await loadAutoKeys();
-            }
-            jumpHostConfig = SshConnectionConfig.fromHost(
-              jumpHost,
-              key: jumpKey,
-              identityKeys: jumpIdentityKeys,
-            );
-          }
+        if (skipJumpHost) {
+          return null;
         }
+        preflightPhase = 'load_jump_host';
+        final jumpHost = await hostRepository!.getById(jumpHostId);
+        if (jumpHost == null) {
+          return null;
+        }
+        SshKey? jumpKey;
+        List<SshKey>? jumpIdentityKeys;
+        if (jumpHost.keyId != null && keyRepository != null) {
+          preflightPhase = 'load_jump_host_key';
+          jumpKey = await keyRepository!.getById(jumpHost.keyId!);
+          if (keyRepository!.hasUnreadablePrivateKey(jumpHost.keyId!) ||
+              keyRepository!.hasUnreadablePassphrase(jumpHost.keyId!)) {
+            throw const FormatException('Unreadable SSH key secret');
+          }
+          if (jumpKey == null && jumpHost.password == null) {
+            jumpIdentityKeys = await loadAutoKeys();
+          }
+        } else if (jumpHost.password == null) {
+          jumpIdentityKeys = await loadAutoKeys();
+        }
+        final nextJumpHostConfig = await resolveJumpHostConfig(jumpHost, {
+          ...visited,
+          jumpHostId,
+        });
+        return SshConnectionConfig.fromHost(
+          jumpHost,
+          key: jumpKey,
+          identityKeys: jumpIdentityKeys,
+          jumpHostConfig: nextJumpHostConfig,
+        );
       }
+
+      final jumpHostConfig = await resolveJumpHostConfig(host, {host.id});
 
       preflightPhase = 'build_config';
       final config = SshConnectionConfig.fromHost(
