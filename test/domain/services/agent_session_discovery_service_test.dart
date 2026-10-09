@@ -1509,6 +1509,61 @@ cwd: /tmp/demo
       final metadata = parseCursorSessionMetadata('not json');
       expect(metadata.parsedAny, isFalse);
       expect(metadata.hasConversation, isTrue);
+      expect(metadata.isSubagent, isFalse);
+    });
+
+    test('marks subagent chats', () {
+      expect(
+        parseCursorSessionMetadata(
+          '{"createdAtMs":1783404550969,"isSubagent":true}',
+        ).isSubagent,
+        isTrue,
+      );
+      expect(
+        parseCursorSessionMetadata('{"createdAtMs":1783404550969}').isSubagent,
+        isFalse,
+      );
+    });
+  });
+
+  group('parseCursorPromptHistoryTail', () {
+    test('reads the oldest prompt of a whole file', () {
+      expect(
+        parseCursorPromptHistoryTail(
+          const JsonEncoder.withIndent('  ')
+              .convert(['Newest prompt', 'Oldest prompt']),
+        ),
+        'Oldest prompt',
+      );
+      expect(
+        parseCursorPromptHistoryTail('["Newest prompt","Oldest prompt"]'),
+        'Oldest prompt',
+      );
+    });
+
+    test('reads the oldest request from the tail of a longer file', () {
+      expect(
+        parseCursorPromptHistoryTail(
+          '  "Later prompt",\n'
+          '  "Refactor the parser\\nand keep it fast",\n'
+          '  "/model gpt-5"\n'
+          ']',
+        ),
+        'Refactor the parser',
+      );
+      // The first line of a tail can be the end of a cut prompt.
+      expect(
+        parseCursorPromptHistoryTail('of a cut prompt",\n  "Oldest"\n]'),
+        'Oldest',
+      );
+    });
+
+    test('returns null without a usable prompt', () {
+      expect(parseCursorPromptHistoryTail(''), isNull);
+      expect(parseCursorPromptHistoryTail('[]'), isNull);
+      expect(parseCursorPromptHistoryTail('[\n  "/clear"\n]'), isNull);
+      expect(parseCursorPromptHistoryTail('not json'), isNull);
+      expect(parseCursorPromptHistoryTail('{"prompt":"Hi"}'), isNull);
     });
   });
 
@@ -3058,6 +3113,107 @@ branch refs/heads/main
         );
         expect(result.sessions.single.summary, 'Cursor session bfc1447e…');
       },
+    );
+
+    test(
+      'Cursor discovery names untitled chats after their first prompt',
+      () async {
+        final home = await Directory.systemTemp.createTemp('cursor-chats-');
+        addTearDown(() => home.delete(recursive: true));
+        final workspace = '${home.path}/.cursor/chats/7fb0188e9fe01ef05027';
+        const promptless = '11111111-1111-4111-8111-111111111111';
+        const prompted = '22222222-2222-4222-8222-222222222222';
+        const placeholder = '33333333-3333-4333-8333-333333333333';
+        const titled = '44444444-4444-4444-8444-444444444444';
+        const subagent = '55555555-5555-4555-8555-555555555555';
+        void writeChat(
+          String chatId, {
+          String? title,
+          bool isSubagent = false,
+          List<String>? prompts,
+        }) {
+          final chat = Directory('$workspace/$chatId')
+            ..createSync(recursive: true);
+          File('${chat.path}/meta.json').writeAsStringSync(
+            jsonEncode({
+              'schemaVersion': 1,
+              'createdAtMs': 1787302131000,
+              'hasConversation': true,
+              'title': ?title,
+              if (isSubagent) 'isSubagent': true,
+              'updatedAtMs': 1787302132665,
+              'cwd': '/Users/depoll/Code/MonkeySSH',
+            }),
+          );
+          if (prompts == null) return;
+          // Cursor writes the prompts newest first, indented one per line.
+          File('${chat.path}/prompt_history.json').writeAsStringSync(
+            const JsonEncoder.withIndent('  ').convert(prompts),
+          );
+        }
+
+        writeChat(promptless);
+        writeChat(
+          prompted,
+          prompts: [
+            'Now add tests',
+            for (var i = 0; i < 20; i++) 'Follow-up $i',
+            'Fix the session picker\nso Cursor chats have names',
+            '/model gpt-5',
+          ],
+        );
+        writeChat(
+          placeholder,
+          title: 'New Agent',
+          prompts: ['Second prompt', 'Explain the build'],
+        );
+        writeChat(
+          titled,
+          title: 'Copilot Theming Fix',
+          prompts: ['Unread prompt'],
+        );
+        writeChat(subagent, isSubagent: true, prompts: ['Subagent task']);
+
+        final commands = <String>[];
+        final client = _MockSshClient();
+        _stubDiscoveryExec(client, (command) async {
+          commands.add(command);
+          final result = await Process.run(
+            'bash',
+            ['-c', command],
+            environment: {'HOME': home.path, 'PATH': '/usr/bin:/bin'},
+            includeParentEnvironment: false,
+          );
+          return _buildExecSession(stdout: result.stdout as String);
+        });
+
+        final result = await AgentSessionDiscoveryService()
+            .discoverSessionsStream(
+              _buildDiscoverySession(client),
+              toolName: 'Cursor Agent',
+            )
+            .last;
+
+        expect(result.failedTools, isEmpty);
+        expect(
+          {
+            for (final session in result.sessions)
+              session.sessionId: session.summary,
+          },
+          {
+            promptless: 'Cursor session 11111111…',
+            prompted: 'Fix the session picker',
+            placeholder: 'Explain the build',
+            titled: 'Copilot Theming Fix',
+          },
+        );
+        // Only untitled chats need their prompt history.
+        expect(
+          commands.where((command) => command.contains('prompt_history.json')),
+          everyElement(isNot(contains(titled))),
+        );
+      },
+      skip: Platform.isWindows,
     );
 
     for (final indexTitle in [null, '', 'Renamed session']) {

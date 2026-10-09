@@ -27,6 +27,9 @@ const _genericSessionSummaries = <String>{
   'new session',
   'empty session',
   'session',
+  'new chat',
+  // Cursor Agent's name for a chat it has not titled yet.
+  'new agent',
 };
 
 const _profileSourcingPrefix =
@@ -1114,6 +1117,7 @@ List<ToolSessionInfo> parseMuseSessionIndex(String output) {
   String? workingDirectory,
   DateTime? updatedAt,
   bool hasConversation,
+  bool isSubagent,
   bool parsedAny,
 })
 parseCursorSessionMetadata(String raw) {
@@ -1124,6 +1128,7 @@ parseCursorSessionMetadata(String raw) {
       workingDirectory: null,
       updatedAt: null,
       hasConversation: true,
+      isSubagent: false,
       parsedAny: false,
     );
   }
@@ -1143,8 +1148,49 @@ parseCursorSessionMetadata(String raw) {
     workingDirectory: workingDirectory,
     updatedAt: updatedAt,
     hasConversation: hasConversation,
+    isSubagent: decoded['isSubagent'] == true,
     parsedAny: parsedAny,
   );
+}
+
+/// Reads the earliest prompt from the end of a Cursor Agent chat's
+/// `prompt_history.json`.
+///
+/// Cursor keeps that file as a JSON array of the chat's prompts, newest first
+/// and one per line, so its last lines hold the oldest ones. Slash commands
+/// are skipped in favor of the next prompt that reads as a request.
+@visibleForTesting
+String? parseCursorPromptHistoryTail(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return null;
+  // A short or single-line file arrives whole; a longer one is cut mid-array
+  // and read line by line.
+  Object? whole;
+  try {
+    whole = jsonDecode(trimmed);
+  } on FormatException {
+    whole = null;
+  }
+  final oldestFirst = whole is List
+      ? whole.reversed
+      : trimmed.split('\n').reversed.map((line) {
+          final entry = line.trim();
+          if (!entry.startsWith('"')) return null;
+          try {
+            return jsonDecode(
+              entry.endsWith(',')
+                  ? entry.substring(0, entry.length - 1)
+                  : entry,
+            );
+          } on FormatException {
+            return null;
+          }
+        });
+  for (final prompt in oldestFirst.whereType<String>()) {
+    final summary = _extractClaudeUserSummary(prompt);
+    if (summary != null) return summary;
+  }
+  return null;
 }
 
 /// Parses Antigravity session metadata from a saved session JSON file.
@@ -2796,7 +2842,10 @@ class AgentSessionDiscoveryService {
 
   // ── Cursor Agent ─────────────────────────────────────────────────────────
   // Sessions: ~/.cursor/chats/<workspaceHash>/<chatId>/meta.json
-  // meta.json: {title, createdAtMs, updatedAtMs, cwd, hasConversation}.
+  // meta.json: {title, createdAtMs, updatedAtMs, cwd, hasConversation,
+  // isSubagent}. The title mirrors the chat's name, which stays unset or
+  // "New Agent" until Cursor titles the chat; prompt_history.json beside it
+  // then supplies the first prompt instead.
   // The chat id (used with `cursor-agent --resume <id>`) is the directory name
   // that contains meta.json.
 
@@ -2841,14 +2890,23 @@ class AgentSessionDiscoveryService {
         metaFiles.map((file) => file.path),
         maxLines: 20,
       );
-      final sessions = <ToolSessionInfo>[];
+      final chats =
+          <
+            ({
+              String chatId,
+              String metaPath,
+              String? title,
+              String? workingDirectory,
+              DateTime? lastActive,
+            })
+          >[];
       var hadError = false;
 
       for (final file in metaFiles) {
         final chatId = _cursorChatIdFromMetaPath(file.path);
         if (chatId == null) continue;
 
-        String? summary;
+        String? title;
         String? sessionWorkingDirectory;
         DateTime? lastActive;
 
@@ -2861,31 +2919,71 @@ class AgentSessionDiscoveryService {
             if (snapshot.content.trim().isNotEmpty && !metadata.parsedAny) {
               hadError = true;
             }
+            // A subagent's chat belongs to its parent; Cursor's own session
+            // list leaves it out too.
+            if (metadata.isSubagent) continue;
             // Current Cursor Agent persists the active resumable chat id with
             // hasConversation=false, including after the TUI has created its
             // workspace chat. The parent directory remains the authoritative
             // --resume id, so keep metadata-only records instead of returning
             // an empty picker.
-            summary = metadata.summary;
+            title = _sanitizeSessionSummary(
+              metadata.summary,
+              sessionId: chatId,
+            );
             sessionWorkingDirectory = metadata.workingDirectory;
             lastActive = metadata.updatedAt;
           } on Object {
             hadError = true;
           }
         }
-        lastActive ??= file.modifiedAt;
+        chats.add((
+          chatId: chatId,
+          metaPath: file.path,
+          title: title,
+          workingDirectory: sessionWorkingDirectory,
+          lastActive: lastActive ?? file.modifiedAt,
+        ));
+      }
 
-        sessions.add(
+      // Untitled chats are named after their first prompt when they have one.
+      String promptHistoryPath(String metaPath) =>
+          metaPath.replaceFirst(RegExp(r'meta\.json$'), 'prompt_history.json');
+      var promptSnapshots = const <String, _RemoteFileSnapshot>{};
+      try {
+        promptSnapshots = await _readRemoteFileSnapshots(
+          session,
+          chats
+              .where((chat) => chat.title == null)
+              .map((chat) => promptHistoryPath(chat.metaPath)),
+          maxLines: 1,
+          tailLines: 8,
+        );
+      } on Object {
+        // The chats stay listed under their fallback names.
+      }
+      String? firstPrompt(String metaPath) {
+        final snapshot = promptSnapshots[promptHistoryPath(metaPath)];
+        return snapshot == null
+            ? null
+            : parseCursorPromptHistoryTail(
+                snapshot.tailContent ?? snapshot.content,
+              );
+      }
+
+      final sessions = [
+        for (final chat in chats)
           ToolSessionInfo(
             toolName: 'Cursor Agent',
-            sessionId: chatId,
-            workingDirectory: sessionWorkingDirectory,
-            lastActive: lastActive,
+            sessionId: chat.chatId,
+            workingDirectory: chat.workingDirectory,
+            lastActive: chat.lastActive,
             summary:
-                summary ?? 'Cursor session ${_truncateSessionIdValue(chatId)}',
+                chat.title ??
+                firstPrompt(chat.metaPath) ??
+                'Cursor session ${_truncateSessionIdValue(chat.chatId)}',
           ),
-        );
-      }
+      ];
       return _ToolDiscoveryResult.success(
         AgentLaunchTool.cursorAgent,
         _scopeSessions(
