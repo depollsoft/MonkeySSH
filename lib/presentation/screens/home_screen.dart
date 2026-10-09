@@ -43,6 +43,7 @@ import '../widgets/acp_mux_window_status_badge.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/agent_tool_icon.dart';
+import '../widgets/agent_worktree_removal.dart';
 import '../widgets/ai_session_picker.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
@@ -3431,6 +3432,21 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ? widget.tmuxExtraFlags
             : null,
       );
+      if (mounted) {
+        await offerAgentWorktreeRemoval(
+          context: context,
+          ref: ref,
+          session: session,
+          closedWindowDirectory: window.currentPath,
+          remainingWindowDirectories: [
+            for (final other in _badge.windows ?? const <TmuxWindow>[])
+              if (window.id != null
+                  ? other.id != window.id
+                  : other.index != window.index)
+                other.currentPath,
+          ],
+        );
+      }
       if (closesLastMonkeyMuxWindow) {
         await _badge.disconnectEndedMonkeyMuxSession(session);
       }

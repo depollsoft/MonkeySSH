@@ -144,6 +144,9 @@ enum AgentWorktreeErrorKind {
   /// The host is not a POSIX shell host.
   unsupportedHost,
 
+  /// The preset's worktree settings do not render a usable branch or path.
+  invalidOptions,
+
   /// The command did not finish or returned output the app cannot read.
   unavailable,
 }
@@ -182,6 +185,8 @@ final class AgentWorktreeException implements Exception {
         'The worktree has uncommitted changes, so it was kept.',
       AgentWorktreeErrorKind.unsupportedHost =>
         'Worktree launches need a macOS or Linux host.',
+      AgentWorktreeErrorKind.invalidOptions =>
+        'Fix the worktree settings in this host’s preset.',
       AgentWorktreeErrorKind.unavailable =>
         'The host did not answer the worktree command.',
     };

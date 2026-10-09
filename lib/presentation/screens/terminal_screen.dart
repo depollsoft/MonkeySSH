@@ -54,6 +54,7 @@ import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/agent_management_service.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
+import '../../domain/services/agent_worktree_service.dart';
 import '../../domain/services/app_review_demo_service.dart';
 import '../../domain/services/app_review_prompt_service.dart';
 import '../../domain/services/clipboard_content_service.dart';
@@ -96,6 +97,7 @@ import '../widgets/acp_session_presentation.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/agent_usage_rings.dart';
 import '../widgets/agent_usage_rings_menu_item.dart';
+import '../widgets/agent_worktree_removal.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
@@ -122,6 +124,7 @@ import 'agent_management_screen.dart';
 import 'port_forward_browser_screen.dart';
 import 'sftp_screen.dart';
 import 'snippet_edit_screen.dart';
+import 'terminal/terminal_agent_worktree_launch.dart';
 import 'terminal/terminal_path_verifier.dart';
 import 'terminal/terminal_screen_policy.dart';
 
@@ -6357,23 +6360,66 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    if (agentPreset != null &&
-        agentPreset.tool.needsExecutableProbe &&
+    var launchPreset = agentPreset;
+    TerminalAgentWorktreeLaunch? worktreeLaunch;
+    if (launchPreset != null &&
+        launchPreset.launchesInNewWorktree &&
+        host.autoConnectSnippetId == null) {
+      final tmuxSessionName = launchPreset.usesTmuxSession
+          ? launchPreset.tmuxSessionName!.trim()
+          : null;
+      final worktreeService = ref.read(agentWorktreeServiceProvider);
+      if (!mounted) return;
+      worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
+        context: context,
+        ref: ref,
+        session: session,
+        preset: launchPreset,
+        sessionExists: tmuxSessionName == null
+            ? null
+            : () => worktreeService.tmuxSessionExists(
+                SshAgentWorktreeShell(session),
+                tmuxSessionName,
+              ),
+      );
+      if (worktreeLaunch == null) return;
+      launchPreset = worktreeLaunch.preset;
+      try {
+        resolvedStoredCommand = buildAgentLaunchCommand(
+          launchPreset,
+          startInYoloMode: _startClisInYoloMode,
+          windows: session.remoteIsWindows,
+        );
+      } on FormatException {
+        worktreeLaunch.abandon();
+        return;
+      }
+      if (!mounted || !identical(_shell, shell)) {
+        worktreeLaunch.abandon();
+        return;
+      }
+    }
+
+    if (launchPreset != null &&
+        launchPreset.tool.needsExecutableProbe &&
         host.autoConnectSnippetId == null &&
         resolvedStoredCommand != null) {
       final executable = await _tmuxService.resolveAgentToolExecutable(
         session,
-        agentPreset.tool,
+        launchPreset.tool,
       );
       resolvedStoredCommand = buildAgentLaunchCommand(
-        agentPreset,
+        launchPreset,
         startInYoloMode: _startClisInYoloMode,
         windows: session.remoteIsWindows,
-        executable: executable == agentPreset.tool.commandName
+        executable: executable == launchPreset.tool.commandName
             ? null
             : executable,
       );
-      if (!mounted || !identical(_shell, shell)) return;
+      if (!mounted || !identical(_shell, shell)) {
+        worktreeLaunch?.abandon();
+        return;
+      }
     }
 
     String? snippetCommand;
@@ -6401,6 +6447,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       snippetCommand: snippetCommand,
     );
     if (command == null) {
+      worktreeLaunch?.abandon();
       return;
     }
 
@@ -6410,10 +6457,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
+      worktreeLaunch?.abandon();
       return;
     }
 
     shell.write(utf8.encode(formatAutoConnectCommandForShell(command)));
+    worktreeLaunch?.launched();
     if (resolvedSnippetId != null) {
       unawaited(
         ref.read(snippetRepositoryProvider).incrementUsage(resolvedSnippetId),
@@ -7220,6 +7269,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommand(
+    SshSession session,
+    Host host,
+    AgentLaunchPreset preset,
+  ) async {
+    final sessionName = preset.tmuxSessionName?.trim();
+    if (sessionName == null || sessionName.isEmpty) {
+      return null;
+    }
+    final worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
+      context: context,
+      ref: ref,
+      session: session,
+      preset: preset,
+      sessionExists: () async =>
+          await _monkeyMuxService.runningServerStatusFromInstalledHelpers(
+            session,
+            sessionName,
+          ) !=
+          null,
+    );
+    if (worktreeLaunch == null) {
+      return null;
+    }
+    _PreparedRemoteMuxCommand? command;
+    try {
+      command = await _prepareMonkeyMuxAgentLaunchCommandIn(
+        session,
+        host,
+        worktreeLaunch.preset,
+      );
+    } finally {
+      if (command == null) {
+        worktreeLaunch.abandon();
+      } else {
+        worktreeLaunch.launched(
+          windowDirectories: () async => [
+            for (final window in await _monkeyMuxService.listWindows(
+              session,
+              sessionName,
+            ))
+              window.currentPath,
+          ],
+        );
+      }
+    }
+    return command;
+  }
+
+  Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommandIn(
     SshSession session,
     Host host,
     AgentLaunchPreset preset,
@@ -9011,6 +9109,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           );
           if (!(closingWindow?.isNativeAcp ?? false)) {
             await _closeTmuxWindow(session, windowIndex, windowId: windowId);
+            _offerClosedWindowWorktreeRemoval(session, closingWindow);
             break;
           }
 
@@ -9040,6 +9139,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           for (final key in closingKeys) {
             _nativeAcpScrollStates.remove(key.value);
           }
+          _offerClosedWindowWorktreeRemoval(session, closingWindow);
       }
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
@@ -10217,6 +10317,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionName,
         forceVisibleTmux: forceVisibleTmux,
         deferUntilAfterRedraw: deferPostSwitchExec,
+      ),
+    );
+  }
+
+  /// Offers to remove the worktree a preset launch created for [closed],
+  /// unless another window still uses it.
+  void _offerClosedWindowWorktreeRemoval(
+    SshSession session,
+    TmuxWindow? closed,
+  ) {
+    if (closed == null || !mounted) return;
+    unawaited(
+      offerAgentWorktreeRemoval(
+        context: context,
+        ref: ref,
+        session: session,
+        closedWindowDirectory: closed.currentPath,
+        remainingWindowDirectories: [
+          for (final window in _currentTmuxWindowsSnapshot ?? <TmuxWindow>[])
+            if (closed.id != null
+                ? window.id != closed.id
+                : window.index != closed.index)
+              window.currentPath,
+        ],
       ),
     );
   }
