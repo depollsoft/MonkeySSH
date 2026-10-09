@@ -126,6 +126,7 @@ class _Node {
     required this.warnings,
     required this.identityFiles,
     required this.problem,
+    this.truncated = false,
   });
 
   final String name;
@@ -140,8 +141,19 @@ class _Node {
   /// Why this host's own ProxyJump chain can't be imported, or null.
   final String? problem;
 
-  /// Number of jump hosts between the phone and this host.
-  late final int chainLength = jump == null ? 0 : jump!.chainLength + 1;
+  /// Whether resolution stopped at this host because the chain above it was
+  /// already longer than [sshConfigMaxJumpDepth].
+  final bool truncated;
+
+  /// Whether this host or one further down its chain was [truncated]. Such
+  /// results depend on where resolution started, so they aren't cached.
+  late final bool partial = truncated || (jump?.partial ?? false);
+
+  /// Number of jump hosts between the phone and this host. A [truncated]
+  /// host counts as already past the limit.
+  late final int chainLength = jump == null
+      ? (truncated ? sshConfigMaxJumpDepth + 1 : 0)
+      : jump!.chainLength + 1;
 
   /// [problem], or the first problem further down the chain.
   late final String? unsupportedReason =
@@ -209,7 +221,11 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
         'directly. Add a jump host if it needs one.',
       );
     }
-    if (hops != null) {
+    var truncated = false;
+    if (hops != null && stack.length >= sshConfigMaxJumpDepth) {
+      // The caller's chain is already past the limit; don't descend further.
+      truncated = true;
+    } else if (hops != null) {
       final last = hops.last;
       try {
         jump = resolve(
@@ -239,14 +255,10 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
       jump: jump,
       warnings: warnings,
       identityFiles: options.identityFiles,
-      problem:
-          problem ??
-          (jump != null && jump.chainLength + 1 > sshConfigMaxJumpDepth
-              ? 'its ProxyJump chain has ${jump.chainLength + 1} hops, and '
-                    'MonkeySSH follows at most $sshConfigMaxJumpDepth.'
-              : null),
+      truncated: truncated,
+      problem: problem ?? _depthProblem(jump, truncated: truncated),
     );
-    memo[key] = node;
+    if (!node.partial) memo[key] = node;
     return node;
   }
 
@@ -268,11 +280,12 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
   var hopCount = 0;
 
   String entryIdForJump(_Node node) {
-    final existing = entryIdsBySignature[node.signature];
+    final usable = node.unsupportedReason == null;
+    final existing = usable ? entryIdsBySignature[node.signature] : null;
     if (existing != null) return existing;
     final jumpId = node.jump == null ? null : entryIdForJump(node.jump!);
     final id = 'jump:${hopCount++}';
-    entryIdsBySignature[node.signature] = id;
+    if (usable) entryIdsBySignature[node.signature] = id;
     entryIndexById[id] = entries.length;
     entries.add(
       SshConfigImportEntry(
@@ -314,6 +327,8 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
     final existing = existingIndex == null ? null : entries[existingIndex];
     if (existing != null &&
         !existing.isJumpOnly &&
+        existing.unsupportedReason == null &&
+        node.unsupportedReason == null &&
         listEquals(existing.forwards, forwards) &&
         listEquals(existing.identityFiles, options.identityFiles)) {
       // `Host web web.example.com` style duplicates become one host.
@@ -334,7 +349,11 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
       continue;
     }
     final id = 'host:${alias.toLowerCase()}';
-    entryIdsBySignature.putIfAbsent(node.signature, () => id);
+    // Only a host that can be imported stands in for other entries with the
+    // same endpoint; a blocked one (a loop, say) keeps its own entry.
+    if (node.unsupportedReason == null) {
+      entryIdsBySignature.putIfAbsent(node.signature, () => id);
+    }
     entryIndexById[id] = entries.length;
     aliasEntryIds.add(id);
     entries.add(
@@ -370,7 +389,8 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
   for (final id in aliasEntryIds) {
     final node = aliasNodeById[id]!;
     final jump = node.jump;
-    if (jump == null) continue;
+    // A blocked host won't be imported, so it needs no jump-only entries.
+    if (jump == null || node.unsupportedReason != null) continue;
     final jumpId = entryIdForJump(jump);
     final index = entryIndexById[id]!;
     final entry = entries[index];
@@ -410,6 +430,18 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
 }
 
 bool _hasToken(String? value) => value != null && value.contains('%');
+
+String? _depthProblem(_Node? jump, {required bool truncated}) {
+  if (truncated || (jump?.partial ?? false)) {
+    return 'its ProxyJump chain has more than $sshConfigMaxJumpDepth hops, '
+        'and MonkeySSH follows at most $sshConfigMaxJumpDepth.';
+  }
+  if (jump != null && jump.chainLength + 1 > sshConfigMaxJumpDepth) {
+    return 'its ProxyJump chain has ${jump.chainLength + 1} hops, and '
+        'MonkeySSH follows at most $sshConfigMaxJumpDepth.';
+  }
+  return null;
+}
 
 /// The listen address MonkeySSH saves for [forward].
 ///

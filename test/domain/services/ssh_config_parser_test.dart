@@ -495,7 +495,10 @@ Host c
 
       final deep = _plan('Host target\n  ProxyJump ${chainOf(9)}\n');
       final deepTarget = _entry(deep, 'target');
-      expect(deepTarget.unsupportedReason, contains('9 hops'));
+      expect(
+        deepTarget.unsupportedReason,
+        contains('follows at most $sshConfigMaxJumpDepth'),
+      );
     });
 
     for (final reversed in [false, true]) {
@@ -508,7 +511,10 @@ Host c
           ];
           final plan = _plan((reversed ? blocks.reversed : blocks).join());
           // h1 jumps through h2..h10: nine hops.
-          expect(_entry(plan, 'h1').unsupportedReason, contains('9 hops'));
+          expect(
+            _entry(plan, 'h1').unsupportedReason,
+            contains('follows at most $sshConfigMaxJumpDepth'),
+          );
           // h2 has exactly eight and h8 two; both import intact.
           expect(_entry(plan, 'h2').unsupportedReason, isNull);
           expect(plan.jumpChain(_entry(plan, 'h2')), hasLength(8));
@@ -520,6 +526,47 @@ Host c
         },
       );
     }
+
+    for (final badFirst in [true, false]) {
+      test(
+        'a looping alias never merges with a valid one (bad first: $badFirst)',
+        () {
+          const bad =
+              'Host bad\n  HostName shared.example.com\n'
+              '  User me\n  ProxyJump bad\n';
+          const good =
+              'Host good\n  HostName shared.example.com\n'
+              '  User me\n';
+          final plan = _plan(badFirst ? '$bad$good' : '$good$bad');
+          expect(_entry(plan, 'bad').unsupportedReason, contains('loops'));
+          expect(_entry(plan, 'good').unsupportedReason, isNull);
+          expect(_entry(plan, 'good').aliases, ['good']);
+        },
+      );
+    }
+
+    test('a huge ProxyJump list is blocked without exhausting the stack', () {
+      final hops = [for (var i = 0; i < 3000; i++) 'h$i'].join(',');
+      final text = 'Host target\n  User me\n  ProxyJump $hops\nHost ok\n';
+      final plan = _plan(text);
+      expect(
+        _entry(plan, 'target').unsupportedReason,
+        contains('more than $sshConfigMaxJumpDepth'),
+      );
+      expect(_entry(plan, 'ok').unsupportedReason, isNull);
+    });
+
+    test('a long chain of aliases stays fast and judged per host', () {
+      final text = [
+        for (var i = 1; i < 2000; i++) 'Host h$i\n  ProxyJump h${i + 1}\n',
+        'Host h2000\n',
+      ].join();
+      final plan = _plan(text);
+      expect(_entry(plan, 'h1').unsupportedReason, isNotNull);
+      expect(_entry(plan, 'h1992').unsupportedReason, isNull);
+      expect(plan.jumpChain(_entry(plan, 'h1992')), hasLength(8));
+      expect(_entry(plan, 'h1991').unsupportedReason, isNotNull);
+    });
 
     test('a jump-only host keeps its IdentityFile', () {
       final plan = _plan('''
