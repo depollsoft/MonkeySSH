@@ -13,6 +13,7 @@ import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/acp_updates.dart';
+import '../../domain/models/acp_writer_lease.dart';
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../models/acp_slash_command.dart';
@@ -602,8 +603,11 @@ class AcpComposerController extends ChangeNotifier {
   ) async {
     try {
       await promptFuture;
-    } on Object {
-      if (_disposed) {
+    } on Object catch (error) {
+      // A prompt that reached the agent keeps running after another device
+      // takes the chat; restoring it would invite sending it twice.
+      if (_disposed ||
+          (error is AcpInputHeldElsewhereException && error.delivered)) {
         return;
       }
       if (_sendState != _SendState.idle) {
@@ -615,12 +619,19 @@ class AcpComposerController extends ChangeNotifier {
         ));
         return;
       }
-      _error = null;
+      _error = error is AcpInputHeldElsewhereException
+          ? _heldElsewhereError
+          : null;
       _restoreSnapshot(snapshotText, snapshotAttachments);
       _recomputeSlash();
       notifyListeners();
     }
   }
+
+  static const _heldElsewhereError = AcpComposerError(
+    AcpComposerErrorKind.send,
+    'Another device took this chat before your message was sent.',
+  );
 
   static const _sendFailedError = AcpComposerError(
     AcpComposerErrorKind.send,

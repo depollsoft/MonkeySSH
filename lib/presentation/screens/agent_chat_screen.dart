@@ -62,6 +62,7 @@ import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/acp_terminal_output.dart';
+import '../widgets/acp_writer_lease_banner.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -208,6 +209,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Timer? _initialScrollSettleTimer;
   var _userDraggingTranscript = false;
   var _connecting = true;
+  var _takingOver = false;
   AcpSessionError? _connectError;
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
@@ -329,7 +331,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       .firstOrNull
       ?.connectionId;
 
-  Future<void> _ensureConnected() async {
+  Future<void> _ensureConnected({bool takeOver = false}) async {
     final manager = ref.read(acpSessionManagerProvider);
     final existing = manager.state.byKeyValue(_key.value);
     if (existing != null && existing.isLive) {
@@ -344,7 +346,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     try {
       final recents = await manager.loadRecentSessions();
       final match = recents.where((r) => r.key.value == _key.value).firstOrNull;
-      final result = await _reconnect(cwd: match?.cwd ?? '~');
+      final result = await _reconnect(
+        cwd: match?.cwd ?? '~',
+        takeOver: takeOver,
+      );
       if (!mounted) {
         return;
       }
@@ -408,9 +413,20 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
   }
 
+  Future<void> _takeOver() async {
+    if (_takingOver) return;
+    setState(() => _takingOver = true);
+    try {
+      await _ensureConnected(takeOver: true);
+    } finally {
+      if (mounted) setState(() => _takingOver = false);
+    }
+  }
+
   Future<AcpSessionLaunchResult?> _reconnect({
     required String cwd,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    bool takeOver = false,
   }) async {
     final manager = ref.read(acpSessionManagerProvider);
     final connection = await ensureAcpHostConnection(context, ref, _key.hostId);
@@ -443,13 +459,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       ),
       autoApprovePermissions: launchPreferences.startInYoloMode,
       replace: replace,
+      takeOver: takeOver,
     );
     if (result is AcpSessionLaunchBlocked && mounted) {
       return resolveAcpConcurrencyBlock(
         context,
         ref,
         result.decision,
-        relaunch: (replace) => _reconnect(cwd: cwd, replace: replace),
+        relaunch: (replace) =>
+            _reconnect(cwd: cwd, replace: replace, takeOver: takeOver),
       );
     }
     return result;
@@ -1200,6 +1218,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
                       _buildPendingPanel(session, prompts, toolTitles),
+                    if (session.remoteWriter case final writer?)
+                      AcpWriterLeaseBanner(
+                        writer: writer,
+                        busy: _takingOver,
+                        onTakeOver: () => unawaited(_takeOver()),
+                      ),
                     AcpComposer(
                       controller: _composer,
                       attachmentActions: _attachmentActions(session),
@@ -1282,6 +1306,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   Widget? _buildBanner(AcpSessionState session, AcpStatusDisplay activity) {
+    // A read-only chat explains itself beside the composer instead.
+    if (session.remoteWriter != null) return null;
     if (session.status != AcpConnectionStatus.ready) {
       return _buildSessionStatusBanner(session);
     }

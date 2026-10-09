@@ -202,7 +202,15 @@ AcpStatusDisplay acpStatusDisplay(AcpConnectionStatus status) =>
 /// terminal-like activity descriptor. User decisions take priority over active
 /// work so a background native session cannot silently wait for attention.
 AcpStatusDisplay acpSessionActivityDisplay(AcpSessionState session) =>
-    acpActivitySnapshotDisplay(AcpActivitySnapshot.fromSession(session));
+    session.remoteWriter != null
+    ? _readOnlyStatusDisplay
+    : acpActivitySnapshotDisplay(AcpActivitySnapshot.fromSession(session));
+
+const _readOnlyStatusDisplay = AcpStatusDisplay(
+  label: 'read-only',
+  icon: Icons.devices_other,
+  tone: AcpStatusTone.neutral,
+);
 
 /// Resolves a coarse activity snapshot without reading transcript content.
 AcpStatusDisplay acpActivitySnapshotDisplay(AcpActivitySnapshot snapshot) {
