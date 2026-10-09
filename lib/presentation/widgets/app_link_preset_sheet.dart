@@ -162,17 +162,28 @@ class AppLinkPresetSheet extends StatelessWidget {
                   const SizedBox(height: FluttyTheme.spacingMd),
                   _YoloWarning(review: review),
                 ],
+                if (muxSessionName != null &&
+                    review.muxBackend == RemoteMuxBackend.tmux) ...[
+                  const SizedBox(height: FluttyTheme.spacingMd),
+                  AcpElicitationNotice(
+                    icon: Icons.info_outline,
+                    text:
+                        'If tmux session $muxSessionName is already running, '
+                        'tmux attaches to it and does not start '
+                        '${review.tool.label} again.',
+                  ),
+                ],
               ],
             ),
           ),
-          AcpElicitationSheetFooter(
+          _SheetActions(
             // Neutral, so the confirm action is the sheet's only teal.
-            secondary: TextButton(
+            cancel: TextButton(
               style: TextButton.styleFrom(foregroundColor: scheme.onSurface),
               onPressed: () => Navigator.of(context).pop(false),
               child: const Text('Cancel'),
             ),
-            primary: FilledButton.icon(
+            run: FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(true),
               icon: const Icon(Icons.play_arrow_rounded, size: 20),
               label: Text(review.yoloMode ? 'Run in YOLO mode' : 'Run'),
@@ -182,6 +193,42 @@ class AppLinkPresetSheet extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Bottom-anchored actions behind a hairline. They sit side by side and
+/// stack, Run on top, when large text or a narrow window leaves no room.
+class _SheetActions extends StatelessWidget {
+  const _SheetActions({required this.cancel, required this.run});
+
+  final Widget cancel;
+  final Widget run;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      border: Border(
+        top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+    ),
+    child: SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          FluttyTheme.spacingLg,
+          FluttyTheme.spacingSm,
+          FluttyTheme.spacingLg,
+          FluttyTheme.spacingSm,
+        ),
+        child: OverflowBar(
+          alignment: MainAxisAlignment.spaceBetween,
+          overflowAlignment: OverflowBarAlignment.end,
+          overflowDirection: VerticalDirection.up,
+          overflowSpacing: FluttyTheme.spacingSm,
+          children: [cancel, run],
+        ),
+      ),
+    ),
+  );
 }
 
 class _ReviewField extends StatelessWidget {

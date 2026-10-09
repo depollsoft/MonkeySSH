@@ -29,15 +29,22 @@ Future<List<bool>> _openSheet(
   AppLinkPresetReview review, {
   ThemeData? theme,
   bool disableAnimations = false,
+  Size size = const Size(390, 844),
+  double textScale = 1,
 }) async {
   final answers = <bool>[];
+  tester.view
+    ..physicalSize = size
+    ..devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
   await tester.pumpWidget(
     MaterialApp(
       theme: theme ?? FluttyTheme.dark,
       home: MediaQuery(
         data: MediaQueryData(
-          size: const Size(390, 844),
+          size: size,
           disableAnimations: disableAnimations,
+          textScaler: TextScaler.linear(textScale),
         ),
         child: Builder(
           builder: (context) => Scaffold(
@@ -164,6 +171,51 @@ void main() {
       expect(size.height, greaterThanOrEqualTo(44), reason: '$finder');
       expect(size.width, greaterThanOrEqualTo(44), reason: '$finder');
     }
+  });
+
+  testWidgets('actions stack instead of overflowing at large text sizes', (
+    tester,
+  ) async {
+    final answers = await _openSheet(
+      tester,
+      _review(yolo: true),
+      size: const Size(320, 640),
+      textScale: 2,
+    );
+
+    expect(tester.takeException(), isNull);
+    final run = find.text('Run in YOLO mode');
+    final cancel = find.text('Cancel');
+    expect(run, findsOneWidget);
+    expect(cancel, findsOneWidget);
+    // Stacked, with Cancel nearest the thumb.
+    expect(tester.getCenter(run).dy, lessThan(tester.getCenter(cancel).dy));
+    expect(tester.getBottomRight(run).dx, lessThanOrEqualTo(320));
+
+    await tester.tap(run);
+    await tester.pumpAndSettle();
+    expect(answers, [true]);
+  });
+
+  testWidgets('tmux presets say an attached session starts nothing', (
+    tester,
+  ) async {
+    await _openSheet(
+      tester,
+      const AppLinkPresetReview(
+        hostLabel: 'build box',
+        tool: AgentLaunchTool.codex,
+        command: 'tmux new-session -A -s work codex',
+        yoloMode: false,
+        muxSessionName: 'work',
+        muxBackend: RemoteMuxBackend.tmux,
+      ),
+    );
+
+    expect(
+      find.textContaining('tmux session work is already running'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('long commands scroll inside the sheet', (tester) async {
