@@ -953,6 +953,43 @@ void main() {
       expect(controller.text, 'B\n\nC');
     });
 
+    test('removing an attachment between refused prompts is safe', () async {
+      final manager = RecordingAcpSessionManager();
+      final firstGate = Completer<void>();
+      final secondGate = Completer<void>();
+      manager
+        ..promptGate = firstGate
+        ..throwOnPrompt = const AcpPromptNotSentException();
+      final controller = _controller(
+        manager,
+        session: _session(embeddedContext: true),
+      )..setText('B');
+      addTearDown(controller.dispose);
+      controller.addAttachment(
+        AcpAttachmentCandidate.memory(
+          name: 'b.txt',
+          bytes: Uint8List.fromList('notes'.codeUnits),
+          mimeType: 'text/plain',
+        ),
+      );
+      expect(await controller.send(), isTrue);
+      manager.promptGate = secondGate;
+      controller.setText('C');
+      expect(await controller.send(), isTrue);
+
+      // B is refused and restored, then the user removes its attachment
+      // before C is refused too.
+      firstGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'B');
+      controller.removeAttachment(controller.attachments.single.id);
+      secondGate.complete();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.text, 'B\n\nC');
+      expect(controller.attachments, isEmpty);
+    });
+
     test('editing keeps prompts whose attachments would not fit', () async {
       final manager = RecordingAcpSessionManager()
         ..throwOnPrompt = const AcpConnectionClosedException();

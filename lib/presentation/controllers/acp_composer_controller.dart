@@ -778,9 +778,9 @@ class AcpComposerController extends ChangeNotifier {
     _error ??= _sendFailedError;
   }
 
-  /// The draft right after the last refused prompt was restored, and where
-  /// that restored block ends in it.
-  ({String text, int textEnd, int attachmentEnd})? _lastRestore;
+  /// The draft right after the last refused prompt was restored, where that
+  /// restored block's text ends in it, and which attachments it restored.
+  ({String text, int textEnd, Set<String> attachmentIds})? _lastRestore;
 
   /// Restores a refused prompt like [_restoreSnapshot], but after any refused
   /// prompt restored just before it (with no edit since), so several queued
@@ -796,7 +796,7 @@ class AcpComposerController extends ChangeNotifier {
         if (!currentIds.contains(attachment.id)) attachment,
     ];
     int textEnd;
-    int attachmentEnd;
+    final Set<String> restoredIds;
     if (last != null && last.text == _text) {
       final before = _text.substring(0, last.textEnd);
       textEnd = last.textEnd;
@@ -808,19 +808,26 @@ class AcpComposerController extends ChangeNotifier {
         _caret = _text.length;
         textEnd = joined.length;
       }
-      _attachments.insertAll(last.attachmentEnd, added);
-      attachmentEnd = last.attachmentEnd + added.length;
+      // After the restored attachments still attached, located by id:
+      // attachments may have been removed since, so a remembered index could
+      // be past the end.
+      final insertAt =
+          _attachments.lastIndexWhere(
+            (attachment) => last.attachmentIds.contains(attachment.id),
+          ) +
+          1;
+      _attachments.insertAll(insertAt, added);
+      restoredIds = {
+        ...last.attachmentIds,
+        for (final attachment in added) attachment.id,
+      };
     } else {
       _mergeDraft(snapshotText, snapshotAttachments);
       textEnd = snapshotText.length;
-      attachmentEnd = added.length;
+      restoredIds = {for (final attachment in added) attachment.id};
     }
     _error ??= _sendFailedError;
-    _lastRestore = (
-      text: _text,
-      textEnd: textEnd,
-      attachmentEnd: attachmentEnd,
-    );
+    _lastRestore = (text: _text, textEnd: textEnd, attachmentIds: restoredIds);
   }
 
   void _mergeDraft(
