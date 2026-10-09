@@ -20,6 +20,7 @@ import '../../data/repositories/known_hosts_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../models/acp_native_preview.dart';
 import '../models/acp_session_keys.dart';
+import '../models/port_forward_type.dart';
 import '../models/port_proxy_name.dart';
 import '../models/remote_multiplexer.dart';
 import '../models/terminal_preview.dart';
@@ -39,6 +40,7 @@ import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
 import 'serial_task_queue.dart';
 import 'settings_service.dart';
+import 'socks5_protocol.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_wire.dart';
@@ -53,6 +55,7 @@ import 'terminal_preview_graphics.dart';
 import 'wifi_network_service.dart';
 import 'windows_remote_powershell.dart';
 
+part 'ssh_dynamic_forward.dart';
 part 'ssh_session_runtime.dart';
 
 /// Current terminal dimensions used to answer terminal size queries.
@@ -2677,10 +2680,14 @@ const _forwardRelayCloseGrace = Duration(seconds: 5);
 /// failure destroys both endpoints at once, so a client that stopped reading
 /// cannot hold the relay open; any other ending flushes what was accepted for
 /// at most [closeGrace].
+///
+/// [clientData] replaces [socket] as the source of client bytes when a caller
+/// has already read a protocol preamble, such as a SOCKS5 handshake, from it.
 @visibleForTesting
 Future<void> relayPortForward(
   Socket socket,
   FutureOr<SSHForwardChannel?> Function() openChannel, {
+  Stream<Uint8List>? clientData,
   Future<void>? stopped,
   Duration? openTimeout,
   void Function(SSHForwardChannel)? destroyChannel,
@@ -2748,7 +2755,7 @@ Future<void> relayPortForward(
           );
           return forward = channel;
         });
-    outgoing = StreamIterator(socket);
+    outgoing = StreamIterator(clientData ?? socket);
     final source = outgoing;
     Object? readError;
     StackTrace? readStackTrace;
@@ -3813,6 +3820,7 @@ class SshSession {
           remoteHost: e.value.remoteHost,
           remotePort: e.value.remotePort,
           isLocal: e.value.isLocal,
+          isDynamic: e.value.isDynamic,
           isAutomatic: e.value.isAutomatic,
           isShellRelated: e.value.isShellRelated,
         ),
@@ -3896,6 +3904,11 @@ class SshSession {
           localHost: portForward.localHost,
           localPort: portForward.localPort,
         );
+      case dynamicPortForwardType:
+        return startDynamicForward(
+          portForwardId: portForward.id,
+          localPort: portForward.localPort,
+        );
       default:
         return Future<bool>.value(false);
     }
@@ -3931,6 +3944,11 @@ class SshSession {
           remoteHost: portForward.remoteHost,
           remotePort: portForward.remotePort,
           localHost: portForward.localHost,
+          localPort: portForward.localPort,
+        );
+      case dynamicPortForwardType:
+        return _startDynamicForward(
+          portForwardId: portForward.id,
           localPort: portForward.localPort,
         );
       default:
@@ -6047,6 +6065,27 @@ while($true){
     }
   }
 
+  /// Start a SOCKS5 dynamic forward (`ssh -D`).
+  ///
+  /// Listens on IPv4 loopback at [localPort], or a free port when it is zero,
+  /// and opens an SSH channel to whichever destination each SOCKS client
+  /// names. The SSH server resolves destination host names.
+  Future<bool> startDynamicForward({
+    required int portForwardId,
+    required int localPort,
+  }) {
+    if (_isClosing) {
+      return Future<bool>.value(false);
+    }
+    return _runPortForwardOperation(
+      portForwardId,
+      () => _startDynamicForward(
+        portForwardId: portForwardId,
+        localPort: localPort,
+      ),
+    );
+  }
+
   /// Start a remote port forward tunnel.
   ///
   /// Binds to [remoteHost]:[remotePort] on the SSH server and forwards
@@ -6509,6 +6548,7 @@ class ActiveTunnelInfo {
     required this.remoteHost,
     required this.remotePort,
     required this.isLocal,
+    this.isDynamic = false,
     this.isAutomatic = false,
     this.isShellRelated = false,
     this.browserHost,
@@ -6541,7 +6581,15 @@ class ActiveTunnelInfo {
   final int remotePort;
 
   /// Whether this is a local (true) or remote (false) forward.
+  ///
+  /// A dynamic forward also listens locally, so it is local too.
   final bool isLocal;
+
+  /// Whether this is a SOCKS5 dynamic forward listening on [localPort].
+  ///
+  /// Its [remoteHost] is empty and [remotePort] is zero because each SOCKS
+  /// client names its own destination.
+  final bool isDynamic;
 
   /// Whether this tunnel was created by remote-listener discovery.
   final bool isAutomatic;
@@ -6564,7 +6612,25 @@ class _ActiveTunnel {
     required this.isAutomatic,
     required this.isShellRelated,
   }) : remoteForward = null,
-       isLocal = true;
+       isLocal = true,
+       isDynamic = false;
+
+  /// A SOCKS5 listener whose clients name each destination.
+  _ActiveTunnel.dynamic({
+    required ServerSocket this.serverSocket,
+    required this.localHost,
+    required this.localPort,
+  }) : browserServerSockets = const [],
+       remoteForward = null,
+       browserHost = null,
+       browserPort = null,
+       browserFallbackHost = null,
+       remoteHost = '',
+       remotePort = 0,
+       isAutomatic = false,
+       isShellRelated = false,
+       isLocal = true,
+       isDynamic = true;
 
   _ActiveTunnel.remote({
     required this.remoteForward,
@@ -6579,7 +6645,8 @@ class _ActiveTunnel {
        browserFallbackHost = null,
        isAutomatic = false,
        isShellRelated = false,
-       isLocal = false;
+       isLocal = false,
+       isDynamic = false;
 
   final stopped = Completer<void>();
 
@@ -6596,8 +6663,12 @@ class _ActiveTunnel {
   final String remoteHost;
   final int remotePort;
   final bool isLocal;
+  final bool isDynamic;
   final bool isAutomatic;
   bool isShellRelated;
+
+  /// Whether a dynamic forward already logged reaching its connection cap.
+  bool connectionLimitLogged = false;
   // Cancelled in SshSession.stopForward().
   // ignore: cancel_subscriptions
   StreamSubscription<dynamic>? subscription;

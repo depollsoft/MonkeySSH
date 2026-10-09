@@ -14,6 +14,7 @@ import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
+import '../models/port_forward_type.dart';
 import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
@@ -977,18 +978,22 @@ class SecureTransferService {
         continue;
       }
 
+      final forwardType = _requiredString(item, 'forwardType');
       await _db
           .into(_db.portForwards)
           .insert(
             PortForwardsCompanion.insert(
               name: _requiredString(item, 'name'),
               hostId: mappedHostId,
-              forwardType: _requiredString(item, 'forwardType'),
+              forwardType: forwardType,
               localHost: Value(
                 _optionalString(item['localHost']) ?? '127.0.0.1',
               ),
               localPort: _optionalInt(item['localPort']) ?? 0,
-              remoteHost: _requiredString(item, 'remoteHost'),
+              // A SOCKS forward has no fixed destination.
+              remoteHost: isDynamicPortForwardType(forwardType)
+                  ? _optionalString(item['remoteHost']) ?? ''
+                  : _requiredString(item, 'remoteHost'),
               remotePort: _optionalInt(item['remotePort']) ?? 0,
               autoStart: Value((item['autoStart'] as bool?) ?? false),
               createdAt: Value(

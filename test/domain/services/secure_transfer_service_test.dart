@@ -1291,6 +1291,46 @@ void main() {
       },
     );
 
+    test('imports SOCKS forwards, which have no destination', () async {
+      await transferService.importMigrationData(
+        mode: MigrationImportMode.replace,
+        data: {
+          'hosts': [
+            {
+              'id': 301,
+              'label': 'A',
+              'hostname': 'a.example.com',
+              'username': 'root',
+            },
+          ],
+          'portForwards': [
+            {
+              'name': 'socks',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+              'localPort': 1080,
+              'remoteHost': '',
+              'remotePort': 0,
+            },
+            {
+              'name': 'socks without destination fields',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+            },
+          ],
+        },
+      );
+
+      final portForwards = await db.select(db.portForwards).get();
+      expect(portForwards, hasLength(2));
+      expect(portForwards.map((forward) => forward.forwardType), [
+        'dynamic',
+        'dynamic',
+      ]);
+      expect(portForwards.map((forward) => forward.remoteHost), ['', '']);
+      expect(portForwards.map((forward) => forward.localPort), [1080, 0]);
+    });
+
     test(
       'imports full migration in replace mode with self references',
       () async {

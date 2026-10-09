@@ -4087,7 +4087,10 @@ class PortForward extends DataClass implements Insertable<PortForward> {
   /// Associated host.
   final int hostId;
 
-  /// Forward type: 'local' or 'remote'.
+  /// Forward type: 'local', 'remote', or 'dynamic' (SOCKS5).
+  ///
+  /// A dynamic forward listens on loopback [localPort] (zero picks a free
+  /// port) and leaves [remoteHost] empty and [remotePort] zero.
   final String forwardType;
 
   /// Local bind address.

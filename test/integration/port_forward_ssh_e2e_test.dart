@@ -121,4 +121,131 @@ void main() {
         : false,
     timeout: const Timeout(Duration(seconds: 120)),
   );
+
+  test(
+    'SOCKS forward reaches host-only services by name',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        if (WebSocketTransformer.isUpgradeRequest(request)) {
+          // Closed when the server is force-closed in tear-down.
+          // ignore: close_sinks
+          final webSocket = await WebSocketTransformer.upgrade(request);
+          webSocket.listen((message) => webSocket.add('echo:$message'));
+          return;
+        }
+        request.response.write('host-only');
+        await request.response.close();
+      });
+      // Nothing listens here, so OpenSSH refuses the channel.
+      final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final closedPort = closed.port;
+      await closed.close();
+
+      final client = SSHClient(
+        await SSHSocket.connect('127.0.0.1', 22),
+        username: Platform.environment['USER']!,
+        identities: SSHKeyPair.fromPem(await File(keyPath!).readAsString()),
+      );
+      addTearDown(client.close);
+      await client.authenticated;
+      final session = SshSession(
+        connectionId: 2,
+        hostId: 42,
+        client: client,
+        config: SshConnectionConfig(
+          hostname: '127.0.0.1',
+          port: 22,
+          username: Platform.environment['USER']!,
+        ),
+      );
+      addTearDown(session.stopAllForwards);
+      expect(
+        await session.startDynamicForward(portForwardId: 9, localPort: 0),
+        isTrue,
+      );
+      final proxyPort = session.activeTunnels.single.localPort;
+
+      Future<(Socket, StreamIterator<Uint8List>, int)> socks(int port) async {
+        // Each caller destroys the returned socket in tear-down.
+        // ignore: close_sinks
+        final socket = await Socket.connect('127.0.0.1', proxyPort);
+        final reader = StreamIterator(socket);
+        final pending = <int>[];
+        Future<List<int>> read(int count) async {
+          while (pending.length < count) {
+            expect(await reader.moveNext(), isTrue);
+            pending.addAll(reader.current);
+          }
+          final bytes = pending.sublist(0, count);
+          pending.removeRange(0, count);
+          return bytes;
+        }
+
+        socket.add([0x05, 0x01, 0x00]);
+        expect(await read(2), [0x05, 0x00]);
+        // 'localhost' is resolved by sshd, not by the client.
+        socket.add([
+          0x05, 0x01, 0x00, 0x03, 9, //
+          ...ascii.encode('localhost'),
+          port >> 8, port & 0xff,
+        ]);
+        final reply = await read(10);
+        expect(pending, isEmpty);
+        return (socket, reader, reply[1]);
+      }
+
+      final (page, pageReader, pageReply) = await socks(server.port);
+      addTearDown(page.destroy);
+      expect(pageReply, 0x00);
+      page.write(
+        'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n',
+      );
+      final body = StringBuffer();
+      while (await pageReader.moveNext()) {
+        body.write(latin1.decode(pageReader.current));
+      }
+      expect(body.toString(), contains('host-only'));
+
+      final (ws, wsReader, wsReply) = await socks(server.port);
+      addTearDown(ws.destroy);
+      expect(wsReply, 0x00);
+      ws.write(
+        'GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
+        'Connection: Upgrade\r\n'
+        'Sec-WebSocket-Key: ${base64Encode(List<int>.generate(16, (i) => i * 11 + 3))}\r\n'
+        'Sec-WebSocket-Version: 13\r\n\r\n',
+      );
+      final received = <int>[];
+      while (!latin1.decode(received).contains('\r\n\r\n')) {
+        expect(await wsReader.moveNext(), isTrue);
+        received.addAll(wsReader.current);
+      }
+      expect(latin1.decode(received), startsWith('HTTP/1.1 101'));
+      final payload = utf8.encode('ping');
+      ws.add([
+        0x81, 0x80 | payload.length, 1, 2, 3, 4, //
+        for (var i = 0; i < payload.length; i++) payload[i] ^ (i % 4 + 1),
+      ]);
+      final frame = received.sublist(
+        latin1.decode(received).indexOf('\r\n\r\n') + 4,
+      );
+      while (frame.length < 2 || frame.length < 2 + frame[1]) {
+        expect(await wsReader.moveNext(), isTrue);
+        frame.addAll(wsReader.current);
+      }
+      expect(utf8.decode(frame.sublist(2, 2 + frame[1])), 'echo:ping');
+
+      final (refused, refusedReader, refusedReply) = await socks(closedPort);
+      addTearDown(refused.destroy);
+      expect(refusedReply, 0x05);
+      await refusedReader.cancel();
+      expect(utf8.decode(await client.run('printf alive')), 'alive');
+    },
+    skip: keyPath == null
+        ? 'Set MONKEYSSH_FORWARD_E2E_KEY for localhost SSH'
+        : false,
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
 }
