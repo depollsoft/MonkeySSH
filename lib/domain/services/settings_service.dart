@@ -1,6 +1,13 @@
 import 'dart:convert';
 
-import 'package:drift/drift.dart' show BooleanExpressionOperators, Value;
+import 'package:drift/drift.dart'
+    show
+        BooleanExpressionOperators,
+        ComparableExpr,
+        Expression,
+        GeneratedColumn,
+        StringExpressionOperators,
+        Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -109,6 +116,31 @@ abstract final class SettingKeys {
 
   /// Canonical key of the last selected ACP session (JSON string).
   static const acpLastSelectedSession = 'acp_last_selected_session';
+
+  /// Key prefix for unsent native chat composer drafts, one row per session.
+  ///
+  /// The rest of the key is the session's draft identity, the JSON array
+  /// `[hostId,providerId,acpSessionId]`. These rows hold user content, stay
+  /// on this device, and are left out of migration exports.
+  static const acpComposerDraftPrefix = 'acp_composer_draft:';
+
+  /// Key prefix for the pasted-text chips of a draft, one row per session.
+  ///
+  /// Chips are written only when they change, so typing does not rewrite
+  /// large pastes. Same identity suffix and handling as
+  /// [acpComposerDraftPrefix].
+  static const acpComposerDraftChipsPrefix = 'acp_composer_draft_chips:';
+
+  /// Whether [key] holds an unsent native chat composer draft or its chips.
+  static bool isAcpComposerDraft(String key) =>
+      key.startsWith(acpComposerDraftPrefix) ||
+      key.startsWith(acpComposerDraftChipsPrefix);
+
+  /// Key prefixes of every draft row belonging to saved host [hostId].
+  static List<String> acpComposerDraftHostPrefixes(int hostId) => [
+    '$acpComposerDraftPrefix[$hostId,',
+    '$acpComposerDraftChipsPrefix[$hostId,',
+  ];
 
   /// Saved user-defined MCP servers for native agent sessions (JSON array).
   ///
@@ -234,6 +266,56 @@ class SettingsService {
     }
   });
 
+  /// Returns every setting whose key starts with [prefix], keyed by full key.
+  ///
+  /// With [valueLength], each value is cut to its first [valueLength]
+  /// characters in SQL, so large values are never loaded.
+  Future<Map<String, String>> getStringsWithPrefix(
+    String prefix, {
+    int? valueLength,
+  }) async {
+    final settings = _db.settings;
+    final value = valueLength == null
+        ? settings.value
+        : settings.value.substr(1, valueLength);
+    final query = _db.selectOnly(settings)
+      ..addColumns([settings.key, value])
+      ..where(settingKeyStartsWith(settings.key, prefix));
+    final rows = await query.get();
+    return <String, String>{
+      for (final row in rows)
+        if (row.read(settings.key) case final key? when key.startsWith(prefix))
+          key: row.read(value) ?? '',
+    };
+  }
+
+  /// Returns the keys of every setting that starts with [prefix], without
+  /// reading any values.
+  Future<List<String>> getKeysWithPrefix(String prefix) async {
+    final settings = _db.settings;
+    final query = _db.selectOnly(settings)
+      ..addColumns([settings.key])
+      ..where(settingKeyStartsWith(settings.key, prefix));
+    final rows = await query.get();
+    return [
+      for (final row in rows)
+        if (row.read(settings.key) case final key? when key.startsWith(prefix))
+          key,
+    ];
+  }
+
+  /// Writes several settings in one transaction; a `null` value deletes.
+  Future<void> setStrings(Map<String, String?> values) =>
+      _db.transaction(() async {
+        for (final MapEntry(:key, :value) in values.entries) {
+          if (value == null) {
+            await delete(key);
+          } else {
+            await setString(key, value);
+          }
+        }
+      });
+
   /// Delete a setting.
   Future<void> delete(String key) async {
     await (_db.delete(_db.settings)..where((s) => s.key.equals(key))).go();
@@ -243,6 +325,24 @@ class SettingsService {
   Stream<String?> watchString(String key) => (_db.select(
     _db.settings,
   )..where((s) => s.key.equals(key))).watchSingleOrNull().map((s) => s?.value);
+}
+
+/// Matches setting keys that start with [prefix].
+///
+/// Keys compare as binary text, so the prefix range is `[prefix, next)` where
+/// `next` bumps the prefix's last code unit. Unlike `LIKE`, this is exact and
+/// case-sensitive, and `_` is not a wildcard.
+Expression<bool> settingKeyStartsWith(
+  GeneratedColumn<String> key,
+  String prefix,
+) {
+  if (prefix.isEmpty) {
+    throw ArgumentError.value(prefix, 'prefix', 'must not be empty');
+  }
+  final last = prefix.codeUnitAt(prefix.length - 1);
+  final upperBound =
+      prefix.substring(0, prefix.length - 1) + String.fromCharCode(last + 1);
+  return key.isBiggerOrEqualValue(prefix) & key.isSmallerThanValue(upperBound);
 }
 
 /// Provider for [SettingsService].

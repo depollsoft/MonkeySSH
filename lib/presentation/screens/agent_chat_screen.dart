@@ -35,6 +35,7 @@ import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
+import '../../domain/services/acp_composer_draft_store.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
@@ -42,6 +43,7 @@ import '../../domain/services/pi_model_scope_metadata_service.dart';
 import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../controllers/acp_composer_controller.dart';
+import '../controllers/acp_composer_draft_persistence.dart';
 import '../controllers/acp_sftp_client_cache.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
@@ -199,6 +201,7 @@ class AgentChatScreen extends ConsumerStatefulWidget {
 class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   late AcpSessionKey _key;
   late final AcpComposerController _composer;
+  late final AcpComposerDraftPersistence _draftPersistence;
   late final ScrollController _scroll;
 
   late bool _autoScroll;
@@ -245,6 +248,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       uploaderBuilder: _buildUploader,
       initialSession: manager.state.byKeyValue(_key.value),
     );
+    _draftPersistence = AcpComposerDraftPersistence(
+      controller: _composer,
+      store: ref.read(acpComposerDraftStoreProvider),
+    )..start();
     _scroll.addListener(_onScroll);
     if (widget.connectOnMount) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _ensureConnected());
@@ -259,6 +266,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
+    _draftPersistence.dispose();
     _composer.dispose();
     super.dispose();
   }
@@ -1752,6 +1760,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         case _ChatAction.delete:
           if (!await _confirmDeleteSession() || !mounted) return;
           await manager.deleteSession(_key);
+          _draftPersistence.discard();
           if (mounted) _leaveChat();
         case _ChatAction.signOut:
           await _signOut(session);

@@ -9,6 +9,7 @@ import '../../domain/models/acp_attachment.dart';
 import '../../domain/models/acp_updates.dart';
 import '../controllers/acp_composer_controller.dart';
 import 'acp_attachment_strip.dart';
+import 'acp_restored_draft_banner.dart';
 import 'acp_slash_command_picker.dart';
 import 'terminal_menu_style.dart';
 
@@ -586,6 +587,17 @@ class _AcpComposerState extends State<AcpComposer> {
                                 _controller.attachments.isNotEmpty
                             ? _confirmRemoteUpload
                             : null,
+                      ),
+                    ),
+                  ),
+                if (_controller.restoredDraftNotice case final notice?)
+                  KeyedSubtree(
+                    key: const ValueKey('acp-restored-draft-banner'),
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: AcpRestoredDraftBanner(
+                        notice: notice,
+                        onDismiss: _controller.dismissRestoredDraftNotice,
                       ),
                     ),
                   ),

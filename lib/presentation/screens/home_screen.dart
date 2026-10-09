@@ -19,6 +19,7 @@ import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/acp_composer_draft_store.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
 import '../../domain/services/auth_service.dart';
@@ -1713,6 +1714,7 @@ class _HostRow extends ConsumerWidget {
           .read(hostRepositoryProvider)
           .delete(host.id);
       if (deletedCount > 0) {
+        unawaited(ref.read(acpComposerDraftStoreProvider).forgetHost(host.id));
         await ref
             .read(homeScreenShortcutPreferencesServiceProvider)
             .setHostPinned(host.id, pinned: false);

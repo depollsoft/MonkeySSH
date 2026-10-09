@@ -7,6 +7,7 @@ import '../data/database/database.dart';
 import '../data/repositories/host_repository.dart';
 import '../domain/models/terminal_theme.dart';
 import '../domain/models/terminal_themes.dart';
+import '../domain/services/acp_composer_draft_store.dart';
 import '../domain/services/acp_lifecycle_service.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/background_ssh_service.dart';
@@ -202,6 +203,11 @@ class _BackgroundLifecycleBridgeState
     _runLifecycleSync(
       _recordAppStartedTelemetry,
       errorContext: 'while recording app startup telemetry',
+      defer: true,
+    );
+    _runLifecycleSync(
+      () => ref.read(acpComposerDraftStoreProvider).pruneExpired(),
+      errorContext: 'while pruning old native chat drafts during app startup',
       defer: true,
     );
     // Activates the ACP auth-lock and SSH-disconnect cleanup listeners; both

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/services/auth_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
+import '../../domain/services/settings_service.dart';
 import '../database/database.dart';
 import '../security/secret_encryption_service.dart';
 import 'plaintext_cache.dart';
@@ -258,6 +259,12 @@ class HostRepository {
       await (_db.delete(
         _db.portForwards,
       )..where((portForward) => portForward.hostId.equals(id))).go();
+      // Unsent native chat drafts for this host's sessions go with it.
+      for (final prefix in SettingKeys.acpComposerDraftHostPrefixes(id)) {
+        await (_db.delete(
+          _db.settings,
+        )..where((setting) => settingKeyStartsWith(setting.key, prefix))).go();
+      }
       return (_db.delete(_db.hosts)..where((h) => h.id.equals(id))).go();
     });
     if (deleted > 0) {
