@@ -116,25 +116,29 @@ class KeyService {
 
   /// Delete [key], removing a hardware-backed private key from the device.
   ///
-  /// The row goes first: a failed hardware delete leaves an unreachable
-  /// keystore entry rather than a row whose key is gone.
-  Future<void> deleteKey(SshKey key) async {
-    final deleted = await _keyRepository.delete(key.id);
+  /// The hardware key goes first, and the row only once it is gone, so a
+  /// failure keeps the alias for a retry; deleting a missing key succeeds.
+  /// Returns false, keeping the row, when secure hardware refused.
+  Future<bool> deleteKey(SshKey key) async {
     final reference = key.hardwareKeyReference;
-    if (deleted > 0 && reference != null) {
-      await _deleteHardwareKey(reference);
+    if (reference != null && !await _deleteHardwareKey(reference)) {
+      return false;
     }
+    await _keyRepository.delete(key.id);
+    return true;
   }
 
-  Future<void> _deleteHardwareKey(HardwareKeyReference reference) async {
+  Future<bool> _deleteHardwareKey(HardwareKeyReference reference) async {
     try {
       await _hardwareKeyService.delete(reference);
+      return true;
     } on HardwareKeyException catch (error) {
       DiagnosticsLogService.instance.warning(
         'hardware_key',
         'delete_failed',
         fields: {'code': error.code.wireName},
       );
+      return false;
     }
   }
 

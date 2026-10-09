@@ -494,10 +494,27 @@ void main() {
     final alias = key.hardwareKeyReference!.alias;
     expect(fixture.platform.keys, contains(alias));
 
-    await fixture.keyService.deleteKey(key);
+    expect(await fixture.keyService.deleteKey(key), isTrue);
 
     expect(await fixture.keyRepository.getById(key.id), isNull);
     expect(fixture.platform.deletedAliases, [alias]);
+    expect(fixture.platform.keys, isEmpty);
+  });
+
+  test('a refused hardware delete keeps the key for a retry', () async {
+    final fixture = await _Fixture.create();
+    final key = await fixture.hardwareKey();
+    fixture.platform.deleteError = const HardwareKeyException(
+      HardwareKeyErrorCode.failed,
+    );
+
+    expect(await fixture.keyService.deleteKey(key), isFalse);
+    expect(await fixture.keyRepository.getById(key.id), isNotNull);
+    expect(fixture.platform.keys, contains(key.hardwareKeyReference!.alias));
+
+    fixture.platform.deleteError = null;
+    expect(await fixture.keyService.deleteKey(key), isTrue);
+    expect(await fixture.keyRepository.getById(key.id), isNull);
     expect(fixture.platform.keys, isEmpty);
   });
 

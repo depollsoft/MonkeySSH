@@ -100,6 +100,9 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
   /// Thrown by [sign] when set, after any held prompt resolves.
   HardwareKeyException? signError;
 
+  /// Thrown by [deleteKey] when set.
+  HardwareKeyException? deleteError;
+
   /// Public point returned by [generateKey] instead of the real one.
   Uint8List? publicPointOverride;
 
@@ -197,6 +200,10 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
 
   @override
   Future<void> deleteKey(String alias) async {
+    final error = deleteError;
+    if (error != null) {
+      throw error;
+    }
     deletedAliases.add(alias);
     keys.remove(alias);
   }
@@ -221,6 +228,7 @@ SshKey hardwareSshKeyFixture({
   String name = 'Phone key',
   HardwareKeyBacking backing = HardwareKeyBacking.secureEnclave,
   bool requireUserPresence = false,
+  bool allowsPasscode = true,
   bool isEmulated = false,
 }) {
   final blob = encodeEcdsaP256PublicKeyBlob(
@@ -236,6 +244,7 @@ SshKey hardwareSshKeyFixture({
       backing: backing,
       publicKeyBlob: blob,
       requiresUserPresence: requireUserPresence,
+      userPresenceAllowsPasscode: allowsPasscode,
       isEmulated: isEmulated,
     ).encode(),
     fingerprint: 'SHA256:hardware$id',

@@ -101,7 +101,7 @@ class HardwareKeyException implements Exception {
           'screen lock changed. Generate a new key.',
     HardwareKeyErrorCode.userPresenceUnavailable =>
       'Per-use confirmation needs a screen lock, plus an enrolled fingerprint '
-          'or face on Android 9 and 10.',
+          'or face on Android 10 and earlier.',
     HardwareKeyErrorCode.deviceLocked =>
       'Unlock this device once after it restarts; until then the hardware '
           'key can’t sign.',
@@ -679,11 +679,20 @@ class HardwareKeyService {
       await _deleteQuietly(alias);
       throw const HardwareKeyException(HardwareKeyErrorCode.failed);
     }
+    // Record whether this key's prompt accepts the screen lock, so key
+    // details can say so; it does not change after an OS upgrade.
+    var allowsPasscode = true;
+    if (requireUserPresence) {
+      final capabilities = await getCapabilities();
+      allowsPasscode =
+          !capabilities.isAvailable || capabilities.userPresenceAllowsPasscode;
+    }
     final reference = HardwareKeyReference(
       alias: alias,
       backing: result.backing,
       publicKeyBlob: publicKeyBlob,
       requiresUserPresence: requireUserPresence,
+      userPresenceAllowsPasscode: allowsPasscode,
       isEmulated: result.isEmulated,
     );
     DiagnosticsLogService.instance.info(

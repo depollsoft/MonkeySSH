@@ -395,7 +395,7 @@ void main() {
       ).called(1);
     });
 
-    testWidgets('Android 9 and 10 say per-use keys are biometric only', (
+    testWidgets('Android 10 and earlier say per-use keys are biometric only', (
       tester,
     ) async {
       await pumpHardwareTab(

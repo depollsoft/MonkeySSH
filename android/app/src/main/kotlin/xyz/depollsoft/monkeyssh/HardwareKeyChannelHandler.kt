@@ -408,7 +408,8 @@ object HardwareKeyChannelHandler {
                 builder.setInvalidatedByBiometricEnrollment(false)
             } else {
                 // Biometric only, and invalidated when biometrics are
-                // enrolled; the Generate tab says so on Android 9 and 10.
+                // enrolled; the Generate tab says so on Android 10 and
+                // earlier.
                 @Suppress("DEPRECATION")
                 builder.setUserAuthenticationValidityDurationSeconds(-1)
             }
@@ -488,8 +489,8 @@ object HardwareKeyChannelHandler {
                 return
             }
             request.signature = signature
-            // A key made on Android 9 or 10 stays biometric-only after an
-            // upgrade; offering the screen lock would only fail.
+            // A key made on Android 10 or earlier stays biometric-only
+            // after an upgrade; offering the screen lock would only fail.
             request.allowDeviceCredential = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                 (info.userAuthenticationType and KeyProperties.AUTH_DEVICE_CREDENTIAL) != 0
             mainHandler.post {

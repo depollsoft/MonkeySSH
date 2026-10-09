@@ -113,11 +113,18 @@ class KeysScreen extends ConsumerWidget {
     );
 
     if (confirmed) {
-      await ref.read(keyServiceProvider).deleteKey(key);
+      final deleted = await ref.read(keyServiceProvider).deleteKey(key);
       ref.invalidate(allKeysProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Deleted "${key.name}"')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              deleted
+                  ? 'Deleted "${key.name}"'
+                  : hardwareKeyDeleteFailedMessage,
+            ),
+          ),
+        );
       }
     }
   }

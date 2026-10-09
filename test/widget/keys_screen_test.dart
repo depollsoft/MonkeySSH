@@ -3,13 +3,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/hardware_key.dart';
+import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/keys_screen.dart';
+import 'package:monkeyssh/presentation/widgets/hardware_key_widgets.dart';
 
 import '../helpers/fake_hardware_key_platform.dart';
+
+class _MockKeyService extends Mock implements KeyService {}
 
 final _testKey = SshKey(
   id: 1,
@@ -234,6 +239,67 @@ void main() {
 
       expect(find.textContaining('simulated in software'), findsOneWidget);
       expect(find.textContaining('inside this device’s secure'), findsNothing);
+    });
+
+    testWidgets('a biometric-only key does not promise the passcode', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      final key = hardwareSshKeyFixture(
+        backing: HardwareKeyBacking.tee,
+        requireUserPresence: true,
+        allowsPasscode: false,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Phone key'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('fingerprint or face'), findsOneWidget);
+      expect(find.textContaining('passcode'), findsNothing);
+    });
+
+    testWidgets('a refused hardware delete says the key was kept', (
+      tester,
+    ) async {
+      final key = hardwareSshKeyFixture();
+      final service = _MockKeyService();
+      when(() => service.deleteKey(key)).thenAnswer((_) async => false);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            allKeysProvider.overrideWith((ref) => Stream.value([key])),
+            keyServiceProvider.overrideWithValue(service),
+          ],
+          child: const MaterialApp(home: KeysScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      verify(() => service.deleteKey(key)).called(1);
+      expect(find.text(hardwareKeyDeleteFailedMessage), findsOneWidget);
+      expect(find.textContaining('Deleted'), findsNothing);
     });
 
     testWidgets('details never reveal or copy the hardware reference', (

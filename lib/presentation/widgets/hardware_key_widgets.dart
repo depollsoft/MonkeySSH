@@ -11,6 +11,11 @@ import 'cursor_block.dart';
 String hardwareKeyBackingLabel(SshKey key) =>
     key.hardwareKeyReference?.backingLabel ?? 'secure hardware';
 
+/// Shown when secure hardware refused to delete a key; the key is kept.
+const hardwareKeyDeleteFailedMessage =
+    'Couldn’t remove the key from secure hardware, so it was kept. '
+    'Unlock the device and try again.';
+
 /// Delete confirmation copy, warning that a hardware key is unrecoverable.
 String sshKeyDeleteConfirmationMessage(
   SshKey key, {
@@ -175,11 +180,15 @@ class HardwareKeyPrivateKeyNotice extends StatelessWidget {
             if (reference != null) ...[
               const SizedBox(height: 8),
               if (reference.requiresUserPresence)
-                const _Note(
+                _Note(
                   icon: Icons.fingerprint,
-                  text:
-                      'Asks for biometrics or the passcode at every sign-in, '
-                      'so auto-connect and background reconnect can’t use it.',
+                  text: reference.userPresenceAllowsPasscode
+                      ? 'Asks for biometrics or the passcode at every '
+                            'sign-in, so auto-connect and background '
+                            'reconnect can’t use it.'
+                      : 'Asks for a fingerprint or face at every sign-in, so '
+                            'auto-connect and background reconnect can’t use '
+                            'it.',
                 )
               else
                 const _Note(

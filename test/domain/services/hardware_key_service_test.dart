@@ -269,6 +269,33 @@ void main() {
       expect(other.reference.alias, isNot(reference.alias));
     });
 
+    test('records whether per-use confirmation accepts the passcode', () async {
+      final platform = FakeHardwareKeyPlatform();
+      final service = HardwareKeyService(
+        platform: platform,
+        isPlatformSupported: true,
+      );
+
+      final ios = await service.generate(requireUserPresence: true);
+      expect(ios.reference.userPresenceAllowsPasscode, isTrue);
+
+      platform.capabilities = const {
+        'available': true,
+        'backing': 'tee',
+        'userPresenceAvailable': true,
+        'userPresenceAllowsPasscode': false,
+      };
+      final android10 = await service.generate(requireUserPresence: true);
+      expect(android10.reference.userPresenceAllowsPasscode, isFalse);
+      expect(
+        parseHardwareKeyReference(android10.reference.encode())!
+            .userPresenceAllowsPasscode,
+        isFalse,
+      );
+      final noPrompt = await service.generate(requireUserPresence: false);
+      expect(noPrompt.reference.userPresenceAllowsPasscode, isTrue);
+    });
+
     test('deletes the key when the platform returns a bad point', () async {
       final platform = FakeHardwareKeyPlatform()
         ..publicPointOverride = Uint8List.fromList([0x04, 1, 2]);

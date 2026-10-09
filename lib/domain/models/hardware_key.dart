@@ -142,7 +142,7 @@ class HardwareKeyCapabilities {
   final bool userPresenceAvailable;
 
   /// Whether per-use confirmation accepts the screen lock, not only a
-  /// biometric (false on Android 9 and 10).
+  /// biometric (false on Android 10 and earlier).
   final bool userPresenceAllowsPasscode;
 
   /// Whether the app runs on an emulator whose keystore is itself emulated.
@@ -168,6 +168,7 @@ class HardwareKeyReference {
     required this.backing,
     required this.publicKeyBlob,
     required this.requiresUserPresence,
+    this.userPresenceAllowsPasscode = true,
     this.isEmulated = false,
   });
 
@@ -185,6 +186,10 @@ class HardwareKeyReference {
 
   /// Whether every signature needs biometric or passcode confirmation.
   final bool requiresUserPresence;
+
+  /// Whether that confirmation accepts the screen lock, not only a
+  /// biometric (false for Android 10 and earlier).
+  final bool userPresenceAllowsPasscode;
 
   /// Whether the key was generated in an emulator's simulated keystore.
   final bool isEmulated;
@@ -221,6 +226,7 @@ class HardwareKeyReference {
         backing: backing,
         publicKeyBlob: publicKeyBlob,
         requiresUserPresence: decoded['userPresence'] == true,
+        userPresenceAllowsPasscode: decoded['passcode'] != false,
         isEmulated: decoded['emulated'] == true,
       );
     } on FormatException {
@@ -235,6 +241,8 @@ class HardwareKeyReference {
       'backing': backing.wireName,
       'publicKey': base64Encode(publicKeyBlob),
       'userPresence': requiresUserPresence,
+      if (requiresUserPresence && !userPresenceAllowsPasscode)
+        'passcode': false,
       if (isEmulated) 'emulated': true,
     };
     return '$prefix${jsonEncode(fields)}';

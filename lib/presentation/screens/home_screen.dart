@@ -2259,7 +2259,12 @@ class _KeyRow extends ConsumerWidget {
     );
 
     if (confirmed && context.mounted) {
-      await ref.read(keyServiceProvider).deleteKey(sshKey);
+      final deleted = await ref.read(keyServiceProvider).deleteKey(sshKey);
+      if (!deleted && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(hardwareKeyDeleteFailedMessage)),
+        );
+      }
     }
   }
 }
