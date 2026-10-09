@@ -16,6 +16,7 @@ typedef _Harness = ({
   List<String> output,
   List<AppShortcutIntent> appCalls,
   FocusNode focusNode,
+  Terminal terminal,
 });
 
 Future<_Harness> _pump(WidgetTester tester, {bool kitty = false}) async {
@@ -52,7 +53,12 @@ Future<_Harness> _pump(WidgetTester tester, {bool kitty = false}) async {
   focusNode.requestFocus();
   await tester.pump();
   output.clear();
-  return (output: output, appCalls: appCalls, focusNode: focusNode);
+  return (
+    output: output,
+    appCalls: appCalls,
+    focusNode: focusNode,
+    terminal: terminal,
+  );
 }
 
 /// What the terminal would send for [key] with these modifiers.
@@ -128,7 +134,7 @@ void main() {
 
       expect(harness.appCalls, const [
         AppShortcutIntent(AppShortcutAction.newWindow),
-        AppShortcutIntent(AppShortcutAction.goToWindow, slot: 2),
+        AppShortcutIntent(AppShortcutAction.goToWindow, windowNumber: 2),
         AppShortcutIntent(AppShortcutAction.closeWindow),
       ]);
       expect(_withoutModifierReports(harness.output), isEmpty);
@@ -182,6 +188,97 @@ void main() {
             ),
       );
     }, variant: ios);
+  });
+
+  group('keys pressed outside the terminal (review round 1)', () {
+    testWidgets('never send repeats or releases into the program', (
+      tester,
+    ) async {
+      final harness = await _pump(tester, kitty: true);
+      final elsewhere = FocusNode();
+      addTearDown(elsewhere.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                Focus(focusNode: elsewhere, child: const SizedBox(height: 10)),
+                Expanded(
+                  child: Focus(
+                    focusNode: harness.focusNode,
+                    child: TerminalTextInputHandler(
+                      terminal: harness.terminal,
+                      focusNode: harness.focusNode,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      elsewhere.requestFocus();
+      await tester.pump();
+      harness.output.clear();
+
+      // Esc closes a switcher row; focus lands on the terminal while held.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+      harness.focusNode.requestFocus();
+      await tester.pump();
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.escape);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.escape);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+
+      expect(harness.output.join(), isEmpty);
+
+      // The next press goes through as usual.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      expect(harness.output.join(), isNotEmpty);
+    }, variant: android);
+
+    testWidgets('a key pressed in the terminal still gets its release', (
+      tester,
+    ) async {
+      final harness = await _pump(tester, kitty: true);
+      final elsewhere = FocusNode();
+      addTearDown(elsewhere.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                Focus(focusNode: elsewhere, child: const SizedBox(height: 10)),
+                Expanded(
+                  child: Focus(
+                    focusNode: harness.focusNode,
+                    child: TerminalTextInputHandler(
+                      terminal: harness.terminal,
+                      focusNode: harness.focusNode,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      harness.focusNode.requestFocus();
+      await tester.pump();
+      harness.output.clear();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowUp);
+      expect(harness.output, hasLength(1));
+      elsewhere.requestFocus();
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowUp);
+
+      // Kitty event types: the release ends in ":3A".
+      expect(harness.output, hasLength(2));
+      expect(harness.output.last, endsWith(':3A'));
+    }, variant: android);
   });
 
   group('Android', () {

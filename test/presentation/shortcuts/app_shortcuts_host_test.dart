@@ -65,7 +65,7 @@ void main() {
 
     expect(calls, const [
       AppShortcutIntent(AppShortcutAction.newWindow),
-      AppShortcutIntent(AppShortcutAction.goToWindow, slot: 3),
+      AppShortcutIntent(AppShortcutAction.goToWindow, windowNumber: 3),
     ]);
     expect(ranInKeyboardFlow, isTrue);
   }, variant: ios);
@@ -144,6 +144,54 @@ void main() {
     expect(calls, ['home']);
   }, variant: ios);
 
+  testWidgets('chords do nothing while another route covers the scope', (
+    tester,
+  ) async {
+    // Touch-opened terminal sheets leave focus on the terminal underneath.
+    final calls = <String>[];
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    await tester.pumpWidget(
+      _app(
+        home: Scaffold(
+          body: AppShortcutScope(
+            handlers: {
+              AppShortcutAction.newWindow: (_) => calls.add('new'),
+              AppShortcutAction.closeWindow: (_) => calls.add('close'),
+            },
+            child: Builder(
+              builder: (context) => Focus(
+                focusNode: focusNode,
+                autofocus: true,
+                child: TextButton(
+                  onPressed: () => showModalBottomSheet<void>(
+                    context: context,
+                    requestFocus: false,
+                    builder: (_) => const SizedBox(height: 200),
+                  ),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(focusNode.hasFocus, isTrue);
+
+    expect(await _press(tester, LogicalKeyboardKey.keyT, meta: true), isFalse);
+    expect(await _press(tester, LogicalKeyboardKey.keyW, meta: true), isFalse);
+    expect(calls, isEmpty);
+
+    // The shortcuts list stays reachable everywhere.
+    await _press(tester, LogicalKeyboardKey.slash, meta: true);
+    await tester.pumpAndSettle();
+    expect(find.text('keyboard shortcuts'), findsOneWidget);
+  }, variant: ios);
+
   testWidgets('⌘/ opens and closes the shortcuts sheet', (tester) async {
     await tester.pumpWidget(
       _app(
@@ -206,6 +254,14 @@ void main() {
 
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    // It fades out rather than vanishing.
+    expect(peek, findsOneWidget);
+    final opacity = tester.widget<AnimatedOpacity>(
+      find.ancestor(of: peek, matching: find.byType(AnimatedOpacity)),
+    );
+    expect(opacity.opacity, 0);
+    await tester.pump(const Duration(milliseconds: 200));
     expect(peek, findsNothing);
 
     // A chord typed before the delay never shows the peek.

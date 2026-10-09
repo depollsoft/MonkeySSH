@@ -7,7 +7,8 @@ import 'package:flutter/material.dart';
 import '../../app/theme.dart';
 import '../shortcuts/app_shortcuts.dart';
 
-/// One visible row in the shortcuts list. Window slots 1 to 8 share a row.
+/// One visible row in the shortcuts list. The numbered window shortcuts
+/// share a row.
 @immutable
 class KeyboardShortcutListEntry {
   /// Creates a list row.
@@ -36,42 +37,43 @@ List<KeyboardShortcutListEntry> keyboardShortcutListEntries(
   TargetPlatform platform,
 ) {
   final shortcuts = appShortcutsFor(platform);
-  final entries = <KeyboardShortcutListEntry>[];
   final numbered = [
     for (final shortcut in shortcuts)
-      if (shortcut.action == AppShortcutAction.goToWindow &&
-          (shortcut.slot ?? 0) < 9)
-        shortcut,
+      if (shortcut.action == AppShortcutAction.goToWindow) shortcut,
   ];
+  final entries = <KeyboardShortcutListEntry>[];
   var numberedAdded = false;
   for (final shortcut in shortcuts) {
-    final isNumbered = numbered.contains(shortcut);
-    if (isNumbered && numberedAdded) {
-      continue;
-    }
-    if (isNumbered && numbered.length > 1) {
-      numberedAdded = true;
-      final first = numbered.first;
-      final last = numbered.last;
+    if (shortcut.action != AppShortcutAction.goToWindow ||
+        numbered.length < 2) {
       entries.add(
         KeyboardShortcutListEntry(
-          group: first.group,
-          label: 'Go to window ${first.slot}–${last.slot}',
-          chord:
-              '${describeAppShortcutChord(first, platform)}–${last.key.glyph}',
-          semanticChord:
-              '${describeAppShortcutChordForSemantics(first, platform)} '
-              'to ${last.key.spokenName}',
+          group: shortcut.group,
+          label: shortcut.label,
+          chord: describeAppShortcutChord(shortcut, platform),
+          semanticChord: describeAppShortcutChordForSemantics(
+            shortcut,
+            platform,
+          ),
         ),
       );
       continue;
     }
+    if (numberedAdded) {
+      continue;
+    }
+    numberedAdded = true;
+    final first = numbered.first;
+    final last = numbered.last;
     entries.add(
       KeyboardShortcutListEntry(
-        group: shortcut.group,
-        label: shortcut.label,
-        chord: describeAppShortcutChord(shortcut, platform),
-        semanticChord: describeAppShortcutChordForSemantics(shortcut, platform),
+        group: first.group,
+        label:
+            'Go to window numbered ${first.windowNumber}–${last.windowNumber}',
+        chord: '${describeAppShortcutChord(first, platform)}–${last.key.glyph}',
+        semanticChord:
+            '${describeAppShortcutChordForSemantics(first, platform)} '
+            'to ${last.key.spokenName}',
       ),
     );
   }

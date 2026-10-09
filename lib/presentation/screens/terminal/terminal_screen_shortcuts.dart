@@ -31,7 +31,7 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
           : null,
       AppShortcutAction.goToWindow: barShown
           ? (intent) => _afterKeyboardWindowSwitch(
-              bar()?.selectWindowSlotFromKeyboard(intent.slot ?? 1),
+              bar()?.selectWindowNumberFromKeyboard(intent.windowNumber ?? 0),
             )
           : null,
       AppShortcutAction.newWindow: barShown

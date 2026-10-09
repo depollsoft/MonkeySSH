@@ -42,7 +42,7 @@ KeyDownEvent _down(
 
 PhysicalKeyboardKey _physicalFor(LogicalKeyboardKey logical) {
   for (final key in AppShortcutKey.values) {
-    if (key.logical.contains(logical)) {
+    if (key.unshifted == logical || key.shifted == logical) {
       return key.physical;
     }
   }
@@ -131,23 +131,30 @@ void main() {
       );
     });
 
-    test('map digits to window slots, including layouts without digits', () {
-      for (var slot = 1; slot <= 9; slot++) {
+    test('map digits to window numbers, including layouts without digits', () {
+      for (var number = 0; number <= 9; number++) {
         final key = AppShortcutKey.values.firstWhere(
-          (key) => key.name == 'digit$slot',
+          (key) => key.name == 'digit$number',
         );
-        final shortcut = _match(key.logical.first, platform: ios, meta: true);
+        final shortcut = _match(key.unshifted, platform: ios, meta: true);
         expect(shortcut?.action, AppShortcutAction.goToWindow);
-        expect(shortcut?.slot, slot);
+        expect(shortcut?.windowNumber, number);
       }
-      // AZERTY: the 1 key types "&" without Shift.
+      // AZERTY: the 1 key types "&" and the 0 key types "à" without Shift.
       final azerty = _match(
         LogicalKeyboardKey.ampersand,
         physical: PhysicalKeyboardKey.digit1,
         platform: ios,
         meta: true,
       );
-      expect(azerty?.slot, 1);
+      expect(azerty?.windowNumber, 1);
+      final azertyZero = _match(
+        const LogicalKeyboardKey(0x00e0),
+        physical: PhysicalKeyboardKey.digit0,
+        platform: ios,
+        meta: true,
+      );
+      expect(azertyZero?.windowNumber, 0);
     });
 
     test('follow the layout for letters', () {
@@ -222,6 +229,67 @@ void main() {
     });
   });
 
+  group('layout handling (review round 1)', () {
+    test('shifted digit aliases need Shift', () {
+      // AZERTY types "!" on the US slash key without Shift.
+      expect(
+        _match(
+          LogicalKeyboardKey.exclamation,
+          physical: PhysicalKeyboardKey.slash,
+          platform: ios,
+          meta: true,
+        ),
+        isNull,
+      );
+      // UK and German ISO keyboards type "#" without Shift.
+      expect(
+        _match(
+          LogicalKeyboardKey.numberSign,
+          physical: PhysicalKeyboardKey.backslash,
+          platform: ios,
+          meta: true,
+        ),
+        isNull,
+      );
+    });
+
+    test('logical matches win over physical fallbacks', () {
+      // Dvorak puts "/" and "?" on the US left-bracket key.
+      expect(
+        _match(
+          LogicalKeyboardKey.question,
+          physical: PhysicalKeyboardKey.bracketLeft,
+          platform: android,
+          control: true,
+          shift: true,
+        )?.action,
+        AppShortcutAction.showShortcuts,
+      );
+      expect(
+        _match(
+          LogicalKeyboardKey.slash,
+          physical: PhysicalKeyboardKey.bracketLeft,
+          platform: ios,
+          meta: true,
+        )?.action,
+        AppShortcutAction.showShortcuts,
+      );
+    });
+
+    test('letters fall back to position only on non-Latin layouts', () {
+      // Dvorak types "," on the US W key: ⌘, is not ⌘W.
+      expect(
+        _match(
+          LogicalKeyboardKey.comma,
+          physical: PhysicalKeyboardKey.keyW,
+          platform: ios,
+          meta: true,
+        ),
+        isNull,
+      );
+    });
+  });
+
   group('Android chords', () {
     test('use Ctrl+Shift in place of ⌘', () {
       expect(
@@ -260,14 +328,14 @@ void main() {
         )?.action,
         AppShortcutAction.showShortcuts,
       );
-      final slot = _match(
+      final number = _match(
         LogicalKeyboardKey.exclamation,
         physical: PhysicalKeyboardKey.digit1,
         platform: android,
         control: true,
         shift: true,
       );
-      expect(slot?.slot, 1);
+      expect(number?.windowNumber, 1);
     });
 
     test('leave Ctrl, Meta and other Ctrl+Shift chords to the terminal', () {
@@ -437,14 +505,8 @@ void main() {
     final close = allAppShortcuts.firstWhere(
       (s) => s.action == AppShortcutAction.closeWindow,
     );
-    final nextActivator = AppShortcutActivator(
-      next,
-      AppShortcutModifierScheme.command,
-    );
-    final closeActivator = AppShortcutActivator(
-      close,
-      AppShortcutModifierScheme.command,
-    );
+    final nextActivator = AppShortcutActivator(next, ios);
+    final closeActivator = AppShortcutActivator(close, ios);
     final shifted = _Keyboard(meta: true, shift: true);
     final plain = _Keyboard(meta: true);
     const repeatNext = KeyRepeatEvent(
@@ -480,13 +542,13 @@ void main() {
     );
   });
 
-  test('resolves window slots and wraps adjacent windows', () {
-    expect(resolveAppShortcutWindowSlot(1, 3), 0);
-    expect(resolveAppShortcutWindowSlot(3, 3), 2);
-    expect(resolveAppShortcutWindowSlot(4, 3), isNull);
-    expect(resolveAppShortcutWindowSlot(9, 3), 2);
-    expect(resolveAppShortcutWindowSlot(9, 12), 11);
-    expect(resolveAppShortcutWindowSlot(1, 0), isNull);
+  test('resolves window numbers and wraps adjacent windows', () {
+    expect(resolveAppShortcutWindowNumber(1, [0, 1, 2]), 1);
+    expect(resolveAppShortcutWindowNumber(0, [0, 1, 2]), 0);
+    // Gaps after a closed window: numbers follow the badges.
+    expect(resolveAppShortcutWindowNumber(3, [1, 3, 4]), 1);
+    expect(resolveAppShortcutWindowNumber(2, [1, 3, 4]), isNull);
+    expect(resolveAppShortcutWindowNumber(1, []), isNull);
 
     expect(
       resolveAppShortcutAdjacentWindow(activeIndex: 0, delta: 1, count: 3),

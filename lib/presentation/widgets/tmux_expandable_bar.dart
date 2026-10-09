@@ -260,6 +260,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   late LocalNotificationService _localNotifications;
 
   final _keyboardListKey = GlobalKey<KeyboardListNavigationState>();
+  bool _showingNewWindowPicker = false;
 
   late final _windowLoader = TmuxWindowLoader(
     fetch: () => _mux.listWindows(
@@ -792,6 +793,20 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       .initializedValue();
 
   Future<void> _showNewWindowPicker({BuildContext? anchorContext}) async {
+    if (_showingNewWindowPicker) {
+      return;
+    }
+    _showingNewWindowPicker = true;
+    try {
+      await _showNewWindowPickerUnguarded(anchorContext: anchorContext);
+    } finally {
+      _showingNewWindowPicker = false;
+    }
+  }
+
+  Future<void> _showNewWindowPickerUnguarded({
+    BuildContext? anchorContext,
+  }) async {
     final installedToolsFuture = widget.ref
         .read(tmuxServiceProvider)
         .detectInstalledAgentTools(widget.session);
@@ -1218,6 +1233,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
     final window = target.window;
     if (window == null) {
+      // A pending server selection would otherwise still count as active,
+      // and ⌘W would close that window instead of the session shown now.
+      _clearPendingSelectedWindow(notify: true);
       await widget.onAction(TmuxOpenAcpSessionAction(target.session!.key));
       return;
     }
@@ -1246,11 +1264,15 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     return _activateKeyboardTarget(targets[index]);
   }
 
-  /// Switches to numbered [slot] (1 to 8 by position, 9 for the last row).
-  /// Returns null when the slot is empty.
-  Future<void>? selectWindowSlotFromKeyboard(int slot) {
+  /// Switches to the window whose badge shows [number]: its tmux or
+  /// MonkeyMux index, or a native session's synthetic number. Returns null
+  /// when no row has that number.
+  Future<void>? selectWindowNumberFromKeyboard(int number) {
     final targets = _keyboardTargets;
-    final index = resolveAppShortcutWindowSlot(slot, targets.length);
+    final index = resolveAppShortcutWindowNumber(number, [
+      for (final target in targets)
+        target.window?.index ?? _nativeAcpWindowIndex(target.session!),
+    ]);
     if (index == null) {
       return null;
     }

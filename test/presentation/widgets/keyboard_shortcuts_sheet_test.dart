@@ -5,15 +5,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_shortcuts_sheet.dart';
 
 void main() {
-  test('lists iPadOS chords, grouping window slots 1 to 8', () {
+  test('lists iPadOS chords, grouping the numbered windows', () {
     final entries = keyboardShortcutListEntries(TargetPlatform.iOS);
     final byLabel = {for (final entry in entries) entry.label: entry};
 
     expect(byLabel['Next window']?.chord, '⇧⌘]');
     expect(byLabel['Previous window']?.chord, '⇧⌘[');
-    expect(byLabel['Go to window 1–8']?.chord, '⌘1–8');
-    expect(byLabel['Go to window 1–8']?.semanticChord, 'Command 1 to 8');
-    expect(byLabel['Go to last window']?.chord, '⌘9');
+    expect(byLabel['Go to window numbered 0–9']?.chord, '⌘0–9');
+    expect(
+      byLabel['Go to window numbered 0–9']?.semanticChord,
+      'Command 0 to 9',
+    );
     expect(byLabel['New window']?.chord, '⌘T');
     expect(byLabel['Close window']?.chord, '⌘W');
     expect(byLabel['Show or hide windows']?.chord, '⌃⌘S');
@@ -33,7 +35,7 @@ void main() {
     final byLabel = {for (final entry in entries) entry.label: entry};
 
     expect(byLabel['New window']?.chord, 'Ctrl+Shift+T');
-    expect(byLabel['Go to window 1–8']?.chord, 'Ctrl+Shift+1–8');
+    expect(byLabel['Go to window numbered 0–9']?.chord, 'Ctrl+Shift+0–9');
     expect(byLabel['Show or hide windows']?.chord, 'Ctrl+Shift+S');
   });
 

@@ -14,7 +14,10 @@ typedef AppShortcutHandler = void Function(AppShortcutIntent intent);
 ///
 /// A chord's handler is looked up from the focused widget outward, so the
 /// innermost scope with a handler for the action wins. When nothing is
-/// focused, the scopes of the current route answer instead. A null handler
+/// focused, the scopes of the current route answer instead. Scopes under a
+/// route that is not the current one never answer: touch-opened terminal
+/// sheets leave focus on the terminal below them, and a chord must not act
+/// behind the sheet. A null handler
 /// means the action cannot run here; its chord then does nothing (it is still
 /// withheld from the terminal, see `app_shortcuts.dart`).
 ///
@@ -100,6 +103,8 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
   final List<_AppShortcutScopeState> _scopes = <_AppShortcutScopeState>[];
   Timer? _peekTimer;
   bool _peekVisible = false;
+  // Stays true while the peek fades out.
+  bool _peekBuilt = false;
   late final _HostAction _action = _HostAction(this);
 
   TargetPlatform get _platform => defaultTargetPlatform;
@@ -147,7 +152,9 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
     if (context != null && context.mounted) {
       var scope = context.findAncestorStateOfType<_AppShortcutScopeState>();
       while (scope != null) {
-        final handler = scope.handlerFor(intent.action);
+        final handler = scope.isInCurrentRoute
+            ? scope.handlerFor(intent.action)
+            : null;
         if (handler != null) {
           return handler;
         }
@@ -214,7 +221,10 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
     if (!mounted || !_onlyMetaPressed() || KeyboardShortcutsSheet.isOpen) {
       return;
     }
-    setState(() => _peekVisible = true);
+    setState(() {
+      _peekVisible = true;
+      _peekBuilt = true;
+    });
   }
 
   void _hidePeek() {
@@ -252,7 +262,12 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
                             ? Duration.zero
                             : const Duration(milliseconds: 120),
                         curve: Curves.easeOut,
-                        child: _peekVisible
+                        onEnd: () {
+                          if (!_peekVisible && _peekBuilt && mounted) {
+                            setState(() => _peekBuilt = false);
+                          }
+                        },
+                        child: _peekBuilt
                             ? const KeyboardShortcutsPeek()
                             : const SizedBox.shrink(),
                       ),

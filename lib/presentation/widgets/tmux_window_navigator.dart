@@ -363,38 +363,44 @@ Future<TmuxNavigatorAction?> showTmuxNewWindowPicker({
   Future<Set<AgentLaunchTool>>? installedToolsFuture,
   AgentLaunchTool? preferredTool,
   Map<AgentLaunchTool, String> nativeAcpProviderIds = const {},
-}) => showModalBottomSheet<TmuxNavigatorAction>(
-  context: context,
-  isScrollControlled: true,
-  requestFocus: terminalOverlayRouteRequestFocus(context),
-  builder: (context) => KeyboardListNavigation(
-    child: TmuxToolPickerSheet(
-      installedToolsFuture: installedToolsFuture,
-      preferredTool: preferredTool,
-      nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
-      onToolSelected: (tool) => _selectAgentLaunchMode(
-        context: context,
-        tool: tool,
-        isProUser: isProUser,
-        startClisInYoloMode: startClisInYoloMode,
-        nativeAcpProviderIds: nativeAcpProviderIds,
-        preference: agentWindowModePreference,
+}) {
+  // From a keyboard shortcut the list takes focus, so the first arrow
+  // lands on a tool.
+  final focusList = hardwareKeyboardOverlaysTakeFocus;
+  return showModalBottomSheet<TmuxNavigatorAction>(
+    context: context,
+    isScrollControlled: true,
+    requestFocus: terminalOverlayRouteRequestFocus(context),
+    builder: (context) => KeyboardListNavigation(
+      autofocus: focusList,
+      child: TmuxToolPickerSheet(
+        installedToolsFuture: installedToolsFuture,
+        preferredTool: preferredTool,
+        nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
+        onToolSelected: (tool) => _selectAgentLaunchMode(
+          context: context,
+          tool: tool,
+          isProUser: isProUser,
+          startClisInYoloMode: startClisInYoloMode,
+          nativeAcpProviderIds: nativeAcpProviderIds,
+          preference: agentWindowModePreference,
+        ),
+        onToolLongPressed: (tool) => _selectAgentLaunchMode(
+          context: context,
+          tool: tool,
+          isProUser: isProUser,
+          startClisInYoloMode: startClisInYoloMode,
+          nativeAcpProviderIds: nativeAcpProviderIds,
+          preference: agentWindowModePreference,
+          forcePicker: true,
+        ),
+        onEmptyWindow: () {
+          Navigator.pop(context, const TmuxNewWindowAction());
+        },
       ),
-      onToolLongPressed: (tool) => _selectAgentLaunchMode(
-        context: context,
-        tool: tool,
-        isProUser: isProUser,
-        startClisInYoloMode: startClisInYoloMode,
-        nativeAcpProviderIds: nativeAcpProviderIds,
-        preference: agentWindowModePreference,
-        forcePicker: true,
-      ),
-      onEmptyWindow: () {
-        Navigator.pop(context, const TmuxNewWindowAction());
-      },
     ),
-  ),
-);
+  );
+}
 
 Future<void> _selectAgentLaunchMode({
   required BuildContext context,

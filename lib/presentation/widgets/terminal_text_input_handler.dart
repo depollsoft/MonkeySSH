@@ -450,6 +450,12 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   bool _isInputConnectionShown = false;
   final _appShortcutKeyFilter = AppShortcutKeyFilter();
 
+  /// Physical keys whose press this terminal received while focused. A
+  /// repeat or release of any other key belongs to whatever had focus at the
+  /// press (a switcher row, a dialog), not to the program.
+  final Set<PhysicalKeyboardKey> _keysPressedWhileFocused =
+      <PhysicalKeyboardKey>{};
+
   @override
   void initState() {
     super.initState();
@@ -533,7 +539,31 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
   }
 
   bool _handleGlobalKeyEvent(KeyEvent event) {
-    if (!widget.focusNode.hasFocus) {
+    final focused = widget.focusNode.hasFocus;
+    final physicalKey = event.physicalKey;
+    switch (event) {
+      case KeyDownEvent():
+        if (focused) {
+          _keysPressedWhileFocused.add(physicalKey);
+        } else {
+          _keysPressedWhileFocused.remove(physicalKey);
+        }
+      case KeyRepeatEvent():
+        if (!focused || !_keysPressedWhileFocused.contains(physicalKey)) {
+          return false;
+        }
+      case KeyUpEvent():
+        if (!_keysPressedWhileFocused.remove(physicalKey)) {
+          return false;
+        }
+        if (!focused) {
+          // The program saw the press; let it see the release too, so a
+          // kitty-protocol program is not left with a key held down.
+          _onKeyEvent(widget.focusNode, event);
+          return false;
+        }
+    }
+    if (!focused) {
       return false;
     }
     final result = _onKeyEvent(widget.focusNode, event);

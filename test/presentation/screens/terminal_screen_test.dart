@@ -1789,6 +1789,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      bool appShortcuts = false,
     }) async {
       await tester.pumpWidget(
         buildScreen(
@@ -1830,6 +1831,9 @@ void main() {
             theme: theme ?? ThemeData.light(),
             darkTheme: theme ?? ThemeData.dark(),
             themeMode: themeMode,
+            builder: appShortcuts
+                ? (context, child) => AppShortcutsHost(child: child!)
+                : null,
             home: TerminalScreen(
               hostId: host.id,
               connectionId: resolveConnection ? null : session.connectionId,
@@ -10695,7 +10699,7 @@ void main() {
 
         await pressChord(tester, [
           LogicalKeyboardKey.metaLeft,
-        ], LogicalKeyboardKey.digit2);
+        ], LogicalKeyboardKey.digit1);
         verifySelected(tmuxService, 1);
 
         await pressChord(tester, [
@@ -10769,6 +10773,135 @@ void main() {
         expect(terminalFocus(tester).hasFocus, isTrue);
         expect(shellWrites.map(utf8.decode).join(), isEmpty);
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('⌘N selects the window whose badge shows N', (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        stubSelect(tmuxService, 0);
+
+        // tmux numbers from 0: the second row is badged "1".
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit1);
+        verifySelected(tmuxService, 1);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit0);
+        verifySelected(tmuxService, 0);
+
+        // No window is numbered 5, so nothing happens.
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit5);
+        verifyNever(
+          () => tmuxService.selectWindow(
+            session,
+            'work',
+            5,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('chords do nothing behind a touch-opened picker', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump(const Duration(milliseconds: 400));
+        // The row sits under the extra-keys toolbar in this layout, so run
+        // its tap handler directly; it is the same touch path.
+        tester
+            .widget<ListTile>(
+              find.ancestor(
+                of: find.text('New window'),
+                matching: find.byType(ListTile),
+              ),
+            )
+            .onTap!();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Empty terminal'), findsOneWidget);
+        // Touch-opened sheets leave focus on the terminal underneath.
+        expect(terminalFocus(tester).hasFocus, isTrue);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyT);
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Empty terminal'), findsOneWidget);
+        expect(find.text('Close window?'), findsNothing);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘W closes the native session a number key opened', (
+        tester,
+      ) async {
+        final orphanKey = fakeAcpKey(
+          hostId: host.id,
+          bridgeId: 'native-session',
+          acpSessionId: 'orphan-session',
+          providerId: AcpBuiltinProviderIds.codex,
+        );
+        final acpManager = FakeAcpSessionManager(
+          sessions: [fakeAcpSession(key: orphanKey, title: 'Orphan chat')],
+        );
+        addTearDown(acpManager.dispose);
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+          (_) async => const [
+            TmuxWindow(index: 0, name: 'build', isActive: true),
+            TmuxWindow(index: 1, name: 'logs', isActive: false),
+          ],
+        );
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        await pumpScreen(
+          tester,
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+          acpSessionManager: acpManager,
+          appShortcuts: true,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // ⌘1 leaves a pending switch to "logs"; ⌘2 opens the native session.
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit1);
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Close window?'), findsOneWidget);
+        expect(find.textContaining('Orphan chat'), findsWidgets);
+        expect(find.textContaining('“logs”'), findsNothing);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
       testWidgets('⌘W asks before closing and Return confirms', (tester) async {
         final tmuxService = _MockTmuxService();

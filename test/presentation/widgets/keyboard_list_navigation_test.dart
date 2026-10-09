@@ -93,6 +93,39 @@ void main() {
     expect(harness.rows[0].hasPrimaryFocus, isTrue, reason: 'stays at top');
   });
 
+  testWidgets('walks a lazily built list past the first screen', (
+    tester,
+  ) async {
+    final nodes = List.generate(60, (i) => FocusNode(debugLabel: 'lazy $i'));
+    addTearDown(() {
+      for (final node in nodes) {
+        node.dispose();
+      }
+    });
+    await tester.pumpWidget(
+      _app(
+        KeyboardListNavigation(
+          autofocus: true,
+          child: ListView.builder(
+            itemCount: nodes.length,
+            itemBuilder: (context, i) => ListTile(
+              focusNode: nodes[i],
+              title: Text('lazy $i'),
+              onTap: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    for (var i = 0; i < 40; i++) {
+      await _key(tester, LogicalKeyboardKey.arrowDown);
+    }
+    expect(nodes[39].hasPrimaryFocus, isTrue);
+    expect(find.text('lazy 39'), findsOneWidget);
+  });
+
   testWidgets('Up from the list itself starts at the last row', (tester) async {
     final harness = _ListHarness(3);
     addTearDown(harness.dispose);
