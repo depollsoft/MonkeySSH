@@ -501,6 +501,23 @@ void main() {
     expect(fixture.platform.keys, isEmpty);
   });
 
+  test('a damaged public key still deletes the hardware key', () async {
+    final fixture = await _Fixture.create();
+    final key = await fixture.hardwareKey();
+    final alias = key.hardwareKeyReference!.alias;
+    final damaged = key.copyWith(
+      privateKey:
+          HardwareKeyReference.prefix +
+          jsonEncode({'alias': alias, 'backing': 'tee', 'publicKey': 'AAAA'}),
+    );
+    expect(damaged.hardwareKeyReference, isNull);
+
+    expect(await fixture.keyService.deleteKey(damaged), isTrue);
+
+    expect(fixture.platform.deletedAliases, [alias]);
+    expect(await fixture.keyRepository.getById(key.id), isNull);
+  });
+
   test('a refused hardware delete keeps the key for a retry', () async {
     final fixture = await _Fixture.create();
     final key = await fixture.hardwareKey();

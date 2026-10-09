@@ -369,20 +369,26 @@ object HardwareKeyChannelHandler {
             generator.generateKeyPair()
         }
 
-        val backing = securityBacking(keyPair.private, usedStrongBox)
-        if (backing == null) {
-            keyStore.deleteEntry(alias)
-            throw HardwareKeyError("not_hardware_backed")
+        // The alias persists from here on: any failure must remove it, since
+        // Dart never learns about a key it did not get back.
+        return try {
+            val backing = securityBacking(keyPair.private, usedStrongBox)
+                ?: throw HardwareKeyError("not_hardware_backed")
+            val publicKey = keyPair.public as? ECPublicKey
+                ?: throw HardwareKeyError("failed")
+            val point = ByteArray(1 + COORDINATE_BYTES * 2)
+            point[0] = 0x04
+            unsignedFixed(publicKey.w.affineX).copyInto(point, 1)
+            unsignedFixed(publicKey.w.affineY).copyInto(point, 1 + COORDINATE_BYTES)
+            GeneratedKey(point, backing)
+        } catch (error: Exception) {
+            try {
+                keyStore.deleteEntry(alias)
+            } catch (cleanup: Exception) {
+                Log.w(TAG, "Generated key cleanup failed: ${cleanup.javaClass.simpleName}")
+            }
+            throw error
         }
-        val publicKey = keyPair.public as? ECPublicKey ?: run {
-            keyStore.deleteEntry(alias)
-            throw HardwareKeyError("failed")
-        }
-        val point = ByteArray(1 + COORDINATE_BYTES * 2)
-        point[0] = 0x04
-        unsignedFixed(publicKey.w.affineX).copyInto(point, 1)
-        unsignedFixed(publicKey.w.affineY).copyInto(point, 1 + COORDINATE_BYTES)
-        return GeneratedKey(point, backing)
     }
 
     private fun keySpec(

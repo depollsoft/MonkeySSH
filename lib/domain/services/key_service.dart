@@ -120,7 +120,9 @@ class KeyService {
   /// failure keeps the alias for a retry; deleting a missing key succeeds.
   /// Returns false, keeping the row, when secure hardware refused.
   Future<bool> deleteKey(SshKey key) async {
-    final reference = key.hardwareKeyReference;
+    // Structural parse: a damaged public key must not orphan the hardware
+    // key, as long as the alias is readable.
+    final reference = HardwareKeyReference.tryParse(key.privateKey);
     if (reference != null && !await _deleteHardwareKey(reference)) {
       return false;
     }
