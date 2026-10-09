@@ -2983,6 +2983,99 @@ void main() {
       expect(secondOffset, lessThan(firstOffset));
     });
 
+    testWidgets(
+      'find takes focus from the terminal so the query never reaches the shell',
+      (tester) async {
+        session.terminal!.write('needle near the top\r\n');
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final terminalFocus =
+            tester
+                  .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+                  .focusNode!
+              ..requestFocus();
+        await tester.pump();
+        expect(terminalFocus.hasFocus, isTrue);
+        shellWrites.clear();
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+        // Typed through the platform text input, as a keyboard would.
+        tester.testTextInput.enterText('needle');
+        await tester.pump();
+        expect(tester.widget<TextField>(field).controller!.text, 'needle');
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          isNot(contains('needle')),
+        );
+
+        // Choosing Find again while the bar is open focuses the field again.
+        terminalFocus.requestFocus();
+        await tester.pump();
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Close find'));
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('find searches the scrollback and closes cleanly', (
+      tester,
+    ) async {
+      final terminal = session.terminal!;
+      for (var row = 0; row < 80; row += 1) {
+        terminal.write(
+          row == 5 ? 'needle near the top\r\n' : 'output $row\r\n',
+        );
+      }
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final scrollController = terminalView().scrollController!;
+      scrollController.jumpTo(scrollController.position.maxScrollExtent);
+      await tester.pump();
+      final bottom = scrollController.offset;
+
+      await openTerminalOverflowMenu(tester);
+      expect(terminalMenuItemButton('Export Scrollback'), findsOneWidget);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      expect(terminalView().searchHits, isNotNull);
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'NEEDLE',
+      );
+      // Past the typing debounce, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(scrollController.offset, lessThan(bottom));
+
+      await tester.tap(find.byTooltip('Close find'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('terminal-search-bar')),
+        findsNothing,
+      );
+      expect(terminalView().searchHits, isNull);
+    });
+
     for (final (updateAgents, adapters) in [
       (false, false),
       (true, false),
