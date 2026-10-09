@@ -22,6 +22,7 @@ import '../../domain/models/monetization.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/monetization_service.dart';
+import '../../domain/services/remote_file_edit_session.dart';
 import '../../domain/services/remote_file_service.dart';
 import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_error_policy.dart';
@@ -36,6 +37,7 @@ import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/syntax_highlight_controller.dart';
 import '../widgets/syntax_highlight_language.dart';
 import '../widgets/syntax_highlight_theme.dart';
+import 'remote_text_editor_conflict.dart';
 import 'remote_text_editor_screen.dart';
 import 'sftp_browser_logic.dart';
 
@@ -2297,8 +2299,16 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     final remotePath = joinRemotePath(_currentPath, file.filename);
+    final editSession = RemoteFileEditSession(
+      remotePath: remotePath,
+      service: ref.read(remoteFileServiceProvider),
+    );
     try {
-      final bytes = await _readFileBytes(remotePath, maxSftpEditableBytes + 1);
+      final snapshot = await editSession.read(
+        _sftp!,
+        maxBytes: maxSftpEditableBytes + 1,
+      );
+      final bytes = snapshot.bytes;
 
       final loadedMessage = resolveSftpTextEditBlockMessage(
         byteCount: bytes.length,
@@ -2308,6 +2318,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         _showMessage(loadedMessage);
         return;
       }
+      editSession.accept(snapshot);
 
       final decodedText = utf8.decode(bytes);
       final detectedLanguage = detectLanguageFromFilename(file.filename);
@@ -2371,20 +2382,21 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         controller.dispose();
         return;
       }
-      final saved = await navigator.push<bool>(
+      final result = await navigator.push<Object?>(
         MaterialPageRoute(
           fullscreenDialog: true,
           builder: (context) => RemoteTextEditorScreen(
             fileName: file.filename,
             filePath: remotePath,
             controller: controller,
-            onSave: (text) => ref
-                .read(remoteFileServiceProvider)
-                .replaceFileBytes(
-                  sftp: _sftp!,
-                  remotePath: remotePath,
-                  bytes: Uint8List.fromList(utf8.encode(text)),
-                ),
+            onSave: (text) => editSession.save(_sftp!, utf8.encode(text)),
+            conflictHandler: RemoteEditorConflictHandler(
+              checkForChanges: () => editSession.checkForChanges(_sftp!),
+              reload: () => _reloadEditedFile(editSession),
+              saveCopy: (text) async => path.posix.basename(
+                await editSession.saveCopy(_sftp!, utf8.encode(text)),
+              ),
+            ),
             terminalTheme: editorTheme,
             fontFamily: fontFamily,
             initialFontSize: initialFontSize,
@@ -2392,12 +2404,16 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         ),
       );
       controller.dispose();
-      if (saved != true) {
+      if (result != true && result is! RemoteEditorSavedCopy) {
         return;
       }
 
       await _loadDirectory(_currentPath);
-      _showMessage('Saved "${file.filename}"');
+      _showMessage(
+        result is RemoteEditorSavedCopy
+            ? 'Saved your edits as "${result.fileName}"'
+            : 'Saved "${file.filename}"',
+      );
     } on Object catch (e) {
       if (e is! Exception && !isExpectedSshOperationError(e)) {
         rethrow;
@@ -2408,6 +2424,22 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         error: e,
       );
     }
+  }
+
+  Future<String> _reloadEditedFile(RemoteFileEditSession editSession) async {
+    final snapshot = await editSession.read(
+      _sftp!,
+      maxBytes: maxSftpEditableBytes + 1,
+    );
+    final blockedMessage = resolveSftpTextEditBlockMessage(
+      byteCount: snapshot.bytes.length,
+      loadedBytes: snapshot.bytes,
+    );
+    if (blockedMessage != null) {
+      throw RemoteEditorReloadBlockedException(blockedMessage);
+    }
+    editSession.accept(snapshot);
+    return utf8.decode(snapshot.bytes);
   }
 
   void _showSftpFailureSnackBar({
