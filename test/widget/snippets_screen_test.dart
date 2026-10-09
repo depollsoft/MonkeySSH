@@ -333,6 +333,42 @@ void main() {
       expect(find.text('branch'), findsOneWidget);
     });
 
+    testWidgets('full editor rejects a bad key token before saving', (
+      tester,
+    ) async {
+      registerFallbackValue(
+        SnippetsCompanion.insert(name: 'fallback', command: 'fallback'),
+      );
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          ],
+          child: const MaterialApp(home: SnippetEditScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Name'),
+        'Rewind',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        '{key:esc}{key:escc}',
+      );
+      await tester.ensureVisible(find.byIcon(Icons.save));
+      await tester.tap(find.byIcon(Icons.save));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Unknown key: {key:escc}'), findsOneWidget);
+      verifyNever(() => snippetRepository.insert(any()));
+    });
+
     testWidgets('full editor uses snippet prefill values', (tester) async {
       final snippetRepository = _MockSnippetRepository();
       when(snippetRepository.getAllFolders)
