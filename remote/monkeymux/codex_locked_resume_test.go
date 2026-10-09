@@ -472,6 +472,58 @@ func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
 	waitForCodexLockedResume(t, "R press", func() bool { return pty.String() == "r" })
 }
 
+// The backoff runs from when R was written, not from when the watcher decided
+// to press before waiting for window input.
+func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-backoff")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes atomic.Int32
+	released := make(chan struct{})
+	var once sync.Once
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		once.Do(func() { close(released) })
+		return false
+	}
+	const backoff = 200 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: backoff, maxPresses: 4})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		server.mu.Lock()
+		window.closed = true
+		server.mu.Unlock()
+		<-done
+	})
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+
+	window.inputMu.Lock()
+	held.Store(false)
+	<-released
+	time.Sleep(backoff + backoff/2) // The press waits longer than the backoff.
+	window.inputMu.Unlock()
+	waitForCodexLockedResume(t, "first R press", func() bool { return pty.String() != "" })
+	time.Sleep(backoff / 2)
+	if got := pty.String(); got != "r" {
+		t.Fatalf("window input = %q within half a backoff of the first press, want one R", got)
+	}
+}
+
 func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)

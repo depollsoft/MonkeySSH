@@ -173,10 +173,10 @@ func (s *muxServer) watchCodexLockedResume(
 		windowPty := window.pty
 		s.mu.Unlock()
 		foreground := ptyForegroundProcessGroup(windowPty)
-		now := time.Now()
-		press, done := retry.step(now, prompt, foreground, lockHeld)
+		press, done := retry.step(time.Now(), prompt, foreground, lockHeld)
 		if press && s.pressCodexLockedRetry(window, foreground, lockHeld) {
-			retry.pressed(now)
+			// The write may have waited for window input; back off from it.
+			retry.pressed(time.Now())
 		}
 		if done {
 			return
