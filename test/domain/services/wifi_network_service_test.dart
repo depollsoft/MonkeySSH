@@ -1,9 +1,86 @@
 // ignore_for_file: public_member_api_docs
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 
+import 'app_permission_service_cases.dart';
+
 void main() {
+  registerAppPermissionServiceTests();
+
+  group('WifiNetworkService.requestPermission', () {
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      for (final (status, expected) in [
+        (AppPermissionStatus.granted, WifiPermissionStatus.granted),
+        (AppPermissionStatus.approximate, WifiPermissionStatus.approximate),
+        (AppPermissionStatus.denied, WifiPermissionStatus.denied),
+        (
+          AppPermissionStatus.permanentlyDenied,
+          WifiPermissionStatus.permanentlyDenied,
+        ),
+        (AppPermissionStatus.restricted, WifiPermissionStatus.denied),
+      ]) {
+        test('maps ${status.name} on ${platform.name}', () async {
+          debugDefaultTargetPlatformOverride = platform;
+          final calls = answerPermissionChannel((_) async => status.name);
+
+          expect(await WifiNetworkService().requestPermission(), expected);
+          expect(calls.single.arguments, AppPermission.locationWhenInUse.name);
+        });
+      }
+    }
+
+    for (final platform in [
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+      TargetPlatform.linux,
+    ]) {
+      test('needs no runtime grant on ${platform.name}', () async {
+        debugDefaultTargetPlatformOverride = platform;
+        final calls = answerPermissionChannel((_) async => 'denied');
+
+        expect(
+          await WifiNetworkService().requestPermission(),
+          WifiPermissionStatus.granted,
+        );
+        expect(calls, isEmpty);
+      });
+    }
+
+    test('reads a platform error as denied', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      answerPermissionChannel(
+        (_) async => throw PlatformException(code: 'unavailable'),
+      );
+
+      expect(
+        await WifiNetworkService().requestPermission(),
+        WifiPermissionStatus.denied,
+      );
+    });
+
+    test(
+      'surfaces a missing channel handler instead of reading it as denied',
+      () async {
+        // An unregistered channel is a build bug; reporting it as the user's
+        // denial would hide it behind "Location permission is required".
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+
+        await expectLater(
+          WifiNetworkService().requestPermission(),
+          throwsA(isA<MissingPluginException>()),
+        );
+      },
+    );
+  });
+
   group('encodeSkipJumpHostSsids', () {
     test('returns null for empty input', () {
       expect(encodeSkipJumpHostSsids(const []), isNull);

@@ -29,6 +29,7 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    AppPermissionsPlugin.register(in: self)
     if let registrar = self.registrar(forPlugin: "AppDelegateBridge") {
       setupBackgroundSshChannel(with: registrar)
       setupTransferChannel(with: registrar)

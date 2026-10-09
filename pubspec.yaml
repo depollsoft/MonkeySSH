@@ -87,7 +87,6 @@ dependencies:
 
   # Network / connectivity
   network_info_plus: ^8.2.1
-  permission_handler: ^13.0.2
   wakelock_plus: ^1.8.0
   sqlite3: ^3.6.0
   firebase_core: ^4.15.0
@@ -101,14 +100,6 @@ dependency_overrides:
   # packages releases it: https://github.com/flutter/packages/pull/12640
   in_app_purchase_android:
     path: third_party/in_app_purchase_android
-  # permission_handler_apple's Package.swift derives the PERMISSION_* macros by
-  # discovering the host Info.plist, walking up from the working directory and
-  # from #file. A pub.dev install puts #file in ~/.pub-cache, where the walk can
-  # never reach the app, so Xcode.app builds (working directory "/") silently
-  # compile out camera, microphone and location. Vendoring puts #file inside the
-  # repo so every build path agrees. Tracking removal in #790.
-  permission_handler_apple:
-    path: third_party/permission_handler_apple
 
 dev_dependencies:
   flutter_test:

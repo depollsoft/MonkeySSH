@@ -4,7 +4,6 @@ import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -19,6 +18,7 @@ import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/app_permission_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -2523,26 +2523,43 @@ class _SkipJumpHostOnWifiSection extends ConsumerStatefulWidget {
 
 class _SkipJumpHostOnWifiSectionState
     extends ConsumerState<_SkipJumpHostOnWifiSection> {
+  /// Longer than anyone takes to answer the prompt; a prompt the OS never
+  /// answers must not leave the button spinning.
+  static const _permissionTimeout = Duration(seconds: 60);
+
   bool _detecting = false;
 
   Future<void> _addCurrentSsid() async {
     setState(() => _detecting = true);
     final messenger = ScaffoldMessenger.of(context);
+    // Read before any await: the Settings action can outlive this widget.
+    final permissions = ref.read(appPermissionServiceProvider);
     try {
       final wifiService = ref.read(wifiNetworkServiceProvider);
-      final permission = await wifiService.requestPermission();
+      final permission = await wifiService.requestPermission().timeout(
+        _permissionTimeout,
+        onTimeout: () => WifiPermissionStatus.denied,
+      );
       if (!mounted) return;
       if (permission != WifiPermissionStatus.granted) {
+        final approximate = permission == WifiPermissionStatus.approximate;
         messenger.showSnackBar(
           SnackBar(
-            content: const Text(
-              'Location permission is required to read the current Wi-Fi '
-              'network name. You can also add the SSID manually.',
+            content: Text(
+              approximate
+                  ? 'Precise location is required to read the current Wi-Fi '
+                        'network name. Turn it on in Settings, or add the '
+                        'SSID manually.'
+                  : 'Location permission is required to read the current '
+                        'Wi-Fi network name. You can also add the SSID '
+                        'manually.',
             ),
-            action: permission == WifiPermissionStatus.permanentlyDenied
+            action:
+                approximate ||
+                    permission == WifiPermissionStatus.permanentlyDenied
                 ? SnackBarAction(
                     label: 'Settings',
-                    onPressed: () => unawaited(openAppSettings()),
+                    onPressed: () => unawaited(permissions.openAppSettings()),
                   )
                 : null,
           ),

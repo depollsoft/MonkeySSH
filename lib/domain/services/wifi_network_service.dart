@@ -1,8 +1,9 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:network_info_plus/network_info_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
 
+import 'app_permission_service.dart';
 import 'diagnostics_log_service.dart';
 
 /// Reads the current Wi-Fi SSID, where supported by the platform.
@@ -11,10 +12,14 @@ import 'diagnostics_log_service.dart';
 /// not on Wi-Fi, or when the necessary OS permissions have not been granted.
 class WifiNetworkService {
   /// Creates a new [WifiNetworkService].
-  WifiNetworkService({NetworkInfo? networkInfo})
-    : _networkInfo = networkInfo ?? NetworkInfo();
+  WifiNetworkService({
+    NetworkInfo? networkInfo,
+    AppPermissionService permissions = const AppPermissionService(),
+  }) : _networkInfo = networkInfo ?? NetworkInfo(),
+       _permissions = permissions;
 
   final NetworkInfo _networkInfo;
+  final AppPermissionService _permissions;
 
   /// Whether SSID detection is supported on the current platform at all.
   ///
@@ -31,14 +36,14 @@ class WifiNetworkService {
   }
 
   /// Whether SSID detection requires a runtime location-permission grant via
-  /// `permission_handler` on the current platform.
+  /// [AppPermissionService] on the current platform.
   ///
   /// - **Android** requires `ACCESS_FINE_LOCATION` for `WifiManager` to
   ///   return the actual SSID.
   /// - **iOS** needs the location prompt to back the
   ///   `com.apple.developer.networking.wifi-info` entitlement.
   /// - **macOS** uses CoreLocation's first-use prompt natively, fired by
-  ///   `network_info_plus` without a `permission_handler` round-trip.
+  ///   `network_info_plus` without an [AppPermissionService] round-trip.
   /// - **Windows** and **Linux** read from system services (Win32 WLAN /
   ///   NetworkManager) that don't require a per-app grant for read-only
   ///   SSID lookups.
@@ -49,11 +54,29 @@ class WifiNetworkService {
 
   /// Result of a permission request, surfaced to the UI so it can guide the
   /// user to Settings when the OS has permanently denied access.
+  ///
+  /// A [PlatformException] reads as [WifiPermissionStatus.denied], so callers
+  /// fall back to the jump host. A [MissingPluginException] propagates: it
+  /// means the native channel was never registered, which is a build bug that
+  /// would otherwise pass for a user's denial.
   Future<WifiPermissionStatus> requestPermission() async {
     if (!_requiresLocationPermission) {
       return WifiPermissionStatus.granted;
     }
-    final status = await Permission.locationWhenInUse.request();
+    final AppPermissionStatus status;
+    try {
+      status = await _permissions.request(AppPermission.locationWhenInUse);
+    } on PlatformException catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'wifi.ssid',
+        'permission_request_failed',
+        fields: {'errorType': error.runtimeType.toString()},
+      );
+      return WifiPermissionStatus.denied;
+    }
+    if (status == AppPermissionStatus.approximate) {
+      return WifiPermissionStatus.approximate;
+    }
     if (status.isGranted) {
       return WifiPermissionStatus.granted;
     }
@@ -138,7 +161,8 @@ final RegExp _visibleContent = RegExp(r'[\p{L}\p{N}\p{P}\p{S}]', unicode: true);
 
 /// Provider for [WifiNetworkService].
 final wifiNetworkServiceProvider = Provider<WifiNetworkService>(
-  (ref) => WifiNetworkService(),
+  (ref) =>
+      WifiNetworkService(permissions: ref.watch(appPermissionServiceProvider)),
 );
 
 /// Encodes a list of SSIDs to the storage format used in the Hosts table.
@@ -213,4 +237,8 @@ enum WifiPermissionStatus {
 
   /// Permission was permanently denied; user must change it in Settings.
   permanentlyDenied,
+
+  /// Location is allowed only at approximate accuracy, which cannot read the
+  /// SSID; the user must turn on precise location in Settings.
+  approximate,
 }
