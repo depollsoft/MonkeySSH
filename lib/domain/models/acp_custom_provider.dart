@@ -50,6 +50,15 @@ final _unsafeTextPattern = RegExp(
   unicode: true,
 );
 
+// Characters that render as nothing (Unicode default-ignorable code points,
+// such as Hangul fillers, variation selectors and the combining grapheme
+// joiner) plus the blank braille pattern. A label made of them looks empty
+// or like another label.
+final _invisibleLabelPattern = RegExp(
+  r'\p{Default_Ignorable_Code_Point}|\u2800',
+  unicode: true,
+);
+
 /// Custom IDs MonkeyMux would read as a built-in agent once it strips the
 /// `builtin:` prefix, so native window titles could pick the wrong agent.
 final Set<String> acpReservedCustomProviderIds = Set.unmodifiable({
@@ -70,7 +79,10 @@ final _environmentVariableNamePattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
 /// session keys, routes and MonkeyMux arguments. Throws a [FormatException]
 /// when [id] is blank, too long, uses the reserved built-in prefix, or
 /// contains anything other than `a-z`, `0-9`, `.`, `_` and `-`.
-String validateAcpCustomProviderId(String id) {
+///
+/// IDs that MonkeyMux would read as a built-in agent are refused unless
+/// [allowReserved] is set, which is only for definitions already stored.
+String validateAcpCustomProviderId(String id, {bool allowReserved = false}) {
   final trimmed = id.trim();
   if (trimmed.isEmpty) {
     throw const FormatException('Agent ID must not be blank.');
@@ -88,7 +100,7 @@ String validateAcpCustomProviderId(String id) {
       'Agent ID may only use lowercase letters, digits, ".", "_" and "-".',
     );
   }
-  if (acpReservedCustomProviderIds.contains(trimmed)) {
+  if (!allowReserved && acpReservedCustomProviderIds.contains(trimmed)) {
     throw FormatException(
       'Agent ID "$trimmed" is reserved for a built-in agent.',
     );
@@ -109,9 +121,10 @@ String validateAcpProviderLabel(String label) {
       utf8.encode(trimmed).length > acpProviderLabelMaxBytes) {
     throw const FormatException('Name is too long.');
   }
-  if (_unsafeTextPattern.hasMatch(trimmed)) {
+  if (_unsafeTextPattern.hasMatch(trimmed) ||
+      _invisibleLabelPattern.hasMatch(trimmed)) {
     throw const FormatException(
-      'Name must not contain control or invisible formatting characters.',
+      'Name must not contain control or invisible characters.',
     );
   }
   return trimmed;
@@ -184,13 +197,33 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
 String? acpWindowsLaunchArgumentProblem(AcpLaunchCommand command) {
   if (command.arguments.any(
     (argument) =>
-        argument.isEmpty || _windowsUnsafeArgumentPattern.hasMatch(argument),
+        argument.isEmpty ||
+        _windowsUnsafeArgumentPattern.hasMatch(argument) ||
+        _endsQuotedWithBackslash(argument),
   )) {
-    return 'On Windows hosts, arguments cannot be empty or contain '
-        '" % ^ & | < or >, because Windows would not pass them exactly.';
+    return 'On Windows hosts, arguments cannot be empty, contain '
+        r'" % ^ & | < or >, or contain a space and end with \, because '
+        'Windows would not pass them exactly.';
   }
   return null;
 }
+
+/// Explains why [label] cannot travel to a Windows host's MonkeyMux helper
+/// exactly, or returns `null` when it can.
+///
+/// Windows PowerShell 5.1 quotes a label that contains spaces without
+/// escaping a double quote or a final backslash.
+String? acpWindowsLabelProblem(String label) {
+  if (label.contains('"') || label.endsWith(r'\')) {
+    return r'On Windows hosts, the name cannot contain " or end with \.';
+  }
+  return null;
+}
+
+// Windows PowerShell 5.1 wraps an argument with whitespace in double quotes,
+// so a final backslash escapes the closing quote.
+bool _endsQuotedWithBackslash(String value) =>
+    value.endsWith(r'\') && value.contains(RegExp(r'\s'));
 
 /// Validates and normalizes the names of host environment variables a custom
 /// provider needs.
@@ -350,6 +383,7 @@ final class AcpCustomProviderDefinition implements AcpProvider {
     required this.approval,
     required this.createdAt,
     required this.updatedAt,
+    this.renamedFromId,
   }) : environmentVariableNames = List<String>.unmodifiable(
          environmentVariableNames,
        );
@@ -441,6 +475,7 @@ final class AcpCustomProviderDefinition implements AcpProvider {
     if (rawApproval != null && approval == null) {
       return null;
     }
+    final renamedFrom = json['renamedFrom'];
     return AcpCustomProviderDefinition._(
       id: fields.id,
       label: fields.label,
@@ -450,6 +485,9 @@ final class AcpCustomProviderDefinition implements AcpProvider {
       approval: approval,
       createdAt: createdAt,
       updatedAt: updatedAt,
+      renamedFromId: renamedFrom is String && renamedFrom.isNotEmpty
+          ? renamedFrom
+          : null,
     );
   }
 
@@ -480,6 +518,10 @@ final class AcpCustomProviderDefinition implements AcpProvider {
 
   /// When this definition was last changed.
   final DateTime updatedAt;
+
+  /// The ID this definition was stored under before a built-in agent took
+  /// it, until the user approves the definition under its new ID.
+  final String? renamedFromId;
 
   @override
   bool get isCustom => true;
@@ -520,16 +562,26 @@ final class AcpCustomProviderDefinition implements AcpProvider {
       approval: approval,
       createdAt: createdAt,
       updatedAt: (now ?? DateTime.now()).toUtc(),
+      renamedFromId: renamedFromId,
     );
   }
 
-  /// Returns a copy approving the current [fingerprint] as of [now].
-  AcpCustomProviderDefinition approve({DateTime? now}) => _withApproval(
-    AcpCommandApproval(
-      commandFingerprint: fingerprint,
-      approvedAt: (now ?? DateTime.now()).toUtc(),
-    ),
-  );
+  /// Returns a copy approving the current [fingerprint] as of [now]. It
+  /// also clears [renamedFromId]: the user has reviewed the new ID.
+  AcpCustomProviderDefinition approve({DateTime? now}) =>
+      AcpCustomProviderDefinition._(
+        id: id,
+        label: label,
+        launchCommand: launchCommand,
+        environmentVariableNames: environmentVariableNames,
+        cwdPolicy: cwdPolicy,
+        approval: AcpCommandApproval(
+          commandFingerprint: fingerprint,
+          approvedAt: (now ?? DateTime.now()).toUtc(),
+        ),
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+      );
 
   /// Returns a copy with no approval record.
   AcpCustomProviderDefinition withoutApproval() => _withApproval(null);
@@ -544,6 +596,20 @@ final class AcpCustomProviderDefinition implements AcpProvider {
         approval: approval,
         createdAt: createdAt,
         updatedAt: updatedAt,
+        renamedFromId: renamedFromId,
+      );
+
+  AcpCustomProviderDefinition _renamedTo(String newId) =>
+      AcpCustomProviderDefinition._(
+        id: newId,
+        label: label,
+        launchCommand: launchCommand,
+        environmentVariableNames: environmentVariableNames,
+        cwdPolicy: cwdPolicy,
+        approval: null,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        renamedFromId: id,
       );
 
   /// Encodes this definition for on-device storage, including its approval.
@@ -553,6 +619,7 @@ final class AcpCustomProviderDefinition implements AcpProvider {
     'approval': ?approval?.toJson(),
     'createdAt': createdAt.toUtc().toIso8601String(),
     'updatedAt': updatedAt.toUtc().toIso8601String(),
+    'renamedFrom': ?renamedFromId,
   };
 
   /// Encodes this definition for export.
@@ -583,7 +650,8 @@ final class AcpCustomProviderDefinition implements AcpProvider {
           cwdPolicy == other.cwdPolicy &&
           approval == other.approval &&
           createdAt.isAtSameMomentAs(other.createdAt) &&
-          updatedAt.isAtSameMomentAs(other.updatedAt);
+          updatedAt.isAtSameMomentAs(other.updatedAt) &&
+          renamedFromId == other.renamedFromId;
 
   @override
   int get hashCode => Object.hash(
@@ -595,6 +663,7 @@ final class AcpCustomProviderDefinition implements AcpProvider {
     approval,
     createdAt.millisecondsSinceEpoch,
     updatedAt.millisecondsSinceEpoch,
+    renamedFromId,
   );
 
   // Never include the label or command: both are user content.
@@ -613,7 +682,10 @@ final class _AcpCustomProviderFields {
     required this.cwdPolicy,
   });
 
-  factory _AcpCustomProviderFields.parse(Map<Object?, Object?> json) {
+  factory _AcpCustomProviderFields.parse(
+    Map<Object?, Object?> json, {
+    bool stored = false,
+  }) {
     final rawId = json['id'];
     final rawLabel = json['label'];
     if (rawId is! String) {
@@ -655,7 +727,7 @@ final class _AcpCustomProviderFields {
       );
     }
     return _AcpCustomProviderFields(
-      id: validateAcpCustomProviderId(rawId),
+      id: validateAcpCustomProviderId(rawId, allowReserved: stored),
       label: validateAcpProviderLabel(rawLabel),
       command: command,
       environmentVariableNames: validateAcpEnvironmentVariableNames(
@@ -675,7 +747,7 @@ final class _AcpCustomProviderFields {
 
   static _AcpCustomProviderFields? tryParse(Map<Object?, Object?> json) {
     try {
-      return _AcpCustomProviderFields.parse(json);
+      return _AcpCustomProviderFields.parse(json, stored: true);
     } on FormatException {
       return null;
     }
@@ -750,17 +822,47 @@ List<AcpCustomProviderDefinition> decodeAcpCustomProviderImport(
 
 /// Decodes the stored custom provider list, skipping unreadable entries and
 /// repeated IDs so one bad entry never hides the rest.
-List<AcpCustomProviderDefinition> decodeStoredAcpCustomProviders(Object? raw) {
+///
+/// A stored ID that has since become reserved for a built-in agent is not
+/// dropped: the definition moves to `custom-<id>`, loses its approval and
+/// records [AcpCustomProviderDefinition.renamedFromId] so the UI can say
+/// why. At most [limit] definitions are returned; pass `null` to keep them
+/// all, for callers that must reject an oversized list instead.
+List<AcpCustomProviderDefinition> decodeStoredAcpCustomProviders(
+  Object? raw, {
+  int? limit = acpCustomProviderMaxCount,
+}) {
   if (raw is! List) return const <AcpCustomProviderDefinition>[];
-  final definitions = <AcpCustomProviderDefinition>[];
+  final decoded = <AcpCustomProviderDefinition>[];
   final ids = <String>{};
   for (final item in raw) {
     final definition = AcpCustomProviderDefinition.tryFromJson(item);
     if (definition == null || !ids.add(definition.id)) continue;
-    definitions.add(definition);
-    if (definitions.length >= acpCustomProviderMaxCount) break;
+    decoded.add(definition);
+    if (limit != null && decoded.length >= limit) break;
   }
+  final definitions = [
+    for (final definition in decoded)
+      if (acpReservedCustomProviderIds.contains(definition.id))
+        definition._renamedTo(_unreservedId(definition.id, ids))
+      else
+        definition,
+  ];
   return List<AcpCustomProviderDefinition>.unmodifiable(definitions);
+}
+
+/// A free `custom-` ID for [reservedId], added to [taken].
+String _unreservedId(String reservedId, Set<String> taken) {
+  final base = 'custom-$reservedId';
+  final trimmed = base.length > acpCustomProviderIdMaxLength - 4
+      ? base.substring(0, acpCustomProviderIdMaxLength - 4)
+      : base;
+  var candidate = trimmed;
+  for (var suffix = 2; taken.contains(candidate); suffix++) {
+    candidate = '$trimmed-$suffix';
+  }
+  taken.add(candidate);
+  return candidate;
 }
 
 /// Merges custom provider definitions that arrive in a settings migration

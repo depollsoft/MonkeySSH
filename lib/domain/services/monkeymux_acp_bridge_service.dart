@@ -126,6 +126,40 @@ String buildMonkeyMuxAcpProviderCommand(
   return command;
 }
 
+/// Explains why a custom agent's [label] and [argv] cannot launch exactly on
+/// a Windows host, or returns `null` when they can.
+///
+/// Besides the argument and label rules, the provider command must stay in
+/// the encoded form: a long one switches to a compact `-Command "…"` form
+/// whose double quotes Windows PowerShell 5.1 would split when it passes the
+/// command to the MonkeyMux helper.
+String? acpWindowsCustomLaunchProblem({
+  required String label,
+  required List<String> argv,
+  String? providerId,
+}) {
+  if (argv.isEmpty) return null;
+  final argumentProblem = acpWindowsLaunchArgumentProblem(
+    AcpLaunchCommand(executable: argv.first, arguments: argv.sublist(1)),
+  );
+  if (argumentProblem != null) return argumentProblem;
+  final labelProblem = acpWindowsLabelProblem(label);
+  if (labelProblem != null) return labelProblem;
+  try {
+    if (buildMonkeyMuxAcpProviderCommand(
+      argv,
+      isWindows: true,
+      providerId: providerId,
+    ).contains('"')) {
+      return 'This command is too long to launch on a Windows host. Shorten '
+          'the command or its arguments.';
+    }
+  } on MonkeyMuxAcpBridgeException {
+    return 'This command is too long to launch on a Windows host.';
+  }
+  return null;
+}
+
 /// Builds the interactive login command for an ACP `terminal` auth method.
 ///
 /// Reuses the exact bridge launch construction (profile/PATH prefix, literal
@@ -594,16 +628,14 @@ final class MonkeyMuxAcpBridgeService {
       priority: SshExecPriority.normal,
       confirmInstall: confirmInstall,
     );
-    // Custom agents carry arbitrary argv, which Windows cannot always pass
-    // exactly. Built-in argv is fixed and safe.
+    // Custom agents carry an arbitrary label and argv, which Windows cannot
+    // always pass exactly. Built-in labels and argv are fixed and safe.
     if (installation.isWindows &&
-        launchArgv.isNotEmpty &&
         !providerId.startsWith(acpBuiltinProviderIdPrefix) &&
-        acpWindowsLaunchArgumentProblem(
-              AcpLaunchCommand(
-                executable: launchArgv.first,
-                arguments: launchArgv.sublist(1),
-              ),
+        acpWindowsCustomLaunchProblem(
+              label: providerLabel,
+              argv: launchArgv,
+              providerId: providerId,
             ) !=
             null) {
       throw const MonkeyMuxAcpBridgeException(

@@ -1110,7 +1110,12 @@ class SecureTransferService {
   }) {
     final merged = mergeImportedAcpCustomProviders(
       local: decodeStoredAcpCustomProviders(decodeJsonList(localValue)),
-      imported: decodeStoredAcpCustomProviders(decodeJsonList(importedValue)),
+      // Decode every imported agent, so an oversized list is rejected below
+      // rather than cut to the limit.
+      imported: decodeStoredAcpCustomProviders(
+        decodeJsonList(importedValue),
+        limit: null,
+      ),
       keepUnmatchedLocal: keepUnmatchedLocal,
     );
     if (merged.length > acpCustomProviderMaxCount) {

@@ -1222,9 +1222,59 @@ touch "$HOME/installed"
           ),
         );
       }
+      await expectLater(
+        service.start(
+          session: _sshSession(client, windows: true),
+          providerId: 'goose',
+          providerLabel: 'Goose "dev"',
+          launchArgv: const ['goose', 'acp'],
+          cwd: r'C:\Users\demo',
+        ),
+        throwsA(isA<MonkeyMuxAcpBridgeException>()),
+      );
       verifyNever(() => client.execute(any(), pty: any(named: 'pty')));
     },
   );
+
+  test('a custom agent must keep the encoded Windows command form', () {
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: const ['goose', 'acp'],
+        providerId: 'goose',
+      ),
+      isNull,
+    );
+    // Long enough to switch to `-Command "..."`, whose quotes PowerShell 5.1
+    // would split on the way to the helper.
+    final long = ['goose', 'acp', 'x' * 1700];
+    expect(
+      buildMonkeyMuxAcpProviderCommand(long, isWindows: true),
+      contains('"'),
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: long,
+        providerId: 'goose',
+      ),
+      contains('too long'),
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: r'Goose dev\',
+        argv: const ['goose'],
+      ),
+      isNotNull,
+    );
+    expect(
+      acpWindowsCustomLaunchProblem(
+        label: 'Goose',
+        argv: const ['goose', r'C:\My Dir\'],
+      ),
+      isNotNull,
+    );
+  });
 
   test(
     'uses encoded PowerShell for Windows helper lifecycle commands',

@@ -86,6 +86,33 @@ void main() {
     );
   });
 
+  test('a replace with more than the agent limit fails instead of '
+      'cutting the list', () async {
+    final local = await customProviders.create(
+      label: 'Local',
+      launchCommand: AcpLaunchCommand(executable: 'agent'),
+    );
+    final incoming = [
+      for (var i = 0; i <= acpCustomProviderMaxCount; i++)
+        AcpCustomProviderDefinition.create(
+          id: 'incoming-$i',
+          label: 'Incoming $i',
+          launchCommand: AcpLaunchCommand(executable: 'incoming'),
+        ),
+    ];
+
+    await expectLater(
+      transfer.importMigrationData(
+        data: migrationWith(incoming),
+        mode: MigrationImportMode.replace,
+      ),
+      throwsFormatException,
+    );
+
+    final stored = await customProviders.listCustomProviders();
+    expect(stored.map((definition) => definition.id), [local.id]);
+  });
+
   for (final mode in MigrationImportMode.values) {
     test(
       'a migration import never carries approvals in (${mode.name})',

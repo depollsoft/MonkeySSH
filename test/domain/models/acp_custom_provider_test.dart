@@ -92,15 +92,51 @@ void main() {
       expect(validateAcpProviderLabel(r"Goose's \agent! 日本"), isNotEmpty);
     });
 
+    test('labels reject characters that render as nothing', () {
+      for (final blank in [
+        '\u3164', // Hangul filler
+        '\u115F', // Hangul choseong filler
+        '\u2800', // braille pattern blank
+        '\u034F', // combining grapheme joiner
+        '\uFE0F', // variation selector 16
+      ]) {
+        expect(
+          () => validateAcpProviderLabel('Goose$blank'),
+          throwsFormatException,
+          reason: blank.codeUnitAt(0).toRadixString(16),
+        );
+      }
+    });
+
     test('Windows hosts refuse arguments they would not pass exactly', () {
       expect(acpWindowsLaunchArgumentProblem(_command()), isNull);
-      for (final argument in ['', 'say "hi"', '50%', 'a&b', 'a|b', 'a^b']) {
+      for (final argument in [
+        '',
+        'say "hi"',
+        '50%',
+        'a&b',
+        'a|b',
+        'a^b',
+        // PowerShell 5.1 quotes it, and the final backslash escapes the quote.
+        r'C:\My Dir\',
+      ]) {
         expect(
           acpWindowsLaunchArgumentProblem(_command(['acp', argument])),
           isNotNull,
           reason: argument,
         );
       }
+      // Without whitespace PowerShell passes it bare, so it is exact.
+      expect(
+        acpWindowsLaunchArgumentProblem(_command(['acp', r'C:\Dir\'])),
+        isNull,
+      );
+    });
+
+    test('Windows hosts refuse labels the helper would split', () {
+      expect(acpWindowsLabelProblem('Goose CLI'), isNull);
+      expect(acpWindowsLabelProblem('Goose "dev"'), isNotNull);
+      expect(acpWindowsLabelProblem(r'Goose dev\'), isNotNull);
     });
 
     test('launch commands reject blanks, controls and oversized argv', () {
@@ -258,6 +294,54 @@ void main() {
           reason: '$invalid',
         );
       }
+    });
+
+    test('a stored ID that became reserved moves instead of vanishing', () {
+      // Saved before `opencode` was reserved, for example by an older build.
+      final approved = _goose().approve();
+      final stored = [
+        {...approved.toJson(), 'id': 'opencode', 'label': 'OpenCode'},
+        {...approved.toJson(), 'id': 'custom-opencode', 'label': 'Mine'},
+      ];
+
+      final decoded = decodeStoredAcpCustomProviders(stored);
+
+      expect(decoded.map((definition) => definition.id), [
+        'custom-opencode-2',
+        'custom-opencode',
+      ]);
+      final moved = decoded.first;
+      expect(moved.label, 'OpenCode');
+      expect(moved.launchCommand, approved.launchCommand);
+      expect(moved.renamedFromId, 'opencode');
+      expect(moved.isCommandApproved, isFalse);
+      // The note survives a save until the user approves the new ID.
+      final saved = AcpCustomProviderDefinition.tryFromJson(moved.toJson())!;
+      expect(saved.id, 'custom-opencode-2');
+      expect(saved.renamedFromId, 'opencode');
+      expect(saved.approve().renamedFromId, isNull);
+      // New definitions and imports still refuse the reserved ID.
+      expect(
+        () => decodeAcpCustomProviderImport(
+          jsonEncode({...approved.toExportJson(), 'id': 'opencode'}),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('decodeStoredAcpCustomProviders can keep every entry', () {
+      final many = [
+        for (var i = 0; i <= acpCustomProviderMaxCount; i++)
+          {..._goose().toJson(), 'id': 'agent-$i'},
+      ];
+      expect(
+        decodeStoredAcpCustomProviders(many),
+        hasLength(acpCustomProviderMaxCount),
+      );
+      expect(
+        decodeStoredAcpCustomProviders(many, limit: null),
+        hasLength(acpCustomProviderMaxCount + 1),
+      );
     });
 
     test('decodeStoredAcpCustomProviders skips bad and repeated entries', () {
