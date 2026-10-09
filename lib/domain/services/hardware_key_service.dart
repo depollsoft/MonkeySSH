@@ -100,8 +100,8 @@ class HardwareKeyException implements Exception {
       'The device invalidated this hardware key after its biometrics or '
           'screen lock changed. Generate a new key.',
     HardwareKeyErrorCode.userPresenceUnavailable =>
-      'Per-use confirmation needs a screen lock, plus an enrolled fingerprint '
-          'or face on Android 10 and earlier.',
+      'Per-use confirmation needs a screen lock, plus an enrolled strong '
+          'biometric (usually a fingerprint) on Android 10 and earlier.',
     HardwareKeyErrorCode.deviceLocked =>
       'Unlock this device once after it restarts; until then the hardware '
           'key can’t sign.',
@@ -424,6 +424,12 @@ class _PendingSigns {
 
 int _nextSignRequest = 0;
 
+/// How often a request waiting for the app lock checks the app is on screen.
+const _lockPollInterval = Duration(milliseconds: 500);
+
+/// Prefix of every keystore alias the app creates.
+const hardwareKeyAliasPrefix = 'xyz.depollsoft.monkeyssh.sshkey.';
+
 /// SSH identity whose private key never leaves secure hardware.
 ///
 /// Probes the server before signing, so a key the server would reject never
@@ -492,13 +498,7 @@ class HardwareKeyIdentity extends SSHIdentity {
     try {
       final Uint8List der;
       if (requiresUserPresence) {
-        // Never stack a key prompt on the app lock or on another prompt.
-        await request.unlessCancelled(
-          _promptCoordinator.waitUntilAppUnlocked(),
-        );
-        der = await request.unlessCancelled(
-          _promptCoordinator.run(() => _signNative(request, data)),
-        );
+        der = await _signWithPrompt(request, data);
       } else {
         der = await request.unlessCancelled(_signNative(request, data));
       }
@@ -527,6 +527,47 @@ class HardwareKeyIdentity extends SSHIdentity {
       throw reported;
     } finally {
       _pending.requests.remove(request);
+    }
+  }
+
+  /// Shows the confirmation prompt once the app is unlocked and no other
+  /// prompt is showing.
+  Future<Uint8List> _signWithPrompt(
+    _SignRequest request,
+    Uint8List data,
+  ) async {
+    while (true) {
+      await _awaitUnlockedApp(request);
+      // Recheck when the queue reaches this request: the app may have locked
+      // while it waited, and the lock's own prompt needs this slot.
+      final der = await request.unlessCancelled(
+        _promptCoordinator.run<Uint8List?>(
+          () async => _promptCoordinator.isAppLocked
+              ? null
+              : await _signNative(request, data),
+        ),
+      );
+      if (der != null) {
+        return der;
+      }
+    }
+  }
+
+  Future<void> _awaitUnlockedApp(_SignRequest request) async {
+    while (_promptCoordinator.isAppLocked) {
+      // Nobody can unlock an app in the background; fail now rather than
+      // leave the SSH attempt waiting until the server gives up.
+      if (!_promptCoordinator.isAppInForeground) {
+        throw const HardwareKeyException(
+          HardwareKeyErrorCode.interactionRequired,
+        );
+      }
+      await request.unlessCancelled(
+        _promptCoordinator.waitUntilAppUnlocked().timeout(
+          _lockPollInterval,
+          onTimeout: () {},
+        ),
+      );
     }
   }
 
@@ -719,7 +760,10 @@ class HardwareKeyService {
 
   /// Deletes the private key from secure hardware.
   Future<void> delete(HardwareKeyReference reference) =>
-      _platform.deleteKey(reference.alias);
+      deleteAlias(reference.alias);
+
+  /// Deletes the key under [alias] from secure hardware.
+  Future<void> deleteAlias(String alias) => _platform.deleteKey(alias);
 
   Future<void> _deleteQuietly(String alias) async {
     try {
@@ -736,7 +780,7 @@ class HardwareKeyService {
   String _newAlias() {
     final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
     final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    return 'xyz.depollsoft.monkeyssh.sshkey.$hex';
+    return '$hardwareKeyAliasPrefix$hex';
   }
 }
 

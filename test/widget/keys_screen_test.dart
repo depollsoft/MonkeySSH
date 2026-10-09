@@ -268,7 +268,7 @@ void main() {
       await tester.tap(find.text('Phone key'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('fingerprint or face'), findsOneWidget);
+      expect(find.textContaining('usually a fingerprint'), findsOneWidget);
       expect(find.textContaining('passcode'), findsNothing);
     });
 

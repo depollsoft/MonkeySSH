@@ -186,9 +186,9 @@ class HardwareKeyPrivateKeyNotice extends StatelessWidget {
                       ? 'Asks for biometrics or the passcode at every '
                             'sign-in, so auto-connect and background '
                             'reconnect can’t use it.'
-                      : 'Asks for a fingerprint or face at every sign-in, so '
-                            'auto-connect and background reconnect can’t use '
-                            'it.',
+                      : 'Asks for a strong biometric, usually a fingerprint, '
+                            'at every sign-in, so auto-connect and background '
+                            'reconnect can’t use it.',
                 )
               else
                 const _Note(
@@ -332,12 +332,12 @@ class _AvailablePanel extends StatelessWidget {
             (true, true) =>
               'Biometric or passcode confirmation before every sign-in.',
             (true, false) =>
-              'Fingerprint or face confirmation before every sign-in. '
-                  'Enrolling new biometrics deletes the key.',
+              'Strong biometric confirmation, usually a fingerprint, before '
+                  'every sign-in. Enrolling new biometrics deletes the key.',
             (false, true) => 'Set up a screen lock to turn this on.',
             (false, false) =>
-              'Set up a screen lock and enroll a fingerprint or face to turn '
-                  'this on.',
+              'Set up a screen lock and enroll a strong biometric, usually a '
+                  'fingerprint, to turn this on.',
           }),
         ),
         if (requireUserPresence && capabilities.userPresenceAvailable)

@@ -204,6 +204,10 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
     if (error != null) {
       throw error;
     }
+    // Like the native side, refuse aliases the app could not have created.
+    if (!alias.startsWith(hardwareKeyAliasPrefix)) {
+      throw const HardwareKeyException(HardwareKeyErrorCode.failed);
+    }
     deletedAliases.add(alias);
     keys.remove(alias);
   }

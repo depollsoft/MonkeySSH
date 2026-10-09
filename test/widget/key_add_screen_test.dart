@@ -407,7 +407,10 @@ void main() {
         ),
       );
 
-      expect(find.textContaining('Fingerprint or face'), findsOneWidget);
+      expect(
+        find.textContaining('Strong biometric confirmation'),
+        findsOneWidget,
+      );
       expect(find.textContaining('deletes the key'), findsOneWidget);
       expect(find.textContaining('Biometric or passcode'), findsNothing);
     });

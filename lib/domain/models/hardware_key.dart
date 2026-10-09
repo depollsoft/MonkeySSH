@@ -198,6 +198,21 @@ class HardwareKeyReference {
   static bool looksLikeReference(String? value) =>
       value != null && value.startsWith(prefix);
 
+  /// Reads only the keystore alias of a stored reference, however damaged
+  /// the rest is, so cleanup can still find the key.
+  static String? tryParseAlias(String? value) {
+    if (!looksLikeReference(value)) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(value!.substring(prefix.length));
+      final alias = decoded is Map ? decoded['alias'] : null;
+      return alias is String && alias.isNotEmpty ? alias : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
   /// Parses an encoded reference, returning `null` when [value] is not one.
   static HardwareKeyReference? tryParse(String? value) {
     if (!looksLikeReference(value)) {

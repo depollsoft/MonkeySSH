@@ -1832,6 +1832,7 @@ class SshService {
     SSHClient? jumpClient;
     var hardwareIdentities = const <HardwareKeyIdentity>[];
     final hardwareKeyFailures = <HardwareKeyException>[];
+    var onlyHardwareKeysOffered = false;
     var abandoningHardwareSigns = false;
     void abandonHardwareSigns(List<HardwareKeyIdentity> identities) {
       abandoningHardwareSigns = true;
@@ -1884,6 +1885,11 @@ class SshService {
           parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
       hardwareIdentities = [...?identities?.whereType<HardwareKeyIdentity>()];
+      onlyHardwareKeysOffered =
+          hardwareIdentities.isNotEmpty &&
+          hardwareIdentities.length == identities!.length &&
+          config.password == null &&
+          interactiveAuthPromptHandler == null;
       if (hardwareIdentities.isNotEmpty && cancellationToken != null) {
         // Dismiss a biometric prompt the user can no longer act on.
         final pendingIdentities = hardwareIdentities;
@@ -2117,9 +2123,13 @@ class SshService {
         FormatException(:final message) => message,
         SSHHostkeyError(:final message) =>
           'Host key verification failed: $message',
-        // Name the hardware key failure rather than "no method worked".
-        SSHAuthFailError() when hardwareKeyFailures.isNotEmpty =>
-          hardwareKeyFailures.last.message,
+        // Name the hardware key failure rather than "no method worked", but
+        // keep the real cause when a password or another key also failed.
+        SSHAuthFailError(:final message) when hardwareKeyFailures.isNotEmpty =>
+          onlyHardwareKeysOffered
+              ? hardwareKeyFailures.last.message
+              : 'Authentication failed: $message. '
+                    '${hardwareKeyFailures.last.message}',
         SSHAuthFailError(:final message) => 'Authentication failed: $message',
         SSHAuthAbortError(
           reason: SSHInternalError(

@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
+
 /// Keeps the app's biometric prompts from overlapping.
 ///
 /// On Android every androidx `BiometricPrompt` on an activity shares one view
@@ -10,17 +12,29 @@ import 'dart:async';
 /// never stacks a key prompt on the lock screen.
 class BiometricPromptCoordinator {
   /// Creates a coordinator; the app uses [instance].
-  BiometricPromptCoordinator();
+  ///
+  /// [isAppInForeground] defaults to the Flutter lifecycle state.
+  BiometricPromptCoordinator({bool Function()? isAppInForeground})
+    : _isAppInForeground = isAppInForeground ?? _lifecycleIsForeground;
 
   /// The coordinator shared by the app lock and hardware key signing.
   static final instance = BiometricPromptCoordinator();
 
+  final bool Function() _isAppInForeground;
   Future<void> _tail = Future<void>.value();
   bool _appLocked = false;
   Completer<void>? _unlocked;
 
   /// Whether the app lock is showing.
   bool get isAppLocked => _appLocked;
+
+  /// Whether the app is on screen, so the user could answer a prompt.
+  bool get isAppInForeground => _isAppInForeground();
+
+  static bool _lifecycleIsForeground() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  }
 
   /// Records whether the app lock is showing.
   void setAppLocked({required bool locked}) {

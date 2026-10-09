@@ -501,6 +501,60 @@ void main() {
     expect(fixture.platform.keys, isEmpty);
   });
 
+  test('a failed password is reported alongside the hardware key', () async {
+    final fixture = await _Fixture.create()
+      ..acceptedPassword = 'right';
+    final key = await fixture.hardwareKey();
+    final host = fixture.stubHost(keyId: key.id, password: 'wrong');
+    fixture.platform.keys.clear();
+
+    final result = await fixture.service.connectToHost(host.id);
+
+    expect(result.success, isFalse);
+    expect(result.error, startsWith('Authentication failed: '));
+    expect(
+      result.error,
+      contains(
+        const HardwareKeyException(HardwareKeyErrorCode.keyNotFound).message,
+      ),
+    );
+  });
+
+  test('a reference damaged beyond its alias still deletes the key', () async {
+    final fixture = await _Fixture.create();
+    final key = await fixture.hardwareKey();
+    final alias = key.hardwareKeyReference!.alias;
+    final damaged = key.copyWith(
+      privateKey:
+          HardwareKeyReference.prefix +
+          jsonEncode({'alias': alias, 'backing': 'nonsense', 'publicKey': 1}),
+    );
+
+    expect(await fixture.keyService.deleteKey(damaged), isTrue);
+
+    expect(fixture.platform.deletedAliases, [alias]);
+    expect(await fixture.keyRepository.getById(key.id), isNull);
+  });
+
+  test(
+    'a row with a foreign alias is deleted without touching the keystore',
+    () async {
+      final fixture = await _Fixture.create();
+      final key = await fixture.hardwareKey();
+      final foreign = key.copyWith(
+        privateKey: key.privateKey.replaceFirst(
+          key.hardwareKeyReference!.alias,
+          'com.example.other-app.key',
+        ),
+      );
+
+      expect(await fixture.keyService.deleteKey(foreign), isTrue);
+
+      expect(fixture.platform.deletedAliases, isEmpty);
+      expect(await fixture.keyRepository.getById(key.id), isNull);
+    },
+  );
+
   test('a damaged public key still deletes the hardware key', () async {
     final fixture = await _Fixture.create();
     final key = await fixture.hardwareKey();

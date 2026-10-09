@@ -109,7 +109,7 @@ class KeyService {
         publicKeyBlob: generated.publicKeyBlob,
       );
     } on Object {
-      await _deleteHardwareKey(generated.reference);
+      await _deleteHardwareKey(generated.reference.alias);
       rethrow;
     }
   }
@@ -120,19 +120,22 @@ class KeyService {
   /// failure keeps the alias for a retry; deleting a missing key succeeds.
   /// Returns false, keeping the row, when secure hardware refused.
   Future<bool> deleteKey(SshKey key) async {
-    // Structural parse: a damaged public key must not orphan the hardware
-    // key, as long as the alias is readable.
-    final reference = HardwareKeyReference.tryParse(key.privateKey);
-    if (reference != null && !await _deleteHardwareKey(reference)) {
+    // Only the alias matters for cleanup, so a reference damaged anywhere
+    // else still removes its key. An alias the app could not have created
+    // is never sent to the keystore, and its row is simply dropped.
+    final alias = HardwareKeyReference.tryParseAlias(key.privateKey);
+    if (alias != null &&
+        alias.startsWith(hardwareKeyAliasPrefix) &&
+        !await _deleteHardwareKey(alias)) {
       return false;
     }
     await _keyRepository.delete(key.id);
     return true;
   }
 
-  Future<bool> _deleteHardwareKey(HardwareKeyReference reference) async {
+  Future<bool> _deleteHardwareKey(String alias) async {
     try {
-      await _hardwareKeyService.delete(reference);
+      await _hardwareKeyService.deleteAlias(alias);
       return true;
     } on HardwareKeyException catch (error) {
       DiagnosticsLogService.instance.warning(

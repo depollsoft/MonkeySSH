@@ -442,6 +442,110 @@ void main() {
     );
 
     test(
+      'a queued prompt yields to the app lock that engaged meanwhile',
+      () async {
+        platform.holdSigns = true;
+        final first = await perUseIdentity();
+        final second = await perUseIdentity();
+
+        final firstSign = first.sign(Uint8List.fromList([1]));
+        final secondSign = second.sign(Uint8List.fromList([2]));
+        final firstRequest = await platform.waitForPrompt();
+        // Auto-lock fires while the second request waits behind the first.
+        coordinator.setAppLocked(locked: true);
+        var lockPromptShown = false;
+        final lockPrompt = coordinator.run(() async => lockPromptShown = true);
+
+        platform.approve(firstRequest);
+        await firstSign;
+        await lockPrompt;
+        expect(lockPromptShown, isTrue);
+        expect(platform.signRequests, hasLength(1));
+
+        coordinator.setAppLocked(locked: false);
+        platform.approve(await platform.waitForPrompt());
+        await secondSign;
+        expect(platform.signRequests, hasLength(2));
+      },
+    );
+
+    test('a locked app in the background fails at once', () async {
+      final background = BiometricPromptCoordinator(
+        isAppInForeground: () => false,
+      )..setAppLocked(locked: true);
+      final service = HardwareKeyService(
+        platform: platform,
+        isPlatformSupported: true,
+        promptCoordinator: background,
+      );
+      final identity = service.identityFor(
+        (await service.generate(requireUserPresence: true)).reference,
+      );
+
+      await expectLater(
+        identity
+            .sign(Uint8List.fromList([1]))
+            .timeout(const Duration(seconds: 3)),
+        failsWith(HardwareKeyErrorCode.interactionRequired),
+      );
+      expect(platform.signRequests, isEmpty);
+    });
+
+    test('leaving the app from the lock screen ends the wait', () async {
+      var foreground = true;
+      final lockScreen = BiometricPromptCoordinator(
+        isAppInForeground: () => foreground,
+      )..setAppLocked(locked: true);
+      final service = HardwareKeyService(
+        platform: platform,
+        isPlatformSupported: true,
+        promptCoordinator: lockScreen,
+      );
+      final identity = service.identityFor(
+        (await service.generate(requireUserPresence: true)).reference,
+      );
+
+      final signing = identity.sign(Uint8List.fromList([1]));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      foreground = false;
+
+      await expectLater(
+        signing.timeout(const Duration(seconds: 3)),
+        failsWith(HardwareKeyErrorCode.interactionRequired),
+      );
+      expect(platform.signRequests, isEmpty);
+    });
+
+    test(
+      'a lost native reply holds the app lock back only until the timeout',
+      () async {
+        final quick = HardwareKeyService(
+          platform: platform,
+          isPlatformSupported: true,
+          promptCoordinator: coordinator,
+          promptTimeout: const Duration(milliseconds: 50),
+        );
+        platform.holdSigns = true;
+        final identity = quick.identityFor(
+          (await quick.generate(requireUserPresence: true)).reference,
+        );
+
+        final signing = expectLater(
+          identity.sign(Uint8List.fromList([1])),
+          failsWith(HardwareKeyErrorCode.timedOut),
+        );
+        await platform.waitForPrompt();
+        final lockPrompt = coordinator.run(() async => 'unlocked');
+
+        expect(
+          await lockPrompt.timeout(const Duration(seconds: 2)),
+          'unlocked',
+        );
+        await signing;
+      },
+    );
+
+    test(
       'a key without confirmation that needs interaction is locked',
       () async {
         final identity = service.identityFor(
