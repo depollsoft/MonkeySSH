@@ -8,8 +8,10 @@ import '../../app/routes.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/port_forward_repository.dart';
+import '../../domain/models/port_forward_type.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
+import '../../domain/services/socks_browser_proxy_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../widgets/brand_empty_state.dart';
@@ -96,8 +98,15 @@ class PortForwardsScreen extends ConsumerWidget {
           portForwards: forwards,
           onEdit: (pf) => context.push('/port-forwards/edit/${pf.id}'),
           onDelete: (pf) => _deletePortForward(context, ref, pf),
-          onOpenBrowser: (pf) =>
-              unawaited(_openPortForwardBrowser(context, ref, pf)),
+          onOpenBrowser: (pf) => unawaited(
+            isDynamicPortForwardType(pf.forwardType)
+                ? openSocksForwardBrowser(
+                    context,
+                    portForward: pf,
+                    hostLabel: host?.label,
+                  )
+                : _openPortForwardBrowser(context, ref, pf),
+          ),
         );
       },
     );
@@ -331,7 +340,7 @@ class _HostGroup extends StatelessWidget {
   }
 }
 
-class _PortForwardListTile extends StatelessWidget {
+class _PortForwardListTile extends ConsumerWidget {
   const _PortForwardListTile({
     required this.portForward,
     required this.onTap,
@@ -343,41 +352,69 @@ class _PortForwardListTile extends StatelessWidget {
   final VoidCallback onOpenBrowser;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final canOpenInBrowser =
-        isPortForwardBrowserSupported() &&
-        canOpenPortForwardInBrowser(portForward);
+    final isDynamic = isDynamicPortForwardType(portForward.forwardType);
+    final socksSupport = isDynamic
+        ? ref.watch(socksBrowserRoutingSupportProvider).asData?.value
+        : null;
+    final canOpenInBrowser = isDynamic
+        ? socksSupport?.isSupported ?? false
+        : isPortForwardBrowserSupported() &&
+              canOpenPortForwardInBrowser(portForward);
+    final socksUnavailableReason = socksSupport?.unavailableReason;
     final isLocal = portForward.forwardType == 'local';
+    final endpoint = isDynamic
+        ? 'D ${dynamicPortForwardListenerLabel(portForward.localPort)} · '
+              'SOCKS5 via host'
+        : isLocal
+        ? 'L ${portForward.localHost}:${portForward.localPort} → ${portForward.remoteHost}:${portForward.remotePort}'
+        : 'R ${portForward.remoteHost}:${portForward.remotePort} → ${portForward.localHost}:${portForward.localPort}';
+    final subtitleStyle = FluttyTheme.monoStyle.copyWith(
+      fontSize: 12,
+      color: theme.colorScheme.outline,
+    );
 
     return ListTile(
       leading: CircleAvatar(
-        backgroundColor: isLocal
+        backgroundColor: isLocal || isDynamic
             ? theme.colorScheme.primaryContainer
             : theme.colorScheme.secondaryContainer,
         child: Icon(
-          isLocal ? Icons.arrow_forward : Icons.arrow_back,
-          color: isLocal
+          isDynamic
+              ? Icons.hub_outlined
+              : isLocal
+              ? Icons.arrow_forward
+              : Icons.arrow_back,
+          color: isLocal || isDynamic
               ? theme.colorScheme.onPrimaryContainer
               : theme.colorScheme.onSecondaryContainer,
         ),
       ),
       title: Text(portForward.name),
-      subtitle: Text(
-        isLocal
-            ? 'L ${portForward.localHost}:${portForward.localPort} → ${portForward.remoteHost}:${portForward.remotePort}'
-            : 'R ${portForward.remoteHost}:${portForward.remotePort} → ${portForward.localHost}:${portForward.localPort}',
-        style: FluttyTheme.monoStyle.copyWith(
-          fontSize: 12,
-          color: theme.colorScheme.outline,
-        ),
-      ),
+      subtitle: socksUnavailableReason == null
+          ? Text(endpoint, style: subtitleStyle)
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(endpoint, style: subtitleStyle),
+                const SizedBox(height: 2),
+                Text(
+                  socksUnavailableReason,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (canOpenInBrowser)
             IconButton(
-              tooltip: 'Open in app browser',
+              tooltip: isDynamic
+                  ? 'Browse through ${portForward.name}'
+                  : 'Open in app browser',
               icon: const Icon(Icons.open_in_browser),
               onPressed: onOpenBrowser,
             ),
@@ -393,7 +430,11 @@ class _PortForwardListTile extends StatelessWidget {
           const SizedBox(width: 8),
           Chip(
             label: Text(
-              isLocal ? 'Local' : 'Remote',
+              isDynamic
+                  ? 'SOCKS'
+                  : isLocal
+                  ? 'Local'
+                  : 'Remote',
               style: TextStyle(
                 fontSize: 10,
                 color: theme.colorScheme.onSurface,

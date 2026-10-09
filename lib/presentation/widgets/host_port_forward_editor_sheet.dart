@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
 import '../../data/repositories/port_forward_repository.dart';
+import '../../domain/models/port_forward_type.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
 import '../../domain/services/ssh_service.dart';
@@ -128,6 +129,8 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
 
   bool get _isEditing => widget.existing != null;
 
+  bool get _isDynamic => isDynamicPortForwardType(_forwardType);
+
   @override
   void initState() {
     super.initState();
@@ -136,14 +139,24 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
     _localHostController = TextEditingController(
       text: existing?.localHost ?? '127.0.0.1',
     );
+    final existingIsDynamic =
+        existing != null && isDynamicPortForwardType(existing.forwardType);
     _localPortController = TextEditingController(
-      text: existing?.localPort.toString() ?? '',
+      text: existing == null || (existingIsDynamic && existing.localPort == 0)
+          ? ''
+          : existing.localPort.toString(),
     );
+    // A SOCKS rule stores no destination; offer the defaults if the user
+    // switches it back to a local or remote forward.
     _remoteHostController = TextEditingController(
-      text: existing?.remoteHost ?? widget.defaultRemoteHost,
+      text: existing == null || existingIsDynamic
+          ? widget.defaultRemoteHost
+          : existing.remoteHost,
     );
     _remotePortController = TextEditingController(
-      text: existing?.remotePort.toString() ?? '',
+      text: existing == null || existingIsDynamic
+          ? ''
+          : existing.remotePort.toString(),
     );
     _autoStart = existing?.autoStart ?? widget.defaultAutoStart;
     _forwardType = existing?.forwardType ?? 'local';
@@ -231,26 +244,34 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
                     : (value) => setState(() => _forwardType = value),
               ),
               const SizedBox(height: 20),
-              PortForwardEndpointFields(
-                label: 'Local',
-                hostController: _localHostController,
-                portController: _localPortController,
-                hostHint: '127.0.0.1',
-                portHint: _compact ? '3306' : '8080',
-                compact: _compact,
-                enabled: !_isSaving,
-              ),
-              const SizedBox(height: 16),
-              PortForwardEndpointFields(
-                label: 'Remote',
-                hostController: _remoteHostController,
-                portController: _remotePortController,
-                hostHint: 'localhost',
-                portHint: _compact ? '3306' : '80',
-                portInputAction: TextInputAction.done,
-                compact: _compact,
-                enabled: !_isSaving,
-              ),
+              if (_isDynamic)
+                SocksPortField(
+                  portController: _localPortController,
+                  compact: _compact,
+                  enabled: !_isSaving,
+                )
+              else ...[
+                PortForwardEndpointFields(
+                  label: 'Local',
+                  hostController: _localHostController,
+                  portController: _localPortController,
+                  hostHint: '127.0.0.1',
+                  portHint: _compact ? '3306' : '8080',
+                  compact: _compact,
+                  enabled: !_isSaving,
+                ),
+                const SizedBox(height: 16),
+                PortForwardEndpointFields(
+                  label: 'Remote',
+                  hostController: _remoteHostController,
+                  portController: _remotePortController,
+                  hostHint: 'localhost',
+                  portHint: _compact ? '3306' : '80',
+                  portInputAction: TextInputAction.done,
+                  compact: _compact,
+                  enabled: !_isSaving,
+                ),
+              ],
               const SizedBox(height: 20),
               SwitchListTile(
                 title: const Text('Auto-start'),
@@ -305,8 +326,11 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
     if (!_formKey.currentState!.validate()) {
       return;
     }
+    final isDynamic = _isDynamic;
     final isRemote = _forwardType == 'remote';
-    final bindHost = isRemote
+    final bindHost = isDynamic
+        ? dynamicPortForwardBindHost
+        : isRemote
         ? _remoteHostController.text.trim()
         : _localHostController.text.trim();
     if (!isPortForwardLoopbackHost(bindHost)) {
@@ -320,10 +344,15 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
       }
     }
     final name = _nameController.text;
-    final localHost = _localHostController.text;
-    final localPort = int.parse(_localPortController.text);
-    final remoteHost = _remoteHostController.text;
-    final remotePort = int.parse(_remotePortController.text);
+    // A SOCKS rule always listens on loopback and has no fixed destination.
+    final localHost = isDynamic
+        ? dynamicPortForwardBindHost
+        : _localHostController.text;
+    final localPort = isDynamic && _localPortController.text.isEmpty
+        ? 0
+        : int.parse(_localPortController.text);
+    final remoteHost = isDynamic ? '' : _remoteHostController.text;
+    final remotePort = isDynamic ? 0 : int.parse(_remotePortController.text);
     final autoStart = _autoStart;
     final forwardType = _forwardType;
     final previous = widget.existing;

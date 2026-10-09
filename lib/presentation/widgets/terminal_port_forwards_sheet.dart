@@ -7,8 +7,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
+import '../../domain/models/port_forward_type.dart';
+import '../../domain/services/socks_browser_proxy_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
+import '../screens/port_forward_browser_screen.dart';
 import 'brand_empty_state.dart';
 import 'brand_error_state.dart';
 import 'brand_list_skeleton.dart';
@@ -449,24 +452,39 @@ class _TerminalPortForwardsSheetState
     final isActive = activeTunnel != null;
     final isPending = _pendingPortForwardIds.contains(portForward.id);
     final isLocal = portForward.forwardType == 'local';
-    final canOpenInBrowser =
-        isLocal &&
-        activeTunnel?.browserHost != null &&
-        activeTunnel?.browserPort != null;
-    final endpoint = isLocal
+    final isDynamic = isDynamicPortForwardType(portForward.forwardType);
+    final socksSupport = isDynamic
+        ? ref.watch(socksBrowserRoutingSupportProvider).asData?.value
+        : null;
+    final canOpenInBrowser = isDynamic
+        ? isActive && (socksSupport?.isSupported ?? false)
+        : isLocal &&
+              activeTunnel?.browserHost != null &&
+              activeTunnel?.browserPort != null;
+    final endpoint = isDynamic
+        ? '${dynamicPortForwardListenerLabel(activeTunnel?.localPort ?? portForward.localPort)}'
+              ' · SOCKS5 via host'
+        : isLocal
         ? '${portForward.localHost}:${portForward.localPort} → '
               '${portForward.remoteHost}:${portForward.remotePort}'
         : '${portForward.remoteHost}:${portForward.remotePort} → '
               '${portForward.localHost}:${portForward.localPort}';
+    final socksUnavailableReason = socksSupport?.unavailableReason;
 
     return Semantics(
       button: canOpenInBrowser,
       label: canOpenInBrowser
-          ? 'Open ${portForward.name} in the in-app browser'
+          ? (isDynamic
+                ? 'Browse through ${portForward.name} in the in-app browser'
+                : 'Open ${portForward.name} in the in-app browser')
           : null,
       child: InkWell(
         onTap: canOpenInBrowser
-            ? () => unawaited(widget.onOpenInBrowser(activeTunnel!))
+            ? () => unawaited(
+                isDynamic
+                    ? _openSocksBrowser(portForward)
+                    : widget.onOpenInBrowser(activeTunnel!),
+              )
             : null,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
@@ -478,7 +496,9 @@ class _TerminalPortForwardsSheetState
           child: Row(
             children: [
               Icon(
-                isLocal
+                isDynamic
+                    ? Icons.hub_outlined
+                    : isLocal
                     ? Icons.arrow_forward_rounded
                     : Icons.arrow_back_rounded,
                 color: isActive
@@ -519,6 +539,15 @@ class _TerminalPortForwardsSheetState
                         fontWeight: isActive ? FontWeight.w600 : null,
                       ),
                     ),
+                    if (socksUnavailableReason != null) ...[
+                      const SizedBox(height: FluttyTheme.spacingXs),
+                      Text(
+                        socksUnavailableReason,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -599,6 +628,17 @@ class _TerminalPortForwardsSheetState
       }
     }
   }
+
+  Future<void> _openSocksBrowser(PortForward portForward) =>
+      openSocksForwardBrowser(
+        context,
+        portForward: portForward,
+        hostLabel: ref
+            .read(hostByIdProvider(widget.hostId))
+            .asData
+            ?.value
+            ?.label,
+      );
 
   Future<void> _openEditor({PortForward? existing}) async {
     final result = await showHostPortForwardEditorSheet(
