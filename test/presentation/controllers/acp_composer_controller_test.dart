@@ -81,18 +81,23 @@ class _GatedUploader implements AcpAttachmentUploader {
 const _agentError = AcpRemoteException(code: -32603, message: 'Internal error');
 
 /// Completes every prompt with [stopReason] instead of `end_turn`.
+/// Completes the nth prompt with the nth of [stopReasons], repeating the
+/// last one, instead of `end_turn`.
 class _StoppingAcpSessionManager extends RecordingAcpSessionManager {
-  _StoppingAcpSessionManager(this.stopReason);
+  _StoppingAcpSessionManager(this.stopReasons);
 
-  AcpStopReason stopReason;
+  List<AcpStopReason> stopReasons;
+  var _calls = 0;
 
   @override
   Future<AcpPromptResult> prompt(
     AcpSessionKey key,
     List<AcpContentBlock> content,
   ) async {
+    final reason = stopReasons[_calls.clamp(0, stopReasons.length - 1)];
+    _calls++;
     await super.prompt(key, content);
-    return AcpPromptResult(stopReason: stopReason);
+    return AcpPromptResult(stopReason: reason);
   }
 }
 
@@ -721,7 +726,7 @@ void main() {
     );
 
     test('a stopped last turn offers its prompt back for editing', () async {
-      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      final manager = _StoppingAcpSessionManager([AcpStopReason.cancelled]);
       final controller = _controller(
         manager,
         session: _session(embeddedContext: true),
@@ -747,7 +752,11 @@ void main() {
     });
 
     test('only the latest submission offers a stopped prompt', () async {
-      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      // The first prompt is stopped, but a newer one was sent after it.
+      final manager = _StoppingAcpSessionManager([
+        AcpStopReason.cancelled,
+        AcpStopReason.endTurn,
+      ]);
       final gate = Completer<void>();
       manager.promptGate = gate;
       final controller = _controller(manager)..setText('first');
@@ -756,7 +765,6 @@ void main() {
       expect(await controller.send(), isTrue);
       controller.setText('second');
       expect(await controller.send(), isTrue);
-      manager.stopReason = AcpStopReason.endTurn;
       gate.complete();
       await Future<void>.delayed(Duration.zero);
 
@@ -764,7 +772,7 @@ void main() {
     });
 
     test('sending a new prompt or dismissing clears the offer', () async {
-      final manager = _StoppingAcpSessionManager(AcpStopReason.cancelled);
+      final manager = _StoppingAcpSessionManager([AcpStopReason.cancelled]);
       final controller = _controller(manager)..setText('one');
       addTearDown(controller.dispose);
 
@@ -774,11 +782,138 @@ void main() {
       controller.dismissTurnRecovery();
       expect(controller.turnRecovery, isNull);
 
-      manager.stopReason = AcpStopReason.endTurn;
+      manager.stopReasons = [AcpStopReason.endTurn];
       controller.setText('two');
       expect(await controller.send(), isTrue);
       await Future<void>.delayed(Duration.zero);
       expect(controller.turnRecovery, isNull);
+    });
+  });
+
+  group('prompt failure outcomes', () {
+    test(
+      'a prompt that was never sent returns to the draft with Retry',
+      () async {
+        final manager = RecordingAcpSessionManager()
+          ..throwOnPrompt = const AcpPromptNotSentException();
+        final controller = _controller(manager)..setText('queued work');
+        addTearDown(controller.dispose);
+
+        expect(await controller.send(), isTrue);
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.text, 'queued work');
+        expect(controller.canRetryFailedPrompt, isTrue);
+        expect(controller.turnRecovery, isNull);
+      },
+    );
+
+    test(
+      'an agent error after the turn started offers Edit, not Retry',
+      () async {
+        final manager = RecordingAcpSessionManager()
+          ..throwOnPrompt = const AcpPromptFailedMidTurnException(_agentError);
+        final controller = _controller(manager)..setText('migrate');
+        addTearDown(controller.dispose);
+
+        expect(await controller.send(), isTrue);
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.text, isEmpty);
+        expect(controller.canRetryFailedPrompt, isFalse);
+        expect(
+          controller.turnRecovery?.kind,
+          AcpTurnRecoveryKind.failedMidTurn,
+        );
+        controller.editLastPrompt();
+        expect(controller.text, 'migrate');
+      },
+    );
+
+    test('a lost prompt survives sending another one', () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpConnectionClosedException();
+      final controller = _controller(manager)..setText('deploy');
+      addTearDown(controller.dispose);
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      manager.throwOnPrompt = null;
+      controller.setText('continue');
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.turnRecovery?.kind, AcpTurnRecoveryKind.unconfirmed);
+      expect(controller.turnRecovery?.drafts.single.text, 'deploy');
+    });
+
+    test(
+      'a lost answer is withdrawn once its reattached turn finishes',
+      () async {
+        final manager = RecordingAcpSessionManager()
+          ..throwOnPrompt = const AcpConnectionClosedException();
+        final controller = _controller(
+          manager,
+          session: _session(promptStatus: AcpPromptStatus.streaming),
+        )..setText('long build');
+        addTearDown(controller.dispose);
+        expect(await controller.send(), isTrue);
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.turnRecovery, isNotNull);
+
+        // The failing turn's own settling is not a reattached turn finishing.
+        controller.updateSession(_session());
+        expect(controller.turnRecovery, isNotNull);
+        controller.updateSession(
+          _session(
+            status: AcpConnectionStatus.detached,
+            promptStatus: AcpPromptStatus.streaming,
+          ),
+        );
+        expect(controller.turnRecovery, isNotNull);
+        controller.updateSession(
+          _session(promptStatus: AcpPromptStatus.streaming),
+        );
+        expect(controller.turnRecovery, isNotNull);
+        controller.updateSession(_session());
+        expect(controller.turnRecovery, isNull);
+      },
+    );
+
+    test('editing keeps prompts whose attachments would not fit', () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpConnectionClosedException();
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxCount: 2),
+        ),
+        session: _session(embeddedContext: true),
+      )..setText('with files');
+      addTearDown(controller.dispose);
+      AcpAttachmentCandidate file(String name) => AcpAttachmentCandidate.memory(
+        name: name,
+        bytes: Uint8List.fromList('notes'.codeUnits),
+        mimeType: 'text/plain',
+      );
+      controller
+        ..addAttachment(file('a.txt'))
+        ..addAttachment(file('b.txt'));
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.turnRecovery, isNotNull);
+
+      controller
+        ..addAttachment(file('c.txt'))
+        ..editLastPrompt();
+      expect(controller.turnRecovery, isNotNull);
+      expect(controller.attachments, hasLength(1));
+      expect(controller.error?.kind, AcpComposerErrorKind.attachment);
+
+      controller
+        ..removeAttachment(controller.attachments.single.id)
+        ..editLastPrompt();
+      expect(controller.turnRecovery, isNull);
+      expect(controller.attachments.map((a) => a.name), ['a.txt', 'b.txt']);
+      expect(controller.text, 'with files');
     });
   });
 }

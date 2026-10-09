@@ -105,6 +105,7 @@ void registerAcpTurnRecoveryTests() {
               drafts: const [
                 (text: 'retry me', attachments: <AcpComposerAttachment>[]),
               ],
+              submission: 1,
             ),
             onEdit: () => edited = true,
             onDismiss: () => dismissed = true,
@@ -118,6 +119,28 @@ void registerAcpTurnRecoveryTests() {
       expect(edited, isTrue);
       await tester.tap(find.byTooltip('Dismiss'));
       expect(dismissed, isTrue);
+    });
+
+    testWidgets('a mid-turn failure names the risk with shape and text', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _app(
+          AcpTurnRecoveryBanner(
+            recovery: AcpTurnRecovery(
+              kind: AcpTurnRecoveryKind.failedMidTurn,
+              drafts: const [
+                (text: 'migrate', attachments: <AcpComposerAttachment>[]),
+              ],
+              submission: 1,
+            ),
+            onEdit: () {},
+            onDismiss: () {},
+          ),
+        ),
+      );
+      expect(find.textContaining('failed partway through'), findsOneWidget);
+      expect(find.byIcon(Icons.error_outline), findsOneWidget);
     });
   });
 }

@@ -314,6 +314,12 @@ class _FakeAcpServer implements AcpTransport {
     _reply(id, {'stopReason': 'end_turn'});
   }
 
+  /// Answers the oldest held prompt with a JSON-RPC error.
+  void failNextPrompt(String message) {
+    final id = _heldPromptIds.removeFirst();
+    _replyError(id, -32603, message);
+  }
+
   int get heldPromptCount => _heldPromptIds.length;
 
   void pushUpdate(String sessionId, Map<String, Object?> update) {
@@ -1565,6 +1571,88 @@ void main() {
       server.completeNextPrompt();
       await retry;
     });
+
+    test(
+      'a prompt still queued when the session closes was not sent',
+      () async {
+        final key = await startCopilot();
+        connector.servers[key.bridgeId]!.holdPrompts = true;
+        final first = manager.prompt(key, const [AcpTextContent('first')]);
+        await _pump();
+        final queued = manager.prompt(key, const [AcpTextContent('second')]);
+        await _pump();
+        final firstOutcome = first.then<Object?>(
+          (_) => null,
+          onError: (Object error) => error,
+        );
+
+        final queuedOutcome = expectLater(
+          queued,
+          throwsA(isA<AcpPromptNotSentException>()),
+        );
+
+        await manager.dispose();
+
+        await queuedOutcome;
+        // The dispatched prompt reached the agent: its answer was lost, which
+        // is not the same as never sending it.
+        expect(await firstOutcome, isNot(isA<AcpPromptNotSentException>()));
+      },
+    );
+
+    test('an agent error after the turn produced output is a mid-turn '
+        'failure and keeps the prompt', () async {
+      final key = await startCopilot();
+      final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+      final prompt = manager.prompt(key, const [AcpTextContent('migrate')]);
+      await _pump();
+      server.pushUpdate(key.acpSessionId, {
+        'sessionUpdate': 'tool_call',
+        'toolCallId': 'edit-1',
+        'title': 'Edit schema',
+        'kind': 'edit',
+        'status': 'completed',
+      });
+      await _pump();
+      server.failNextPrompt('Overloaded');
+
+      final error = await prompt.then<Object?>(
+        (_) => null,
+        onError: (Object error) => error,
+      );
+      expect(error, isA<AcpPromptFailedMidTurnException>());
+      expect(
+        (error! as AcpPromptFailedMidTurnException).cause,
+        isA<AcpRemoteException>(),
+      );
+      final entries = manager.state.byKeyValue(key.value)!.timeline.entries;
+      expect(
+        entries.whereType<AcpMessageEntry>().where(
+          (entry) => entry.role == AcpMessageRole.user,
+        ),
+        hasLength(1),
+      );
+    });
+
+    test(
+      'an agent error before any output is a refusal and rolls back',
+      () async {
+        final key = await startCopilot();
+        final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+        final prompt = manager.prompt(key, const [AcpTextContent('migrate')]);
+        await _pump();
+        server.failNextPrompt('Overloaded');
+
+        await expectLater(prompt, throwsA(isA<AcpRemoteException>()));
+        final entries = manager.state.byKeyValue(key.value)!.timeline.entries;
+        expect(
+          entries.whereType<AcpMessageEntry>().where(
+            (entry) => entry.role == AcpMessageRole.user,
+          ),
+          isEmpty,
+        );
+      },
+    );
 
     test('queues follow-up prompts and dispatches them sequentially', () async {
       final key = await startCopilot();

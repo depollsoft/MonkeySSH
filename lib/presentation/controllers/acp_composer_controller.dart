@@ -353,7 +353,15 @@ class AcpComposerController extends ChangeNotifier {
     }
     final previousPrompt = previous?.capabilities.prompt;
     final prompt = session?.capabilities.prompt;
-    return commandsChanged ||
+    final recovery = _turnRecovery?.afterSessionUpdate(
+      previous: previous,
+      session: session,
+      latestSubmission: _submissions,
+    );
+    final recoveryChanged = !identical(recovery, _turnRecovery);
+    _turnRecovery = recovery;
+    return recoveryChanged ||
+        commandsChanged ||
         previous?.status != session?.status ||
         previous?.promptStatus != session?.promptStatus ||
         previousPrompt?.image != prompt?.image ||
@@ -604,7 +612,7 @@ class AcpComposerController extends ChangeNotifier {
     _caret = 0;
     _attachments.clear();
     _error = null;
-    _turnRecovery = null;
+    if (_turnRecovery?.withdrawnBySend ?? false) _turnRecovery = null;
     _applyPendingRestore();
     _recomputeSlash();
     notifyListeners();
@@ -629,10 +637,12 @@ class AcpComposerController extends ChangeNotifier {
       final result = await promptFuture;
       if (!_disposed &&
           result.stopReason == AcpStopReason.cancelled &&
-          submission == _submissions) {
+          submission == _submissions &&
+          (_turnRecovery?.withdrawnBySend ?? true)) {
         _turnRecovery = AcpTurnRecovery(
           kind: AcpTurnRecoveryKind.cancelled,
           drafts: [(text: snapshotText, attachments: snapshotAttachments)],
+          submission: _submissions,
         );
         notifyListeners();
       }
@@ -640,17 +650,22 @@ class AcpComposerController extends ChangeNotifier {
       if (_disposed) {
         return;
       }
-      if (!isConfirmedAcpPromptFailure(error)) {
-        // The answer was lost, not refused: keep the prompt out of the draft
-        // so it is not resent by reflex, and offer it back explicitly.
+      final failure = classifyAcpPromptFailure(error);
+      if (failure != AcpPromptFailure.refused) {
+        // The agent may have acted on it: keep the prompt out of the draft so
+        // it is not resent by reflex, and offer it back explicitly, together
+        // with any earlier prompt still waiting there.
         final previous = _turnRecovery;
         _turnRecovery = AcpTurnRecovery(
-          kind: AcpTurnRecoveryKind.unconfirmed,
+          kind: failure == AcpPromptFailure.lost
+              ? AcpTurnRecoveryKind.unconfirmed
+              : AcpTurnRecoveryKind.failedMidTurn,
           drafts: [
-            if (previous?.kind == AcpTurnRecoveryKind.unconfirmed)
-              ...previous!.drafts,
+            if (previous != null && !previous.withdrawnBySend)
+              ...previous.drafts,
             (text: snapshotText, attachments: snapshotAttachments),
           ],
+          submission: _submissions,
         );
         notifyListeners();
         return;
@@ -682,14 +697,39 @@ class AcpComposerController extends ChangeNotifier {
       canRetryFailedPrompt && await send();
 
   /// Puts the prompts offered by [turnRecovery] back into the draft, ahead of
-  /// anything typed since.
+  /// anything typed since. Prompts whose attachments would exceed the
+  /// attachment limit stay offered.
   void editLastPrompt() {
     final recovery = _turnRecovery;
     if (recovery == null || !isEditable) {
       return;
     }
-    _turnRecovery = null;
-    for (final draft in recovery.drafts.reversed) {
+    var room = limits.maxCount - _attachments.length;
+    final restored = <AcpSubmittedDraft>[];
+    final kept = <AcpSubmittedDraft>[];
+    for (final draft in recovery.drafts) {
+      if (kept.isEmpty && draft.attachments.length <= room) {
+        restored.add(draft);
+        room -= draft.attachments.length;
+      } else {
+        kept.add(draft);
+      }
+    }
+    _turnRecovery = kept.isEmpty
+        ? null
+        : AcpTurnRecovery(
+            kind: recovery.kind,
+            drafts: kept,
+            submission: recovery.submission,
+            turnResumed: recovery.turnResumed,
+          );
+    if (kept.isNotEmpty) {
+      _error = const AcpComposerError(
+        AcpComposerErrorKind.attachment,
+        'Remove some attachments to restore the rest of the prompt.',
+      );
+    }
+    for (final draft in restored.reversed) {
       _mergeDraft(draft.text, draft.attachments);
     }
     _recomputeSlash();

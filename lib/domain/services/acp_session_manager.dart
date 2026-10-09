@@ -1742,6 +1742,31 @@ class AcpPromptQueueFullException implements Exception {
   String toString() => 'The agent prompt queue is full.';
 }
 
+/// Raised for a prompt that never reached the agent: it was still queued
+/// when the session closed, or its request was never written. Sending it
+/// again cannot repeat anything.
+class AcpPromptNotSentException implements Exception {
+  /// Creates a not-sent failure.
+  const AcpPromptNotSentException();
+
+  @override
+  String toString() => 'The prompt was not sent.';
+}
+
+/// Raised when the agent fails a prompt after it had started on it: tool
+/// calls or reply text arrived before the error, so running the prompt again
+/// may repeat what it already did.
+class AcpPromptFailedMidTurnException implements Exception {
+  /// Wraps the agent's [cause].
+  const AcpPromptFailedMidTurnException(this.cause);
+
+  /// The error the agent answered with.
+  final Object cause;
+
+  @override
+  String toString() => 'The agent failed the prompt after starting it.';
+}
+
 class _QueuedAcpPrompt {
   _QueuedAcpPrompt({
     required this.content,
@@ -2896,9 +2921,7 @@ class _SessionController {
 
   Future<AcpPromptResult> prompt(List<AcpContentBlock> content) {
     if (_disposed) {
-      return Future<AcpPromptResult>.error(
-        const AcpConnectionClosedException(),
-      );
+      return Future<AcpPromptResult>.error(const AcpPromptNotSentException());
     }
     final snapshot = List<AcpContentBlock>.unmodifiable(content);
     // Estimate from the block payloads; the JSON-RPC connection enforces the
@@ -2964,10 +2987,12 @@ class _SessionController {
           ),
         );
         final promptAttachment = attachment;
+        var sent = false;
         try {
           final result = await promptAttachment.client.prompt(
             sessionId: _key.acpSessionId,
             content: queued.content,
+            onSent: () => sent = true,
           );
           _update(
             (s) => s.copyWith(
@@ -2980,11 +3005,13 @@ class _SessionController {
             queued.completer.complete(result);
           }
         } on Object catch (error, stackTrace) {
+          // A request that never started writing was not in flight.
           final detachedInFlight =
-              !identical(attachment, promptAttachment) ||
-              !_holdsAttachment ||
-              !_state.attached ||
-              _state.status == AcpConnectionStatus.detached;
+              sent &&
+              (!identical(attachment, promptAttachment) ||
+                  !_holdsAttachment ||
+                  !_state.attached ||
+                  _state.status == AcpConnectionStatus.detached);
           if (detachedInFlight) {
             _diagnostics.info(
               'acp.session',
@@ -3012,9 +3039,15 @@ class _SessionController {
             }
             continue;
           }
-          final rolledBackTimeline = _timelineBuilder.removeLocalUserPrompt(
-            queued.localMessageId,
-          );
+          // Once the agent has acted on the prompt it stays in the transcript
+          // above that output; otherwise the failed prompt is rolled back.
+          final midTurn =
+              sent &&
+              error is AcpRemoteException &&
+              _turnProgressedSince(queued.localMessageId);
+          final rolledBackTimeline = midTurn
+              ? _timelineBuilder.snapshot()
+              : _timelineBuilder.removeLocalUserPrompt(queued.localMessageId);
           final mapped = _mapClientError(error);
           _update(
             (s) => s.copyWith(
@@ -3029,7 +3062,14 @@ class _SessionController {
             ),
           );
           if (!queued.completer.isCompleted) {
-            queued.completer.completeError(error, stackTrace);
+            queued.completer.completeError(
+              !sent
+                  ? const AcpPromptNotSentException()
+                  : midTurn
+                  ? AcpPromptFailedMidTurnException(error)
+                  : error,
+              stackTrace,
+            );
           }
         }
       }
@@ -3037,6 +3077,25 @@ class _SessionController {
       _promptActive = false;
       _scheduleRecentPersistence();
     }
+  }
+
+  /// Whether the agent replied, reasoned or ran a tool after the local prompt
+  /// [localMessageId], counting updates received but not yet applied.
+  bool _turnProgressedSince(String localMessageId) {
+    _applyReceivedSessionUpdates();
+    final entries = _timelineBuilder.snapshot().entries;
+    final promptIndex = entries.indexWhere(
+      (entry) => entry is AcpMessageEntry && entry.messageId == localMessageId,
+    );
+    // A prompt trimmed off the bounded timeline had plenty of output after it.
+    if (promptIndex < 0) return true;
+    return entries
+        .skip(promptIndex + 1)
+        .any(
+          (entry) =>
+              entry is AcpToolCallEntry ||
+              (entry is AcpMessageEntry && entry.role != AcpMessageRole.user),
+        );
   }
 
   Future<void> cancelPrompt() async {
@@ -3592,7 +3651,7 @@ class _SessionController {
     while (_promptQueue.isNotEmpty) {
       final queued = _promptQueue.removeFirst();
       if (!queued.completer.isCompleted) {
-        queued.completer.completeError(const AcpConnectionClosedException());
+        queued.completer.completeError(const AcpPromptNotSentException());
       }
     }
     _queuedPromptBytes = 0;

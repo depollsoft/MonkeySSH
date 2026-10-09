@@ -8,9 +8,10 @@ import '../controllers/acp_turn_recovery.dart';
 
 /// A compact notice above the composer with an Edit action.
 ///
-/// After a stop it offers the prompt back for editing. After a lost answer it
-/// says the agent may still have run the prompt and offers no one-tap resend,
-/// because sending it again could repeat what the agent already did.
+/// After a stop it offers the prompt back for editing. After a lost answer,
+/// or an agent error once work had started, it says the agent may have acted
+/// on the prompt and offers no one-tap resend, because sending it again could
+/// repeat what the agent already did.
 class AcpTurnRecoveryBanner extends StatelessWidget {
   /// Creates a recovery banner.
   const AcpTurnRecoveryBanner({
@@ -46,6 +47,12 @@ class AcpTurnRecoveryBanner extends StatelessWidget {
         plural
             ? 'No reply arrived. The agent may have run these anyway.'
             : 'No reply arrived. The agent may have run this anyway.',
+      ),
+      AcpTurnRecoveryKind.failedMidTurn => (
+        Icons.error_outline,
+        scheme.error,
+        'The agent failed partway through. Check what it did before sending '
+            'this again.',
       ),
     };
     return Semantics(
