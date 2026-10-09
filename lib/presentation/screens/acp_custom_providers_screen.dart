@@ -7,6 +7,7 @@ library;
 
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -284,7 +285,11 @@ class _AgentTile extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
           const SizedBox(height: FluttyTheme.spacingXs),
-          _ApprovalStatus(approved: approved, style: muted),
+          _ApprovalStatus(
+            approved: approved,
+            renamed: definition.renamedFromId != null,
+            style: muted,
+          ),
         ],
       ),
       trailing: approved
@@ -302,9 +307,14 @@ class _AgentTile extends StatelessWidget {
 }
 
 class _ApprovalStatus extends StatelessWidget {
-  const _ApprovalStatus({required this.approved, this.style});
+  const _ApprovalStatus({
+    required this.approved,
+    this.renamed = false,
+    this.style,
+  });
 
   final bool approved;
+  final bool renamed;
   final TextStyle? style;
 
   @override
@@ -321,7 +331,11 @@ class _ApprovalStatus extends StatelessWidget {
         const SizedBox(width: FluttyTheme.spacingXs),
         Flexible(
           child: Text(
-            approved ? 'approved' : 'needs approval',
+            approved
+                ? 'approved'
+                : renamed
+                ? 'id changed · needs approval'
+                : 'needs approval',
             style: style,
             overflow: TextOverflow.ellipsis,
           ),
@@ -563,7 +577,7 @@ class _AcpCustomProviderEditScreenState
             padding: const EdgeInsets.all(FluttyTheme.spacingMd),
             children: [
               if (definition != null) ...[
-                _EditorApprovalBanner(definition: definition),
+                _EditorApprovalBanner(initial: definition),
                 const SizedBox(height: FluttyTheme.spacingMd),
               ],
               TextFormField(
@@ -621,8 +635,9 @@ class _AcpCustomProviderEditScreenState
                   hintText: 'acp',
                   helperText:
                       'One per line, exactly as written, spaces included. An '
-                      'empty line between arguments passes an empty one. No '
-                      r'shell quoting, ~ or $VARIABLE expansion.',
+                      'empty line between arguments passes an empty one; '
+                      'empty lines at the end are ignored. No shell quoting, '
+                      r'~ or $VARIABLE expansion.',
                   helperMaxLines: 3,
                   alignLabelWithHint: true,
                 ),
@@ -724,15 +739,25 @@ class _AcpCustomProviderEditScreenState
   }
 }
 
-class _EditorApprovalBanner extends StatelessWidget {
-  const _EditorApprovalBanner({required this.definition});
+class _EditorApprovalBanner extends ConsumerWidget {
+  const _EditorApprovalBanner({required this.initial});
 
-  final AcpCustomProviderDefinition definition;
+  /// The definition the editor opened with; the banner follows the stored
+  /// one, so approving from here updates it at once.
+  final AcpCustomProviderDefinition initial;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final definition =
+        ref
+            .watch(acpCustomProvidersProvider)
+            .asData
+            ?.value
+            .firstWhereOrNull((candidate) => candidate.id == initial.id) ??
+        initial;
     final theme = Theme.of(context);
     final approved = definition.isCommandApproved;
+    final renamedFrom = definition.renamedFromId;
     final colorScheme = theme.colorScheme;
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -757,6 +782,10 @@ class _EditorApprovalBanner extends StatelessWidget {
                 approved
                     ? 'Approved. Any change, including the name, needs '
                           'approval again.'
+                    : renamedFrom != null
+                    ? 'A built-in agent now uses the ID "$renamedFrom", so '
+                          'this agent moved to "${definition.id}". Review it '
+                          'to run it again.'
                     : 'Needs approval before it can run.',
                 style: theme.textTheme.bodySmall,
               ),

@@ -21,6 +21,7 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
+import 'package:monkeyssh/presentation/widgets/acp_auth_method_sheet.dart';
 import 'package:monkeyssh/presentation/widgets/acp_custom_agent_launch.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
@@ -89,6 +90,7 @@ class _FakeLookup implements AcpCustomProviderLookup {
 class _ResumingManager extends FakeAcpSessionManager {
   final List<({String providerId, String acpSessionId, String cwd})> resumes =
       [];
+  final List<AcpSessionWorkspaceOptions?> resumeWorkspaces = [];
 
   @override
   Future<AcpSessionLaunchResult> resumeProviderSession({
@@ -105,6 +107,7 @@ class _ResumingManager extends FakeAcpSessionManager {
     AcpSessionWorkspaceOptions? workspace,
   }) async {
     resumes.add((providerId: providerId, acpSessionId: acpSessionId, cwd: cwd));
+    resumeWorkspaces.add(workspace);
     return AcpSessionLaunchStarted(
       fakeAcpKey(providerId: providerId, acpSessionId: acpSessionId),
     );
@@ -315,6 +318,7 @@ void main() {
             cwd: '/work/project',
             title: 'Refactor the parser',
             updatedAt: '2026-10-08T12:00:00Z',
+            additionalDirectories: ['/work/shared'],
           ),
         ],
       ),
@@ -342,6 +346,57 @@ void main() {
       ),
     ]);
     expect(manager.starts, isEmpty);
+    // The roots the agent reported for the session go with the resume.
+    expect(
+      manager.resumeWorkspaces.single?.additionalDirectories,
+      contains('/work/shared'),
+    );
+  });
+
+  testWidgets('terminal sign-in refuses an agent no longer approved', (
+    tester,
+  ) async {
+    final lookup = _FakeLookup([]);
+    bool? signedIn;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [acpCustomProviderLookupProvider.overrideWithValue(lookup)],
+        child: MaterialApp(
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => ElevatedButton(
+                onPressed: () async => signedIn = await runAcpTerminalSignIn(
+                  context,
+                  ref,
+                  AcpTerminalAuthLaunch.forMethod(
+                    hostId: 1,
+                    providerId: 'goose',
+                    providerLabel: 'Goose',
+                    method: const AcpAuthMethod(
+                      id: 'login',
+                      name: 'Sign in',
+                      type: AcpAuthMethod.terminalType,
+                    ),
+                    launchArgv: const ['goose', 'acp'],
+                    workingDirectory: '/repo',
+                  ),
+                ),
+                child: const Text('sign in'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('sign in'));
+    await tester.pumpAndSettle();
+
+    expect(signedIn, isFalse);
+    expect(
+      find.textContaining('Approve this agent in Settings › Custom agents'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('lists sessions only for the stored, approved definition', (

@@ -6,6 +6,8 @@ import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -219,6 +221,98 @@ void main() {
       throwsA(isA<AcpCustomProviderException>()),
     );
     expect(await service.listCustomProviders(), hasLength(1));
+  });
+
+  test(
+    'an agent stored under a now-reserved ID survives the next save',
+    () async {
+      final created = await addGoose();
+      final stored =
+          (jsonDecode(
+                (await settings.getString(SettingKeys.acpCustomProviders))!,
+              ) as List).single
+              as Map<String, Object?>;
+      // As if it had been saved before `opencode` was reserved.
+      await settings.setString(
+        SettingKeys.acpCustomProviders,
+        jsonEncode([
+          {...stored, 'id': 'opencode'},
+        ]),
+      );
+
+      // Any later change writes the list back; the agent must stay.
+      await service.create(
+        label: 'Kimi',
+        launchCommand: AcpLaunchCommand(executable: 'kimi'),
+      );
+
+      final definitions = await service.listCustomProviders();
+      expect(definitions.map((definition) => definition.id), [
+        'custom-opencode',
+        'kimi',
+      ]);
+      expect(definitions.first.launchCommand, created.launchCommand);
+      expect(definitions.first.renamedFromId, 'opencode');
+      final raw = await settings.getString(SettingKeys.acpCustomProviders);
+      expect(raw, contains('"custom-opencode"'));
+    },
+  );
+
+  group('currentAcpTerminalSignInLaunch', () {
+    const method = AcpAuthMethod(
+      id: 'terminal-login',
+      name: 'Sign in',
+      type: AcpAuthMethod.terminalType,
+      args: ['login'],
+    );
+
+    AcpTerminalAuthLaunch launchFor(String providerId) =>
+        AcpTerminalAuthLaunch.forMethod(
+          hostId: 1,
+          providerId: providerId,
+          providerLabel: 'Goose',
+          method: method,
+          launchArgv: const ['old-goose', 'acp'],
+          workingDirectory: '/repo',
+        );
+
+    test('runs the command approved now', () async {
+      final created = await service.create(
+        label: 'Goose',
+        launchCommand: AcpLaunchCommand(
+          executable: 'goose',
+          arguments: const ['acp'],
+        ),
+      );
+      await service.approve(
+        created.id,
+        reviewedFingerprint: created.fingerprint,
+      );
+
+      final launch = await currentAcpTerminalSignInLaunch(
+        service,
+        launchFor(created.id),
+      );
+
+      expect(launch!.argv, ['goose', 'acp', 'login']);
+    });
+
+    test('refuses a deleted or unapproved agent', () async {
+      final created = await addGoose();
+      expect(
+        await currentAcpTerminalSignInLaunch(service, launchFor(created.id)),
+        isNull,
+      );
+      expect(
+        await currentAcpTerminalSignInLaunch(service, launchFor('deleted')),
+        isNull,
+      );
+    });
+
+    test('leaves built-in agents unchanged', () async {
+      final builtin = launchFor(AcpBuiltinProviderIds.copilotCli);
+      expect(await currentAcpTerminalSignInLaunch(service, builtin), builtin);
+    });
   });
 
   test('delete removes the definition', () async {

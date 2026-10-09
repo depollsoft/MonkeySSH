@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:collection/collection.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/acp_authentication.dart';
 import '../models/acp_provider.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'monkeymux_acp_bridge_service.dart';
@@ -296,6 +297,28 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
 
   static List<AcpCustomProviderDefinition> _decode(String? raw) =>
       decodeStoredAcpCustomProviders(decodeJsonList(raw));
+}
+
+/// The terminal sign-in [launch] to run now.
+///
+/// A sign-in reruns the agent's own command. For a custom agent that is the
+/// command approved now, not the one captured when its session started:
+/// returns `null` when the agent was deleted or awaits approval.
+Future<AcpTerminalAuthLaunch?> currentAcpTerminalSignInLaunch(
+  AcpCustomProviderLookup lookup,
+  AcpTerminalAuthLaunch launch,
+) async {
+  if (launch.providerId.startsWith(acpBuiltinProviderIdPrefix)) return launch;
+  final definition = await lookup.getCustomProvider(launch.providerId);
+  if (definition == null || !definition.isCommandApproved) return null;
+  return AcpTerminalAuthLaunch.forMethod(
+    hostId: launch.hostId,
+    providerId: launch.providerId,
+    providerLabel: launch.providerLabel,
+    method: launch.method,
+    launchArgv: definition.launchCommand.argv,
+    workingDirectory: launch.workingDirectory,
+  );
 }
 
 /// Derives a unique custom provider ID slug from [label].

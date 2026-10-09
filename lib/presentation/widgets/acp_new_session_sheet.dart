@@ -26,6 +26,7 @@ import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_session_workspace.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/services/acp_custom_provider_host_service.dart';
@@ -35,6 +36,7 @@ import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/monkeymux_acp_bridge_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
@@ -508,7 +510,11 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       );
       if (!mounted) return null;
       final windowsProblem = sshSession.remoteIsWindows
-          ? acpWindowsLaunchArgumentProblem(customProvider.launchCommand)
+          ? acpWindowsCustomLaunchProblem(
+              label: customProvider.label,
+              argv: customProvider.launchCommand.argv,
+              providerId: customProvider.id,
+            )
           : null;
       if (problem != null || windowsProblem != null) {
         setState(() => _error = problem ?? windowsProblem);
@@ -534,7 +540,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         chooseAuthentication: _chooseAuthentication,
         autoApprovePermissions: launchPreferences.startInYoloMode,
         replace: replace,
-        workspace: _workspace.options,
+        // Re-send the roots the agent reported for this session alongside
+        // the ones chosen here.
+        workspace: _withListedDirectories(_workspace.options, agentSession),
       );
     }
 
@@ -572,6 +580,17 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       workspace: _workspace.options,
     );
   }
+
+  static AcpSessionWorkspaceOptions _withListedDirectories(
+    AcpSessionWorkspaceOptions options,
+    AcpSessionInfo session,
+  ) => AcpSessionWorkspaceOptions(
+    mcpServerIds: options.mcpServerIds,
+    additionalDirectories: <String>{
+      ...options.additionalDirectories,
+      ...session.additionalDirectories,
+    }.toList(growable: false),
+  );
 
   /// The approved custom agent with [providerId], when one is selected.
   AcpCustomProviderDefinition? _customProvider(String? providerId) => ref

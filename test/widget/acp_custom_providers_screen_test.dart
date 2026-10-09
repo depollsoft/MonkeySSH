@@ -242,6 +242,69 @@ void main() {
     await _unmount(tester);
   });
 
+  testWidgets('approving from the editor updates its banner at once', (
+    tester,
+  ) async {
+    final service = AcpCustomProviderService(SettingsService(db));
+    await tester.runAsync(
+      () => service.create(
+        label: 'Goose',
+        launchCommand: AcpLaunchCommand(executable: 'goose'),
+      ),
+    );
+    await _pump(tester, db);
+    await tester.tap(find.text('Goose'));
+    await tester.pumpAndSettle();
+    expect(find.text('Needs approval before it can run.'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Review'));
+    await tester.pumpAndSettle();
+    await _tapVisible(
+      tester,
+      find.byKey(const ValueKey('custom-agent-approve')),
+    );
+
+    expect(find.text('Needs approval before it can run.'), findsNothing);
+    expect(
+      find.text(
+        'Approved. Any change, including the name, needs approval again.',
+      ),
+      findsOneWidget,
+    );
+    await _unmount(tester);
+  });
+
+  testWidgets('says why an agent moved off a reserved ID', (tester) async {
+    final settings = SettingsService(db);
+    final approved = AcpCustomProviderDefinition.create(
+      id: 'opencode-mine',
+      label: 'OpenCode',
+      launchCommand: AcpLaunchCommand(
+        executable: 'opencode',
+        arguments: const ['acp'],
+      ),
+    ).approve();
+    await tester.runAsync(
+      () => settings.setString(
+        SettingKeys.acpCustomProviders,
+        jsonEncode([
+          {...approved.toJson(), 'id': 'opencode'},
+        ]),
+      ),
+    );
+    await _pump(tester, db);
+
+    expect(find.text('id changed · needs approval'), findsOneWidget);
+    await tester.tap(find.text('OpenCode'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('A built-in agent now uses the ID "opencode"'),
+      findsOneWidget,
+    );
+    expect(find.text('id: custom-opencode'), findsOneWidget);
+    await _unmount(tester);
+  });
+
   testWidgets('imported agents wait for approval', (tester) async {
     final service = await _pump(tester, db);
     clipboardText = jsonEncode({
