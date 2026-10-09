@@ -456,6 +456,166 @@ final _yoloConflictPatterns = <AgentLaunchTool, List<RegExp>>{
   ],
 };
 
+/// The permissive part of [_yoloConflictPatterns]: switches that, on their
+/// own, let each tool act without asking. Valued options count only with the
+/// listed values, so `--permission-mode plan` is not YOLO but
+/// `--permission-mode bypassPermissions` is.
+final _yoloSwitches =
+    <AgentLaunchTool, ({Set<String> flags, Map<String, Set<String>> valued})>{
+      AgentLaunchTool.claudeCode: (
+        flags: {'--dangerously-skip-permissions'},
+        valued: {
+          '--permission-mode': {'bypassPermissions'},
+        },
+      ),
+      AgentLaunchTool.copilotCli: (
+        flags: {
+          '--allow-all',
+          '--yolo',
+          '--allow-all-tools',
+          '--allow-all-paths',
+          '--allow-all-urls',
+        },
+        valued: const {},
+      ),
+      AgentLaunchTool.codex: (
+        flags: {
+          '--full-auto',
+          '--yolo',
+          '--dangerously-bypass-approvals-and-sandbox',
+        },
+        valued: {
+          '--approval-mode': {'never'},
+          '--ask-for-approval': {'never'},
+          '-a': {'never'},
+          '--sandbox': {'danger-full-access'},
+          '-s': {'danger-full-access'},
+        },
+      ),
+      AgentLaunchTool.openCode: (
+        flags: {'--auto', '--yolo', '--dangerously-skip-permissions'},
+        valued: const {},
+      ),
+      AgentLaunchTool.antigravity: (
+        flags: {'--dangerously-skip-permissions'},
+        valued: const {},
+      ),
+      AgentLaunchTool.cursorAgent: (
+        flags: {'--force', '--yolo', '-f'},
+        valued: const {},
+      ),
+      AgentLaunchTool.hermes: (flags: {'--yolo'}, valued: const {}),
+      AgentLaunchTool.museCode: (
+        flags: {
+          '--yolo',
+          '--disable-approval',
+          '--disable-sandbox',
+          '--trust-workspace',
+        },
+        valued: const {},
+      ),
+      AgentLaunchTool.grokBuild: (
+        flags: {'--always-approve', '--yolo', '--dangerously-skip-permissions'},
+        valued: {
+          '--permission-mode': {'bypassPermissions'},
+        },
+      ),
+    };
+
+/// Whether [arguments], read as shell words, switch [tool] into YOLO mode on
+/// their own, whatever the host's YOLO preference says.
+bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) =>
+    agentYoloSwitchesInArguments(tool, arguments).isNotEmpty;
+
+/// The switches in [arguments], read as shell words, that put [tool] in
+/// YOLO mode, written as they appear (`--sandbox danger-full-access`).
+List<String> agentYoloSwitchesInArguments(
+  AgentLaunchTool tool,
+  String? arguments,
+) {
+  final switches = _yoloSwitches[tool];
+  if (switches == null || arguments == null || arguments.trim().isEmpty) {
+    return const [];
+  }
+  final found = <String>[];
+  final words = _splitShellWords(arguments);
+  for (var index = 0; index < words.length; index++) {
+    final word = words[index];
+    if (switches.flags.contains(word)) {
+      found.add(word);
+      continue;
+    }
+    final equals = word.indexOf('=');
+    if (equals > 0) {
+      final allowed = switches.valued[word.substring(0, equals)];
+      if (allowed != null && allowed.contains(word.substring(equals + 1))) {
+        found.add(word);
+      }
+      continue;
+    }
+    final allowed = switches.valued[word];
+    if (allowed != null &&
+        index + 1 < words.length &&
+        allowed.contains(words[index + 1])) {
+      found.add('$word ${words[++index]}');
+    }
+  }
+  return found;
+}
+
+/// Splits [value] into words the way a POSIX shell would for plain
+/// arguments: quotes group and are removed, and backslashes escape. It never
+/// throws; an unterminated quote runs to the end.
+List<String> _splitShellWords(String value) {
+  final words = <String>[];
+  final current = StringBuffer();
+  var started = false;
+  var quote = _ShellQuoteMode.none;
+  for (var index = 0; index < value.length; index++) {
+    final character = value[index];
+    switch (quote) {
+      case _ShellQuoteMode.single:
+        if (character == "'") {
+          quote = _ShellQuoteMode.none;
+        } else {
+          current.write(character);
+        }
+      case _ShellQuoteMode.double:
+        if (character == '"') {
+          quote = _ShellQuoteMode.none;
+        } else if (character.codeUnitAt(0) == _backslashCodeUnit &&
+            index + 1 < value.length &&
+            r'"\$`'.contains(value[index + 1])) {
+          current.write(value[++index]);
+        } else {
+          current.write(character);
+        }
+      case _ShellQuoteMode.none:
+        if (character.trim().isEmpty) {
+          if (started) {
+            words.add(current.toString());
+            current.clear();
+            started = false;
+          }
+          continue;
+        }
+        started = true;
+        if (character == "'") {
+          quote = _ShellQuoteMode.single;
+        } else if (character == '"') {
+          quote = _ShellQuoteMode.double;
+        } else if (character.codeUnitAt(0) == _backslashCodeUnit &&
+            index + 1 < value.length) {
+          current.write(value[++index]);
+        } else {
+          current.write(character);
+        }
+    }
+  }
+  if (started) words.add(current.toString());
+  return words;
+}
+
 /// Builds the shell command for a saved agent launch preset.
 String buildAgentLaunchCommand(
   AgentLaunchPreset preset, {

@@ -7659,6 +7659,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       {};
   final Map<String, SerialTaskQueue> _automaticForwardReconfigurationQueues =
       {};
+  final Set<int> _automaticForwardHeldHostIds = {};
   Timer? _previewStateRefreshTimer;
   final _backgroundStatusSyncQueue = SerialTaskQueue();
 
@@ -7696,6 +7697,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       _automaticForwardShellOwnedByEndpoint.clear();
       _automaticForwardHostReconfigurationQueues.clear();
       _automaticForwardReconfigurationQueues.clear();
+      _automaticForwardHeldHostIds.clear();
     });
     _connectionHostIds.clear();
     _connectionSessionTitles.clear();
@@ -7713,6 +7715,27 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     int hostId, {
     bool forceNew = false,
     bool useHostThemeOverrides = true,
+  }) async {
+    try {
+      return await _connectHost(
+        hostId,
+        forceNew: forceNew,
+        useHostThemeOverrides: useHostThemeOverrides,
+      );
+    } finally {
+      // A link's forwarding hold belongs to the connection it opens. When
+      // the attempt fails or is cancelled, no session takes it, so nothing
+      // else would end it and a later normal connect would inherit it.
+      if (getConnectionsForHost(hostId).isEmpty) {
+        _automaticForwardHeldHostIds.remove(hostId);
+      }
+    }
+  }
+
+  Future<SshConnectionResult> _connectHost(
+    int hostId, {
+    required bool forceNew,
+    required bool useHostThemeOverrides,
   }) async {
     final cancellationToken = SshConnectionCancellationToken();
     _connectionCancellationTokens
@@ -8207,7 +8230,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
         fields: {'hostId': host.id, 'errorType': error.runtimeType},
       );
     }
-    final proxyHost = host.autoForwardPorts && resolvedProxyName != null
+    final proxyHost =
+        _allowsAutomaticForwarding(host) && resolvedProxyName != null
         ? '$resolvedProxyName.localhost'
         : null;
     final shellLineageTokens = sessions
@@ -8250,7 +8274,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     if (owner != null) {
       await configureSession(
         owner,
-        enabled: host.autoForwardPorts && proxyHost != null,
+        enabled: _allowsAutomaticForwarding(host) && proxyHost != null,
       );
     }
     if (configurationFailed) {
@@ -8288,6 +8312,33 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       }
     });
   }
+
+  /// Keeps automatic port forwarding off for [hostId] until the user starts
+  /// it, because a link is about to open the host's first connection.
+  ///
+  /// A host that already has a connection keeps whatever forwarding it runs.
+  /// The hold ends with [releaseAutomaticForwardingHold] or when the host's
+  /// last connection closes.
+  void holdAutomaticForwardingUntilStarted(int hostId) {
+    if (getConnectionsForHost(hostId).isEmpty) {
+      _automaticForwardHeldHostIds.add(hostId);
+    }
+  }
+
+  /// Whether a link-opened connection is holding [hostId]'s automatic
+  /// forwarding off.
+  bool isAutomaticForwardingHeld(int hostId) =>
+      _automaticForwardHeldHostIds.contains(hostId);
+
+  /// Ends a hold from [holdAutomaticForwardingUntilStarted] and applies the
+  /// host's automatic forwarding setting.
+  Future<void> releaseAutomaticForwardingHold(int hostId) {
+    _automaticForwardHeldHostIds.remove(hostId);
+    return reconfigureAutomaticPortForwardingForHost(hostId);
+  }
+
+  bool _allowsAutomaticForwarding(Host host) =>
+      host.autoForwardPorts && !_automaticForwardHeldHostIds.contains(host.id);
 
   /// Reapplies automatic forwarding for every currently connected saved host.
   Future<void> reconfigureAutomaticPortForwardingForConnectedHosts() async {
@@ -8345,7 +8396,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       final hostLevelOwnerCandidates = siblingHosts
           .where(
             (host) =>
-                host.autoForwardPorts && connectedHostIds.contains(host.id),
+                _allowsAutomaticForwarding(host) &&
+                connectedHostIds.contains(host.id),
           )
           .map((host) => host.id)
           .toList(growable: false);
@@ -8396,6 +8448,9 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     int hostId,
     String? endpointKey,
   ) async {
+    if (getConnectionsForHost(hostId).isEmpty) {
+      _automaticForwardHeldHostIds.remove(hostId);
+    }
     final triggerHost = await _telemetryHostForConnection(hostId);
     if (triggerHost != null && endpointKey != null) {
       await _reconfigureAutomaticPortForwardingEndpoint(
