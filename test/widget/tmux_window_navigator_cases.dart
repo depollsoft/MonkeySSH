@@ -31,6 +31,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/tmux_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
+import 'package:monkeyssh/presentation/shortcuts/app_shortcuts.dart';
 import 'package:monkeyssh/presentation/widgets/acp_mux_window_status_badge.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
@@ -723,6 +724,7 @@ void registerTmuxWindowNavigatorTests() {
         bool? confirmWindowClose,
         ValueChanged<TmuxNavigatorAction?>? onActionSelected,
         FakeAcpSessionManager? acpManager,
+        bool fromKeyboardShortcut = false,
       }) async {
         final resolvedAcpManager = acpManager ?? FakeAcpSessionManager();
         addTearDown(resolvedAcpManager.dispose);
@@ -750,16 +752,20 @@ void registerTmuxWindowNavigatorTests() {
                 body: Consumer(
                   builder: (context, ref, _) => TextButton(
                     onPressed: () {
+                      Future<TmuxNavigatorAction?> show() => showTmuxNavigator(
+                        context: context,
+                        session: session,
+                        tmuxSessionName: tmuxSessionName,
+                        remoteMuxBackend: remoteMuxBackend,
+                        remoteMultiplexerService: tmuxService,
+                        isProUser: isProUser,
+                        startClisInYoloMode: startClisInYoloMode,
+                      );
                       unawaited(
-                        showTmuxNavigator(
-                          context: context,
-                          session: session,
-                          tmuxSessionName: tmuxSessionName,
-                          remoteMuxBackend: remoteMuxBackend,
-                          remoteMultiplexerService: tmuxService,
-                          isProUser: isProUser,
-                          startClisInYoloMode: startClisInYoloMode,
-                        ).then((action) => onActionSelected?.call(action)),
+                        (fromKeyboardShortcut
+                                ? runHardwareKeyboardFlow(show)
+                                : show())
+                            .then((action) => onActionSelected?.call(action)),
                       );
                     },
                     child: const Text('Open'),
@@ -1170,6 +1176,83 @@ void registerTmuxWindowNavigatorTests() {
           expect(closeAction.windowId, windowId);
         });
       }
+
+      group('opened from a keyboard shortcut', () {
+        setUp(() {
+          FocusManager.instance.highlightStrategy =
+              FocusHighlightStrategy.alwaysTraditional;
+        });
+        tearDown(() {
+          FocusManager.instance.highlightStrategy =
+              FocusHighlightStrategy.automatic;
+        });
+
+        bool focusShows(String text) {
+          final context = FocusManager.instance.primaryFocus?.context;
+          return context != null &&
+              find
+                  .descendant(
+                    of: find.byElementPredicate(
+                      (element) => identical(element, context),
+                    ),
+                    matching: find.text(text),
+                  )
+                  .evaluate()
+                  .isNotEmpty;
+        }
+
+        testWidgets('focuses the active row; arrows and Return switch', (
+          tester,
+        ) async {
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) async => windows);
+          TmuxNavigatorAction? selected;
+          await pumpNavigatorHost(
+            tester,
+            tmuxSessionName: 'main',
+            fromKeyboardShortcut: true,
+            onActionSelected: (action) => selected = action,
+          );
+          await tester.tap(find.text('Open'));
+          await tester.pumpAndSettle();
+
+          expect(focusShows('vim'), isTrue);
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+          expect(focusShows('Claude Code'), isTrue);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pumpAndSettle();
+
+          expect(selected, isA<TmuxSwitchWindowAction>());
+          expect((selected! as TmuxSwitchWindowAction).windowIndex, 1);
+        });
+
+        testWidgets('Esc closes the sheet', (tester) async {
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) async => windows);
+          var closed = false;
+          TmuxNavigatorAction? selected;
+          await pumpNavigatorHost(
+            tester,
+            tmuxSessionName: 'main',
+            fromKeyboardShortcut: true,
+            onActionSelected: (action) {
+              closed = true;
+              selected = action;
+            },
+          );
+          await tester.tap(find.text('Open'));
+          await tester.pumpAndSettle();
+          expect(find.text('windows'), findsOneWidget);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pumpAndSettle();
+
+          expect(find.text('windows'), findsNothing);
+          expect(closed, isTrue);
+          expect(selected, isNull);
+        });
+      });
 
       testWidgets('shows MonkeyMux terminal shortcuts', (tester) async {
         const sessionName = 'main';

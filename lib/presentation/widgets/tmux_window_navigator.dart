@@ -26,12 +26,14 @@ import '../../domain/services/ssh_error_policy.dart';
 import '../../domain/services/ssh_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/tmux_service.dart';
+import '../shortcuts/app_shortcuts.dart';
 import 'acp_mux_window_status_badge.dart';
 import 'acp_native_badge.dart';
 import 'acp_new_session_sheet.dart';
 import 'acp_session_presentation.dart';
 import 'agent_tool_icon.dart';
 import 'ai_session_picker.dart';
+import 'keyboard_list_navigation.dart';
 import 'premium_badge.dart';
 import 'terminal_overlay_focus.dart';
 import 'tmux_window_policy.dart';
@@ -222,6 +224,8 @@ Future<bool> confirmMuxWindowClose({
       .initializedValue();
   if (!context.mounted) return false;
   if (!shouldConfirm) return true;
+  // From a keyboard shortcut, Return confirms like a desktop default button.
+  final focusConfirm = hardwareKeyboardOverlaysTakeFocus;
   var dontAskAgain = false;
   final result = await showDialog<({bool confirmed, bool dontAskAgain})>(
     context: context,
@@ -254,6 +258,7 @@ Future<bool> confirmMuxWindowClose({
             child: const Text('Cancel'),
           ),
           FilledButton(
+            autofocus: focusConfirm,
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(dialogContext).colorScheme.error,
               foregroundColor: Theme.of(dialogContext).colorScheme.onError,
@@ -310,7 +315,9 @@ AgentLaunchTool? agentLaunchToolForAcpProviderId(String providerId) =>
 
 /// Shows the tmux window navigator bottom sheet.
 ///
-/// Returns the action the user selected, or `null` if dismissed.
+/// Returns the action the user selected, or `null` if dismissed. Opened from
+/// a keyboard shortcut, the sheet takes focus on the active window's row so
+/// arrows, Return and Esc drive it.
 Future<TmuxNavigatorAction?> showTmuxNavigator({
   required BuildContext context,
   required SshSession session,
@@ -323,22 +330,28 @@ Future<TmuxNavigatorAction?> showTmuxNavigator({
       AgentWindowModePreference.askEveryTime,
   String? tmuxExtraFlags,
   String? scopeWorkingDirectory,
-}) => showModalBottomSheet<TmuxNavigatorAction>(
-  context: context,
-  isScrollControlled: true,
-  requestFocus: terminalOverlayRouteRequestFocus(context),
-  builder: (context) => _TmuxNavigatorSheet(
-    session: session,
-    tmuxSessionName: tmuxSessionName,
-    remoteMuxBackend: remoteMuxBackend,
-    remoteMultiplexerService: remoteMultiplexerService,
-    tmuxExtraFlags: tmuxExtraFlags,
-    isProUser: isProUser,
-    startClisInYoloMode: startClisInYoloMode,
-    agentWindowModePreference: agentWindowModePreference,
-    scopeWorkingDirectory: scopeWorkingDirectory,
-  ),
-);
+}) {
+  final focusActiveWindow = hardwareKeyboardOverlaysTakeFocus;
+  return showModalBottomSheet<TmuxNavigatorAction>(
+    context: context,
+    isScrollControlled: true,
+    requestFocus: terminalOverlayRouteRequestFocus(context),
+    builder: (context) => KeyboardListNavigation(
+      child: _TmuxNavigatorSheet(
+        session: session,
+        tmuxSessionName: tmuxSessionName,
+        remoteMuxBackend: remoteMuxBackend,
+        remoteMultiplexerService: remoteMultiplexerService,
+        tmuxExtraFlags: tmuxExtraFlags,
+        isProUser: isProUser,
+        startClisInYoloMode: startClisInYoloMode,
+        agentWindowModePreference: agentWindowModePreference,
+        scopeWorkingDirectory: scopeWorkingDirectory,
+        focusActiveWindow: focusActiveWindow,
+      ),
+    ),
+  );
+}
 
 /// Shows the tmux new-window picker bottom sheet.
 Future<TmuxNavigatorAction?> showTmuxNewWindowPicker({
@@ -354,30 +367,32 @@ Future<TmuxNavigatorAction?> showTmuxNewWindowPicker({
   context: context,
   isScrollControlled: true,
   requestFocus: terminalOverlayRouteRequestFocus(context),
-  builder: (context) => TmuxToolPickerSheet(
-    installedToolsFuture: installedToolsFuture,
-    preferredTool: preferredTool,
-    nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
-    onToolSelected: (tool) => _selectAgentLaunchMode(
-      context: context,
-      tool: tool,
-      isProUser: isProUser,
-      startClisInYoloMode: startClisInYoloMode,
-      nativeAcpProviderIds: nativeAcpProviderIds,
-      preference: agentWindowModePreference,
+  builder: (context) => KeyboardListNavigation(
+    child: TmuxToolPickerSheet(
+      installedToolsFuture: installedToolsFuture,
+      preferredTool: preferredTool,
+      nativeAcpTools: nativeAcpProviderIds.keys.toSet(),
+      onToolSelected: (tool) => _selectAgentLaunchMode(
+        context: context,
+        tool: tool,
+        isProUser: isProUser,
+        startClisInYoloMode: startClisInYoloMode,
+        nativeAcpProviderIds: nativeAcpProviderIds,
+        preference: agentWindowModePreference,
+      ),
+      onToolLongPressed: (tool) => _selectAgentLaunchMode(
+        context: context,
+        tool: tool,
+        isProUser: isProUser,
+        startClisInYoloMode: startClisInYoloMode,
+        nativeAcpProviderIds: nativeAcpProviderIds,
+        preference: agentWindowModePreference,
+        forcePicker: true,
+      ),
+      onEmptyWindow: () {
+        Navigator.pop(context, const TmuxNewWindowAction());
+      },
     ),
-    onToolLongPressed: (tool) => _selectAgentLaunchMode(
-      context: context,
-      tool: tool,
-      isProUser: isProUser,
-      startClisInYoloMode: startClisInYoloMode,
-      nativeAcpProviderIds: nativeAcpProviderIds,
-      preference: agentWindowModePreference,
-      forcePicker: true,
-    ),
-    onEmptyWindow: () {
-      Navigator.pop(context, const TmuxNewWindowAction());
-    },
   ),
 );
 
@@ -864,6 +879,7 @@ class _TmuxNavigatorSheet extends ConsumerStatefulWidget {
     required this.agentWindowModePreference,
     this.tmuxExtraFlags,
     this.scopeWorkingDirectory,
+    this.focusActiveWindow = false,
   });
 
   final SshSession session;
@@ -875,6 +891,9 @@ class _TmuxNavigatorSheet extends ConsumerStatefulWidget {
   final bool startClisInYoloMode;
   final AgentWindowModePreference agentWindowModePreference;
   final String? scopeWorkingDirectory;
+
+  /// Opened from a keyboard shortcut: focus the active window's row.
+  final bool focusActiveWindow;
 
   @override
   ConsumerState<_TmuxNavigatorSheet> createState() =>
@@ -1382,6 +1401,7 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
     return MuxWindowRow(
       key: ValueKey(('server-window', window.index)),
       presentation: presentation,
+      autofocus: widget.focusActiveWindow && isActive,
       onClose: () => unawaited(
         _confirmCloseWindow(window, displayTitle: presentation.title),
       ),
@@ -1859,6 +1879,7 @@ class MuxWindowRow extends StatelessWidget {
     required this.onTap,
     required this.onClose,
     this.inBar = false,
+    this.autofocus = false,
     super.key,
   });
 
@@ -1873,6 +1894,9 @@ class MuxWindowRow extends StatelessWidget {
 
   /// Uses the compact persistent-bar layout.
   final bool inBar;
+
+  /// Whether the row takes keyboard focus when its scope has none.
+  final bool autofocus;
 
   @override
   Widget build(BuildContext context) {
@@ -1910,6 +1934,7 @@ class MuxWindowRow extends StatelessWidget {
       key: ValueKey(
         orphan && !inBar ? 'native-acp-session-$identity' : '$prefix-$identity',
       ),
+      autofocus: autofocus,
       dense: true,
       visualDensity: inBar && orphan ? null : _tmuxNavigatorDenseVisualDensity,
       minVerticalPadding: inBar && orphan ? null : 2,
