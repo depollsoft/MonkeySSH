@@ -229,6 +229,28 @@ void registerAcpTranscriptMarkdownTests() {
       expect(export.omittedAttachments, 3);
     });
 
+    test('marks resources a tool returned as not included', () {
+      final export = _export([
+        AcpToolCallEntry(
+          id: 'tool',
+          toolCall: AcpToolCall(
+            id: 't',
+            title: 'Fetch notes',
+            status: AcpToolStatus.completed,
+            resources: const [
+              AcpResourceRef(uri: '/repo/notes.txt', text: 'secret notes'),
+            ],
+          ),
+        ),
+      ]);
+      expect(
+        export.markdown,
+        contains('**Fetch notes** · completed · 1 attachment not included'),
+      );
+      expect(export.markdown, isNot(contains('secret notes')));
+      expect(export.omittedAttachments, 1);
+    });
+
     test('excludes reasoning unless asked', () {
       expect(_export(_conversation()).markdown, isNot(contains('secret')));
       final included = _export(_conversation(), includeReasoning: true);

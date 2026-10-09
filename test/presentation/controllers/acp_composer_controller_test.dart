@@ -330,6 +330,54 @@ void main() {
     },
   );
 
+  test('a prompt refused after a parked restore comes back after it', () async {
+    final manager = RecordingAcpSessionManager();
+    final firstGate = Completer<void>();
+    final secondGate = Completer<void>();
+    final uploadGate = Completer<void>();
+    manager
+      ..promptGate = firstGate
+      ..throwOnPrompt = _agentError;
+    final controller = _controller(
+      manager,
+      preparation: const AcpAttachmentPreparationService(
+        limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+      ),
+      uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+      session: _session(embeddedContext: true),
+    )..setText('first');
+    addTearDown(controller.dispose);
+
+    expect(await controller.send(), isTrue);
+    controller
+      ..setText('second')
+      ..addAttachment(
+        AcpAttachmentCandidate.memory(
+          name: 'big.txt',
+          bytes: Uint8List.fromList('hello world'.codeUnits),
+          mimeType: 'text/plain',
+        ),
+      )
+      ..enableRemoteUploadFallback();
+    final second = controller.send();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.activity, AcpComposerActivity.preparing);
+
+    // The first prompt is refused while the second is uploading, so its
+    // restore is parked; then the second is refused too.
+    firstGate.complete();
+    await Future<void>.delayed(Duration.zero);
+    manager.promptGate = secondGate;
+    uploadGate.complete();
+    expect(await second, isTrue);
+    expect(controller.text, 'first');
+    secondGate.complete();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.text, 'first\n\nsecond');
+    expect(controller.attachments.map((a) => a.name), ['big.txt']);
+  });
+
   test(
     'restores every rejected draft parked behind a preparing send',
     () async {

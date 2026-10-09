@@ -791,23 +791,15 @@ class AcpComposerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Merges a rejected prompt back into the draft. A failure the current send
-  /// already reported stays visible; otherwise the send error is shown.
-  void _restoreSnapshot(
-    String snapshotText,
-    List<AcpComposerAttachment> snapshotAttachments,
-  ) {
-    _mergeDraft(snapshotText, snapshotAttachments);
-    _reportRestore();
-  }
-
   /// The draft right after the last refused prompt was restored, where that
   /// restored block's text ends in it, and which attachments it restored.
   ({String text, int textEnd, Set<String> attachmentIds})? _lastRestore;
 
-  /// Restores a refused prompt like [_restoreSnapshot], but after any refused
-  /// prompt restored just before it (with no edit since), so several queued
-  /// prompts that never left come back in the order they were sent.
+  /// Merges a refused prompt back into the draft, after any refused prompt
+  /// restored just before it (with no edit since), so several queued prompts
+  /// that never left come back in the order they were sent. A failure the
+  /// current send already reported stays visible; otherwise the send error is
+  /// shown.
   void _restoreInSendOrder(
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
@@ -874,12 +866,12 @@ class AcpComposerController extends ChangeNotifier {
     if (_pendingRestores.isEmpty) {
       return;
     }
-    // _restoreSnapshot prepends, so merging newest first keeps the drafts in
-    // the order they were sent.
-    final restores = _pendingRestores.reversed.toList();
+    // Through the same bookkeeping as a refusal handled while idle, so a
+    // prompt refused after these still comes back after them.
+    final restores = List.of(_pendingRestores);
     _pendingRestores.clear();
     for (final restore in restores) {
-      _restoreSnapshot(restore.text, restore.attachments);
+      _restoreInSendOrder(restore.text, restore.attachments);
     }
   }
 

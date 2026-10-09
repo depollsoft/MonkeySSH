@@ -113,9 +113,11 @@ final class AcpTranscriptExport {
 ///
 /// Prompts and replies keep their text. Tool calls become one-line summaries
 /// with any diffs as fenced patches. Reasoning is left out unless
-/// [includeReasoning] is set. Images, audio and attachments are never
-/// embedded; each is marked where it appeared. Missing earlier history and
-/// anything else left out are stated at the top.
+/// [includeReasoning] is set. Images, audio, prompt attachments and tool
+/// output resources are never embedded; each is marked where it appeared.
+/// A resource the agent quoted inside its reply stays as the thread shows
+/// it, as part of the reply's text. Missing earlier history and anything
+/// else left out are stated at the top.
 AcpTranscriptExport buildAcpTranscriptMarkdown(
   AcpTranscriptExportSource source, {
   bool includeReasoning = false,
@@ -385,6 +387,12 @@ final class _ExportWriter {
       buffer.write(
         ' · ${_count(media, 'image or audio clip', 'images and audio clips')} '
         'not included',
+      );
+    }
+    if (call.resources.isNotEmpty) {
+      omittedAttachments += call.resources.length;
+      buffer.write(
+        ' · ${_count(call.resources.length, 'attachment')} not included',
       );
     }
     for (final diff in call.diffs) {
