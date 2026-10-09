@@ -33,6 +33,7 @@ import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
@@ -924,6 +925,7 @@ class _TestThemeModeNotifier extends ThemeModeNotifier {
 Host _buildHost({
   required int id,
   String? autoConnectCommand,
+  int? autoConnectSnippetId,
   String? tmuxSessionName,
   String? tmuxWorkingDirectory,
   String? tmuxExtraFlags,
@@ -936,6 +938,7 @@ Host _buildHost({
   port: 22,
   username: 'root',
   autoConnectCommand: autoConnectCommand,
+  autoConnectSnippetId: autoConnectSnippetId,
   tmuxSessionName: tmuxSessionName,
   tmuxWorkingDirectory: tmuxWorkingDirectory,
   tmuxExtraFlags: tmuxExtraFlags,
@@ -1154,6 +1157,17 @@ void main() {
       );
 
       expect(items.where((item) => item.label == 'Create Snippet'), isEmpty);
+    });
+
+    test('keeps key-token text from a selection literal in the snippet', () {
+      final prefill = buildSnippetPrefillFromTerminalSelection(
+        r'db.c.createIndex({key:1}) \{x',
+      );
+      expect(prefill.command, r'db.c.createIndex(\{key:1}) \{x');
+      expect(
+        parseSnippetKeySequence(prefill.command!).plainText,
+        r'db.c.createIndex({key:1}) \{x',
+      );
     });
 
     test('builds snippet name from selected terminal text', () {
@@ -2358,7 +2372,12 @@ void main() {
       WidgetTester tester,
       String name, {
       bool expectReview = false,
+      bool keyTokensReady = true,
     }) async {
+      // Startup records that stored snippets are written for key tokens.
+      if (keyTokensReady) {
+        await markSnippetKeyTokensEscaped(db);
+      }
       await openTerminalOverflowMenu(tester);
       await tester.tap(terminalMenuItemButton('Snippets'));
       await tester.pumpAndSettle();
@@ -2459,6 +2478,32 @@ void main() {
       );
     }
 
+    for (final (command, reviewed) in [
+      ('rm -rf a && rm -rf b{key:enter}', true),
+      ('/clear{key:enter}', false),
+    ]) {
+      testWidgets(
+        'without prompt reporting only suspicious key snippets are reviewed, '
+        'reviewed=$reviewed',
+        (tester) async {
+          await SnippetRepository(db)
+              .insert(SnippetsCompanion.insert(name: 'Keys', command: command));
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Keys', expectReview: reviewed);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), endsWith('\r'));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
     testWidgets('snippet pauses separate keys on the wire after a held Enter', (
       tester,
     ) async {
@@ -2473,7 +2518,8 @@ void main() {
       shellWrites.clear();
       final writes = timeShellWrites(tester);
 
-      await runSnippetFromSheet(tester, 'Quit vim');
+      // `:wq` is typed after a submitted line, so it asks first.
+      await runSnippetFromSheet(tester, 'Quit vim', expectReview: true);
       await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
 
@@ -2520,12 +2566,33 @@ void main() {
 
       expect(shellOutput(), isNot(contains('\x1b[Z')));
       expect(
-        find.text('Snippet stopped: you typed in the terminal.'),
+        find.text('Snippet stopped: other input went to the terminal.'),
         findsOneWidget,
       );
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets(
+      'until stored snippets are upgraded, key tokens paste as text',
+      (tester) async {
+        await SnippetRepository(db).insert(
+          SnippetsCompanion.insert(name: 'Old', command: 'ls{key:enter}'),
+        );
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+
+        await runSnippetFromSheet(tester, 'Old', keyTokensReady: false);
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+
+        expect(shellOutput(), 'ls{key:enter}');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
 
     testWidgets('a snippet key sequence stops when the connection drops', (
       tester,
@@ -4703,6 +4770,7 @@ void main() {
           command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
         ),
       );
+      await markSnippetKeyTokensEscaped(db);
       await pumpTmuxScreen(
         tester,
         _MockTmuxService(),
@@ -11275,6 +11343,34 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
+
+    testWidgets('auto-connect sends an upgraded snippet as it reads', (
+      tester,
+    ) async {
+      final snippetId = await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Index',
+          command: r"mongosh --eval 'db.c.find(\{key:1})'",
+        ),
+      );
+      host = _buildHost(id: host.id, autoConnectSnippetId: snippetId);
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+
+      await pumpScreen(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        shellWrites.map(utf8.decode).join(),
+        contains("mongosh --eval 'db.c.find({key:1})'\r"),
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
       'still reviews an imported resume command before executing it',

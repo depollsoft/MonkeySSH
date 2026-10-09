@@ -257,6 +257,36 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                         color: Theme.of(context).colorScheme.outline,
                       ),
                     ),
+                    for (final warning in parseSnippetKeySequence(
+                      _contentController.text,
+                    ).warnings) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        key: const ValueKey('snippet-key-token-warning'),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.info_outline_rounded,
+                            size: 16,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              warning,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 24),
 
                     // Variable preview

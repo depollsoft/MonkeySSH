@@ -570,6 +570,15 @@ String buildSnippetNameFromTerminalSelection(String text) {
   return 'Terminal selection';
 }
 
+/// The snippet editor prefill for selected terminal text. Selected output is
+/// text, so any `{key:...}` in it is escaped to stay literal.
+@visibleForTesting
+SnippetEditPrefill buildSnippetPrefillFromTerminalSelection(String command) =>
+    SnippetEditPrefill(
+      name: buildSnippetNameFromTerminalSelection(command),
+      command: escapeSnippetKeyTokens(command),
+    );
+
 /// Resolves the active terminal selection text, preferring the xterm
 /// controller's selection but falling back to the SelectionArea's content
 /// when system selection (mobile) owns the selection.
@@ -6399,7 +6408,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           );
         }
       } else {
-        snippetCommand = snippet.command;
+        // Auto-connect cannot press keys: send what the snippet reads as.
+        snippetCommand = snippetLiteralText(snippet.command);
         resolvedSnippetId = snippet.id;
       }
     }
@@ -14746,10 +14756,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     await context.pushNamed<void>(
       Routes.snippetAdd,
-      extra: SnippetEditPrefill(
-        name: buildSnippetNameFromTerminalSelection(command),
-        command: command,
-      ),
+      extra: buildSnippetPrefillFromTerminalSelection(command),
     );
     if (mounted) {
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
@@ -15985,6 +15992,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     KeyboardToolbarSnippet selectedSnippet,
   ) async {
     final repository = ref.read(snippetRepositoryProvider);
+    final tokensReady = await repository.keyTokensReady();
     final snippet = await repository.getById(selectedSnippet.id);
     if (!mounted) {
       return;
@@ -15993,7 +16001,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _showClipboardMessage('Snippet is no longer available.');
       return;
     }
-    final sequence = parseSnippetKeySequence(snippet.command);
+    final sequence = tokensReady
+        ? parseSnippetKeySequence(snippet.command)
+        : SnippetKeySequence.literal(snippet.command);
     if (sequence.needsTerminal) {
       _showClipboardMessage(
         'This snippet presses keys, so it only works in a terminal window.',
@@ -16014,6 +16024,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     KeyboardToolbarSnippet selectedSnippet,
   ) async {
     final snippetRepo = ref.read(snippetRepositoryProvider);
+    // Until stored snippets are upgraded for key tokens, an old `{key:esc}`
+    // is text and must be pasted as text.
+    final tokensReady = await snippetRepo.keyTokensReady();
     final snippet = await snippetRepo.getById(selectedSnippet.id);
     if (!mounted) {
       return;
@@ -16023,7 +16036,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _showClipboardMessage('Snippet is no longer available.');
       return;
     }
-    final parsedSequence = parseSnippetKeySequence(snippet.command);
+    final parsedSequence = tokensReady
+        ? parseSnippetKeySequence(snippet.command)
+        : SnippetKeySequence.literal(snippet.command);
     if (parsedSequence.errors.isNotEmpty) {
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage(parsedSequence.errors.first);
@@ -16036,23 +16051,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     final sequence = parsedSequence.withVariables(substitution.values);
-    final skipsReview =
-        sequence.hasActions &&
-        !shouldReviewSnippetKeySequence(
-          shellStatus: _shellStatus,
-          isUsingAltBuffer: _isUsingAltBuffer,
-          isAgentToolActive: _isAgentToolActive,
-        );
+    final reviewMode = sequence.hasActions
+        ? snippetKeySequenceReviewMode(
+            shellStatus: _shellStatus,
+            isUsingAltBuffer: _isUsingAltBuffer,
+            isAgentToolActive: _isAgentToolActive,
+          )
+        : SnippetReviewMode.full;
 
     final shouldInsert =
-        skipsReview ||
+        reviewMode == SnippetReviewMode.none ||
         await _confirmTerminalInsertionIfNeeded(
           insertedText: sequence.hasActions
               ? sequence.reviewText
               : sequence.plainText,
-          buildReview: (commandText) => assessSnippetCommandInsertion(
-            commandText,
-            hadVariableSubstitution: substitution.hadVariableSubstitution,
+          buildReview: (commandText) => reviewForSnippetMode(
+            assessSnippetCommandInsertion(
+              commandText,
+              hadVariableSubstitution: substitution.hadVariableSubstitution,
+            ),
+            reviewMode,
+            typesAfterSubmit: sequence.typesAfterSubmit,
           ),
           title: 'Review snippet command',
           messageBuilder: (_) =>
@@ -16128,7 +16147,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _showClipboardMessage(
           inputGeneration == _terminalUserInputGeneration
               ? 'Snippet stopped: the connection or window changed.'
-              : 'Snippet stopped: you typed in the terminal.',
+              : 'Snippet stopped: other input went to the terminal.',
         );
       }
     } finally {

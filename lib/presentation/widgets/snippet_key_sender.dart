@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:xterm/xterm.dart';
 
+import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/services/ssh_service.dart' show TerminalShellStatus;
 import 'terminal_key_input.dart';
@@ -27,23 +28,61 @@ enum SnippetSendOutcome {
   stopped,
 }
 
-/// Whether a snippet with key tokens should go through the command review
-/// before it is sent.
-///
-/// Only when shell integration reports a prompt on the main screen and no
-/// agent is running: there a submitted line runs as a shell command, which is
-/// what the review is for. Inside an agent, a full-screen program, or a shell
-/// that does not report its prompt, a key snippet is a macro the user wrote
-/// on purpose and goes out in one tap.
-bool shouldReviewSnippetKeySequence({
+/// How a snippet with key tokens goes through the command review.
+enum SnippetReviewMode {
+  /// Shell integration reports a prompt: the same review as a plain snippet,
+  /// so a key that submits a line counts as a line break.
+  full,
+
+  /// The prompt state is unknown (the shell does not report it): review only
+  /// what the plain-snippet classifier finds suspicious (chaining,
+  /// redirection, command substitution, control characters, variables, text
+  /// typed after a submitted line). One command followed by the key that
+  /// submits it, or by more keys, does not ask on its own.
+  suspiciousOnly,
+
+  /// A full-screen program, a detected agent or a running command owns the
+  /// input: the snippet is a macro for that program and goes out in one tap.
+  none,
+}
+
+/// Picks the [SnippetReviewMode] for a key snippet.
+SnippetReviewMode snippetKeySequenceReviewMode({
   required TerminalShellStatus? shellStatus,
   required bool isUsingAltBuffer,
   required bool isAgentToolActive,
-}) =>
-    !isUsingAltBuffer &&
-    !isAgentToolActive &&
-    (shellStatus == TerminalShellStatus.prompt ||
-        shellStatus == TerminalShellStatus.editingCommand);
+}) {
+  if (isUsingAltBuffer ||
+      isAgentToolActive ||
+      shellStatus == TerminalShellStatus.runningCommand) {
+    return SnippetReviewMode.none;
+  }
+  return shellStatus == null
+      ? SnippetReviewMode.suspiciousOnly
+      : SnippetReviewMode.full;
+}
+
+/// Narrows [review] to what [mode] reviews. In
+/// [SnippetReviewMode.suspiciousOnly] a line break that only submits the
+/// command does not ask; a second command line ([typesAfterSubmit], from
+/// [SnippetKeySequence.typesAfterSubmit]) still does.
+TerminalCommandReview reviewForSnippetMode(
+  TerminalCommandReview review,
+  SnippetReviewMode mode, {
+  required bool typesAfterSubmit,
+}) {
+  if (mode != SnippetReviewMode.suspiciousOnly || typesAfterSubmit) {
+    return review;
+  }
+  return TerminalCommandReview(
+    command: review.command,
+    reasons: [
+      for (final reason in review.reasons)
+        if (reason != TerminalCommandReviewReason.multiline) reason,
+    ],
+    bracketedPasteModeEnabled: review.bracketedPasteModeEnabled,
+  );
+}
 
 /// Sends [sequence] to [terminal] one step at a time.
 ///

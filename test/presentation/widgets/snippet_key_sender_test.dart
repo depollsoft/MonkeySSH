@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/auto_connect_command.dart';
 import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart'
+    show TerminalShellStatus;
 import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:xterm/xterm.dart';
@@ -115,6 +118,55 @@ void main() {
       final target = _terminal();
       sendSnippetKey(target.terminal, parseSnippetKeyChord('enter')!);
       expect(target.enterFlags, [true]);
+    });
+  });
+
+  group('snippetKeySequenceReviewMode', () {
+    test('reviews fully at a reported prompt and not inside programs', () {
+      SnippetReviewMode mode({
+        TerminalShellStatus? shell,
+        bool alt = false,
+        bool agent = false,
+      }) => snippetKeySequenceReviewMode(
+        shellStatus: shell,
+        isUsingAltBuffer: alt,
+        isAgentToolActive: agent,
+      );
+      expect(mode(shell: TerminalShellStatus.prompt), SnippetReviewMode.full);
+      expect(
+        mode(shell: TerminalShellStatus.editingCommand),
+        SnippetReviewMode.full,
+      );
+      expect(mode(), SnippetReviewMode.suspiciousOnly);
+      expect(mode(alt: true), SnippetReviewMode.none);
+      expect(mode(agent: true), SnippetReviewMode.none);
+      expect(
+        mode(shell: TerminalShellStatus.runningCommand),
+        SnippetReviewMode.none,
+      );
+    });
+
+    test('with an unknown prompt only suspicious text asks', () {
+      bool asks(String snippet) {
+        final sequence = parseSnippetKeySequence(snippet);
+        return reviewForSnippetMode(
+          assessSnippetCommandInsertion(
+            sequence.reviewText,
+            hadVariableSubstitution: false,
+          ),
+          SnippetReviewMode.suspiciousOnly,
+          typesAfterSubmit: sequence.typesAfterSubmit,
+        ).requiresReview;
+      }
+
+      // One command and the key that runs it, or more keys after it.
+      expect(asks('/clear{key:enter}'), isFalse);
+      expect(asks('rm -rf build{key:enter}'), isFalse);
+      expect(asks('ls{key:enter}{key:shift+tab}{key:ctrl+c}'), isFalse);
+      // Chaining, or a second command line, still asks.
+      expect(asks('rm a && rm b{key:enter}'), isTrue);
+      expect(asks('rm a{key:enter}rm b{key:enter}'), isTrue);
+      expect(asks('rm a\nrm b{key:enter}'), isTrue);
     });
   });
 

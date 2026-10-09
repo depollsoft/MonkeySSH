@@ -369,6 +369,40 @@ void main() {
       verifyNever(() => snippetRepository.insert(any()));
     });
 
+    testWidgets('full editor warns about a key token after a dollar sign', (
+      tester,
+    ) async {
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          ],
+          child: const MaterialApp(home: SnippetEditScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('snippet-key-token-warning')),
+        findsNothing,
+      );
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        r'/foo${key:enter}',
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('snippet-key-token-warning')),
+        findsOneWidget,
+      );
+      expect(find.textContaining(r'write {key:$}{key:enter}'), findsOneWidget);
+    });
+
     testWidgets('full editor uses snippet prefill values', (tester) async {
       final snippetRepository = _MockSnippetRepository();
       when(snippetRepository.getAllFolders)
