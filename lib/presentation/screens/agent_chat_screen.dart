@@ -43,10 +43,12 @@ import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../controllers/acp_composer_controller.dart';
 import '../controllers/acp_sftp_client_cache.dart';
+import '../controllers/acp_unread_tracker.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
+import '../models/acp_unread.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
@@ -62,6 +64,7 @@ import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/acp_terminal_output.dart';
+import '../widgets/acp_unread_digest_bar.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -221,6 +224,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   String? _piModelScopeIdentity;
   List<String>? _piEnabledModelPatterns;
   var _piModelScopeLoading = false;
+  late final AcpUnreadVisit _unread;
+  late final AppLifecycleListener _lifecycle;
+  AcpSessionState? _lastSession;
 
   @override
   void initState() {
@@ -246,13 +252,24 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       initialSession: manager.state.byKeyValue(_key.value),
     );
     _scroll.addListener(_onScroll);
+    _unread = AcpUnreadVisit(ref.read(acpLastSeenRegistryProvider))
+      ..begin(_key);
+    _lifecycle = AppLifecycleListener(
+      onHide: _markChatSeen,
+      onShow: () => setState(() => _unread.begin(_key)),
+    );
     if (widget.connectOnMount) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _ensureConnected());
     }
   }
 
+  /// Everything loaded now counts as seen; the next visit compares with it.
+  void _markChatSeen() => _unread.end(_key, _lastSession);
+
   @override
   void dispose() {
+    _markChatSeen();
+    _lifecycle.dispose();
     _previewPublishTimer?.cancel();
     _initialScrollSettleTimer?.cancel();
     _publishScrollState();
@@ -1174,7 +1191,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
 
     _ensurePiModelScope(session);
+    _lastSession = session;
     final entries = _timelineMapperCache.map(session);
+    final unread = _unread.evaluate(session, entries);
     final activity = acpSessionActivityDisplay(session);
     _queuePreviewPublish(session, entries, activity);
     final toolTitles = _toolTitles(session);
@@ -1195,7 +1214,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 child: Column(
                   children: [
                     ?_buildBanner(session, activity),
-                    Expanded(child: _buildTranscript(session, entries)),
+                    Expanded(child: _buildTranscript(session, entries, unread)),
+                    if (unread != null && !_unread.digestDismissed)
+                      AcpUnreadDigestBar(
+                        state: unread,
+                        onJump: () => setState(_unread.jumpToDivider),
+                        onDismiss: () => setState(_unread.dismissDigest),
+                      ),
                     if (prompts.isNotEmpty ||
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
@@ -1307,6 +1332,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Widget _buildTranscript(
     AcpSessionState session,
     List<ui.AcpTimelineEntry> entries,
+    AcpUnreadState? unread,
   ) => Stack(
     children: [
       if (entries.isEmpty)
@@ -1345,6 +1371,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               onCopyCode: (code) => _copyToClipboard(code, 'Code'),
               onOpenLocation: (location) =>
                   unawaited(_openRemotePath(location.path)),
+              unreadDivider: unread == null
+                  ? null
+                  : AcpThreadUnreadDivider(
+                      entryIndex: unread.dividerEntryIndex,
+                      earlierHistoryUnavailable:
+                          unread.earlierHistoryUnavailable,
+                      jumpSerial: _unread.jumpSerial,
+                    ),
             ),
           ),
         ),
