@@ -199,6 +199,49 @@ void main() {
     await _unmount(tester);
   });
 
+  testWidgets('saving keeps empty and padded arguments exactly', (
+    tester,
+  ) async {
+    final service = AcpCustomProviderService(SettingsService(db));
+    await tester.runAsync(
+      () => service.create(
+        label: 'Goose',
+        launchCommand: AcpLaunchCommand(
+          executable: 'goose',
+          arguments: const ['acp', '', ' padded '],
+        ),
+      ),
+    );
+    await _pump(tester, db);
+
+    await tester.tap(find.text('Goose'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-agent-label')),
+      'Goose CLI',
+    );
+    await _tapVisible(tester, find.byKey(const ValueKey('custom-agent-save')));
+    await _tapVisible(tester, find.text('Not now'));
+
+    var stored = (await tester.runAsync(service.listCustomProviders))!.single;
+    expect(stored.label, 'Goose CLI');
+    expect(stored.launchCommand.arguments, ['acp', '', ' padded ']);
+
+    // Typed arguments keep their spaces too.
+    await tester.tap(find.text('Goose CLI'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-agent-arguments')),
+      'acp\n --flag \n\n',
+    );
+    await _tapVisible(tester, find.byKey(const ValueKey('custom-agent-save')));
+    await _tapVisible(tester, find.text('Not now'));
+
+    stored = (await tester.runAsync(service.listCustomProviders))!.single;
+    expect(stored.launchCommand.arguments, ['acp', ' --flag ']);
+    await _unmount(tester);
+  });
+
   testWidgets('imported agents wait for approval', (tester) async {
     final service = await _pump(tester, db);
     clipboardText = jsonEncode({
@@ -332,5 +375,6 @@ void main() {
       r"/usr/local/bin/goose acp --name=dev 'two words' 'it'\''s' '' '$HOME'",
     );
     expect(formatAcpFingerprintForDisplay('0123456789'), '0123 4567 89');
+    expect(parseAcpArgumentLines('a\n\n b \r\n\n'), ['a', '', ' b ']);
   });
 }

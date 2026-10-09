@@ -37,6 +37,17 @@ String formatAcpArgvForDisplay(List<String> argv) => argv
     )
     .join(' ');
 
+/// Splits the editor's arguments field into argv elements, one per line,
+/// keeping each line exactly (spaces included). Trailing empty lines are
+/// ignored; an empty line between arguments is an empty argument.
+List<String> parseAcpArgumentLines(String text) {
+  final lines = text.replaceAll('\r\n', '\n').split('\n');
+  while (lines.isNotEmpty && lines.last.isEmpty) {
+    lines.removeLast();
+  }
+  return lines;
+}
+
 /// Splits a SHA-256 fingerprint into groups of four for reading aloud.
 String formatAcpFingerprintForDisplay(String fingerprint) => [
   for (var index = 0; index < fingerprint.length; index += 4)
@@ -184,12 +195,16 @@ class AcpCustomProvidersScreen extends ConsumerWidget {
     );
     if (result == null || !context.mounted) return;
     final count = result.total == 1 ? '1 agent' : '${result.total} agents';
+    // Imports replace agents with the same ID, so say so.
+    final replaced = result.replaced == 0
+        ? ''
+        : ', replacing ${result.replaced} with the same ID';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           result.needsApproval == 0
-              ? 'Imported $count.'
-              : 'Imported $count. Review each one before it can run.',
+              ? 'Imported $count$replaced.'
+              : 'Imported $count$replaced. Review each one before it can run.',
         ),
       ),
     );
@@ -373,13 +388,21 @@ class _AcpCustomProviderEditScreenState
     if (!_dirty) setState(() => _dirty = true);
   }
 
-  AcpLaunchCommand _buildCommand() => AcpLaunchCommand(
-    executable: _command.text.trim(),
-    arguments: [
-      for (final line in _arguments.text.split('\n'))
-        if (line.trim().isNotEmpty) line.trim(),
-    ],
-  );
+  AcpLaunchCommand _buildCommand() {
+    final original = widget.definition?.launchCommand;
+    final executable = _command.text.trim();
+    // An untouched field keeps the stored argv exactly, including empty
+    // arguments a text field cannot show unambiguously.
+    if (original != null &&
+        executable == original.executable &&
+        _arguments.text == original.arguments.join('\n')) {
+      return original;
+    }
+    return AcpLaunchCommand(
+      executable: executable,
+      arguments: parseAcpArgumentLines(_arguments.text),
+    );
+  }
 
   List<String> _environmentNames() => [
     for (final name in _environment.text.split(RegExp(r'[\s,]+')))
@@ -597,8 +620,9 @@ class _AcpCustomProviderEditScreenState
                   labelText: 'Arguments',
                   hintText: 'acp',
                   helperText:
-                      'One per line, passed exactly as written. No shell '
-                      r'quoting, ~ or $VARIABLE expansion.',
+                      'One per line, exactly as written, spaces included. An '
+                      'empty line between arguments passes an empty one. No '
+                      r'shell quoting, ~ or $VARIABLE expansion.',
                   helperMaxLines: 3,
                   alignLabelWithHint: true,
                 ),
@@ -731,8 +755,8 @@ class _EditorApprovalBanner extends StatelessWidget {
             Expanded(
               child: Text(
                 approved
-                    ? 'Approved. Changing the command, variables or starting '
-                          'folder needs approval again.'
+                    ? 'Approved. Any change, including the name, needs '
+                          'approval again.'
                     : 'Needs approval before it can run.',
                 style: theme.textTheme.bodySmall,
               ),
@@ -927,8 +951,8 @@ class _ReviewSheetState extends ConsumerState<_ReviewSheet> {
                         ),
                         const SizedBox(height: FluttyTheme.spacingXs),
                         Text(
-                          'SHA-256 of the command, variable names and starting '
-                          'folder. Any change needs approval again.',
+                          'SHA-256 of the name, command, variable names and '
+                          'starting folder. Any change needs approval again.',
                           style: muted,
                         ),
                       ],

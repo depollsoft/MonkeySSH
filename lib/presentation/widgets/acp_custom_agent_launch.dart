@@ -7,6 +7,7 @@ library;
 
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -82,34 +83,43 @@ class _AcpCustomAgentSessionsState extends State<AcpCustomAgentSessions> {
   var _loading = false;
   AcpCustomAgentSessionListing? _listing;
   var _attempted = false;
+  // Bumped whenever the agent or host changes, so a lookup that finishes
+  // late is ignored instead of leaving this section loading.
+  var _generation = 0;
 
   @override
   void didUpdateWidget(AcpCustomAgentSessions oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.definition.id != widget.definition.id ||
         oldWidget.hostId != widget.hostId) {
+      _generation++;
       _listing = null;
       _attempted = false;
+      _loading = false;
     }
   }
 
   Future<void> _load() async {
+    final generation = ++_generation;
     setState(() {
       _loading = true;
       _attempted = true;
     });
-    final definitionId = widget.definition.id;
-    final hostId = widget.hostId;
     final listing = await widget.loadSessions();
-    if (!mounted ||
-        widget.definition.id != definitionId ||
-        widget.hostId != hostId) {
-      return;
-    }
+    if (!mounted || generation != _generation) return;
     setState(() {
       _loading = false;
       _listing = listing;
     });
+    // Keep the chosen session only if the new list still has it, as the
+    // new list's entry; otherwise go back to starting a new session.
+    final selected = widget.selected;
+    if (selected != null) {
+      final match = listing?.sessions.firstWhereOrNull(
+        (session) => session.sessionId == selected.sessionId,
+      );
+      if (!identical(match, selected)) widget.onSelected(match);
+    }
   }
 
   @override
@@ -148,7 +158,9 @@ class _AcpCustomAgentSessionsState extends State<AcpCustomAgentSessions> {
         Text('Agent sessions on this host', style: theme.textTheme.labelLarge),
         if (sessions.isNotEmpty)
           RadioGroup<AcpSessionInfo?>(
-            groupValue: widget.selected,
+            groupValue: sessions.firstWhereOrNull(
+              (session) => session.sessionId == widget.selected?.sessionId,
+            ),
             onChanged: (value) {
               if (widget.enabled) widget.onSelected(value);
             },
@@ -160,6 +172,7 @@ class _AcpCustomAgentSessionsState extends State<AcpCustomAgentSessions> {
                   RadioListTile<AcpSessionInfo?>(
                     key: ValueKey('custom-agent-session-${session.sessionId}'),
                     value: session,
+                    enabled: widget.enabled,
                     toggleable: true,
                     contentPadding: EdgeInsets.zero,
                     title: Text(

@@ -507,8 +507,11 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         customProvider,
       );
       if (!mounted) return null;
-      if (problem != null) {
-        setState(() => _error = problem);
+      final windowsProblem = sshSession.remoteIsWindows
+          ? acpWindowsLaunchArgumentProblem(customProvider.launchCommand)
+          : null;
+      if (problem != null || windowsProblem != null) {
+        setState(() => _error = problem ?? windowsProblem);
         return null;
       }
     }
@@ -579,10 +582,21 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       .firstWhereOrNull((provider) => provider.id == providerId);
 
   Future<AcpCustomAgentSessionListing?> _listAgentSessions(
-    AcpCustomProviderDefinition definition,
+    String definitionId,
   ) async {
     final hostId = _hostId;
     if (hostId == null) return null;
+    // Listing starts the agent, so act on the stored definition, not the
+    // copy this sheet was built with.
+    final definition = await ref
+        .read(acpCustomProviderLookupProvider)
+        .getCustomProvider(definitionId);
+    if (!mounted) return null;
+    if (definition == null || !definition.isCommandApproved) {
+      return const AcpCustomAgentSessionListing(
+        AcpCustomAgentSessionListStatus.notApproved,
+      );
+    }
     final knownHost = ref
         .read(allHostsProvider)
         .asData
@@ -913,7 +927,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                     });
                     if (session != null) _workspace.clearRecent();
                   },
-                  loadSessions: () => _listAgentSessions(selectedCustom),
+                  loadSessions: () => _listAgentSessions(selectedCustom.id),
                 ),
               if (_error != null) ...[
                 const SizedBox(height: FluttyTheme.spacingMd),

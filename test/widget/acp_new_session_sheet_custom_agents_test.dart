@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs, avoid_redundant_argument_values
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +21,7 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
+import 'package:monkeyssh/presentation/widgets/acp_custom_agent_launch.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
 import '../helpers/mocks.dart';
@@ -66,6 +69,21 @@ class _FakeHostService extends AcpCustomProviderHostService {
           AcpCustomAgentSessionListStatus.unsupportedAgent,
         );
   }
+}
+
+class _FakeLookup implements AcpCustomProviderLookup {
+  _FakeLookup(Iterable<AcpProvider> providers)
+    : definitions = {
+        for (final provider
+            in providers.whereType<AcpCustomProviderDefinition>())
+          provider.id: provider,
+      };
+
+  final Map<String, AcpCustomProviderDefinition> definitions;
+
+  @override
+  Future<AcpCustomProviderDefinition?> getCustomProvider(String id) async =>
+      definitions[id];
 }
 
 class _ResumingManager extends FakeAcpSessionManager {
@@ -144,6 +162,7 @@ Future<void> _pumpSheet(
   required FakeAcpSessionManager manager,
   required _FakeHostService hostService,
   required List<AcpProvider> providers,
+  _FakeLookup? lookup,
 }) async {
   tester.view.physicalSize = const Size(800, 1400);
   tester.view.devicePixelRatio = 1;
@@ -179,6 +198,9 @@ Future<void> _pumpSheet(
           launchPreferences,
         ),
         acpCustomProviderHostServiceProvider.overrideWithValue(hostService),
+        acpCustomProviderLookupProvider.overrideWithValue(
+          lookup ?? _FakeLookup(providers),
+        ),
         allHostsProvider.overrideWith((ref) => Stream.value(<Host>[_host()])),
         acpProvidersProvider.overrideWith((ref) => Stream.value(providers)),
       ],
@@ -322,6 +344,34 @@ void main() {
     expect(manager.starts, isEmpty);
   });
 
+  testWidgets('lists sessions only for the stored, approved definition', (
+    tester,
+  ) async {
+    final goose = _goose();
+    final hostService = _FakeHostService();
+    final lookup = _FakeLookup([goose]);
+    // The definition changed in Settings after this sheet was built.
+    lookup.definitions['goose'] = goose.edit(
+      launchCommand: AcpLaunchCommand(executable: '/bin/sh'),
+    );
+    await _pumpSheet(
+      tester,
+      manager: FakeAcpSessionManager(),
+      hostService: hostService,
+      providers: [...acpBuiltinProviders, goose],
+      lookup: lookup,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('custom-agent-find-sessions')));
+    await tester.pumpAndSettle();
+
+    expect(hostService.listCalls, 0);
+    expect(
+      find.text('Approve this agent before listing its sessions.'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('says when an agent cannot list its sessions', (tester) async {
     await _pumpSheet(
       tester,
@@ -347,5 +397,149 @@ void main() {
     );
 
     expect(find.text('Agent sessions on this host'), findsNothing);
+  });
+
+  group('AcpCustomAgentSessions', () {
+    AcpSessionInfo info(String id) =>
+        AcpSessionInfo(sessionId: id, cwd: '/work', title: 'Session $id');
+
+    AcpCustomAgentSessionListing listed(List<String> ids) =>
+        AcpCustomAgentSessionListing(AcpCustomAgentSessionListStatus.listed, [
+          for (final id in ids) info(id),
+        ]);
+
+    testWidgets('a host change mid-lookup leaves the section usable', (
+      tester,
+    ) async {
+      var hostId = 1;
+      late StateSetter rebuild;
+      final pending = <Completer<AcpCustomAgentSessionListing?>>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                rebuild = setState;
+                return AcpCustomAgentSessions(
+                  definition: _goose(),
+                  hostId: hostId,
+                  enabled: true,
+                  selected: null,
+                  onSelected: (_) {},
+                  loadSessions: () {
+                    final completer =
+                        Completer<AcpCustomAgentSessionListing?>();
+                    pending.add(completer);
+                    return completer.future;
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Find sessions'));
+      await tester.pump();
+      expect(find.byType(LinearProgressIndicator), findsOneWidget);
+
+      rebuild(() => hostId = 2);
+      await tester.pump();
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.text('Find sessions'), findsOneWidget);
+
+      // The first host's answer arrives late and is ignored.
+      pending.first.complete(listed(['old-host']));
+      await tester.pump();
+      expect(find.text('Session old-host'), findsNothing);
+      expect(find.text('Find sessions'), findsOneWidget);
+    });
+
+    testWidgets('refresh keeps the choice by session id, or clears it', (
+      tester,
+    ) async {
+      AcpSessionInfo? selected;
+      late StateSetter rebuild;
+      final results = <AcpCustomAgentSessionListing>[
+        listed(['a', 'b']),
+        listed(['a', 'b']),
+        listed(['a']),
+      ];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                rebuild = setState;
+                return AcpCustomAgentSessions(
+                  definition: _goose(),
+                  hostId: 1,
+                  enabled: true,
+                  selected: selected,
+                  onSelected: (value) => rebuild(() => selected = value),
+                  loadSessions: () async => results.removeAt(0),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Find sessions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Session b'));
+      await tester.pumpAndSettle();
+      final first = selected;
+      expect(first?.sessionId, 'b');
+
+      await tester.tap(find.text('Refresh'));
+      await tester.pumpAndSettle();
+      expect(selected?.sessionId, 'b');
+      expect(identical(selected, first), isFalse);
+      final radio = tester.widget<RadioListTile<AcpSessionInfo?>>(
+        find.byKey(const ValueKey('custom-agent-session-b')),
+      );
+      expect(radio.value, same(selected));
+
+      await tester.tap(find.text('Refresh'));
+      await tester.pumpAndSettle();
+      expect(selected, isNull);
+    });
+
+    testWidgets('session rows look disabled while the sheet is busy', (
+      tester,
+    ) async {
+      var enabled = true;
+      late StateSetter rebuild;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                rebuild = setState;
+                return AcpCustomAgentSessions(
+                  definition: _goose(),
+                  hostId: 1,
+                  enabled: enabled,
+                  selected: null,
+                  onSelected: (_) {},
+                  loadSessions: () async => listed(['a']),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Find sessions'));
+      await tester.pumpAndSettle();
+
+      rebuild(() => enabled = false);
+      await tester.pump();
+
+      final radio = tester.widget<RadioListTile<AcpSessionInfo?>>(
+        find.byKey(const ValueKey('custom-agent-session-a')),
+      );
+      expect(radio.enabled, isFalse);
+    });
   });
 }
