@@ -299,6 +299,31 @@ void main() {
       expect(snapshot.exitCode, 128);
     });
 
+    test('drops a cut-off numstat path instead of misattributing it', () {
+      const oid = '0000000000000000000000000000000000000000';
+      final snapshot = parseGitWorkingTreeOutput(
+        [
+          '$_marker:root\n/r\n',
+          '$_marker:status\n',
+          '1 .M N... 100644 100644 100644 $oid $oid src/a\u0000',
+          '1 .M N... 100644 100644 100644 $oid $oid src/ab\u0000',
+          '\n$_marker:status-exit:0\n',
+          // The cap cut `src/ab` short, leaving a name that matches `src/a`.
+          '$_marker:unstaged\n1\t1\tsrc/a\u00009\t9\tsrc/a',
+        ].join(),
+        marker: _marker,
+        outputTruncated: true,
+        refreshedAt: at,
+      );
+      expect(snapshot.state, GitWorkingTreeState.ready);
+      expect(snapshot.truncated, isTrue);
+      final counts = {
+        for (final file in snapshot.files) file.path: file.counts,
+      };
+      expect(counts['src/a'], const GitLineCounts(added: 1, removed: 1));
+      expect(counts['src/ab'], isNull);
+    });
+
     test('is truncated when the status section never finished', () {
       final snapshot = parseGitWorkingTreeOutput(
         [
@@ -725,6 +750,29 @@ void main() {
         hasLength(1),
       );
       expect(glob.hunks.single.lines, contains('+changed'));
+    });
+
+    test('an untracked file that vanished fails its diff', () async {
+      final snapshot = await service.loadStatus(repo.path);
+      final file = _file(snapshot, GitChangeGroup.untracked, 'untracked.txt');
+      File('${repo.path}/untracked.txt').deleteSync();
+
+      final diff = await service.loadDiff(snapshot.repositoryRoot!, file);
+      expect(diff.failed, isTrue);
+
+      // An empty untracked file also exits 1, but with a diff header.
+      _write(repo, 'empty.txt', '');
+      final empty = await service.loadDiff(
+        snapshot.repositoryRoot!,
+        const GitChangedFile(
+          path: 'empty.txt',
+          group: GitChangeGroup.untracked,
+          kind: GitChangeKind.untracked,
+        ),
+      );
+      expect(empty.failed, isFalse);
+      expect(empty.hunks, isEmpty);
+      expect(empty.headerLines, contains('new file mode 100644'));
     });
 
     test('reports conflicts with their porcelain code', () async {

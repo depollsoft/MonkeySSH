@@ -9,10 +9,17 @@
 /// `git status` from refreshing the index (and taking `index.lock`) while an
 /// agent works in the same tree. `git diff` ignores that variable and
 /// rewrites the index when it finds stat-only changes, so every diff also
-/// runs with `diff.autoRefreshIndex=false`. `core.fsmonitor` is cleared so a
-/// configured fsmonitor hook never runs. `GIT_LITERAL_PATHSPECS=1` keeps
-/// file names with glob characters from matching other paths. Paths and diff
-/// text are user content: callers must never log them.
+/// runs with `diff.autoRefreshIndex=false`. `core.fsmonitor` is cleared so
+/// reading never starts or queries an fsmonitor hook or daemon as a side
+/// effect. `GIT_LITERAL_PATHSPECS=1` keeps file names with glob characters
+/// from matching other paths.
+///
+/// The repository's own configuration is trusted the way git trusts it: a
+/// clean or process filter named in `.gitattributes` and `.git/config` still
+/// runs during status and diff, exactly as it would for `git status` in a
+/// shell prompt. A hostile `.git/config` is out of scope.
+///
+/// Paths and diff text are user content: callers must never log them.
 library;
 
 import 'dart:async';
@@ -216,8 +223,11 @@ class GitWorkingTreeService {
     }
     final exitCode = _sectionExitCode(sections, 'exit');
     final finished = exitCode != null;
-    // `git diff --no-index` exits 1 when the files differ.
-    final okExit = file.group == GitChangeGroup.untracked ? 1 : 0;
+    // `git diff --no-index` exits 1 when the files differ, but also when the
+    // file has gone; only a diff it actually printed counts as success.
+    final okExit = file.group == GitChangeGroup.untracked && diff.isNotEmpty
+        ? 1
+        : 0;
     final parsed = parseGitUnifiedDiff(diff, truncated: !finished);
     if (finished && exitCode != 0 && exitCode != okExit) {
       return GitFileDiff(
@@ -567,8 +577,16 @@ GitWorkingTreeSnapshot parseGitWorkingTreeOutput(
     complete: statusFinished,
     maxEntries: maxEntries,
   );
-  final unstaged = parseGitNumstatZ(sections['unstaged'] ?? '');
-  final staged = parseGitNumstatZ(sections['staged'] ?? '');
+  // A numstat section is whole only when the next marker follows it; a
+  // cut-off one ends in a partial path that could match another file.
+  final unstaged = parseGitNumstatZ(
+    sections['unstaged'] ?? '',
+    complete: sections.containsKey('staged'),
+  );
+  final staged = parseGitNumstatZ(
+    sections['staged'] ?? '',
+    complete: sections.containsKey('end'),
+  );
   final files = [
     for (final file in parsed.files)
       file.withCounts(switch (file.group) {
@@ -592,9 +610,18 @@ GitWorkingTreeSnapshot parseGitWorkingTreeOutput(
 /// Parses `git diff --numstat -z` output into counts keyed by path (the new
 /// path for renames). A later entry for the same path wins, which for an
 /// unmerged path is its working-tree side.
-Map<String, GitLineCounts> parseGitNumstatZ(String payload) {
+///
+/// When [complete] is false the payload was cut off, so its last field is a
+/// partial path and is dropped.
+Map<String, GitLineCounts> parseGitNumstatZ(
+  String payload, {
+  bool complete = true,
+}) {
   final counts = <String, GitLineCounts>{};
   final tokens = payload.split('\u0000');
+  if (!complete && tokens.isNotEmpty) {
+    tokens.removeLast();
+  }
   var index = 0;
   while (index < tokens.length) {
     final token = tokens[index++];
