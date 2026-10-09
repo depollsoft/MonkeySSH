@@ -3225,7 +3225,9 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                   if (alertCount > 0) ...[
                     const SizedBox(width: 4),
                     Semantics(
-                      label: '$alertCount need attention',
+                      label: alertCount == 1
+                          ? '1 window needs attention'
+                          : '$alertCount windows need attention',
                       excludeSemantics: true,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,

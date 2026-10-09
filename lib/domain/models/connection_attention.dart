@@ -63,10 +63,17 @@ const terminalQuietAfterSeconds = 15;
 /// Returns why a tracked native [session] is blocked on the user, if it is.
 ///
 /// Local session state is authoritative while a client is attached. Once
-/// detached, the session stops hearing about requests, both new ones and
-/// ones another client answers, so fresh host-reported [bridge] metadata
-/// decides whether it still waits. Retained local requests only name the
-/// kind of wait.
+/// detached, the session stops hearing about requests, both new ones and ones
+/// another client answers, so only fresh host-reported [bridge] metadata can
+/// say it waits:
+///
+/// - No [bridge]: not claimed. Either its host has not been polled since the
+///   app came back, so retained requests may already be answered, or the poll
+///   no longer lists the bridge because the agent was stopped.
+/// - [bridge] present: it waits only while the bridge holds a request that no
+///   attached client is answering. Retained requests name the kind; without
+///   one, it is a generic request, and only when the bridge's own session is
+///   this one, so a detached fork does not echo a sibling's request.
 AttentionReason? acpSessionWaitingReason(
   AcpSessionState session, {
   MonkeyMuxAcpBridgeMetadata? bridge,
@@ -89,25 +96,35 @@ AttentionReason? acpSessionWaitingReason(
         AcpConnectionStatus.detached:
       break;
   }
-  final hostReported = !session.isLive && bridge != null;
-  if (hostReported && bridge.state != MonkeyMuxAcpProviderState.running) {
+  final needsSignIn =
+      session.status == AcpConnectionStatus.authenticationRequired ||
+      session.pendingAuthentication ||
+      authFailed;
+  if (session.isLive) {
+    if (session.pendingPermissions.isNotEmpty ||
+        session.pendingWrites.isNotEmpty) {
+      return AttentionReason.permission;
+    }
+    if (session.pendingElicitations.isNotEmpty) return AttentionReason.input;
+    return needsSignIn ? AttentionReason.signIn : null;
+  }
+  if (bridge == null || bridge.state != MonkeyMuxAcpProviderState.running) {
     return null;
   }
-  // Null when the local state is authoritative.
-  final hostPending = hostReported ? bridge.pendingRequestCount > 0 : null;
-  if (hostPending ?? true) {
+  final unanswered = bridge.pendingRequestCount > 0 && bridge.clientCount == 0;
+  if (unanswered) {
     if (session.pendingPermissions.isNotEmpty ||
         session.pendingWrites.isNotEmpty) {
       return AttentionReason.permission;
     }
     if (session.pendingElicitations.isNotEmpty) return AttentionReason.input;
   }
-  if (session.status == AcpConnectionStatus.authenticationRequired ||
-      session.pendingAuthentication ||
-      authFailed) {
-    return AttentionReason.signIn;
-  }
-  return (hostPending ?? false) ? AttentionReason.hostRequest : null;
+  if (needsSignIn) return AttentionReason.signIn;
+  final bridgeSession = bridge.sessionId;
+  return unanswered &&
+          (bridgeSession == null || bridgeSession == session.key.acpSessionId)
+      ? AttentionReason.hostRequest
+      : null;
 }
 
 /// Returns [AttentionReason.hostRequest] when a running [bridge] holds a

@@ -22,12 +22,13 @@ int _epochSecondsAgo(int seconds) =>
 
 MonkeyMuxAcpBridgeMetadata _bridge(
   String id, {
+  String? sessionId,
   int pending = 0,
   int inFlight = 0,
 }) => MonkeyMuxAcpBridgeMetadata(
   id: id,
   providerId: 'builtin:copilot-cli',
-  sessionId: 'session-$id',
+  sessionId: sessionId ?? 'session-$id',
   provider: 'Copilot CLI',
   commandHash: 'hash',
   state: MonkeyMuxAcpProviderState.running,
@@ -251,7 +252,7 @@ void main() {
         ],
         sessions: [detached],
         bridges: {
-          'b1': _bridge('b1', pending: 1),
+          'b1': _bridge('b1', sessionId: 'session-1', pending: 1),
           'untracked': _bridge('untracked', inFlight: 1),
         },
         now: _now,

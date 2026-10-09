@@ -12,12 +12,14 @@ import '../../support/fake_acp_session_manager.dart';
 
 MonkeyMuxAcpBridgeMetadata bridge({
   String id = 'bridge-1',
+  String? sessionId,
   int pending = 0,
   int inFlight = 0,
   int clients = 0,
   MonkeyMuxAcpProviderState state = MonkeyMuxAcpProviderState.running,
 }) => MonkeyMuxAcpBridgeMetadata(
   id: id,
+  sessionId: sessionId,
   provider: 'Copilot CLI',
   commandHash: 'hash',
   state: state,
@@ -116,6 +118,30 @@ void main() {
       );
     });
 
+    test('a detached fork does not echo its sibling or a busy client', () {
+      final fork = fakeAcpSession(status: AcpConnectionStatus.detached);
+      expect(
+        acpSessionWaitingReason(
+          fork,
+          bridge: bridge(pending: 1, sessionId: 'sibling'),
+        ),
+        isNull,
+        reason: "The bridge's own session is another fork.",
+      );
+      expect(
+        acpSessionWaitingReason(
+          fork,
+          bridge: bridge(pending: 1, sessionId: 'session-1'),
+        ),
+        AttentionReason.hostRequest,
+      );
+      expect(
+        acpSessionWaitingReason(fork, bridge: bridge(pending: 1, clients: 1)),
+        isNull,
+        reason: 'An attached client is answering its own request.',
+      );
+    });
+
     test('fresh host counts decide whether a detached session waits', () {
       final detached = fakeAcpSession(
         status: AcpConnectionStatus.detached,
@@ -123,8 +149,10 @@ void main() {
       );
       expect(
         acpSessionWaitingReason(detached),
-        AttentionReason.permission,
-        reason: 'Without host data the retained request still counts.',
+        isNull,
+        reason:
+            'Without a fresh host report (not polled yet, or the bridge is '
+            'gone because the agent was stopped) nothing is claimed.',
       );
       expect(
         acpSessionWaitingReason(detached, bridge: bridge(pending: 1)),
@@ -142,6 +170,14 @@ void main() {
           bridge: bridge(pending: 1, state: MonkeyMuxAcpProviderState.stopped),
         ),
         isNull,
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(pending: 1, clients: 1),
+        ),
+        isNull,
+        reason: 'Another client is answering it.',
       );
     });
 

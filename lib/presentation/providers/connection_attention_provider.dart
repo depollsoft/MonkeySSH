@@ -91,6 +91,7 @@ final class HostBridges {
     bridge.cwd,
     bridge.provider,
     bridge.state,
+    bridge.clientCount,
     bridge.pendingRequestCount,
     bridge.inFlightTurnCount,
     bridge.lastActivity,
@@ -184,6 +185,9 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
   Timer? _release;
   AppLifecycleListener? _lifecycle;
   bool _backgrounded = false;
+
+  /// Connections with a list in flight. Keyed by connection, not host, so a
+  /// request stuck on a dropped connection never blocks its replacement.
   final _inFlight = <int>{};
   final _failures = <int, int>{};
   final _skipPolls = <int, int>{};
@@ -272,7 +276,9 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
     }
     if (_backgrounded) {
       _backgrounded = false;
-      unawaited(poll());
+      // Only refresh while a visible surface is watching; otherwise the next
+      // watcher polls when it arrives.
+      if (_timer != null) unawaited(poll());
     }
   }
 
@@ -339,7 +345,7 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
     int hostId,
     SshSession session,
   ) async {
-    if (!_inFlight.add(hostId)) return;
+    if (!_inFlight.add(session.connectionId)) return;
     try {
       final bridges = await lister(session);
       // The host may have disconnected, or the app gone to the background,
@@ -352,7 +358,9 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
         HostBridges(connectionId: session.connectionId, bridges: bridges),
       );
     } on Object catch (error) {
-      if (!ref.mounted) return;
+      // A failure that lands after the host moved to another connection, or
+      // after backgrounding, must not drop or back off the newer state.
+      if (!_stillTarget(hostId, session)) return;
       // Stale counts would claim an agent is waiting when it may not be.
       state = state.withHost(hostId, null);
       final failures = (_failures[hostId] ?? 0) + 1;
@@ -376,7 +384,7 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
         );
       }
     } finally {
-      _inFlight.remove(hostId);
+      _inFlight.remove(session.connectionId);
     }
   }
 }

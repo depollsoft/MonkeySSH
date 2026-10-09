@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/acp_session_keys.dart';
 import '../../domain/services/monkeymux_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/connection_attention_provider.dart';
@@ -56,7 +57,7 @@ class _ConnectionsWaitingSectionState
     extends ConsumerState<ConnectionsWaitingSection> {
   Timer? _ageTicker;
   List<WaitingOnYouItem> _items = const <WaitingOnYouItem>[];
-  bool _opening = false;
+  AcpSessionKey? _opening;
 
   /// Resolves the destination at tap time, so an untracked session opens in
   /// the workspace whose window hosts its bridge right now.
@@ -65,8 +66,8 @@ class _ConnectionsWaitingSectionState
       widget.onOpen(context, item.chatLocation);
       return;
     }
-    if (_opening) return;
-    _opening = true;
+    if (_opening != null) return;
+    setState(() => _opening = item.key);
     try {
       final sessions = ref.read(activeSessionsProvider.notifier);
       final location = await resolveWaitingOnYouLocation(
@@ -79,9 +80,13 @@ class _ConnectionsWaitingSectionState
         listWindows: (session, workspace) =>
             ref.read(monkeyMuxServiceProvider).listWindows(session, workspace),
       );
-      if (mounted) widget.onOpen(context, location);
+      // The lookup takes a round trip; if the user moved on meanwhile, do
+      // not push a terminal over wherever they went.
+      if (mounted && attentionSurfaceVisible(context)) {
+        widget.onOpen(context, location);
+      }
     } finally {
-      _opening = false;
+      if (mounted) setState(() => _opening = null);
     }
   }
 
@@ -140,11 +145,13 @@ class _ConnectionsWaitingSectionState
                 padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
                 child: Row(
                   children: [
-                    Text(
-                      'waiting on you',
-                      style: FluttyTheme.displayMono(
-                        fontSize: 15,
-                        color: scheme.onSurface,
+                    Flexible(
+                      child: Text(
+                        'waiting on you',
+                        style: FluttyTheme.displayMono(
+                          fontSize: 15,
+                          color: scheme.onSurface,
+                        ),
                       ),
                     ),
                     const SizedBox(width: FluttyTheme.spacingSm),
@@ -176,6 +183,7 @@ class _ConnectionsWaitingSectionState
                 key: ValueKey('waiting-on-you-${items[index].key.value}'),
                 item: items[index],
                 now: now,
+                opening: _opening == items[index].key,
                 onOpen: () => unawaited(_open(items[index])),
               ),
             ],
@@ -194,8 +202,12 @@ class WaitingOnYouRow extends StatelessWidget {
     required this.item,
     required this.now,
     required this.onOpen,
+    this.opening = false,
     super.key,
   });
+
+  /// Whether Open is resolving this session's workspace.
+  final bool opening;
 
   /// Session to show.
   final WaitingOnYouItem item;
@@ -224,12 +236,117 @@ class WaitingOnYouRow extends StatelessWidget {
       if (item.providerLabel != item.title) item.providerLabel,
       ?item.cwdSummary,
     ].join(' · ');
+    final reasonPill = DecoratedBox(
+      key: ValueKey('waiting-reason-${reason.name}'),
+      decoration: BoxDecoration(
+        color: reasonBackground,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(reason.icon, size: 12, color: reasonForeground),
+            const SizedBox(width: 3),
+            Flexible(
+              child: Text(
+                reason.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  color: reasonForeground,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          item.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: scheme.onSurface,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 4),
+        // Wraps under large text instead of pushing the row past its width.
+        Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            reasonPill,
+            Text(
+              details,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: FluttyTheme.monoStyle.copyWith(
+                fontSize: 11,
+                height: 1.2,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+    final openPill = DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outline),
+        borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Open',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: scheme.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 2),
+            if (opening)
+              const Padding(
+                padding: EdgeInsets.all(2),
+                child: SizedBox.square(
+                  key: ValueKey('waiting-on-you-opening'),
+                  dimension: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else
+              Icon(
+                Icons.chevron_right,
+                size: 16,
+                color: scheme.onSurfaceVariant,
+              ),
+          ],
+        ),
+      ),
+    );
+    // Large text gets its own line for Open, so the title keeps its width.
+    final largeText = MediaQuery.textScalerOf(context).scale(14) > 14 * 1.3;
+    final icon = AgentToolIcon(tool: item.tool, color: scheme.onSurfaceVariant);
     return Semantics(
       container: true,
       button: true,
       label:
-          'Open ${item.title}. ${item.providerLabel} on ${item.hostLabel} '
-          '${reason.description}, $age.',
+          '${opening ? 'Opening' : 'Open'} ${item.title}. ${item.providerLabel} '
+          'on ${item.hostLabel} ${reason.description}, $age.',
       excludeSemantics: true,
       onTap: onOpen,
       child: InkWell(
@@ -238,107 +355,30 @@ class WaitingOnYouRow extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 56),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
-            child: Row(
-              children: [
-                AgentToolIcon(tool: item.tool, color: scheme.onSurfaceVariant),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
+            child: largeText
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text(
-                        item.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: scheme.onSurface,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
                       Row(
                         children: [
-                          DecoratedBox(
-                            key: ValueKey('waiting-reason-${reason.name}'),
-                            decoration: BoxDecoration(
-                              color: reasonBackground,
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    reason.icon,
-                                    size: 12,
-                                    color: reasonForeground,
-                                  ),
-                                  const SizedBox(width: 3),
-                                  Text(
-                                    reason.label,
-                                    style: FluttyTheme.monoStyle.copyWith(
-                                      fontSize: 11,
-                                      height: 1.2,
-                                      fontWeight: FontWeight.w600,
-                                      color: reasonForeground,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              details,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: FluttyTheme.monoStyle.copyWith(
-                                fontSize: 11,
-                                height: 1.2,
-                                color: scheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ),
+                          icon,
+                          const SizedBox(width: 12),
+                          Expanded(child: content),
                         ],
                       ),
+                      const SizedBox(height: 8),
+                      Align(alignment: Alignment.centerRight, child: openPill),
+                    ],
+                  )
+                : Row(
+                    children: [
+                      icon,
+                      const SizedBox(width: 12),
+                      Expanded(child: content),
+                      const SizedBox(width: 8),
+                      openPill,
                     ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: scheme.outline),
-                    borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Open',
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: scheme.onSurface,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Icon(
-                          Icons.chevron_right,
-                          size: 16,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
           ),
         ),
       ),

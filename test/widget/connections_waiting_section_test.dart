@@ -1,13 +1,48 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/connection_attention.dart';
+import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/tmux_state.dart';
+import 'package:monkeyssh/domain/services/monkeymux_service.dart';
+import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/connection_attention_provider.dart';
 import 'package:monkeyssh/presentation/widgets/connections_waiting_section.dart';
+
+class _MockSshClient extends Mock implements SSHClient {}
+
+class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {}
+
+final _workspaceSession =
+    SshSession(
+        connectionId: 20,
+        hostId: 2,
+        client: _MockSshClient(),
+        config: const SshConnectionConfig(
+          hostname: 'beta.example.com',
+          port: 22,
+          username: 'dev',
+        ),
+      )
+      ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+      ..remoteMuxSessionName = 'mmux';
+
+class _Sessions extends ActiveSessionsNotifier {
+  @override
+  Map<int, SshConnectionState> build() => {20: SshConnectionState.connected};
+
+  @override
+  SshSession? getSession(int connectionId) =>
+      connectionId == 20 ? _workspaceSession : null;
+}
 
 WaitingOnYouItem _item({
   AttentionReason reason = AttentionReason.permission,
@@ -34,9 +69,14 @@ Widget _harness({
   required List<WaitingOnYouItem> items,
   required List<String> opened,
   ThemeData? theme,
+  MonkeyMuxService? monkeyMux,
 }) => ProviderScope(
   overrides: [
     waitingOnYouProvider.overrideWithValue(WaitingOnYouSnapshot(items)),
+    if (monkeyMux != null) ...[
+      monkeyMuxServiceProvider.overrideWithValue(monkeyMux),
+      activeSessionsProvider.overrideWith(_Sessions.new),
+    ],
   ],
   child: MaterialApp(
     theme: theme ?? FluttyTheme.dark,
@@ -133,5 +173,106 @@ void main() {
       );
       await expectLater(tester, meetsGuideline(textContrastGuideline));
     }
+  });
+
+  testWidgets('large text stacks Open under the row without overflowing', (
+    tester,
+  ) async {
+    tester.view
+      ..physicalSize = const Size(320 * 3, 900 * 3)
+      ..devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(
+          size: Size(320, 900),
+          textScaler: TextScaler.linear(2),
+        ),
+        child: _harness(
+          items: [_item(title: 'A long session title that will not fit')],
+          opened: [],
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getTopLeft(find.text('Open')).dy,
+      greaterThan(tester.getBottomLeft(find.text('permission')).dy),
+      reason: 'Open moves below the content.',
+    );
+  });
+
+  group('opening an untracked session', () {
+    late _MockMonkeyMuxService monkeyMux;
+    late Completer<List<TmuxWindow>> windows;
+    final item = _item(tracked: false, reason: AttentionReason.hostRequest);
+
+    // Created inside each test body so the completion runs in the test's
+    // fake-async zone.
+    void stubWindows() {
+      monkeyMux = _MockMonkeyMuxService();
+      windows = Completer<List<TmuxWindow>>();
+      when(
+        () => monkeyMux.listWindows(
+          _workspaceSession,
+          'mmux',
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) => windows.future);
+    }
+
+    testWidgets('shows progress, then lands in the hosting workspace', (
+      tester,
+    ) async {
+      stubWindows();
+      final opened = <String>[];
+      await tester.pumpWidget(
+        _harness(items: [item], opened: opened, monkeyMux: monkeyMux),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('waiting-on-you-opening')),
+        findsOneWidget,
+      );
+      expect(opened, isEmpty);
+
+      windows.complete([
+        TmuxWindow(
+          index: 2,
+          name: 'agent',
+          isActive: false,
+          nativeAcpBridgeId: item.key.bridgeId,
+          nativeAcpProviderId: item.key.providerId,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(opened, [item.terminalLocation(20)]);
+      expect(
+        find.byKey(const ValueKey('waiting-on-you-opening')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('does not open after the user navigated away', (tester) async {
+      stubWindows();
+      final opened = <String>[];
+      await tester.pumpWidget(
+        _harness(items: [item], opened: opened, monkeyMux: monkeyMux),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pump();
+      unawaited(
+        Navigator.of(tester.element(find.text('Open'))).push(
+          MaterialPageRoute<void>(
+            builder: (context) => const Scaffold(body: Text('elsewhere')),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      windows.complete(const []);
+      await tester.pumpAndSettle();
+      expect(opened, isEmpty);
+    });
   });
 }

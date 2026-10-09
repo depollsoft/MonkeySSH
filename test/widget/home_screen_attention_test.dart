@@ -332,7 +332,10 @@ void main() {
         lessThan(tester.getTopLeft(find.text('Alpha')).dy),
         reason: 'The section sits above every connection.',
       );
-      expect(find.bySemanticsLabel(RegExp('1 need attention')), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('1 window needs attention')),
+        findsOneWidget,
+      );
 
       await tester.tap(find.text('Open'));
       await tester.pump();

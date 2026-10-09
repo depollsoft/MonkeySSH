@@ -39,9 +39,19 @@ SshSession _session({
 )..remoteMuxBackend = backend;
 
 class _Sessions extends ActiveSessionsNotifier {
-  _Sessions(this.sessions);
+  _Sessions(List<SshSession> sessions) : sessions = [...sessions];
 
   final List<SshSession> sessions;
+
+  void replace(List<SshSession> next) {
+    sessions
+      ..clear()
+      ..addAll(next);
+    state = {
+      for (final session in sessions)
+        session.connectionId: SshConnectionState.connected,
+    };
+  }
 
   @override
   Map<int, SshConnectionState> build() => {
@@ -230,6 +240,32 @@ void main() {
       expect(items(0), isEmpty);
     });
 
+    test('a detached request whose agent was stopped elsewhere leaves', () {
+      final detached = fakeAcpSession(
+        key: fakeAcpKey(bridgeId: 'b1'),
+        status: AcpConnectionStatus.detached,
+        pendingPermissions: [_permission(DateTime(2026))],
+      );
+      List<WaitingOnYouItem> items(HostBridgeMetadata bridges) =>
+          buildWaitingOnYouItems(
+            sessions: [detached],
+            bridges: bridges,
+            connectedHosts: const {1},
+            hostLabels: const {},
+          );
+      // The stopped bridge no longer appears in `acp list`.
+      expect(
+        items(
+          HostBridgeMetadata(const {})
+              .withHost(1, HostBridges(connectionId: 10, bridges: const [])),
+        ),
+        isEmpty,
+      );
+      // Before the first poll after returning, retained requests are not
+      // claimed either; they may have been answered meanwhile.
+      expect(items(HostBridgeMetadata.empty), isEmpty);
+    });
+
     test('orders permission before sign-in, then most recent first', () {
       AcpSessionState waiting(String bridgeId, DateTime at) => fakeAcpSession(
         key: fakeAcpKey(bridgeId: bridgeId),
@@ -320,6 +356,15 @@ void main() {
       );
       expect(location, item.chatLocation);
     });
+  });
+
+  test('a change in attached clients is a change in the snapshot', () {
+    HostBridges host(int clients) => HostBridges(
+      connectionId: 10,
+      bridges: [_bridge(pending: 1, clients: clients)],
+    );
+    expect(host(0), host(0));
+    expect(host(0), isNot(host(1)));
   });
 
   group('connectionBridgeMetadataProvider', () {
@@ -491,6 +536,49 @@ void main() {
       });
     });
 
+    test('a failure that lands after the host switched connection is '
+        'ignored', () {
+      fakeAsync((async) {
+        final old = _session(connectionId: 10, hostId: 1);
+        final sessions = _Sessions([old]);
+        final manager = FakeAcpSessionManager();
+        final oldList = Completer<List<MonkeyMuxAcpBridgeMetadata>>();
+        var calls = 0;
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            calls++;
+            if (identical(session, old)) return oldList.future;
+            return [_bridge(pending: 1)];
+          },
+        );
+        final subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        async.flushMicrotasks();
+
+        sessions.replace([_session(connectionId: 11, hostId: 1)]);
+        async.elapse(connectionAttentionPollInterval);
+        expect(_read(container).hosts[1]?.connectionId, 11);
+
+        oldList.completeError(StateError('channel closed'));
+        async.flushMicrotasks();
+        expect(
+          _read(container).hosts[1]?.connectionId,
+          11,
+          reason: 'The old failure does not drop the new state.',
+        );
+        async.elapse(connectionAttentionPollInterval);
+        expect(calls, 3, reason: 'Nor does it back off the new connection.');
+
+        subscription.close();
+        container.dispose();
+        unawaited(manager.dispose());
+      });
+    });
+
     test('a list that finishes after its host disconnects is dropped', () {
       fakeAsync((async) {
         final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
@@ -575,7 +663,22 @@ void main() {
     expect(calls, 3, reason: 'Returning to the foreground refreshes at once.');
     expect(_read(container).hosts, contains(1));
 
+    // With nothing watching, returning does not run an unwatched poll.
     subscription.close();
+    await tester.pump(const Duration(seconds: 2));
+    for (final state in [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+    expect(calls, 3);
+
     container.dispose();
     await manager.dispose();
   });
