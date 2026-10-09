@@ -115,6 +115,10 @@ abstract final class SettingKeys {
   /// Environment variable and HTTP header values are stored encrypted.
   static const acpMcpServers = 'acp_mcp_servers';
 
+  /// Saved user-defined ACP agent definitions and their device-local
+  /// approvals (JSON array). Environment variables are stored by name only.
+  static const acpCustomProviders = 'acp_custom_providers';
+
   /// Enable shared clipboard between device and remote session.
   ///
   /// The remote host can update the local clipboard through OSC 52 and remote
