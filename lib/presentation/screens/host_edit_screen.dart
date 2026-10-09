@@ -1825,7 +1825,10 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       // host's own jump hosts.
       final jumpHostConfig = _selectedJumpHostId == null
           ? null
-          : await sshService.buildJumpHostChainConfig(_selectedJumpHostId!);
+          : await sshService.buildJumpHostChainConfig(
+              _selectedJumpHostId!,
+              fromHostId: widget.hostId,
+            );
 
       final config = SshConnectionConfig(
         hostname: _hostnameController.text.trim(),

@@ -1733,11 +1733,17 @@ class SshService {
   ///
   /// Throws [JumpHostChainTooLongException] for a chain longer than a
   /// connection follows.
-  Future<SshConnectionConfig?> buildJumpHostChainConfig(int jumpHostId) {
+  ///
+  /// Pass the edited host's [fromHostId] when it is already saved, so a loop
+  /// back to it resolves the way a real connection would.
+  Future<SshConnectionConfig?> buildJumpHostChainConfig(
+    int jumpHostId, {
+    int? fromHostId,
+  }) {
     List<SshKey>? cachedAutoKeys;
     var didLoadAutoKeys = false;
     return _resolveJumpHostChain(
-      fromHostId: null,
+      fromHostId: fromHostId,
       jumpHostId: jumpHostId,
       skipJumpHostOnSsids: null,
       context: _JumpChainContext(

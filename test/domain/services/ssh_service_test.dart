@@ -8877,6 +8877,24 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(hops, 8);
     });
 
+    test('Test Connection counts the edited host as the chain start', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final edited = await insertHost(db, 'edited');
+      final jump = await insertHost(db, 'jump', jumpHostId: edited);
+
+      // Saving `edited` with `jump` as its jump host makes a loop, so a real
+      // connection dials `jump` directly; Test Connection must match.
+      final config = await service.buildJumpHostChainConfig(
+        jump,
+        fromHostId: edited,
+      );
+
+      expect(config!.hostname, 'jump.example.com');
+      expect(config.jumpHost, isNull);
+    });
+
     test('Test Connection builds the same multi-hop chain', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
