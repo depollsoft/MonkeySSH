@@ -28,6 +28,9 @@ String? sshConfigEntryBlockReason(
   while (current != null && checked.add(current.id)) {
     final isSelf = identical(current, entry);
     final subject = isSelf ? 'This host' : 'Jump host ${current.label}';
+    if (current.unsupportedReason case final reason?) {
+      return '$subject can’t be imported: $reason';
+    }
     final hostname = current.hostname;
     if (hostname.isEmpty ||
         hostname.length > _maxColumnLength ||
@@ -45,6 +48,49 @@ String? sshConfigEntryBlockReason(
     current = jumpId == null ? null : plan.entryById(jumpId);
   }
   return null;
+}
+
+/// Saved hosts that entries of [plan] would reuse instead of creating.
+///
+/// An entry reuses a saved host with the same hostname (ignoring case), port
+/// and effective user ([defaultUsername] when the entry has no User), whose
+/// jump host is the saved host its own jump entry reuses (or none). The
+/// preview and [SshConfigImportService.importEntries] both use this, so what
+/// the preview calls "already saved" is exactly what the import reuses.
+Map<String, Host> sshConfigSavedMatches(
+  SshConfigImportPlan plan,
+  List<Host> savedHosts, {
+  required String defaultUsername,
+}) {
+  final matches = <String, Host?>{};
+  Host? match(SshConfigImportEntry entry, Set<String> visiting) {
+    if (matches.containsKey(entry.id)) return matches[entry.id];
+    if (!visiting.add(entry.id)) return null;
+    final jumpEntry = entry.jumpEntryId == null
+        ? null
+        : plan.entryById(entry.jumpEntryId!);
+    final savedJump = jumpEntry == null ? null : match(jumpEntry, visiting);
+    Host? found;
+    if (jumpEntry == null || savedJump != null) {
+      final username = entry.username ?? defaultUsername.trim();
+      final hostname = entry.hostname.toLowerCase();
+      for (final host in savedHosts) {
+        if (host.hostname.toLowerCase() == hostname &&
+            host.port == entry.port &&
+            host.username == username &&
+            host.jumpHostId == savedJump?.id) {
+          found = host;
+          break;
+        }
+      }
+    }
+    return matches[entry.id] = found;
+  }
+
+  for (final entry in plan.entries) {
+    match(entry, <String>{});
+  }
+  return {for (final entry in matches.entries) entry.key: ?entry.value};
 }
 
 /// Entries that would be saved for [selectedIds]: the selection plus every
@@ -141,7 +187,11 @@ class SshConfigImportService {
     var reused = 0;
     var forwardCount = 0;
     await _db.transaction(() async {
-      final existingHosts = await _hostRepository.getAll();
+      final savedMatches = sshConfigSavedMatches(
+        plan,
+        await _hostRepository.getAll(),
+        defaultUsername: defaultUsername,
+      );
       final resolved = <String, int>{};
 
       Future<int> save(SshConfigImportEntry entry) async {
@@ -151,16 +201,16 @@ class SshConfigImportService {
             ? null
             : await save(plan.entryById(entry.jumpEntryId!)!);
         final username = entry.username ?? defaultUsername.trim();
-        final match = existingHosts.where(
-          (host) =>
-              host.hostname.toLowerCase() == entry.hostname.toLowerCase() &&
-              host.port == entry.port &&
-              host.username == username &&
-              host.jumpHostId == jumpId,
-        );
-        if (match.isNotEmpty) {
+        final match = savedMatches[entry.id];
+        if (match != null) {
           reused++;
-          return resolved[entry.id] = match.first.id;
+          // A host the user picked keeps its saved settings but gains any
+          // forwards from the config it doesn't already have. A saved host
+          // pulled in only as a jump host is left alone.
+          if (selectedIds.contains(entry.id)) {
+            forwardCount += await _addMissingForwards(match.id, entry);
+          }
+          return resolved[entry.id] = match.id;
         }
         final hostId = await _hostRepository.insert(
           HostsCompanion.insert(
@@ -217,6 +267,30 @@ class SshConfigImportService {
     );
   }
 
+  Future<int> _addMissingForwards(
+    int hostId,
+    SshConfigImportEntry entry,
+  ) async {
+    if (entry.forwards.isEmpty) return 0;
+    final existing = await _portForwardRepository.getByHostId(hostId);
+    var added = 0;
+    for (final forward in entry.forwards) {
+      final companion = _forwardCompanion(hostId, forward);
+      final duplicate = existing.any(
+        (saved) =>
+            saved.forwardType == companion.forwardType.value &&
+            saved.localHost == companion.localHost.value &&
+            saved.localPort == companion.localPort.value &&
+            saved.remoteHost == companion.remoteHost.value &&
+            saved.remotePort == companion.remotePort.value,
+      );
+      if (duplicate) continue;
+      await _portForwardRepository.insert(companion);
+      added++;
+    }
+    return added;
+  }
+
   static String _truncate(String value) => value.length <= _maxColumnLength
       ? value
       : value.substring(0, _maxColumnLength);
@@ -232,7 +306,7 @@ class SshConfigImportService {
     SshConfigForward forward,
   ) {
     final bindHost = sshConfigForwardBindHost(forward);
-    final autoStart = !sshConfigForwardIsExposed(forward);
+    final autoStart = sshConfigForwardAutoStarts(forward);
     return switch (forward.type) {
       SshConfigForwardType.local => PortForwardsCompanion.insert(
         name: _truncate(

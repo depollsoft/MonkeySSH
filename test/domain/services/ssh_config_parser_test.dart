@@ -463,35 +463,77 @@ Host app
       expect(app.warnings, isEmpty);
     });
 
-    test('a loop is reported instead of followed', () {
+    test('a loop blocks every host in it instead of being followed', () {
       final plan = _plan('''
 Host a
   ProxyJump b
 Host b
   ProxyJump a
+Host c
 ''');
       final a = _entry(plan, 'a');
       final b = _entry(plan, 'b');
       expect(a.jumpEntryId, isNull);
-      expect(a.warnings.single, contains('loops'));
-      expect(b.jumpEntryId, a.id);
+      expect(a.unsupportedReason, contains('loops'));
+      expect(b.unsupportedReason, contains('Its jump host a'));
+      expect(_entry(plan, 'c').unsupportedReason, isNull);
     });
 
-    test('a self-reference is reported', () {
+    test('a self-reference is blocked', () {
       final plan = _plan('Host a\n  ProxyJump a\n');
       expect(plan.entries.single.jumpEntryId, isNull);
-      expect(plan.entries.single.warnings.single, contains('loops'));
+      expect(plan.entries.single.unsupportedReason, contains('loops'));
     });
 
-    test('an overly deep chain stops with a warning', () {
-      final hops = [for (var i = 0; i < 12; i++) 'h$i'].join(',');
-      final plan = _plan('Host target\n  ProxyJump $hops\n');
-      final chain = plan.jumpChain(_entry(plan, 'target'));
-      expect(chain.length, lessThan(sshConfigMaxJumpDepth));
-      expect(
-        plan.entries.expand((e) => e.warnings),
-        contains(contains('too deep')),
+    test('allows exactly $sshConfigMaxJumpDepth hops and blocks more', () {
+      String chainOf(int count) =>
+          [for (var i = 0; i < count; i++) 'h$i'].join(',');
+      final ok = _plan('Host target\n  ProxyJump ${chainOf(8)}\n');
+      final okTarget = _entry(ok, 'target');
+      expect(ok.jumpChain(okTarget), hasLength(8));
+      expect(okTarget.unsupportedReason, isNull);
+
+      final deep = _plan('Host target\n  ProxyJump ${chainOf(9)}\n');
+      final deepTarget = _entry(deep, 'target');
+      expect(deepTarget.unsupportedReason, contains('9 hops'));
+    });
+
+    for (final reversed in [false, true]) {
+      test(
+        'depth is judged per host, not per lookup order (reversed: $reversed)',
+        () {
+          final blocks = [
+            for (var i = 1; i < 10; i++) 'Host h$i\n  ProxyJump h${i + 1}\n',
+            'Host h10\n',
+          ];
+          final plan = _plan((reversed ? blocks.reversed : blocks).join());
+          // h1 jumps through h2..h10: nine hops.
+          expect(_entry(plan, 'h1').unsupportedReason, contains('9 hops'));
+          // h2 has exactly eight and h8 two; both import intact.
+          expect(_entry(plan, 'h2').unsupportedReason, isNull);
+          expect(plan.jumpChain(_entry(plan, 'h2')), hasLength(8));
+          expect(_entry(plan, 'h8').unsupportedReason, isNull);
+          expect(plan.jumpChain(_entry(plan, 'h8')).map((e) => e.label), [
+            'h9',
+            'h10',
+          ]);
+        },
       );
+    }
+
+    test('a jump-only host keeps its IdentityFile', () {
+      final plan = _plan('''
+Host gw
+  HostName gw.example.com
+  User gwuser
+  IdentityFile ~/.ssh/gw
+Host app
+  ProxyJump special@gw
+''');
+      final hop = plan.entries.singleWhere((e) => e.isJumpOnly);
+      expect(hop.username, 'special');
+      expect(hop.keyNeeded, isTrue);
+      expect(hop.identityFiles, ['~/.ssh/gw']);
     });
   });
 
@@ -624,6 +666,40 @@ Match exec "touch /tmp/pwned"
 ''');
       expect(document.skipped.first.kind, SshConfigSkipKind.command);
       expect(document.skipped.first.reason, contains('never'));
+    });
+
+    test('Match final and Match canonical stay skipped', () {
+      final document = parseSshConfig('''
+Match final all
+  User finaluser
+Match canonical all
+  Port 2200
+Host web
+  User ordinaryuser
+''');
+      final options = document.resolve('web');
+      expect(options.user, 'ordinaryuser');
+      expect(options.port, isNull);
+      expect(document.skipped.map((s) => s.lineNumber), [1, 2, 3, 4]);
+    });
+
+    test('entries a skipped Match block may change carry a warning', () {
+      final plan = _plan('''
+Match host web,!other
+  User root
+Match user bob
+  Port 2222
+Match host nothing
+Host web
+Host api
+  HostName api.example.com
+''');
+      expect(_entry(plan, 'web').warnings, [
+        'Skipped Match blocks on lines 1, 3 may change this host’s settings.',
+      ]);
+      expect(_entry(plan, 'api').warnings, [
+        'The skipped Match block on line 3 may change this host’s settings.',
+      ]);
     });
 
     test('Match all applies to every host', () {

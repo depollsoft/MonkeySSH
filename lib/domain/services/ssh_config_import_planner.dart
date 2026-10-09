@@ -26,6 +26,7 @@ class SshConfigImportEntry {
     required this.isJumpOnly,
     this.username,
     this.jumpEntryId,
+    this.unsupportedReason,
   });
 
   /// Stable identifier within the plan.
@@ -61,6 +62,10 @@ class SshConfigImportEntry {
 
   /// Whether this entry exists only because another host jumps through it.
   final bool isJumpOnly;
+
+  /// Why this entry can't be imported as configured (a ProxyJump loop or a
+  /// chain longer than [sshConfigMaxJumpDepth]), or null.
+  final String? unsupportedReason;
 
   /// Whether the host needs a key imported separately.
   bool get keyNeeded => identityFiles.isNotEmpty;
@@ -112,20 +117,39 @@ class SshConfigImportPlan {
 /// A host resolved from the config, before it becomes an entry.
 class _Node {
   _Node({
+    required this.name,
     required this.label,
     required this.hostname,
     required this.port,
     required this.username,
     required this.jump,
     required this.warnings,
+    required this.identityFiles,
+    required this.problem,
   });
 
+  final String name;
   final String label;
   final String hostname;
   final int port;
   final String? username;
   final _Node? jump;
   final List<String> warnings;
+  final List<String> identityFiles;
+
+  /// Why this host's own ProxyJump chain can't be imported, or null.
+  final String? problem;
+
+  /// Number of jump hosts between the phone and this host.
+  late final int chainLength = jump == null ? 0 : jump!.chainLength + 1;
+
+  /// [problem], or the first problem further down the chain.
+  late final String? unsupportedReason =
+      problem ??
+      (jump?.unsupportedReason == null
+          ? null
+          : 'Its jump host ${jump!.label} can’t be imported: '
+                '${jump!.unsupportedReason}');
 
   late final String signature =
       '${username ?? ''}@${hostname.toLowerCase()}:$port'
@@ -142,7 +166,13 @@ class _JumpLoop implements Exception {
 /// Builds the import preview for [document].
 SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
   final memo = <String, _Node>{};
+  final optionsCache = <String, SshConfigResolvedOptions>{};
+  SshConfigResolvedOptions optionsFor(String name) =>
+      optionsCache[name.toLowerCase()] ??= document.resolve(name);
 
+  // Results never depend on how deep the caller is, so they can be cached.
+  // Hosts inside a loop are not cached: they unwind with _JumpLoop and are
+  // resolved again on their own.
   _Node resolve(
     String name, {
     required List<String> stack,
@@ -161,11 +191,12 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
     if (cached != null) return cached;
     if (stack.contains(key)) throw _JumpLoop(key);
 
-    final options = document.resolve(name);
+    final options = optionsFor(name);
     final warnings = <String>[];
     final hostname = _expandHostName(options.hostName, name, warnings);
 
     _Node? jump;
+    String? problem;
     List<SshConfigJumpHop>? hops;
     if (via.isNotEmpty) {
       hops = via;
@@ -180,45 +211,55 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
     }
     if (hops != null) {
       final last = hops.last;
-      if (stack.length + 1 >= sshConfigMaxJumpDepth) {
-        warnings.add(
-          'The ProxyJump chain through ${last.display} is too deep, so it '
-          'was not imported.',
+      try {
+        jump = resolve(
+          last.host,
+          stack: [...stack, key],
+          user: last.user,
+          port: last.port,
+          via: hops.sublist(0, hops.length - 1),
+          label: hops.length > 1
+              ? '${last.display} (via ${hops[hops.length - 2].display})'
+              : last.display,
         );
-      } else {
-        try {
-          jump = resolve(
-            last.host,
-            stack: [...stack, key],
-            user: last.user,
-            port: last.port,
-            via: hops.sublist(0, hops.length - 1),
-            label: hops.length > 1
-                ? '${last.display} (via ${hops[hops.length - 2].display})'
-                : last.display,
-          );
-        } on _JumpLoop catch (loop) {
-          // Only the host where the loop starts drops its jump; hosts inside
-          // the loop are resolved again on their own.
-          if (loop.key != key) rethrow;
-          warnings.add(
-            'The ProxyJump chain through ${last.display} loops back to this '
-            'host, so it was not imported.',
-          );
-        }
+      } on _JumpLoop catch (loop) {
+        if (loop.key != key) rethrow;
+        problem =
+            'its ProxyJump chain through ${last.display} loops back to '
+            'it.';
       }
     }
 
     final node = _Node(
+      name: name,
       label: label ?? name,
       hostname: hostname,
       port: port ?? options.port ?? 22,
       username: user ?? options.user,
       jump: jump,
       warnings: warnings,
+      identityFiles: options.identityFiles,
+      problem:
+          problem ??
+          (jump != null && jump.chainLength + 1 > sshConfigMaxJumpDepth
+              ? 'its ProxyJump chain has ${jump.chainLength + 1} hops, and '
+                    'MonkeySSH follows at most $sshConfigMaxJumpDepth.'
+              : null),
     );
     memo[key] = node;
     return node;
+  }
+
+  List<String> matchWarnings(String name, String hostname) {
+    final lines = [
+      for (final block in document.skippedMatchBlocks)
+        if (block.mayApplyTo(name, hostname)) block.lineNumber,
+    ];
+    if (lines.isEmpty) return const [];
+    final where = lines.length == 1
+        ? 'The skipped Match block on line ${lines.single}'
+        : 'Skipped Match blocks on lines ${lines.join(', ')}';
+    return ['$where may change this host’s settings.'];
   }
 
   final entries = <SshConfigImportEntry>[];
@@ -243,9 +284,13 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
         username: node.username,
         jumpEntryId: jumpId,
         forwards: const [],
-        identityFiles: const [],
-        warnings: List.unmodifiable(node.warnings),
+        identityFiles: node.identityFiles,
+        warnings: List.unmodifiable([
+          ...node.warnings,
+          ...matchWarnings(node.name, node.hostname),
+        ]),
         isJumpOnly: true,
+        unsupportedReason: node.unsupportedReason,
       ),
     );
     return id;
@@ -255,7 +300,7 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
   final aliasNodes = <(String, _Node, SshConfigResolvedOptions)>[];
   for (final alias in document.concreteAliases) {
     final node = resolve(alias, stack: const []);
-    aliasNodes.add((alias, node, document.resolve(alias)));
+    aliasNodes.add((alias, node, optionsFor(alias)));
   }
 
   final aliasEntryIds = <String>[];
@@ -284,6 +329,7 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
         identityFiles: existing.identityFiles,
         warnings: existing.warnings,
         isJumpOnly: false,
+        unsupportedReason: existing.unsupportedReason,
       );
       continue;
     }
@@ -303,6 +349,7 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
         identityFiles: options.identityFiles,
         warnings: List.unmodifiable([
           ...node.warnings,
+          ...matchWarnings(alias, node.hostname),
           if (_hasToken(node.username))
             'User contains % tokens, which aren’t expanded.',
           for (final forward in forwards)
@@ -310,6 +357,7 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
               _exposedForwardWarning(forward),
         ]),
         isJumpOnly: false,
+        unsupportedReason: node.unsupportedReason,
       ),
     );
   }
@@ -338,6 +386,7 @@ SshConfigImportPlan buildSshConfigImportPlan(SshConfigDocument document) {
       identityFiles: entry.identityFiles,
       warnings: entry.warnings,
       isJumpOnly: false,
+      unsupportedReason: entry.unsupportedReason,
     );
   }
 
@@ -374,10 +423,17 @@ String sshConfigForwardBindHost(SshConfigForward forward) =>
       final String host => host,
     };
 
-/// Whether [forward] listens on more than loopback. Such forwards are saved
-/// but not started automatically.
+/// Whether [forward] listens on more than loopback.
 bool sshConfigForwardIsExposed(SshConfigForward forward) =>
     !isPortForwardLoopbackHost(sshConfigForwardBindHost(forward));
+
+/// Whether an imported [forward] starts when the host connects.
+///
+/// Only local forwards bound to loopback do. A remote forward lets the
+/// server open connections to the phone's side, so it starts manually.
+bool sshConfigForwardAutoStarts(SshConfigForward forward) =>
+    forward.type == SshConfigForwardType.local &&
+    !sshConfigForwardIsExposed(forward);
 
 String _exposedForwardWarning(SshConfigForward forward) {
   final keyword = forward.type == SshConfigForwardType.local

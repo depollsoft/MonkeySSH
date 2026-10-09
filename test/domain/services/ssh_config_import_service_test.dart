@@ -264,6 +264,159 @@ Host secret-alias
     }
   });
 
+  test('saved-host matching uses the effective user and jump host', () {
+    Host saved(int id, String hostname, String user, {int? jumpHostId}) => Host(
+      id: id,
+      label: hostname,
+      hostname: hostname,
+      port: 22,
+      username: user,
+      jumpHostId: jumpHostId,
+      isFavorite: false,
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+      autoConnectRequiresConfirmation: false,
+      autoForwardPorts: false,
+      sortOrder: id,
+    );
+    final plan = _plan('''
+Host nouser
+Host direct
+  User me
+Host jumped
+  User me
+  ProxyJump bastion
+Host bastion
+  User jump
+''');
+    final savedHosts = [
+      saved(1, 'nouser', 'alice'),
+      saved(2, 'direct', 'me'),
+      saved(3, 'bastion', 'jump'),
+      saved(4, 'jumped', 'me'),
+    ];
+    final matches = sshConfigSavedMatches(
+      plan,
+      savedHosts,
+      defaultUsername: 'bob',
+    );
+    // bob@nouser isn't alice@nouser.
+    expect(matches.containsKey(_idFor(plan, 'nouser')), isFalse);
+    expect(matches[_idFor(plan, 'direct')]?.id, 2);
+    expect(matches[_idFor(plan, 'bastion')]?.id, 3);
+    // Saved "jumped" connects directly, but the config jumps via bastion.
+    expect(matches.containsKey(_idFor(plan, 'jumped')), isFalse);
+
+    final viaBastion = sshConfigSavedMatches(plan, [
+      ...savedHosts,
+      saved(5, 'jumped', 'me', jumpHostId: 3),
+    ], defaultUsername: 'alice');
+    expect(viaBastion[_idFor(plan, 'jumped')]?.id, 5);
+    expect(viaBastion[_idFor(plan, 'nouser')]?.id, 1);
+  });
+
+  test('a picked host that is already saved gains missing forwards', () async {
+    final hostId = await hosts.insert(
+      HostsCompanion.insert(label: 'Web', hostname: 'web', username: 'me'),
+    );
+    await forwards.insert(
+      PortForwardsCompanion.insert(
+        name: 'existing',
+        hostId: hostId,
+        forwardType: 'local',
+        localPort: 8080,
+        remoteHost: 'localhost',
+        remotePort: 80,
+      ),
+    );
+    final plan = _plan('''
+Host web
+  User me
+  LocalForward 8080 localhost:80
+  LocalForward 5432 db:5432
+''');
+    final result = await service.importEntries(
+      plan,
+      selectedIds: {plan.entries.single.id},
+      defaultUsername: '',
+    );
+    expect(result.createdHostIds, isEmpty);
+    expect(result.reusedHostCount, 1);
+    expect(result.forwardCount, 1);
+    final saved = await forwards.getByHostId(hostId);
+    expect(saved.map((f) => f.localPort), unorderedEquals([8080, 5432]));
+  });
+
+  test('a saved host reused only as a jump host is left alone', () async {
+    final bastionId = await hosts.insert(
+      HostsCompanion.insert(
+        label: 'Bastion',
+        hostname: 'bastion',
+        username: 'jump',
+      ),
+    );
+    final plan = _plan('''
+Host bastion
+  User jump
+  LocalForward 9000 localhost:9000
+Host app
+  User me
+  ProxyJump bastion
+''');
+    await service.importEntries(
+      plan,
+      selectedIds: {_idFor(plan, 'app')},
+      defaultUsername: '',
+    );
+    expect(await forwards.getByHostId(bastionId), isEmpty);
+  });
+
+  test('remote forwards never start automatically', () async {
+    final plan = _plan('''
+Host web
+  User me
+  RemoteForward 9000 192.168.1.1:80
+  LocalForward 8080 localhost:80
+''');
+    await service.importEntries(
+      plan,
+      selectedIds: {plan.entries.single.id},
+      defaultUsername: '',
+    );
+    final saved = await forwards.getAll();
+    expect(
+      saved.singleWhere((f) => f.forwardType == 'remote').autoStart,
+      isFalse,
+    );
+    expect(
+      saved.singleWhere((f) => f.forwardType == 'local').autoStart,
+      isTrue,
+    );
+  });
+
+  test('hosts with a looping or too-deep chain are blocked', () {
+    final plan = _plan('''
+Host a
+  User me
+  ProxyJump b
+Host b
+  User me
+  ProxyJump a
+''');
+    expect(
+      sshConfigEntryBlockReason(plan, plan.entries.first, defaultUsername: ''),
+      contains('loops'),
+    );
+    expect(
+      () => service.importEntries(
+        plan,
+        selectedIds: {plan.entries.first.id},
+        defaultUsername: '',
+      ),
+      throwsA(isA<SshConfigImportBlockedException>()),
+    );
+  });
+
   test('closure adds the jump hosts a selection needs', () {
     final plan = _plan('''
 Host a

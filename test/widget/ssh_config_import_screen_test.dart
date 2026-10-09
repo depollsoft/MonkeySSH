@@ -161,6 +161,23 @@ void main() {
     await _unmount(tester);
   });
 
+  testWidgets('oversized pasted text is refused before parsing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(db, text: 'Host a\n${'#' * sshConfigImportMaxBytes}\n'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Preview'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('That text is too large for an ssh config.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('hosts ·'), findsNothing);
+    await _unmount(tester);
+  });
+
   testWidgets('preview waits for text', (tester) async {
     await tester.pumpWidget(_app(db, text: null));
     await tester.pumpAndSettle();

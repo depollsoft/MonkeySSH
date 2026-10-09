@@ -163,23 +163,31 @@ class SshConfigForward {
 @immutable
 class SshConfigHostPattern {
   /// Creates a host pattern.
-  const SshConfigHostPattern(this.pattern, {this.negated = false});
+  SshConfigHostPattern(this.pattern, {this.negated = false})
+    : _lowerPattern = pattern.toLowerCase(),
+      hasWildcard = pattern.contains('*') || pattern.contains('?');
 
   /// The pattern without its `!` prefix.
   final String pattern;
+
+  final String _lowerPattern;
 
   /// Whether the pattern excludes matching hosts.
   final bool negated;
 
   /// Whether the pattern uses `*` or `?` wildcards.
-  bool get hasWildcard => pattern.contains('*') || pattern.contains('?');
+  final bool hasWildcard;
 
   /// Whether this pattern names exactly one host alias.
   bool get isConcrete => !negated && !hasWildcard;
 
   /// Whether [host] matches the pattern, ignoring its negation.
-  bool matches(String host) =>
-      sshConfigPatternMatches(pattern.toLowerCase(), host.toLowerCase());
+  bool matches(String host) => matchesLowerCase(host.toLowerCase());
+
+  /// [matches] for a host name that is already lower case.
+  bool matchesLowerCase(String host) => hasWildcard
+      ? sshConfigPatternMatches(_lowerPattern, host)
+      : _lowerPattern == host;
 
   @override
   String toString() => negated ? '!$pattern' : pattern;
@@ -231,16 +239,11 @@ class SshConfigBlock {
 
   /// Whether this block applies to [host], using OpenSSH rules: at least one
   /// positive pattern matches and no negated pattern matches.
-  bool matches(String host) {
-    if (patterns.isEmpty) return true;
-    var matched = false;
-    for (final pattern in patterns) {
-      if (!pattern.matches(host)) continue;
-      if (pattern.negated) return false;
-      matched = true;
-    }
-    return matched;
-  }
+  bool matches(String host) => matchesLowerCase(host.toLowerCase());
+
+  /// [matches] for a host name that is already lower case.
+  bool matchesLowerCase(String host) =>
+      patterns.isEmpty || sshConfigPatternListMatches(patterns, host);
 
   /// Whether the block only supplies defaults (no concrete alias).
   bool get isDefaultsOnly => !patterns.any((pattern) => pattern.isConcrete);
@@ -296,13 +299,20 @@ class SshConfigResolvedOptions {
 @immutable
 class SshConfigDocument {
   /// Creates a document.
-  const SshConfigDocument({required this.blocks, required this.skipped});
+  const SshConfigDocument({
+    required this.blocks,
+    required this.skipped,
+    this.skippedMatchBlocks = const [],
+  });
 
   /// Blocks in file order, including the global block when present.
   final List<SshConfigBlock> blocks;
 
   /// Every directive the import leaves out, in line order.
   final List<SshConfigSkippedDirective> skipped;
+
+  /// Skipped `Match` blocks that held at least one directive.
+  final List<SshConfigSkippedMatchBlock> skippedMatchBlocks;
 
   /// Concrete aliases in order of first appearance.
   ///
@@ -337,8 +347,9 @@ class SshConfigDocument {
     final localForwards = <SshConfigForward>[];
     final remoteForwards = <SshConfigForward>[];
     final identityFiles = <String>[];
+    final lowerName = name.toLowerCase();
     for (final block in blocks) {
-      if (!block.matches(name)) continue;
+      if (!block.matchesLowerCase(lowerName)) continue;
       for (final directive in block.directives) {
         final value = directive.value;
         switch (directive.keyword) {
@@ -381,6 +392,48 @@ class SshConfigDocument {
       remoteForwards: List.unmodifiable(remoteForwards),
       identityFiles: List.unmodifiable(identityFiles),
     );
+  }
+}
+
+/// Whether lower-case [host] matches [patterns]: at least one positive
+/// pattern matches and no negated pattern does.
+bool sshConfigPatternListMatches(
+  List<SshConfigHostPattern> patterns,
+  String host,
+) {
+  var matched = false;
+  for (final pattern in patterns) {
+    if (!pattern.matchesLowerCase(host)) continue;
+    if (pattern.negated) return false;
+    matched = true;
+  }
+  return matched;
+}
+
+/// A `Match` block the import skipped, kept so entries it might affect can
+/// say so.
+@immutable
+class SshConfigSkippedMatchBlock {
+  /// Creates a skipped block record.
+  const SshConfigSkippedMatchBlock({
+    required this.lineNumber,
+    required this.hostPatterns,
+  });
+
+  /// One-based line of the `Match` line.
+  final int lineNumber;
+
+  /// Patterns from its `host` and `originalhost` criteria, or null when the
+  /// block has no such criterion and could apply to any host.
+  final List<SshConfigHostPattern>? hostPatterns;
+
+  /// Whether the block could apply to a host reached as [alias] at
+  /// [hostname].
+  bool mayApplyTo(String alias, String hostname) {
+    final patterns = hostPatterns;
+    if (patterns == null) return true;
+    return sshConfigPatternListMatches(patterns, alias.toLowerCase()) ||
+        sshConfigPatternListMatches(patterns, hostname.toLowerCase());
   }
 }
 
@@ -730,6 +783,21 @@ SshConfigDocument parseSshConfig(String text) {
     ),
   );
 
+  final skippedMatchBlocks = <SshConfigSkippedMatchBlock>[];
+  ({int lineNumber, List<SshConfigHostPattern>? hostPatterns, int directives})?
+  pendingMatch;
+  void closeSkippedMatch() {
+    final match = pendingMatch;
+    pendingMatch = null;
+    if (match == null || match.directives == 0) return;
+    skippedMatchBlocks.add(
+      SshConfigSkippedMatchBlock(
+        lineNumber: match.lineNumber,
+        hostPatterns: match.hostPatterns,
+      ),
+    );
+  }
+
   // Directives before the first Host apply to every host.
   hasCurrentBlock = true;
 
@@ -762,6 +830,7 @@ SshConfigDocument parseSshConfig(String text) {
 
     if (keyword == 'host') {
       closeBlock();
+      closeSkippedMatch();
       skippedBlock = null;
       if (args.isEmpty) {
         skip(
@@ -791,10 +860,12 @@ SshConfigDocument parseSshConfig(String text) {
 
     if (keyword == 'match') {
       closeBlock();
+      closeSkippedMatch();
       final criteria = args
           .map((arg) => arg.toLowerCase())
-          .where((arg) => arg != 'canonical' && arg != 'final')
           .toList(growable: false);
+      // Only a bare `Match all` applies on the first pass. `canonical` and
+      // `final` blocks belong to later passes this import doesn't run.
       if (criteria.length == 1 && criteria.single == 'all') {
         skippedBlock = null;
         hasCurrentBlock = true;
@@ -805,6 +876,11 @@ SshConfigDocument parseSshConfig(String text) {
       skippedBlock = (
         kind: SshConfigSkipKind.match,
         reason: 'Inside a skipped Match block.',
+      );
+      pendingMatch = (
+        lineNumber: lineNumber,
+        hostPatterns: _matchHostPatterns(args),
+        directives: 0,
       );
       final runsCommand = criteria.contains('exec');
       skip(
@@ -821,6 +897,13 @@ SshConfigDocument parseSshConfig(String text) {
 
     if (skippedBlock case final block?) {
       skip(lineNumber, keywordAsWritten, block.kind, block.reason);
+      if (pendingMatch case final match?) {
+        pendingMatch = (
+          lineNumber: match.lineNumber,
+          hostPatterns: match.hostPatterns,
+          directives: match.directives + 1,
+        );
+      }
       continue;
     }
 
@@ -1004,9 +1087,43 @@ SshConfigDocument parseSshConfig(String text) {
     }
   }
   closeBlock();
+  closeSkippedMatch();
 
   return SshConfigDocument(
     blocks: List.unmodifiable(blocks),
     skipped: List.unmodifiable(skipped),
+    skippedMatchBlocks: List.unmodifiable(skippedMatchBlocks),
   );
+}
+
+/// Host patterns from a `Match` line's `host` and `originalhost` criteria.
+///
+/// Returns null when the line has no such criterion, or negates one, so the
+/// block could apply to any host.
+List<SshConfigHostPattern>? _matchHostPatterns(List<String> args) {
+  const noArgument = {'all', 'canonical', 'final'};
+  final patterns = <SshConfigHostPattern>[];
+  var i = 0;
+  while (i < args.length) {
+    final criterion = args[i].toLowerCase();
+    if (noArgument.contains(criterion)) {
+      i++;
+      continue;
+    }
+    final value = i + 1 < args.length ? args[i + 1] : '';
+    if (criterion == 'host' || criterion == 'originalhost') {
+      for (final raw in value.split(',')) {
+        if (raw.isEmpty) continue;
+        patterns.add(
+          raw.startsWith('!')
+              ? SshConfigHostPattern(raw.substring(1), negated: true)
+              : SshConfigHostPattern(raw),
+        );
+      }
+    } else if (criterion == '!host' || criterion == '!originalhost') {
+      return null;
+    }
+    i += 2;
+  }
+  return patterns.isEmpty ? null : patterns;
 }

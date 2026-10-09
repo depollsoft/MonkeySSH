@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,9 +14,15 @@ import '../../domain/services/ssh_config_import_service.dart';
 import '../../domain/services/ssh_config_parser.dart';
 import '../providers/entity_list_providers.dart';
 
-/// Largest config the importer reads, to keep a stray binary file from
-/// freezing the preview.
+/// Largest config the importer reads, to keep a stray binary file or paste
+/// from freezing the preview.
 const sshConfigImportMaxBytes = 512 * 1024;
+
+/// Configs at least this large are parsed off the UI isolate.
+const _backgroundParseBytes = 32 * 1024;
+
+SshConfigImportPlan _planFromText(String text) =>
+    buildSshConfigImportPlan(parseSshConfig(text));
 
 /// Imports hosts from an OpenSSH client config pasted or opened from a file,
 /// with a preview of every host, jump host, forward, and skipped directive
@@ -38,6 +45,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
   SshConfigImportPlan? _plan;
   Set<String> _selected = {};
   var _importing = false;
+  var _parsing = false;
 
   @override
   void initState() {
@@ -71,9 +79,19 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     _source.text = text;
   }
 
+  void _tooLarge(String what) => ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text('That $what is too large for an ssh config.')),
+  );
+
   Future<void> _openFile() async {
     final file = await FilePicker.pickFile();
     if (!mounted || file == null) return;
+    // Reject a known-large file before reading it into memory.
+    final knownLength = file.lengthSync();
+    if (knownLength != null && knownLength > sshConfigImportMaxBytes) {
+      _tooLarge('file');
+      return;
+    }
     final Uint8List bytes;
     try {
       bytes = await file.readAsBytes();
@@ -87,37 +105,47 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     }
     if (!mounted) return;
     if (bytes.length > sshConfigImportMaxBytes) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('That file is too large for a config.')),
-      );
+      _tooLarge('file');
       return;
     }
     _source.text = utf8.decode(bytes, allowMalformed: true);
   }
 
-  void _preview(List<Host> savedHosts) {
-    final plan = buildSshConfigImportPlan(parseSshConfig(_source.text));
+  Future<void> _preview(List<Host> savedHosts) async {
+    final text = _source.text;
+    if (utf8.encode(text).length > sshConfigImportMaxBytes) {
+      _tooLarge('text');
+      return;
+    }
+    setState(() => _parsing = true);
+    final SshConfigImportPlan plan;
+    try {
+      plan = text.length >= _backgroundParseBytes
+          ? await compute(_planFromText, text)
+          : _planFromText(text);
+    } finally {
+      if (mounted) setState(() => _parsing = false);
+    }
+    if (!mounted) return;
+    final saved = _savedMatches(plan, savedHosts);
     setState(() {
       _plan = plan;
       _selected = {
         for (final entry in plan.entries)
-          if (!entry.isJumpOnly && _savedMatch(entry, savedHosts) == null)
-            entry.id,
+          if (!entry.isJumpOnly && !saved.containsKey(entry.id)) entry.id,
       };
     });
   }
 
-  Host? _savedMatch(SshConfigImportEntry entry, List<Host> savedHosts) {
-    final username = entry.username ?? _defaultUsername.text.trim();
-    for (final host in savedHosts) {
-      if (host.hostname.toLowerCase() == entry.hostname.toLowerCase() &&
-          host.port == entry.port &&
-          (entry.username == null || host.username == username)) {
-        return host;
-      }
-    }
-    return null;
-  }
+  /// The same matching the import uses, so "already saved" is accurate.
+  Map<String, Host> _savedMatches(
+    SshConfigImportPlan plan,
+    List<Host> savedHosts,
+  ) => sshConfigSavedMatches(
+    plan,
+    savedHosts,
+    defaultUsername: _defaultUsername.text,
+  );
 
   Future<void> _import(SshConfigImportPlan plan) async {
     final selected = {
@@ -253,10 +281,10 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
           Padding(
             padding: const EdgeInsets.all(FluttyTheme.spacingMd),
             child: FilledButton(
-              onPressed: _source.text.trim().isEmpty
+              onPressed: _source.text.trim().isEmpty || _parsing
                   ? null
-                  : () => _preview(savedHosts),
-              child: const Text('Preview'),
+                  : () => unawaited(_preview(savedHosts)),
+              child: Text(_parsing ? 'Reading…' : 'Preview'),
             ),
           ),
         ],
@@ -284,6 +312,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
           id,
     };
     final closure = sshConfigImportClosure(plan, selectable);
+    final savedMatches = _savedMatches(plan, savedHosts);
     final needsUsername = plan.entries.any((entry) => entry.username == null);
     final mono = FluttyTheme.monoStyle.copyWith(
       fontSize: 12,
@@ -372,7 +401,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
                       entry,
                       defaultUsername: _defaultUsername.text,
                     ),
-                    savedMatch: _savedMatch(entry, savedHosts),
+                    savedMatch: savedMatches[entry.id],
                     onChanged: (value) => setState(() {
                       if (value) {
                         _selected.add(entry.id);
@@ -392,7 +421,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
                           ? 'Added because a selected host jumps through it'
                           : 'Added only if a selected host needs it',
                       blockedReason: null,
-                      savedMatch: _savedMatch(entry, savedHosts),
+                      savedMatch: savedMatches[entry.id],
                     ),
                 ],
                 if (plan.skipped.isNotEmpty)
@@ -508,7 +537,10 @@ class _EntryTile extends StatelessWidget {
       if (savedMatch != null)
         (
           Icons.bookmark_outline,
-          'Already saved as ${savedMatch!.label}.',
+          entry.forwards.isEmpty
+              ? 'Already saved as ${savedMatch!.label}.'
+              : 'Already saved as ${savedMatch!.label}. Importing it adds '
+                    'any forwards it doesn’t have.',
           false,
         ),
       if (requiredBy != null) (Icons.link, requiredBy!, false),
@@ -599,8 +631,9 @@ class _EntryTile extends StatelessWidget {
 
   static String _forwardSummary(SshConfigForward forward) {
     final direction = forward.type == SshConfigForwardType.local ? 'L' : 'R';
+    final manual = sshConfigForwardAutoStarts(forward) ? '' : ' (manual)';
     return '$direction ${forward.bindPort}→'
-        '${forward.targetHost}:${forward.targetPort}';
+        '${forward.targetHost}:${forward.targetPort}$manual';
   }
 
   static String _fileName(String path) {
