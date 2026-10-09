@@ -18,6 +18,12 @@ func codexSessionLockHeld(path string) bool {
 	err = windows.LockFileEx(handle,
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
 		0, ^uint32(0), ^uint32(0), &overlapped)
+	if err == nil {
+		// Closing a handle releases its locks only eventually. Unlock now so
+		// Codex can take the lock as soon as it retries.
+		_ = windows.UnlockFileEx(handle, 0, ^uint32(0), ^uint32(0), &overlapped)
+		return false
+	}
 	return errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }
 
