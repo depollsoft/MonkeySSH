@@ -25,14 +25,20 @@ func TestCodexLockedPromptShown(t *testing.T) {
 	}{
 		{"codex prompt", render(80, codexLockedPromptFixture), true},
 		{"wrapped mid-word", render(13, "This conversation is open in another app. "+
-			"Close it there and press R to continue here."), true},
+			"Close it there and press R to continue here.\r\nr to retry"), true},
 		{"boxed", []string{
 			"╭─────────────────────────────────────╮",
 			"│ This conversation is open in        │",
 			"│ another app — Close it there and    │",
 			"│ press R to continue here.           │",
 			"╰─────────────────────────────────────╯",
+			"  [r] to retry",
 		}, true},
+		// A transcript that quotes the error rarely carries the key hint.
+		{"quoted without the hint", render(80, "> This conversation is open in another app. "+
+			"Close it there and press R to continue here.\r\n› Why does this happen?"), false},
+		{"hint inside a word", render(80, "This conversation is open in another app. "+
+			"Close it there and press R to continue here. It asks the user to retry."), false},
 		{"title only", render(80, "This conversation is open in another app"), false},
 		{"other retry prompt", render(80, "Request interrupted. Press R to retry."), false},
 		{"empty", nil, false},
@@ -130,12 +136,51 @@ func TestCodexLockedResumeRetry(t *testing.T) {
 			wantEnd: release + 7*time.Second + policy.poll,
 		},
 		{
-			name: "holder seen behind another program",
+			name: "program changes after the lease ends",
 			frame: func(elapsed time.Duration) codexLockedResumeFrame {
 				if elapsed < release {
 					return codexLockedResumeFrame{prompt: true, foreground: 41, held: true}
 				}
 				return codexLockedResumeFrame{prompt: true, foreground: 42}
+			},
+			wantEnd: release,
+		},
+		{
+			// The old prompt can outlive its Codex on screen (inline mode) while
+			// the lease is still held. The next program must not inherit it.
+			name: "program changes while the lease is still held",
+			frame: func(elapsed time.Duration) codexLockedResumeFrame {
+				switch {
+				case elapsed < time.Minute:
+					return codexLockedResumeFrame{prompt: true, foreground: 41, held: true}
+				case elapsed < release:
+					return codexLockedResumeFrame{prompt: true, foreground: 42, held: true}
+				default:
+					return codexLockedResumeFrame{prompt: true, foreground: 42}
+				}
+			},
+			wantEnd: time.Minute,
+		},
+		{
+			name: "program changes while the prompt is hidden",
+			frame: func(elapsed time.Duration) codexLockedResumeFrame {
+				switch {
+				case elapsed < time.Minute:
+					return codexLockedResumeFrame{prompt: true, foreground: 41, held: true}
+				case elapsed < time.Minute+3*time.Second:
+					return codexLockedResumeFrame{foreground: 41}
+				default:
+					return codexLockedResumeFrame{prompt: elapsed >= time.Minute+5*time.Second, foreground: 42}
+				}
+			},
+			wantEnd: time.Minute + 3*time.Second,
+		},
+		{
+			// Without a foreground identity (ConPTY) nothing ties the lock to
+			// the program showing the prompt.
+			name: "no foreground identity",
+			frame: func(elapsed time.Duration) codexLockedResumeFrame {
+				return codexLockedResumeFrame{prompt: true, held: elapsed < release}
 			},
 			wantEnd: policy.limit,
 		},
@@ -250,6 +295,7 @@ func TestWatchCodexLockedResumePressesROnceLockReleases(t *testing.T) {
 func TestWatchCodexLockedResumeStopsWithWindow(t *testing.T) {
 	server := newMuxServer("codex-locked-resume-close")
 	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
 	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
 	server.activeID = "@1"
@@ -274,6 +320,62 @@ func TestWatchCodexLockedResumeStopsWithWindow(t *testing.T) {
 	}
 	if got := pty.String(); strings.Contains(got, "r") {
 		t.Fatalf("pressed %q for a held lock", got)
+	}
+}
+
+// An interrupted resume can leave its prompt on screen while the old lease
+// is still held. Once another program takes the terminal, the release must
+// not press R into it.
+func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-switch")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var probes atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, func() bool { probes.Add(1); return held.Load() },
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
+		close(done)
+	}()
+	waitForCodexLockedResume(t, "lock probe", func() bool { return probes.Load() > 0 })
+	pty.foreground.Store(42)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher kept watching the next program")
+	}
+	held.Store(false)
+	time.Sleep(20 * time.Millisecond)
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q into the next program", got)
+	}
+}
+
+func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	var armed []string
+	original := startCodexLockedResumeWatch
+	t.Cleanup(func() { startCodexLockedResumeWatch = original })
+	startCodexLockedResumeWatch = func(_ *muxServer, window *muxWindow, lockPath string) {
+		armed = append(armed, window.id+" "+lockPath)
+	}
+	options := createWindowOptionsForRestore(
+		restoreWindowState{AgentTool: "codex", AgentSessionID: "saved-thread"}, false)
+	server := newMuxServer("codex-locked-resume-arm")
+	server.watchRestoredCodexResume(&muxWindow{id: "@1", pty: &recordingPty{}}, options)
+	server.watchRestoredCodexResume(&muxWindow{id: "@2", pty: &codexLockedResumeTestPty{}}, options)
+	want := "@2 " + codexSessionLockPath(codexHome, "saved-thread")
+	if len(armed) != 1 || armed[0] != want {
+		t.Fatalf("armed = %q, want only %q (ConPTY reports no foreground group)", armed, want)
 	}
 }
 

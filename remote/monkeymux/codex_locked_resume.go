@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -15,14 +16,18 @@ import (
 // (waitForCodexSession) by minutes.
 //
 // watchCodexLockedResume presses R for the user once that holder lets go. It
-// presses only while the prompt is on screen and only after it has seen the
-// writer lock held and then free in front of the same foreground process
-// group. It therefore never competes with a live holder, and it does nothing
-// when it cannot observe the lock, for example under a CODEX_HOME that only
-// the pane's shell sets. A transcript that merely quotes the prompt is safe
-// too: the resumed session holds its own lock until it exits, and on Unix its
-// exit also changes the foreground group. Presses and time are bounded: a
-// thread that stays open elsewhere keeps Codex's prompt for the user.
+// presses only while the prompt and its "r to retry" hint are on screen, and
+// only after it has seen the writer lock held and then free. It never
+// competes with a live holder, and it does nothing when it cannot observe the
+// lock, for example under a CODEX_HOME that only the pane's shell sets.
+//
+// The watch belongs to the foreground process group that first showed the
+// prompt and ends when another group takes the terminal: an interrupted
+// resume can leave its prompt on screen while the old lease is still held,
+// and the fresh fallback or recovery shell must not receive the press.
+// ConPTY has no foreground group, so Windows windows are not watched; they
+// keep the launch gate and Codex's own prompt. Presses and time are bounded:
+// a thread that stays open elsewhere keeps Codex's prompt for the user.
 //
 // The prompt text and the lock file are Codex's, so this is Codex-specific.
 // Graceful teardown on the outgoing side is in codex_shutdown_unix.go.
@@ -50,10 +55,10 @@ type codexLockedResumeRetry struct {
 	policy   codexLockedResumePolicy
 	started  time.Time
 	lastSeen time.Time // last poll that showed the prompt
-	// held records that the lock was seen held behind the prompt while
-	// holderForeground was the pane's foreground process group.
-	held             bool
-	holderForeground int
+	// promptForeground is the foreground process group that first showed
+	// the prompt; the watch ends when another group takes the terminal.
+	promptForeground int
+	held             bool // the lock was seen held behind the prompt
 	nextPress        time.Time
 	backoff          time.Duration
 	presses          int
@@ -64,7 +69,7 @@ func newCodexLockedResumeRetry(policy codexLockedResumePolicy, started time.Time
 }
 
 // step reports whether to press R now and whether watching is over. lockHeld
-// is probed only while the prompt is up.
+// is probed only while the prompt is up. A foreground of 0 is unknown.
 func (r *codexLockedResumeRetry) step(
 	now time.Time,
 	prompt bool,
@@ -74,6 +79,9 @@ func (r *codexLockedResumeRetry) step(
 	if now.Sub(r.started) >= r.policy.limit {
 		return false, true
 	}
+	if r.promptForeground > 0 && foreground > 0 && foreground != r.promptForeground {
+		return false, true // The program that showed the prompt is gone.
+	}
 	if !prompt {
 		if r.lastSeen.IsZero() {
 			return false, now.Sub(r.started) >= r.policy.promptWait
@@ -81,16 +89,17 @@ func (r *codexLockedResumeRetry) step(
 		return false, now.Sub(r.lastSeen) >= r.policy.settle
 	}
 	r.lastSeen = now
+	if foreground <= 0 {
+		return false, false // Nothing ties the lock to the program in front.
+	}
+	if r.promptForeground == 0 {
+		r.promptForeground = foreground
+	}
 	if r.presses >= r.policy.maxPresses {
 		return false, true // Leave Codex's prompt to the user.
 	}
-	if r.held && foreground != r.holderForeground {
-		// Another program is in front: the lock seen earlier says nothing
-		// about the prompt now on screen.
-		r.held = false
-	}
 	if lockHeld() {
-		r.held, r.holderForeground = true, foreground
+		r.held = true
 		return false, false
 	}
 	if !r.held || now.Before(r.nextPress) {
@@ -103,15 +112,28 @@ func (r *codexLockedResumeRetry) step(
 }
 
 // watchRestoredCodexResume starts the locked-thread retry for a window that
-// restore launched with `codex resume <id>`.
+// restore launched with `codex resume <id>`, on a pty that reports its
+// foreground process group.
 func (s *muxServer) watchRestoredCodexResume(window *muxWindow, options createWindowOptions) {
 	path := restoredCodexResumeLockPath(options)
 	if window == nil || path == "" {
 		return
 	}
+	s.mu.Lock()
+	windowPty := window.pty
+	s.mu.Unlock()
+	if _, ok := windowPty.(interface{ foregroundProcessGroup() int }); !ok {
+		return
+	}
+	startCodexLockedResumeWatch(s, window, path)
+}
+
+// startCodexLockedResumeWatch runs the watcher; tests replace it to observe
+// which windows restore arms.
+var startCodexLockedResumeWatch = func(s *muxServer, window *muxWindow, lockPath string) {
 	go s.watchCodexLockedResume(
 		window,
-		func() bool { return codexSessionLockHeld(path) },
+		func() bool { return codexSessionLockHeld(lockPath) },
 		defaultCodexLockedResumePolicy,
 	)
 }
@@ -167,12 +189,18 @@ func ptyForegroundProcessGroup(windowPty muxPty) int {
 	return 0
 }
 
+// codexLockedRetryHint is the key hint Codex shows with the prompt. A pasted
+// quote of the error rarely includes it.
+var codexLockedRetryHint = regexp.MustCompile(`(?i)(?:^|[^\p{L}])r[^\p{L}\s]*\s+to\s+retry`)
+
 // codexLockedPromptShown reports whether Codex's locked-thread prompt is on
-// screen. It compares letters only, so wrapping at any column, borders and
-// punctuation do not matter.
+// screen. The message compares letters only, so wrapping at any column,
+// borders and punctuation do not matter. The short hint must sit on one row.
 func codexLockedPromptShown(rows []string) bool {
 	var letters strings.Builder
+	hint := false
 	for _, row := range rows {
+		hint = hint || codexLockedRetryHint.MatchString(row)
 		for _, r := range row {
 			if unicode.IsLetter(r) {
 				letters.WriteRune(unicode.ToLower(r))
@@ -180,6 +208,6 @@ func codexLockedPromptShown(rows []string) bool {
 		}
 	}
 	text := letters.String()
-	return strings.Contains(text, "conversationisopeninanotherapp") &&
+	return hint && strings.Contains(text, "conversationisopeninanotherapp") &&
 		strings.Contains(text, "pressrtocontinuehere")
 }
