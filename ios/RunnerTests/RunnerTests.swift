@@ -147,3 +147,110 @@ private final class SuspendedActivity {
     continuation = nil
   }
 }
+
+final class LocationPromptQueueTests: XCTestCase {
+  private var decided: String?
+  private var authorizationRequests = 0
+  private var scheduled: [() -> Void] = []
+  private var replies: [String] = []
+  private var queue: LocationPromptQueue!
+
+  override func setUp() {
+    super.setUp()
+    decided = nil
+    authorizationRequests = 0
+    scheduled = []
+    replies = []
+    queue = LocationPromptQueue(
+      decidedStatus: { [unowned self] in self.decided },
+      requestAuthorization: { [unowned self] in self.authorizationRequests += 1 },
+      schedule: { [unowned self] _, work in self.scheduled.append(work) }
+    )
+  }
+
+  private func enqueue() {
+    queue.enqueue { [unowned self] in self.replies.append($0) }
+  }
+
+  private func runScheduled() {
+    let work = scheduled
+    scheduled = []
+    work.forEach { $0() }
+  }
+
+  func testDecisionSettlesEveryWaitingCaller() {
+    enqueue()
+    enqueue()
+    decided = "granted"
+    queue.authorizationDidChange()
+
+    XCTAssertEqual(replies, ["granted", "granted"])
+    XCTAssertEqual(authorizationRequests, 2)
+    XCTAssertFalse(queue.isWaiting)
+  }
+
+  func testUndecidedCallbackKeepsCallersWaiting() {
+    enqueue()
+    queue.authorizationDidChange()
+
+    XCTAssertEqual(replies, [])
+    XCTAssertTrue(queue.isWaiting)
+  }
+
+  func testPromptClosedWithoutDecisionAnswersDeniedAndPromptsAgain() {
+    enqueue()
+    queue.appWillResignActive()
+    queue.appDidBecomeActive()
+    runScheduled()
+
+    XCTAssertEqual(replies, ["denied"])
+    XCTAssertFalse(queue.isWaiting)
+
+    enqueue()
+    XCTAssertEqual(authorizationRequests, 2)
+    decided = "approximate"
+    queue.authorizationDidChange()
+    XCTAssertEqual(replies, ["denied", "approximate"])
+  }
+
+  func testDecisionDuringGraceIsReportedOnce() {
+    enqueue()
+    queue.appWillResignActive()
+    queue.appDidBecomeActive()
+    decided = "permanentlyDenied"
+    queue.authorizationDidChange()
+    runScheduled()
+
+    XCTAssertEqual(replies, ["permanentlyDenied"])
+  }
+
+  func testDecisionReadAtTheEndOfGraceWins() {
+    enqueue()
+    queue.appWillResignActive()
+    queue.appDidBecomeActive()
+    decided = "granted"
+    runScheduled()
+
+    XCTAssertEqual(replies, ["granted"])
+  }
+
+  func testBecomingActiveWithoutLosingFocusSchedulesNothing() {
+    enqueue()
+    queue.appDidBecomeActive()
+
+    XCTAssertTrue(scheduled.isEmpty)
+    XCTAssertTrue(queue.isWaiting)
+  }
+
+  func testCallerArrivingDuringGraceKeepsWaitingForTheNewPrompt() {
+    enqueue()
+    queue.appWillResignActive()
+    queue.appDidBecomeActive()
+    enqueue()
+    runScheduled()
+
+    XCTAssertEqual(replies, [])
+    XCTAssertTrue(queue.isWaiting)
+    XCTAssertEqual(authorizationRequests, 2)
+  }
+}

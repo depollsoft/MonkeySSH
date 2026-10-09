@@ -14,19 +14,52 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
 
   private enum Status: String {
     case granted
+    case approximate
     case denied
     case permanentlyDenied
     case restricted
   }
 
-  private var locationManager: CLLocationManager?
-  /// Callers waiting on the one when-in-use prompt in flight.
-  private var pendingLocationResults: [FlutterResult] = []
+  private lazy var locationManager: CLLocationManager = {
+    let manager = CLLocationManager()
+    manager.delegate = self
+    return manager
+  }()
 
-  /// Registers the channel on `registry` under its own plugin key.
+  private lazy var locationPrompt = LocationPromptQueue(
+    decidedStatus: { [weak self] in self?.decidedLocationStatus() },
+    requestAuthorization: { [weak self] in
+      self?.locationManager.requestWhenInUseAuthorization()
+    },
+    schedule: { delay, work in
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+  )
+
+  override init() {
+    super.init()
+    let center = NotificationCenter.default
+    center.addObserver(
+      self,
+      selector: #selector(appWillResignActive),
+      name: UIApplication.willResignActiveNotification,
+      object: nil
+    )
+    center.addObserver(
+      self,
+      selector: #selector(appDidBecomeActive),
+      name: UIApplication.didBecomeActiveNotification,
+      object: nil
+    )
+  }
+
+  /// Registers the channel on `registry` under its own plugin key. Pass the
+  /// registry `GeneratedPluginRegistrant` uses: under the UIScene lifecycle the
+  /// app delegate has no engine at launch and returns no registrar.
   static func register(in registry: FlutterPluginRegistry) {
     guard let registrar = registry.registrar(forPlugin: "AppPermissionsPlugin") else {
       NSLog("Failed to configure the permissions channel.")
+      assertionFailure("No registrar for AppPermissionsPlugin")
       return
     }
     register(with: registrar)
@@ -105,57 +138,46 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
   // MARK: - Location
 
   private func requestLocationWhenInUse(result: @escaping FlutterResult) {
-    let manager = locationManager ?? makeLocationManager()
-    let status = manager.authorizationStatus
-    guard
-      status == .notDetermined,
-      canPrompt(usageKey: "NSLocationWhenInUseUsageDescription")
-    else {
-      result(Self.status(for: status).rawValue)
+    if let status = decidedLocationStatus() {
+      result(status)
       return
     }
-    pendingLocationResults.append(result)
-    if pendingLocationResults.count == 1 {
-      manager.requestWhenInUseAuthorization()
+    guard canPrompt(usageKey: "NSLocationWhenInUseUsageDescription") else {
+      result(Status.denied.rawValue)
+      return
     }
+    locationPrompt.enqueue { result($0) }
   }
 
-  private func makeLocationManager() -> CLLocationManager {
-    let manager = CLLocationManager()
-    manager.delegate = self
-    locationManager = manager
-    return manager
+  /// The wire status once the user has decided, or nil while undetermined.
+  private func decidedLocationStatus() -> String? {
+    switch locationManager.authorizationStatus {
+    case .notDetermined:
+      return nil
+    case .authorizedWhenInUse, .authorizedAlways:
+      // Reading the Wi-Fi SSID needs precise location.
+      return locationManager.accuracyAuthorization == .reducedAccuracy
+        ? Status.approximate.rawValue : Status.granted.rawValue
+    case .denied:
+      // Also reported while Location Services are off device-wide.
+      return Status.permanentlyDenied.rawValue
+    case .restricted:
+      return Status.restricted.rawValue
+    @unknown default:
+      return Status.denied.rawValue
+    }
   }
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-    // The manager reports .notDetermined once on creation, before the prompt
-    // is answered; only a decided status settles the waiting callers.
-    let status = manager.authorizationStatus
-    guard status != .notDetermined, !pendingLocationResults.isEmpty else {
-      return
-    }
-    let results = pendingLocationResults
-    pendingLocationResults.removeAll()
-    let value = Self.status(for: status).rawValue
-    for result in results {
-      result(value)
-    }
+    locationPrompt.authorizationDidChange()
   }
 
-  private static func status(for status: CLAuthorizationStatus) -> Status {
-    switch status {
-    case .authorizedWhenInUse, .authorizedAlways:
-      return .granted
-    case .denied:
-      // Also reported while Location Services are off device-wide.
-      return .permanentlyDenied
-    case .restricted:
-      return .restricted
-    case .notDetermined:
-      return .denied
-    @unknown default:
-      return .denied
-    }
+  @objc private func appWillResignActive() {
+    locationPrompt.appWillResignActive()
+  }
+
+  @objc private func appDidBecomeActive() {
+    locationPrompt.appDidBecomeActive()
   }
 
   // MARK: - Shared
@@ -175,6 +197,91 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
     }
     UIApplication.shared.open(url, options: [:]) { success in
       result(success)
+    }
+  }
+}
+
+/// Callers waiting on the when-in-use location prompt. Kept apart from
+/// `CLLocationManager` and `UIApplication` so RunnerTests can drive it.
+///
+/// A decided status settles every waiting caller. The alert can also close
+/// without a decision (home swipe, incoming call), and then the status stays
+/// `.notDetermined` and no delegate callback arrives. The alert takes focus
+/// from the app, so when the app becomes active again with the status still
+/// undecided, the waiting callers read as denied and the next request prompts
+/// again.
+final class LocationPromptQueue {
+  typealias Reply = (String) -> Void
+
+  /// How long after the app becomes active a decision may still arrive.
+  static let decisionGrace: TimeInterval = 1
+
+  private let decidedStatus: () -> String?
+  private let requestAuthorization: () -> Void
+  private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+
+  private var waiting: [Reply] = []
+  /// Bumped on every prompt, so a check scheduled for an earlier one stands down.
+  private var promptGeneration = 0
+  /// Whether the app resigned active while callers were waiting, which the
+  /// alert causes.
+  private var promptTookFocus = false
+
+  init(
+    decidedStatus: @escaping () -> String?,
+    requestAuthorization: @escaping () -> Void,
+    schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void
+  ) {
+    self.decidedStatus = decidedStatus
+    self.requestAuthorization = requestAuthorization
+    self.schedule = schedule
+  }
+
+  var isWaiting: Bool { !waiting.isEmpty }
+
+  /// Queues `reply` and asks for authorization. Asking again does nothing
+  /// while the alert is up, and brings it back after one closed unanswered.
+  func enqueue(_ reply: @escaping Reply) {
+    waiting.append(reply)
+    promptGeneration += 1
+    requestAuthorization()
+  }
+
+  func authorizationDidChange() {
+    // The manager reports .notDetermined once when it is created; only a
+    // decided status settles the waiting callers.
+    guard !waiting.isEmpty, let status = decidedStatus() else {
+      return
+    }
+    settle(with: status)
+  }
+
+  func appWillResignActive() {
+    if !waiting.isEmpty {
+      promptTookFocus = true
+    }
+  }
+
+  func appDidBecomeActive() {
+    guard promptTookFocus, !waiting.isEmpty else {
+      return
+    }
+    promptTookFocus = false
+    let generation = promptGeneration
+    schedule(Self.decisionGrace) { [weak self] in
+      guard let self, generation == self.promptGeneration, !self.waiting.isEmpty else {
+        return
+      }
+      self.settle(with: self.decidedStatus() ?? "denied")
+    }
+  }
+
+  private func settle(with status: String) {
+    let replies = waiting
+    waiting.removeAll()
+    promptTookFocus = false
+    for reply in replies {
+      reply(status)
     }
   }
 }
