@@ -81,6 +81,7 @@ import '../../domain/services/terminal_notification.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/terminal_wake_lock_service.dart';
 import '../../domain/services/tmux_service.dart';
+import '../controllers/acp_chat_actions_controller.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
@@ -813,6 +814,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _systemKeyboardVisibilityController =
       SystemKeyboardVisibilityController.instance;
   final _nativeComposerFocusController = AcpComposerFocusController();
+  final _nativeChatActions = AcpChatActionsController();
   bool _keyboardVisibilityRebuildScheduled = false;
   int _terminalFocusRestoreGeneration = 0;
   final _toolbarController = KeyboardToolbarController();
@@ -10001,6 +10003,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       embedded: true,
       connectOnMount: _nativeAcpReconnectOwnedKeyValue != key.value,
       composerFocusController: _nativeComposerFocusController,
+      chatActions: _nativeChatActions,
       preferredFontSize: fontSize,
       preferredFontFamily: fontFamily,
       onFontSizeCommitted: _commitNativeAgentFontSize,
@@ -11609,6 +11612,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 isMobilePlatform: isMobile,
               ),
               menuChildren: [
+                if (_activeNativeAcpSessionKey != null) ...[
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.search,
+                    label: 'Search Chat',
+                    action: 'search_chat',
+                  ),
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.adaptive.share,
+                    label: 'Export Chat',
+                    action: 'export_chat',
+                  ),
+                ],
                 if (showsTerminalViewportMenuActions)
                   _terminalOverflowMenuItem(
                     context: context,
@@ -13138,6 +13155,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   Future<void> _handleMenuAction(String action) async {
     switch (action) {
+      case 'search_chat':
+        _nativeChatActions.openSearch();
+        break;
+      case 'export_chat':
+        _nativeChatActions.exportTranscript();
+        break;
       case 'snippets':
         await _showSnippetPicker();
         break;

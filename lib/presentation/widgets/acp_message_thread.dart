@@ -24,6 +24,35 @@ export 'acp_thread_projection.dart' show acpUserPromptSummary;
 
 const int _earlierTranscriptPageChildren = 8;
 
+/// Height of the pinned prompt summary that can cover the viewport top.
+const double _stickyPromptHeight = 44;
+
+/// The transcript child a search wants revealed and highlighted.
+@immutable
+final class AcpThreadSearchFocus {
+  /// Creates a search focus. A new [serial] asks the thread to scroll to the
+  /// target again, even when it is the same child.
+  const AcpThreadSearchFocus({
+    required this.entryIndex,
+    required this.childKey,
+    required this.entryId,
+    required this.serial,
+  });
+
+  /// Index of the top-level entry containing the target.
+  final int entryIndex;
+
+  /// Key of the thread child to reveal and highlight.
+  final String childKey;
+
+  /// Identifier of the entry rendering the target. A collapsed tool call or
+  /// reasoning block with this identifier expands so the match is visible.
+  final String entryId;
+
+  /// Changes whenever the target should be scrolled into view.
+  final int serial;
+}
+
 /// Renders an ordered list of [AcpTimelineEntry]s as a conversation thread.
 ///
 /// The renderer is suitable for both live streaming and replay. It stays lazy,
@@ -52,6 +81,7 @@ class AcpMessageThread extends StatefulWidget {
     this.onCopyCode,
     this.onOpenLocation,
     this.followTail = false,
+    this.searchFocus,
   });
 
   /// The ordered timeline entries to render.
@@ -103,6 +133,9 @@ class AcpMessageThread extends StatefulWidget {
   /// output. Older children are revealed in pages when the user scrolls up.
   final bool followTail;
 
+  /// The active transcript search match, revealed and highlighted.
+  final AcpThreadSearchFocus? searchFocus;
+
   @override
   State<AcpMessageThread> createState() => _AcpMessageThreadState();
 }
@@ -130,6 +163,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _tailAnchorAttempts = 0;
   int _tailAnchorStableFrames = 0;
   double? _lastTailMaxExtent;
+  int _searchRevealGeneration = 0;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -141,6 +175,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _controller.addListener(_scheduleStickyUpdate);
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
+    final focus = widget.searchFocus;
+    if (focus != null) _revealSearchFocus(focus);
   }
 
   @override
@@ -158,6 +194,34 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
+    final focus = widget.searchFocus;
+    if (focus != null && focus.serial != oldWidget.searchFocus?.serial) {
+      _revealSearchFocus(focus);
+    }
+  }
+
+  /// Scrolls to a search match. Search navigation is the user moving through
+  /// the transcript, so it suspends live-follow like a drag does.
+  void _revealSearchFocus(AcpThreadSearchFocus focus) {
+    final generation = ++_searchRevealGeneration;
+    _userOwnsScrollPosition = true;
+    _earlierTranscriptAnchorGeneration += 1;
+    _earlierTranscriptLoadScheduled = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || widget.searchFocus?.serial != focus.serial) return;
+      if (focus.entryIndex < 0 || focus.entryIndex >= widget.entries.length) {
+        return;
+      }
+      widget.onStickyPromptTap?.call();
+      unawaited(
+        _scrollEntryIntoView(
+          focus.entryIndex,
+          childKey: focus.childKey,
+          topInset: _stickyPromptHeight,
+          isCurrent: () => generation == _searchRevealGeneration,
+        ),
+      );
+    });
   }
 
   @override
@@ -576,9 +640,22 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     );
   }
 
-  Future<void> _scrollEntryIntoView(int entryIndex) async {
+  /// Scrolls the first child of [entryIndex], or the child keyed [childKey]
+  /// when given, to the viewport top, leaving [topInset] above it. Stops as
+  /// soon as [isCurrent] reports that a newer scroll has superseded it.
+  Future<void> _scrollEntryIntoView(
+    int entryIndex, {
+    String? childKey,
+    double topInset = 0,
+    bool Function()? isCurrent,
+  }) async {
+    bool superseded() =>
+        !mounted || !_controller.hasClients || !(isCurrent?.call() ?? true);
     if (!_controller.hasClients) return;
-    var absoluteTargetChildIndex = _firstChildIndexByEntry[entryIndex];
+    int? resolveTarget() =>
+        (childKey == null ? null : _childIndexByKey[childKey]) ??
+        _firstChildIndexByEntry[entryIndex];
+    var absoluteTargetChildIndex = resolveTarget();
     if (absoluteTargetChildIndex == null &&
         entryIndex < _loadedStartEntryIndex) {
       setState(() {
@@ -593,8 +670,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         _rebuildThreadChildIndexes();
       });
       await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || !_controller.hasClients) return;
-      absoluteTargetChildIndex = _firstChildIndexByEntry[entryIndex];
+      if (superseded()) return;
+      absoluteTargetChildIndex = resolveTarget();
     }
     final absoluteTarget = absoluteTargetChildIndex;
     if (absoluteTarget == null) return;
@@ -602,7 +679,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     if (absoluteTarget < _renderStartChildIndex) {
       setState(() => _renderStartChildIndex = absoluteTarget);
       await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || !_controller.hasClients) return;
+      if (superseded()) return;
     }
     final targetChildIndex =
         absoluteTarget - _renderStartChildIndex + _leadingWindowChildCount;
@@ -611,10 +688,11 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     // animate to its exact scroll offset. RenderObject.showOnScreen is not
     // reliable here because a cached off-screen child may be considered
     // revealed without moving the outer CustomScrollView to its beginning.
+    if (!mounted) return;
     final reduceMotion =
         MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     for (var attempt = 0; attempt < 12; attempt++) {
-      if (!mounted || !_controller.hasClients) return;
+      if (superseded()) return;
       final sliver = _sliverListKey.currentContext?.findRenderObject();
       if (sliver is! RenderSliverMultiBoxAdaptor ||
           sliver.firstChild == null ||
@@ -627,10 +705,11 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       while (child != null) {
         if (sliver.indexOf(child) == targetChildIndex) {
           final viewport = RenderAbstractViewport.of(child);
-          final destination = viewport
-              .getOffsetToReveal(child, 0)
-              .offset
-              .clamp(position.minScrollExtent, position.maxScrollExtent);
+          final destination =
+              (viewport.getOffsetToReveal(child, 0).offset - topInset).clamp(
+                position.minScrollExtent,
+                position.maxScrollExtent,
+              );
           if (reduceMotion) {
             _controller.jumpTo(destination);
           } else {
@@ -685,6 +764,13 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
   }
 
+  /// The active search focus's serial when [entry] holds the match, so a
+  /// collapsed tool call or reasoning block opens to show it.
+  Object? _searchRevealToken(AcpTimelineEntry entry) {
+    final focus = widget.searchFocus;
+    return focus?.entryId == entry.id ? focus!.serial : null;
+  }
+
   Widget _buildEntry(BuildContext context, AcpTimelineEntry entry) {
     switch (entry) {
       case AcpUserPromptEntry():
@@ -707,6 +793,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       case AcpThoughtEntry():
         return AcpThoughtView(
           entry: entry,
+          revealToken: _searchRevealToken(entry),
           onTapLink: widget.onTapLink,
           imageResolver: widget.imageResolver,
         );
@@ -718,6 +805,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           onCopy: widget.onCopyResource,
           child: AcpToolCallView(
             toolCall: entry.toolCall,
+            revealToken: _searchRevealToken(entry),
             onOpenLocation: widget.onOpenLocation,
             onTapLink: widget.onTapLink,
           ),
@@ -760,7 +848,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
     final threadChild = _threadChildren[absoluteIndex];
     final entry = threadChild.entry;
-    final Widget content;
+    Widget content;
     if (entry is AcpUserPromptEntry && threadChild.userParts != null) {
       content = AcpUserPromptView(
         entry: entry,
@@ -788,6 +876,11 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     } else {
       content = _buildEntry(context, entry);
     }
+    // Always wrapped so moving the highlight never remounts a child's state.
+    content = _SearchMatchHighlight(
+      active: widget.searchFocus?.childKey == threadChild.keyValue,
+      child: content,
+    );
     var gap = absoluteIndex == 0 || threadChild.isEntryContinuation
         ? 0.0
         : FluttyTheme.spacingSm;
@@ -1120,6 +1213,46 @@ class _StickyUserPromptSummary extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Outlines the transcript child holding the active search match.
+///
+/// The outline sits behind the content and outside its bounds, so turning it
+/// on or off never changes layout or rebuilds the child.
+class _SearchMatchHighlight extends StatelessWidget {
+  const _SearchMatchHighlight({required this.active, required this.child});
+
+  final bool active;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned(
+          left: -6,
+          right: -6,
+          top: -4,
+          bottom: -4,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              key: active ? const ValueKey('acp-search-match-highlight') : null,
+              decoration: active
+                  ? BoxDecoration(
+                      color: scheme.primary.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+                      border: Border.all(color: scheme.primary, width: 1.5),
+                    )
+                  : const BoxDecoration(),
+            ),
+          ),
+        ),
+        child,
+      ],
     );
   }
 }

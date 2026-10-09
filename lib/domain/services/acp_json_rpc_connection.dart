@@ -238,12 +238,14 @@ final class _PendingResponse {
     required this.completer,
     required this.timer,
     this.cancellation,
+    this.onWriteStarted,
   });
 
   final AcpRequestId id;
   final Completer<Object?> completer;
   final Timer? timer;
   final AcpRequestCancellation? cancellation;
+  final void Function()? onWriteStarted;
 
   /// Whether the request's frame started reaching the peer. A request that
   /// expires while still queued is never written, so the peer needs no
@@ -327,6 +329,10 @@ final class AcpJsonRpcConnection {
   /// peer to stop working on it. [cancellation] lets the caller cancel it
   /// explicitly; see [cancelRequest]. Requests that expire or are cancelled
   /// before their queued write begins are not sent, and need no cancel.
+  ///
+  /// [onWriteStarted] runs once the frame starts reaching the peer. A request
+  /// that fails without it never left this side: the connection was already
+  /// closed, the frame was too large, or it closed while the write was queued.
   Future<Object?> request(
     String method, {
     Object? params,
@@ -334,6 +340,7 @@ final class AcpJsonRpcConnection {
     AcpRequestId? id,
     bool noTimeout = false,
     AcpRequestCancellation? cancellation,
+    void Function()? onWriteStarted,
   }) {
     _ensureOpen();
     final requestId = id ?? _requestIdFactory();
@@ -371,6 +378,7 @@ final class AcpJsonRpcConnection {
       completer: completer,
       timer: timer,
       cancellation: cancellation,
+      onWriteStarted: onWriteStarted,
     );
     _pending[requestId] = pending;
     cancellation?._bind(pending, () => cancelRequest(requestId));
@@ -633,6 +641,7 @@ final class AcpJsonRpcConnection {
       if (pending != null) {
         if (!identical(_pending[pending.id], pending)) return;
         pending.writeStarted = true;
+        pending.onWriteStarted?.call();
       }
       await _transport.write(bytes);
     });

@@ -68,6 +68,7 @@ class AcpToolCallView extends StatefulWidget {
     required this.toolCall,
     super.key,
     this.initiallyExpanded = false,
+    this.revealToken,
     this.onOpenLocation,
     this.onTapLink,
   });
@@ -77,6 +78,11 @@ class AcpToolCallView extends StatefulWidget {
 
   /// Whether the detail section is expanded initially.
   final bool initiallyExpanded;
+
+  /// Keeps the details expanded while non-null, even when the call finishes,
+  /// and expands them again whenever it changes. Transcript search uses it
+  /// to reveal a match inside the details.
+  final Object? revealToken;
 
   /// Called when a file location is tapped.
   final ValueChanged<AcpToolLocation>? onOpenLocation;
@@ -89,7 +95,10 @@ class AcpToolCallView extends StatefulWidget {
 }
 
 class _AcpToolCallViewState extends State<AcpToolCallView> {
-  late bool _expanded = widget.initiallyExpanded || _isActive(widget.toolCall);
+  late bool _expanded =
+      widget.initiallyExpanded ||
+      widget.revealToken != null ||
+      _isActive(widget.toolCall);
   late String? _headerPreview = _buildHeaderPreview();
 
   static bool _isActive(AcpToolCall call) =>
@@ -102,7 +111,11 @@ class _AcpToolCallViewState extends State<AcpToolCallView> {
     final wasActive = _isActive(oldWidget.toolCall);
     final isActive = _isActive(widget.toolCall);
     if (wasActive != isActive) {
-      _expanded = isActive;
+      _expanded = isActive || widget.revealToken != null;
+    }
+    if (widget.revealToken != null &&
+        widget.revealToken != oldWidget.revealToken) {
+      _expanded = true;
     }
     if (!identical(oldWidget.toolCall, widget.toolCall)) {
       _headerPreview = _buildHeaderPreview();
