@@ -170,13 +170,41 @@ func (s *muxServer) watchCodexLockedResume(
 		}
 		windowPty := window.pty
 		s.mu.Unlock()
-		press, done := retry.step(time.Now(), prompt, ptyForegroundProcessGroup(windowPty), lockHeld)
+		foreground := ptyForegroundProcessGroup(windowPty)
+		press, done := retry.step(time.Now(), prompt, foreground, lockHeld)
 		if press {
-			_ = s.writeWindowData(window.id, []byte("r"), false, false)
+			s.pressCodexLockedRetry(window, foreground)
 		}
 		if done {
 			return
 		}
+	}
+}
+
+// pressCodexLockedRetry writes R only if the prompt is still on screen with
+// the same foreground group once this window's input is serialized. A paste
+// can hold that lock while the child is blocked, and the program in front can
+// change during the wait.
+func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int) {
+	window.inputMu.Lock()
+	var scheduleFlush func()
+	defer func() {
+		window.inputMu.Unlock()
+		if scheduleFlush != nil {
+			scheduleFlush()
+		}
+	}()
+	// Replies the output reader queued before this write go first.
+	if err := s.writeQueuedWindowRepliesLocked(window); err != nil {
+		return
+	}
+	s.mu.Lock()
+	current := !s.closed && !window.closed && s.windowByIDLocked(window.id) == window &&
+		window.screen != nil && codexLockedPromptShown(window.screen.TextRows()) &&
+		ptyForegroundProcessGroup(window.pty) == foreground
+	s.mu.Unlock()
+	if current {
+		scheduleFlush, _ = s.writeWindowDataLocked(window, []byte("r"), false, false)
 	}
 }
 
@@ -193,6 +221,18 @@ func ptyForegroundProcessGroup(windowPty muxPty) int {
 // quote of the error rarely includes it.
 var codexLockedRetryHint = regexp.MustCompile(`(?i)(?:^|[^\p{L}])r[^\p{L}\s]*\s+to\s+retry`)
 
+// codexLockedRetryHintShown matches the bare "r to retry" key hint, not the
+// "Press R to retry." sentence Codex's other errors print.
+func codexLockedRetryHintShown(row string) bool {
+	for _, match := range codexLockedRetryHint.FindAllStringIndex(row, -1) {
+		before := strings.TrimRightFunc(row[:match[0]], func(r rune) bool { return !unicode.IsLetter(r) })
+		if !strings.HasSuffix(strings.ToLower(before), "press") {
+			return true
+		}
+	}
+	return false
+}
+
 // codexLockedPromptShown reports whether Codex's locked-thread prompt is on
 // screen. The message compares letters only, so wrapping at any column,
 // borders and punctuation do not matter. The short hint must sit on one row.
@@ -200,7 +240,7 @@ func codexLockedPromptShown(rows []string) bool {
 	var letters strings.Builder
 	hint := false
 	for _, row := range rows {
-		hint = hint || codexLockedRetryHint.MatchString(row)
+		hint = hint || codexLockedRetryHintShown(row)
 		for _, r := range row {
 			if unicode.IsLetter(r) {
 				letters.WriteRune(unicode.ToLower(r))

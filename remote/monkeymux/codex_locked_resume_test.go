@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ func TestCodexLockedPromptShown(t *testing.T) {
 		// A transcript that quotes the error rarely carries the key hint.
 		{"quoted without the hint", render(80, "> This conversation is open in another app. "+
 			"Close it there and press R to continue here.\r\n› Why does this happen?"), false},
+		// Codex's other errors say "Press R to retry." That sentence is not the
+		// locked prompt's key hint.
+		{"quoted with another retry error", render(80, "> This conversation is open in another app. "+
+			"Close it there and press R to continue here.\r\nRequest interrupted. Press R to retry."), false},
 		{"hint inside a word", render(80, "This conversation is open in another app. "+
 			"Close it there and press R to continue here. It asks the user to retry."), false},
 		{"title only", render(80, "This conversation is open in another app"), false},
@@ -354,6 +359,55 @@ func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
 	}
 	held.Store(false)
 	time.Sleep(20 * time.Millisecond)
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q into the next program", got)
+	}
+}
+
+// A paste can hold the window's input lock while the child is blocked. If
+// the program changes during that wait, the queued press must not land in the
+// next program.
+func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-input")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes atomic.Int32
+	released := make(chan struct{})
+	var once sync.Once
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		once.Do(func() { close(released) })
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
+		close(done)
+	}()
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+
+	window.inputMu.Lock()
+	held.Store(false)
+	<-released // step has decided to press for group 41.
+	pty.foreground.Store(42)
+	window.inputMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher kept watching the next program")
+	}
 	if got := pty.String(); got != "" {
 		t.Fatalf("pressed %q into the next program", got)
 	}
