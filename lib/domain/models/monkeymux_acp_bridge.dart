@@ -6,6 +6,10 @@ const monkeyMuxAcpBridgeProtocolVersion = 1;
 /// Maximum encoded size of one bridge or ACP NDJSON frame.
 const monkeyMuxAcpBridgeMaxFrameBytes = 20 * 1024 * 1024;
 
+/// Bridge hello capability: the bridge reports who holds the input lease and
+/// accepts a request to take it over.
+const monkeyMuxAcpWriterLeaseCapability = 'writer_lease';
+
 /// Helper failure message for a locked Cursor Agent login keychain.
 ///
 /// Mirrors `errCursorAgentKeychainLocked` in `remote/monkeymux/acp_bridge.go`;
@@ -52,6 +56,7 @@ final class MonkeyMuxAcpBridgeMetadata {
     this.providerId,
     this.sessionId,
     this.cwd,
+    this.writer,
   });
 
   /// Opaque bridge identifier.
@@ -92,6 +97,30 @@ final class MonkeyMuxAcpBridgeMetadata {
 
   /// Latest sequence allocated by the bridge.
   final int nextSequence;
+
+  /// Client holding the input lease, when a lease-aware helper reports one.
+  final MonkeyMuxAcpLeaseHolder? writer;
+}
+
+/// The client holding a bridge's input lease, as listed by the helper.
+@immutable
+final class MonkeyMuxAcpLeaseHolder {
+  /// Creates a lease holder description.
+  const MonkeyMuxAcpLeaseHolder({
+    required this.lastActiveAt,
+    required this.stale,
+    this.label,
+  });
+
+  /// Short device description that client supplied, if any.
+  final String? label;
+
+  /// Local time of the holder's last input.
+  final DateTime lastActiveAt;
+
+  /// Whether the holder has been silent long enough that the next attach
+  /// takes the lease without asking.
+  final bool stale;
 }
 
 /// Result of starting a persistent bridge.
@@ -126,6 +155,43 @@ enum MonkeyMuxAcpTransportStatus {
 
   /// The local transport was explicitly closed.
   closed,
+
+  /// Another client holds the bridge's input lease, so this transport closed
+  /// without sending anything. See [MonkeyMuxAcpTransportState.writer].
+  heldElsewhere,
+}
+
+/// The client that holds a bridge's input lease, as seen by one that does not.
+@immutable
+final class MonkeyMuxAcpRemoteWriter {
+  /// Creates a remote writer description.
+  const MonkeyMuxAcpRemoteWriter({
+    required this.lastActiveAt,
+    required this.leaseLost,
+    this.label,
+  });
+
+  /// Short device description that client supplied, such as `iPad`, or null
+  /// when it gave none (an older MonkeySSH).
+  final String? label;
+
+  /// Local time of the writer's last input, derived from the bridge's idle
+  /// count so it needs no clock agreement with the host.
+  final DateTime lastActiveAt;
+
+  /// Whether this client held the lease until the writer took it.
+  final bool leaseLost;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MonkeyMuxAcpRemoteWriter &&
+          label == other.label &&
+          lastActiveAt == other.lastActiveAt &&
+          leaseLost == other.leaseLost;
+
+  @override
+  int get hashCode => Object.hash(label, lastActiveAt, leaseLost);
 }
 
 /// Typed transport state that never contains ACP payloads or launch data.
@@ -140,6 +206,7 @@ final class MonkeyMuxAcpTransportState {
     this.providerState,
     this.exitCode,
     this.retainedFrom,
+    this.writer,
   });
 
   /// Current local connection status.
@@ -162,6 +229,10 @@ final class MonkeyMuxAcpTransportState {
 
   /// Oldest retained sequence after replay overflow.
   final int? retainedFrom;
+
+  /// Client holding the input lease, when [status] is
+  /// [MonkeyMuxAcpTransportStatus.heldElsewhere].
+  final MonkeyMuxAcpRemoteWriter? writer;
 }
 
 /// Stable categories for bridge service and transport failures.

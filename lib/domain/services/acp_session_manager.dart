@@ -21,6 +21,7 @@ import '../models/acp_terminal_display.dart';
 import '../models/acp_timeline.dart';
 import '../models/acp_tool_subject.dart';
 import '../models/acp_updates.dart';
+import '../models/acp_writer_lease.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import 'acp_bridge_connector.dart';
 import 'acp_client.dart';
@@ -374,6 +375,7 @@ class AcpSessionManager {
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
     AcpSessionWorkspaceOptions? workspace,
+    bool takeOver = false,
   }) => _serialize(() async {
     if (selectOnSuccess) _telemetry.featureOpened();
     final key = AcpSessionKey.of(
@@ -491,8 +493,36 @@ class AcpSessionManager {
       return restarted;
     }
 
+    final heldElsewhere = existing?.isHeldElsewhere ?? false;
+    final holder = remoteBridge.writer;
+    if (existing != null &&
+        heldElsewhere &&
+        !takeOver &&
+        holder != null &&
+        !holder.stale &&
+        _liveAttachment(key.bridge) == null) {
+      // Still held by a live device: keep the frozen view, with its
+      // transcript and whether this device lost the chat, and refresh only
+      // who holds it. When a sibling session here already took the input
+      // back, this one reopens on that attachment instead.
+      existing.refreshRemoteWriter(holder);
+      if (selectOnSuccess) {
+        _select(key.value);
+      } else {
+        _emit();
+      }
+      return AcpSessionLaunchStarted(key);
+    }
+    if (existing != null && heldElsewhere) {
+      // Another device held the input. Open afresh like any device joining a
+      // live bridge: its pending requests replay to the new attachment, and
+      // the history this frozen view is missing reloads.
+      _controllers.remove(key.value);
+      await existing.disposeLocal(permanent: false);
+    }
+
     // Re-attach an existing (detached) controller in place when possible.
-    if (existing != null) {
+    if (existing != null && !heldElsewhere) {
       // Re-send this workspace on the reattached session's load/resume.
       existing
         ..updateWorkingDirectory(resolvedCwd)
@@ -503,19 +533,27 @@ class AcpSessionManager {
           chooseAuthentication: chooseAuthentication,
         );
       } on _LaunchException catch (error) {
-        _emit();
-        return AcpSessionLaunchFailed(
-          error.key ?? key,
-          error.error,
-          terminalAuthentication: error.terminalAuthentication,
-        );
+        // Another device took the input while this one was detached: the
+        // session stays open read-only, offering to take it back.
+        if (!existing.isHeldElsewhere) {
+          _emit();
+          return AcpSessionLaunchFailed(
+            error.key ?? key,
+            error.error,
+            terminalAuthentication: error.terminalAuthentication,
+          );
+        }
+        // Publish the read-only state that history-replay holding deferred.
+        existing._commitPublishedState();
       }
       if (selectOnSuccess) {
         _select(key.value);
       } else {
         _emit();
       }
-      if (selectOnSuccess) await _recordRecent(existing.state);
+      if (selectOnSuccess && !existing.isHeldElsewhere) {
+        await _recordRecent(existing.state);
+      }
       return AcpSessionLaunchStarted(key);
     }
 
@@ -531,8 +569,38 @@ class AcpSessionManager {
       workspace: reconnectWorkspace,
       liveBridge: remoteBridge,
       selectOnSuccess: selectOnSuccess,
+      takeOver: takeOver,
     );
   });
+
+  /// Refreshes who holds [key]'s input while this device shows it read-only.
+  ///
+  /// Best effort: without an SSH session, or once the session is no longer
+  /// held elsewhere, nothing changes.
+  Future<void> refreshHeldSession(AcpSessionKey key) async {
+    final controller = _controllers[key.value];
+    // A sibling session here may already hold the input; reopening this one
+    // joins it, so there is no other holder to report.
+    if (controller == null ||
+        !controller.isHeldElsewhere ||
+        _liveAttachment(key.bridge) != null) {
+      return;
+    }
+    final MonkeyMuxAcpBridgeMetadata status;
+    try {
+      status = await _connector.bridgeStatus(key.hostId, key.bridgeId);
+    } on Object {
+      return;
+    }
+    final holder = status.writer;
+    if (holder == null ||
+        holder.stale ||
+        !identical(_controllers[key.value], controller) ||
+        !controller.isHeldElsewhere) {
+      return;
+    }
+    controller.refreshRemoteWriter(holder);
+  }
 
   /// Lists safe metadata for remote bridges on [hostId].
   Future<List<MonkeyMuxAcpBridgeMetadata>> listRemoteBridges(int hostId) =>
@@ -979,13 +1047,14 @@ class AcpSessionManager {
     bool selectOnSuccess = true,
     bool startedBridge = false,
     DateTime? bridgeStartedAt,
+    bool takeOver = false,
   }) async {
     final bridgeKey = AcpBridgeKey(
       host: AcpHostKey(hostId),
       bridgeId: bridgeId,
     );
     final attachment =
-        _attachments[bridgeKey.value] ??
+        _liveAttachment(bridgeKey) ??
         _BridgeAttachment(
           bridgeKey: bridgeKey,
           providerId: launch.providerId,
@@ -993,6 +1062,7 @@ class AcpSessionManager {
             hostId: hostId,
             bridgeId: bridgeId,
             providerId: launch.providerId,
+            takeOver: takeOver,
           ),
           capabilityServiceFactory: _capabilityServiceFactory(
             hostId: hostId,
@@ -1031,6 +1101,29 @@ class AcpSessionManager {
             : null;
       }
       _emit();
+    }
+
+    // Another device holds the input. Keep the session as a read-only view
+    // that offers to take over, instead of failing the open.
+    AcpSessionLaunchResult? keepHeldController() {
+      final value = provisionalKeyValue;
+      if (!controller.isHeldElsewhere ||
+          value == null ||
+          !identical(_controllers[value], controller)) {
+        return null;
+      }
+      controller._commitPublishedState();
+      if (selectOnSuccess) {
+        _select(value);
+      } else {
+        _emit();
+      }
+      _diagnostics.info(
+        'acp.manager',
+        'session_held_elsewhere',
+        fields: {'hostId': hostId, 'bridgeId': bridgeId},
+      );
+      return AcpSessionLaunchStarted(controller.state.key);
     }
 
     try {
@@ -1091,6 +1184,7 @@ class AcpSessionManager {
       }
       return AcpSessionLaunchStarted(key);
     } on _LaunchException catch (error) {
+      if (keepHeldController() case final held?) return held;
       discardProvisionalController();
       await controller.disposeLocal();
       await _maybeStopOrphanBridge(
@@ -1105,6 +1199,7 @@ class AcpSessionManager {
         terminalAuthentication: error.terminalAuthentication,
       );
     } on Object catch (error) {
+      if (keepHeldController() case final held?) return held;
       discardProvisionalController();
       await controller.disposeLocal();
       final mapped = _mapBridgeError(error);
@@ -1116,6 +1211,13 @@ class AcpSessionManager {
       _telemetry.failure(category: mapped.kind.name);
       return AcpSessionLaunchFailed(null, mapped);
     }
+  }
+
+  /// The shared attachment for [bridgeKey], unless its transport has ended
+  /// (for example because another device took the input lease).
+  _BridgeAttachment? _liveAttachment(AcpBridgeKey bridgeKey) {
+    final attachment = _attachments[bridgeKey.value];
+    return attachment == null || attachment.isTerminated ? null : attachment;
   }
 
   /// Best-effort stops a freshly started bridge that never produced a usable
@@ -1654,6 +1756,8 @@ class _BridgeAttachment {
   AcpInitializeResult? get initialization => _initialization;
   bool get skippedHistoricalReplay => _session.skippedHistoricalReplay;
   int get lastDeliveredSequence => _session.lastDeliveredSequence;
+  AcpInputDelivery promptDelivery(String sessionId) =>
+      _session.promptDelivery(sessionId);
 
   /// The capability service bound to this attachment's client, or `null` when
   /// no same-host filesystem/terminal binding was available at initialize
@@ -1848,6 +1952,31 @@ class _SessionController {
 
   /// Bridge key of the attachment currently backing this session.
   AcpBridgeKey get bridgeKey => _key.bridge;
+
+  /// Whether another device holds this session's input, leaving it read-only.
+  bool get isHeldElsewhere => _state.remoteWriter != null;
+
+  /// Updates who holds this read-only session's input, keeping whether this
+  /// device lost it.
+  void refreshRemoteWriter(MonkeyMuxAcpLeaseHolder holder) {
+    final transportState = _state.transportState;
+    final current = _state.remoteWriter;
+    if (transportState == null || current == null) return;
+    _update(
+      (s) => s.copyWith(
+        transportState: MonkeyMuxAcpTransportState(
+          status: transportState.status,
+          bridgeId: transportState.bridgeId,
+          lastDeliveredSequence: transportState.lastDeliveredSequence,
+          writer: MonkeyMuxAcpRemoteWriter(
+            label: holder.label,
+            lastActiveAt: holder.lastActiveAt,
+            leaseLost: current.leaseLost,
+          ),
+        ),
+      ),
+    );
+  }
 
   void updateWorkingDirectory(String cwd) {
     if (_cwd == cwd) {
@@ -2991,6 +3120,10 @@ class _SessionController {
               'prompt_detached_in_flight',
               fields: {'queuedPromptCount': _promptQueue.length},
             );
+            if (isHeldElsewhere) {
+              _completeHeldElsewherePrompt(queued, promptAttachment);
+              continue;
+            }
             if (!queued.completer.isCompleted) {
               queued.completer.completeError(error, stackTrace);
             }
@@ -3366,20 +3499,27 @@ class _SessionController {
       final mapped = error is _LaunchException
           ? error.error
           : _mapClientError(error);
-      _update(
-        (s) => s.copyWith(
-          status: AcpConnectionStatus.failed,
-          attached: false,
-          error: mapped,
-        ),
-      );
+      // Finding the input held by another device is not a failure; the
+      // transport state already made this session read-only.
+      final heldElsewhere = isHeldElsewhere;
+      if (!heldElsewhere) {
+        _update(
+          (s) => s.copyWith(
+            status: AcpConnectionStatus.failed,
+            attached: false,
+            error: mapped,
+          ),
+        );
+      }
       _stopDetachedTurnMonitor();
       await _cancelSubscriptions();
-      await _releaseLease();
-      _manager._telemetry.reconnectOutcome(
-        succeeded: false,
-        failureCategory: mapped.kind.name,
-      );
+      await _releaseLease(permanent: heldElsewhere);
+      if (!heldElsewhere) {
+        _manager._telemetry.reconnectOutcome(
+          succeeded: false,
+          failureCategory: mapped.kind.name,
+        );
+      }
       throw _LaunchException(
         _key,
         mapped,
@@ -3512,10 +3652,27 @@ class _SessionController {
           if (s.status != AcpConnectionStatus.detached) {
             next = next.copyWith(status: AcpConnectionStatus.closed);
           }
+        case MonkeyMuxAcpTransportStatus.heldElsewhere:
+          // Read-only until the user takes over. Requests awaiting a decision
+          // now belong to the device holding the input.
+          attachment.markTerminated();
+          next = next.copyWith(
+            status: AcpConnectionStatus.detached,
+            attached: false,
+            promptStatus: AcpPromptStatus.idle,
+            pendingPermissions: const <AcpPendingPermission>[],
+            pendingWrites: const <AcpPendingWrite>[],
+            pendingElicitations: const <AcpSessionElicitation>[],
+            awaitingElicitations: const <AcpAwaitingElicitation>[],
+            clearError: true,
+          );
       }
       return next;
     });
     switch (transportState.status) {
+      case MonkeyMuxAcpTransportStatus.heldElsewhere:
+        _returnQueuedPromptsHeldElsewhere();
+        unawaited(_cleanUpAfterTerminalTransport());
       case MonkeyMuxAcpTransportStatus.providerExited:
       case MonkeyMuxAcpTransportStatus.failed:
       case MonkeyMuxAcpTransportStatus.closed:
@@ -3535,9 +3692,56 @@ class _SessionController {
   Future<void> _cleanUpAfterTerminalTransport() async {
     _stopDetachedTurnMonitor();
     await _cancelSubscriptions();
+    // A lost lease is final for this attachment too: taking over opens a new
+    // one, so its terminals and request registry are released here.
     await _releaseLease(
-      permanent: _state.status == AcpConnectionStatus.providerExited,
+      permanent:
+          _state.status == AcpConnectionStatus.providerExited ||
+          isHeldElsewhere,
     );
+  }
+
+  /// Ends a dispatched prompt after another device took the input. One the
+  /// agent received keeps its transcript entry, since its turn continues on
+  /// the other device; any other prompt goes back to the composer.
+  void _completeHeldElsewherePrompt(
+    _QueuedAcpPrompt queued,
+    _BridgeAttachment promptAttachment,
+  ) {
+    final delivery = promptAttachment.promptDelivery(_key.acpSessionId);
+    if (delivery != AcpInputDelivery.delivered) {
+      final timeline = _timelineBuilder.removeLocalUserPrompt(
+        queued.localMessageId,
+      );
+      _update((s) => s.copyWith(timeline: timeline));
+    }
+    if (!queued.completer.isCompleted) {
+      queued.completer.completeError(
+        AcpInputHeldElsewhereException(delivery: delivery),
+      );
+    }
+  }
+
+  /// Hands prompts that never left this device back to the composer, since
+  /// the device no longer holds the input.
+  void _returnQueuedPromptsHeldElsewhere() {
+    if (_promptQueue.isEmpty) return;
+    final returned = _promptQueue.toList(growable: false);
+    _promptQueue.clear();
+    _queuedPromptBytes = 0;
+    for (final queued in returned) {
+      _timelineBuilder.removeLocalUserPrompt(queued.localMessageId);
+    }
+    _update((s) => s.copyWith(timeline: _timelineBuilder.snapshot()));
+    for (final queued in returned) {
+      if (!queued.completer.isCompleted) {
+        queued.completer.completeError(
+          const AcpInputHeldElsewhereException(
+            delivery: AcpInputDelivery.notSent,
+          ),
+        );
+      }
+    }
   }
 
   void _onTransportError(MonkeyMuxAcpBridgeException error) {
