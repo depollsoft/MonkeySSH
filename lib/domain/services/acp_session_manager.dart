@@ -313,9 +313,11 @@ class AcpSessionManager {
       launch as _ResolvedLaunch,
       providerLabelOverride,
     );
+    // A home-folder agent starts new sessions in ~; a resumed session keeps
+    // the folder it was created in.
     final workingDirectory = await _resolveWorkingDirectory(
       hostId,
-      resolved.startsInHomeDirectory ? '~' : cwd,
+      resolved.startsInHomeDirectory && existingSessionId == null ? '~' : cwd,
     );
     if (workingDirectory.error case final error?) {
       return AcpSessionLaunchFailed(null, error);
@@ -399,13 +401,27 @@ class AcpSessionManager {
       providerId,
       launchCommandOverride: launchCommandOverride,
     );
-    if (launch is _LaunchError) {
+    // Attaching to a custom agent's running bridge starts no process, so it
+    // needs no approval: an edited or deleted definition must not strand its
+    // live sessions. The launch error applies only if a process must start.
+    final isBuiltin = acpBuiltinProviders.any(
+      (provider) => provider.id == providerId,
+    );
+    if (launch is _LaunchError &&
+        (isBuiltin || launchCommandOverride != null)) {
       return AcpSessionLaunchFailed(key, launch.error);
     }
-    final resolved = _withProviderLabel(
-      launch as _ResolvedLaunch,
-      providerLabelOverride,
-    );
+    final deferredLaunchError = launch is _LaunchError ? launch.error : null;
+    var resolved = launch is _ResolvedLaunch
+        ? _withProviderLabel(launch, providerLabelOverride)
+        : _ResolvedLaunch(
+            providerId: providerId,
+            label:
+                providerLabelOverride ??
+                existing?._providerLabel ??
+                'Coding agent',
+            argv: const <String>[],
+          );
     final workingDirectory = await _resolveWorkingDirectory(
       hostId,
       cwd,
@@ -472,6 +488,9 @@ class AcpSessionManager {
           ),
         );
       }
+      if (deferredLaunchError != null) {
+        return AcpSessionLaunchFailed(key, deferredLaunchError);
+      }
       if (existing != null) {
         _controllers.remove(key.value);
         await existing.disposeLocal();
@@ -496,6 +515,18 @@ class AcpSessionManager {
         await _recentSessions.remove(key);
       }
       return restarted;
+    }
+
+    if (deferredLaunchError != null && existing == null) {
+      // Show the label the running agent was started with.
+      final bridgeLabel = remoteBridge.provider.trim();
+      if (providerLabelOverride == null && bridgeLabel.isNotEmpty) {
+        resolved = _ResolvedLaunch(
+          providerId: providerId,
+          label: bridgeLabel,
+          argv: const <String>[],
+        );
+      }
     }
 
     // Re-attach an existing (detached) controller in place when possible.
@@ -759,14 +790,21 @@ class AcpSessionManager {
           (other) =>
               !identical(other, controller) && other.bridgeKey == key.bridge,
         );
-        if (shared || controller._launchArgv.isEmpty) {
+        var argv = controller._launchArgv;
+        if (!acpBuiltinProviders.any((p) => p.id == key.providerId)) {
+          // A custom agent restarts only with the command approved now; if
+          // its definition changed or went away, it is just marked signed in.
+          final current = await _resolveLaunch(key.providerId);
+          argv = current is _ResolvedLaunch ? current.argv : const <String>[];
+        }
+        if (shared || argv.isEmpty) {
           controller.clearAuthenticationRequired();
           return AcpSessionLaunchStarted(key);
         }
         final launch = _ResolvedLaunch(
           providerId: key.providerId,
           label: controller._providerLabel,
-          argv: controller._launchArgv,
+          argv: argv,
         );
         final cwd = controller._cwd;
         final workspace = controller._workspace;

@@ -7,6 +7,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
+import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
@@ -78,6 +79,8 @@ typedef _StartedBridge = ({
 class _Connector implements AcpBridgeConnector {
   final List<_StartedBridge> started = [];
   final Map<String, _Agent> agents = {};
+  final Map<String, String> runningLabels = {};
+  final List<String> stopped = [];
   var _counter = 0;
 
   @override
@@ -95,13 +98,15 @@ class _Connector implements AcpBridgeConnector {
       launchArgv: launchArgv,
       cwd: cwd,
     ));
-    return MonkeyMuxAcpBridgeStartResult(bridgeId: 'bridge-${++_counter}');
+    final bridgeId = 'bridge-${++_counter}';
+    runningLabels[bridgeId] = providerLabel;
+    return MonkeyMuxAcpBridgeStartResult(bridgeId: bridgeId);
   }
 
   MonkeyMuxAcpBridgeMetadata _metadata(String bridgeId) =>
       MonkeyMuxAcpBridgeMetadata(
         id: bridgeId,
-        provider: 'Goose',
+        provider: runningLabels[bridgeId] ?? 'Goose',
         commandHash: 'hash',
         state: MonkeyMuxAcpProviderState.running,
         clientCount: 0,
@@ -116,7 +121,7 @@ class _Connector implements AcpBridgeConnector {
   Future<List<MonkeyMuxAcpBridgeMetadata>> listBridges(
     int hostId, {
     MonkeyMuxInstallConfirmation? confirmInstall,
-  }) async => const [];
+  }) async => [for (final id in runningLabels.keys) _metadata(id)];
 
   @override
   Future<String> resolveWorkingDirectory(
@@ -135,7 +140,10 @@ class _Connector implements AcpBridgeConnector {
   ) async => _metadata(bridgeId);
 
   @override
-  Future<void> stopBridge(int hostId, String bridgeId) async {}
+  Future<void> stopBridge(int hostId, String bridgeId) async {
+    stopped.add(bridgeId);
+    runningLabels.remove(bridgeId);
+  }
 
   @override
   AcpBridgeSession connect({
@@ -338,6 +346,158 @@ void main() {
       );
     },
   );
+
+  test(
+    'a home-folder agent resumes a listed session in its own folder',
+    () async {
+      final goose = _goose(cwdPolicy: AcpCustomProviderCwdPolicy.homeDirectory)
+          .approve();
+      lookup.definitions[goose.id] = goose;
+
+      final result = await manager.resumeProviderSession(
+        hostId: 1,
+        providerId: goose.id,
+        acpSessionId: 'listed-session',
+        cwd: '/work/project',
+      );
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      expect(connector.started.single.cwd, '/work/project');
+      expect(
+        connector.agents.values.single.params['session/load']!.single['cwd'],
+        '/work/project',
+      );
+    },
+  );
+
+  group('a running custom agent after its definition changes', () {
+    late AcpSessionKey key;
+
+    setUp(() async {
+      final goose = _goose().approve();
+      lookup.definitions[goose.id] = goose;
+      final result = await manager.startNewSession(
+        hostId: 1,
+        providerId: goose.id,
+        cwd: '/repo',
+      );
+      key = (result as AcpSessionLaunchStarted).key;
+      // Leave the bridge running on the host, as after an app restart.
+      await manager.detachSession(key);
+    });
+
+    Future<AcpSessionLaunchResult> reconnect() => manager.reconnectSession(
+      hostId: key.hostId,
+      providerId: key.providerId,
+      bridgeId: key.bridgeId,
+      acpSessionId: key.acpSessionId,
+      cwd: '/repo',
+    );
+
+    for (final (change, apply) in <(String, void Function(_Lookup))>[
+      (
+        'edited and awaiting approval',
+        (lookup) =>
+            lookup.definitions['goose'] = lookup.definitions['goose']!.edit(
+              launchCommand: AcpLaunchCommand(
+                executable: '/opt/goose/bin/goose',
+                arguments: const ['acp', '--yolo'],
+              ),
+            ),
+      ),
+      ('deleted', (lookup) => lookup.definitions.remove('goose')),
+    ]) {
+      test('reattaches its live bridge when $change', () async {
+        apply(lookup);
+
+        final result = await reconnect();
+
+        expect(result, isA<AcpSessionLaunchStarted>());
+        expect(connector.started, hasLength(1), reason: 'no new process');
+        expect(manager.state.sessions.single.providerLabel, 'Goose');
+      });
+    }
+
+    test('reattaches after an app restart once the definition is '
+        'deleted', () async {
+      lookup.definitions.remove('goose');
+      final restarted = AcpSessionManager(
+        connector: connector,
+        recentSessions: AcpRecentSessionsService(SettingsService(database)),
+        customProviders: lookup,
+        isProUnlocked: () => true,
+        diagnostics: const NoopDiagnosticsLogger(),
+      );
+      addTearDown(restarted.dispose);
+
+      final result = await restarted.reconnectSession(
+        hostId: key.hostId,
+        providerId: key.providerId,
+        bridgeId: key.bridgeId,
+        acpSessionId: key.acpSessionId,
+        cwd: '/repo',
+      );
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      expect(connector.started, hasLength(1), reason: 'no new process');
+      // The label comes from the running bridge.
+      expect(restarted.state.sessions.single.providerLabel, 'Goose');
+    });
+
+    test('does not start a new process for an unapproved definition when '
+        'the bridge is gone', () async {
+      lookup.definitions['goose'] = lookup.definitions['goose']!.edit(
+        label: 'Goose (edited)',
+      );
+      connector.runningLabels.clear();
+
+      final result = await reconnect();
+
+      expect(
+        (result as AcpSessionLaunchFailed).error.kind,
+        AcpSessionErrorKind.commandNotApproved,
+      );
+      expect(connector.started, hasLength(1));
+    });
+  });
+
+  group('restart after sign-in', () {
+    late AcpSessionKey key;
+
+    setUp(() async {
+      final goose = _goose().approve();
+      lookup.definitions[goose.id] = goose;
+      final result = await manager.startNewSession(
+        hostId: 1,
+        providerId: goose.id,
+        cwd: '/repo',
+      );
+      key = (result as AcpSessionLaunchStarted).key;
+    });
+
+    test('reruns the approved command', () async {
+      final result = await manager.restartAfterSignIn(key);
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      expect(connector.started, hasLength(2));
+      expect(
+        connector.started.last.launchArgv,
+        connector.started.first.launchArgv,
+      );
+    });
+
+    test('starts nothing once the definition is no longer approved', () async {
+      lookup.definitions['goose'] = lookup.definitions['goose']!.edit(
+        launchCommand: AcpLaunchCommand(executable: '/bin/sh'),
+      );
+
+      final result = await manager.restartAfterSignIn(key);
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      expect(connector.started, hasLength(1));
+      expect(connector.stopped, isEmpty);
+    });
+  });
 
   test('an unknown provider id still fails as unknown', () async {
     final result = await manager.startNewSession(
