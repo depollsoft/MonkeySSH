@@ -71,3 +71,43 @@ func TestCodexSessionGateWaitsForHeldFileWindows(t *testing.T) {
 		})
 	}
 }
+
+// Codex removes a released lock file. A probe that happens to have it open
+// must not turn that removal into a sharing violation.
+func TestCodexSessionLockProbeSharesDeleteWindows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-id.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openCodexSessionLockForProbe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove while probed: %v", err)
+	}
+}
+
+// A probe of a free lock briefly takes it. Codex must be able to take it
+// again straight away.
+func TestCodexSessionLockProbeReleasesFreeLockWindows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-id.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if codexSessionLockHeld(path) {
+		t.Fatal("free lock reported held")
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var overlapped windows.Overlapped
+	if err := windows.LockFileEx(windows.Handle(file.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, ^uint32(0), ^uint32(0), &overlapped); err != nil {
+		t.Fatalf("lock after probe: %v", err)
+	}
+}
