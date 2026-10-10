@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +10,31 @@ import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 
 import '../../support/fake_agent_worktree.dart';
+
+/// Lets a test decide when each `git worktree add` finishes and how.
+class _GatedAddService extends FakeAgentWorktreeService {
+  final gates = <Completer<AgentWorktreeException?>>[];
+
+  @override
+  Future<AgentWorktreeRecord> add(
+    AgentWorktreeShell shell, {
+    required int hostId,
+    required AgentWorktreePlan plan,
+    String? launchId,
+    DateTime? now,
+  }) async {
+    final gate = Completer<AgentWorktreeException?>();
+    gates.add(gate);
+    if (await gate.future case final error?) throw error;
+    return super.add(
+      shell,
+      hostId: hostId,
+      plan: plan,
+      launchId: launchId,
+      now: now,
+    );
+  }
+}
 
 class _NoShell implements AgentWorktreeShell {
   @override
@@ -120,6 +146,52 @@ void main() {
         expect(service.targets, isEmpty);
       },
     );
+
+    test('a launch that loses a collision keeps the winner’s record', () async {
+      final gated = _GatedAddService();
+      final concurrent = AgentWorktreeLauncher(
+        service: gated,
+        registry: registry,
+        clock: () => DateTime(2026, 10, 9, 8, 30),
+        wait: (_) async {},
+      );
+      const fixedNames = AgentLaunchPreset(
+        tool: AgentLaunchTool.claudeCode,
+        workingDirectory: '~/src/app',
+        tmuxSessionName: 'agents',
+        worktree: AgentWorktreeLaunchOptions(branchTemplate: 'agent/fixed'),
+      );
+      Future<AgentWorktreeRecord> launch() => concurrent.create(
+        shell,
+        hostId: 1,
+        preset: fixedNames,
+        windowsHost: false,
+      );
+
+      final winner = launch();
+      final loser = launch().then<Object>(
+        (record) => record,
+        onError: (Object error) => error,
+      );
+      await pumpEventQueue();
+      expect(gated.gates, hasLength(2));
+      gated.gates[0].complete(null);
+      final record = await winner;
+      gated.gates[1].complete(
+        const AgentWorktreeException(AgentWorktreeErrorKind.collision),
+      );
+
+      expect(
+        await loser,
+        isA<AgentWorktreeException>().having(
+          (error) => error.kind,
+          'kind',
+          AgentWorktreeErrorKind.collision,
+        ),
+      );
+      expect(registry.records, [record]);
+      expect(record.launchId, isNotNull);
+    });
 
     test('forgets the pending record when git refuses', () async {
       service.addError = const AgentWorktreeException(

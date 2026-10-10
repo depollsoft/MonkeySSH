@@ -40,7 +40,11 @@ class AgentWorktreeRegistry {
     return null;
   }
 
-  /// Adds [record], replacing any record for the same worktree.
+  /// Adds [record], replacing an equal record.
+  ///
+  /// A record only replaces its own launch's entry: two launches that
+  /// planned the same folder each keep theirs, so one cleaning up never
+  /// drops the other.
   Future<void> add(AgentWorktreeRecord record) =>
       _settings.updateJson(SettingKeys.agentWorktrees, (current) {
         final key = record.hostId.toString();
@@ -49,7 +53,7 @@ class AgentWorktreeRegistry {
           ..._decode(
             current?[key],
             record.hostId,
-          ).where((existing) => existing.path != record.path),
+          ).where((existing) => existing != record),
         ].take(_maxRecordsPerHost);
         return (current ?? <String, dynamic>{})
           ..[key] = [for (final entry in records) entry.toJson()];

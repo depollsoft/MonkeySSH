@@ -62,6 +62,7 @@ class _LocalShell implements AgentWorktreeShell {
         'PATH': _systemPath,
         'SHELL': loginShell,
         'LANG': 'C',
+        'TMPDIR': home,
       },
       includeParentEnvironment: false,
     );
@@ -279,17 +280,20 @@ void main() {
           await root.delete(recursive: true);
         });
 
+        var launches = 0;
         Future<AgentWorktreeRecord> create({
           String? repositoryPath,
           String baseRef = 'HEAD',
           AgentWorktreeLaunchOptions options =
               const AgentWorktreeLaunchOptions(),
+          bool withLaunchId = true,
         }) => service.create(
           shell,
           hostId: 7,
           repository: repositoryPath ?? repository,
           baseRef: baseRef,
           target: renderAgentWorktreeTarget(options, _values),
+          launchId: withLaunchId ? 'launch-${++launches}' : null,
         );
 
         Future<void> commit(
@@ -659,6 +663,61 @@ void main() {
           expect(File('${record.path}/keep').existsSync(), isTrue);
         });
 
+        test(
+          'keeps a worktree recorded through a branch switch and rename',
+          () async {
+            final record = await create();
+            await git(record.path, ['checkout', '-q', '-b', 'feature/x']);
+
+            var status = await service.status(shell, record);
+            expect(status.stale, isFalse);
+            expect(status.currentBranch, 'feature/x');
+            expect(status.branchHasNewCommits, isTrue);
+
+            await git(record.path, [
+              'branch',
+              '-m',
+              'feature/x',
+              'feat/pretty',
+            ]);
+            status = await service.status(shell, record);
+            expect(status.stale, isFalse);
+            expect(status.currentBranch, 'feat/pretty');
+
+            await service.remove(shell, record);
+            expect(Directory(record.path).existsSync(), isFalse);
+            expect(
+              await git(repository, ['branch', '--list', 'feat/pretty']),
+              contains('feat/pretty'),
+            );
+            expect(
+              await git(repository, ['branch', '--list', record.branch]),
+              isEmpty,
+            );
+          },
+        );
+
+        test('records without a launch id fall back to the branch', () async {
+          final record = await create(withLaunchId: false);
+          await git(record.path, ['checkout', '-q', '-b', 'feature/x']);
+
+          expect((await service.status(shell, record)).stale, isTrue);
+        });
+
+        test('does not count per-worktree refs as keeping a commit', () async {
+          final record = await create();
+          await git(record.path, ['checkout', '-q', '--detach']);
+          await commit(record.path, 'kept', 'kept by a worktree ref');
+          await git(record.path, ['update-ref', 'refs/worktree/keep', 'HEAD']);
+
+          expect((await service.status(shell, record)).unsavedCommits, isTrue);
+          await expectLater(
+            service.remove(shell, record),
+            _throwsKind(AgentWorktreeErrorKind.unsavedCommits),
+          );
+          expect(Directory(record.path).existsSync(), isTrue);
+        });
+
         test('keeps a branch that has new commits', () async {
           final record = await create();
           await commit(record.path, 'feature', 'feature');
@@ -835,7 +894,11 @@ void main() {
         '\n'
         r'case "$1" in'
         '\n'
-        r'  has-session) [ -f "$state" ] ;;'
+        r'  has-session) if [ -f "$state.err" ]; then cat "$state.err" >&2; exit 1; fi'
+        '\n'
+        r'    if [ -f "$HOME/want-tmpdir" ] && [ "${TMUX_TMPDIR-}" != "$(cat "$HOME/want-tmpdir")" ]; then echo "no server running on x" >&2; exit 1; fi'
+        '\n'
+        r'''    [ -f "$state" ] || { echo "can't find session: agents" >&2; exit 1; } ;;'''
         '\n'
         r'  list-panes) [ ! -f "$state.fail" ] && cat "$state" ;;'
         '\n'
@@ -847,8 +910,68 @@ void main() {
     });
 
     tearDown(() async {
+      final pid = File('$home/sleep.pid');
+      if (pid.existsSync()) {
+        Process.killPid(int.parse(pid.readAsStringSync().trim()));
+      }
       await root.delete(recursive: true);
     });
+
+    test(
+      'treats an unexpected tmux error as unknown, not as no session',
+      () async {
+        File('$home/panes.err')
+            .writeAsStringSync('error connecting to x (Permission denied)\n');
+
+        await expectLater(
+          service.tmuxSessionDirectories(shell, 'agents'),
+          _throwsKind(AgentWorktreeErrorKind.unavailable),
+        );
+      },
+    );
+
+    test('looks for the server where the login profile points tmux', () async {
+      File('$home/panes').writeAsStringSync('/srv/a\n');
+      File('$home/want-tmpdir').writeAsStringSync('$home/sockets');
+      File('$home/.profile').writeAsStringSync(
+        // The fake tmux stays first on the login PATH, ahead of any real one.
+        r'PATH="$HOME/.local/bin:$PATH"; export PATH'
+        '\n'
+        r'TMUX_TMPDIR="$HOME/sockets"; export TMUX_TMPDIR'
+        '\n',
+      );
+      final loginShell = _LocalShell(
+        '/bin/sh',
+        home: home,
+        loginShell: '/bin/sh',
+      );
+
+      expect(await service.tmuxSessionDirectories(loginShell, 'agents'), [
+        '/srv/a',
+      ]);
+    });
+
+    test(
+      'a background job in the login profile does not stall scripts',
+      () async {
+        File('$home/.profile').writeAsStringSync(
+          r'PATH="$HOME/.local/bin:$PATH"; export PATH'
+          '\n'
+          r'sleep 5 & echo $! > "$HOME/sleep.pid"'
+          '\n',
+        );
+        final loginShell = _LocalShell(
+          '/bin/sh',
+          home: home,
+          loginShell: '/bin/sh',
+        );
+        final stopwatch = Stopwatch()..start();
+
+        await service.tmuxSessionDirectories(loginShell, 'agents');
+
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 3)));
+      },
+    );
 
     test('reports a missing session as null', () async {
       expect(await service.tmuxSessionDirectories(shell, 'agents'), isNull);

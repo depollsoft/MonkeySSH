@@ -156,7 +156,12 @@ class AgentWorktreeLauncher {
           ),
         ),
       );
-      final pending = plan.pendingRecord(hostId: hostId, createdAt: now);
+      final launchId = _newLaunchId();
+      final pending = plan.pendingRecord(
+        hostId: hostId,
+        createdAt: now,
+        launchId: launchId,
+      );
       try {
         await _registry.add(pending);
       } on Object catch (error) {
@@ -169,6 +174,7 @@ class AgentWorktreeLauncher {
           shell,
           hostId: hostId,
           plan: plan,
+          launchId: launchId,
           now: now,
         );
       } on AgentWorktreeException catch (error) {
@@ -343,6 +349,14 @@ class AgentWorktreeLauncher {
         await rollBack(shell, record);
       }
     }
+  }
+
+  String _newLaunchId() {
+    final random = _random ?? Random.secure();
+    return [
+      for (var i = 0; i < 4; i++)
+        random.nextInt(1 << 16).toRadixString(16).padLeft(4, '0'),
+    ].join();
   }
 
   Future<void> _forget(AgentWorktreeRecord record) async {

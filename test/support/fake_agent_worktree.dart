@@ -45,6 +45,9 @@ class FakeAgentWorktreeService extends AgentWorktreeService {
   /// Session names [tmuxSessionDirectories] was asked about.
   final tmuxProbes = <String>[];
 
+  /// Thrown by [tmuxSessionDirectories] when set, as when tmux cannot answer.
+  AgentWorktreeException? tmuxError;
+
   final targets = <AgentWorktreeTarget>[];
   final created = <AgentWorktreeRecord>[];
   final removed = <AgentWorktreeRecord>[];
@@ -72,10 +75,12 @@ class FakeAgentWorktreeService extends AgentWorktreeService {
     AgentWorktreeShell shell, {
     required int hostId,
     required AgentWorktreePlan plan,
+    String? launchId,
     DateTime? now,
   }) async {
     if (addError case final error?) throw error;
     final record = AgentWorktreeRecord(
+      launchId: launchId,
       hostId: hostId,
       repository: plan.repository,
       path: plan.path,
@@ -94,6 +99,7 @@ class FakeAgentWorktreeService extends AgentWorktreeService {
     String name,
   ) async {
     tmuxProbes.add(name);
+    if (tmuxError case final error?) throw error;
     return tmuxAnswers.length > 1 ? tmuxAnswers.removeAt(0) : tmuxAnswers.first;
   }
 
@@ -127,7 +133,7 @@ class MemoryAgentWorktreeRegistry implements AgentWorktreeRegistry {
       throw StateError('settings write failed');
     }
     records
-      ..removeWhere((existing) => existing.path == record.path)
+      ..removeWhere((existing) => existing == record)
       ..insert(0, record);
   }
 

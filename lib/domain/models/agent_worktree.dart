@@ -474,6 +474,7 @@ final class AgentWorktreeRecord {
     String? startDirectory,
     this.alternatePath,
     this.pending = false,
+    this.launchId,
   }) : startDirectory = startDirectory ?? path;
 
   /// Decodes a record stored under [hostId], or returns null when it is
@@ -504,6 +505,7 @@ final class AgentWorktreeRecord {
       startDirectory: _readTrimmed(json['startDirectory']),
       alternatePath: _readTrimmed(json['alternatePath']),
       pending: json['pending'] == true,
+      launchId: _readTrimmed(json['launchId']),
     );
   }
 
@@ -537,6 +539,14 @@ final class AgentWorktreeRecord {
   /// report back. A later launch on the same host cleans it up.
   final bool pending;
 
+  /// Random id of the launch that created the worktree.
+  ///
+  /// The app also writes it into the worktree's git admin dir, so a branch
+  /// switch or rename inside the worktree does not make the record look
+  /// stale, and it tells apart records of concurrent launches that planned
+  /// the same branch and folder. Null for records made before launch ids.
+  final String? launchId;
+
   /// Whether [directory] is the worktree root or inside it.
   bool contains(String? directory) {
     final trimmed = directory?.trim();
@@ -563,6 +573,7 @@ final class AgentWorktreeRecord {
     if (startDirectory != path) 'startDirectory': startDirectory,
     'alternatePath': ?alternatePath,
     if (pending) 'pending': true,
+    'launchId': ?launchId,
   };
 
   @override
@@ -570,10 +581,12 @@ final class AgentWorktreeRecord {
       other is AgentWorktreeRecord &&
       other.hostId == hostId &&
       other.path == path &&
-      other.branch == branch;
+      other.branch == branch &&
+      other.launchId == launchId &&
+      other.pending == pending;
 
   @override
-  int get hashCode => Object.hash(hostId, path, branch);
+  int get hashCode => Object.hash(hostId, path, branch, launchId, pending);
 }
 
 String _withoutTrailingSlashes(String value) {
