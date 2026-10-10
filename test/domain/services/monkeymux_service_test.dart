@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
@@ -555,6 +556,32 @@ void main() {
           percentage: 63,
         ),
       );
+    });
+
+    test('maps helper program status onto tmux windows', () {
+      final window = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@1',
+        'index': 0,
+        'name': 'claude',
+        'active': false,
+        'programStatus': {
+          'state': 'blocked',
+          'kind': 'permission',
+          'app': 'claude-code',
+          'msg': 'approve Bash: touch probe2.txt',
+        },
+      });
+
+      expect(
+        window!.programStatus,
+        const TerminalProgramStatus(
+          state: TerminalProgramState.blocked,
+          kind: TerminalProgramBlockedKind.permission,
+          app: 'claude-code',
+          message: 'approve Bash: touch probe2.txt',
+        ),
+      );
+      expect(window.statusLabel, 'approval');
     });
 
     test('ignores invalid helper terminal progress metadata', () {

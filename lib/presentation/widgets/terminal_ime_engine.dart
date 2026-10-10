@@ -68,6 +68,10 @@ const shellCompletionComposingReplayWindow = Duration(seconds: 2);
 @visibleForTesting
 const terminalImeFramingContinuationWindow = Duration(milliseconds: 150);
 
+/// Gboard adds a space after these once the next key is pressed (measured
+/// with Gboard 18.4), so Return commits that space just before itself.
+const _autoSpacedPunctuation = {'.', ',', '?', '!', ':', ';', ')'};
+
 /// Longest line of IME text sent in one bracketed paste.
 ///
 /// Agent composers replace a long paste with a placeholder such as
@@ -280,6 +284,11 @@ class TerminalImeEngine {
   /// Stops tracking a native Android backspace gesture.
   void cancelAndroidBackspace() => _activeAndroidImeBackspace = null;
 
+  /// Records a Space key left to the IME, so the space it commits for the key
+  /// counts as typed rather than as the keyboard's own; see
+  /// [writeKeyboardSpace].
+  void noteSpaceKey() => _spaceKeyPressed = true;
+
   /// Coalesces a toolbar-modified hardware Enter with its later IME commit.
   void recordHardwareEnter() {
     if (_pendingEnterActionSuppressions < 1) {
@@ -325,6 +334,7 @@ class TerminalImeEngine {
   /// The IME text a hardware Enter just submitted, for [recordHardwareEnter].
   String? _hardwareEnterSubmittedText;
   DateTime? _hardwareEnterAt;
+  bool _spaceKeyPressed = false;
   List<String> _hardwareEnterStaleLines = const [];
   bool _isFramingImeText = false;
 
@@ -425,6 +435,12 @@ class TerminalImeEngine {
             meta: meta,
             type: type,
           );
+    if (key == TerminalKey.space && type != TerminalKeyEventType.release) {
+      // A Space the terminal leaves unhandled goes on to the IME, which
+      // commits its space; one it takes itself, such as Ctrl+Space sent as
+      // NUL, commits nothing.
+      _spaceKeyPressed = !handled;
+    }
 
     if (handled) {
       // Hardware Enter and control keys bypass the IME commit/reset path.
@@ -1194,6 +1210,7 @@ class TerminalImeEngine {
     _clearPendingComposingEnterAction();
     _pendingPerformedEnterText = null;
     _hardwareEnterAt = null;
+    _spaceKeyPressed = false;
     _pendingEnterActionSuppressions = 0;
     _pendingAndroidHardwareBackspaces = 0;
     _activeAndroidImeBackspace = null;
@@ -1621,6 +1638,22 @@ class TerminalImeEngine {
       return;
     }
     final input = _applyTerminalTextInputModifiers(text);
+    // A lone space committed right after punctuation with no Space key
+    // behind it is the one the keyboard added there itself. A paste of
+    // spaces, or of a space with a line break, is the user's, and nothing is
+    // treated as the keyboard's in a password prompt. A single space pasted
+    // from the keyboard's clipboard looks the same; the pacer drops it only
+    // if Return lands within its hold, two taps under 50 ms apart.
+    final keyboardSpace =
+        !options.sensitiveInput &&
+        !_spaceKeyPressed &&
+        text == ' ' &&
+        input == text &&
+        !beforeEnter &&
+        _autoSpacedPunctuation.contains(precedingGrapheme);
+    _spaceKeyPressed = false;
+    void send(void Function() write) =>
+        keyboardSpace ? writeKeyboardSpace(write) : write();
     final controlCheckText = embedsNewlines
         ? text.replaceAll(terminalNewlinePattern, '')
         : text;
@@ -1681,10 +1714,10 @@ class TerminalImeEngine {
           },
         );
       }
-      pastes.forEach(terminal.paste);
+      send(() => pastes.forEach(terminal.paste));
     } else {
       _isFramingImeText = false;
-      terminal.textInput(input);
+      send(() => terminal.textInput(input));
     }
   }
 
