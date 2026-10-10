@@ -16,6 +16,8 @@ import '../../../domain/models/agent_launch_preset.dart';
 import '../../../domain/services/agent_worktree_launcher.dart';
 import '../../../domain/services/agent_worktree_service.dart';
 import '../../../domain/services/diagnostics_log_service.dart';
+import '../../../domain/services/remote_file_service.dart'
+    show shellEscapePosix;
 import '../../../domain/services/ssh_service.dart';
 
 /// A preset launch, with the worktree created for it when it needed one.
@@ -95,7 +97,8 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
         },
       );
       explain(
-        'MonkeySSH could not tell whether the session is already running.',
+        'MonkeySSH could not check whether the session is running, so it '
+        'made no worktree.',
       );
       return null;
     }
@@ -126,6 +129,11 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
     return null;
   }
 }
+
+/// Command that reattaches to tmux session [sessionName] without starting
+/// anything, used when the session probe cannot answer.
+String buildAgentWorktreeTmuxReattachCommand(String sessionName) =>
+    'tmux attach-session -t ${shellEscapePosix('=$sessionName')}';
 
 /// Why a worktree preset without a remote window session cannot launch.
 const agentWorktreeNeedsSessionMessage =

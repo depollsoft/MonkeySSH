@@ -870,6 +870,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _tmuxSessionName;
   String? _muxVersion;
   String? _monkeyMuxReconnectSessionName;
+
+  /// Set while closing the session's last window still needs the
+  /// connection, for example to offer removing the window's worktree.
+  /// Session-end handling waits for it, because MonkeyMux announces the empty
+  /// window list before it answers the close.
+  Future<void>? _muxSessionEndHold;
   bool _monkeyMuxReconnectAttachPending = false;
   bool _monkeyMuxAttachEstablished = false;
   _PendingMonkeyMuxServerReplacement? _pendingMonkeyMuxServerReplacement;
@@ -6448,6 +6454,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final worktreeShell = SshAgentWorktreeShell(session);
     Future<List<String>?> panes() =>
         worktreeService.tmuxSessionDirectories(worktreeShell, sessionName);
+    var probeFailed = false;
     final launch = await prepareTerminalAgentWorktreeLaunch(
       context: context,
       ref: ref,
@@ -6455,9 +6462,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       preset: preset,
       sessionExists: sessionName.isEmpty
           ? null
-          : () async => await panes() != null,
+          : () async {
+              try {
+                return await panes() != null;
+              } on Object {
+                probeFailed = true;
+                rethrow;
+              }
+            },
     );
-    if (launch == null) return;
+    if (launch == null) {
+      // Without an answer no worktree is made, but the terminal still
+      // reattaches to the session, as a preset without a worktree would.
+      if (probeFailed && mounted && identical(_shell, shell)) {
+        shell.write(
+          utf8.encode(
+            formatAutoConnectCommandForShell(
+              buildAgentWorktreeTmuxReattachCommand(sessionName),
+            ),
+          ),
+        );
+      }
+      return;
+    }
     var launched = false;
     try {
       if (!mounted || !identical(_shell, shell)) return;
@@ -6488,8 +6515,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (!mounted || !identical(_shell, shell)) return;
       shell.write(utf8.encode(formatAutoConnectCommandForShell(command)));
       launched = true;
+      var seenRunning = false;
       launch.launched(
-        windowDirectories: () async => await panes() ?? const <String>[],
+        windowDirectories: () async {
+          final directories = await panes();
+          if (directories == null) {
+            // Until the session has been seen, "absent" may only mean the
+            // probe found a different tmux server than the shell used, so
+            // it is not an answer and the worktree is kept.
+            if (!seenRunning) {
+              throw const AgentWorktreeException(
+                AgentWorktreeErrorKind.unavailable,
+              );
+            }
+            return const <String>[];
+          }
+          seenRunning = true;
+          return directories;
+        },
       );
     } finally {
       if (!launched) launch.abandon();
@@ -10190,6 +10233,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     String sessionName,
   ) async {
+    final hold = _muxSessionEndHold;
+    if (hold != null) await hold;
     if (!mounted ||
         _activeMuxBackend != RemoteMuxBackend.monkeyMux ||
         _connectionId != session.connectionId ||
@@ -10386,7 +10431,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool sessionEnding = false,
   }) async {
     final sessionName = _tmuxSessionName;
-    if (closed == null || sessionName == null || !mounted) return;
+    if (closed == null || !mounted) return;
+    if (sessionName == null && !sessionEnding) return;
     final mux = _activeRemoteMultiplexerService;
     final extraFlags = _activeTmuxExtraFlags;
     await offerAgentWorktreeRemoval(
@@ -10404,7 +10450,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     : window.index != closed.index)
                   window.currentPath,
             ],
-      liveWindowDirectories: sessionEnding
+      liveWindowDirectories: sessionEnding || sessionName == null
           ? null
           : () async => [
               for (final window in await mux.listWindows(
@@ -10577,36 +10623,64 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           windowIndex,
           windowId: windowId,
         );
+    // The session ends with this window, and ending it disconnects, so
+    // anything that still needs the connection runs first. The window bar
+    // sees the empty window list before the close returns; the hold keeps
+    // its session-end handling waiting until then.
+    final sessionEndHold =
+        closesLastMonkeyMuxWindow && beforeSessionEnds != null
+        ? Completer<void>()
+        : null;
+    void releaseSessionEnd() {
+      if (sessionEndHold == null || sessionEndHold.isCompleted) return;
+      sessionEndHold.complete();
+      if (identical(_muxSessionEndHold, sessionEndHold.future)) {
+        _muxSessionEndHold = null;
+      }
+    }
+
+    Future<void> endSession() async {
+      try {
+        await beforeSessionEnds?.call();
+      } finally {
+        releaseSessionEnd();
+      }
+      await _handleMuxSessionEnded(session, sessionName);
+    }
+
+    if (sessionEndHold != null) {
+      _muxSessionEndHold = sessionEndHold.future;
+    }
     try {
-      await _activeTerminalConnectionBackend(session)
-          .killWindow(windowIndex, windowId: windowId);
-    } on Object catch (error) {
-      if (error is! Exception && !isExpectedSshOperationError(error)) {
+      try {
+        await _activeTerminalConnectionBackend(session)
+            .killWindow(windowIndex, windowId: windowId);
+      } on Object catch (error) {
+        if (error is! Exception && !isExpectedSshOperationError(error)) {
+          rethrow;
+        }
+        if (closesLastMonkeyMuxWindow &&
+            _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
+            _isExpectedMonkeyMuxFinalCloseError(error)) {
+          DiagnosticsLogService.instance.info(
+            'tmux.ui',
+            'monkeymux_final_close_control_closed',
+            fields: {
+              'connectionId': session.connectionId,
+              'errorType': error.runtimeType,
+            },
+          );
+          await endSession();
+          return;
+        }
         rethrow;
       }
-      if (closesLastMonkeyMuxWindow &&
-          _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
-          _isExpectedMonkeyMuxFinalCloseError(error)) {
-        DiagnosticsLogService.instance.info(
-          'tmux.ui',
-          'monkeymux_final_close_control_closed',
-          fields: {
-            'connectionId': session.connectionId,
-            'errorType': error.runtimeType,
-          },
-        );
-        await beforeSessionEnds?.call();
-        await _handleMuxSessionEnded(session, sessionName);
+      if (closesLastMonkeyMuxWindow) {
+        await endSession();
         return;
       }
-      rethrow;
-    }
-    if (closesLastMonkeyMuxWindow) {
-      // The session ends with this window, and ending it disconnects, so
-      // anything that still needs the connection runs first.
-      await beforeSessionEnds?.call();
-      await _handleMuxSessionEnded(session, sessionName);
-      return;
+    } finally {
+      releaseSessionEnd();
     }
     final isMonkeyMux = _activeMuxBackend == RemoteMuxBackend.monkeyMux;
     _prepareTerminalForMuxWindowChange(clearTerminalProgress: !isMonkeyMux);

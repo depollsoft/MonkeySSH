@@ -7113,7 +7113,12 @@ void main() {
             windowId: '@0',
             extraFlags: any(named: 'extraFlags'),
           ),
-        ).thenAnswer((_) async {});
+        ).thenAnswer((_) async {
+          // Like the server: the empty window list arrives before the close
+          // is answered, and the window bar treats it as the session's end.
+          windowEvents.add(const TmuxWindowListEvent(<TmuxWindow>[]));
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        });
 
         await tester.pumpWidget(
           buildScreen(
@@ -11055,7 +11060,13 @@ void main() {
               FakeAgentWorktreeService(path: '/work/project.worktrees/agent')
                 ..tmuxAnswers = [
                   null,
-                  if (agentStays) ['/work/project.worktrees/agent'] else null,
+                  if (agentStays)
+                    ['/work/project.worktrees/agent']
+                  else ...[
+                    // Seen running without the worktree, then gone.
+                    ['/work/project'],
+                    null,
+                  ],
                 ];
           host = _buildHost(id: host.id, autoConnectCommand: 'codex');
           session = SshSession(
@@ -11180,6 +11191,133 @@ void main() {
         );
         expect(worktrees.created, isEmpty);
         expect(written, contains("-c '/work/project'"));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tmux worktree preset keeps its worktree when the session is never seen',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final registry = MemoryAgentWorktreeRegistry();
+        // The probe may be looking at another tmux server than the shell
+        // used, so "absent" after the launch is not a reason to remove.
+        final worktrees = FakeAgentWorktreeService(
+          path: '/work/project.worktrees/agent',
+        );
+        host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: registry,
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(worktrees.created, hasLength(1));
+        expect(written, contains("-c '/work/project.worktrees/agent'"));
+        expect(worktrees.removed, isEmpty);
+        expect(registry.records, worktrees.created);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tmux probe that cannot answer reattaches without a worktree',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final worktrees = FakeAgentWorktreeService()
+          ..tmuxError = const AgentWorktreeException(
+            AgentWorktreeErrorKind.unavailable,
+          );
+        host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: MemoryAgentWorktreeRegistry(),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(worktrees.created, isEmpty);
+        expect(written, contains("tmux attach-session -t '=agents'"));
+        expect(written, isNot(contains('new-session')));
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(seconds: 2));
       },

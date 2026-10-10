@@ -136,7 +136,7 @@ void main() {
     expect(launch, isNull);
     expect(service.created, isEmpty);
     expect(
-      find.textContaining('could not tell whether the session'),
+      find.textContaining('could not check whether the session'),
       findsOneWidget,
     );
   });

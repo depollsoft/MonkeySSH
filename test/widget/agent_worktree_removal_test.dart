@@ -385,6 +385,24 @@ void main() {
     });
   });
 
+  testWidgets('names the branch the worktree has after a rename', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      const AgentWorktreeStatus(
+        exists: true,
+        changedFiles: 0,
+        ignoredEntries: 0,
+        branchHasNewCommits: true,
+        currentBranch: 'feat/pretty',
+      ),
+    );
+
+    expect(find.text('feat/pretty'), findsOneWidget);
+    expect(find.text('agent/claude-1'), findsNothing);
+  });
+
   testWidgets('a detached worktree with unsaved commits offers no removal', (
     tester,
   ) async {

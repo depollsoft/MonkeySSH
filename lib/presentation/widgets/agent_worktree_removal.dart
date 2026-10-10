@@ -249,7 +249,8 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              record.branch,
+              // After a switch or rename, name the branch the worktree has.
+              status.currentBranch ?? record.branch,
               style: mono.copyWith(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: FluttyTheme.spacingXs),

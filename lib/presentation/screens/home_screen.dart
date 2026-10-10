@@ -3414,7 +3414,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final closesLastMonkeyMuxWindow =
         _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
         (_badge.windows?.length ?? 0) <= 1;
-    _runTmuxPreviewAction(() async {
+    final releaseSessionEnd = _badge.holdSessionEnd();
+    final closing = () async {
       if (window.isNativeAcp) {
         await ref
             .read(acpSessionManagerProvider)
@@ -3459,10 +3460,12 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                 ],
         );
       }
+      releaseSessionEnd();
       if (closesLastMonkeyMuxWindow) {
         await _badge.disconnectEndedMonkeyMuxSession(session);
       }
-    }());
+    }();
+    _runTmuxPreviewAction(closing.whenComplete(releaseSessionEnd));
 
     // Optimistically remove from the list.
     setState(() {
