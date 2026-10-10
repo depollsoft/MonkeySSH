@@ -2077,6 +2077,9 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           }
           progress.start(index, file.name, totalBytes: totalBytes);
           final remotePath = joinRemotePath(destinationDirectory, file.name);
+          // A cancelled upload removes only a file it created; uploads write
+          // in place, so an existing file it replaced cannot be restored.
+          final existed = await _remoteEntryExists(sftp, remotePath);
           try {
             await remoteFileService.uploadStream(
               sftp: sftp,
@@ -2092,8 +2095,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               },
             );
           } on SftpBatchCancelledException {
-            // A cancelled upload leaves a truncated file; remove it.
-            await _removePartialUpload(sftp, remotePath);
+            if (!existed) await _removePartialUpload(sftp, remotePath);
             rethrow;
           }
         },

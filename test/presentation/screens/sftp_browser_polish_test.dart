@@ -208,6 +208,8 @@ class _TransferService extends RemoteFileService {
     FutureOr<void> Function(int uploadedBytes)? onProgress,
   }) async {
     uploads.add(remotePath);
+    // Opening for upload creates or truncates the destination.
+    (sftp as _HostSftp).files[remotePath] = 0;
     await onProgress?.call(1);
     await uploadGate?.future;
     await onProgress?.call(2);
@@ -500,7 +502,7 @@ void main() {
     final previous = FilePickerPlatform.instance;
     FilePickerPlatform.instance = picker;
     addTearDown(() => FilePickerPlatform.instance = previous);
-    final sftp = _HostSftp(files: {'$_home/first.txt': 0});
+    final sftp = _HostSftp(files: {'$_home/other.txt': 0});
     final transfers = _TransferService()..uploadGate = Completer<void>();
     await _pumpBrowser(
       tester,
@@ -848,6 +850,38 @@ void main() {
     expect(find.text('Move results'), findsOneWidget);
     expect(find.text('Skipped: Already in this folder'), findsOneWidget);
     expect(find.textContaining('failed'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('cancelling an upload keeps a file that already existed', (
+    tester,
+  ) async {
+    final picker = _Picker()
+      ..files = [
+        AppPlatformFile(
+          name: 'notes.txt',
+          bytes: Uint8List.fromList([1, 2, 3, 4]),
+        ),
+      ];
+    final previous = FilePickerPlatform.instance;
+    FilePickerPlatform.instance = picker;
+    addTearDown(() => FilePickerPlatform.instance = previous);
+    final sftp = _HostSftp(files: {'$_home/notes.txt': 9});
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(sftp.removed, isEmpty);
+    expect(sftp.files, contains('$_home/notes.txt'));
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

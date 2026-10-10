@@ -40,6 +40,12 @@ Future<void> _completeSftpClose(Invocation _) async {}
 class _MockSftpClient extends Mock implements SftpClient {
   _MockSftpClient() {
     when(close).thenAnswer(_completeSftpClose);
+    // Paths are missing unless a test says otherwise.
+    when(() => stat(any(), followLink: any(named: 'followLink'))).thenAnswer(
+      (_) => Future<SftpFileAttrs>.error(
+        SftpStatusError(SftpStatusCode.noSuchFile, 'missing'),
+      ),
+    );
   }
 }
 

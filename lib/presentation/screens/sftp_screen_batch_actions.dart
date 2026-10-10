@@ -346,19 +346,21 @@ extension _SftpScreenBatchActions on _SftpScreenState {
         sizeBytes: sizeBytes,
       ),
     );
-    final staging = await (await getTemporaryDirectory()).createTemp(
-      'sftp-export-',
-    );
-    var keepStaging = false;
-    final downloaded = <File>[];
+    // Take the batch before the first await so a second tap cannot start
+    // another one.
     final progress = SftpBatchProgress(
       verb: 'Downloading',
       total: files.length,
     );
     _beginBatch(progress);
+    Directory? staging;
+    var keepStaging = false;
+    final downloaded = <File>[];
     try {
       final SftpBatchReport report;
       try {
+        final stagingFolder = staging = await (await getTemporaryDirectory())
+            .createTemp('sftp-export-');
         report = await runSftpBatch<RemoteFileSelection>(
           items: files,
           nameOf: (file) => file.displayName,
@@ -370,7 +372,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
             // copies attachments by base name), and names holding `\\` or
             // `:` cannot point outside it.
             final local = File(
-              freeLocalExportPath(staging.path, file.displayName),
+              freeLocalExportPath(stagingFolder.path, file.displayName),
             );
             final cancelToken = RemoteFileDownloadCancelToken();
             final removeCancel = progress.onCancel(cancelToken.cancel);
@@ -430,7 +432,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
         error: error,
       );
     } finally {
-      if (!keepStaging) {
+      if (!keepStaging && staging != null) {
         try {
           await staging.delete(recursive: true);
         } on FileSystemException {
