@@ -436,8 +436,9 @@ class TerminalImeEngine {
             type: type,
           );
     if (key == TerminalKey.space && type != TerminalKeyEventType.release) {
-      // A Space the terminal did not take, such as Ctrl+Space, goes on to
-      // the IME, which commits its space.
+      // A Space the terminal leaves unhandled goes on to the IME, which
+      // commits its space; one it takes itself, such as Ctrl+Space sent as
+      // NUL, commits nothing.
       _spaceKeyPressed = !handled;
     }
 
