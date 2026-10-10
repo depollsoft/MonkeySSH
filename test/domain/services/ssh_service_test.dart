@@ -3771,6 +3771,19 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
     });
 
+    test('answers OSC 7501 feature detection only in a plain shell', () async {
+      final opened = await openShell();
+      opened.session.debugHandlePrivateOsc('7501', const ['?']);
+
+      expect(utf8.decode(opened.shellWrites.single), '\x1b]7501;?\x1b\\');
+
+      // MonkeyMux answers for its windows, and tmux never forwards the query.
+      opened.session
+        ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+        ..debugHandlePrivateOsc('7501', const ['?']);
+      expect(opened.shellWrites, hasLength(1));
+    });
+
     test('applies mixed OSC 4 setters before answering queries', () async {
       final opened = await openShell();
       opened.session

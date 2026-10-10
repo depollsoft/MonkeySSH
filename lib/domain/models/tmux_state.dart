@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
 import 'terminal_backend.dart';
+import 'terminal_program_status.dart';
 import 'terminal_progress.dart';
 
 /// Field separator used for tmux format strings.
@@ -103,6 +104,7 @@ class TmuxWindow {
     this.terminalMouseReportSgr,
     this.terminalBracketedPasteMode,
     this.terminalProgress,
+    this.programStatus,
     int? idleSeconds,
     this.lastActivityEpochSeconds,
     this.pendingNotifications = const [],
@@ -234,6 +236,17 @@ class TmuxWindow {
   /// Plain tmux snapshots leave this unset.
   final TerminalProgress? terminalProgress;
 
+  /// The most urgent OSC 7501 status a program in this MonkeyMux window
+  /// reported, when any.
+  ///
+  /// Plain tmux snapshots leave this unset.
+  final TerminalProgramStatus? programStatus;
+
+  /// Progress to draw for this window: work a program reported through OSC
+  /// 7501, otherwise its OSC 9;4 progress.
+  TerminalProgress? get activityProgress =>
+      programStatus?.terminalProgress ?? terminalProgress;
+
   /// tmux's `window_activity` epoch seconds, if available.
   final int? lastActivityEpochSeconds;
 
@@ -273,7 +286,10 @@ class TmuxWindow {
   /// Whether the window's status can still change from running to waiting
   /// without tmux emitting a new control-mode notification.
   bool get needsLocalIdleRefresh =>
-      !hasAlert && idleSeconds != null && idleSeconds! <= _idleThreshold;
+      programStatus == null &&
+      !hasAlert &&
+      idleSeconds != null &&
+      idleSeconds! <= _idleThreshold;
 
   /// Returns a copy of this window with selectively overridden fields.
   TmuxWindow copyWith({
@@ -315,6 +331,7 @@ class TmuxWindow {
     terminalMouseReportSgr: terminalMouseReportSgr,
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: terminalProgress,
+    programStatus: programStatus,
     idleSeconds: _snapshotIdleSeconds,
     lastActivityEpochSeconds: clearLastActivityEpochSeconds
         ? null
@@ -549,10 +566,23 @@ class TmuxWindow {
 
   /// A human-readable status label for display.
   ///
+  /// A program's own OSC 7501 report replaces the guess from output timing. A
+  /// blocked program outranks a pending alert; any other report yields to it.
   String get statusLabel {
+    if (reportedStatus case final status?) return status.label;
     if (hasAlert) return 'alert';
     if (isIdle) return 'waiting';
     return 'running';
+  }
+
+  /// The [programStatus] the status badge shows, or null when it shows the
+  /// alert or the output-timing guess instead.
+  TerminalProgramStatus? get reportedStatus {
+    final status = programStatus;
+    if (status == null) return null;
+    return status.state == TerminalProgramState.blocked || !hasAlert
+        ? status
+        : null;
   }
 
   /// The supported agent CLI running in the foreground, if one can be inferred.
@@ -607,6 +637,7 @@ class TmuxWindow {
           terminalMouseReportSgr == other.terminalMouseReportSgr &&
           terminalBracketedPasteMode == other.terminalBracketedPasteMode &&
           terminalProgress == other.terminalProgress &&
+          programStatus == other.programStatus &&
           lastActivityEpochSeconds == other.lastActivityEpochSeconds &&
           _snapshotIdleSeconds == other._snapshotIdleSeconds &&
           listEquals(pendingNotifications, other.pendingNotifications);
@@ -635,6 +666,7 @@ class TmuxWindow {
     terminalMouseReportSgr,
     terminalBracketedPasteMode,
     terminalProgress,
+    programStatus,
     lastActivityEpochSeconds,
     _snapshotIdleSeconds,
     Object.hashAll(pendingNotifications),

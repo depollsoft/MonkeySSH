@@ -23,6 +23,7 @@ import '../models/acp_session_keys.dart';
 import '../models/port_proxy_name.dart';
 import '../models/remote_multiplexer.dart';
 import '../models/terminal_preview.dart';
+import '../models/terminal_program_status.dart';
 import '../models/terminal_progress.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart' show isValidTmuxWindowId;
@@ -3475,7 +3476,21 @@ class SshSession {
   AcpNativePreviewSnapshot? activeNativeAcpPreviewSnapshot;
 
   /// The terminal multiplexer backend currently attached in this session.
-  RemoteMuxBackend? remoteMuxBackend;
+  ///
+  /// Changing it drops the OSC 7501 program status of whatever drew the
+  /// terminal before.
+  RemoteMuxBackend? get remoteMuxBackend => _remoteMuxBackend;
+  set remoteMuxBackend(RemoteMuxBackend? value) {
+    if (_remoteMuxBackend == value) return;
+    final hadProgramStatus = programStatus != null;
+    _remoteMuxBackend = value;
+    _programStatusRecords.clear();
+    _plainProgramStatus = null;
+    _muxProgramStatus = null;
+    if (hadProgramStatus) _notifyMetadataChanged();
+  }
+
+  RemoteMuxBackend? _remoteMuxBackend;
 
   bool _canTerminalResizeFromHost() =>
       remoteMuxBackend == RemoteMuxBackend.monkeyMux;
@@ -3587,6 +3602,9 @@ class SshSession {
   TerminalShellStatus? _shellStatus;
   int? _lastExitCode;
   TerminalProgress? _terminalProgress;
+  final _programStatusRecords = TerminalProgramStatusRecords();
+  TerminalProgramStatus? _plainProgramStatus;
+  TerminalProgramStatus? _muxProgramStatus;
   SftpClient? _sftpClient;
   Future<SftpClient>? _sftpClientFuture;
 
@@ -3684,6 +3702,24 @@ class SshSession {
 
   /// Clears active OSC 9;4 progress metadata.
   bool clearTerminalProgress() => synchronizeTerminalProgress(null);
+
+  /// The most urgent OSC 7501 program status: this session's own records in a
+  /// plain shell, or the active multiplexer window's once synchronized.
+  TerminalProgramStatus? get programStatus =>
+      remoteMuxBackend == null ? _plainProgramStatus : _muxProgramStatus;
+
+  /// Synchronizes the active multiplexer window's OSC 7501 status.
+  ///
+  /// Returns whether it changed. Metadata listeners are notified only when
+  /// this call changes the session state.
+  bool synchronizeProgramStatus(TerminalProgramStatus? status) {
+    if (_muxProgramStatus == status) {
+      return false;
+    }
+    _muxProgramStatus = status;
+    _notifyMetadataChanged();
+    return true;
+  }
 
   /// Records visible terminal dimensions used to answer size report queries.
   void updateTerminalWindowMetrics({
@@ -4018,6 +4054,7 @@ class SshSession {
         _shellStatus != null ||
         _lastExitCode != null ||
         _terminalProgress != null ||
+        programStatus != null ||
         terminalCommandMarkTracker.markCount > 0 ||
         _windowTitle != null ||
         _terminalColorOverrides.isNotEmpty;
@@ -4034,6 +4071,9 @@ class SshSession {
     _shellStatus = null;
     _lastExitCode = null;
     _terminalProgress = null;
+    _programStatusRecords.clear();
+    _plainProgramStatus = null;
+    _muxProgramStatus = null;
     _terminalPreview = null;
     _terminalPreviewSnapshot = null;
     _windowTitle = null;
@@ -4267,6 +4307,11 @@ class SshSession {
       return;
     }
 
+    if (code == terminalProgramStatusOscCode) {
+      _handleProgramStatusOsc(args.join(';'));
+      return;
+    }
+
     if (code == '9') {
       if (args.firstOrNull?.trim() == '4') {
         final previousProgress = _terminalProgress;
@@ -4330,11 +4375,54 @@ class SshSession {
     _logUnhandledPrivateOsc(code, args);
   }
 
+  /// Handles OSC 7501 in a plain shell, where the app is the program's
+  /// terminal. Inside a multiplexer it is not: MonkeyMux answers and tracks
+  /// OSC 7501 per window, and tmux does not pass the sequence on.
+  void _handleProgramStatusOsc(String body) {
+    if (remoteMuxBackend != null) return;
+    if (TerminalProgramStatusRecords.isQuery(body)) {
+      if (_runtime.hasShell) {
+        _runtime.writeToShell(terminalProgramStatusQueryReply);
+      }
+      return;
+    }
+    if (_programStatusRecords.apply(body) && _updatePlainProgramStatus()) {
+      _notifyMetadataChanged();
+    }
+  }
+
+  /// Recomputes the plain-shell status after its records changed and reports
+  /// whether it differs; the caller notifies metadata listeners.
+  bool _updatePlainProgramStatus() {
+    final next = _programStatusRecords.summary;
+    if (next == _plainProgramStatus) return false;
+    _plainProgramStatus = next;
+    DiagnosticsLogService.instance.debug(
+      'terminal.osc',
+      'program_status_changed',
+      fields: {
+        'connectionId': connectionId,
+        'state': next?.state.name,
+        'kind': next?.kind?.name,
+        'hasProgress': next?.progress != null,
+        'records': _programStatusRecords.length,
+      },
+    );
+    return true;
+  }
+
   void _handleShellIntegrationOsc(
     String code,
     List<String> args, {
     required bool commandMarkAdded,
   }) {
+    // A prompt ends whatever ran before it.
+    final programStatusChanged =
+        code == '133' &&
+        args.firstOrNull == 'A' &&
+        remoteMuxBackend == null &&
+        _programStatusRecords.dropRunning() &&
+        _updatePlainProgramStatus();
     final nextShellState = applyTerminalShellIntegrationOsc(
       args,
       previousStatus: _shellStatus,
@@ -4351,7 +4439,10 @@ class SshSession {
     final workingDirectoryChanged =
         nextWorkingDirectory != null &&
         nextWorkingDirectory.toString() != _workingDirectory?.toString();
-    if (!shellStateChanged && !workingDirectoryChanged && !commandMarkAdded) {
+    if (!shellStateChanged &&
+        !workingDirectoryChanged &&
+        !commandMarkAdded &&
+        !programStatusChanged) {
       return;
     }
     _shellStatus = nextShellState.status;

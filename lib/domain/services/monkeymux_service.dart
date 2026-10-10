@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
 import '../models/terminal_backend.dart';
+import '../models/terminal_program_status.dart';
 import '../models/terminal_progress.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
@@ -2747,6 +2748,7 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalMouseReportSgr: terminalMouseReportSgr,
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
+    programStatus: TerminalProgramStatus.fromJson(value['programStatus']),
     lastActivityEpochSeconds: value['lastActivityEpochSeconds'] as int?,
     pendingNotifications: _muxWindowNotificationsFromJson(
       value['notifications'],

@@ -200,7 +200,20 @@ independently. Normal reconnects and live native ACP handoffs retain progress.
 Upgrade restores that relaunch CLI or shell processes start without the old
 process's progress, so an idle resumed agent does not inherit a stuck busy bar.
 Restored shell history also drops old OSC 9;4 markers; normal reconnect history
-is unchanged. It also tracks the PTY foreground process group for snapshots,
+is unchanged.
+
+MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
+(OSC 7501, revision 0.3) as each window's terminal. It answers the `OSC 7501 ; ?`
+feature query itself, even in a window no client is showing, and strips that
+query from what clients receive; Claude Code reports nothing until it gets the
+reply. Each window keeps up to 64 records with the spec's id hierarchy, `app`
+inheritance and limits, and window snapshots carry the most urgent one as
+`programStatus` (blocked, then error, working, done, idle). Idle, working and
+blocked records end at an OSC 133 `A` prompt, on RIS, or when the process group
+that sent them has exited (checked every two seconds, so a crashed agent in a
+shell without prompt marks does not stay "working"). Done and error records
+outlive their program. Restored shell history drops OSC 7501 like OSC 9;4. It
+also tracks the PTY foreground process group for snapshots,
 so shell-launched tools
 such as Codex can be surfaced as agent windows even when the terminal title is
 only the current directory. Window replay resets stale local mouse/focus modes

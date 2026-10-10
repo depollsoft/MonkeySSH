@@ -2,6 +2,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 
@@ -602,6 +603,57 @@ void main() {
       expect(waiting.isIdle, true);
       expect(activeWaiting.statusLabel, 'waiting');
       expect(activeWaiting.isIdle, true);
+    });
+
+    test('a reported program status replaces the output-timing guess', () {
+      const blockedWithAlert = TmuxWindow(
+        index: 0,
+        name: 'claude',
+        isActive: false,
+        flags: '#',
+        idleSeconds: 120,
+        programStatus: TerminalProgramStatus(
+          state: TerminalProgramState.blocked,
+          kind: TerminalProgramBlockedKind.question,
+        ),
+      );
+      const doneWithAlert = TmuxWindow(
+        index: 1,
+        name: 'claude',
+        isActive: false,
+        flags: '#',
+        programStatus: TerminalProgramStatus(state: TerminalProgramState.done),
+      );
+      const workingQuietly = TmuxWindow(
+        index: 2,
+        name: 'deploy',
+        isActive: false,
+        idleSeconds: 3,
+        terminalProgress: TerminalProgress(
+          state: TerminalProgressState.indeterminate,
+        ),
+        programStatus: TerminalProgramStatus(
+          state: TerminalProgramState.working,
+          progress: 40,
+        ),
+      );
+
+      expect(blockedWithAlert.statusLabel, 'question');
+      expect(doneWithAlert.statusLabel, 'alert');
+      expect(doneWithAlert.reportedStatus, isNull);
+      expect(workingQuietly.statusLabel, 'working');
+      expect(workingQuietly.needsLocalIdleRefresh, isFalse);
+      expect(
+        workingQuietly.activityProgress,
+        const TerminalProgress(
+          state: TerminalProgressState.normal,
+          percentage: 40,
+        ),
+      );
+      expect(
+        workingQuietly.copyWith(isActive: true).programStatus,
+        workingQuietly.programStatus,
+      );
     });
 
     test(

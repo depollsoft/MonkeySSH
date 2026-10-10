@@ -19,6 +19,7 @@ import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
@@ -168,6 +169,80 @@ void registerTmuxWindowNavigatorTests() {
 
         expect(find.text('running'), findsOneWidget);
         expect(find.byIcon(Icons.play_arrow), findsOneWidget);
+      });
+
+      testWidgets('shows what a blocked program reported over an alert', (
+        tester,
+      ) async {
+        const window = TmuxWindow(
+          index: 1,
+          name: 'claude',
+          isActive: false,
+          flags: '#',
+          programStatus: TerminalProgramStatus(
+            state: TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.permission,
+            message: 'approve Bash: touch probe2.txt',
+          ),
+        );
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: Center(child: TmuxWindowStatusBadge(window: window)),
+            ),
+          ),
+        );
+
+        final semantics = tester.ensureSemantics();
+        expect(find.text('approval'), findsOneWidget);
+        expect(find.byIcon(Icons.pending_actions), findsOneWidget);
+        expect(
+          find.bySemanticsLabel(RegExp('^terminal window needs approval')),
+          findsOneWidget,
+        );
+        semantics.dispose();
+        expect(
+          MuxWindowPresentation.window(window, isActive: false).subtitle,
+          'approve Bash: touch probe2.txt',
+        );
+      });
+
+      testWidgets('shows reported working and done states', (tester) async {
+        for (final (status, label, icon) in [
+          (
+            const TerminalProgramStatus(state: TerminalProgramState.working),
+            'working',
+            Icons.play_arrow,
+          ),
+          (
+            const TerminalProgramStatus(state: TerminalProgramState.done),
+            'done',
+            Icons.check_circle_outline,
+          ),
+        ]) {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: Center(
+                  child: TmuxWindowStatusBadge(
+                    window: TmuxWindow(
+                      index: 0,
+                      name: 'claude',
+                      isActive: false,
+                      idleSeconds: 120,
+                      programStatus: status,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          expect(find.text(label), findsOneWidget);
+          expect(find.byIcon(icon), findsOneWidget);
+          expect(find.text('waiting'), findsNothing);
+        }
       });
 
       testWidgets('uses high-contrast container colors for alert badges', (
