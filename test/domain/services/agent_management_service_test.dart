@@ -3365,7 +3365,7 @@ exit "$result"
       expect(command, contains('__monkeyssh_agent_runtime__='));
       expect(command, contains("'cli:claude'"));
       expect(command, contains("'cli:copilot'"));
-      expect(RegExp('~/.zprofile').allMatches(command), hasLength(1));
+      expect(RegExp(r'\$HOME/\.zprofile').allMatches(command), hasLength(1));
     });
   });
 
@@ -3374,7 +3374,7 @@ exit "$result"
       final command = buildAgentBatchProbeCommand([
         agentCliRuntimeDefinitions.first,
       ], windows: false);
-      expect(command, contains('~/.zprofile'));
+      expect(command, contains(r'"$HOME/.zprofile"'));
       expect(
         command.replaceAll(r"'\''", "'"),
         contains("'claude' 'claude-code'"),
