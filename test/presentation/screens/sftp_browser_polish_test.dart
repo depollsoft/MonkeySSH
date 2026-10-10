@@ -70,8 +70,15 @@ class _MemoryViewStore implements SftpBrowserViewStore {
 
   final filters = <int, SftpBrowserFilter>{};
 
+  /// Holds the saved-filter read until completed, to play a slow database.
+  Completer<void>? filterReadGate;
+
   @override
-  Future<SftpBrowserFilter?> loadFilter(int hostId) async => filters[hostId];
+  Future<SftpBrowserFilter?> loadFilter(int hostId) async {
+    final saved = filters[hostId];
+    await filterReadGate?.future;
+    return saved;
+  }
 
   @override
   Future<void> saveFilter(int hostId, SftpBrowserFilter? filter) async {
@@ -547,30 +554,27 @@ void main() {
   testWidgets('extract here refuses an archive that escapes its folder', (
     tester,
   ) async {
-    final commands = <String>[];
+    final scripts = <String>[];
     Future<RemoteCommandResult> runner(
       String script, {
       required Duration timeout,
       required int maxOutputBytes,
     }) async {
-      final lines = script.split('\n');
-      final command = lines[lines.indexOf('} </dev/null') - 1];
-      commands.add(command);
-      if (command.startsWith('unzip -Z1')) {
-        return const RemoteCommandResult(
-          exitCode: 0,
-          stdout: '../../.ssh/authorized_keys\n',
+      scripts.add(script);
+      final marker = RegExp("m='([^']+)'").firstMatch(script)!.group(1);
+      RemoteCommandResult finish(String output) =>
+          RemoteCommandResult(exitCode: 0, stdout: '$output\n$marker 0\n');
+      if (script.contains('command -v')) return finish('4242');
+      if (script.contains('unzip -Z1')) {
+        return finish('../../.ssh/authorized_keys');
+      }
+      if (script.contains('unzip -Z ')) {
+        return finish(
+          '-rw-r--r--  3.0 unx       10 tx defN 26-Oct-01 12:00 '
+          '../../.ssh/authorized_keys',
         );
       }
-      if (command.startsWith('unzip -Z')) {
-        return const RemoteCommandResult(
-          exitCode: 0,
-          stdout:
-              '-rw-r--r--  3.0 unx       10 tx defN 26-Oct-01 12:00 '
-              '../../.ssh/authorized_keys\n',
-        );
-      }
-      return const RemoteCommandResult(exitCode: 0, stdout: '');
+      return finish('');
     }
 
     final sftp = _HostSftp(files: {'$_home/evil.zip': 10});
@@ -588,10 +592,7 @@ void main() {
       find.text('The archive has entries that would land outside this folder.'),
       findsOneWidget,
     );
-    expect(
-      commands.where((command) => command.startsWith('unzip -qq')),
-      isEmpty,
-    );
+    expect(scripts.where((script) => script.contains('unzip -qq')), isEmpty);
     expect(sftp.directories, {_home});
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -785,6 +786,68 @@ void main() {
     await tester.pumpAndSettle();
     transfers.uploadGate!.complete();
     await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a slow saved-filter read never undoes a clear', (tester) async {
+    final sftp = _HostSftp(
+      files: {'$_home/notes.txt': 1, '$_home/build.log': 2},
+    );
+    final store = _MemoryViewStore()
+      ..filters[1] = (directory: _home, query: 'notes')
+      ..filterReadGate = Completer<void>();
+    await _pumpBrowser(tester, _container(sftp, store: store));
+
+    final field = find.byKey(const ValueKey('sftpFilterField'));
+    await tester.enterText(field, 'log');
+    await tester.pump();
+    await tester.enterText(field, '');
+    await tester.pump();
+    store.filterReadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+    expect(find.text('notes.txt'), findsOneWidget);
+    expect(find.text('build.log'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a filter saved for another folder waits for that folder', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/src/main.dart': 1, '$_home/src/notes.md': 2},
+      directories: {'$_home/src'},
+    );
+    final store = _MemoryViewStore()
+      ..filters[1] = (directory: '$_home/src', query: 'main');
+    await _pumpBrowser(tester, _container(sftp, store: store));
+
+    // Opening at the start folder keeps it.
+    expect(store.filters[1], (directory: '$_home/src', query: 'main'));
+
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    expect(find.text('main.dart'), findsOneWidget);
+    expect(find.text('notes.md'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a move with only skips still lists what happened', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(files: {'$_home/a.txt': 1});
+    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+
+    await _selectFiles(tester, ['a.txt']);
+    await tester.tap(_barAction('Move'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Move here'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move results'), findsOneWidget);
+    expect(find.text('Skipped: Already in this folder'), findsOneWidget);
+    expect(find.textContaining('failed'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

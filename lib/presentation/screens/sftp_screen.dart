@@ -255,6 +255,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   List<RemoteFileSelection> _selectedFiles = const [];
   SftpBrowserViewSettings _viewSettings = const SftpBrowserViewSettings();
   bool _viewSettingsChangedLocally = false;
+  bool _filterChangedLocally = false;
   final TextEditingController _filterController = TextEditingController();
   String _filterQuery = '';
   String? _filterDirectory;

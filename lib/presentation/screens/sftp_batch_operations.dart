@@ -270,19 +270,28 @@ String describeSftpBatchError(Object error) => switch (error) {
   _ => 'Failed',
 };
 
-/// One-line summary such as `Deleted 2 of 3 files`.
+/// One-line summary such as `Deleted 2 of 3 files. 1 failed.`
 String sftpBatchSummary(String pastVerb, SftpBatchReport report) {
   final total = report.results.length;
   final done = report.doneCount;
   final noun = total == 1 ? 'file' : 'files';
   if (report.allDone) return '$pastVerb $total $noun';
-  final suffix = report.cancelled ? 'Cancelled.' : 'Some failed.';
-  return '$pastVerb $done of $total $noun. $suffix';
+  final failed = report.results
+      .where((result) => result.outcome == SftpBatchOutcome.failed)
+      .length;
+  final skipped = report.results
+      .where((result) => result.outcome == SftpBatchOutcome.skipped)
+      .length;
+  final parts = [
+    if (failed > 0) '$failed failed',
+    if (report.cancelled) 'Cancelled' else if (skipped > 0) '$skipped skipped',
+  ];
+  return '$pastVerb $done of $total $noun. ${parts.join(', ')}.';
 }
 
 final _unsafeLocalNameCharacters = RegExp(r'[\\/:*?"<>|\x00-\x1F]');
 final _reservedWindowsNames = RegExp(
-  r'^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$',
+  r'^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$',
   caseSensitive: false,
 );
 

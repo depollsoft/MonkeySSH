@@ -31,7 +31,7 @@ void main() {
       expect(report.firstError, isA<SftpStatusError>());
       expect(
         sftpBatchSummary('Deleted', report),
-        'Deleted 2 of 3 files. Some failed.',
+        'Deleted 2 of 3 files. 1 failed.',
       );
     });
 
@@ -98,6 +98,28 @@ void main() {
         (SftpBatchOutcome.skipped, 'Already in this folder'),
         (SftpBatchOutcome.failed, 'A file with this name is already here'),
       ]);
+      expect(
+        sftpBatchSummary('Moved', report),
+        'Moved 0 of 2 files. 1 failed, 1 skipped.',
+      );
+    });
+
+    test('a batch with only skips does not claim failures', () async {
+      final report = await runSftpBatch<String>(
+        items: ['a', 'b'],
+        nameOf: (item) => item,
+        progress: SftpBatchProgress(verb: 'Moving', total: 2),
+        run: (item, _) async {
+          if (item == 'a') {
+            throw const SftpBatchItemSkipped('Already in this folder');
+          }
+        },
+      );
+
+      expect(
+        sftpBatchSummary('Moved', report),
+        'Moved 1 of 2 files. 1 skipped.',
+      );
     });
   });
 
@@ -219,6 +241,9 @@ void main() {
       expect(safeLocalFileName('..'), 'file');
       expect(safeLocalFileName('notes. '), 'notes');
       expect(safeLocalFileName('CON.txt'), '_CON.txt');
+      expect(safeLocalFileName('COM¹'), '_COM¹');
+      expect(safeLocalFileName('lpt³.log'), '_lpt³.log');
+      expect(safeLocalFileName('COM10'), 'COM10');
       expect(safeLocalFileName('what?.md'), 'what_.md');
     });
 

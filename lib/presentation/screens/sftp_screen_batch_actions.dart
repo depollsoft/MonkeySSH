@@ -52,6 +52,8 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       if (!mounted) return;
       _update(() {
         if (!_viewSettingsChangedLocally) _viewSettings = settings;
+        // A filter typed or cleared while the read was pending wins.
+        if (_filterChangedLocally) return;
         _rememberedFilter ??= filter;
         // The folder may have loaded before the saved filter did.
         if (filter != null &&
@@ -93,6 +95,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   }
 
   void _onFilterChanged(String query) {
+    _filterChangedLocally = true;
     _update(() {
       _filterQuery = query;
       _filterDirectory = _currentPath;
@@ -107,12 +110,19 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   /// restarts. Runs inside setState.
   void _syncFilterWithDirectory(String path) {
     if (_filterDirectory == path) return;
+    // Leaving the folder a filter was applied to forgets it; a filter saved
+    // for a folder not opened yet (the browser restarts at its start folder)
+    // waits until that folder is opened.
+    final leavingAppliedFilter =
+        _filterQuery.trim().isNotEmpty && _filterDirectory != null;
     _filterDirectory = path;
     final remembered = _rememberedFilter;
     final query = remembered?.directory == path ? remembered!.query : '';
     _filterQuery = query;
     if (_filterController.text != query) _filterController.text = query;
-    if (remembered != null && query.isEmpty) _rememberFilter(null);
+    if (remembered != null && query.isEmpty && leavingAppliedFilter) {
+      _rememberFilter(null);
+    }
   }
 
   void _rememberFilter(SftpBrowserFilter? filter) {
@@ -177,10 +187,14 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   }) {
     if (!mounted) return;
     final summary = message ?? sftpBatchSummary(pastVerb, report);
-    final anyFailed = report.results.any(
-      (result) => result.outcome == SftpBatchOutcome.failed,
+    // Failures, and skips the user did not cause by cancelling, open the
+    // per-file list straight away.
+    final needsDetails = report.results.any(
+      (result) =>
+          result.outcome == SftpBatchOutcome.failed ||
+          (result.outcome == SftpBatchOutcome.skipped && !report.cancelled),
     );
-    if (anyFailed) {
+    if (needsDetails) {
       unawaited(showSftpBatchResults(context, title: title, report: report));
       return;
     }
