@@ -172,6 +172,15 @@ usable terminal hints. They also advertise `FORCE_HYPERLINK=1` (unless already
 set) so OSC 8 capable CLIs such as Copilot and `gh` emit clickable hyperlinks,
 which MonkeySSH renders and opens.
 
+SSH agent forwarding outlives reconnects through a stable path. sshd gives
+each forwarding connection its own agent socket and deletes it when the
+connection closes, while windows outlive connections. On POSIX hosts every
+`attach`, `new-session`, `control` and `acp` command whose `SSH_AUTH_SOCK` is a
+live socket points `agent.sock` in the MonkeyMux runtime directory at it, and
+windows and ACP agents started after that get `SSH_AUTH_SOCK` set to the link,
+so `git push` in a window opened before a reconnect uses the agent the client
+is forwarding now. Hosts that never forward keep their own `SSH_AUTH_SOCK`.
+
 Window switching and reconnect repaint from raw byte history for the selected
 window. Main-screen shell history is capped for responsive switching; active
 alternate-screen, agent, and non-shell foreground program windows replay the

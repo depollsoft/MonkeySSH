@@ -32,6 +32,7 @@ import '../view_models/host_edit_view_model.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
+import '../widgets/host_agent_forwarding_section.dart';
 import '../widgets/host_port_forward_editor_sheet.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
@@ -823,6 +824,12 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                             ),
                             const SizedBox(height: 16),
                           ],
+                        ),
+                        const SizedBox(height: 32),
+
+                        HostAgentForwardingSection(
+                          hostId: widget.hostId,
+                          hostKeyId: _selectedKeyId,
                         ),
                         const SizedBox(height: 32),
 

@@ -96,6 +96,12 @@ dependencies:
   mime: ^2.1.0
 
 dependency_overrides:
+  # A process on a host with SSH agent forwarding could stall the app and
+  # exhaust its memory through the forwarded agent channel, and OpenSSH's
+  # refusal of a repeated agent request failed later sessions. Patched copy of
+  # 4.1.0 until the fix ships upstream; see third_party/dartssh2/README.md.
+  dartssh2:
+    path: third_party/dartssh2
   # Play Billing can invoke one callback twice and crash Android while the app
   # is backgrounded. Use the vendored upstream single-reply guard until Flutter
   # packages releases it: https://github.com/flutter/packages/pull/12640

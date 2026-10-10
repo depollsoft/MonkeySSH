@@ -93,6 +93,7 @@ import '../widgets/acp_native_badge.dart';
 import '../widgets/acp_native_starting_view.dart';
 import '../widgets/acp_new_session_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
+import '../widgets/agent_forwarding_indicator.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/agent_usage_rings.dart';
 import '../widgets/agent_usage_rings_menu_item.dart';
@@ -11477,30 +11478,37 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _host?.label ?? 'Terminal',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: FluttyTheme.displayMono(
-                        fontSize: 16,
-                        color: theme.colorScheme.onSurface,
-                      ),
-                    ),
-                    if (titleSubtitle.isNotEmpty)
+                child: AgentForwardingTitleSlot(
+                  forwarding: connectionState == SshConnectionState.connected
+                      ? (_observedSession ?? activeSession)
+                            ?.config
+                            .agentForwarding
+                      : null,
+                  title: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       Text(
-                        titleSubtitle,
+                        _host?.label ?? 'Terminal',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: FluttyTheme.monoStyle.copyWith(
-                          fontSize: 11,
-                          color: theme.colorScheme.onSurfaceVariant,
+                        style: FluttyTheme.displayMono(
+                          fontSize: 16,
+                          color: theme.colorScheme.onSurface,
                         ),
                       ),
-                  ],
+                      if (titleSubtitle.isNotEmpty)
+                        Text(
+                          titleSubtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 11,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ],
