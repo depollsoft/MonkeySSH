@@ -340,23 +340,30 @@ func TestProgramStatusAttributesReportsLaterWithoutProcessGroups(t *testing.T) {
 		programStatusOwnerExited = originalExited
 	})
 	programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerUnattributed }
-	child := 4242
-	resolveProgramStatusOwner = func(int) int { return child }
-	exited := map[int]bool{}
-	programStatusOwnerExited = func(owner int) bool { return exited[owner] }
-
 	server := newMuxServer("program-status-windows")
 	window := &muxWindow{id: "@1", name: "pwsh", lastActivity: time.Now()}
 	server.windows = []*muxWindow{window}
-	server.handleWindowOutput("@1", []byte(programStatusOsc("state=working:app=claude-code")))
+	child := 4242
+	resolveProgramStatusOwner = func(int) int {
+		// A report that arrives during the lookup may come from a newer
+		// program, so it must wait for the next lookup.
+		server.handleWindowOutput("@1", []byte(programStatusOsc("state=working:id=late")))
+		return child
+	}
+	exited := map[int]bool{}
+	programStatusOwnerExited = func(owner int) bool { return exited[owner] }
 
+	server.handleWindowOutput("@1", []byte(programStatusOsc("state=working:app=claude-code")))
 	server.dropExitedProgramStatus()
 	server.mu.Lock()
 	owner := window.programStatus[""].owner
+	lateOwner := window.programStatus["late"].owner
 	server.mu.Unlock()
-	if owner != child {
-		t.Fatalf("owner = %d, want the resolved child %d", owner, child)
+	if owner != child || lateOwner != programStatusOwnerUnattributed {
+		t.Fatalf("owners = %d and %d, want the resolved child %d and a late report left unattributed",
+			owner, lateOwner, child)
 	}
+	resolveProgramStatusOwner = func(int) int { return child }
 
 	// A later resolution must not reassign an attributed record.
 	child = 5151
@@ -365,8 +372,8 @@ func TestProgramStatusAttributesReportsLaterWithoutProcessGroups(t *testing.T) {
 	server.mu.Lock()
 	remaining := len(window.programStatus)
 	server.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("records = %d, want the exited child's record dropped", remaining)
+	if remaining != 1 || window.programStatus["late"] == nil {
+		t.Fatalf("records = %v, want only the late report, now owned by the new child", window.programStatus)
 	}
 }
 

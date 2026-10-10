@@ -474,10 +474,12 @@ func (w *muxWindow) takeProgramStatusRepliesLocked() []byte {
 	return replies
 }
 
-// attributeProgramStatusLocked gives every unattributed record owner.
-func (w *muxWindow) attributeProgramStatusLocked(owner int) {
+// attributeProgramStatusLocked gives owner to the unattributed records
+// updated at or before clock. Later reports arrived after the owner was looked
+// up and wait for the next lookup.
+func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
 	for _, record := range w.programStatus {
-		if record.owner == programStatusOwnerUnattributed {
+		if record.owner == programStatusOwnerUnattributed && record.updated <= clock {
 			record.owner = owner
 		}
 	}
@@ -501,12 +503,15 @@ func (s *muxServer) dropExitedProgramStatus() {
 	type unattributed struct {
 		window *muxWindow
 		pid    int
+		clock  uint64
 	}
 	s.mu.Lock()
 	var pending []unattributed
 	for _, window := range s.windows {
 		if !window.closed && window.hasUnattributedProgramStatusLocked() {
-			pending = append(pending, unattributed{window, window.processID()})
+			pending = append(pending, unattributed{
+				window, window.processID(), window.programStatusClock,
+			})
 		}
 	}
 	s.mu.Unlock()
@@ -519,7 +524,7 @@ func (s *muxServer) dropExitedProgramStatus() {
 	for index, entry := range pending {
 		if s.windowByIDLocked(entry.window.id) == entry.window &&
 			!entry.window.closed && entry.window.processID() == entry.pid {
-			entry.window.attributeProgramStatusLocked(owners[index])
+			entry.window.attributeProgramStatusLocked(owners[index], entry.clock)
 		}
 	}
 	var snapshots []windowSnapshot

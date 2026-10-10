@@ -58,6 +58,8 @@ void main() {
         'state=done:msg=${base64.encode([0xff])}',
         'state=done:msg=${base64.encode(List.filled(2049, 0x6d))}',
         'state=done:${'x' * 4096}',
+        // Under 4096 code units but over 4096 UTF-8 bytes.
+        'state=done:x=${'é' * 2100}',
       ]) {
         expect(_single(body), isNull, reason: body);
       }

@@ -343,7 +343,11 @@ final _base64Pattern = RegExp(r'^[A-Za-z0-9+/]*$');
 final _progressPattern = RegExp(r'^[0-9]{1,3}$');
 
 _ProgramStatusReport? _parseReport(String body) {
-  if (body.length > _maxSequenceBytes) return null;
+  // The cap is in bytes; a UTF-16 code unit is at least one UTF-8 byte.
+  if (body.length > _maxSequenceBytes ||
+      utf8.encode(body).length > _maxSequenceBytes) {
+    return null;
+  }
   final fields = <String, String>{};
   for (final pair in body.split(':')) {
     final separator = pair.indexOf('=');
