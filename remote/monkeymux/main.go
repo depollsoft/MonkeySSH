@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.226"
+	monkeyMuxVersion                  = "0.1.228"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -286,6 +286,7 @@ var capabilities = []string{
 	"acp-bridge-control-start-v1",
 	"acp-window-v1",
 	"native-acp-upgrade-handoff-v1",
+	"push-v1",
 }
 
 var (
@@ -529,6 +530,8 @@ type controlMessage struct {
 	// but never received (or has evicted) their bytes. Sent with request_images
 	// so the server can replay exactly those retained transmissions.
 	ImageIDs []string `json:"imageIds,omitempty"`
+	// Push carries the push_* operation fields (push_notify.go).
+	Push *pushControlRequest `json:"push,omitempty"`
 }
 
 type controlResponse struct {
@@ -551,6 +554,9 @@ type controlResponse struct {
 	ImagesAcknowledged bool             `json:"imagesAcknowledged,omitempty"`
 	FocusChanged       bool             `json:"focusChanged,omitempty"`
 	Restore            *serverRestore   `json:"restore,omitempty"`
+
+	// Push carries push_test results (push_notify.go).
+	Push *pushControlResult `json:"push,omitempty"`
 }
 
 type windowSnapshot struct {
@@ -747,6 +753,9 @@ type muxServer struct {
 	// beforeInstallRepublishedSocket is a test seam for the narrow interval
 	// after a replacement is bound but before it is installed under s.mu.
 	beforeInstallRepublishedSocket func()
+	// push holds push notification state, created on first use.
+	push     *pushNotifier
+	pushOnce sync.Once
 }
 
 type muxWindow struct {
@@ -6086,6 +6095,7 @@ func serveSession(
 	}()
 	server.startSocketRepublisher()
 	server.startAgentSessionTitleRefresher()
+	server.startPushLoop()
 
 	for {
 		conn, err := server.acceptConnection()
@@ -6921,6 +6931,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
+	pushAlert := isPushAlertOutput(terminalBell, completedOscs)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
@@ -7073,6 +7084,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.queueWindowReply(window, capabilityHintData)
 	}
 	s.mu.Unlock()
+	if pushAlert {
+		s.notePushAlert(windowID)
+	}
 
 	if shouldWrite {
 		if len(forwarded) > 0 {
@@ -9284,6 +9298,8 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 	case "shutdown":
 		client.send(controlResponse{ID: request.ID, Type: "shutdown", Status: "ok"})
 		go s.close()
+	case "push_register", "push_unregister", "push_presence", "push_test":
+		s.handlePushControl(client, request)
 	default:
 		client.sendError(request, fmt.Errorf("unsupported command %q", request.Type))
 	}

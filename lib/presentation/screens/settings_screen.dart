@@ -25,6 +25,7 @@ import '../widgets/font_family_picker.dart';
 import '../widgets/message_of_the_day.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
+import '../widgets/push_notification_settings_section.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
 import 'acp_mcp_servers_screen.dart';
@@ -51,6 +52,7 @@ class SettingsScreen extends ConsumerWidget {
         const _PrivacySection(),
         const _TerminalSection(),
         const _AgentsSection(),
+        const PushNotificationSettingsSection(),
         const _ImportExportSection(),
         if (BackgroundSshService.supportsBatteryOptimizationControls)
           const _AndroidBackgroundSection(),

@@ -66,6 +66,7 @@ import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
+import '../../domain/services/push/push_local_alerts.dart';
 import '../../domain/services/remote_clipboard_sync_service.dart';
 import '../../domain/services/remote_file_service.dart';
 import '../../domain/services/remote_multiplexer_service.dart';

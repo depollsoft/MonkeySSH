@@ -76,6 +76,26 @@ enum MonkeyMuxServerUpdatePolicy {
   final String cliValue;
 }
 
+/// Outcome of a push notification control operation.
+@immutable
+class MonkeyMuxPushControlResult {
+  /// Creates a result.
+  const MonkeyMuxPushControlResult({
+    required this.ok,
+    this.unsupported = false,
+    this.result,
+  });
+
+  /// Whether the helper accepted the operation.
+  final bool ok;
+
+  /// Whether the helper predates push support.
+  final bool unsupported;
+
+  /// The `push_test` outcome, such as `sent`.
+  final String? result;
+}
+
 /// Version metadata for an already-running MonkeyMux server.
 @immutable
 class MonkeyMuxServerStatus {
@@ -982,6 +1002,33 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     );
   }
 
+  /// Sends a push notification control operation (`push_register`,
+  /// `push_unregister`, `push_presence` or `push_test`; see
+  /// docs/push-notifications.md).
+  Future<MonkeyMuxPushControlResult> runPushControl(
+    SshSession session,
+    String sessionName,
+    Map<String, Object?> command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) async {
+    if (isAppReviewDemoSession(session)) {
+      return const MonkeyMuxPushControlResult(ok: false, unsupported: true);
+    }
+    final response = await _runControlCommand(
+      session,
+      sessionName,
+      command,
+      priority: priority,
+    );
+    if (response.isError) {
+      return MonkeyMuxPushControlResult(
+        ok: false,
+        unsupported: response.error?.startsWith('unsupported command') ?? false,
+      );
+    }
+    return MonkeyMuxPushControlResult(ok: true, result: response.pushResult);
+  }
+
   /// Returns metadata for an already-running MonkeyMux server, if any.
   Future<MonkeyMuxServerStatus?> runningServerStatus(
     SshSession session,
@@ -1572,7 +1619,9 @@ Future<_MonkeyMuxControlResponse> _runOneShotControlCommand(
 }
 
 Duration _oneShotResponseTimeout(Map<String, Object?> request) =>
-    request['type'] == 'run_command' || request['type'] == 'start_acp_bridge'
+    request['type'] == 'run_command' ||
+        request['type'] == 'start_acp_bridge' ||
+        request['type'] == 'push_test'
     ? _oneShotRunCommandResponseTimeout
     : _oneShotControlResponseTimeout;
 
@@ -2269,6 +2318,7 @@ class _MonkeyMuxControlResponse {
     this.imageIds = const [],
     this.imagesAcknowledged = false,
     this.focusChanged = false,
+    this.pushResult,
   });
 
   factory _MonkeyMuxControlResponse.fromJson(Map<String, Object?> json) =>
@@ -2305,6 +2355,10 @@ class _MonkeyMuxControlResponse {
         },
         imagesAcknowledged: json['imagesAcknowledged'] == true,
         focusChanged: json['focusChanged'] == true,
+        pushResult: switch (json['push']) {
+          {'result': final String result} => result,
+          _ => null,
+        },
       );
 
   static _MonkeyMuxControlResponse? tryParse(String line) {
@@ -2335,6 +2389,7 @@ class _MonkeyMuxControlResponse {
   final List<String> imageIds;
   final bool imagesAcknowledged;
   final bool focusChanged;
+  final String? pushResult;
 
   bool get isError => status == 'error' || type == 'error';
 }

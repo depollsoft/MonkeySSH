@@ -330,11 +330,17 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     _windowLoader.load();
     _subscribeToWindowChanges();
     _subscribeToNativeAcpSessions();
+    pushLocalAlertListeners.add(widget.session.connectionId);
   }
 
   @override
   void didUpdateWidget(covariant _TmuxExpandableBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.connectionId != widget.session.connectionId) {
+      pushLocalAlertListeners
+        ..remove(oldWidget.session.connectionId)
+        ..add(widget.session.connectionId);
+    }
     final sessionChanged =
         oldWidget.session.connectionId != widget.session.connectionId ||
         oldWidget.tmuxSessionName != widget.tmuxSessionName ||
@@ -390,6 +396,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   @override
   void dispose() {
+    pushLocalAlertListeners.remove(widget.session.connectionId);
     _clearPendingSelectedWindow(notify: false);
     _windowLoader.dispose();
     unawaited(_windowChangeSubscription?.cancel());
