@@ -30,6 +30,20 @@ MonkeyMux payload changes set `go` and `run_check` but not the platform builds: 
 Go binary ships as an opaque blob under `assets/monkeymux/`, and `go-test` plus the
 `monkeymux-assets` build already validate it.
 
+## Background steps in ci.yml
+
+Setup steps that touch disjoint paths (the payload download, Apple cache restores,
+`setup-gradle`, the apt cache, the Windows Node test) run with `background: true`
+and are joined by a named `wait:` before the first step that needs them. Keep
+`flutter-setup` in the foreground: it is the longest setup step, so the wait is
+short, and its `GITHUB_PATH` edit applies immediately. A composite action can be a
+background step but cannot declare one. Give every background step an `id`, never
+an `if:` (the runner does not document what `wait:` does for a skipped step, which
+is also why `build-deploy.yml` stays sequential), and keep each background step and
+its wait at the top level of `steps` so the workflow-structure tests still see
+them. `ci_changes_test.py` enforces the pairing. The `tooling` job lints with
+`jdx/jactionlint`; upstream `rhysd/actionlint` 1.7.12 rejects these keys.
+
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.

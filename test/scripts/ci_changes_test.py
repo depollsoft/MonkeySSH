@@ -552,9 +552,44 @@ class WorkflowContractsTest(unittest.TestCase):
         jobs = self.workflows['ci.yml']['jobs']
         windows = next(s for s in jobs['build-windows']['steps']
                        if s.get('uses') == './.github/actions/flutter-setup')
-        # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is safe.
+        # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is
+        # safe, but only a pull_request run can read it back (a merge-queue
+        # cache is scoped to its throwaway ref), so the gating run skips the
+        # ~2m45s post-job save.
         self.assertEqual(windows['with']['cache'], 'false')
-        self.assertEqual(windows['with']['pub-cache'], 'true')
+        self.assertEqual(windows['with']['pub-cache'],
+                         "${{ github.event_name == 'pull_request' }}")
+
+    def test_background_steps_are_joined_before_their_consumers(self):
+        # Setup steps overlap via `background: true`; a later `wait:` in the
+        # same job must join each one, and nothing may read its results first.
+        # (Outputs and PATH changes only land after the wait.) Keep the longest
+        # setup step, flutter-setup, in the foreground so the wait is short.
+        seen = 0
+        for filename, workflow in self.workflows.items():
+            for name, job in workflow['jobs'].items():
+                steps = job.get('steps', [])
+                pending = {}
+                for index, step in enumerate(steps):
+                    waited = step.get('wait')
+                    if waited is not None:
+                        self.assertNotIn('if', step, (filename, name, index))
+                        for step_id in [waited] if isinstance(waited, str) else waited:
+                            self.assertIn(step_id, pending, (filename, name, step_id))
+                            del pending[step_id]
+                    if step.get('background'):
+                        seen += 1
+                        self.assertIn('id', step, (filename, name, index))
+                        self.assertNotIn('if', step, (filename, name, index))
+                        self.assertNotEqual(step.get('uses'), './.github/actions/flutter-setup')
+                        pending[step['id']] = index
+                    self.assertNotIn('parallel', step)
+                    self.assertNotIn('wait-all', step)
+                self.assertEqual(pending, {}, (filename, name))
+        self.assertGreaterEqual(seen, 7)
+        windows = self.workflows['ci.yml']['jobs']['build-windows']['steps']
+        node = next(s for s in windows if 'node --test' in s.get('run', ''))
+        self.assertTrue(node['background'])
 
     def test_payload_cache_can_only_be_saved_by_push_to_main_ci(self):
         for filename, workflow in self.workflows.items():
