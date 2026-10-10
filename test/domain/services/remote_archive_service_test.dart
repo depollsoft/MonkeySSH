@@ -104,8 +104,9 @@ class _TreeSftp extends Fake implements SftpClient {
   }
 }
 
-/// Answers the extractor's commands and plays the archive's contents into
-/// the scratch folder when asked to extract.
+/// Plays the host for the extractor's scripts: makes the private folder and
+/// its archive copy, answers the listings, plays the archive's contents into
+/// `out`, and performs the final move and cleanup on [sftp].
 class _FakeHost {
   _FakeHost(
     this.sftp, {
@@ -114,6 +115,8 @@ class _FakeHost {
     this.extracted = const [],
     this.hasTool = true,
     this.extractExitCode = 0,
+    this.unsafeOutput = false,
+    this.dropMarker = false,
   });
 
   final _TreeSftp sftp;
@@ -125,11 +128,20 @@ class _FakeHost {
   final bool hasTool;
   final int extractExitCode;
 
-  /// Each script's command line, without the shared PATH setup.
-  final commands = <String>[];
+  /// Whether the post-extraction check finds a link in the output.
+  final bool unsafeOutput;
+
+  /// Whether a startup file swallows the script, so no marker comes back.
+  final bool dropMarker;
 
   /// Whole scripts as sent to `/bin/sh` on stdin.
   final scripts = <String>[];
+
+  /// Which step each script was: prepare, names, verbose, extract, place or
+  /// cleanup.
+  final steps = <String>[];
+
+  late String _scratch;
 
   Future<RemoteCommandResult> run(
     String script, {
@@ -138,45 +150,98 @@ class _FakeHost {
   }) async {
     scripts.add(script);
     final lines = script.split('\n');
-    final command = lines[lines.indexOf('} </dev/null') - 1];
-    commands.add(command);
-    RemoteCommandResult output(String stdout) {
-      final truncated = utf8.encode(stdout).length > maxOutputBytes;
+    final marker = _shellWords(
+      lines.firstWhere((line) => line.startsWith('m=')).substring(2),
+    ).single;
+    String? argumentOf(String prefix) {
+      for (final line in lines) {
+        if (line.startsWith(prefix)) {
+          return _shellWords(line.split(' || ').first).last;
+        }
+      }
+      return null;
+    }
+
+    RemoteCommandResult finish(int status, [String output = '']) {
+      if (dropMarker) return const RemoteCommandResult(exitCode: 0, stdout: '');
+      final text = '$output\n$marker $status\n';
+      final truncated = utf8.encode(text).length > maxOutputBytes;
       return RemoteCommandResult(
         exitCode: truncated ? null : 0,
-        stdout: truncated ? stdout.substring(0, maxOutputBytes) : stdout,
+        stdout: truncated ? text.substring(0, maxOutputBytes) : text,
         truncated: truncated,
       );
     }
 
-    if (command.startsWith('command -v')) {
-      return output(hasTool ? '' : 'MONKEYSSH_ARCHIVE_TOOL_MISSING\n');
-    }
-    if (command.startsWith('cp ')) {
-      final words = _shellWords(command);
-      if (!sftp.files.contains(words[1])) {
-        return const RemoteCommandResult(exitCode: 1, stdout: '');
+    final directory = argumentOf('cd -- ')!;
+    if (script.contains('command -v')) {
+      steps.add('prepare');
+      if (!hasTool) return finish(10);
+      final scratch = '$directory/${argumentOf('mkdir -- ')}';
+      if (sftp.directories.contains(scratch) || sftp.files.contains(scratch)) {
+        return finish(11);
       }
-      sftp.files.add(words[2]);
-      return output('');
+      sftp.directories.add(scratch);
+      _scratch = scratch;
+      final source = _shellWords(
+        lines.firstWhere((line) => line.startsWith('cat -- ')).split(' > ')[0],
+      ).last;
+      if (!sftp.files.contains(source)) return finish(13);
+      sftp.files.add('$scratch/archive');
+      return finish(0, '4242');
     }
-    if (command.startsWith('unzip -Z1') ||
-        command.startsWith('tar -t') && !command.startsWith('tar -tv')) {
-      return output(names);
+    if (script.contains('rm -rf -- ')) {
+      steps.add('cleanup');
+      final scratch = '$directory/${argumentOf('rm -rf -- ')}';
+      sftp.directories.removeWhere(
+        (p) => p == scratch || p.startsWith('$scratch/'),
+      );
+      sftp.files.removeWhere((p) => p.startsWith('$scratch/'));
+      return finish(0);
     }
-    if (command.startsWith('unzip -Z') || command.startsWith('tar -tv')) {
-      return output(verbose);
+    // Every later step must check it is still in the folder it made.
+    expect(script, contains('[ -O . ] || finish 12'));
+    expect(script, contains("[ \"\$1\" = '4242' ] || finish 12"));
+    final scratch = _scratch;
+    if (script.contains('unzip -Z1') ||
+        (script.contains('tar -t') && !script.contains('tar -tv'))) {
+      steps.add('names');
+      return finish(0, names);
     }
-    final target = _shellWords(command).last;
-    for (final entry in extracted) {
-      final path = '$target/${entry.replaceAll(RegExp(r'/$'), '')}';
-      if (entry.endsWith('/')) {
-        sftp.directories.add(path);
-      } else {
-        sftp.files.add(path);
+    if (script.contains('unzip -Z ') || script.contains('tar -tv')) {
+      steps.add('verbose');
+      return finish(0, verbose);
+    }
+    if (script.contains('mkdir out')) {
+      steps.add('extract');
+      sftp.directories.add('$scratch/out');
+      for (final entry in extracted) {
+        final path = '$scratch/out/${entry.replaceAll(RegExp(r'/$'), '')}';
+        if (entry.endsWith('/')) {
+          sftp.directories.add(path);
+        } else {
+          sftp.files.add(path);
+        }
       }
+      if (extractExitCode != 0) return finish(20);
+      if (unsafeOutput) return finish(21);
+      return finish(0);
     }
-    return RemoteCommandResult(exitCode: extractExitCode, stdout: '');
+    if (script.contains('mv -- ')) {
+      steps.add('place');
+      final words = _shellWords(
+        lines.firstWhere((line) => line.startsWith('mv -- ')).split(' || ')[0],
+      );
+      final source = '$scratch/${words[2]}';
+      final destination = words[3];
+      if (sftp.directories.contains(destination) ||
+          sftp.files.contains(destination)) {
+        return finish(30);
+      }
+      await sftp.rename(source, destination);
+      return finish(0);
+    }
+    fail('Unexpected script:\n$script');
   }
 }
 
@@ -360,7 +425,7 @@ void main() {
         ),
       );
       addTearDown(session.close);
-      final script = remoteArchiveScript([
+      final script = remoteArchiveScript(marker: 'MARK', [
         r"unzip -Z1 '/srv/it'\''s; rm -rf ~.zip'",
       ]);
 
@@ -386,7 +451,7 @@ void main() {
 
       final running = collectRemoteCommandOutput(
         channel.exec,
-        script: remoteArchiveScript(['tar -tf x']),
+        script: remoteArchiveScript(['tar -tf x'], marker: 'MARK'),
         timeout: const Duration(seconds: 5),
         maxOutputBytes: 4,
       );
@@ -402,6 +467,14 @@ void main() {
   });
 
   group('RemoteArchiveExtractor', () {
+    Future<RemoteArchiveExtraction> extract(
+      _FakeHost host,
+      String archivePath,
+      RemoteArchiveKind kind,
+    ) =>
+        RemoteArchiveExtractor(runCommand: host.run)
+            .extractHere(sftp: host.sftp, archivePath: archivePath, kind: kind);
+
     test('moves a single top-level folder up beside the archive', () async {
       final sftp = _TreeSftp(files: {'/srv/project.tar.gz'});
       final host = _FakeHost(
@@ -413,28 +486,26 @@ void main() {
         extracted: ['project/', 'project/main.dart'],
       );
 
-      final result = await RemoteArchiveExtractor(runCommand: host.run)
-          .extractHere(
-            sftp: sftp,
-            archivePath: '/srv/project.tar.gz',
-            kind: RemoteArchiveKind.tarGzip,
-          );
+      final result = await extract(
+        host,
+        '/srv/project.tar.gz',
+        RemoteArchiveKind.tarGzip,
+      );
 
       expect(result.name, 'project');
       expect(result.isDirectory, isTrue);
       expect(sftp.files, contains('/srv/project/main.dart'));
+      expect(host.steps, [
+        'prepare',
+        'names',
+        'verbose',
+        'extract',
+        'place',
+        'cleanup',
+      ]);
       expect(
         sftp.directories.where((p) => p.contains('.monkeyssh-extract-')),
         isEmpty,
-      );
-      expect(
-        host.commands.last,
-        matches(
-          RegExp(
-            r"^tar -xzf '/srv/\.monkeyssh-extract-[0-9a-f]+/archive' -C "
-            r"'/srv/\.monkeyssh-extract-[0-9a-f]+/out'$",
-          ),
-        ),
       );
     });
 
@@ -454,24 +525,15 @@ void main() {
         extracted: ['index.html', 'style.css'],
       );
 
-      final result = await RemoteArchiveExtractor(runCommand: host.run)
-          .extractHere(
-            sftp: sftp,
-            archivePath: '/srv/site.zip',
-            kind: RemoteArchiveKind.zip,
-          );
+      final result = await extract(
+        host,
+        '/srv/site.zip',
+        RemoteArchiveKind.zip,
+      );
 
       expect(result.name, 'site (2)');
-      expect(sftp.files, containsAll(['/srv/site (2)/index.html']));
+      expect(sftp.files, contains('/srv/site (2)/index.html'));
       expect(sftp.directories, contains('/srv/site'));
-      expect(
-        host.commands.last,
-        matches(
-          RegExp(
-            r"^unzip -qq -o '/srv/\.monkeyssh-extract-[0-9a-f]+/archive' -d ",
-          ),
-        ),
-      );
     });
 
     test('refuses traversal before extracting anything', () async {
@@ -487,18 +549,14 @@ void main() {
       );
 
       await expectLater(
-        RemoteArchiveExtractor(runCommand: host.run).extractHere(
-          sftp: sftp,
-          archivePath: '/srv/evil.zip',
-          kind: RemoteArchiveKind.zip,
-        ),
+        extract(host, '/srv/evil.zip', RemoteArchiveKind.zip),
         throwsA(isA<RemoteArchiveException>()),
       );
-      expect(host.commands.where((c) => c.startsWith('unzip -qq')), isEmpty);
+      expect(host.steps, ['prepare', 'names', 'verbose', 'cleanup']);
       expect(sftp.directories, {'/', '/srv'});
     });
 
-    test('refuses an archive holding a symlink', () async {
+    test('refuses an archive listing a symlink', () async {
       final sftp = _TreeSftp(files: {'/srv/links.tar.gz'});
       final host = _FakeHost(
         sftp,
@@ -509,11 +567,7 @@ void main() {
       );
 
       await expectLater(
-        RemoteArchiveExtractor(runCommand: host.run).extractHere(
-          sftp: sftp,
-          archivePath: '/srv/links.tar.gz',
-          kind: RemoteArchiveKind.tarGzip,
-        ),
+        extract(host, '/srv/links.tar.gz', RemoteArchiveKind.tarGzip),
         throwsA(
           isA<RemoteArchiveException>().having(
             (error) => error.message,
@@ -522,19 +576,44 @@ void main() {
           ),
         ),
       );
-      expect(host.commands.where((c) => c.startsWith('tar -xzf')), isEmpty);
+      expect(host.steps, isNot(contains('extract')));
     });
 
-    test('reports a missing tool', () async {
+    test('refuses links that only show up after extraction', () async {
+      // A zip entry can list as `?---------` yet carry a link mode in its
+      // extra field; the host check after extraction catches it.
+      final sftp = _TreeSftp(files: {'/srv/asi.zip'});
+      final host = _FakeHost(
+        sftp,
+        names: 'docs\n',
+        verbose:
+            '$_zipVerboseHeader'
+            '?---------  2.0 unx       12 b- stor 26-Oct-01 12:00 docs\n',
+        extracted: ['docs'],
+        unsafeOutput: true,
+      );
+
+      await expectLater(
+        extract(host, '/srv/asi.zip', RemoteArchiveKind.zip),
+        throwsA(
+          isA<RemoteArchiveException>().having(
+            (error) => error.message,
+            'message',
+            contains('links'),
+          ),
+        ),
+      );
+      expect(host.steps, isNot(contains('place')));
+      expect(sftp.files, {'/srv/asi.zip'});
+      expect(sftp.directories, {'/', '/srv'});
+    });
+
+    test('reports a missing tool and leaves nothing behind', () async {
       final sftp = _TreeSftp(files: {'/srv/a.zip'});
       final host = _FakeHost(sftp, names: '', verbose: '', hasTool: false);
 
       await expectLater(
-        RemoteArchiveExtractor(runCommand: host.run).extractHere(
-          sftp: sftp,
-          archivePath: '/srv/a.zip',
-          kind: RemoteArchiveKind.zip,
-        ),
+        extract(host, '/srv/a.zip', RemoteArchiveKind.zip),
         throwsA(
           isA<RemoteArchiveException>().having(
             (error) => error.message,
@@ -543,12 +622,29 @@ void main() {
           ),
         ),
       );
-      expect(host.commands, hasLength(1));
+      expect(host.steps, ['prepare']);
     });
 
+    test(
+      'a script swallowed by a startup file is not read as success',
+      () async {
+        final sftp = _TreeSftp(files: {'/srv/a.zip'});
+        final host = _FakeHost(sftp, names: '', verbose: '', dropMarker: true);
+
+        await expectLater(
+          extract(host, '/srv/a.zip', RemoteArchiveKind.zip),
+          throwsA(
+            isA<RemoteArchiveException>().having(
+              (error) => error.message,
+              'message',
+              contains('stopped the extraction early'),
+            ),
+          ),
+        );
+      },
+    );
+
     test('extracts zip entries that carry no Unix type bits', () async {
-      // Python's ZipFile.writestr leaves the type bits out; unzip -Z shows
-      // `?` and extracts a plain file.
       final sftp = _TreeSftp(files: {'/srv/py.zip'});
       final host = _FakeHost(
         sftp,
@@ -559,18 +655,13 @@ void main() {
         extracted: ['hello.txt'],
       );
 
-      final result = await RemoteArchiveExtractor(runCommand: host.run)
-          .extractHere(
-            sftp: sftp,
-            archivePath: '/srv/py.zip',
-            kind: RemoteArchiveKind.zip,
-          );
+      final result = await extract(host, '/srv/py.zip', RemoteArchiveKind.zip);
 
       expect(result.name, 'hello.txt');
       expect(sftp.files, contains('/srv/hello.txt'));
     });
 
-    test('lists and extracts a private copy, never the original', () async {
+    test('only the first step names the original archive', () async {
       final sftp = _TreeSftp(files: {"/srv/it's a.zip"});
       final host = _FakeHost(
         sftp,
@@ -581,48 +672,39 @@ void main() {
         extracted: ['x.txt'],
       );
 
-      await RemoteArchiveExtractor(runCommand: host.run).extractHere(
-        sftp: sftp,
-        archivePath: "/srv/it's a.zip",
-        kind: RemoteArchiveKind.zip,
-      );
+      await extract(host, "/srv/it's a.zip", RemoteArchiveKind.zip);
 
-      final scratch = sftp.modes.keys.singleWhere(
-        (path) => path.contains('.monkeyssh-extract-'),
-      );
-      expect(sftp.modes[scratch], 0x1C0);
-      expect(host.commands[1], startsWith('cp '));
-      for (final command in host.commands.skip(2)) {
-        expect(command, isNot(contains('a.zip')));
-        expect(command, contains('$scratch/archive'));
-      }
-      expect(sftp.files, isNot(contains('$scratch/archive')));
-    });
-
-    test('every script starts from the login PATH', () async {
-      final sftp = _TreeSftp(files: {'/srv/a.zip'});
-      final host = _FakeHost(
-        sftp,
-        names: 'x.txt\n',
-        verbose:
-            '$_zipVerboseHeader'
-            '-rw-r--r--  3.0 unx        5 tx defN 26-Oct-01 12:00 x.txt\n',
-        extracted: ['x.txt'],
-      );
-
-      await RemoteArchiveExtractor(runCommand: host.run).extractHere(
-        sftp: sftp,
-        archivePath: '/srv/a.zip',
-        kind: RemoteArchiveKind.zip,
-      );
-
-      expect(host.scripts, isNotEmpty);
-      for (final script in host.scripts) {
-        expect(script, startsWith('{\n'));
-        expect(script, contains('. ~/.profile'));
-        expect(script, endsWith('} </dev/null\n'));
+      expect(host.scripts.first, contains(r"cat -- '/srv/it'\''s a.zip'"));
+      expect(host.scripts.first, contains('set -C'));
+      expect(host.scripts.first, contains('umask 077'));
+      for (final script in host.scripts.skip(1)) {
+        expect(script, isNot(contains('a.zip')));
       }
     });
+
+    test(
+      'every script starts from the login PATH and ends with a marker',
+      () async {
+        final sftp = _TreeSftp(files: {'/srv/a.zip'});
+        final host = _FakeHost(
+          sftp,
+          names: 'x.txt\n',
+          verbose:
+              '$_zipVerboseHeader'
+              '-rw-r--r--  3.0 unx        5 tx defN 26-Oct-01 12:00 x.txt\n',
+          extracted: ['x.txt'],
+        );
+
+        await extract(host, '/srv/a.zip', RemoteArchiveKind.zip);
+
+        expect(host.scripts, hasLength(6));
+        for (final script in host.scripts) {
+          expect(script, startsWith('{\n'));
+          expect(script, contains(r'[ -r "$__fl_profile" ]'));
+          expect(script, endsWith('finish 0\n} </dev/null\n'));
+        }
+      },
+    );
 
     test('refuses listings past the entry or byte limit', () async {
       for (final count in [remoteArchiveMaxEntries + 1, 600000]) {
@@ -640,11 +722,7 @@ void main() {
         );
 
         await expectLater(
-          RemoteArchiveExtractor(runCommand: host.run).extractHere(
-            sftp: sftp,
-            archivePath: '/srv/big.tar.gz',
-            kind: RemoteArchiveKind.tarGzip,
-          ),
+          extract(host, '/srv/big.tar.gz', RemoteArchiveKind.tarGzip),
           throwsA(
             isA<RemoteArchiveException>().having(
               (error) => error.message,
@@ -653,7 +731,7 @@ void main() {
             ),
           ),
         );
-        expect(host.commands.where((c) => c.startsWith('tar -x')), isEmpty);
+        expect(host.steps, isNot(contains('extract')));
         expect(sftp.directories, {'/', '/srv'});
       }
     });
@@ -674,13 +752,11 @@ void main() {
           extracted: ['project/', 'project/main.dart'],
         );
 
-        final result = await RemoteArchiveExtractor(runCommand: folder.run)
-            .extractHere(
-              sftp: sftp,
-              archivePath: '/srv/project.tar.gz',
-              kind: RemoteArchiveKind.tarGzip,
-            );
-
+        final result = await extract(
+          folder,
+          '/srv/project.tar.gz',
+          RemoteArchiveKind.tarGzip,
+        );
         expect(result.name, 'project (2)');
         expect(sftp.files, contains('/srv/project (2)/main.dart'));
 
@@ -690,17 +766,16 @@ void main() {
           verbose: '-rw-r--r-- me/me 5 2026-10-01 12:00 notes.txt\n',
           extracted: ['notes.txt'],
         );
-        final single = await RemoteArchiveExtractor(runCommand: file.run)
-            .extractHere(
-              sftp: sftp,
-              archivePath: '/srv/notes.tgz',
-              kind: RemoteArchiveKind.tarGzip,
-            );
+        final single = await extract(
+          file,
+          '/srv/notes.tgz',
+          RemoteArchiveKind.tarGzip,
+        );
         expect(single.name, 'notes (2).txt');
       },
     );
 
-    test('removes the partial folder when extraction fails', () async {
+    test('removes the private folder when extraction fails', () async {
       final sftp = _TreeSftp(files: {'/srv/broken.tar.gz'});
       final host = _FakeHost(
         sftp,
@@ -713,13 +788,10 @@ void main() {
       );
 
       await expectLater(
-        RemoteArchiveExtractor(runCommand: host.run).extractHere(
-          sftp: sftp,
-          archivePath: '/srv/broken.tar.gz',
-          kind: RemoteArchiveKind.tarGzip,
-        ),
+        extract(host, '/srv/broken.tar.gz', RemoteArchiveKind.tarGzip),
         throwsA(isA<RemoteArchiveException>()),
       );
+      expect(host.steps.last, 'cleanup');
       expect(sftp.directories, {'/', '/srv'});
       expect(sftp.files, {'/srv/broken.tar.gz'});
     });
