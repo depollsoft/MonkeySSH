@@ -1264,6 +1264,7 @@ void main() {
         (_) async => const AgentLaunchPreset(
           tool: AgentLaunchTool.codex,
           workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
           worktree: AgentWorktreeLaunchOptions(),
         ),
       );
@@ -1296,6 +1297,96 @@ void main() {
           tester,
           const Key('host-agent-worktree-branch-field'),
         ),
+        isTrue,
+      );
+    });
+
+    testWidgets('focuses the worktree field that needs fixing', (tester) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      final baseField = find.byKey(const Key('host-agent-worktree-base-field'));
+      await tester.ensureVisible(baseField);
+      await tester.enterText(baseField, '--upload-pack=x');
+      await tester.pump();
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-worktree-base-field')),
+        isTrue,
+      );
+    });
+
+    testWidgets('requires a session before saving a worktree preset', (
+      tester,
+    ) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-tmux-session-field')),
         isTrue,
       );
     });

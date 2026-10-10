@@ -24,11 +24,24 @@ class AgentPresetWorkspaceFormState {
   /// Prompt sent once when a native session starts.
   final initialPrompt = TextEditingController();
 
-  /// Focus target for validation failures in the worktree section.
-  final worktreeFocusNode = FocusNode();
+  final _focusNodes = {
+    for (final field in AgentWorktreeField.values) field: FocusNode(),
+  };
+  final _locationKeys = {
+    for (final field in AgentWorktreeField.values) field: GlobalKey(),
+  };
 
-  /// Scroll target for validation failures in the worktree section.
-  final worktreeLocationKey = GlobalKey();
+  /// Focus target for a validation problem in [field].
+  FocusNode focusNodeFor(AgentWorktreeField field) => _focusNodes[field]!;
+
+  /// Scroll target for a validation problem in [field].
+  GlobalKey locationKeyFor(AgentWorktreeField field) => _locationKeys[field]!;
+
+  /// The field holding the first problem for [workingDirectory], so a failed
+  /// save takes the user to the field they must fix.
+  AgentWorktreeField problemField(String workingDirectory) =>
+      worktree?.problem(workingDirectory: workingDirectory)?.field ??
+      AgentWorktreeField.branchTemplate;
 
   /// Whether launches create a new worktree.
   bool worktreeEnabled = false;
@@ -68,7 +81,9 @@ class AgentPresetWorkspaceFormState {
     for (final controller in controllers) {
       controller.dispose();
     }
-    worktreeFocusNode.dispose();
+    for (final node in _focusNodes.values) {
+      node.dispose();
+    }
   }
 }
 
@@ -109,7 +124,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
       children: [
         const SizedBox(height: 4),
         KeyedSubtree(
-          key: state.worktreeLocationKey,
+          key: const Key('host-agent-worktree-switch-location'),
           child: SwitchListTile(
             key: const Key('host-agent-worktree-switch'),
             value: state.worktreeEnabled,
@@ -131,6 +146,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
         if (state.worktreeEnabled) ...[
           const SizedBox(height: 8),
           _field(
+            field: AgentWorktreeField.repository,
             key: const Key('host-agent-worktree-repository-field'),
             controller: state.repository,
             label: 'Repository (optional)',
@@ -148,6 +164,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _field(
+            field: AgentWorktreeField.baseRef,
             key: const Key('host-agent-worktree-base-field'),
             controller: state.baseRef,
             label: 'Base branch or ref (optional)',
@@ -160,9 +177,9 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _field(
+            field: AgentWorktreeField.branchTemplate,
             key: const Key('host-agent-worktree-branch-field'),
             controller: state.branchTemplate,
-            focusNode: state.worktreeFocusNode,
             label: 'New branch name',
             hint: defaultAgentWorktreeBranchTemplate,
             icon: Icons.call_split,
@@ -173,6 +190,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _field(
+            field: AgentWorktreeField.pathTemplate,
             key: const Key('host-agent-worktree-path-field'),
             controller: state.pathTemplate,
             label: 'Worktree folder',
@@ -199,9 +217,9 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            'Closing the agent’s window offers to remove a clean worktree. '
-            'Use a MonkeyMux session so reconnecting returns to the same '
-            'worktree.',
+            'Needs a MonkeyMux or tmux session, set below, so reconnecting '
+            'returns to the same worktree. Closing the agent’s window offers '
+            'to remove a clean worktree.',
             style: helperStyle,
           ),
         ],
@@ -229,30 +247,33 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
   }
 
   Widget _field({
+    required AgentWorktreeField field,
     required Key key,
     required TextEditingController controller,
     required String label,
     required String hint,
     required IconData icon,
     required FormFieldValidator<String> validator,
-    FocusNode? focusNode,
     String? helper,
-  }) => TextFormField(
-    key: key,
-    controller: controller,
-    focusNode: focusNode,
-    readOnly: !enabled,
-    autocorrect: false,
-    enableSuggestions: false,
-    style: FluttyTheme.monoStyle,
-    autovalidateMode: AutovalidateMode.onUserInteraction,
-    validator: validator,
-    decoration: InputDecoration(
-      labelText: label,
-      hintText: hint,
-      prefixIcon: Icon(icon),
-      helperText: helper,
-      helperMaxLines: 3,
+  }) => KeyedSubtree(
+    key: state.locationKeyFor(field),
+    child: TextFormField(
+      key: key,
+      controller: controller,
+      focusNode: state.focusNodeFor(field),
+      readOnly: !enabled,
+      autocorrect: false,
+      enableSuggestions: false,
+      style: FluttyTheme.monoStyle,
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      validator: validator,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        prefixIcon: Icon(icon),
+        helperText: helper,
+        helperMaxLines: 3,
+      ),
     ),
   );
 

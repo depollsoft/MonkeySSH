@@ -75,6 +75,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   final _usernameFieldLocationKey = GlobalKey();
   final _tmuxSessionFieldLocationKey = GlobalKey();
   final _agentTmuxFlagsFieldLocationKey = GlobalKey();
+  final _agentSessionFieldLocationKey = GlobalKey();
   final _customCommandFieldLocationKey = GlobalKey();
   final _snippetFieldLocationKey = GlobalKey();
   final _portProxyNameFieldLocationKey = GlobalKey();
@@ -101,6 +102,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   late FocusNode _usernameFocusNode;
   late FocusNode _tmuxSessionFocusNode;
   late FocusNode _agentTmuxFlagsFocusNode;
+  final _agentSessionFocusNode = FocusNode();
   late FocusNode _customCommandFocusNode;
   late FocusNode _snippetFocusNode;
   late FocusNode _portProxyNameFocusNode;
@@ -323,6 +325,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _usernameFocusNode.dispose();
     _tmuxSessionFocusNode.dispose();
     _agentTmuxFlagsFocusNode.dispose();
+    _agentSessionFocusNode.dispose();
     _customCommandFocusNode.dispose();
     _snippetFocusNode.dispose();
     _portProxyNameFocusNode.dispose();
@@ -1250,25 +1253,35 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           },
         ),
         const SizedBox(height: 12),
-        TextFormField(
-          key: const Key('host-agent-tmux-session-field'),
-          controller: _agentTmuxSessionController,
-          readOnly: !hasAgentPresetAccess,
-          decoration: InputDecoration(
-            labelText: isAgentTmuxBackend
-                ? 'tmux session (optional)'
-                : 'MonkeyMux session (optional)',
-            hintText: 'app-agent',
-            prefixIcon: const Icon(Icons.view_carousel_outlined),
-            helperText: isAgentTmuxBackend
-                ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
-                : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
-            helperMaxLines: _hostFieldHelperMaxLines,
+        KeyedSubtree(
+          key: _agentSessionFieldLocationKey,
+          child: TextFormField(
+            key: const Key('host-agent-tmux-session-field'),
+            controller: _agentTmuxSessionController,
+            focusNode: _agentSessionFocusNode,
+            readOnly: !hasAgentPresetAccess,
+            validator: (value) =>
+                _agentWorkspaceForm.worktreeEnabled &&
+                    (value?.trim().isEmpty ?? true)
+                ? 'Worktree launches need a session, so reconnecting returns to '
+                      'the same worktree.'
+                : null,
+            decoration: InputDecoration(
+              labelText: isAgentTmuxBackend
+                  ? 'tmux session (optional)'
+                  : 'MonkeyMux session (optional)',
+              hintText: 'app-agent',
+              prefixIcon: const Icon(Icons.view_carousel_outlined),
+              helperText: isAgentTmuxBackend
+                  ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
+                  : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
+              helperMaxLines: _hostFieldHelperMaxLines,
+            ),
+            autocorrect: false,
+            onChanged: hasAgentPresetAccess
+                ? (_) => _handleAgentPresetFieldChanged()
+                : null,
           ),
-          autocorrect: false,
-          onChanged: hasAgentPresetAccess
-              ? (_) => _handleAgentPresetFieldChanged()
-              : null,
         ),
         if (isAgentTmuxBackend) ...[
           const SizedBox(height: 12),
@@ -1699,9 +1712,21 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         locationKey: _agentTmuxFlagsFieldLocationKey,
         focusNode: _agentTmuxFlagsFocusNode,
       ),
+      HostEditValidationTarget.agentSession => (
+        locationKey: _agentSessionFieldLocationKey,
+        focusNode: _agentSessionFocusNode,
+      ),
       HostEditValidationTarget.agentWorktree => (
-        locationKey: _agentWorkspaceForm.worktreeLocationKey,
-        focusNode: _agentWorkspaceForm.worktreeFocusNode,
+        locationKey: _agentWorkspaceForm.locationKeyFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
+        focusNode: _agentWorkspaceForm.focusNodeFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
       ),
       HostEditValidationTarget.customCommand => (
         locationKey: _customCommandFieldLocationKey,

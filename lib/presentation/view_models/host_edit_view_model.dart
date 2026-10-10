@@ -174,6 +174,9 @@ enum HostEditValidationTarget {
   /// Agent tmux flags field.
   agentTmuxFlags,
 
+  /// Agent remote window session field.
+  agentSession,
+
   /// Agent worktree settings.
   agentWorktree,
 
@@ -405,14 +408,20 @@ class HostEditViewModel extends Notifier<HostEditState> {
             message: 'Fix agent tmux flags to save this host',
           );
         }
-        if (draft.agentWorktree?.validate(
-              workingDirectory: draft.agentWorkingDirectory,
-            )
-            case final problem?) {
-          return HostEditValidationIssue(
-            target: HostEditValidationTarget.agentWorktree,
-            message: problem,
-          );
+        if (draft.agentWorktree case final worktree?) {
+          if (draft.agentTmuxSession.trim().isEmpty) {
+            return const HostEditValidationIssue(
+              target: HostEditValidationTarget.agentSession,
+              message: 'Add a MonkeyMux or tmux session to use worktrees',
+            );
+          }
+          if (worktree.problem(workingDirectory: draft.agentWorkingDirectory)
+              case final problem?) {
+            return HostEditValidationIssue(
+              target: HostEditValidationTarget.agentWorktree,
+              message: problem.message,
+            );
+          }
         }
         return null;
       case HostStartupMode.customCommand:

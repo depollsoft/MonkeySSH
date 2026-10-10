@@ -375,6 +375,21 @@ void main() {
           viewModel.validateDraft(
             _draft(
               startupMode: HostStartupMode.agent,
+              agentWorkingDirectory: '~/src/app',
+              agentWorktree: const AgentWorktreeLaunchOptions(),
+            ),
+          ),
+          isA<HostEditValidationIssue>().having(
+            (issue) => issue.target,
+            'target',
+            HostEditValidationTarget.agentSession,
+          ),
+        );
+        expect(
+          viewModel.validateDraft(
+            _draft(
+              startupMode: HostStartupMode.agent,
+              agentTmuxSession: 'agents',
               agentWorktree: const AgentWorktreeLaunchOptions(),
             ),
           ),
@@ -386,6 +401,7 @@ void main() {
         );
         final valid = _draft(
           startupMode: HostStartupMode.agent,
+          agentTmuxSession: 'agents',
           agentWorkingDirectory: '~/src/app',
           agentWorktree: const AgentWorktreeLaunchOptions(
             branchTemplate: 'wip/{id}',
@@ -403,6 +419,7 @@ void main() {
           viewModel.updateDraft(
             _draft(
               startupMode: HostStartupMode.agent,
+              agentTmuxSession: 'agents',
               agentWorkingDirectory: '~/src/app',
               agentInitialPrompt: '  Summarise the open tasks.  ',
             ),
