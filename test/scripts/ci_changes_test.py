@@ -88,6 +88,22 @@ class ClassificationTest(unittest.TestCase):
                 result = self.assert_platforms([path], changes.PLATFORMS)
                 self.assertTrue(result['run_check'])
 
+    def test_cloud_functions_run_only_their_own_tests(self):
+        for path in ['functions/src/index.ts', 'functions/package-lock.json',
+                     'firebase.json', '.firebaserc']:
+            with self.subTest(path=path):
+                result = self.assert_platforms([path], [])
+                self.assertTrue(result['functions'])
+                self.assertFalse(result['run_check'])
+                self.assertFalse(result['go'])
+        # The deploy workflow is also workflow tooling, and ci.yml owns the job.
+        for path in ['.github/workflows/deploy-functions.yml', '.github/workflows/ci.yml']:
+            with self.subTest(path=path):
+                result = changes.classify([path])
+                self.assertTrue(result['functions'])
+                self.assertTrue(result['tooling'])
+        self.assertFalse(changes.classify(['docs/push-notifications.md'])['functions'])
+
     def test_firebase_config_action_builds_only_the_mobile_platforms(self):
         result = self.assert_platforms(['.github/actions/firebase-config/action.yml'],
                                        ['android', 'ios'])
@@ -579,6 +595,34 @@ class WorkflowContractsTest(unittest.TestCase):
             for step in job.get('steps', []):
                 if step.get('uses', '').startswith('actions/checkout@'):
                     self.assertNotEqual(step.get('with', {}).get('ref'), '${{ github.ref }}')
+
+    def test_functions_are_tested_by_ci_and_deployed_only_from_main(self):
+        jobs = self.workflows['ci.yml']['jobs']
+        self.assertEqual(jobs['changes']['outputs']['functions'],
+                         '${{ steps.filter.outputs.functions }}')
+        self.assertIn("needs.changes.outputs.functions == 'true'", jobs['functions-test']['if'])
+        self.assertIn('functions-test', jobs['ci']['needs'])
+        self.assertIn('functions-test:$FUNCTIONS_TEST_RESULT', jobs['ci']['steps'][0]['run'])
+
+        workflow = self.workflows['deploy-functions.yml']
+        triggers = workflow.get('on', workflow.get('true'))
+        self.assertEqual(triggers['push']['branches'], ['main'])
+        self.assertEqual(triggers['push']['paths'], changes.FUNCTIONS_PATHS)
+        self.assertNotIn('pull_request', triggers)
+        self.assertNotIn('pull_request_target', triggers)
+        # Only the deploy job may mint an OIDC token, and only on main; the
+        # Workload Identity provider enforces the same ref and workflow file.
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        self.assertFalse(workflow['concurrency']['cancel-in-progress'])
+        deploy = workflow['jobs']['deploy']
+        self.assertEqual(deploy['if'], "github.ref == 'refs/heads/main'")
+        self.assertEqual(deploy['permissions']['id-token'], 'write')
+        steps = deploy['steps']
+        names = [step.get('name') for step in steps]
+        self.assertLess(names.index('Install and test'), names.index('Deploy'))
+        auth = next(s for s in steps if s.get('uses', '').startswith('google-github-actions/auth@'))
+        self.assertNotIn('credentials_json', auth['with'])
+        self.assertIn('workload_identity_provider', auth['with'])
 
     def test_profile_maintenance_supports_both_distribution_types(self):
         workflow = self.workflows['regenerate-ios-profiles.yml']

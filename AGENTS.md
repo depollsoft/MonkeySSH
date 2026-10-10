@@ -30,6 +30,11 @@ MonkeyMux payload changes set `go` and `run_check` but not the platform builds: 
 Go binary ships as an opaque blob under `assets/monkeymux/`, and `go-test` plus the
 `monkeymux-assets` build already validate it.
 
+Cloud Functions changes (`functions/`, `firebase.json`, `.firebaserc`) set `functions`,
+which runs `functions-test` only. `deploy-functions.yml` deploys them from `main`
+through keyless Workload Identity Federation (`scripts/setup_functions_iam.sh`);
+never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
+
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.

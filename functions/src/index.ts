@@ -1,8 +1,8 @@
 /**
  * MonkeySSH push notification sender. See docs/push-notifications.md.
  *
- * Deploy with `firebase deploy --only functions` after the PUSH_TICKET_KEYS
- * secret exists in the monkeyssh project.
+ * .github/workflows/deploy-functions.yml deploys this on every push to main
+ * that changes it. The PUSH_TICKET_KEYS secret must already exist.
  */
 import { initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
@@ -19,9 +19,23 @@ import { parseTicketKeys, type TicketKeys } from "./ticket";
 /** Function region; hosts post to this region's URL. */
 export const functionRegion = "us-central1";
 
+/**
+ * Runtime identity. It may send FCM messages, verify App Check tokens and read
+ * PUSH_TICKET_KEYS, and nothing else; the default compute account is a
+ * project Editor, too broad for a public endpoint. Spelled out in full:
+ * firebase-tools 15 grants secret access to the literal `name@` shorthand,
+ * which IAM rejects.
+ */
+export const functionServiceAccount =
+  "push-functions@monkeyssh.iam.gserviceaccount.com";
+
 // The hard bound on cost and abuse. Billing budgets alert but do not stop
 // spending, so this is the real ceiling.
-setGlobalOptions({ region: functionRegion, maxInstances: 10 });
+setGlobalOptions({
+  region: functionRegion,
+  maxInstances: 10,
+  serviceAccount: functionServiceAccount,
+});
 
 initializeApp();
 

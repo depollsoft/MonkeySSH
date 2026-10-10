@@ -42,6 +42,7 @@ jobs:
       tooling: ${{ steps.filter.outputs.tooling }}
       third_party: ${{ steps.filter.outputs.third_party }}
       deps: ${{ steps.filter.outputs.deps }}
+      functions: ${{ steps.filter.outputs.functions }}
       android: ${{ steps.filter.outputs.android }}
       ios: ${{ steps.filter.outputs.ios }}
       macos: ${{ steps.filter.outputs.macos }}
@@ -371,6 +372,34 @@ jobs:
             echo "vetting $goos"
             GOOS="$goos" go vet ./...
           done
+
+  # The push Cloud Functions build and test here; deploy-functions.yml runs the
+  # same suite again before it deploys from main.
+  functions-test:
+    name: Functions Tests
+    needs: changes
+    if: needs.changes.outputs.functions == 'true' && github.event_name != 'push'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: functions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build and test
+        run: npm test
 
   # ---------------------------------------------------------------------------
   # Platform builds — conditional on detected changes.
@@ -740,7 +769,7 @@ jobs:
   ci:
     name: CI
     if: ${{ always() && !cancelled() }}
-    needs: [changes, monkeymux-assets, check, tooling, test, terminal-test, go-test, build-android, build-ios, build-macos, build-windows, build-linux]
+    needs: [changes, monkeymux-assets, check, tooling, test, terminal-test, go-test, functions-test, build-android, build-ios, build-macos, build-windows, build-linux]
     runs-on: ubicloud-standard-4
     timeout-minutes: 2
     steps:
@@ -753,6 +782,7 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           TERMINAL_TEST_RESULT: ${{ needs.terminal-test.result }}
           GO_TEST_RESULT: ${{ needs.go-test.result }}
+          FUNCTIONS_TEST_RESULT: ${{ needs.functions-test.result }}
           ANDROID_RESULT: ${{ needs.build-android.result }}
           IOS_RESULT: ${{ needs.build-ios.result }}
           MACOS_RESULT: ${{ needs.build-macos.result }}
@@ -768,6 +798,7 @@ jobs:
             "test:$TEST_RESULT" \
             "terminal-test:$TERMINAL_TEST_RESULT" \
             "go-test:$GO_TEST_RESULT" \
+            "functions-test:$FUNCTIONS_TEST_RESULT" \
             "build-android:$ANDROID_RESULT" \
             "build-ios:$IOS_RESULT" \
             "build-macos:$MACOS_RESULT" \

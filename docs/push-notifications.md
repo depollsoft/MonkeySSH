@@ -265,6 +265,35 @@ gcloud logging sinks update _Default --project=monkeyssh \
 The function's own outcome logs carry no IP address and keep the default 30-day
 retention.
 
+### Deployment
+
+CI owns deploys. The `functions-test` job in `ci.yml` builds and tests
+`functions/` on pull requests and in the merge queue. After merge,
+`.github/workflows/deploy-functions.yml` tests the same commit again and runs
+`firebase deploy --only functions --force` on every push to `main` that changes
+the paths in `FUNCTIONS_PATHS` (`scripts/ci_changes.py`). It can also be run by
+hand on `main`.
+
+- **Identity:** the workflow holds no key. GitHub's OIDC token is exchanged
+  through the `github` Workload Identity pool for `functions-deployer@`, and
+  the pool's provider accepts only this repository, `refs/heads/main` and
+  `deploy-functions.yml`.
+- **Runtime:** the functions run as `push-functions@`, which may send FCM
+  messages, verify App Check tokens and read `PUSH_TICKET_KEYS`, and nothing
+  else. The default compute account is a project Editor.
+- **Setup:** `scripts/setup_functions_iam.sh` creates both accounts, their
+  roles and the pool, and is safe to re-run. The ticket secret is created once
+  by hand and never passes through CI:
+
+  ```sh
+  python3 -c 'import os,base64,json;print(json.dumps({"current":"k1","keys":{"k1":base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()}}))' \
+    | firebase functions:secrets:set PUSH_TICKET_KEYS --project monkeyssh --data-file -
+  ```
+
+  A rotation adds a new secret version (`firebase functions:secrets:access
+  PUSH_TICKET_KEYS` reads the current one). The functions pick up the latest
+  version on their next deploy, so run the workflow by hand after setting it.
+
 ## MonkeyMux
 
 ### Control operations
@@ -468,4 +497,3 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   needs approval on build-box". It needs the App Group and keychain access group
   work in #947.
 - Live Activity push updates for #922.
-- A CI job that runs `npm test` in `functions/`, and a deploy job.
