@@ -139,9 +139,18 @@ fi;
 
 const _profilePrefix =
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
-    r'__fl_profile_path=$( set +e; . ~/.profile >/dev/null 2>&1 || true; . ~/.bash_profile >/dev/null 2>&1 || true; . ~/.zprofile >/dev/null 2>&1 || true; if [ "${SHELL##*/}" = zsh ]; then . ~/.zshrc >/dev/null 2>&1 || true; elif [ "${SHELL##*/}" = bash ]; then . ~/.bashrc >/dev/null 2>&1 || true; fi; printf "%s" "$PATH" ) || true; '
-    r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path:$PATH"; unset __fl_profile_path; '
+    // Each startup file is sourced in its own subshell and only when it is
+    // readable: POSIX sh (dash, macOS /bin/sh) leaves the whole subshell when
+    // `.` names a missing file or hits a syntax error, which would otherwise
+    // drop every PATH entry the other files add.
+    r'for __fl_profile in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zprofile" "$(if [ "${SHELL##*/}" = zsh ]; then printf %s "$HOME/.zshrc"; elif [ "${SHELL##*/}" = bash ]; then printf %s "$HOME/.bashrc"; fi)"; do '
+    r'[ -n "$__fl_profile" ] && [ -r "$__fl_profile" ] && __fl_profile_path=$( set +e; . "$__fl_profile" >/dev/null 2>&1; printf "%s" "$PATH" ) && [ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path:$PATH"; '
+    'done; unset __fl_profile __fl_profile_path; '
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
+
+/// The login PATH setup above, for other host scripts that must find tools
+/// installed through profile files (Homebrew, `~/.local/bin`, nix).
+const remoteProfilePathPrefix = _profilePrefix;
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
