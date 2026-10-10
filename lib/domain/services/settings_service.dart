@@ -97,6 +97,10 @@ abstract final class SettingKeys {
   /// Saved host-scoped coding CLI launch preferences.
   static const hostCliLaunchPreferences = 'host_cli_launch_preferences';
 
+  /// Per-host SSH agent forwarding opt-ins. Kept on this device only: never
+  /// exported or imported with migration data.
+  static const hostAgentForwarding = 'host_agent_forwarding';
+
   /// App-wide default for ACP-capable agent windows.
   static const agentWindowModePreference = 'agent_window_mode_preference';
 

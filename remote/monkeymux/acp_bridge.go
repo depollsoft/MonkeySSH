@@ -665,7 +665,7 @@ func newAcpBridge(
 	}
 	cmd := newAcpProviderCommand(command)
 	cmd.Dir = expandedCwd
-	cmd.Env = inheritedEnvironment(os.Environ())
+	cmd.Env = withForwardedAgentSocket(inheritedEnvironment(os.Environ()))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

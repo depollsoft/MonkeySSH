@@ -229,6 +229,10 @@ class SecureTransferService {
     SettingKeys.hostCliLaunchPreferences,
   };
 
+  // Opt-ins that must be made again on each device: agent forwarding hands a
+  // host this phone's keys, so an import never turns it on.
+  static const _deviceOnlySettingsKeys = {SettingKeys.hostAgentForwarding};
+
   /// Creates an encrypted host transfer payload.
   Future<String> createHostPayload({
     required Host host,
@@ -358,7 +362,9 @@ class SecureTransferService {
     }
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
-      for (final setting in settings) setting.key: setting.value,
+      for (final setting in settings)
+        if (!_deviceOnlySettingsKeys.contains(setting.key))
+          setting.key: setting.value,
     };
 
     return {
@@ -1138,7 +1144,9 @@ class SecureTransferService {
     }
     final result = <String, String>{};
     for (final entry in rawSettings.entries) {
-      if (entry.key is String && entry.value is String) {
+      if (entry.key is String &&
+          entry.value is String &&
+          !_deviceOnlySettingsKeys.contains(entry.key)) {
         result[entry.key as String] = entry.value as String;
       }
     }

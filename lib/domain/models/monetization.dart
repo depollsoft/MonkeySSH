@@ -121,6 +121,9 @@ enum MonetizationFeature {
 
   /// Per-host terminal theme overrides.
   hostSpecificThemes,
+
+  /// Per-host SSH agent forwarding.
+  agentForwarding,
 }
 
 /// Presentation helpers for [MonetizationFeature].
@@ -135,6 +138,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.agentUsageRings => 'Agent usage rings',
     MonetizationFeature.concurrentAcpSessions => 'Parallel native chats',
     MonetizationFeature.hostSpecificThemes => 'Host-specific themes',
+    MonetizationFeature.agentForwarding => 'SSH agent forwarding',
   };
 
   /// Plain-language description shown in upgrade prompts.
@@ -153,6 +157,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.concurrentAcpSessions =>
       'Keep multiple native agent chats connected across hosts and providers.',
     MonetizationFeature.hostSpecificThemes => 'Save terminal theme overrides for individual hosts while keeping app-wide defaults unchanged.',
+    MonetizationFeature.agentForwarding =>
+      'Let a host use the keys on your phone, for example to git push.',
   };
 
   /// The blocked action shown at the top of feature-triggered paywalls.
@@ -169,6 +175,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.concurrentAcpSessions =>
       'Connect another native agent chat',
     MonetizationFeature.hostSpecificThemes => 'Save a host-specific theme',
+    MonetizationFeature.agentForwarding => 'Forward your SSH agent to a host',
   };
 
   /// The outcome unlocked by Pro for this feature.
@@ -182,6 +189,8 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.hostSpecificThemes => 'Unlock Pro to keep this host on its own terminal theme while preserving your app defaults.',
     MonetizationFeature.agentManagement => 'Unlock Pro to install, repair, and update agents, with automatic update checks.',
     MonetizationFeature.agentUsageRings => 'Unlock Pro to see live account-usage rings without leaving the terminal.',
+    MonetizationFeature.agentForwarding =>
+      'Unlock Pro to push and pull from a host with the keys on your phone.',
   };
 }
 

@@ -7,12 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:xterm/xterm.dart';
 
+import 'app/agent_signature_prompt.dart';
 import 'app/app.dart';
 import 'app/app_metadata.dart';
 import 'app/host_key_prompt.dart';
 import 'app/interactive_auth_prompt.dart';
 import 'data/database/database.dart';
 import 'domain/services/diagnostics_log_service.dart';
+import 'domain/services/host_agent_forwarding_service.dart';
 import 'domain/services/host_key_prompt_handler_provider.dart';
 import 'domain/services/interactive_auth_prompt.dart';
 import 'domain/services/performance_diagnostics_service.dart';
@@ -42,6 +44,9 @@ Future<void> main() async {
         ),
         interactiveAuthPromptHandlerProvider.overrideWith(
           (ref) => createInteractiveAuthPromptHandler(),
+        ),
+        sshAgentSignaturePromptHandlerProvider.overrideWith(
+          (ref) => createAgentSignaturePromptHandler(),
         ),
       ],
       child: const FluttyApp(),
