@@ -103,7 +103,7 @@ void main() {
     expect(source.route, isNull);
     expect(await source.probe(), isFalse);
 
-    expect(await source.restart(), isNull);
+    expect((await source.restart()).route, isNotNull);
     final route = source.route!;
     expect(notifications, 1);
     expect(await source.probe(), isTrue);
@@ -115,7 +115,7 @@ void main() {
     // A dead listener on a still-listed route is replaced in place.
     await session.startPortForward(_forward());
     expect(source.route, isNotNull);
-    expect(await source.restart(), isNull);
+    expect((await source.restart()).route, isNotNull);
     expect(source.route, isNotNull);
     expect(route.connectionId, source.route!.connectionId);
   });
@@ -149,5 +149,21 @@ void main() {
 
     await source.stopForward();
     expect(session.activeTunnels, isEmpty);
+  });
+
+  test('restart reports the started forward even after dispose', () async {
+    final source =
+        SessionSocksForwardRouteSource(
+            sessions: sessions,
+            portForward: _forward(),
+          )
+          ..refresh()
+          // A browser closed mid-start disposes its source before the start ends.
+          ..dispose();
+
+    final result = await source.restart();
+    expect(result.errorMessage, isNull);
+    expect(result.route?.port, session.activeTunnels.single.localPort);
+    expect(source.route, isNull);
   });
 }

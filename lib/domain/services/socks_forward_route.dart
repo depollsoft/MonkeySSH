@@ -65,6 +65,15 @@ SocksForwardRoute? findSocksForwardRoute(
 class SocksForwardStartResult {
   const SocksForwardStartResult._({this.route, this.errorMessage});
 
+  /// A result for a forward running at [route].
+  @visibleForTesting
+  const SocksForwardStartResult.running(SocksForwardRoute this.route)
+    : errorMessage = null;
+
+  /// A result for a forward that did not start, because of [errorMessage].
+  @visibleForTesting
+  const SocksForwardStartResult.failed(String this.errorMessage) : route = null;
+
   /// The running forward, when it started.
   final SocksForwardRoute? route;
 
@@ -149,8 +158,10 @@ abstract interface class SocksForwardRouteSource implements Listenable {
 
   /// Starts the forward, or restarts it when its listener stopped answering.
   ///
-  /// Returns a user-facing reason when it is still not running.
-  Future<String?> restart();
+  /// The result is read from the sessions, not from [route], so it stays
+  /// accurate after [dispose]: a browser closed mid-start still learns that
+  /// the forward came up and can stop it.
+  Future<SocksForwardStartResult> restart();
 
   /// Whether the listener still accepts connections.
   ///
@@ -225,11 +236,7 @@ class SessionSocksForwardRouteSource extends ChangeNotifier
     if (_disposed) {
       return;
     }
-    final next = findSocksForwardRoute(
-      _sessions,
-      hostId: portForward.hostId,
-      portForwardId: portForward.id,
-    );
+    final next = _findRoute();
     if (next == _route) {
       return;
     }
@@ -238,23 +245,32 @@ class SessionSocksForwardRouteSource extends ChangeNotifier
   }
 
   @override
-  Future<String?> restart() async {
+  Future<SocksForwardStartResult> restart() async {
     final current = _route;
     if (current != null) {
       final session = _sessions.getSession(current.connectionId);
       if (session != null && await session.replacePortForward(portForward)) {
         refresh();
-        if (_route != null) {
-          return null;
+        final replaced = _findRoute();
+        if (replaced != null) {
+          return SocksForwardStartResult._(route: replaced);
         }
       }
     }
     final result = await startSocksForwardRoute(_sessions, portForward);
     refresh();
-    return _route == null
-        ? result.errorMessage ?? 'Could not start the SOCKS forward.'
-        : null;
+    return result.route == null && result.errorMessage == null
+        ? const SocksForwardStartResult._(
+            errorMessage: 'Could not start the SOCKS forward.',
+          )
+        : result;
   }
+
+  SocksForwardRoute? _findRoute() => findSocksForwardRoute(
+    _sessions,
+    hostId: portForward.hostId,
+    portForwardId: portForward.id,
+  );
 
   @override
   Future<bool> probe() async {

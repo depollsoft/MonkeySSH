@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -208,4 +209,100 @@ void main() {
     await proxy.release();
     expect(calls.last, 'apply:$_sinkPort');
   });
+
+  test('reports when the sink could not be applied', () async {
+    handle((call) async {
+      if (call.method == 'apply' &&
+          (call.arguments as Map)['port'] == _sinkPort) {
+        throw PlatformException(code: 'apply_failed');
+      }
+      return null;
+    });
+    final proxy = service();
+
+    await proxy.hold(41080);
+    expect(await proxy.block(), isFalse);
+    await proxy.reroute(41080);
+    // The caller keeps the forward listening while the proxy targets it.
+    expect(await proxy.release(), isFalse);
+  });
+
+  group('iOS sink', () {
+    test('a lost sink is replaced and the proxy moved off it', () async {
+      handle((_) async => null);
+      final sinks = <_FakeSink>[];
+      final proxy = SocksBrowserProxyService(
+        platform: TargetPlatform.iOS,
+        bindSink: () async {
+          final sink = _FakeSink(50000 + sinks.length);
+          sinks.add(sink);
+          return sink;
+        },
+      );
+
+      await proxy.hold(41080);
+      expect(await proxy.release(), isTrue);
+      expect(calls.last, 'apply:50000');
+
+      // iOS reclaims the listener while the app is suspended; an error event
+      // must not escape as an uncaught error.
+      sinks.single.connections.addError(const SocketException('reclaimed'));
+      await pumpEventQueue();
+      expect(sinks, hasLength(2));
+      expect(calls.last, 'apply:50001');
+    });
+
+    test('a failed bind is retried on the next block', () async {
+      handle((_) async => null);
+      var attempts = 0;
+      final proxy = SocksBrowserProxyService(
+        platform: TargetPlatform.iOS,
+        bindSink: () async {
+          attempts++;
+          if (attempts == 1) {
+            throw const SocketException('too many open files');
+          }
+          return _FakeSink(50010);
+        },
+      );
+
+      await proxy.hold(41080);
+      expect(await proxy.block(), isFalse);
+      expect(calls, ['apply:41080']);
+      expect(await proxy.block(), isTrue);
+      expect(calls, ['apply:41080', 'apply:50010']);
+    });
+  });
+}
+
+/// A sink listener whose accept stream the test can fail, like iOS
+/// reclaiming it.
+class _FakeSink extends Stream<Socket> implements ServerSocket {
+  _FakeSink(this.port);
+
+  // Ended by the test, or left open when the test finishes.
+  // ignore: close_sinks
+  final connections = StreamController<Socket>();
+
+  @override
+  final int port;
+
+  @override
+  InternetAddress get address => InternetAddress.loopbackIPv4;
+
+  @override
+  StreamSubscription<Socket> listen(
+    void Function(Socket event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => connections.stream.listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
+
+  @override
+  Future<ServerSocket> close() async => this;
 }

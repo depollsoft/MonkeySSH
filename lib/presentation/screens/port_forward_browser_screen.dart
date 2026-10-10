@@ -537,7 +537,7 @@ class _PortForwardBrowserScreenState
       }
       tab.socksRestoreUri = null;
       restored++;
-      unawaited(_loadSafely(tab, restoreUri));
+      unawaited(_restoreSocksPage(tab, restoreUri));
     }
     if (restored > 0) {
       DiagnosticsLogService.instance.info(
@@ -546,6 +546,60 @@ class _PortForwardBrowserScreenState
         fields: {'tabs': restored},
       );
     }
+  }
+
+  /// Brings back the page a drop replaced with a blank one.
+  ///
+  /// Steps back over the blank entry rather than loading the page again, so
+  /// history keeps no blank page behind the restored one. A drop can land
+  /// mid-navigation, so [_handlePageStarted] loads [restoreUri] if going back
+  /// reaches a different page.
+  Future<void> _restoreSocksPage(
+    _PortForwardBrowserTabState tab,
+    Uri restoreUri,
+  ) async {
+    var canGoBack = false;
+    try {
+      canGoBack = await tab.controller.canGoBack();
+    } on PlatformException {
+      canGoBack = false;
+    }
+    if (!mounted ||
+        !_tabs.contains(tab) ||
+        !_canLoadPages ||
+        tab.socksRestoreUri != null) {
+      return;
+    }
+    if (canGoBack) {
+      tab
+        ..socksPendingRestoreUri = restoreUri
+        ..socksPlaceholderAhead = true;
+      try {
+        await tab.controller.goBack();
+        return;
+      } on PlatformException {
+        tab.socksPendingRestoreUri = null;
+      }
+    }
+    await _loadSafely(tab, restoreUri);
+  }
+
+  /// Steps back off a blank placeholder reached through history.
+  ///
+  /// After a restore the placeholder sits ahead of the page, so only Forward
+  /// (or a swipe) reaches it; going back returns to the page.
+  void _skipSocksPlaceholder(_PortForwardBrowserTabState tab) {
+    if (!_canLoadPages ||
+        tab.socksRestoreUri != null ||
+        tab.socksPendingRestoreUri != null ||
+        tab.skippingSocksPlaceholder) {
+      // Our own blanking or restore is still in progress.
+      return;
+    }
+    tab
+      ..skippingSocksPlaceholder = true
+      ..socksPlaceholderAhead = true;
+    unawaited(_goBackSafely(tab));
   }
 
   /// Stops every routed page and points the proxy at the sink.
@@ -563,6 +617,14 @@ class _PortForwardBrowserScreenState
     }
     if (_socksProxyHeld) {
       await _socksProxy.block();
+    }
+  }
+
+  Future<void> _goBackSafely(_PortForwardBrowserTabState tab) async {
+    try {
+      await tab.controller.goBack();
+    } on PlatformException {
+      tab.skippingSocksPlaceholder = false;
     }
   }
 
@@ -590,14 +652,25 @@ class _PortForwardBrowserScreenState
     }
     final released = _socksProxyHeld
         ? _socksProxy.release()
-        : Future<void>.value();
+        : Future<bool>.value(true);
     if (source != null) {
-      final stopForward = _socksStartedForward ? source.stopForward : null;
+      final startedForward = _socksStartedForward;
       unawaited(
-        released.whenComplete(() async {
-          await stopForward?.call();
-          source.dispose();
-        }),
+        released
+            .then((sunk) async {
+              if (!startedForward) return;
+              if (sunk) {
+                await source.stopForward();
+              } else {
+                // The proxy still targets the forward's port. Keep listening
+                // there, or another app could bind the freed port.
+                DiagnosticsLogService.instance.warning(
+                  'browser.socks',
+                  'forward_kept_after_sink_failed',
+                );
+              }
+            })
+            .whenComplete(source.dispose),
       );
     }
   }
@@ -614,8 +687,10 @@ class _PortForwardBrowserScreenState
       _socksMessage = null;
     });
     final wasStopped = source.route == null;
-    final error = await source.restart();
-    if (wasStopped && source.route != null) {
+    final result = await source.restart();
+    // Decided from the start result: a browser closed meanwhile has disposed
+    // [source], whose cached route no longer updates.
+    if (wasStopped && result.route != null) {
       if (!mounted) {
         // Closed while the forward was starting; nothing will use it.
         unawaited(source.stopForward());
@@ -629,7 +704,8 @@ class _PortForwardBrowserScreenState
     if (source.route == null) {
       setState(() {
         _socksStatus = SocksBrowserRouteStatus.down;
-        _socksMessage = error;
+        _socksMessage =
+            result.errorMessage ?? 'Could not start the SOCKS forward.';
       });
       return;
     }
@@ -736,6 +812,13 @@ class _PortForwardBrowserScreenState
     }
     if (platformController is WebKitWebViewController) {
       await platformController.setAllowsBackForwardNavigationGestures(true);
+    }
+    // The forward may have dropped, or the browser closed, during the
+    // platform calls above; Android's loadUrl skips the navigation delegate.
+    if (!mounted ||
+        !_tabs.contains(tab) ||
+        (_isSocksBrowser && (!_canLoadPages || tab.socksRestoreUri != null))) {
+      return;
     }
     await controller.loadRequest(tab.currentUri);
   }
@@ -1427,6 +1510,19 @@ class _PortForwardBrowserScreenState
     if (!mounted) return;
     final uri = Uri.tryParse(url);
     if (_isSocksPlaceholder(uri)) return;
+    if (_isSocksBrowser) {
+      final pendingRestore = tab.socksPendingRestoreUri;
+      if (pendingRestore != null) {
+        tab.socksPendingRestoreUri = null;
+        if (uri != null && uri.toString() != pendingRestore.toString()) {
+          // Going back reached another page; load the one that was showing.
+          unawaited(_loadSafely(tab, pendingRestore));
+        }
+      } else {
+        // Any other navigation moves away from the placeholder.
+        tab.socksPlaceholderAhead = false;
+      }
+    }
     setState(() {
       tab.isLoading = true;
       if (uri != null) {
@@ -1441,7 +1537,12 @@ class _PortForwardBrowserScreenState
   void _handleUrlChange(_PortForwardBrowserTabState tab, String? url) {
     if (!mounted || url == null) return;
     final uri = Uri.tryParse(url);
-    if (uri == null || _isSocksPlaceholder(uri)) return;
+    if (uri == null) return;
+    if (_isSocksPlaceholder(uri)) {
+      _skipSocksPlaceholder(tab);
+      return;
+    }
+    tab.skippingSocksPlaceholder = false;
 
     setState(() {
       tab.currentUri = _normalizeLoadedBrowserUri(uri);
@@ -1654,7 +1755,8 @@ class _PortForwardBrowserScreenState
     setState(() {
       tab
         ..canGoBack = canGoBack
-        ..canGoForward = canGoForward;
+        // Forward would only reach a drop's blank placeholder.
+        ..canGoForward = canGoForward && !tab.socksPlaceholderAhead;
     });
   }
 
@@ -1782,6 +1884,15 @@ class _PortForwardBrowserTabState {
 
   /// Address to load again once a dropped SOCKS forward is back.
   Uri? socksRestoreUri;
+
+  /// Address a restore is stepping back to, until that page starts.
+  Uri? socksPendingRestoreUri;
+
+  /// Whether the next history entry is a drop's blank placeholder.
+  bool socksPlaceholderAhead = false;
+
+  /// Whether a step back off a placeholder is in flight.
+  bool skippingSocksPlaceholder = false;
   Uri currentUri;
   String? pageTitle;
 }

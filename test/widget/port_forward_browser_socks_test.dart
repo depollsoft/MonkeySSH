@@ -57,22 +57,50 @@ class _WebViewPlatform extends WebViewPlatform {
   ) => _WebViewWidget(params);
 }
 
+/// A web view with a minimal history: loads push, goBack steps back.
 class _Controller extends Fake
     with MockPlatformInterfaceMixin
     implements PlatformWebViewController {
   final requests = <Uri>[];
+  final history = <Uri>[];
+  int index = -1;
   int reloads = 0;
+
+  /// Holds the first platform setup call, to model a slow first load.
+  Completer<void>? setupGate;
+
+  @override
+  Future<void> enableZoom(bool enabled) async => setupGate?.future;
 
   @override
   Future<void> loadRequest(LoadRequestParams params) async {
     _events.add('load:${params.uri}');
     requests.add(params.uri);
+    history
+      ..removeRange(index + 1, history.length)
+      ..add(params.uri);
+    index = history.length - 1;
   }
 
   @override
   Future<void> reload() async {
     reloads++;
   }
+
+  @override
+  Future<bool> canGoBack() async => index > 0;
+
+  @override
+  Future<bool> canGoForward() async => index < history.length - 1;
+
+  @override
+  Future<void> goBack() async {
+    _events.add('back');
+    if (index > 0) index--;
+  }
+
+  @override
+  Future<String?> getTitle() async => null;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => Future<void>.value();
@@ -82,12 +110,24 @@ class _NavigationDelegate extends Fake
     with MockPlatformInterfaceMixin
     implements PlatformNavigationDelegate {
   NavigationRequestCallback? onNavigationRequest;
+  PageEventCallback? onPageStarted;
+  UrlChangeCallback? onUrlChange;
 
   @override
   Future<void> setOnNavigationRequest(
     NavigationRequestCallback onNavigationRequest,
   ) async {
     this.onNavigationRequest = onNavigationRequest;
+  }
+
+  @override
+  Future<void> setOnPageStarted(PageEventCallback onPageStarted) async {
+    this.onPageStarted = onPageStarted;
+  }
+
+  @override
+  Future<void> setOnUrlChange(UrlChangeCallback onUrlChange) async {
+    this.onUrlChange = onUrlChange;
   }
 
   @override
@@ -101,6 +141,7 @@ class _WebViewWidget extends PlatformWebViewWidget {
   Widget build(BuildContext context) => const SizedBox.expand();
 }
 
+/// Like the real source, it stops tracking the route once disposed.
 class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   _RouteSource(this._route);
 
@@ -109,11 +150,14 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   bool probeResult = true;
   SocksForwardRoute? Function()? onRestart;
   String? restartError;
+  Completer<void>? restartGate;
+  bool disposed = false;
 
   @override
   SocksForwardRoute? get route => _route;
 
   set route(SocksForwardRoute? value) {
+    if (disposed) return;
     _route = value;
     notifyListeners();
   }
@@ -122,14 +166,21 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   void refresh() {}
 
   @override
-  Future<String?> restart() async {
+  Future<SocksForwardStartResult> restart() async {
     restarts++;
+    await restartGate?.future;
     final next = onRestart?.call();
     if (next != null) {
       route = next;
-      return null;
+      return SocksForwardStartResult.running(next);
     }
-    return restartError;
+    return SocksForwardStartResult.failed(restartError ?? 'failed');
+  }
+
+  @override
+  void dispose() {
+    disposed = true;
+    super.dispose();
   }
 
   @override
@@ -329,15 +380,162 @@ void main() {
     source.route = const SocksForwardRoute(connectionId: 2, port: 41090);
     await tester.pump();
     await tester.pump();
-    expect(_events, ['apply:41090', 'load:$page']);
+    // The page comes back by stepping off the blank entry, so Back never
+    // lands on it.
+    expect(_events, ['apply:41090', 'back']);
     expect(find.text('tunnel down'), findsNothing);
     expect(platform.controllers.single.reloads, 0);
+    final controller = platform.controllers.single;
+    expect(controller.history[controller.index], page);
 
     _events.clear();
     await closeBrowser(tester);
     // The page goes blank before the proxy moves to the sink; the forward was
     // already running, so it stays up.
     expect(_events, ['load:about:blank', 'apply:$_sinkPort']);
+  });
+
+  testWidgets('history skips the blank placeholder a drop left behind', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    await openAddress(tester, '10.0.0.5:8080');
+    final page = Uri.parse('http://10.0.0.5:8080');
+    final controller = platform.controllers.single;
+    final delegate = platform.delegates.single;
+
+    source.route = null;
+    await tester.pump();
+    source.route = const SocksForwardRoute(connectionId: 1, port: 41090);
+    await tester.pump();
+    await tester.pump();
+    delegate.onPageStarted!(page.toString());
+    delegate.onUrlChange!(UrlChange(url: page.toString()));
+    await tester.pump();
+    await tester.pump();
+    // The blank entry sits ahead of the page, so Forward stays off.
+    expect(controller.history, [page, Uri.parse('about:blank')]);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byIcon(Icons.arrow_forward),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
+
+    // Reaching it anyway (a swipe) steps straight back to the page.
+    _events.clear();
+    delegate.onUrlChange!(const UrlChange(url: 'about:blank'));
+    await tester.pump();
+    expect(_events, ['back']);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      page.toString(),
+    );
+    await closeBrowser(tester);
+  });
+
+  testWidgets('a restore that lands elsewhere loads the dropped page', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    await openAddress(tester, '10.0.0.5:8080');
+    // A link to a second page starts, and the forward drops before it commits.
+    final second = Uri.parse('http://10.0.0.6:9090');
+    platform.delegates.single.onPageStarted!(second.toString());
+    await tester.pump();
+
+    source.route = null;
+    await tester.pump();
+    source.route = const SocksForwardRoute(connectionId: 1, port: 41090);
+    await tester.pump();
+    await tester.pump();
+    expect(_events.last, 'back');
+    _events.clear();
+    // Going back reached the first page instead.
+    platform.delegates.single.onPageStarted!('http://10.0.0.5:8080');
+    await tester.pump();
+    expect(_events, ['load:$second']);
+    await closeBrowser(tester);
+  });
+
+  testWidgets('a first load still being set up does not outlive a drop', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    final controller = platform.controllers.single
+      ..setupGate = Completer<void>();
+
+    await openAddress(tester, '10.0.0.5:8080');
+    source.route = null;
+    await tester.pump();
+    controller.setupGate!.complete();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('tunnel down'), findsOneWidget);
+    expect(controller.requests, [Uri.parse('about:blank')]);
+    await closeBrowser(tester);
+  });
+
+  testWidgets('a first load still being set up does not outlive a close', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    final controller = platform.controllers.single
+      ..setupGate = Completer<void>();
+
+    await openAddress(tester, '10.0.0.5:8080');
+    await closeBrowser(tester);
+    controller.setupGate!.complete();
+    await tester.pump();
+
+    expect(controller.requests, [Uri.parse('about:blank')]);
+  });
+
+  testWidgets('closing while the forward starts stops it once it is up', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final gate = Completer<void>();
+    final source = _RouteSource(null)
+      ..restartGate = gate
+      ..onRestart = () => const SocksForwardRoute(connectionId: 1, port: 41080);
+    await pumpBrowser(tester, source);
+    expect(find.text('starting tunnel'), findsOneWidget);
+
+    await tester.tap(find.text('Close browser'));
+    await tester.pump();
+    await closeBrowser(tester);
+    expect(source.disposed, isTrue);
+    expect(_events, isNot(contains('stop-forward')));
+
+    // The start completes after the browser and its source are gone.
+    gate.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(source.route, isNull);
+    expect(_events, contains('stop-forward'));
   });
 
   testWidgets('a forward that drops while the proxy is applied ends down', (
