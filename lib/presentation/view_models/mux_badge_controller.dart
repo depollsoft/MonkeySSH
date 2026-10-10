@@ -42,6 +42,26 @@ class MuxBadgeController extends ChangeNotifier {
   final Duration retryMaxDelay;
   bool _disposed = false;
   bool get mounted => !_disposed;
+
+  Future<void>? _sessionEndHold;
+
+  /// Makes an ended session's disconnect wait until the returned callback
+  /// runs, so closing the last window can still use the connection, for
+  /// example to offer removing the window's worktree. MonkeyMux announces the
+  /// empty window list before it answers the close. The callback may run
+  /// more than once.
+  void Function() holdSessionEnd() {
+    final hold = Completer<void>();
+    _sessionEndHold = hold.future;
+    return () {
+      if (hold.isCompleted) return;
+      hold.complete();
+      if (identical(_sessionEndHold, hold.future)) {
+        _sessionEndHold = null;
+      }
+    };
+  }
+
   void _change(VoidCallback change) {
     change();
     notifyListeners();
@@ -364,6 +384,10 @@ class MuxBadgeController extends ChangeNotifier {
       return;
     }
     _muxSessionEnding = true;
+    final hold = _sessionEndHold;
+    if (hold != null) {
+      await hold;
+    }
     DiagnosticsLogService.instance.info(
       'tmux.ui',
       'monkeymux_badge_disconnect',

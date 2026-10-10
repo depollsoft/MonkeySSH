@@ -7,6 +7,7 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/port_proxy_name.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -1176,6 +1177,219 @@ void main() {
         expect(savedPreferences.startInYoloMode, isTrue);
       },
     );
+
+    testWidgets(
+      'saves worktree settings and the initial prompt on the preset',
+      (tester) async {
+        final fixture = HostEditFixture(
+          host: _testHost(
+            id: 1,
+            label: 'Agent Host',
+            autoConnectRequiresConfirmation: false,
+          ),
+        );
+        await fixture.setSurfaceSize(tester);
+
+        final presetService = _MockAgentLaunchPresetService();
+        const preset = AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          initialPrompt: 'Summarise the open tasks.',
+        );
+        when(() => presetService.getPresetForHost(1))
+            .thenAnswer((_) async => preset);
+        when(() => presetService.setPresetForHost(1, any()))
+            .thenAnswer((_) async {});
+        when(() => presetService.deletePresetForHost(1))
+            .thenAnswer((_) async {});
+
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(_proMonetizationState),
+            ),
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+          ],
+        );
+
+        expect(
+          _fieldText(tester, const Key('host-agent-initial-prompt-field')),
+          'Summarise the open tasks.',
+        );
+        final toggle = find.byKey(const Key('host-agent-worktree-switch'));
+        await tester.ensureVisible(toggle);
+        await tester.tap(toggle);
+        await tester.pump();
+        await tester.enterText(
+          find.byKey(const Key('host-agent-worktree-base-field')),
+          'origin/main',
+        );
+        await tester.pump();
+
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 350),
+        );
+
+        final saved =
+            verify(() => presetService.setPresetForHost(1, captureAny()))
+                    .captured
+                    .single
+                as AgentLaunchPreset;
+        expect(
+          saved.worktree,
+          const AgentWorktreeLaunchOptions(baseRef: 'origin/main'),
+        );
+        expect(saved.initialPrompt, 'Summarise the open tasks.');
+        expect(saved.workingDirectory, '~/src/app');
+      },
+    );
+
+    testWidgets('refuses to save a worktree branch template git rejects', (
+      tester,
+    ) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      final branchField = find.byKey(
+        const Key('host-agent-worktree-branch-field'),
+      );
+      await tester.ensureVisible(branchField);
+      await tester.enterText(branchField, 'agent..{id}');
+      await tester.pump();
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(
+          tester,
+          const Key('host-agent-worktree-branch-field'),
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('focuses the worktree field that needs fixing', (tester) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      final baseField = find.byKey(const Key('host-agent-worktree-base-field'));
+      await tester.ensureVisible(baseField);
+      await tester.enterText(baseField, '--upload-pack=x');
+      await tester.pump();
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-worktree-base-field')),
+        isTrue,
+      );
+    });
+
+    testWidgets('requires a session before saving a worktree preset', (
+      tester,
+    ) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-tmux-session-field')),
+        isTrue,
+      );
+    });
 
     testWidgets('validates agent tmux flags before saving', (tester) async {
       final fixture = HostEditFixture(

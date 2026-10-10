@@ -11,25 +11,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_mcp_server.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
 import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
+import '../support/fake_agent_worktree.dart';
 
 class _FakeActiveSessions extends ActiveSessionsNotifier {
   _FakeActiveSessions({
@@ -61,6 +67,86 @@ class _MockAgentLaunchPresetService extends Mock
 
 class _MockHostCliLaunchPreferencesService extends Mock
     implements HostCliLaunchPreferencesService {}
+
+/// A connected session whose provider probe resolves Cursor Agent.
+SshSession _cursorSession() {
+  final client = MockSshClient();
+  final exec = MockSSHSession();
+  when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.6');
+  when(() => exec.stdout).thenAnswer(
+    (_) => Stream.value(
+      Uint8List.fromList(
+        utf8.encode('cursor-agent\u001f/Users/demo/.local/bin/cursor-agent\n'),
+      ),
+    ),
+  );
+  when(() => exec.stderr).thenAnswer((_) => const Stream.empty());
+  when(() => exec.done).thenAnswer((_) => Future<void>.value());
+  when(exec.close).thenAnswer((_) {});
+  when(() => client.execute(any(), pty: any(named: 'pty')))
+      .thenAnswer((_) async => exec);
+  return SshSession(
+    connectionId: 7,
+    hostId: 1,
+    client: client,
+    config: const SshConnectionConfig(
+      hostname: 'alpha.example.com',
+      port: 22,
+      username: 'root',
+    ),
+  );
+}
+
+/// Records the prompts a launch sends, and can hold a start open.
+class _PromptRecordingManager extends FakeAcpSessionManager {
+  final prompts = <List<AcpContentBlock>>[];
+
+  /// Holds [startNewSession] until completed.
+  Completer<void>? startGate;
+
+  /// Throws synchronously from [prompt], like an untracked session key.
+  bool promptThrows = false;
+
+  @override
+  Future<AcpPromptResult> prompt(
+    AcpSessionKey key,
+    List<AcpContentBlock> content,
+  ) {
+    if (promptThrows) throw StateError('Session is not tracked.');
+    prompts.add(content);
+    return Future.value(
+      const AcpPromptResult(stopReason: AcpStopReason.endTurn),
+    );
+  }
+
+  @override
+  Future<AcpSessionLaunchResult> startNewSession({
+    required int hostId,
+    required String providerId,
+    required String cwd,
+    MonkeyMuxInstallConfirmation? confirmInstall,
+    AcpAuthenticationChooser? chooseAuthentication,
+    AcpLaunchCommand? launchCommandOverride,
+    String? providerLabelOverride,
+    bool autoApprovePermissions = false,
+    List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    AcpSessionWorkspaceOptions? workspace,
+  }) async {
+    await startGate?.future;
+    return super.startNewSession(
+      hostId: hostId,
+      providerId: providerId,
+      cwd: cwd,
+      confirmInstall: confirmInstall,
+      chooseAuthentication: chooseAuthentication,
+      launchCommandOverride: launchCommandOverride,
+      providerLabelOverride: providerLabelOverride,
+      autoApprovePermissions: autoApprovePermissions,
+      replace: replace,
+      workspace: workspace,
+    );
+  }
+}
 
 class _FailingRecentSessionsManager extends FakeAcpSessionManager {
   @override
@@ -123,6 +209,7 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
   ),
   SshSession? activeSession,
   List<AcpProvider>? providers,
+  AgentWorktreeLauncher? worktreeLauncher,
 }) async {
   AcpSessionKey? returned;
   var completed = false;
@@ -155,6 +242,8 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
           launchPreferencesService,
         ),
         allHostsProvider.overrideWith((ref) => Stream.value(<Host>[_host()])),
+        if (worktreeLauncher != null)
+          agentWorktreeLauncherProvider.overrideWithValue(worktreeLauncher),
         acpProvidersProvider.overrideWith(
           (ref) => Stream.value(
             providers ??
@@ -201,6 +290,197 @@ Future<AcpSessionKey? Function()> _pumpAndLaunch(
 
 void main() {
   final key = fakeAcpKey();
+
+  group('host preset worktree and initial prompt', () {
+    const preset = AgentLaunchPreset(
+      tool: AgentLaunchTool.cursorAgent,
+      workingDirectory: '~/src/app',
+      worktree: AgentWorktreeLaunchOptions(baseRef: 'origin/main'),
+      initialPrompt: 'Read AGENTS.md and list the open tasks.',
+    );
+    final cursorKey = fakeAcpKey(providerId: AcpBuiltinProviderIds.cursorAgent);
+    late FakeAgentWorktreeService worktrees;
+    late MemoryAgentWorktreeRegistry registry;
+    late AgentWorktreeLauncher launcher;
+
+    setUp(() {
+      worktrees = FakeAgentWorktreeService();
+      registry = MemoryAgentWorktreeRegistry();
+      launcher = AgentWorktreeLauncher(
+        service: worktrees,
+        registry: registry,
+        wait: (_) async {},
+      );
+    });
+
+    testWidgets('starts in a new worktree and sends the prompt exactly once', (
+      tester,
+    ) async {
+      final manager = _PromptRecordingManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(cursorKey);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        preset: preset,
+        initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+        activeSession: _cursorSession(),
+        worktreeLauncher: launcher,
+      );
+
+      expect(result(), cursorKey);
+      final record = worktrees.created.single;
+      expect(record.branch, startsWith('agent/cursor-agent-'));
+      expect(manager.starts.single.cwd, record.startDirectory);
+      expect(manager.prompts, hasLength(1));
+      expect(
+        (manager.prompts.single.single as AcpTextContent).text,
+        'Read AGENTS.md and list the open tasks.',
+      );
+      expect(worktrees.removed, isEmpty);
+      expect(registry.records, [record]);
+    });
+
+    testWidgets(
+      'swiping the sheet away mid-launch keeps the worktree of a session that '
+      'starts',
+      (tester) async {
+        final manager = _PromptRecordingManager()
+          ..startGate = Completer<void>()
+          ..startNewSessionResult = AcpSessionLaunchStarted(cursorKey);
+
+        final result = await _pumpAndLaunch(
+          tester,
+          manager,
+          preset: preset,
+          initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+          activeSession: _cursorSession(),
+          worktreeLauncher: launcher,
+          startSession: false,
+        );
+        final startButton = find.widgetWithText(FilledButton, 'Start session');
+        await tester.ensureVisible(startButton);
+        await tester.pumpAndSettle();
+        await tester.tap(startButton);
+        // The Start button spins while the launch is held, so pump by time.
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+        expect(worktrees.created, hasLength(1));
+        // The drag handle pops the route directly, past the PopScope guard.
+        tester.state<NavigatorState>(find.byType(Navigator)).pop();
+        await tester.pumpAndSettle();
+        expect(find.text('new agent session'), findsNothing);
+
+        manager.startGate!.complete();
+        await tester.pumpAndSettle();
+
+        expect(result(), isNull);
+        expect(worktrees.removed, isEmpty);
+        expect(registry.records, worktrees.created);
+        expect(manager.prompts, hasLength(1));
+      },
+    );
+
+    testWidgets(
+      'a prompt that cannot be sent still reports the session started',
+      (tester) async {
+        final manager = _PromptRecordingManager()
+          ..promptThrows = true
+          ..startNewSessionResult = AcpSessionLaunchStarted(cursorKey);
+
+        final result = await _pumpAndLaunch(
+          tester,
+          manager,
+          preset: preset,
+          initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+          activeSession: _cursorSession(),
+          worktreeLauncher: launcher,
+        );
+
+        expect(result(), cursorKey);
+        expect(
+          find.text('Could not start the session. Try again.'),
+          findsNothing,
+        );
+        expect(worktrees.removed, isEmpty);
+      },
+    );
+
+    testWidgets('rolls the worktree back when the session fails to start', (
+      tester,
+    ) async {
+      final manager = _PromptRecordingManager()
+        ..startNewSessionResult = const AcpSessionLaunchFailed(
+          null,
+          AcpSessionError(
+            kind: AcpSessionErrorKind.unknown,
+            message: 'The agent exited.',
+          ),
+        );
+
+      await _pumpAndLaunch(
+        tester,
+        manager,
+        preset: preset,
+        initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+        activeSession: _cursorSession(),
+        worktreeLauncher: launcher,
+      );
+
+      expect(find.text('The agent exited.'), findsOneWidget);
+      expect(worktrees.removed, worktrees.created);
+      expect(worktrees.created, hasLength(1));
+      expect(registry.records, isEmpty);
+      expect(manager.prompts, isEmpty);
+    });
+
+    testWidgets('both preset options can be turned off for one start', (
+      tester,
+    ) async {
+      final manager = _PromptRecordingManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(cursorKey);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        preset: preset,
+        initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+        activeSession: _cursorSession(),
+        worktreeLauncher: launcher,
+        startSession: false,
+      );
+      final worktreeSwitch = find.byKey(
+        const Key('acp-new-session-worktree-switch'),
+      );
+      final promptSwitch = find.byKey(
+        const Key('acp-new-session-initial-prompt-switch'),
+      );
+      expect(find.text('origin/main · ~/src/app'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('acp-new-session-cwd-field')),
+            )
+            .enabled,
+        isFalse,
+      );
+      await tester.ensureVisible(worktreeSwitch);
+      await tester.tap(worktreeSwitch);
+      await tester.ensureVisible(promptSwitch);
+      await tester.tap(promptSwitch);
+      await tester.pumpAndSettle();
+      final startButton = find.widgetWithText(FilledButton, 'Start session');
+      await tester.ensureVisible(startButton);
+      await tester.tap(startButton);
+      await tester.pumpAndSettle();
+
+      expect(result(), cursorKey);
+      expect(worktrees.created, isEmpty);
+      expect(manager.starts.single.cwd, '~/src/app');
+      expect(manager.prompts, isEmpty);
+    });
+  });
 
   testWidgets('generic sheet launches Cursor through its resolved binary', (
     tester,
@@ -648,6 +928,56 @@ void main() {
         ),
       );
     }
+
+    testWidgets('a sign-in retry reuses the worktree and prompts once', (
+      tester,
+    ) async {
+      final worktrees = FakeAgentWorktreeService();
+      final registry = MemoryAgentWorktreeRegistry();
+      final manager = _PromptRecordingManager()
+        ..startNewSessionResults.add(
+          AcpSessionLaunchFailed(
+            null,
+            authRequired.error,
+            terminalAuthentication: AcpTerminalAuthLaunch.forMethod(
+              hostId: 1,
+              providerId: AcpBuiltinProviderIds.copilotCli,
+              providerLabel: 'Copilot CLI',
+              method: terminalLogin,
+              launchArgv: const ['/usr/bin/copilot', '--acp'],
+              workingDirectory: '/repo',
+            ),
+          ),
+        )
+        ..startNewSessionResult = AcpSessionLaunchStarted(key);
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        preset: const AgentLaunchPreset(
+          tool: AgentLaunchTool.copilotCli,
+          workingDirectory: '~/src/app',
+          worktree: AgentWorktreeLaunchOptions(),
+          initialPrompt: 'Summarise the open tasks.',
+        ),
+        activeSession: signInSession(),
+        worktreeLauncher: AgentWorktreeLauncher(
+          service: worktrees,
+          registry: registry,
+          wait: (_) async {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(result(), key);
+      expect(manager.starts, hasLength(2));
+      expect(worktrees.created, hasLength(1));
+      expect(manager.starts.map((start) => start.cwd).toSet(), {
+        worktrees.created.single.startDirectory,
+      });
+      expect(worktrees.removed, isEmpty);
+      expect(manager.prompts, hasLength(1));
+    });
 
     testWidgets('a terminal method runs in the sign-in terminal and relaunches '
         'after a zero exit status', (tester) async {
