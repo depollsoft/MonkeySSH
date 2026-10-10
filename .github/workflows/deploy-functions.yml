@@ -69,3 +69,26 @@ jobs:
       # prompt.
       - name: Deploy
         run: npx --yes firebase-tools@15.28.1 deploy --only functions --project monkeyssh --non-interactive --force
+
+      # firebase-tools can exit 0 after a function fails to create: on the
+      # first deploy pushNotify lost a 409 race for the source bucket and the
+      # job still passed. Fail unless each endpoint answers as deployed code
+      # does. A missing function answers 404.
+      - name: Verify deployment
+        run: |
+          base=https://us-central1-monkeyssh.cloudfunctions.net
+          expect() {
+            local want="$1" name="$2" body="$3" got=""
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              got=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/$name" \
+                -H 'Content-Type: application/json' -d "$body")
+              [ "$got" = "$want" ] && { echo "$name: $got"; return 0; }
+              sleep 10
+            done
+            echo "::error title=$name not deployed::expected HTTP $want, got $got"
+            return 1
+          }
+          status=0
+          expect 400 pushNotify '{}' || status=1
+          expect 401 registerPushDevice '{"data":{}}' || status=1
+          exit "$status"
