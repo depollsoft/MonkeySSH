@@ -123,6 +123,10 @@ enum AgentWorktreeErrorKind {
   /// `git check-ref-format` rejected the branch name.
   invalidBranch,
 
+  /// An existing branch is a parent folder of the new branch name, such as a
+  /// branch `agent` blocking `agent/claude-1`.
+  branchConflict,
+
   /// The base ref does not name a commit.
   invalidBase,
 
@@ -140,6 +144,18 @@ enum AgentWorktreeErrorKind {
 
   /// The worktree has uncommitted changes, so it was kept.
   dirty,
+
+  /// The worktree's detached HEAD holds commits no branch or tag contains,
+  /// so it was kept.
+  unsavedCommits,
+
+  /// A rebase, merge, cherry-pick, revert or bisect is in progress in the
+  /// worktree, so it was kept.
+  operationInProgress,
+
+  /// The folder is no longer the worktree MonkeySSH recorded, so it was left
+  /// alone and the record forgotten.
+  stale,
 
   /// The host is not a POSIX shell host.
   unsupportedHost,
@@ -172,6 +188,9 @@ final class AgentWorktreeException implements Exception {
         'The repository folder is not a git repository.',
       AgentWorktreeErrorKind.invalidBranch =>
         'git rejected the branch name. Check the branch template.',
+      AgentWorktreeErrorKind.branchConflict =>
+        'An existing branch blocks the new branch name. Change the branch '
+            'template so it does not start with that branch. Blocking branch:',
       AgentWorktreeErrorKind.invalidBase =>
         'The base ref does not name a commit in the repository.',
       AgentWorktreeErrorKind.collision =>
@@ -183,6 +202,14 @@ final class AgentWorktreeException implements Exception {
         'git could not remove the worktree.',
       AgentWorktreeErrorKind.dirty =>
         'The worktree has uncommitted changes, so it was kept.',
+      AgentWorktreeErrorKind.unsavedCommits =>
+        'The worktree has commits that are not on any branch, so it was kept.',
+      AgentWorktreeErrorKind.operationInProgress =>
+        'A rebase, merge or similar operation is in progress in the '
+            'worktree, so it was kept.',
+      AgentWorktreeErrorKind.stale =>
+        'The folder is no longer the worktree MonkeySSH created, so it was '
+            'left alone.',
       AgentWorktreeErrorKind.unsupportedHost =>
         'Worktree launches need a macOS or Linux host.',
       AgentWorktreeErrorKind.invalidOptions =>
@@ -207,6 +234,9 @@ final class AgentWorktreeStatus {
     required this.changedFiles,
     required this.ignoredEntries,
     required this.branchHasNewCommits,
+    this.unsavedCommits = false,
+    this.operationInProgress,
+    this.stale = false,
   });
 
   /// Whether the worktree folder still exists.
@@ -222,8 +252,24 @@ final class AgentWorktreeStatus {
   /// kept after the worktree is removed.
   final bool branchHasNewCommits;
 
+  /// Whether HEAD is detached on commits no branch or tag contains, which
+  /// removing the worktree would make unreachable.
+  final bool unsavedCommits;
+
+  /// The git operation stopped part-way in the worktree, such as
+  /// `rebase-merge` or `MERGE_HEAD`, if any.
+  final String? operationInProgress;
+
+  /// Whether the folder is no longer the worktree MonkeySSH recorded, for
+  /// example because someone made another worktree at the same path.
+  final bool stale;
+
   /// Whether removing the worktree would discard uncommitted work.
   bool get isDirty => changedFiles > 0;
+
+  /// Whether MonkeySSH refuses to remove the worktree.
+  bool get blocksRemoval =>
+      isDirty || unsavedCommits || operationInProgress != null;
 }
 
 /// Result of removing a worktree.
@@ -236,23 +282,130 @@ final class AgentWorktreeRemoval {
   final bool branchDeleted;
 }
 
+/// Branch, folder and base commit chosen for a new worktree before git
+/// creates it, so the app can record the worktree first.
+@immutable
+final class AgentWorktreePlan {
+  /// Creates a plan.
+  const AgentWorktreePlan({
+    required this.branch,
+    required this.path,
+    required this.baseCommit,
+    required this.repository,
+    required this.subdirectory,
+  });
+
+  /// Branch to create.
+  final String branch;
+
+  /// Absolute worktree folder to create.
+  final String path;
+
+  /// Commit the branch starts at.
+  final String baseCommit;
+
+  /// Top-level directory of the repository, without symlinks.
+  final String repository;
+
+  /// Path of the configured repository folder inside the repository, such
+  /// as `packages/app/`, or empty for the top level.
+  final String subdirectory;
+
+  /// A record for this plan before git has created the worktree.
+  AgentWorktreeRecord pendingRecord({
+    required int hostId,
+    required DateTime createdAt,
+  }) => AgentWorktreeRecord(
+    hostId: hostId,
+    repository: repository,
+    path: path,
+    branch: branch,
+    baseCommit: baseCommit,
+    createdAt: createdAt.toUtc(),
+    pending: true,
+  );
+}
+
 const _marker = 'MSSH_WT';
 const _separator = '\x1f';
 const _createTimeout = Duration(minutes: 3);
 const _commandTimeout = Duration(seconds: 30);
 
-/// Puts common git locations (Homebrew first, ahead of the macOS command-line
-/// tools shim) on the minimal PATH that SSH exec channels start with.
-const _pathPrefix =
-    r'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.nix-profile/bin:$HOME/homebrew/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"';
-
-const _scriptPrelude =
-    '$_pathPrefix\n'
-    r'''
+/// Builds the command path for worktree scripts and defines the output
+/// helpers.
+///
+/// SSH exec channels start with a minimal PATH. The script adds common git
+/// and tmux locations (Homebrew ahead of the macOS command-line tools shim,
+/// Linuxbrew and MacPorts), then asks the user's POSIX login shell for the
+/// PATH its profiles set, the way the terminal's own shell sees it. A marker
+/// separates that PATH from anything the profiles print.
+const _pathSetup = r'''
+PATH="$HOME/.local/bin:$HOME/bin:$HOME/.nix-profile/bin:$HOME/homebrew/bin:/opt/homebrew/bin:/home/linuxbrew/.linuxbrew/bin:/opt/local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+case "${SHELL##*/}" in
+  bash|zsh|ksh|sh|dash)
+    mssh_login_path=$("$SHELL" -lc 'printf "\nMSSH_PATH=%s\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^MSSH_PATH=//p' | tail -n 1)
+    [ -z "$mssh_login_path" ] || PATH="$mssh_login_path:$PATH"
+    ;;
+esac
+export PATH
 mssh_emit() { printf 'MSSH_WT'; for mssh_f in "$@"; do printf '\037%s' "$mssh_f"; done; printf '\n'; }
 mssh_fail() { mssh_emit error "$1" "$2"; exit 0; }
 mssh_clean() { printf '%s' "$1" | tr -d '\037\r' | tr '\n' ' ' | cut -c1-240; }
+''';
+
+const _gitPrelude =
+    '$_pathSetup'
+    '''
 command -v git >/dev/null 2>&1 || mssh_fail no_git ''
+''';
+
+/// Shell helpers shared by the scripts that act on a recorded worktree.
+///
+/// `mssh_identity` sets `stale=yes` unless `$wt` is still a worktree of
+/// `$repo` with HEAD on the recorded branch or detached. `mssh_safety` sets
+/// `count` (changed files), `unsaved` (detached commits no ref contains) and
+/// `operation` (a rebase, merge, cherry-pick, revert or bisect in progress).
+/// `mssh_delete_branch` deletes the branch only while it points at `$base`
+/// and no worktree has it checked out.
+const _recordHelpers = r'''
+mssh_identity() {
+  stale=no
+  head_ref=
+  mssh_here=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || { stale=yes; return; }
+  mssh_here=$(cd -P -- "$mssh_here" >/dev/null 2>&1 && pwd -P) || { stale=yes; return; }
+  mssh_phys=$(cd -P -- "$wt" >/dev/null 2>&1 && pwd -P) || { stale=yes; return; }
+  [ "$mssh_here" = "$mssh_phys" ] || { stale=yes; return; }
+  mssh_mine=$(cd -- "$wt" >/dev/null 2>&1 && cd -P -- "$(git rev-parse --git-common-dir 2>/dev/null)" >/dev/null 2>&1 && pwd -P) || { stale=yes; return; }
+  mssh_theirs=$(cd -- "$repo" >/dev/null 2>&1 && cd -P -- "$(git rev-parse --git-common-dir 2>/dev/null)" >/dev/null 2>&1 && pwd -P) || { stale=yes; return; }
+  [ "$mssh_mine" = "$mssh_theirs" ] || { stale=yes; return; }
+  head_ref=$(git -C "$wt" symbolic-ref -q HEAD 2>/dev/null)
+  if [ -n "$head_ref" ] && [ "$head_ref" != "refs/heads/$branch" ]; then stale=yes; fi
+}
+mssh_safety() {
+  changes=$(git -C "$wt" status --porcelain=v1 --untracked-files=normal 2>/dev/null) || mssh_fail status_failed ''
+  count=0
+  [ -z "$changes" ] || count=$(printf '%s\n' "$changes" | wc -l | tr -d ' ')
+  unsaved=no
+  if [ -z "$head_ref" ]; then
+    mssh_head=$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)
+    if [ -n "$mssh_head" ] && [ -z "$(git -C "$wt" for-each-ref --contains "$mssh_head" --count=1 --format=x 2>/dev/null)" ]; then
+      unsaved=yes
+    fi
+  fi
+  operation=
+  for mssh_p in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    mssh_g=$(cd -- "$wt" >/dev/null 2>&1 && git rev-parse --git-path "$mssh_p" 2>/dev/null) || continue
+    case "$mssh_g" in /*) ;; *) mssh_g="$wt/$mssh_g" ;; esac
+    if [ -e "$mssh_g" ]; then operation=$mssh_p; break; fi
+  done
+}
+mssh_delete_branch() {
+  deleted=no
+  if git -C "$repo" worktree list --porcelain 2>/dev/null | grep -F -x -q -e "branch refs/heads/$branch"; then
+    return
+  fi
+  git -C "$repo" update-ref -d "refs/heads/$branch" "$base" >/dev/null 2>&1 && deleted=yes
+}
 ''';
 
 /// Quotes [value] as one literal POSIX shell word.
@@ -272,17 +425,28 @@ String quoteAgentWorktreeRemotePath(String path) {
   return quoteAgentWorktreeShellWord(path);
 }
 
-/// Builds the script that creates a worktree for [target] in [repository].
+/// Shell condition that is true while `$cand_branch` or `$cand_wt` is taken:
+/// an existing branch, a branch nested under it, a file or folder, or a
+/// registered (possibly missing) worktree.
+const _candidateTaken = r'''
+
+git -C "$top" show-ref --verify --quiet "refs/heads/$cand_branch" ||
+  [ -n "$(git -C "$top" for-each-ref --count=1 --format=x "refs/heads/$cand_branch/" 2>/dev/null)" ] ||
+  [ -e "$cand_wt" ] || [ -L "$cand_wt" ] ||
+  git -C "$top" worktree list --porcelain 2>/dev/null | grep -F -x -q -e "worktree $cand_wt"''';
+
+/// Builds the script that picks the branch and folder for [target] in
+/// [repository] without creating anything.
 @visibleForTesting
-String buildAgentWorktreeCreateScript({
+String buildAgentWorktreePlanScript({
   required String repository,
   required String baseRef,
   required AgentWorktreeTarget target,
 }) {
   final worktree = target.pathIsRepositoryRelative
-      ? '"\$top"${quoteAgentWorktreeShellWord(target.path)}'
+      ? '"\$toplevel"${quoteAgentWorktreeShellWord(target.path)}'
       : quoteAgentWorktreeRemotePath(target.path);
-  return '$_scriptPrelude'
+  return '$_gitPrelude'
       'repo=${quoteAgentWorktreeRemotePath(repository)}\n'
       'branch=${quoteAgentWorktreeShellWord(target.branch)}\n'
       'base=${quoteAgentWorktreeShellWord(baseRef)}\n'
@@ -290,9 +454,17 @@ String buildAgentWorktreeCreateScript({
 [ -d "$repo" ] || mssh_fail missing_repository ''
 top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || mssh_fail not_repository ''
 [ -n "$top" ] || mssh_fail not_repository ''
+toplevel=$(cd -P -- "$top" >/dev/null 2>&1 && pwd -P) || toplevel=$top
 prefix=$(git -C "$repo" rev-parse --show-prefix 2>/dev/null)
 checked=$(git check-ref-format --branch "$branch" 2>/dev/null) || mssh_fail invalid_branch ''
 [ "$checked" = "$branch" ] || mssh_fail invalid_branch ''
+mssh_parent=$branch
+while :; do
+  case "$mssh_parent" in */*) mssh_parent=${mssh_parent%/*} ;; *) break ;; esac
+  if git -C "$top" show-ref --verify --quiet "refs/heads/$mssh_parent"; then
+    mssh_fail branch_conflict "$(mssh_clean "$mssh_parent")"
+  fi
+done
 commit=$(git -C "$top" rev-parse --verify --quiet "$base^{commit}" 2>/dev/null) || mssh_fail invalid_base ''
 [ -n "$commit" ] || mssh_fail invalid_base ''
 '''
@@ -301,26 +473,47 @@ commit=$(git -C "$top" rev-parse --verify --quiet "$base^{commit}" 2>/dev/null) 
 cand_branch=$branch
 cand_wt=$wt
 n=1
-while git -C "$top" show-ref --verify --quiet "refs/heads/$cand_branch" ||
-  [ -e "$cand_wt" ] || [ -L "$cand_wt" ] ||
-  git -C "$top" worktree list --porcelain 2>/dev/null | grep -F -x -q -e "worktree $cand_wt"; do
+while '''
+      '$_candidateTaken'
+      '; do\n'
+      r'''
   n=$((n + 1))
   [ "$n" -le 50 ] || mssh_fail collision ''
   cand_branch="$branch-$n"
   cand_wt="$wt-$n"
 done
 git check-ref-format --branch "$cand_branch" >/dev/null 2>&1 || mssh_fail invalid_branch ''
+mssh_emit plan "$cand_branch" "$cand_wt" "$commit" "$toplevel" "$prefix"
+''';
+}
+
+/// Builds the script that creates the worktree [plan] chose.
+@visibleForTesting
+String buildAgentWorktreeAddScript(AgentWorktreePlan plan) =>
+    '$_gitPrelude'
+    'top=${quoteAgentWorktreeShellWord(plan.repository)}\n'
+    'cand_branch=${quoteAgentWorktreeShellWord(plan.branch)}\n'
+    'cand_wt=${quoteAgentWorktreeShellWord(plan.path)}\n'
+    'commit=${quoteAgentWorktreeShellWord(plan.baseCommit)}\n'
+    'prefix=${quoteAgentWorktreeShellWord(plan.subdirectory)}\n'
+    r'''
+[ -d "$top" ] || mssh_fail missing_repository ''
+if '''
+    '$_candidateTaken'
+    '; then\n'
+    r'''
+  mssh_fail collision ''
+fi
+git check-ref-format --branch "$cand_branch" >/dev/null 2>&1 || mssh_fail invalid_branch ''
 if ! err=$(git -C "$top" -c core.hooksPath=/dev/null worktree add -b "$cand_branch" -- "$cand_wt" "$commit" 2>&1 >/dev/null); then
   mssh_fail add_failed "$(mssh_clean "$err")"
 fi
 phys=$(cd -P -- "$cand_wt" >/dev/null 2>&1 && pwd -P) || phys=$cand_wt
 logical=$(cd -- "$cand_wt" >/dev/null 2>&1 && pwd) || logical=$cand_wt
-toplevel=$(cd -P -- "$top" >/dev/null 2>&1 && pwd -P) || toplevel=$top
 start=$phys
 if [ -n "$prefix" ] && [ -d "$phys/${prefix%/}" ]; then start=$phys/${prefix%/}; fi
-mssh_emit ok "$cand_branch" "$phys" "$logical" "$commit" "$toplevel" "$start"
+mssh_emit ok "$phys" "$logical" "$start"
 ''';
-}
 
 String _recordAssignments(AgentWorktreeRecord record) =>
     'repo=${quoteAgentWorktreeShellWord(record.repository)}\n'
@@ -331,59 +524,67 @@ String _recordAssignments(AgentWorktreeRecord record) =>
 /// Builds the script that reports a recorded worktree's state.
 @visibleForTesting
 String buildAgentWorktreeStatusScript(AgentWorktreeRecord record) =>
-    '$_scriptPrelude${_recordAssignments(record)}'
+    '$_gitPrelude$_recordHelpers${_recordAssignments(record)}'
     r'''
-[ -e "$wt" ] || { mssh_emit missing; exit 0; }
-changes=$(git -C "$wt" status --porcelain=v1 --untracked-files=normal 2>/dev/null) || mssh_fail status_failed ''
-count=0
-[ -z "$changes" ] || count=$(printf '%s\n' "$changes" | wc -l | tr -d ' ')
-ignored=$(git -C "$wt" status --porcelain=v1 --ignored 2>/dev/null | grep -c '^!! ')
+[ -e "$wt" ] || [ -L "$wt" ] || { mssh_emit missing; exit 0; }
+mssh_identity
+[ "$stale" = no ] || { mssh_emit stale; exit 0; }
+mssh_safety
+ignored=$(git -C "$wt" status --porcelain=v1 --ignored --untracked-files=normal 2>/dev/null | grep -c '^!! ')
 tip=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null)
 moved=no
 [ -z "$tip" ] || [ "$tip" = "$base" ] || moved=yes
-mssh_emit status "$count" "${ignored:-0}" "$moved"
+mssh_emit status "$count" "${ignored:-0}" "$moved" "$unsaved" "$operation"
 ''';
 
 /// Builds the script that removes a recorded worktree.
 ///
-/// It refuses a worktree with uncommitted changes and never forces git, and
-/// it deletes the branch only while the branch still points at the commit it
-/// was created at, so no commit is ever lost.
+/// It checks that the folder is still the recorded worktree, refuses one with
+/// uncommitted changes, detached commits no ref contains, or a rebase, merge,
+/// cherry-pick, revert or bisect in progress, and never forces git. It
+/// deletes the branch only while the branch still points at the commit it
+/// was created at and no worktree has it checked out, so no commit is lost.
 @visibleForTesting
 String buildAgentWorktreeRemoveScript(AgentWorktreeRecord record) =>
-    '$_scriptPrelude${_recordAssignments(record)}'
+    '$_gitPrelude$_recordHelpers${_recordAssignments(record)}'
     r'''
 if [ ! -e "$wt" ] && [ ! -L "$wt" ]; then
   git -C "$repo" worktree prune >/dev/null 2>&1
-  deleted=no
-  git -C "$repo" update-ref -d "refs/heads/$branch" "$base" >/dev/null 2>&1 && deleted=yes
+  mssh_delete_branch
   mssh_emit removed "$deleted"
   exit 0
 fi
-changes=$(git -C "$wt" status --porcelain=v1 --untracked-files=normal 2>/dev/null) || mssh_fail status_failed ''
-if [ -n "$changes" ]; then
-  mssh_emit dirty "$(printf '%s\n' "$changes" | wc -l | tr -d ' ')"
-  exit 0
-fi
+mssh_identity
+[ "$stale" = no ] || { mssh_emit stale; exit 0; }
+mssh_safety
+[ "$count" = 0 ] || { mssh_emit dirty "$count"; exit 0; }
+[ "$unsaved" = no ] || { mssh_emit blocked unsaved_commits; exit 0; }
+[ -z "$operation" ] || { mssh_emit blocked "$operation"; exit 0; }
 if ! err=$(git -C "$repo" worktree remove -- "$wt" 2>&1 >/dev/null); then
   mssh_fail remove_failed "$(mssh_clean "$err")"
 fi
-deleted=no
-git -C "$repo" update-ref -d "refs/heads/$branch" "$base" >/dev/null 2>&1 && deleted=yes
+mssh_delete_branch
 mssh_emit removed "$deleted"
 ''';
 
-/// Builds the script that reports whether tmux session [name] exists.
+/// Builds the script that lists the pane directories of tmux session [name].
+///
+/// It reports `unknown` when tmux cannot be found or answers unexpectedly,
+/// `absent` when the session does not exist, and otherwise `present` with
+/// each pane's directory.
 @visibleForTesting
-String buildAgentWorktreeTmuxSessionProbeScript(String name) =>
-    '$_pathPrefix\n'
+String buildAgentWorktreeTmuxSessionScript(String name) =>
+    '$_pathSetup'
     'target=${quoteAgentWorktreeShellWord('=$name')}\n'
     r'''
-if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$target" 2>/dev/null; then
-  printf 'MSSH_WT\037present\n'
-else
-  printf 'MSSH_WT\037absent\n'
-fi
+command -v tmux >/dev/null 2>&1 || { mssh_emit unknown; exit 0; }
+tmux has-session -t "$target" 2>/dev/null || { mssh_emit absent; exit 0; }
+dirs=$(tmux list-panes -s -t "$target" -F '#{pane_current_path}' 2>/dev/null) || { mssh_emit unknown; exit 0; }
+printf '%s\n' "$dirs" | {
+  set --
+  while IFS= read -r mssh_d; do [ -z "$mssh_d" ] || set -- "$@" "$mssh_d"; done
+  mssh_emit present "$@"
+}
 ''';
 
 /// Creates and removes agent worktrees on a host.
@@ -391,12 +592,81 @@ class AgentWorktreeService {
   /// Creates the service.
   const AgentWorktreeService();
 
-  /// Creates a worktree on a new branch for a launch.
+  /// Picks the branch and folder for a launch without creating anything.
   ///
   /// [repository] is the configured repository path; when it points inside
   /// the repository, the agent starts in the matching subdirectory of the new
   /// worktree. Collisions with an existing branch, folder or registered
   /// worktree get a numeric suffix rather than touching what is there.
+  Future<AgentWorktreePlan> plan(
+    AgentWorktreeShell shell, {
+    required String repository,
+    required String baseRef,
+    required AgentWorktreeTarget target,
+  }) async {
+    final fields = await _runScript(
+      shell,
+      buildAgentWorktreePlanScript(
+        repository: repository,
+        baseRef: baseRef,
+        target: target,
+      ),
+      timeout: _commandTimeout,
+      operation: 'plan',
+    );
+    if (fields case [
+      'plan',
+      final branch,
+      final path,
+      final commit,
+      final top,
+      final prefix,
+      ...,
+    ]) {
+      return AgentWorktreePlan(
+        branch: branch,
+        path: path,
+        baseCommit: commit,
+        repository: top,
+        subdirectory: prefix,
+      );
+    }
+    throw _errorFrom(fields);
+  }
+
+  /// Creates the worktree [plan] chose.
+  ///
+  /// Throws an [AgentWorktreeException] of kind
+  /// [AgentWorktreeErrorKind.collision] when something took the branch or
+  /// folder after it was planned.
+  Future<AgentWorktreeRecord> add(
+    AgentWorktreeShell shell, {
+    required int hostId,
+    required AgentWorktreePlan plan,
+    DateTime? now,
+  }) async {
+    final fields = await _runScript(
+      shell,
+      buildAgentWorktreeAddScript(plan),
+      timeout: _createTimeout,
+      operation: 'add',
+    );
+    if (fields case ['ok', final path, final logicalPath, final start, ...]) {
+      return AgentWorktreeRecord(
+        hostId: hostId,
+        branch: plan.branch,
+        path: path,
+        alternatePath: logicalPath == path ? null : logicalPath,
+        baseCommit: plan.baseCommit,
+        repository: plan.repository,
+        startDirectory: start,
+        createdAt: (now ?? DateTime.now()).toUtc(),
+      );
+    }
+    throw _errorFrom(fields);
+  }
+
+  /// Plans and creates a worktree in one step.
   Future<AgentWorktreeRecord> create(
     AgentWorktreeShell shell, {
     required int hostId,
@@ -404,35 +674,19 @@ class AgentWorktreeService {
     required String baseRef,
     required AgentWorktreeTarget target,
     DateTime? now,
-  }) async {
-    final fields = await _runScript(
+  }) async => add(
+    shell,
+    hostId: hostId,
+    plan: await plan(
       shell,
-      buildAgentWorktreeCreateScript(
-        repository: repository,
-        baseRef: baseRef,
-        target: target,
-      ),
-      timeout: _createTimeout,
-      operation: 'create',
-    );
-    if (fields.first != 'ok' || fields.length < 7) {
-      throw _errorFrom(fields);
-    }
-    final path = fields[2];
-    final logicalPath = fields[3];
-    return AgentWorktreeRecord(
-      hostId: hostId,
-      branch: fields[1],
-      path: path,
-      alternatePath: logicalPath == path ? null : logicalPath,
-      baseCommit: fields[4],
-      repository: fields[5],
-      startDirectory: fields[6],
-      createdAt: (now ?? DateTime.now()).toUtc(),
-    );
-  }
+      repository: repository,
+      baseRef: baseRef,
+      target: target,
+    ),
+    now: now,
+  );
 
-  /// Reads whether [record]'s worktree has uncommitted work.
+  /// Reads whether [record]'s worktree holds work removal would lose.
   Future<AgentWorktreeStatus> status(
     AgentWorktreeShell shell,
     AgentWorktreeRecord record,
@@ -451,22 +705,43 @@ class AgentWorktreeService {
           ignoredEntries: 0,
           branchHasNewCommits: false,
         );
-      case ['status', final changed, final ignored, final moved, ...]:
+      case ['stale', ...]:
+        return const AgentWorktreeStatus(
+          exists: true,
+          changedFiles: 0,
+          ignoredEntries: 0,
+          branchHasNewCommits: false,
+          stale: true,
+        );
+      case [
+        'status',
+        final changed,
+        final ignored,
+        final moved,
+        final unsaved,
+        final operation,
+        ...,
+      ]:
         return AgentWorktreeStatus(
           exists: true,
           changedFiles: int.tryParse(changed.trim()) ?? 0,
           ignoredEntries: int.tryParse(ignored.trim()) ?? 0,
           branchHasNewCommits: moved == 'yes',
+          unsavedCommits: unsaved == 'yes',
+          operationInProgress: operation.isEmpty ? null : operation,
         );
       default:
         throw _errorFrom(fields);
     }
   }
 
-  /// Removes [record]'s worktree, refusing when it has uncommitted changes.
+  /// Removes [record]'s worktree, refusing when it holds work removal would
+  /// lose or is no longer the recorded worktree.
   ///
   /// Throws an [AgentWorktreeException] of kind
-  /// [AgentWorktreeErrorKind.dirty] instead of removing a dirty worktree.
+  /// [AgentWorktreeErrorKind.dirty], [AgentWorktreeErrorKind.unsavedCommits],
+  /// [AgentWorktreeErrorKind.operationInProgress] or
+  /// [AgentWorktreeErrorKind.stale] instead of removing it.
   Future<AgentWorktreeRemoval> remove(
     AgentWorktreeShell shell,
     AgentWorktreeRecord record,
@@ -482,20 +757,43 @@ class AgentWorktreeService {
         return AgentWorktreeRemoval(branchDeleted: deleted == 'yes');
       case ['dirty', ...]:
         throw const AgentWorktreeException(AgentWorktreeErrorKind.dirty);
+      case ['blocked', 'unsaved_commits', ...]:
+        throw const AgentWorktreeException(
+          AgentWorktreeErrorKind.unsavedCommits,
+        );
+      case ['blocked', ...]:
+        throw const AgentWorktreeException(
+          AgentWorktreeErrorKind.operationInProgress,
+        );
+      case ['stale', ...]:
+        throw const AgentWorktreeException(AgentWorktreeErrorKind.stale);
       default:
         throw _errorFrom(fields);
     }
   }
 
-  /// Whether tmux session [name] already exists on the host.
-  Future<bool> tmuxSessionExists(AgentWorktreeShell shell, String name) async {
+  /// The pane directories of tmux session [name], or null when the session
+  /// does not exist.
+  ///
+  /// Throws an [AgentWorktreeException] when tmux cannot be found or the
+  /// answer is unknown, so callers never mistake that for "no session".
+  Future<List<String>?> tmuxSessionDirectories(
+    AgentWorktreeShell shell,
+    String name,
+  ) async {
     final fields = await _runScript(
       shell,
-      buildAgentWorktreeTmuxSessionProbeScript(name),
+      buildAgentWorktreeTmuxSessionScript(name),
       timeout: _commandTimeout,
       operation: 'tmux_probe',
     );
-    return fields.first == 'present';
+    return switch (fields) {
+      ['present', ...] => fields.sublist(1),
+      ['absent', ...] => null,
+      _ => throw const AgentWorktreeException(
+        AgentWorktreeErrorKind.unavailable,
+      ),
+    };
   }
 
   Future<List<String>> _runScript(
@@ -557,6 +855,7 @@ AgentWorktreeException _errorFrom(List<String> fields) {
     'missing_repository' => AgentWorktreeErrorKind.repositoryMissing,
     'not_repository' => AgentWorktreeErrorKind.notRepository,
     'invalid_branch' => AgentWorktreeErrorKind.invalidBranch,
+    'branch_conflict' => AgentWorktreeErrorKind.branchConflict,
     'invalid_base' => AgentWorktreeErrorKind.invalidBase,
     'collision' => AgentWorktreeErrorKind.collision,
     'add_failed' => AgentWorktreeErrorKind.addFailed,

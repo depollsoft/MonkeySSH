@@ -44,6 +44,25 @@ void main() {
       expect(target.path, '~/wt/wip/20261009-0905');
     });
 
+    test('drops trailing slashes so suffixes stay siblings', () {
+      expect(
+        renderAgentWorktreeTarget(
+          const AgentWorktreeLaunchOptions(
+            pathTemplate: '{repo}.worktrees/{tool}//',
+          ),
+          values,
+        ).path,
+        '.worktrees/codex',
+      );
+      expect(
+        renderAgentWorktreeTarget(
+          const AgentWorktreeLaunchOptions(pathTemplate: '~/wt/{name}/'),
+          values,
+        ).path,
+        '~/wt/agent-codex-20261009-abc123',
+      );
+    });
+
     test('rejects unknown and misplaced placeholders', () {
       expect(
         () => renderAgentWorktreeTarget(
@@ -134,6 +153,33 @@ void main() {
             .validate(workingDirectory: '~/src/app'),
         contains('absolute'),
       );
+    });
+
+    test('names the field each problem belongs to', () {
+      AgentWorktreeField? fieldOf(AgentWorktreeLaunchOptions options) =>
+          options.problem(workingDirectory: '~/src/app')?.field;
+
+      expect(
+        const AgentWorktreeLaunchOptions().problem()?.field,
+        AgentWorktreeField.repository,
+      );
+      expect(
+        fieldOf(const AgentWorktreeLaunchOptions(repositoryPath: 'rel')),
+        AgentWorktreeField.repository,
+      );
+      expect(
+        fieldOf(const AgentWorktreeLaunchOptions(baseRef: '-x')),
+        AgentWorktreeField.baseRef,
+      );
+      expect(
+        fieldOf(const AgentWorktreeLaunchOptions(branchTemplate: 'a b')),
+        AgentWorktreeField.branchTemplate,
+      );
+      expect(
+        fieldOf(const AgentWorktreeLaunchOptions(pathTemplate: 'rel/{id}')),
+        AgentWorktreeField.pathTemplate,
+      );
+      expect(fieldOf(const AgentWorktreeLaunchOptions()), isNull);
     });
 
     test('rejects option-like and spaced base refs', () {
@@ -252,6 +298,25 @@ void main() {
       expect(
         AgentWorktreeRecord.tryFromJson({'path': '/x'}, hostId: 3),
         isNull,
+      );
+    });
+
+    test('keeps the pending flag through JSON', () {
+      final pending = AgentWorktreeRecord(
+        hostId: 3,
+        repository: '/srv/app',
+        path: '/srv/app.worktrees/agent-2',
+        branch: 'agent/2',
+        baseCommit: 'abc',
+        createdAt: DateTime.utc(2026),
+        pending: true,
+      );
+
+      expect(pending.toJson()['pending'], isTrue);
+      expect(record.toJson().containsKey('pending'), isFalse);
+      expect(
+        AgentWorktreeRecord.tryFromJson(pending.toJson(), hostId: 3)!.pending,
+        isTrue,
       );
     });
   });

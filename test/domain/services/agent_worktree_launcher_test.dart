@@ -2,15 +2,13 @@
 
 import 'dart:math';
 
-import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
-import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
-import 'package:monkeyssh/domain/services/settings_service.dart';
+
+import '../../support/fake_agent_worktree.dart';
 
 class _NoShell implements AgentWorktreeShell {
   @override
@@ -20,61 +18,21 @@ class _NoShell implements AgentWorktreeShell {
   }) => throw UnimplementedError();
 }
 
-class _FakeService extends AgentWorktreeService {
-  _FakeService();
-
-  final created =
-      <({String repository, String baseRef, AgentWorktreeTarget target})>[];
-  final removed = <AgentWorktreeRecord>[];
-  AgentWorktreeException? removeError;
-
-  @override
-  Future<AgentWorktreeRecord> create(
-    AgentWorktreeShell shell, {
-    required int hostId,
-    required String repository,
-    required String baseRef,
-    required AgentWorktreeTarget target,
-    DateTime? now,
-  }) async {
-    created.add((repository: repository, baseRef: baseRef, target: target));
-    return AgentWorktreeRecord(
-      hostId: hostId,
-      repository: '/srv/app',
-      path: '/srv/app.worktrees/${target.branch.replaceAll('/', '-')}',
-      branch: target.branch,
-      baseCommit: 'abc',
-      createdAt: now ?? DateTime.utc(2026),
-    );
-  }
-
-  @override
-  Future<AgentWorktreeRemoval> remove(
-    AgentWorktreeShell shell,
-    AgentWorktreeRecord record,
-  ) async {
-    if (removeError case final error?) throw error;
-    removed.add(record);
-    return const AgentWorktreeRemoval(branchDeleted: true);
-  }
-}
-
 void main() {
-  late AppDatabase database;
-  late AgentWorktreeRegistry registry;
-  late _FakeService service;
+  late MemoryAgentWorktreeRegistry registry;
+  late FakeAgentWorktreeService service;
   late AgentWorktreeLauncher launcher;
   final shell = _NoShell();
   const preset = AgentLaunchPreset(
     tool: AgentLaunchTool.claudeCode,
     workingDirectory: '~/src/app',
+    tmuxSessionName: 'agents',
     worktree: AgentWorktreeLaunchOptions(baseRef: 'origin/main'),
   );
 
   setUp(() {
-    database = AppDatabase.forTesting(NativeDatabase.memory());
-    registry = AgentWorktreeRegistry(SettingsService(database));
-    service = _FakeService();
+    registry = MemoryAgentWorktreeRegistry();
+    service = FakeAgentWorktreeService();
     launcher = AgentWorktreeLauncher(
       service: service,
       registry: registry,
@@ -82,10 +40,6 @@ void main() {
       random: Random(4),
       wait: (_) async {},
     );
-  });
-
-  tearDown(() async {
-    await database.close();
   });
 
   Future<AgentWorktreeErrorKind?> createError(
@@ -116,13 +70,26 @@ void main() {
           windowsHost: false,
         );
 
-        final request = service.created.single;
-        expect(request.repository, '~/src/app');
-        expect(request.baseRef, 'origin/main');
-        expect(request.target.branch, startsWith('agent/claude-20261009-'));
-        expect(await registry.findContaining(1, record.path), record);
+        expect(
+          service.targets.single.branch,
+          startsWith('agent/claude-20261009-'),
+        );
+        expect(registry.records, [record]);
+        expect(record.pending, isFalse);
       },
     );
+
+    test('names the branch after the agent actually launched', () async {
+      await launcher.create(
+        shell,
+        hostId: 1,
+        preset: preset,
+        windowsHost: false,
+        tool: AgentLaunchTool.codex,
+      );
+
+      expect(service.targets.single.branch, startsWith('agent/codex-'));
+    });
 
     test(
       'refuses Windows hosts and invalid options before running git',
@@ -150,9 +117,35 @@ void main() {
           ),
           AgentWorktreeErrorKind.invalidOptions,
         );
-        expect(service.created, isEmpty);
+        expect(service.targets, isEmpty);
       },
     );
+
+    test('forgets the pending record when git refuses', () async {
+      service.addError = const AgentWorktreeException(
+        AgentWorktreeErrorKind.addFailed,
+      );
+
+      expect(await createError(preset), AgentWorktreeErrorKind.addFailed);
+      expect(registry.records, isEmpty);
+    });
+
+    test('keeps the pending record when git does not answer', () async {
+      service.addError = const AgentWorktreeException(
+        AgentWorktreeErrorKind.unavailable,
+      );
+
+      expect(await createError(preset), AgentWorktreeErrorKind.unavailable);
+      expect(registry.records.single.pending, isTrue);
+    });
+
+    test('removes the new worktree when recording it fails', () async {
+      registry.failAdd = (record) => !record.pending;
+
+      expect(await createError(preset), AgentWorktreeErrorKind.unavailable);
+      expect(service.removed, service.created);
+      expect(service.created, hasLength(1));
+    });
   });
 
   group('confirm', () {
@@ -181,17 +174,17 @@ void main() {
       expect(outcome, AgentWorktreeLaunchOutcome.confirmed);
       expect(polls, 2);
       expect(service.removed, isEmpty);
-      expect(await registry.findContaining(1, record.path), isNotNull);
+      expect(registry.records, [record]);
     });
 
-    test('rolls back when no window ever runs in the worktree', () async {
+    test('rolls back once a listing shows no window in the worktree', () async {
       var polls = 0;
       final outcome = await launcher.confirm(
         shell,
         record,
         windowDirectories: () async {
           polls++;
-          if (polls.isOdd) throw StateError('session not started');
+          if (polls.isOdd) throw StateError('control channel busy');
           return ['/srv/app'];
         },
       );
@@ -199,7 +192,30 @@ void main() {
       expect(outcome, AgentWorktreeLaunchOutcome.rolledBack);
       expect(polls, agentWorktreeLaunchCheckSchedule.length);
       expect(service.removed, [record]);
-      expect(await registry.recordsForHost(1), isEmpty);
+      expect(registry.records, isEmpty);
+    });
+
+    test('rolls back when the session is gone', () async {
+      final outcome = await launcher.confirm(
+        shell,
+        record,
+        windowDirectories: () async => const <String>[],
+        schedule: const [Duration.zero],
+      );
+
+      expect(outcome, AgentWorktreeLaunchOutcome.rolledBack);
+    });
+
+    test('keeps the worktree when no listing ever succeeds', () async {
+      final outcome = await launcher.confirm(
+        shell,
+        record,
+        windowDirectories: () async => throw StateError('control timed out'),
+      );
+
+      expect(outcome, AgentWorktreeLaunchOutcome.kept);
+      expect(service.removed, isEmpty);
+      expect(registry.records, [record]);
     });
 
     test('keeps the record when git refuses the rollback', () async {
@@ -215,7 +231,18 @@ void main() {
       );
 
       expect(outcome, AgentWorktreeLaunchOutcome.kept);
-      expect(await registry.findContaining(1, record.path), record);
+      expect(registry.records, [record]);
+    });
+
+    test('forgets a record whose folder is someone else’s now', () async {
+      service.removeError = const AgentWorktreeException(
+        AgentWorktreeErrorKind.stale,
+      );
+
+      final outcome = await launcher.rollBack(shell, record);
+
+      expect(outcome, AgentWorktreeLaunchOutcome.kept);
+      expect(registry.records, isEmpty);
     });
   });
 }

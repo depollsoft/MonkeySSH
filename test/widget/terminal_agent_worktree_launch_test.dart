@@ -8,72 +8,13 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
-import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/terminal/terminal_agent_worktree_launch.dart';
 
+import '../support/fake_agent_worktree.dart';
+
 class _MockSshClient extends Mock implements SSHClient {}
-
-class _FakeService extends AgentWorktreeService {
-  _FakeService({this.createError});
-
-  final AgentWorktreeException? createError;
-  final created = <AgentWorktreeRecord>[];
-  final removed = <AgentWorktreeRecord>[];
-
-  @override
-  Future<AgentWorktreeRecord> create(
-    AgentWorktreeShell shell, {
-    required int hostId,
-    required String repository,
-    required String baseRef,
-    required AgentWorktreeTarget target,
-    DateTime? now,
-  }) async {
-    if (createError case final error?) throw error;
-    final record = AgentWorktreeRecord(
-      hostId: hostId,
-      repository: '/srv/app',
-      path: '/srv/app.worktrees/agent',
-      startDirectory: '/srv/app.worktrees/agent/pkg',
-      branch: target.branch,
-      baseCommit: 'abc',
-      createdAt: DateTime.utc(2026),
-    );
-    created.add(record);
-    return record;
-  }
-
-  @override
-  Future<AgentWorktreeRemoval> remove(
-    AgentWorktreeShell shell,
-    AgentWorktreeRecord record,
-  ) async {
-    removed.add(record);
-    return const AgentWorktreeRemoval(branchDeleted: true);
-  }
-}
-
-class _MemoryRegistry implements AgentWorktreeRegistry {
-  final records = <AgentWorktreeRecord>[];
-
-  @override
-  Future<void> add(AgentWorktreeRecord record) async => records.add(record);
-
-  @override
-  Future<void> remove(AgentWorktreeRecord record) async =>
-      records.remove(record);
-
-  @override
-  Future<AgentWorktreeRecord?> findContaining(
-    int hostId,
-    String? directory,
-  ) async => records.where((record) => record.contains(directory)).firstOrNull;
-
-  @override
-  Future<List<AgentWorktreeRecord>> recordsForHost(int hostId) async => records;
-}
 
 SshSession _session({String version = 'SSH-2.0-OpenSSH_9.6'}) {
   final client = _MockSshClient();
@@ -98,8 +39,8 @@ const _preset = AgentLaunchPreset(
 );
 
 void main() {
-  late _FakeService service;
-  late _MemoryRegistry registry;
+  late FakeAgentWorktreeService service;
+  late MemoryAgentWorktreeRegistry registry;
 
   Future<TerminalAgentWorktreeLaunch?> prepare(
     WidgetTester tester, {
@@ -142,8 +83,10 @@ void main() {
   }
 
   setUp(() {
-    service = _FakeService();
-    registry = _MemoryRegistry();
+    service = FakeAgentWorktreeService(
+      startDirectory: '/srv/app.worktrees/agent/pkg',
+    );
+    registry = MemoryAgentWorktreeRegistry();
   });
 
   testWidgets('presets without a worktree launch unchanged', (tester) async {
@@ -182,7 +125,7 @@ void main() {
     expect(registry.records, service.created);
   });
 
-  testWidgets('a failed session probe still creates the worktree', (
+  testWidgets('stops when it cannot tell whether the session runs', (
     tester,
   ) async {
     final launch = await prepare(
@@ -190,16 +133,37 @@ void main() {
       sessionExists: () async => throw StateError('probe failed'),
     );
 
-    expect(launch?.worktree, isNotNull);
+    expect(launch, isNull);
+    expect(service.created, isEmpty);
+    expect(
+      find.textContaining('could not tell whether the session'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('refuses a worktree preset without a session', (tester) async {
+    final launch = await prepare(
+      tester,
+      preset: const AgentLaunchPreset(
+        tool: AgentLaunchTool.codex,
+        workingDirectory: '~/src/app',
+        worktree: AgentWorktreeLaunchOptions(),
+      ),
+    );
+
+    expect(launch, isNull);
+    expect(service.created, isEmpty);
+    expect(
+      find.text('Agent not started: $agentWorktreeNeedsSessionMessage'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('does not start the agent when the worktree fails', (
     tester,
   ) async {
-    service = _FakeService(
-      createError: const AgentWorktreeException(
-        AgentWorktreeErrorKind.notRepository,
-      ),
+    service.planError = const AgentWorktreeException(
+      AgentWorktreeErrorKind.notRepository,
     );
 
     final launch = await prepare(tester);

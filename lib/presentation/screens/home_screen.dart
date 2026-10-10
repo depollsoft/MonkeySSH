@@ -3445,6 +3445,18 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                   : other.index != window.index)
                 other.currentPath,
           ],
+          liveWindowDirectories: closesLastMonkeyMuxWindow
+              ? null
+              : () async => [
+                  for (final other in await mux.listWindows(
+                    session,
+                    _badge.sessionName!,
+                    extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
+                        ? widget.tmuxExtraFlags
+                        : null,
+                  ))
+                    other.currentPath,
+                ],
         );
       }
       if (closesLastMonkeyMuxWindow) {

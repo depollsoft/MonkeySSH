@@ -42,16 +42,20 @@ final class TerminalAgentWorktreeLaunch {
 
 /// Creates the worktree [preset] asks for before its agent starts.
 ///
-/// [sessionExists] reports whether the remote window session the preset
-/// attaches to is already running. Attaching to a running session does not
-/// start the agent again, so no worktree is created then; the session keeps
-/// the windows (and worktrees) it already has, which is also how a MonkeyMux
-/// update restore returns to a recorded worktree without recreating it.
+/// Worktree presets need a MonkeyMux or tmux session: the session is what
+/// lets a reconnect return to the same worktree instead of making another,
+/// and what lets the app check that the agent really started there.
 ///
-/// Returns null when the launch must not go ahead because the worktree could
-/// not be created; the user has been told why. Starting the agent in the
-/// shared checkout instead would silently drop the isolation the preset asks
-/// for.
+/// [sessionExists] reports whether that session is already running.
+/// Attaching to a running session does not start the agent again, so no
+/// worktree is created then; the session keeps the windows (and worktrees)
+/// it already has, which is also how a MonkeyMux update restore returns to a
+/// recorded worktree without recreating it. When [sessionExists] cannot
+/// answer, the launch stops rather than guess.
+///
+/// Returns null when the launch must not go ahead; the user has been told
+/// why. Starting the agent in the shared checkout instead would silently
+/// drop the isolation the preset asks for.
 Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
   required BuildContext context,
   required WidgetRef ref,
@@ -62,14 +66,27 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
   if (!preset.launchesInNewWorktree) {
     return TerminalAgentWorktreeLaunch(preset: preset);
   }
+  void explain(String message) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Agent not started: $message'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  if (!preset.usesMuxSession) {
+    explain(agentWorktreeNeedsSessionMessage);
+    return null;
+  }
   if (sessionExists != null) {
-    var exists = false;
+    final bool exists;
     try {
       exists = await sessionExists();
     } on Object catch (error) {
-      // An unknown answer creates the worktree; if the attach then joins a
-      // running session, the launch check rolls the unused worktree back.
-      DiagnosticsLogService.instance.debug(
+      DiagnosticsLogService.instance.warning(
         'agent.worktree',
         'session_probe_failed',
         fields: {
@@ -77,6 +94,10 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
           'errorType': error.runtimeType,
         },
       );
+      explain(
+        'MonkeySSH could not tell whether the session is already running.',
+      );
+      return null;
     }
     if (exists) {
       DiagnosticsLogService.instance.info(
@@ -101,14 +122,12 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
       worktree: launch,
     );
   } on AgentWorktreeException catch (error) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Agent not started: ${error.message}'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+    explain(error.message);
     return null;
   }
 }
+
+/// Why a worktree preset without a remote window session cannot launch.
+const agentWorktreeNeedsSessionMessage =
+    'Worktree launches need a MonkeyMux or tmux session in the host’s '
+    'preset.';

@@ -26,7 +26,10 @@ const agentWorktreeKeepButtonKey = Key('agent-worktree-keep-button');
 /// in, after its window closed on [session].
 ///
 /// Nothing happens when the directory is not in a worktree MonkeySSH created,
-/// or when another window in [remainingWindowDirectories] still uses it.
+/// or when another window in [remainingWindowDirectories] still uses it. A
+/// folder that is no longer the recorded worktree has its record forgotten.
+/// [liveWindowDirectories], when given, is asked again right before removal,
+/// so a window that entered the worktree while the dialog was open keeps it.
 /// Never throws: closing the window has already succeeded.
 Future<void> offerAgentWorktreeRemoval({
   required BuildContext context,
@@ -34,6 +37,7 @@ Future<void> offerAgentWorktreeRemoval({
   required SshSession session,
   required String? closedWindowDirectory,
   Iterable<String?> remainingWindowDirectories = const [],
+  Future<Iterable<String?>> Function()? liveWindowDirectories,
 }) async {
   if (session.remoteIsWindows) {
     return;
@@ -48,6 +52,7 @@ Future<void> offerAgentWorktreeRemoval({
       session: session,
       closedWindowDirectory: closedWindowDirectory,
       remainingWindowDirectories: remainingWindowDirectories,
+      liveWindowDirectories: liveWindowDirectories,
     );
   } on Object catch (error) {
     DiagnosticsLogService.instance.warning(
@@ -65,6 +70,7 @@ Future<void> _offerRemoval({
   required SshSession session,
   required String? closedWindowDirectory,
   required Iterable<String?> remainingWindowDirectories,
+  required Future<Iterable<String?>> Function()? liveWindowDirectories,
 }) async {
   final shell = SshAgentWorktreeShell(session);
   final record = await registry.findContaining(
@@ -85,7 +91,9 @@ Future<void> _offerRemoval({
     );
     return;
   }
-  if (!status.exists) {
+  if (!status.exists || status.stale) {
+    // Gone, or no longer the worktree MonkeySSH made: never offer to remove
+    // someone else's checkout.
     await registry.remove(record);
     return;
   }
@@ -102,7 +110,7 @@ Future<void> _offerRemoval({
     'removal_offered',
     fields: {
       'hostId': session.hostId,
-      'dirty': status.isDirty,
+      'blocked': status.blocksRemoval,
       'accepted': remove,
     },
   );
@@ -110,19 +118,26 @@ Future<void> _offerRemoval({
     return;
   }
   String message;
-  try {
-    final removal = await service.remove(shell, record);
-    await registry.remove(record);
-    message = removal.branchDeleted
-        ? 'Worktree and its unused branch removed.'
-        : 'Worktree removed. Its branch keeps the commits.';
-  } on AgentWorktreeException catch (error) {
-    DiagnosticsLogService.instance.warning(
-      'agent.worktree',
-      'remove_failed',
-      fields: {'hostId': session.hostId, 'errorKind': error.kind.name},
-    );
-    message = 'Worktree not removed. ${error.message}';
+  if (await _stillInUse(record, liveWindowDirectories)) {
+    message = 'Worktree not removed. Another window is using it.';
+  } else {
+    try {
+      final removal = await service.remove(shell, record);
+      await registry.remove(record);
+      message = removal.branchDeleted
+          ? 'Worktree and its unused branch removed.'
+          : 'Worktree removed. Its branch keeps the commits.';
+    } on AgentWorktreeException catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'agent.worktree',
+        'remove_failed',
+        fields: {'hostId': session.hostId, 'errorKind': error.kind.name},
+      );
+      if (error.kind == AgentWorktreeErrorKind.stale) {
+        await registry.remove(record);
+      }
+      message = 'Worktree not removed. ${error.message}';
+    }
   }
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -131,9 +146,60 @@ Future<void> _offerRemoval({
   }
 }
 
+/// Whether a window entered [record]'s worktree after the offer started.
+///
+/// A listing that fails (for example because the session just ended) counts
+/// as no window: the closed window was the one in the worktree.
+Future<bool> _stillInUse(
+  AgentWorktreeRecord record,
+  Future<Iterable<String?>> Function()? liveWindowDirectories,
+) async {
+  if (liveWindowDirectories == null) {
+    return false;
+  }
+  try {
+    return (await liveWindowDirectories()).any(record.contains);
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.debug(
+      'agent.worktree',
+      'live_windows_failed',
+      fields: {'hostId': record.hostId, 'errorType': error.runtimeType},
+    );
+    return false;
+  }
+}
+
+/// Why MonkeySSH keeps a worktree whose [status] blocks removal, and what the
+/// user can do about it.
+String agentWorktreeKeptReason(AgentWorktreeStatus status) {
+  final changes = status.changedFiles;
+  final reason = status.isDirty
+      ? 'It has $changes uncommitted ${changes == 1 ? 'change' : 'changes'}'
+      : status.unsavedCommits
+      ? 'It has commits that are not on any branch'
+      : 'A ${_operationLabel(status.operationInProgress)} is in progress in it';
+  final fix = status.isDirty
+      ? 'Commit or discard them'
+      : status.unsavedCommits
+      ? 'Put them on a branch'
+      : 'Finish or abort it';
+  return '$reason, so MonkeySSH won’t remove it. $fix, then run git '
+      'worktree remove in a terminal.';
+}
+
+String _operationLabel(String? operation) => switch (operation) {
+  'rebase-merge' || 'rebase-apply' => 'rebase',
+  'MERGE_HEAD' => 'merge',
+  'CHERRY_PICK_HEAD' => 'cherry-pick',
+  'REVERT_HEAD' => 'revert',
+  'BISECT_LOG' => 'bisect',
+  _ => 'git operation',
+};
+
 /// Shows the removal dialog for [record] and returns whether to remove it.
 ///
-/// A dirty worktree gets an explanation and no remove action.
+/// A worktree holding work removal would lose gets an explanation and no
+/// remove action.
 Future<bool> showAgentWorktreeRemovalDialog({
   required BuildContext context,
   required AgentWorktreeRecord record,
@@ -166,8 +232,7 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
     // that carries the decision is lifted to the primary text colour.
     final note = theme.textTheme.bodyMedium;
     final statement = note?.copyWith(color: colorScheme.onSurface);
-    final dirty = status.isDirty;
-    final changes = status.changedFiles;
+    final dirty = status.blocksRemoval;
     final ignored = status.ignoredEntries;
 
     return AlertDialog(
@@ -191,13 +256,7 @@ class _AgentWorktreeRemovalDialog extends StatelessWidget {
             Text(record.path, style: mono.copyWith(color: note?.color)),
             const SizedBox(height: FluttyTheme.spacingMd),
             if (dirty)
-              Text(
-                'It has $changes uncommitted '
-                '${changes == 1 ? 'change' : 'changes'}, so MonkeySSH '
-                'won’t remove it. Commit or discard them, then run '
-                'git worktree remove in a terminal.',
-                style: statement,
-              )
+              Text(agentWorktreeKeptReason(status), style: statement)
             else ...[
               Text(
                 'The agent’s window is closed. Removing deletes this folder.',

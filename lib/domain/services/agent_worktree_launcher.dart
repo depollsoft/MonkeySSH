@@ -106,6 +106,12 @@ class AgentWorktreeLauncher {
   /// Creates the worktree a launch of [preset] on [hostId] starts in and
   /// records it.
   ///
+  /// The worktree is recorded as pending before git creates it, so a create
+  /// that times out (git keeps running on the host) is still known and gets
+  /// cleaned up by a later launch on the same host. [tool] overrides the
+  /// preset's agent in the branch name, for a native session started with
+  /// another provider.
+  ///
   /// Throws an [AgentWorktreeException] when the options are invalid, the
   /// host cannot run the scripts, or git refuses.
   Future<AgentWorktreeRecord> create(
@@ -113,6 +119,7 @@ class AgentWorktreeLauncher {
     required int hostId,
     required AgentLaunchPreset preset,
     required bool windowsHost,
+    AgentLaunchTool? tool,
   }) async {
     final options = preset.worktree;
     if (options == null) {
@@ -133,30 +140,60 @@ class AgentWorktreeLauncher {
           detail: invalid,
         );
       }
+      await _sweepPending(shell, hostId);
       final now = _clock();
-      final target = renderAgentWorktreeTarget(
-        options,
-        AgentWorktreeTemplateValues.forLaunch(
-          tool: preset.tool.commandName,
-          now: now,
-          random: _random,
-        ),
-      );
-      final record = await _service.create(
+      final launchTool = tool ?? preset.tool;
+      final plan = await _service.plan(
         shell,
-        hostId: hostId,
         repository: options.resolveRepositoryPath(preset.workingDirectory)!,
         baseRef: options.effectiveBaseRef,
-        target: target,
-        now: now,
+        target: renderAgentWorktreeTarget(
+          options,
+          AgentWorktreeTemplateValues.forLaunch(
+            tool: launchTool.commandName,
+            now: now,
+            random: _random,
+          ),
+        ),
       );
-      await _registry.add(record);
+      final pending = plan.pendingRecord(hostId: hostId, createdAt: now);
+      try {
+        await _registry.add(pending);
+      } on Object catch (error) {
+        _logPersistenceFailure(hostId, error);
+        throw const AgentWorktreeException(AgentWorktreeErrorKind.unavailable);
+      }
+      final AgentWorktreeRecord record;
+      try {
+        record = await _service.add(
+          shell,
+          hostId: hostId,
+          plan: plan,
+          now: now,
+        );
+      } on AgentWorktreeException catch (error) {
+        // Without an answer git may still be creating the worktree, so the
+        // pending record stays for a later launch to clean up. Any other
+        // failure means git created nothing.
+        if (error.kind != AgentWorktreeErrorKind.unavailable) {
+          await _forget(pending);
+        }
+        rethrow;
+      }
+      try {
+        await _registry.remove(pending);
+        await _registry.add(record);
+      } on Object catch (error) {
+        _logPersistenceFailure(hostId, error);
+        await rollBack(shell, record);
+        throw const AgentWorktreeException(AgentWorktreeErrorKind.unavailable);
+      }
       DiagnosticsLogService.instance.info(
         'agent.worktree',
         'created',
         fields: {
           'hostId': hostId,
-          'tool': preset.tool.name,
+          'tool': launchTool.name,
           'startsInSubdirectory': record.startDirectory != record.path,
         },
       );
@@ -178,12 +215,14 @@ class AgentWorktreeLauncher {
     required int hostId,
     required AgentLaunchPreset preset,
     required bool windowsHost,
+    AgentLaunchTool? tool,
   }) async => AgentWorktreeLaunch._(
     await create(
       shell,
       hostId: hostId,
       preset: preset,
       windowsHost: windowsHost,
+      tool: tool,
     ),
     this,
     shell,
@@ -191,8 +230,10 @@ class AgentWorktreeLauncher {
 
   /// Removes [record]'s worktree after its launch failed.
   ///
-  /// Never throws. A worktree that already has changes is kept, and the
-  /// branch is deleted only if it has no new commits.
+  /// Never throws. A worktree that holds work removal would lose is kept, a
+  /// folder that is no longer the recorded worktree is left alone and its
+  /// record forgotten, and the branch is deleted only if it has no new
+  /// commits.
   Future<AgentWorktreeLaunchOutcome> rollBack(
     AgentWorktreeShell shell,
     AgentWorktreeRecord record,
@@ -210,6 +251,9 @@ class AgentWorktreeLauncher {
       );
       return AgentWorktreeLaunchOutcome.rolledBack;
     } on AgentWorktreeException catch (error) {
+      if (error.kind == AgentWorktreeErrorKind.stale) {
+        await _forget(record);
+      }
       DiagnosticsLogService.instance.warning(
         'agent.worktree',
         'rollback_failed',
@@ -227,23 +271,28 @@ class AgentWorktreeLauncher {
   }
 
   /// Waits for a window to run in [record]'s worktree, and rolls the worktree
-  /// back if none does.
+  /// back once the session shows it does not.
   ///
   /// [windowDirectories] lists the current directory of each window in the
-  /// session the agent was launched into. This covers launches that never
-  /// reached the host, such as a connection dropped before the attach ran or
-  /// an attach that joined an already-running session instead of starting
-  /// the agent.
+  /// session the agent was launched into, returning an empty list when the
+  /// session is gone and throwing when the answer is unknown. This covers an
+  /// attach that joined an already-running session, a session that never
+  /// started, and an agent window that closed at once. The worktree is rolled
+  /// back only after a listing succeeded without it; when every listing
+  /// failed it is kept, because removing a clean worktree under a running
+  /// agent would lose the agent's next edits.
   Future<AgentWorktreeLaunchOutcome> confirm(
     AgentWorktreeShell shell,
     AgentWorktreeRecord record, {
     required Future<Iterable<String?>> Function() windowDirectories,
     List<Duration> schedule = agentWorktreeLaunchCheckSchedule,
   }) async {
+    var observed = false;
     for (final delay in schedule) {
       await _wait(delay);
       try {
         final directories = await windowDirectories();
+        observed = true;
         if (directories.any(record.contains)) {
           DiagnosticsLogService.instance.info(
             'agent.worktree',
@@ -260,6 +309,14 @@ class AgentWorktreeLauncher {
         );
       }
     }
+    if (!observed) {
+      DiagnosticsLogService.instance.warning(
+        'agent.worktree',
+        'launch_unknown',
+        fields: {'hostId': record.hostId},
+      );
+      return AgentWorktreeLaunchOutcome.kept;
+    }
     DiagnosticsLogService.instance.warning(
       'agent.worktree',
       'launch_not_observed',
@@ -267,7 +324,47 @@ class AgentWorktreeLauncher {
     );
     return rollBack(shell, record);
   }
+
+  /// Cleans up worktrees whose create never reported back.
+  ///
+  /// Only records older than [_pendingSweepAge] are touched, so a create
+  /// still running from another screen is left alone.
+  Future<void> _sweepPending(AgentWorktreeShell shell, int hostId) async {
+    final List<AgentWorktreeRecord> records;
+    try {
+      records = await _registry.recordsForHost(hostId);
+    } on Object catch (error) {
+      _logPersistenceFailure(hostId, error);
+      return;
+    }
+    final cutoff = _clock().toUtc().subtract(_pendingSweepAge);
+    for (final record in records) {
+      if (record.pending && record.createdAt.isBefore(cutoff)) {
+        await rollBack(shell, record);
+      }
+    }
+  }
+
+  Future<void> _forget(AgentWorktreeRecord record) async {
+    try {
+      await _registry.remove(record);
+    } on Object catch (error) {
+      _logPersistenceFailure(record.hostId, error);
+    }
+  }
+
+  void _logPersistenceFailure(int hostId, Object error) {
+    DiagnosticsLogService.instance.warning(
+      'agent.worktree',
+      'record_failed',
+      fields: {'hostId': hostId, 'errorType': error.runtimeType},
+    );
+  }
 }
+
+/// How old a pending record must be before a launch cleans it up; well past
+/// the create timeout, so git has finished by then.
+const _pendingSweepAge = Duration(minutes: 10);
 
 /// Provider for [AgentWorktreeLauncher].
 final agentWorktreeLauncherProvider = Provider<AgentWorktreeLauncher>(

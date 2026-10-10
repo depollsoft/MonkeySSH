@@ -185,6 +185,7 @@ void main() {
       _FakeService service, {
       required String? closed,
       List<String?> remaining = const [],
+      Future<Iterable<String?>> Function()? live,
     }) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -202,6 +203,7 @@ void main() {
                     session: session,
                     closedWindowDirectory: closed,
                     remainingWindowDirectories: remaining,
+                    liveWindowDirectories: live,
                   ),
                   child: const Text('close'),
                 ),
@@ -257,6 +259,67 @@ void main() {
       expect(await tester.runAsync(() => registry.recordsForHost(1)), isEmpty);
     });
 
+    testWidgets('forgets a folder that is no longer the recorded worktree', (
+      tester,
+    ) async {
+      final service = _FakeService(
+        const AgentWorktreeStatus(
+          exists: true,
+          changedFiles: 0,
+          ignoredEntries: 0,
+          branchHasNewCommits: false,
+          stale: true,
+        ),
+      );
+      await offer(tester, service, closed: _record.path);
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(service.removed, isEmpty);
+      expect(await tester.runAsync(() => registry.recordsForHost(1)), isEmpty);
+    });
+
+    testWidgets('keeps a worktree another window entered during the dialog', (
+      tester,
+    ) async {
+      final service = _FakeService(_clean);
+      await offer(
+        tester,
+        service,
+        closed: _record.path,
+        live: () async => ['${_record.path}/lib'],
+      );
+
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pumpAndSettle();
+
+      expect(service.removed, isEmpty);
+      expect(
+        find.text('Worktree not removed. Another window is using it.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a failed live check does not block removal', (tester) async {
+      final service = _FakeService(_clean);
+      await offer(
+        tester,
+        service,
+        closed: _record.path,
+        live: () async => throw StateError('session ended'),
+      );
+
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pumpAndSettle();
+
+      expect(service.removed, [_record]);
+    });
+
     testWidgets('never removes a dirty worktree', (tester) async {
       final service = _FakeService(
         const AgentWorktreeStatus(
@@ -277,5 +340,68 @@ void main() {
         _record,
       ]);
     });
+  });
+
+  group('kept reasons', () {
+    test('name the work removal would lose and the fix', () {
+      expect(
+        agentWorktreeKeptReason(
+          const AgentWorktreeStatus(
+            exists: true,
+            changedFiles: 1,
+            ignoredEntries: 0,
+            branchHasNewCommits: false,
+          ),
+        ),
+        startsWith('It has 1 uncommitted change,'),
+      );
+      expect(
+        agentWorktreeKeptReason(
+          const AgentWorktreeStatus(
+            exists: true,
+            changedFiles: 0,
+            ignoredEntries: 0,
+            branchHasNewCommits: false,
+            unsavedCommits: true,
+          ),
+        ),
+        allOf(
+          contains('commits that are not on any branch'),
+          contains('Put them on a branch'),
+        ),
+      );
+      expect(
+        agentWorktreeKeptReason(
+          const AgentWorktreeStatus(
+            exists: true,
+            changedFiles: 0,
+            ignoredEntries: 0,
+            branchHasNewCommits: false,
+            operationInProgress: 'rebase-merge',
+          ),
+        ),
+        allOf(contains('A rebase is in progress'), contains('Finish or abort')),
+      );
+    });
+  });
+
+  testWidgets('a detached worktree with unsaved commits offers no removal', (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      const AgentWorktreeStatus(
+        exists: true,
+        changedFiles: 0,
+        ignoredEntries: 0,
+        branchHasNewCommits: false,
+        unsavedCommits: true,
+      ),
+    );
+
+    expect(find.text('Worktree kept'), findsOneWidget);
+    expect(find.byKey(agentWorktreeRemoveButtonKey), findsNothing);
+    expect(find.textContaining('not on any branch'), findsOneWidget);
+    expect(find.textContaining('no new commits'), findsNothing);
   });
 }

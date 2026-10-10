@@ -24,13 +24,16 @@ class AgentWorktreeRegistry {
     return _decode(stored?[hostId.toString()], hostId);
   }
 
-  /// The record whose worktree contains [directory] on [hostId], if any.
+  /// The created worktree that contains [directory] on [hostId], if any.
+  ///
+  /// Pending records are skipped: git may not have finished creating them,
+  /// and a later launch cleans them up.
   Future<AgentWorktreeRecord?> findContaining(
     int hostId,
     String? directory,
   ) async {
     for (final record in await recordsForHost(hostId)) {
-      if (record.contains(directory)) {
+      if (!record.pending && record.contains(directory)) {
         return record;
       }
     }

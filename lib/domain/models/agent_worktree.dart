@@ -99,26 +99,44 @@ final class AgentWorktreeLaunchOptions {
 
   /// Returns the first problem with these options, or null when they can be
   /// used for a launch from [workingDirectory].
-  String? validate({String? workingDirectory}) {
+  String? validate({String? workingDirectory}) =>
+      problem(workingDirectory: workingDirectory)?.message;
+
+  /// Returns the first problem with these options and the field it belongs
+  /// to, or null when they can be used for a launch from [workingDirectory].
+  ({AgentWorktreeField field, String message})? problem({
+    String? workingDirectory,
+  }) {
     final repository = resolveRepositoryPath(workingDirectory);
     if (repository == null) {
-      return 'Set a repository or a working directory for the worktree.';
+      return (
+        field: AgentWorktreeField.repository,
+        message: 'Set a repository or a working directory for the worktree.',
+      );
     }
     final repositoryError = validateAgentWorktreeRemotePath(
       repository,
       label: 'Repository',
     );
     if (repositoryError != null) {
-      return repositoryError;
+      return (field: AgentWorktreeField.repository, message: repositoryError);
     }
     final baseError = validateAgentWorktreeBaseRef(effectiveBaseRef);
     if (baseError != null) {
-      return baseError;
+      return (field: AgentWorktreeField.baseRef, message: baseError);
+    }
+    try {
+      renderAgentWorktreeTarget(
+        AgentWorktreeLaunchOptions(branchTemplate: branchTemplate),
+        AgentWorktreeTemplateValues.sample,
+      );
+    } on FormatException catch (error) {
+      return (field: AgentWorktreeField.branchTemplate, message: error.message);
     }
     try {
       renderAgentWorktreeTarget(this, AgentWorktreeTemplateValues.sample);
     } on FormatException catch (error) {
-      return error.message;
+      return (field: AgentWorktreeField.pathTemplate, message: error.message);
     }
     return null;
   }
@@ -146,6 +164,22 @@ final class AgentWorktreeLaunchOptions {
     _nonEmpty(branchTemplate),
     _nonEmpty(pathTemplate),
   );
+}
+
+/// The editable worktree settings, for routing a validation problem to the
+/// field that causes it.
+enum AgentWorktreeField {
+  /// Repository path.
+  repository,
+
+  /// Base ref.
+  baseRef,
+
+  /// Branch name template.
+  branchTemplate,
+
+  /// Worktree folder template.
+  pathTemplate,
 }
 
 /// Values substituted into worktree templates for one launch.
@@ -276,18 +310,22 @@ AgentWorktreeTarget renderAgentWorktreeTarget(
       'Worktree path template can use {repo} only at the start.',
     );
   }
-  final path = _renderTemplate(
-    pathTemplate,
-    allowed: _pathPlaceholders,
-    values: {
-      'tool': values.tool,
-      'date': values.date,
-      'time': values.time,
-      'id': values.id,
-      'branch': branch,
-      'name': branch.replaceAll('/', '-'),
-    },
-    label: 'Worktree path template',
+  // A trailing `/` would nest a collision suffix (`-2`) inside the first
+  // worktree, so it is dropped.
+  final path = _withoutTrailingSlashes(
+    _renderTemplate(
+      pathTemplate,
+      allowed: _pathPlaceholders,
+      values: {
+        'tool': values.tool,
+        'date': values.date,
+        'time': values.time,
+        'id': values.id,
+        'branch': branch,
+        'name': branch.replaceAll('/', '-'),
+      },
+      label: 'Worktree path template',
+    ),
   );
   if (repositoryRelative) {
     if (path.isEmpty || path == '/') {
@@ -435,6 +473,7 @@ final class AgentWorktreeRecord {
     required this.createdAt,
     String? startDirectory,
     this.alternatePath,
+    this.pending = false,
   }) : startDirectory = startDirectory ?? path;
 
   /// Decodes a record stored under [hostId], or returns null when it is
@@ -464,6 +503,7 @@ final class AgentWorktreeRecord {
       createdAt: createdAt,
       startDirectory: _readTrimmed(json['startDirectory']),
       alternatePath: _readTrimmed(json['alternatePath']),
+      pending: json['pending'] == true,
     );
   }
 
@@ -492,6 +532,11 @@ final class AgentWorktreeRecord {
   /// the preset's working directory.
   final String startDirectory;
 
+  /// Whether git may not have finished creating the worktree: the app
+  /// recorded it before running `git worktree add`, and the command did not
+  /// report back. A later launch on the same host cleans it up.
+  final bool pending;
+
   /// Whether [directory] is the worktree root or inside it.
   bool contains(String? directory) {
     final trimmed = directory?.trim();
@@ -517,6 +562,7 @@ final class AgentWorktreeRecord {
     'createdAt': createdAt.toUtc().toIso8601String(),
     if (startDirectory != path) 'startDirectory': startDirectory,
     'alternatePath': ?alternatePath,
+    if (pending) 'pending': true,
   };
 
   @override
@@ -528,6 +574,14 @@ final class AgentWorktreeRecord {
 
   @override
   int get hashCode => Object.hash(hostId, path, branch);
+}
+
+String _withoutTrailingSlashes(String value) {
+  var result = value;
+  while (result.length > 1 && result.endsWith('/')) {
+    result = result.substring(0, result.length - 1);
+  }
+  return result;
 }
 
 String _withoutTrailingSlash(String value) =>
