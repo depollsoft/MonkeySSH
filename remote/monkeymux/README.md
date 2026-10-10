@@ -120,6 +120,33 @@ explicitly stopped, like MonkeyMux terminal windows. `gc` performs deliberate
 idle cleanup and removes stale socket artifacts. ACP children use ordinary
 pipes on every platform—never a POSIX PTY or Windows ConPTY.
 
+`status` also reports cumulative counts of permission requests, input
+(elicitation) requests and completed prompt turns, plus how many permission and
+input requests are pending right now. Push notifications use them; see below.
+
+### Push notifications
+
+When the app opts in, it registers each device with the `push_register`
+control operation. Registrations live in `~/.monkeyssh/state/push-devices.json`
+(mode 0600, at most 8 devices and 4 saved hosts per device, expiring after 30
+days without a refresh) and are shared by every MonkeyMux server for the user,
+which lock `push-devices.json.lock` around every read and write. Each entry
+holds a device id, a ticket sealed by the MonkeySSH Firebase Function, the
+device's public key and an opaque host reference; the host never sees the push
+token itself.
+
+A native agent waiting for permission or input, a finished native turn, and a
+bell or desktop notification (OSC 9 text, OSC 777 `notify`, OSC 99) in a window
+raise an event. MonkeyMux skips devices that are looking at that window or did
+so in the last 30 seconds, and devices whose app is alive in the background and
+alerting by itself. A permission or input request that is still pending is
+raised again once that stops being true. Repeats are coalesced, each device has
+separate hourly budgets for approval requests and for routine events, and the
+event is encrypted to the device before it is posted to the function. Only the
+coarse kind is readable outside the device. The full protocol is in
+`docs/push-notifications.md` at the repository root. `MONKEYMUX_PUSH_ENDPOINT`
+overrides the function URL for testing.
+
 ### Terminal session details
 
 `attach` and `new-session` can start a session server. Optional `--cwd`,

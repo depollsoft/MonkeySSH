@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import UserNotifications
 
 @main
 @MainActor
@@ -52,7 +53,51 @@ import UIKit
     if let launchUrl = launchOptions?[.url] as? URL {
       _ = handleTransferFile(url: launchUrl)
     }
+    // FlutterAppDelegate forwards notification center callbacks to every
+    // plugin that registered as an application delegate, which is how both
+    // flutter_local_notifications and firebase_messaging receive taps and
+    // foreground presentations. It must be the delegate before launch ends,
+    // and before firebase_messaging configures itself in super, so that
+    // firebase_messaging keeps this delegate instead of replacing it.
+    UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // FlutterAppDelegate hands each notification callback to every registered
+  // plugin, and both flutter_local_notifications and firebase_messaging call
+  // the completion handler. These overrides make each handler run exactly
+  // once with a fixed policy.
+  //
+  // Foreground policy: nothing is presented while the app is open, which is
+  // how iOS behaved before the app had a notification delegate. Plugins
+  // still see the notification (firebase_messaging forwards it to Dart's
+  // onMessage, which decides whether to show an in-app message).
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler:
+      @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    super.userNotificationCenter(center, willPresent: notification) { _ in }
+    completionHandler([])
+  }
+
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    var completed = false
+    let completeOnce = {
+      if !completed {
+        completed = true
+        completionHandler()
+      }
+    }
+    super.userNotificationCenter(center, didReceive: response) { completeOnce() }
+    // Both plugins answer synchronously; this covers a notification neither
+    // of them claims.
+    completeOnce()
   }
 
   override func application(

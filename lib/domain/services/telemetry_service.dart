@@ -693,6 +693,13 @@ class TelemetryService {
         'has_modifier': hasModifier,
       });
 
+  /// Records that closed-app push notifications were turned on or off.
+  Future<void> logPushNotificationsToggled({required bool enabled}) =>
+      _logEvent(
+        enabled ? 'push_opt_in' : 'push_opt_out',
+        const <String, Object?>{},
+      );
+
   /// Records explicit system-keyboard toggles from terminal UI.
   Future<void> logSystemKeyboardToggled({required bool visible}) => _logEvent(
     'system_keyboard_toggled',
