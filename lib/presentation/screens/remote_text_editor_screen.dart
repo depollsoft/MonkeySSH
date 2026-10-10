@@ -1,13 +1,18 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/services/diagnostics_log_service.dart';
+import '../../domain/services/remote_file_edit_session.dart';
+import '../../domain/services/remote_file_service.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/unsaved_changes_guard.dart';
+import 'remote_text_editor_conflict.dart';
 
 const _unwrappedEditorTrailingSlack = 24.0;
 const _minRemoteEditorFontSize = 8.0;
@@ -120,6 +125,26 @@ List<int> computeRemoteEditorLineStartOffsets(String text) {
   return (line: lineIndex + 1, column: clampedOffset - lineStartOffset + 1);
 }
 
+/// Snackbar text for a failed write: a lost connection and a refusal by the
+/// host need different fixes.
+@visibleForTesting
+String describeRemoteEditorWriteFailure(
+  Object error, {
+  required String action,
+}) {
+  if (error is RemoteFileRefusedException) {
+    return 'Could not $action. ${error.message}';
+  }
+  final connectionLost =
+      error is SSHError ||
+      (error is SftpError && error is! SftpStatusError) ||
+      error is SocketException ||
+      error is TimeoutException;
+  return connectionLost
+      ? 'Could not $action. Check the connection and try again.'
+      : 'Could not $action. Check permissions and try again.';
+}
+
 /// Builds the remote text editor screen for widget and integration tests.
 @visibleForTesting
 Widget buildRemoteTextEditorScreenForTesting({
@@ -127,6 +152,7 @@ Widget buildRemoteTextEditorScreenForTesting({
   required TextEditingController controller,
   required Future<void> Function(String text) onSave,
   String? filePath,
+  RemoteEditorConflictHandler? conflictHandler,
   ScrollController? horizontalScrollController,
   TerminalThemeData? terminalTheme,
   String fontFamily = 'monospace',
@@ -136,6 +162,7 @@ Widget buildRemoteTextEditorScreenForTesting({
   filePath: filePath,
   controller: controller,
   onSave: onSave,
+  conflictHandler: conflictHandler,
   horizontalScrollController: horizontalScrollController,
   terminalTheme: terminalTheme,
   fontFamily: fontFamily,
@@ -168,6 +195,7 @@ class RemoteTextEditorScreen extends StatefulWidget {
     required this.fontFamily,
     required this.initialFontSize,
     this.filePath,
+    this.conflictHandler,
     this.horizontalScrollController,
     this.terminalTheme,
     super.key,
@@ -184,6 +212,10 @@ class RemoteTextEditorScreen extends StatefulWidget {
 
   /// Persists the edited text before the editor closes.
   final Future<void> Function(String text) onSave;
+
+  /// Checks the host's file before [onSave] and resolves conflicts when
+  /// something else changed it. Without one, saves write unconditionally.
+  final RemoteEditorConflictHandler? conflictHandler;
 
   /// Monospace font family matching the active connection.
   final String fontFamily;
@@ -366,7 +398,12 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
     final savedText = widget.controller.text;
     setState(() => _saving = true);
     try {
-      await widget.onSave(savedText);
+      final conflictHandler = widget.conflictHandler;
+      if (conflictHandler == null) {
+        await widget.onSave(savedText);
+      } else if (!await _saveChecked(conflictHandler, savedText)) {
+        return;
+      }
       if (!mounted) {
         return;
       }
@@ -374,11 +411,7 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
         _initialText = savedText;
         _saving = false;
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_hasUnsavedChanges) {
-          Navigator.of(context).pop(true);
-        }
-      });
+      _popAfterSave(true);
     } on Object catch (error) {
       DiagnosticsLogService.instance.warning(
         'sftp.editor',
@@ -387,12 +420,165 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
       );
       if (mounted) {
         setState(() => _saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not save changes. Check permissions and try again.',
-            ),
-          ),
+        _showSnackBar(
+          describeRemoteEditorWriteFailure(error, action: 'save changes'),
+        );
+      }
+    }
+  }
+
+  /// Saves over the host's file when the check finds it unchanged and asks
+  /// first otherwise. Returns whether the original file was written.
+  Future<bool> _saveChecked(
+    RemoteEditorConflictHandler handler,
+    String text,
+  ) async {
+    for (var attempt = 1; ; attempt++) {
+      // After repeated moves under the save, stop re-checking and ask.
+      final change = attempt > 3
+          ? RemoteFileChange.modified
+          : await handler.checkForChanges();
+      if (!mounted) {
+        return false;
+      }
+      try {
+        if (change == RemoteFileChange.unchanged) {
+          await widget.onSave(text);
+          return true;
+        }
+        if (!await _resolveRemoteChange(handler, change, text)) {
+          return false;
+        }
+        if (change == RemoteFileChange.deleted) {
+          await handler.recreate(text);
+        } else {
+          await handler.overwrite(text);
+        }
+        return true;
+      } on RemoteFileChangedDuringSaveException {
+        // The file moved between the check and the write, or a deleted file
+        // came back. Check again so an identical rewrite still saves without
+        // a prompt and a real change gets the dialog.
+        if (!mounted) {
+          return false;
+        }
+      }
+    }
+  }
+
+  void _popAfterSave(Object result) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_hasUnsavedChanges) {
+        Navigator.of(context).pop(result);
+      }
+    });
+  }
+
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Asks how to save over a file that changed on the host and carries out a
+  /// reload or copy. Returns whether the caller should write over the file.
+  Future<bool> _resolveRemoteChange(
+    RemoteEditorConflictHandler handler,
+    RemoteFileChange change,
+    String text,
+  ) async {
+    final choice = await showRemoteEditorConflictDialog(
+      context,
+      fileName: widget.fileName,
+      change: change,
+    );
+    DiagnosticsLogService.instance.info(
+      'sftp.editor',
+      'save_conflict',
+      fields: {'change': change.name, 'choice': choice?.name ?? 'cancel'},
+    );
+    if (!mounted) {
+      return false;
+    }
+    switch (choice) {
+      case RemoteEditorConflictChoice.overwrite:
+        return true;
+      case RemoteEditorConflictChoice.saveCopy:
+        await _saveCopy(handler, text);
+      case RemoteEditorConflictChoice.reload:
+        await _reload(handler);
+      case null:
+        setState(() => _saving = false);
+    }
+    return false;
+  }
+
+  Future<void> _saveCopy(
+    RemoteEditorConflictHandler handler,
+    String text,
+  ) async {
+    try {
+      final copyName = await handler.saveCopy(text);
+      if (!mounted) {
+        return;
+      }
+      // The edits are safe in the copy, so leaving needs no confirmation.
+      setState(() {
+        _initialText = text;
+        _saving = false;
+      });
+      _popAfterSave(RemoteEditorSavedCopy(copyName));
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'sftp.editor',
+        'save_copy_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      if (mounted) {
+        setState(() => _saving = false);
+        _showSnackBar(
+          describeRemoteEditorWriteFailure(error, action: 'save a copy'),
+        );
+      }
+    }
+  }
+
+  Future<void> _reload(RemoteEditorConflictHandler handler) async {
+    if (_hasUnsavedChanges && !await confirmRemoteEditorReload(context)) {
+      if (mounted) {
+        setState(() => _saving = false);
+      }
+      return;
+    }
+    try {
+      final text = await handler.reload();
+      if (!mounted) {
+        return;
+      }
+      final offset = widget.controller.selection.isValid
+          ? math.min(widget.controller.selection.extentOffset, text.length)
+          : 0;
+      widget.controller.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: offset),
+      );
+      setState(() {
+        _initialText = text;
+        _saving = false;
+      });
+      _showSnackBar('Loaded the host version of "${widget.fileName}"');
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'sftp.editor',
+        'reload_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      if (mounted) {
+        setState(() => _saving = false);
+        _showSnackBar(
+          error is RemoteEditorReloadBlockedException
+              ? error.message
+              : 'Could not reload the file. Check the connection and try '
+                    'again.',
         );
       }
     }

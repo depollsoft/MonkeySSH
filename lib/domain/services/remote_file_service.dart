@@ -460,6 +460,19 @@ class RemoteFileDownloadCancelledException implements Exception {
   String toString() => 'Download cancelled';
 }
 
+/// A remote write was refused for a reason the user can act on. [message]
+/// is user-facing and never contains paths.
+class RemoteFileRefusedException implements Exception {
+  /// Creates the exception.
+  const RemoteFileRefusedException(this.message);
+
+  /// Explanation shown to the user.
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// A download exceeded its configured byte limit.
 class RemoteFileDownloadLimitException implements Exception {
   /// Creates an exception with the observed byte count.
@@ -672,10 +685,18 @@ class RemoteFileService {
   /// the second rename fails. When the directory denies new entries, the
   /// scratch directory cannot be made private, or the original owner cannot
   /// be reproduced, this falls back to writing in place, as editors do.
+  ///
+  /// When [remotePath] does not exist, the new file gets [newFileMode] (the
+  /// server default when null) before it is renamed into place. A folder at
+  /// [remotePath] is refused. [beforeReplace] runs just before the rename or
+  /// in-place write and may throw to abandon the save with the original
+  /// untouched.
   Future<void> replaceFileBytes({
     required SftpClient sftp,
     required String remotePath,
     required Uint8List bytes,
+    SftpFileMode? newFileMode,
+    Future<void> Function()? beforeReplace,
   }) async {
     var target = remotePath;
     SftpFileAttrs? original;
@@ -690,12 +711,40 @@ class RemoteFileService {
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
-    Future<void> writeInPlace() => uploadBytes(
-      sftp: sftp,
-      remotePath: target,
-      bytes: bytes,
-      applyPrivateMode: false,
-    );
+    if (original?.isDirectory ?? false) {
+      throw const RemoteFileRefusedException(
+        'The path is now a folder on the host.',
+      );
+    }
+    final isNewFile = original == null;
+    Future<void> writeInPlace() async {
+      await beforeReplace?.call();
+      if (isNewFile && newFileMode != null) {
+        // A new file is created exclusively and restricted on its handle
+        // before any content lands in it.
+        final file = await sftp.open(
+          target,
+          mode:
+              SftpFileOpenMode.write |
+              SftpFileOpenMode.create |
+              SftpFileOpenMode.exclusive,
+        );
+        try {
+          await file.setStat(SftpFileAttrs(mode: newFileMode));
+        } on Object {
+          await _cleanUpQuietly(file.close());
+          await _cleanUpQuietly(sftp.remove(target));
+          rethrow;
+        }
+        return _writeAndClose(file, Stream<List<int>>.value(bytes), null);
+      }
+      await uploadBytes(
+        sftp: sftp,
+        remotePath: target,
+        bytes: bytes,
+        applyPrivateMode: false,
+      );
+    }
 
     // The copy is made inside a fresh 0700 directory, so no other user can
     // open it whatever mode the server gives new files. Short names of its
@@ -749,7 +798,14 @@ class RemoteFileService {
         } on SftpStatusError {
           return await writeInPlace();
         }
+      } else if (newFileMode != null) {
+        try {
+          await sftp.setStat(temporaryPath, SftpFileAttrs(mode: newFileMode));
+        } on SftpStatusError {
+          return await writeInPlace();
+        }
       }
+      await beforeReplace?.call();
       try {
         await sftp.rename(temporaryPath, target);
       } on SftpStatusError catch (error) {
