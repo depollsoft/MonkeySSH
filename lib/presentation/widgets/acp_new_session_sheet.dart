@@ -265,7 +265,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
 
   @override
   void dispose() {
-    _abandonPendingWorktree();
+    // A start still in flight owns its worktree and settles it from the
+    // launch result, even after the sheet is swiped away, so the worktree is
+    // never removed under a session that goes on to start.
     _cwd.dispose();
     _workspace.dispose();
     super.dispose();
@@ -300,6 +302,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   /// the same start made (a sign-in or concurrency retry).
   Future<String?> _launchWorktreeDirectory(
     int hostId,
+    String providerId,
     SshSession? session,
   ) async {
     final pending = _pendingWorktree;
@@ -320,6 +323,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             hostId: hostId,
             preset: preset,
             windowsHost: session.remoteIsWindows,
+            tool: agentLaunchToolForBuiltinAcpProviderId(providerId),
           );
       if (!mounted) {
         launch.abandon();
@@ -330,23 +334,34 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     } on AgentWorktreeException catch (error) {
       if (mounted) {
         setState(
-          () => _error = 'Could not create the worktree. ${error.message}',
+          () => _error = error.kind == AgentWorktreeErrorKind.unsupportedHost
+              ? '${error.message} Turn off “Start in a new git worktree” to '
+                    'start in the working directory.'
+              : 'Could not create the worktree. ${error.message}',
         );
       }
       return null;
     }
   }
 
-  /// Sends the preset's initial prompt to a newly started [key], once.
-  void _sendInitialPromptOnce(AcpSessionKey key) {
-    final prompt = _initialPrompt;
+  /// Settles a launch that started [key]: keeps its worktree and sends the
+  /// preset's initial prompt, once.
+  ///
+  /// Runs whether or not the sheet is still open, so [manager] and [prompt]
+  /// are read before the launch. A prompt failure is logged and never turns
+  /// a started session into a reported failure.
+  void _settleStarted(
+    AcpSessionKey key, {
+    required AcpSessionManager manager,
+    required String? prompt,
+  }) {
+    _pendingWorktree?.launched();
+    _pendingWorktree = null;
     if (prompt == null || _initialPromptSent) {
       return;
     }
     _initialPromptSent = true;
-    ref
-        .read(acpSessionManagerProvider)
-        .prompt(key, [AcpTextContent(prompt)])
+    Future<void>.sync(() => manager.prompt(key, [AcpTextContent(prompt)]))
         .then<void>(
           (_) {},
           onError: (Object error) {
@@ -612,6 +627,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     if (recent == null && _startsInWorktree) {
       final worktreeDirectory = await _launchWorktreeDirectory(
         hostId,
+        providerId,
         sshSession,
       );
       if (!mounted || worktreeDirectory == null) return null;
@@ -658,15 +674,31 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     });
     _authChooserShown = false;
     _providerCommandRequested = false;
+    final manager = ref.read(acpSessionManagerProvider);
+    final prompt = _initialPrompt;
+    Future<AcpSessionLaunchResult?> launchAndSettle({
+      List<AcpSessionKey> replace = const <AcpSessionKey>[],
+      bool reuseResolvedLaunch = false,
+    }) async {
+      final result = await _launch(
+        replace: replace,
+        reuseResolvedLaunch: reuseResolvedLaunch,
+      );
+      if (result case AcpSessionLaunchStarted(:final key)) {
+        _settleStarted(key, manager: manager, prompt: prompt);
+      }
+      return result;
+    }
+
     try {
-      var result = await _launch(reuseResolvedLaunch: afterSignIn);
+      var result = await launchAndSettle(reuseResolvedLaunch: afterSignIn);
       // Resolve a free-tier concurrency block, then retry once.
       if (result is AcpSessionLaunchBlocked && mounted) {
         final resolved = await resolveAcpConcurrencyBlock(
           context,
           ref,
           result.decision,
-          relaunch: (replace) => _launch(replace: replace),
+          relaunch: (replace) => launchAndSettle(replace: replace),
         );
         // Null also covers the sheet being dismissed while the choice dialog
         // or upgrade route was open, so re-check mounted before touching state.
@@ -684,9 +716,6 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       }
       switch (result) {
         case AcpSessionLaunchStarted(:final key):
-          _pendingWorktree?.launched();
-          _pendingWorktree = null;
-          _sendInitialPromptOnce(key);
           Navigator.of(context).pop(key);
         case AcpSessionLaunchFailed(
           :final key,
@@ -734,8 +763,8 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         });
       }
     } finally {
-      // A start that did not launch leaves no worktree behind; a retry
-      // creates a fresh one.
+      // A started launch has already settled its worktree. Anything else
+      // leaves no worktree behind, and a later start creates a fresh one.
       _abandonPendingWorktree();
     }
   }
