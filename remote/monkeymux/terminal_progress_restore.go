@@ -3,8 +3,9 @@ package main
 import "bytes"
 
 // stripTerminalProgressFromRestoreHistory removes task state owned by a process
-// that an upgrade stopped. Do not use this on ordinary reconnect history: that
-// process is still running and its progress remains valid.
+// that an upgrade stopped: OSC 9;4 progress and OSC 7501 program status. Do
+// not use this on ordinary reconnect history: that process is still running
+// and its progress remains valid.
 func stripTerminalProgressFromRestoreHistory(data []byte) []byte {
 	var output []byte
 	copyStart := 0
@@ -47,6 +48,9 @@ func isTerminalProgressOscSequence(sequence []byte) bool {
 		return false
 	}
 	code, value, ok := bytes.Cut(sequence[payloadStart:payloadStart+end], []byte(";"))
+	if ok && bytes.Equal(code, []byte(programStatusOscCode)) {
+		return true
+	}
 	if !ok || !bytes.Equal(code, []byte("9")) {
 		return false
 	}

@@ -44,6 +44,7 @@ import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/snippet_variables.dart';
 import '../../domain/models/terminal_capability_hint.dart';
+import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/terminal_progress.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
@@ -1644,7 +1645,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   int? get _lastExitCode => _observedSession?.lastExitCode;
 
-  TerminalProgress? get _terminalProgress => _observedSession?.terminalProgress;
+  TerminalProgramStatus? get _programStatus => _observedSession?.programStatus;
+
+  /// Work a program reported through OSC 7501, otherwise OSC 9;4 progress.
+  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar.
+  TerminalProgress? get _terminalProgress {
+    final status = _programStatus;
+    return status == null
+        ? _observedSession?.terminalProgress
+        : status.terminalProgress;
+  }
 
   bool get _shouldReviewTerminalCommandInsertion =>
       shouldReviewTerminalCommandInsertion(
@@ -10130,7 +10140,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       windowId: targetWindowId,
     );
     if (backend.remoteMuxBackend == RemoteMuxBackend.monkeyMux) {
-      session.clearTerminalProgress();
+      session
+        ..clearTerminalProgress()
+        ..synchronizeProgramStatus(null);
     }
     if (targetWindowId == null) {
       await backend.selectWindow(
@@ -10430,7 +10442,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     Iterable<TmuxWindow> windows,
   ) {
     final activeWindow = activeTmuxWindow(windows);
-    session.synchronizeTerminalProgress(activeWindow?.terminalProgress);
+    session
+      ..synchronizeTerminalProgress(activeWindow?.terminalProgress)
+      ..synchronizeProgramStatus(activeWindow?.programStatus);
   }
 
   void _prepareTerminalForMuxWindowChange({
@@ -10438,7 +10452,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool clearTerminalProgress = true,
   }) {
     if (clearTerminalProgress) {
-      _observedSession?.clearTerminalProgress();
+      _observedSession
+        ?..clearTerminalProgress()
+        ..synchronizeProgramStatus(null);
     }
     _terminalTextInputController.resetImeCompletions();
     _clearTerminalFollowPauseForMuxWindowChange();
@@ -11272,6 +11288,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           label: shellStatusLabel,
           tooltip:
               'Shell integration status for the current prompt or command.',
+        ),
+      if (_programStatus case final status?)
+        (
+          icon: Icons.monitor_heart_outlined,
+          label: status.app == null
+              ? status.label
+              : '${status.app} · ${status.label}',
+          tooltip: 'Status the running program reports to the terminal.',
         ),
       if (_isUsingAltBuffer)
         (

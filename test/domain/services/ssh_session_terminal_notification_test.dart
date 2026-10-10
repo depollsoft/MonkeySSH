@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
@@ -209,6 +211,88 @@ void main() {
 
     expect(session.clearTerminalProgress(), isFalse);
     expect(metadataChanges, 2);
+  });
+
+  test('routes OSC 7501 reports to program status', () {
+    final session = _session();
+    var metadataChanges = 0;
+    session
+      ..addMetadataListener(() => metadataChanges += 1)
+      ..debugHandlePrivateOsc('7501', const ['state=working:app=claude-code']);
+
+    expect(
+      session.programStatus,
+      const TerminalProgramStatus(
+        state: TerminalProgramState.working,
+        app: 'claude-code',
+      ),
+    );
+    expect(metadataChanges, 1);
+
+    session.debugHandlePrivateOsc('7501', const [
+      'state=working:app=claude-code',
+    ]);
+    expect(metadataChanges, 1);
+
+    session.debugHandlePrivateOsc('133', const ['A', 'redraw=0']);
+    expect(session.programStatus, isNull);
+    expect(metadataChanges, 2);
+
+    session
+      ..debugHandlePrivateOsc('7501', const ['state=blocked'])
+      ..debugHandlePrivateOsc('633', const ['A']);
+    expect(session.programStatus, isNull);
+  });
+
+  test('the terminal parser delivers OSC 7501 and RIS clears it', () {
+    final session = _session();
+    final terminal = session.getOrCreateTerminal()
+      ..write('\x1b]7501;state=blocked:kind=question:app=deploy\x1b\\');
+
+    expect(
+      session.programStatus,
+      const TerminalProgramStatus(
+        state: TerminalProgramState.blocked,
+        kind: TerminalProgramBlockedKind.question,
+        app: 'deploy',
+      ),
+    );
+
+    terminal.write('\x1bc');
+    expect(session.programStatus, isNull);
+  });
+
+  test('takes multiplexer program status from the window snapshot', () {
+    final session = _session()..remoteMuxBackend = RemoteMuxBackend.monkeyMux;
+    const status = TerminalProgramStatus(
+      state: TerminalProgramState.blocked,
+      kind: TerminalProgramBlockedKind.permission,
+    );
+
+    session.debugHandlePrivateOsc('7501', const ['state=working']);
+    expect(session.programStatus, isNull);
+
+    expect(session.synchronizeProgramStatus(status), isTrue);
+    expect(session.synchronizeProgramStatus(status), isFalse);
+    expect(session.programStatus, status);
+
+    session.remoteMuxBackend = null;
+    expect(session.programStatus, isNull);
+  });
+
+  test('attaching a multiplexer drops plain-shell program status', () {
+    final session = _session()
+      ..debugHandlePrivateOsc('7501', const ['state=done']);
+    var metadataChanges = 0;
+    session
+      ..addMetadataListener(() => metadataChanges += 1)
+      ..remoteMuxBackend = RemoteMuxBackend.tmux;
+
+    expect(session.programStatus, isNull);
+    expect(metadataChanges, 1);
+
+    session.remoteMuxBackend = null;
+    expect(session.programStatus, isNull);
   });
 
   test('OSC 9;4 progress does not emit a notification', () async {

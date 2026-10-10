@@ -420,7 +420,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         return acpActivityTerminalProgress(acpSessionActivityDisplay(session));
       }
     }
-    return window.terminalProgress;
+    return window.activityProgress;
   }
 
   TmuxOpenAcpWindowAction _openNativeWindowAction(TmuxWindow window) =>

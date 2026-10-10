@@ -590,6 +590,21 @@ func attachOutputWriter(w io.Writer) io.Writer {
 	return w
 }
 
+// programStatusReportOwner attributes an OSC 7501 report to the window's
+// foreground process group, read as the report arrives.
+var programStatusReportOwner = func(window *muxWindow) int {
+	if pgrp := window.foregroundProcessGroupLocked(); pgrp > 0 {
+		return pgrp
+	}
+	return programStatusOwnerUntracked
+}
+
+// resolveProgramStatusOwner is not needed here: every POSIX report is
+// attributed as it arrives.
+var resolveProgramStatusOwner = func(int) int { return programStatusOwnerUntracked }
+
+func programStatusOwnerAlive(pgrp int) bool { return processGroupAlive(pgrp) }
+
 var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	if window == nil || window.pty == nil {
 		return 0

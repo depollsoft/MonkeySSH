@@ -3765,7 +3765,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
 
   Widget _buildWindowRow(ThemeData theme, TmuxWindow window) {
     final title = window.displayTitle;
-    final secondaryTitle = window.secondaryTitle;
+    final secondaryTitle =
+        window.programStatus?.attentionMessage ?? window.secondaryTitle;
     final iconColor = agentWindowIdentityColor(
       theme.colorScheme,
       isActive: window.isActive,
