@@ -235,6 +235,20 @@ void main() {
       );
     });
 
+    test('an unreadable worktree setting makes the preset unsupported', () {
+      for (final value in <Object>['yes', <Object>[], 3]) {
+        expect(
+          AgentLaunchPreset.tryFromJson({
+            'tool': 'codex',
+            'workingDirectory': '~/src/app',
+            'worktree': value,
+          }),
+          isNull,
+          reason: '$value',
+        );
+      }
+    });
+
     test('presets saved before worktrees still decode without them', () {
       final decoded = AgentLaunchPreset.tryFromJson({
         'tool': 'codex',

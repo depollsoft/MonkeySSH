@@ -10923,10 +10923,16 @@ void main() {
       ).called(1);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-    for (final running in [false, true]) {
+    for (final (running, attachFails) in [
+      (false, false),
+      (true, false),
+      (false, true),
+    ]) {
       testWidgets(
         running
             ? 'a worktree preset attaching to a running session creates nothing'
+            : attachFails
+            ? 'a worktree preset whose attach shell fails rolls back'
             : 'a worktree preset starts its agent in a new worktree',
         (tester) async {
           final settingsService = SettingsService(db);
@@ -11000,9 +11006,11 @@ void main() {
           final executedCommands = <String>[];
           when(() => sshClient.execute(any(), pty: any(named: 'pty')))
               .thenAnswer((invocation) async {
-                executedCommands.add(
-                  invocation.positionalArguments.single as String,
-                );
+                final command = invocation.positionalArguments.single as String;
+                executedCommands.add(command);
+                if (attachFails && command.contains(' attach')) {
+                  throw Exception('channel open refused');
+                }
                 return shellChannel;
               });
 
@@ -11038,7 +11046,9 @@ void main() {
             expect(worktrees.created, hasLength(1));
             expect(attach, contains('/work/project.worktrees/agent'));
           }
-          expect(worktrees.removed, isEmpty);
+          // An attach that never ran leaves no worktree, even though the
+          // session lists a window there.
+          expect(worktrees.removed, attachFails ? worktrees.created : isEmpty);
           await tester.pumpWidget(const SizedBox.shrink());
           await tester.pump();
         },

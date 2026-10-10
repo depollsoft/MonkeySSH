@@ -323,10 +323,10 @@ class _WorktreePreview extends StatelessWidget {
       options,
       AgentWorktreeTemplateValues.sample.withTool(tool.commandName),
     );
-    final repository = options.resolveRepositoryPath(workingDirectory)!;
-    final location = target.pathIsRepositoryRelative
-        ? '${repository.endsWith('/') && repository.length > 1 ? repository.substring(0, repository.length - 1) : repository}${target.path}'
-        : target.path;
+    // The host resolves {repo} to the repository's top level, which the
+    // configured folder may sit below, so a repository-relative example
+    // keeps it symbolic rather than guessing a folder.
+    final location = target.displayPath;
     final mono = FluttyTheme.monoStyle.copyWith(
       fontSize: 12,
       color: colorScheme.onSurfaceVariant,

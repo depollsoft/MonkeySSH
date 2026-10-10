@@ -68,7 +68,7 @@ void main() {
     );
     expect(find.text('HEAD → agent/claude-20261009-k3x9q2'), findsOneWidget);
     expect(
-      find.text('~/src/app.worktrees/agent-claude-20261009-k3x9q2'),
+      find.text('{repo}.worktrees/agent-claude-20261009-k3x9q2'),
       findsOneWidget,
     );
 

@@ -876,6 +876,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Session-end handling waits for it, because MonkeyMux announces the empty
   /// window list before it answers the close.
   Future<void>? _muxSessionEndHold;
+
+  /// The worktree a MonkeyMux preset launch created, from when its attach
+  /// command is ready until that command reaches the host (kept and then
+  /// checked) or the launch is given up (rolled back).
+  ({
+    TerminalAgentWorktreeLaunch launch,
+    SshSession session,
+    String sessionName,
+  })?
+  _unsettledWorktreeLaunch;
   bool _monkeyMuxReconnectAttachPending = false;
   bool _monkeyMuxAttachEstablished = false;
   _PendingMonkeyMuxServerReplacement? _pendingMonkeyMuxServerReplacement;
@@ -4764,7 +4774,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final initialAutoConnect = await _prepareNewShellInitialAutoConnect(
         session,
       );
-      if (!stillOwnsSession()) return;
+      if (!stillOwnsSession()) {
+        _settleWorktreeLaunch(launched: false);
+        return;
+      }
       final startupCommand =
           initialAutoConnect.command?.backend == RemoteMuxBackend.monkeyMux
           ? initialAutoConnect.command
@@ -4788,6 +4801,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         command: startupCommand?.command,
         returnToLoginShell: startupCommand != null,
       );
+      // The attach command ran as the shell's startup command.
+      _settleWorktreeLaunch(launched: true);
       if (!stillOwnsSession()) return;
       _shell = shell;
       DiagnosticsLogService.instance.info(
@@ -4850,6 +4865,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _error = 'Could not reconnect to the MonkeyMux session. Try again.';
       });
     } on Object catch (e) {
+      // The attach command never ran, so its worktree goes.
+      _settleWorktreeLaunch(launched: false);
       DiagnosticsLogService.instance.error(
         'terminal',
         'shell_open_failed',
@@ -7305,6 +7322,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted ||
         _connectionId != session.connectionId ||
         !identical(_shell, shell)) {
+      _settleWorktreeLaunch(launched: false);
       return;
     }
     if (session.remoteIsWindows) {
@@ -7313,6 +7331,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         command: command.command,
         requestPty: false,
       );
+      _settleWorktreeLaunch(launched: true);
       DiagnosticsLogService.instance.info(
         'terminal.agent_launch',
         'command_written',
@@ -7326,6 +7345,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     shell.write(utf8.encode(formatAutoConnectCommandForShell(command.command)));
+    _settleWorktreeLaunch(launched: true);
     DiagnosticsLogService.instance.info(
       'terminal.agent_launch',
       'command_written',
@@ -7371,19 +7391,42 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     } finally {
       if (command == null) {
         worktreeLaunch.abandon();
-      } else {
-        worktreeLaunch.launched(
-          windowDirectories: () async => [
-            for (final window in await _monkeyMuxService.listWindows(
-              session,
-              sessionName,
-            ))
-              window.currentPath,
-          ],
+      } else if (worktreeLaunch.worktree != null) {
+        // The caller settles it once it has used the command or given up.
+        _settleWorktreeLaunch(launched: false);
+        _unsettledWorktreeLaunch = (
+          launch: worktreeLaunch,
+          session: session,
+          sessionName: sessionName,
         );
       }
     }
     return command;
+  }
+
+  /// Settles the worktree of the MonkeyMux preset launch in flight, if any.
+  ///
+  /// [launched] means the attach command reached the host: the worktree is
+  /// kept and then checked against the session's windows. Otherwise the
+  /// command was never used and the worktree is rolled back.
+  void _settleWorktreeLaunch({required bool launched}) {
+    final unsettled = _unsettledWorktreeLaunch;
+    if (unsettled == null) return;
+    _unsettledWorktreeLaunch = null;
+    if (!launched) {
+      unsettled.launch.abandon();
+      return;
+    }
+    final mux = _monkeyMuxService;
+    unsettled.launch.launched(
+      windowDirectories: () async => [
+        for (final window in await mux.listWindows(
+          unsettled.session,
+          unsettled.sessionName,
+        ))
+          window.currentPath,
+      ],
+    );
   }
 
   Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommandIn(
@@ -11365,6 +11408,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   @override
   void dispose() {
+    // A launch whose command may already be running is kept and checked,
+    // never removed blind.
+    _settleWorktreeLaunch(launched: true);
     WidgetsBinding.instance.removeObserver(this);
     _pasteUploadProgress.dispose();
     // Provider notifications must wait until the widget tree finishes unmounting.

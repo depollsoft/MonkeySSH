@@ -297,6 +297,14 @@ class AgentLaunchPreset {
     if (tool == null) {
       return null;
     }
+    // A worktree setting that is present but unreadable must not decode as
+    // "no worktree": that would launch in the shared checkout the preset
+    // asked to stay out of. The whole preset is unsupported instead.
+    final worktreeJson = json['worktree'];
+    final worktree = AgentWorktreeLaunchOptions.tryFromJson(worktreeJson);
+    if (worktreeJson != null && worktree == null) {
+      return null;
+    }
     return AgentLaunchPreset(
       tool: tool,
       workingDirectory: _readTrimmedString(json['workingDirectory']),
@@ -307,7 +315,7 @@ class AgentLaunchPreset {
       tmuxExtraFlags: _readTrimmedString(json['tmuxExtraFlags']),
       tmuxDisableStatusBar: json['tmuxDisableStatusBar'] == true,
       additionalArguments: _readTrimmedString(json['additionalArguments']),
-      worktree: AgentWorktreeLaunchOptions.tryFromJson(json['worktree']),
+      worktree: worktree,
       initialPrompt: _readTrimmedString(json['initialPrompt']),
     );
   }
