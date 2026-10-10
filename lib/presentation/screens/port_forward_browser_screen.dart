@@ -25,6 +25,7 @@ import '../../domain/services/socks_forward_route.dart';
 import '../../domain/services/ssh_service.dart';
 import '../browser/browser_file_picker.dart';
 import '../browser/socks_browser_panels.dart';
+import '../widgets/brand_error_state.dart';
 
 /// Group used to prioritize and separate forwarded browser tabs.
 enum PortForwardBrowserTabGroup {
@@ -190,6 +191,10 @@ class _PortForwardBrowserScreenState
   var _socksGeneration = 0;
   // Port the browser is being pointed at, while that is in flight.
   int? _socksRoutingPort;
+  // Whether this browser started the forward, and so stops it on close.
+  var _socksStartedForward = false;
+  // A loopback browser could not remove a leftover SOCKS proxy.
+  var _directProxyBlocked = false;
 
   _PortForwardBrowserTabState get _selectedTab => _tabs[_selectedTabIndex];
 
@@ -220,13 +225,7 @@ class _PortForwardBrowserScreenState
     if (_isSocksBrowser) {
       WidgetsBinding.instance.removeObserver(this);
       _socksGeneration++;
-      _socksRoute
-        ?..removeListener(_handleSocksRouteChanged)
-        ..dispose();
-      if (_socksProxyHeld) {
-        // Clears after a short delay, once the web view is gone.
-        _socksProxy.release();
-      }
+      _tearDownSocksBrowser();
     }
     _addressFocusNode.removeListener(_handleAddressFocusChanged);
     _addressController?.dispose();
@@ -243,6 +242,22 @@ class _PortForwardBrowserScreenState
 
   @override
   Widget build(BuildContext context) {
+    if (_directProxyBlocked) {
+      return Scaffold(
+        appBar: AppBar(),
+        body: BrandErrorState(
+          icon: Icons.link_off_rounded,
+          title: 'browser proxy stuck',
+          message:
+              'A SOCKS proxy is still set for the in-app browser, so it '
+              'can’t open local forwards yet.',
+          onRetry: () {
+            setState(() => _directProxyBlocked = false);
+            unawaited(_initializeBrowser());
+          },
+        ),
+      );
+    }
     if (_addressController == null || _tabs.isEmpty) {
       if (_isSocksBrowser) {
         return Scaffold(body: SafeArea(child: _buildSocksStatusPanel()));
@@ -272,9 +287,16 @@ class _PortForwardBrowserScreenState
                 child: Stack(
                   children: [
                     Positioned.fill(
-                      child: WebViewWidget(
-                        key: ValueKey<int>(selectedTab.id),
-                        controller: selectedTab.controller,
+                      // A covered page must not stay reachable by screen
+                      // readers either.
+                      child: ExcludeSemantics(
+                        excluding:
+                            !_canLoadPages ||
+                            (_isSocksBrowser && !selectedTab.hasStartedLoading),
+                        child: WebViewWidget(
+                          key: ValueKey<int>(selectedTab.id),
+                          controller: selectedTab.controller,
+                        ),
                       ),
                     ),
                     if (_isSocksBrowser && !selectedTab.hasStartedLoading)
@@ -366,8 +388,15 @@ class _PortForwardBrowserScreenState
       await _initializeSocksBrowser(socksForward);
       return;
     }
-    // A SOCKS browser that just closed may still have its proxy applied.
-    await _socksProxy.clearBeforeDirectBrowsing();
+    // A SOCKS browser that closed earlier leaves its proxy on the sink.
+    try {
+      await _socksProxy.clearBeforeDirectBrowsing();
+    } on SocksBrowserProxyException {
+      if (mounted) {
+        setState(() => _directProxyBlocked = true);
+      }
+      return;
+    }
     await _clearLegacySharedCookiesOnce();
     if (!mounted) {
       return;
@@ -426,13 +455,17 @@ class _PortForwardBrowserScreenState
     if (route == null) {
       _socksGeneration++;
       _socksRoutingPort = null;
-      if (_socksStatus == SocksBrowserRouteStatus.ready) {
-        DiagnosticsLogService.instance.info('browser.socks', 'route_down');
+      final wasReady = _socksStatus == SocksBrowserRouteStatus.ready;
+      if (wasReady || _socksStatus == SocksBrowserRouteStatus.connecting) {
+        if (wasReady) {
+          DiagnosticsLogService.instance.info('browser.socks', 'route_down');
+        }
         setState(() {
           _socksStatus = SocksBrowserRouteStatus.down;
           _socksMessage = null;
         });
       }
+      unawaited(_blockSocksPages());
       return;
     }
     if ((_socksStatus == SocksBrowserRouteStatus.ready &&
@@ -445,9 +478,16 @@ class _PortForwardBrowserScreenState
 
   Future<void> _routeBrowserThrough(SocksForwardRoute route) async {
     final generation = ++_socksGeneration;
-    final resumeAfterDrop = _tabs.isNotEmpty;
+    final wasReady = _socksStatus == SocksBrowserRouteStatus.ready;
     _socksRoutingPort = route.port;
     setState(() => _socksStatus = SocksBrowserRouteStatus.connecting);
+    if (wasReady) {
+      // The forward moved: stop the pages before the old port is let go.
+      await _blockSocksPages();
+      if (!mounted || generation != _socksGeneration) {
+        return;
+      }
+    }
     try {
       if (_socksProxyHeld) {
         await _socksProxy.reroute(route.port);
@@ -489,10 +529,76 @@ class _PortForwardBrowserScreenState
       _socksStatus = SocksBrowserRouteStatus.ready;
       _socksMessage = null;
     });
-    final tab = _selectedTab;
-    if (resumeAfterDrop && tab.hasStartedLoading) {
-      DiagnosticsLogService.instance.info('browser.socks', 'route_restored');
-      unawaited(tab.controller.reload());
+    var restored = 0;
+    for (final tab in _tabs) {
+      final restoreUri = tab.socksRestoreUri;
+      if (restoreUri == null) {
+        continue;
+      }
+      tab.socksRestoreUri = null;
+      restored++;
+      unawaited(_loadSafely(tab, restoreUri));
+    }
+    if (restored > 0) {
+      DiagnosticsLogService.instance.info(
+        'browser.socks',
+        'route_restored',
+        fields: {'tabs': restored},
+      );
+    }
+  }
+
+  /// Stops every routed page and points the proxy at the sink.
+  ///
+  /// Covering a page does not stop its scripts, which keep requesting through
+  /// the proxy. Each page is replaced by a blank one, remembering its address
+  /// so it can load again once the forward is back.
+  Future<void> _blockSocksPages() async {
+    for (final tab in _tabs) {
+      if (!tab.hasStartedLoading || tab.socksRestoreUri != null) {
+        continue;
+      }
+      tab.socksRestoreUri = tab.currentUri;
+      unawaited(_loadSafely(tab, _blankSocksUri));
+    }
+    if (_socksProxyHeld) {
+      await _socksProxy.block();
+    }
+  }
+
+  Future<void> _loadSafely(_PortForwardBrowserTabState tab, Uri uri) async {
+    try {
+      await tab.controller.loadRequest(uri);
+    } on Object catch (error) {
+      if (error is! PlatformException && error is! ArgumentError) rethrow;
+    }
+  }
+
+  /// Leaves nothing able to load directly after the browser closes.
+  ///
+  /// The native web views can outlive this widget (Android's platform view
+  /// does not destroy its WebView), so the pages are blanked first, then the
+  /// proxy goes to the sink, and only then does a forward this browser started
+  /// stop and free its port.
+  void _tearDownSocksBrowser() {
+    final source = _socksRoute;
+    source?.removeListener(_handleSocksRouteChanged);
+    for (final tab in _tabs) {
+      if (tab.hasStartedLoading) {
+        unawaited(_loadSafely(tab, _blankSocksUri));
+      }
+    }
+    final released = _socksProxyHeld
+        ? _socksProxy.release()
+        : Future<void>.value();
+    if (source != null) {
+      final stopForward = _socksStartedForward ? source.stopForward : null;
+      unawaited(
+        released.whenComplete(() async {
+          await stopForward?.call();
+          source.dispose();
+        }),
+      );
     }
   }
 
@@ -507,7 +613,16 @@ class _PortForwardBrowserScreenState
       _socksStatus = SocksBrowserRouteStatus.connecting;
       _socksMessage = null;
     });
+    final wasStopped = source.route == null;
     final error = await source.restart();
+    if (wasStopped && source.route != null) {
+      if (!mounted) {
+        // Closed while the forward was starting; nothing will use it.
+        unawaited(source.stopForward());
+        return;
+      }
+      _socksStartedForward = true;
+    }
     if (!mounted || !identical(source, _socksRoute)) {
       return;
     }
@@ -1303,9 +1418,15 @@ class _PortForwardBrowserScreenState
     _showMessage('Friendly host unavailable; opened the local proxy directly.');
   }
 
+  /// Whether [uri] is a blank page this browser loaded to stop a SOCKS page,
+  /// which must not replace the address the tab shows and restores.
+  bool _isSocksPlaceholder(Uri? uri) =>
+      _isSocksBrowser && uri != null && uri.scheme == 'about';
+
   void _handlePageStarted(_PortForwardBrowserTabState tab, String url) {
     if (!mounted) return;
     final uri = Uri.tryParse(url);
+    if (_isSocksPlaceholder(uri)) return;
     setState(() {
       tab.isLoading = true;
       if (uri != null) {
@@ -1320,7 +1441,7 @@ class _PortForwardBrowserScreenState
   void _handleUrlChange(_PortForwardBrowserTabState tab, String? url) {
     if (!mounted || url == null) return;
     final uri = Uri.tryParse(url);
-    if (uri == null) return;
+    if (uri == null || _isSocksPlaceholder(uri)) return;
 
     setState(() {
       tab.currentUri = _normalizeLoadedBrowserUri(uri);
@@ -1335,9 +1456,10 @@ class _PortForwardBrowserScreenState
     _PortForwardBrowserTabState tab,
     String url,
   ) async {
+    final uri = Uri.tryParse(url);
+    if (_isSocksPlaceholder(uri)) return;
     final title = await tab.controller.getTitle();
     if (!mounted) return;
-    final uri = Uri.tryParse(url);
     setState(() {
       tab
         ..isLoading = false
@@ -1501,6 +1623,12 @@ class _PortForwardBrowserScreenState
       if (!request.isMainFrame) {
         return NavigationDecision.prevent;
       }
+      if (_isSocksBrowser) {
+        // Another app would load its target over this device's own network,
+        // so a page reached through the forward cannot hand off links.
+        _showMessage('Links to other apps are blocked in a SOCKS browser.');
+        return NavigationDecision.prevent;
+      }
       try {
         final launched = await launchUrl(
           uri,
@@ -1651,6 +1779,9 @@ class _PortForwardBrowserTabState {
   bool isLoading = true;
   bool hasStartedLoading = false;
   bool hasTriedLoopbackFallback = false;
+
+  /// Address to load again once a dropped SOCKS forward is back.
+  Uri? socksRestoreUri;
   Uri currentUri;
   String? pageTitle;
 }

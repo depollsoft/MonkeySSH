@@ -241,7 +241,14 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
                 value: _forwardType,
                 onChanged: _isSaving
                     ? null
-                    : (value) => setState(() => _forwardType = value),
+                    : (value) => setState(() {
+                        _forwardType = value;
+                        // A new SOCKS rule runs only while its browser is
+                        // open unless the user opts in to auto-start.
+                        if (!_isEditing && isDynamicPortForwardType(value)) {
+                          _autoStart = false;
+                        }
+                      }),
               ),
               const SizedBox(height: 20),
               if (_isDynamic)
@@ -276,7 +283,11 @@ class _PortForwardEditorFormState extends ConsumerState<PortForwardEditorForm> {
               SwitchListTile(
                 title: const Text('Auto-start'),
                 subtitle: Text(
-                  _compact
+                  _isDynamic
+                      ? 'Runs the proxy whenever you connect, open to every '
+                            'app on this device. Off: it runs only while the '
+                            'SOCKS browser is open.'
+                      : _compact
                       ? 'Start this forward when connecting'
                       : 'Start forwarding when connecting to host',
                 ),

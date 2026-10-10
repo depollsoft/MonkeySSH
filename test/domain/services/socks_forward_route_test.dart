@@ -137,4 +137,17 @@ void main() {
     );
     expect(await source.probe(), isFalse);
   });
+
+  test('stopForward stops the forward, even after dispose', () async {
+    final source = SessionSocksForwardRouteSource(
+      sessions: sessions,
+      portForward: _forward(),
+    )..refresh();
+    await source.restart();
+    expect(session.activeTunnels, hasLength(1));
+    source.dispose();
+
+    await source.stopForward();
+    expect(session.activeTunnels, isEmpty);
+  });
 }

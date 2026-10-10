@@ -250,6 +250,7 @@ void main() {
           home: Scaffold(
             body: PortForwardEditorForm(
               hosts: [_host()],
+              defaultAutoStart: true,
               onSaved: (result) => savedMessage = result.message,
             ),
           ),
@@ -262,9 +263,19 @@ void main() {
     await tester.tap(find.text('Dev box').last);
     await tester.pumpAndSettle();
 
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
     await tester.tap(find.text('SOCKS'));
     await tester.pumpAndSettle();
     expect(find.text('Port on 127.0.0.1'), findsOneWidget);
+    // An unauthenticated proxy only runs on demand unless the user opts in.
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isFalse,
+    );
+    expect(find.textContaining('open to every app'), findsOneWidget);
     // Only the name and listener port remain: no bind host, no destination.
     final fields = find.byType(TextFormField);
     expect(fields, findsNWidgets(2));
@@ -290,6 +301,7 @@ void main() {
     expect(saved.localPort.value, 0);
     expect(saved.remoteHost.value, isEmpty);
     expect(saved.remotePort.value, 0);
+    expect(saved.autoStart.value, isFalse);
     // A loopback-only listener never asks to expose the forward.
     expect(find.text('Expose port forward?'), findsNothing);
     expect(savedMessage, 'Port forward added');

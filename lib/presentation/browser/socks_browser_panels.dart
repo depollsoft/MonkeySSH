@@ -125,24 +125,25 @@ class SocksBrowserStatusPanel extends StatelessWidget {
                       ),
                     ),
                   ],
-                  if (status != SocksBrowserRouteStatus.connecting) ...[
-                    const SizedBox(height: FluttyTheme.spacingLg),
-                    if (onRestart != null &&
-                        status == SocksBrowserRouteStatus.down)
-                      FilledButton.icon(
-                        onPressed: onRestart,
-                        icon: const Icon(Icons.restart_alt_rounded),
-                        label: const Text('Restart forward'),
-                      ),
-                    if (onClose != null) ...[
-                      const SizedBox(height: FluttyTheme.spacingSm),
-                      // Outlined, so the restart stays the one teal action.
-                      OutlinedButton(
-                        onPressed: onClose,
-                        child: const Text('Close browser'),
-                      ),
-                    ],
+                  const SizedBox(height: FluttyTheme.spacingLg),
+                  if (onRestart != null &&
+                      status == SocksBrowserRouteStatus.down) ...[
+                    FilledButton.icon(
+                      onPressed: onRestart,
+                      icon: const Icon(Icons.restart_alt_rounded),
+                      label: const Text('Restart forward'),
+                    ),
+                    const SizedBox(height: FluttyTheme.spacingSm),
                   ],
+                  // Always offered, including while a connection attempt
+                  // runs: the browser opens as a full-screen dialog with no
+                  // swipe-back on iOS. Outlined, so the restart stays the one
+                  // teal action.
+                  if (onClose != null)
+                    OutlinedButton(
+                      onPressed: onClose,
+                      child: const Text('Close browser'),
+                    ),
                 ],
               ),
             ),

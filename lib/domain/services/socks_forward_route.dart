@@ -158,6 +158,13 @@ abstract interface class SocksForwardRouteSource implements Listenable {
   /// checks after the app resumes.
   Future<bool> probe();
 
+  /// Stops the forward wherever it runs.
+  ///
+  /// The browser calls this on close for a forward it started, so the
+  /// unauthenticated listener only runs while something uses it. Still works
+  /// after [dispose].
+  Future<void> stopForward();
+
   /// Stops listening to the sessions.
   void dispose();
 }
@@ -265,6 +272,18 @@ class SessionSocksForwardRouteSource extends ChangeNotifier
       return true;
     } on SocketException {
       return false;
+    }
+  }
+
+  @override
+  Future<void> stopForward() async {
+    for (final connectionId in _sessions.getConnectionsForHost(
+      portForward.hostId,
+    )) {
+      final session = _sessions.getSession(connectionId);
+      if (session != null && session.isPortForwardActive(portForward.id)) {
+        await session.stopForward(portForward.id);
+      }
     }
   }
 

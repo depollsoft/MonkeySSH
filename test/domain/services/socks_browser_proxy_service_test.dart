@@ -1,18 +1,18 @@
-import 'dart:async';
+import 'dart:io';
 
-import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 
 const _channel = MethodChannel(SocksBrowserProxyService.channelName);
+const _sinkPort = 9;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
-  late List<MethodCall> calls;
+  late List<String> calls;
 
   void handle(Future<Object?> Function(MethodCall call)? handler) {
     calls = [];
@@ -21,13 +21,24 @@ void main() {
       handler == null
           ? null
           : (call) {
-              calls.add(call);
+              calls.add(
+                call.method == 'apply'
+                    ? 'apply:${(call.arguments as Map)['port']}'
+                    : call.method,
+              );
               return handler(call);
             },
     );
   }
 
   tearDown(() => messenger.setMockMethodCallHandler(_channel, null));
+
+  SocksBrowserProxyService service({
+    TargetPlatform platform = TargetPlatform.android,
+  }) => SocksBrowserProxyService(
+    platform: platform,
+    sinkPort: () async => _sinkPort,
+  );
 
   group('support', () {
     for (final (platform, nativeSupport, expected) in [
@@ -43,9 +54,7 @@ void main() {
         '${platform.name} native=$nativeSupport → ${expected.name}',
         () async {
           handle((_) async => nativeSupport);
-          final service = SocksBrowserProxyService(platform: platform);
-
-          expect(await service.support(), expected);
+          expect(await service(platform: platform).support(), expected);
           expect(expected.isSupported, nativeSupport);
           expect(expected.unavailableReason == null, nativeSupport);
         },
@@ -54,83 +63,134 @@ void main() {
 
     test('is unavailable without a native bridge', () async {
       handle(null);
-      final service = SocksBrowserProxyService(platform: TargetPlatform.iOS);
-      expect(await service.support(), SocksBrowserRoutingSupport.unavailable);
+      expect(
+        await service(platform: TargetPlatform.iOS).support(),
+        SocksBrowserRoutingSupport.unavailable,
+      );
 
-      final desktop = SocksBrowserProxyService(platform: TargetPlatform.macOS);
       handle((_) async => true);
-      expect(await desktop.support(), SocksBrowserRoutingSupport.unavailable);
+      expect(
+        await service(platform: TargetPlatform.macOS).support(),
+        SocksBrowserRoutingSupport.unavailable,
+      );
       expect(calls, isEmpty);
     });
   });
 
-  test('routes while held and clears only after the last release', () {
-    fakeAsync((async) {
+  test(
+    'never clears on release: the last release points at the sink',
+    () async {
       handle((_) async => null);
-      final service = SocksBrowserProxyService(
-        platform: TargetPlatform.android,
-        clearDelay: const Duration(seconds: 1),
-      );
+      final proxy = service();
 
-      unawaited(service.hold(41080));
-      async.flushMicrotasks();
-      expect(calls.single.method, 'apply');
-      expect(calls.single.arguments, {'port': 41080});
-      expect(service.routedPort, 41080);
+      await proxy.hold(41080);
+      expect(proxy.routedPort, 41080);
+      await proxy.reroute(41081);
+      await proxy.hold(41081);
+      await proxy.release();
+      expect(calls, ['apply:41080', 'apply:41081']);
 
-      unawaited(service.reroute(41081));
-      async.flushMicrotasks();
-      expect(calls.last.arguments, {'port': 41081});
+      await proxy.release();
+      expect(calls, ['apply:41080', 'apply:41081', 'apply:$_sinkPort']);
+      expect(proxy.routedPort, isNull);
+      expect(proxy.isHeld, isFalse);
+    },
+  );
 
-      service.release();
-      async.elapse(const Duration(milliseconds: 500));
-      expect(calls.map((call) => call.method), isNot(contains('clear')));
-
-      // Re-opening the browser before the delay keeps the proxy in place.
-      unawaited(service.hold(41081));
-      async.elapse(const Duration(seconds: 2));
-      expect(calls.map((call) => call.method), isNot(contains('clear')));
-
-      service.release();
-      async.elapse(const Duration(seconds: 2));
-      expect(calls.last.method, 'clear');
-      expect(service.routedPort, isNull);
-    });
-  });
-
-  test('a direct browser clears a released proxy immediately', () async {
+  test('block points a held proxy at the sink until it is re-routed', () async {
     handle((_) async => null);
-    final service = SocksBrowserProxyService(
-      platform: TargetPlatform.iOS,
-      clearDelay: const Duration(hours: 1),
-    );
+    final proxy = service();
 
-    await service.clearBeforeDirectBrowsing();
-    expect(calls, isEmpty);
-
-    await service.hold(41080);
-    await service.clearBeforeDirectBrowsing();
-    expect(calls.map((call) => call.method), ['apply']);
-
-    service.release();
-    await service.clearBeforeDirectBrowsing();
-    expect(calls.map((call) => call.method), ['apply', 'clear']);
+    await proxy.hold(41080);
+    await proxy.block();
+    expect(proxy.routedPort, isNull);
+    await proxy.reroute(41090);
+    expect(calls, ['apply:41080', 'apply:$_sinkPort', 'apply:41090']);
+    expect(proxy.routedPort, 41090);
   });
 
-  test('a refused proxy fails and is still cleared on release', () async {
+  test('Android sinks on a port no app can bind', () async {
+    handle((_) async => null);
+    final proxy = SocksBrowserProxyService(platform: TargetPlatform.android);
+
+    await proxy.hold(41080);
+    await proxy.release();
+    expect(calls.last, 'apply:${SocksBrowserProxyService.androidSinkPort}');
+  });
+
+  test('iOS sinks on a listener this app holds and that refuses all', () async {
+    handle((_) async => null);
+    final proxy = SocksBrowserProxyService(platform: TargetPlatform.iOS);
+
+    await proxy.hold(41080);
+    await proxy.block();
+    final sinkPort = int.parse(calls.last.split(':').last);
+    expect(sinkPort, isNot(41080));
+    final socket = await Socket.connect(InternetAddress.loopbackIPv4, sinkPort);
+    addTearDown(socket.destroy);
+    await expectLater(socket.isEmpty, completion(isTrue));
+  });
+
+  test(
+    'a direct browser clears once per isolate, then only after use',
+    () async {
+      handle((_) async => null);
+      final proxy = service();
+
+      // Process state may predate this isolate, so the first clear always runs.
+      await proxy.clearBeforeDirectBrowsing();
+      await proxy.clearBeforeDirectBrowsing();
+      expect(calls, ['clear']);
+
+      await proxy.hold(41080);
+      await expectLater(
+        proxy.clearBeforeDirectBrowsing(),
+        throwsA(isA<SocksBrowserProxyException>()),
+      );
+      await proxy.release();
+      await proxy.clearBeforeDirectBrowsing();
+      expect(calls, ['clear', 'apply:41080', 'apply:$_sinkPort', 'clear']);
+    },
+  );
+
+  test('a failed clear is reported, not treated as success', () async {
     handle((call) async {
-      if (call.method == 'apply') {
+      if (call.method == 'clear') {
+        throw PlatformException(code: 'clear_failed');
+      }
+      return null;
+    });
+    final proxy = service();
+
+    await expectLater(
+      proxy.clearBeforeDirectBrowsing(),
+      throwsA(
+        isA<SocksBrowserProxyException>().having(
+          (error) => error.code,
+          'code',
+          'clear_failed',
+        ),
+      ),
+    );
+    // Still unresolved, so the next attempt tries again.
+    await expectLater(
+      proxy.clearBeforeDirectBrowsing(),
+      throwsA(isA<SocksBrowserProxyException>()),
+    );
+    expect(calls, ['clear', 'clear']);
+  });
+
+  test('a refused proxy fails and the release still sinks it', () async {
+    handle((call) async {
+      if (call.method == 'apply' && (call.arguments as Map)['port'] == 41080) {
         throw PlatformException(code: 'apply_failed');
       }
       return null;
     });
-    final service = SocksBrowserProxyService(
-      platform: TargetPlatform.android,
-      clearDelay: Duration.zero,
-    );
+    final proxy = service();
 
     await expectLater(
-      service.hold(41080),
+      proxy.hold(41080),
       throwsA(
         isA<SocksBrowserProxyException>().having(
           (error) => error.code,
@@ -139,14 +199,13 @@ void main() {
         ),
       ),
     );
-    expect(service.routedPort, isNull);
+    expect(proxy.routedPort, isNull);
     await expectLater(
-      service.reroute(0),
+      proxy.reroute(0),
       throwsA(isA<SocksBrowserProxyException>()),
     );
 
-    service.release();
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(calls.last.method, 'clear');
+    await proxy.release();
+    expect(calls.last, 'apply:$_sinkPort');
   });
 }

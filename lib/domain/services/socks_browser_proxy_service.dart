@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -57,39 +58,47 @@ class SocksBrowserProxyException implements Exception {
 /// sets them natively: `proxyConfigurations` on the default
 /// `WKWebsiteDataStore` on iOS 17+, and a process-wide `ProxyController`
 /// override on Android. Neither configuration falls back to a direct
-/// connection, so while it stays applied a dropped forward makes pages fail
-/// instead of loading over the device's own network.
+/// connection.
 ///
-/// The configuration stays applied until [release], then clears after a short
-/// delay so a closing web view cannot issue a last request directly. A
-/// browser that must not use the proxy awaits [clearBeforeDirectBrowsing].
+/// Once applied, the proxy is never simply removed while web content may
+/// still be alive. When the forward drops ([block]) or the SOCKS browser
+/// closes ([release]) it is pointed at a sink that refuses every connection,
+/// so a page that keeps polling fails instead of going direct. Only a browser
+/// that must not use the proxy clears it, through [clearBeforeDirectBrowsing].
 class SocksBrowserProxyService {
-  /// Creates the service. [channel] and [platform] are injectable for tests.
+  /// Creates the service. [channel], [platform] and [sinkPort] are injectable
+  /// for tests.
   SocksBrowserProxyService({
     MethodChannel? channel,
     TargetPlatform? platform,
-    this.clearDelay = const Duration(milliseconds: 750),
+    Future<int> Function()? sinkPort,
   }) : _channel = channel ?? const MethodChannel(channelName),
-       _platform = platform;
+       _platform = platform,
+       _sinkPortOverride = sinkPort;
 
   /// Name of the native method channel.
   static const channelName = 'xyz.depollsoft.monkeyssh/socks_browser_proxy';
 
-  /// How long a released proxy stays applied before it is cleared.
-  final Duration clearDelay;
+  /// Android's sink: unprivileged apps cannot bind ports below 1024, so
+  /// nothing on the device can listen here and every connection is refused.
+  static const androidSinkPort = 1;
 
   final MethodChannel _channel;
   final TargetPlatform? _platform;
+  final Future<int> Function()? _sinkPortOverride;
   final _queue = SerialTaskQueue();
   Future<SocksBrowserRoutingSupport>? _support;
-  Timer? _clearTimer;
+  Future<int>? _sinkPort;
+  int? _appliedPort;
   int? _routedPort;
-  // Set from the first apply attempt until a clear succeeds, so a failed or
-  // partial apply is still cleared.
-  var _mayBeApplied = false;
+  // The native override is process state that can outlive this isolate (hot
+  // restart, engine re-creation), so a direct browser clears it once per
+  // isolate even when this service never applied it.
+  var _mayBeApplied = true;
   var _holders = 0;
 
-  /// Loopback port the browser currently routes through, or null.
+  /// Loopback port of the forward the browser routes through, or null while
+  /// the proxy is unset or pointed at the sink.
   int? get routedPort => _routedPort;
 
   /// Whether a SOCKS browser currently holds the proxy.
@@ -98,8 +107,10 @@ class SocksBrowserProxyService {
   /// Reports whether this device can route the browser through SOCKS.
   Future<SocksBrowserRoutingSupport> support() => _support ??= _loadSupport();
 
+  TargetPlatform get _targetPlatform => _platform ?? defaultTargetPlatform;
+
   Future<SocksBrowserRoutingSupport> _loadSupport() async {
-    final platform = _platform ?? defaultTargetPlatform;
+    final platform = _targetPlatform;
     if (kIsWeb ||
         (platform != TargetPlatform.iOS &&
             platform != TargetPlatform.android)) {
@@ -127,9 +138,7 @@ class SocksBrowserProxyService {
   /// caller must not load pages then. Balance every call with [release].
   Future<void> hold(int port) {
     _holders++;
-    _clearTimer?.cancel();
-    _clearTimer = null;
-    return _apply(port);
+    return _route(port);
   }
 
   /// Re-routes a held proxy through [port] after the forward moved.
@@ -137,78 +146,112 @@ class SocksBrowserProxyService {
     if (_holders == 0) {
       return Future<void>.error(const SocksBrowserProxyException('not_held'));
     }
-    return _apply(port);
+    return _route(port);
   }
 
-  Future<void> _apply(int port) {
+  Future<void> _route(int port) {
     if (port < 1 || port > 65535) {
       return Future<void>.error(
         const SocksBrowserProxyException('invalid_port'),
       );
     }
     return _queue.run(() async {
-      if (_routedPort == port) {
-        return;
-      }
-      _routedPort = null;
-      _mayBeApplied = true;
-      try {
-        await _channel.invokeMethod<void>('apply', {'port': port});
-      } on MissingPluginException {
-        _log('apply_failed', code: 'missing_plugin');
-        throw const SocksBrowserProxyException('unavailable');
-      } on PlatformException catch (error) {
-        _log('apply_failed', code: error.code);
-        throw SocksBrowserProxyException(error.code);
-      }
+      await _applyUnlocked(port);
       _routedPort = port;
     });
   }
 
-  /// Drops a hold taken by [hold]; the last release clears the proxy after
-  /// [clearDelay].
-  void release() {
+  /// Points a held proxy at the sink because the forward stopped.
+  ///
+  /// Its listener port is free again and any app could bind it, so the
+  /// browser must not keep sending traffic there.
+  Future<void> block() => _queue.run(_blockUnlocked);
+
+  /// Drops a hold taken by [hold]. The last release points the proxy at the
+  /// sink instead of clearing it, because the closed browser's web view can
+  /// outlive its widget and keep issuing requests.
+  Future<void> release() {
     if (_holders == 0) {
-      return;
+      return Future<void>.value();
     }
     _holders--;
     if (_holders > 0) {
-      return;
+      return Future<void>.value();
     }
-    _clearTimer?.cancel();
-    _clearTimer = Timer(clearDelay, () {
-      _clearTimer = null;
+    return _queue.run(() async {
       if (_holders == 0) {
-        unawaited(_clear());
+        await _blockUnlocked();
       }
     });
   }
 
-  /// Clears a released proxy now so a direct browser does not use it.
-  ///
-  /// Does nothing while a SOCKS browser still holds the proxy.
-  Future<void> clearBeforeDirectBrowsing() async {
-    if (_holders > 0) {
-      return;
-    }
-    _clearTimer?.cancel();
-    _clearTimer = null;
-    await _clear();
-  }
-
-  Future<void> _clear() => _queue.run(() async {
-    if (!_mayBeApplied || _holders > 0) {
-      return;
-    }
+  Future<void> _blockUnlocked() async {
     _routedPort = null;
     try {
-      await _channel.invokeMethod<void>('clear');
-      _mayBeApplied = false;
+      await _applyUnlocked(await (_sinkPort ??= _loadSinkPort()));
+    } on SocksBrowserProxyException {
+      // Logged by the apply; the previous target stays in place.
+    } on SocketException catch (error) {
+      _log('sink_failed', code: error.runtimeType.toString());
+    }
+  }
+
+  Future<void> _applyUnlocked(int port) async {
+    if (_appliedPort == port) {
+      return;
+    }
+    _appliedPort = null;
+    _mayBeApplied = true;
+    try {
+      await _channel.invokeMethod<void>('apply', {'port': port});
     } on MissingPluginException {
-      _mayBeApplied = false;
+      _log('apply_failed', code: 'missing_plugin');
+      throw const SocksBrowserProxyException('unavailable');
+    } on PlatformException catch (error) {
+      _log('apply_failed', code: error.code);
+      throw SocksBrowserProxyException(error.code);
+    }
+    _appliedPort = port;
+  }
+
+  Future<int> _loadSinkPort() async {
+    final override = _sinkPortOverride;
+    if (override != null) {
+      return override();
+    }
+    if (_targetPlatform == TargetPlatform.android) {
+      return androidSinkPort;
+    }
+    // iOS lets apps bind low ports, so hold a loopback port that refuses
+    // every client. While this app owns it, no other app can listen there.
+    final sink = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    sink.listen((socket) => socket.destroy());
+    return sink.port;
+  }
+
+  /// Removes the proxy before a browser that must load pages directly.
+  ///
+  /// Throws [SocksBrowserProxyException] while a SOCKS browser holds the
+  /// proxy or when the platform could not remove it; the caller must not
+  /// load pages then.
+  Future<void> clearBeforeDirectBrowsing() => _queue.run(() async {
+    if (_holders > 0) {
+      throw const SocksBrowserProxyException('held');
+    }
+    if (!_mayBeApplied) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('clear');
+    } on MissingPluginException {
+      // No native bridge here, so nothing was ever applied.
     } on PlatformException catch (error) {
       _log('clear_failed', code: error.code);
+      throw SocksBrowserProxyException(error.code);
     }
+    _mayBeApplied = false;
+    _appliedPort = null;
+    _routedPort = null;
   });
 
   void _log(String event, {required String code}) {
