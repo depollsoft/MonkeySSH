@@ -237,6 +237,29 @@ void main() {
     session.debugHandlePrivateOsc('133', const ['A', 'redraw=0']);
     expect(session.programStatus, isNull);
     expect(metadataChanges, 2);
+
+    session
+      ..debugHandlePrivateOsc('7501', const ['state=blocked'])
+      ..debugHandlePrivateOsc('633', const ['A']);
+    expect(session.programStatus, isNull);
+  });
+
+  test('the terminal parser delivers OSC 7501 and RIS clears it', () {
+    final session = _session();
+    final terminal = session.getOrCreateTerminal()
+      ..write('\x1b]7501;state=blocked:kind=question:app=deploy\x1b\\');
+
+    expect(
+      session.programStatus,
+      const TerminalProgramStatus(
+        state: TerminalProgramState.blocked,
+        kind: TerminalProgramBlockedKind.question,
+        app: 'deploy',
+      ),
+    );
+
+    terminal.write('\x1bc');
+    expect(session.programStatus, isNull);
   });
 
   test('takes multiplexer program status from the window snapshot', () {

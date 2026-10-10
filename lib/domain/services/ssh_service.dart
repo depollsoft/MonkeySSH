@@ -4391,6 +4391,13 @@ class SshSession {
     }
   }
 
+  /// A full reset (RIS) removes every OSC 7501 record.
+  void _handleTerminalFullReset() {
+    if (_programStatusRecords.clear() && _updatePlainProgramStatus()) {
+      _notifyMetadataChanged();
+    }
+  }
+
   /// Recomputes the plain-shell status after its records changed and reports
   /// whether it differs; the caller notifies metadata listeners.
   bool _updatePlainProgramStatus() {
@@ -4416,9 +4423,9 @@ class SshSession {
     List<String> args, {
     required bool commandMarkAdded,
   }) {
-    // A prompt ends whatever ran before it.
+    // A prompt (OSC 133 or VS Code's OSC 633 `A`) ends whatever ran before
+    // it.
     final programStatusChanged =
-        code == '133' &&
         args.firstOrNull == 'A' &&
         remoteMuxBackend == null &&
         _programStatusRecords.dropRunning() &&

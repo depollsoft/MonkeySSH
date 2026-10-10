@@ -6930,7 +6930,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.keyboardModesUsed = true
 	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
-	programStatusReplies := window.takeProgramStatusRepliesLocked()
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
@@ -6970,6 +6969,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	forwarded = window.stripLocallyAnsweredThemeQueriesLocked(chunk, themeHint)
+	programStatusReplies := window.takeProgramStatusRepliesLocked()
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -13604,10 +13604,15 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi=")) ||
 			bytes.HasPrefix(payload, []byte("1337;"+monkeyMuxAgentIdentityOSCPrefix))
 		queryKeys := themeQueryKeysFromOscPayload(string(payload))
-		if !privatePiIdentity && !isProgramStatusQueryPayload(payload) &&
-			!answerable(queryKeys) {
+		// MonkeyMux answers exactly the OSC 7501 queries it removes here, so
+		// none is answered twice.
+		programStatusQuery := isProgramStatusQueryPayload(payload)
+		if !privatePiIdentity && !programStatusQuery && !answerable(queryKeys) {
 			i = sequenceEnd
 			continue
+		}
+		if programStatusQuery {
+			w.programStatusQueries++
 		}
 		if output == nil {
 			output = make([]byte, 0, len(data)-(sequenceEnd-i))
@@ -16385,7 +16390,6 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		case '[':
 		case 'c':
 			w.resetTerminalModesLocked(true)
-			w.programStatus = nil
 			data = data[escapeIndex+2:]
 			continue
 		case '=':
@@ -16732,6 +16736,11 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 				if data[index+1] == ']' {
 					sequenceStart = index
 					payloadStart = index + 2
+				} else if data[index+1] == 'c' {
+					// RIS removes every OSC 7501 record. Handled in this scan,
+					// not with the other modes, so it applies in byte order
+					// with the reports around it.
+					w.programStatus = nil
 				}
 			case 0x9d:
 				if index >= leadingUtf8Prefix &&
@@ -16911,15 +16920,14 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 		}
 	case "9":
 		w.applyTerminalProgressPayloadLocked(value)
-	case "133":
-		// A prompt ends whatever ran before it.
+	case "133", "633":
+		// A prompt ends whatever ran before it. OSC 633 is VS Code's variant
+		// of the OSC 133 shell integration marks.
 		if value == "A" || strings.HasPrefix(value, "A;") {
 			w.dropRunningProgramStatusLocked(nil)
 		}
 	case programStatusOscCode:
-		if w.applyProgramStatusPayloadLocked(value) {
-			w.programStatusQueries++
-		}
+		w.applyProgramStatusPayloadLocked(value)
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
 		w.applyAgentIdentityPayloadLocked(value)

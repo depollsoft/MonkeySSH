@@ -247,9 +247,38 @@ func TestProgramStatusPromptAndResetEndRecords(t *testing.T) {
 		t.Fatal("a non-prompt OSC 133 mark ended records")
 	}
 
-	window.observeTerminalModesLocked([]byte("\x1bc"))
+	window.observeTerminalMetadataLocked([]byte(programStatusOsc("state=working:id=e") + "\x1b]633;A\x07"))
+	if _, ok := window.programStatus["e"]; ok {
+		t.Fatal("a VS Code OSC 633 prompt kept a working record")
+	}
+
+	window.observeTerminalMetadataLocked([]byte("\x1bc"))
 	if len(window.programStatus) != 0 {
 		t.Fatalf("records after RIS = %v, want none", window.programStatus)
+	}
+}
+
+// RIS, prompts and reports apply in the order they were written, also when
+// they share one read.
+func TestProgramStatusResetAppliesInByteOrder(t *testing.T) {
+	server := newMuxServer("program-status-ris")
+	window := &muxWindow{id: "@1", name: "sh", lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+
+	server.handleWindowOutput("@1", []byte(programStatusOsc("state=blocked:kind=permission")+"\x1bc"))
+	if summary := window.programStatusSummaryLocked(); summary.state != "" {
+		t.Fatalf("status after a report then RIS = %#v, want none", summary)
+	}
+
+	server.handleWindowOutput("@1", []byte("\x1bc"+programStatusOsc("state=working")))
+	if summary := window.programStatusSummaryLocked(); summary.state != "working" {
+		t.Fatalf("status after RIS then a report = %#v, want working", summary)
+	}
+
+	server.handleWindowOutput("@1", []byte("\x1b"))
+	server.handleWindowOutput("@1", []byte("c"))
+	if summary := window.programStatusSummaryLocked(); summary.state != "" {
+		t.Fatalf("status after a split RIS = %#v, want none", summary)
 	}
 }
 
@@ -317,6 +346,38 @@ func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {
 	}
 	if got := attach.String(); strings.Contains(got, "7501") || !strings.Contains(got, da1Query) {
 		t.Fatalf("attach output = %q, want the device-attributes query without OSC 7501", got)
+	}
+}
+
+// MonkeyMux answers exactly the queries it strips: one split across reads is
+// answered once, and a C1-introduced one it leaves in the stream is left for
+// the attached terminal to answer.
+func TestProgramStatusQueryIsAnsweredOnlyWhenStripped(t *testing.T) {
+	server := newMuxServer("program-status-query-split")
+	pty := &recordingPty{}
+	window := &muxWindow{id: "@1", name: "claude", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	attach := &recordingConn{}
+	registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
+
+	server.handleWindowOutput("@1", []byte("\x1b]7501"))
+	server.handleWindowOutput("@1", []byte(";?\x1b\\"))
+	waitForWindowReplies(t, window)
+	if got := pty.String(); got != string(programStatusQueryReply) {
+		t.Fatalf("pty got %q, want one reply to the split query", got)
+	}
+
+	pty.Reset()
+	c1Query := "\x9d7501;?\x9c"
+	server.handleWindowOutput("@1", []byte(c1Query))
+	waitForWindowReplies(t, window)
+	waitForTestAttachWrites(t, server)
+	if got := pty.String(); got != "" {
+		t.Fatalf("pty got %q, want no reply to a query left in the stream", got)
+	}
+	if got := attach.String(); !strings.Contains(got, c1Query) || strings.Contains(got, "\x1b]7501") {
+		t.Fatalf("attach output = %q, want only the C1 query forwarded", got)
 	}
 }
 

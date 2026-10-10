@@ -275,17 +275,17 @@ func decodeProgramStatusText(value string, maxEncoded int, maxDecoded int) (stri
 	return text.String(), true
 }
 
-// applyProgramStatusPayloadLocked applies the body of an OSC 7501 sequence
-// and reports whether it was a feature-detection query the caller owes a
-// reply for.
-func (w *muxWindow) applyProgramStatusPayloadLocked(body string) bool {
+// applyProgramStatusPayloadLocked applies the body of an OSC 7501 report.
+// Feature-detection queries are answered where they are stripped from the
+// forwarded stream (stripLocallyAnsweredThemeQueriesLocked).
+func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 	id, record, query, ok := parseProgramStatusBody(body)
 	if !ok || query {
-		return ok && query
+		return
 	}
 	if record.state == "clear" {
 		w.clearProgramStatusLocked(id)
-		return false
+		return
 	}
 	record.owner = w.foregroundProcessGroupLocked()
 	w.programStatusClock++
@@ -303,7 +303,6 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) bool {
 		}
 		delete(w.programStatus, oldestID)
 	}
-	return false
 }
 
 // clearProgramStatusLocked removes the record id names and its descendants;
@@ -459,7 +458,7 @@ func (summary programStatusSummary) snapshot() *programStatusSnapshot {
 }
 
 // takeProgramStatusRepliesLocked returns the replies owed for the feature
-// detection queries seen since the last call.
+// detection queries stripped from the output since the last call.
 func (w *muxWindow) takeProgramStatusRepliesLocked() []byte {
 	if w.programStatusQueries == 0 {
 		return nil
