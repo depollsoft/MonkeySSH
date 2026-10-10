@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../domain/models/port_forward_type.dart';
+
 /// Confirms exposing a listener beyond its loopback interface.
 Future<bool> confirmPortForwardExposure({
   required BuildContext context,
@@ -63,14 +65,19 @@ class PortForwardTypeField extends StatelessWidget {
       SegmentedButton<String>(
         segments: const [
           ButtonSegment(
-            value: 'local',
+            value: localPortForwardType,
             label: Text('Local'),
             icon: Icon(Icons.arrow_forward),
           ),
           ButtonSegment(
-            value: 'remote',
+            value: remotePortForwardType,
             label: Text('Remote'),
             icon: Icon(Icons.arrow_back),
+          ),
+          ButtonSegment(
+            value: dynamicPortForwardType,
+            label: Text('SOCKS'),
+            icon: Icon(Icons.hub_outlined),
           ),
         ],
         selected: {value},
@@ -80,14 +87,80 @@ class PortForwardTypeField extends StatelessWidget {
       ),
       const SizedBox(height: 8),
       Text(
-        value == 'local'
-            ? 'Forward local port to remote host'
-            : 'Forward remote port to local host',
+        switch (value) {
+          localPortForwardType => 'Forward local port to remote host',
+          dynamicPortForwardType =>
+            'SOCKS5 proxy: any address, reached and resolved from the host',
+          _ => 'Forward remote port to local host',
+        },
         style: Theme.of(context).textTheme.bodySmall
             ?.copyWith(color: Theme.of(context).colorScheme.outline),
       ),
     ],
   );
+}
+
+/// Local listener port for a SOCKS (dynamic) forward.
+///
+/// The listener always binds IPv4 loopback, so only the port is editable. An
+/// empty port lets the system pick a free one each time the forward starts.
+class SocksPortField extends StatelessWidget {
+  /// Creates the port field.
+  const SocksPortField({
+    required this.portController,
+    this.enabled = true,
+    this.compact = false,
+    super.key,
+  });
+
+  /// Draft port; empty means automatic.
+  final TextEditingController portController;
+
+  /// Whether the field is editable.
+  final bool enabled;
+
+  /// Uses outlined fields to match the compact sheet.
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Listener', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: portController,
+          enabled: enabled,
+          decoration: InputDecoration(
+            labelText: 'Port on $dynamicPortForwardBindHost',
+            hintText: 'Automatic',
+            helperText:
+                'Leave empty to pick a free port. Only this device can '
+                'connect, and any app on it can use the proxy while it runs.',
+            helperMaxLines: 3,
+            border: compact ? const OutlineInputBorder() : null,
+          ),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          textInputAction: TextInputAction.done,
+          validator: (value) {
+            if (value == null || value.isEmpty) {
+              return null;
+            }
+            final port = int.tryParse(value);
+            if (port == null || port < 1 || port > 65535) {
+              return compact
+                  ? 'Invalid port (1-65535)'
+                  : 'Port must be between 1 and 65535';
+            }
+            return null;
+          },
+        ),
+      ],
+    );
+  }
 }
 
 /// Host and port fields for one forwarding endpoint.

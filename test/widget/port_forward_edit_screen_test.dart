@@ -222,6 +222,105 @@ void main() {
     );
   }
 
+  testWidgets('saves a SOCKS rule on loopback with an automatic port', (
+    tester,
+  ) async {
+    final hostRepository = MockHostRepository();
+    final portForwardRepository = _MockPortForwardRepository();
+    String? savedMessage;
+    when(() => portForwardRepository.insert(any())).thenAnswer((_) async => 12);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          hostRepositoryProvider.overrideWithValue(hostRepository),
+          portForwardRepositoryProvider.overrideWithValue(
+            portForwardRepository,
+          ),
+          activeSessionsProvider.overrideWith(
+            () => TestActiveSessionsNotifier(
+              _RecordingSshSession(
+                connectionId: 7,
+                hostId: 10,
+                client: MockSshClient(),
+              ),
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: PortForwardEditorForm(
+              hosts: [_host()],
+              defaultAutoStart: true,
+              onSaved: (result) => savedMessage = result.message,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dev box').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
+    await tester.tap(find.text('SOCKS'));
+    await tester.pumpAndSettle();
+    expect(find.text('Port on 127.0.0.1'), findsOneWidget);
+    // An unauthenticated proxy only runs on demand unless the user opts in.
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isFalse,
+    );
+    expect(find.textContaining('any app on this device'), findsOneWidget);
+
+    // Looking at SOCKS and switching back keeps the earlier auto-start.
+    await tester.tap(find.text('Local'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
+    await tester.tap(find.text('SOCKS'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isFalse,
+    );
+    // Only the name and listener port remain: no bind host, no destination.
+    final fields = find.byType(TextFormField);
+    expect(fields, findsNWidgets(2));
+    await tester.enterText(fields.at(0), 'Office network');
+    await tester.enterText(fields.at(1), '70000');
+    final saveButton = find.bySubtype<FilledButton>();
+    await tester.ensureVisible(saveButton);
+    await tester.tap(saveButton);
+    await tester.pumpAndSettle();
+    expect(find.text('Port must be between 1 and 65535'), findsOneWidget);
+    verifyNever(() => portForwardRepository.insert(any()));
+
+    await tester.enterText(fields.at(1), '');
+    await tester.ensureVisible(saveButton);
+    await tester.tap(saveButton);
+    await tester.pumpAndSettle();
+
+    final saved =
+        verify(() => portForwardRepository.insert(captureAny())).captured.single
+            as PortForwardsCompanion;
+    expect(saved.forwardType.value, 'dynamic');
+    expect(saved.localHost.value, '127.0.0.1');
+    expect(saved.localPort.value, 0);
+    expect(saved.remoteHost.value, isEmpty);
+    expect(saved.remotePort.value, 0);
+    expect(saved.autoStart.value, isFalse);
+    // A loopback-only listener never asks to expose the forward.
+    expect(find.text('Expose port forward?'), findsNothing);
+    expect(savedMessage, 'Port forward added');
+  });
+
   testWidgets('host sheet keeps its defaults and cancels without saving', (
     tester,
   ) async {

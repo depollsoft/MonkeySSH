@@ -232,7 +232,10 @@ class PortForwards extends Table {
   /// Associated host.
   IntColumn get hostId => integer().references(Hosts, #id)();
 
-  /// Forward type: 'local' or 'remote'.
+  /// Forward type: 'local', 'remote', or 'dynamic' (SOCKS5).
+  ///
+  /// A dynamic forward listens on loopback [localPort] (zero picks a free
+  /// port) and leaves [remoteHost] empty and [remotePort] zero.
   TextColumn get forwardType => text().withLength(min: 1, max: 10)();
 
   /// Local bind address.

@@ -17,6 +17,7 @@ import UIKit
   private var transferChannel: FlutterMethodChannel?
   private var appleDatabaseChannel: FlutterMethodChannel?
   private var keyboardVisibilityChannel: FlutterMethodChannel?
+  private var socksBrowserProxyChannel: SocksBrowserProxyChannel?
   private var keyboardVisible = false
   private var pendingTransferPayload: String?
 
@@ -34,6 +35,7 @@ import UIKit
       setupTransferChannel(with: registrar)
       setupAppleDatabaseChannel(with: registrar)
       setupKeyboardVisibilityChannel(with: registrar)
+      socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
     } else {
       NSLog("Failed to configure AppDelegate method channels.")
     }

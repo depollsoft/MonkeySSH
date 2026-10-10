@@ -10,6 +10,7 @@
 		0BBA2D63F69B026808692429 /* ConnectionStatusAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */; };
 		0D148A56B5D9DF36A2760A83 /* ConnectionStatusLiveActivityBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D2BCA6DCB8D9820FBD06A21 /* ConnectionStatusLiveActivityBundle.swift */; };
 		10F236A3A094B53411236F3F /* ConnectionStatusLiveActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */; };
+		FCDBD9620C4F63C25F6191B2 /* SocksBrowserProxyChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD3CAE4A415FCB873BBF3DA8 /* SocksBrowserProxyChannel.swift */; };
 		11A5A1B98F1D4C6EA1B2C301 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 11A5A1B88F1D4C6EA1B2C300 /* Assets.xcassets */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
@@ -97,6 +98,7 @@
 		EA8C22083AFB91079DC3816C /* ConnectionStatusLiveActivityWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityWidget.swift; sourceTree = "<group>"; };
 		EB229B402BD78D4035BBADEA /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityManager.swift; sourceTree = "<group>"; };
+		FD3CAE4A415FCB873BBF3DA8 /* SocksBrowserProxyChannel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SocksBrowserProxyChannel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -192,6 +194,7 @@
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */,
 				EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */,
+				FD3CAE4A415FCB873BBF3DA8 /* SocksBrowserProxyChannel.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -461,6 +464,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				0BBA2D63F69B026808692429 /* ConnectionStatusAttributes.swift in Sources */,
 				10F236A3A094B53411236F3F /* ConnectionStatusLiveActivityManager.swift in Sources */,
+				FCDBD9620C4F63C25F6191B2 /* SocksBrowserProxyChannel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

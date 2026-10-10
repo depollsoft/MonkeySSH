@@ -14,6 +14,7 @@ import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
+import '../models/port_forward_type.dart';
 import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
@@ -371,7 +372,7 @@ class SecureTransferService {
       ),
       'snippets': _sortedJsonRecords(snippets.map((item) => item.toJson())),
       'portForwards': _sortedJsonRecords(
-        portForwards.map((item) => item.toJson()),
+        portForwards.map(_exportedPortForwardJson),
       ),
       'knownHosts': _sortedJsonRecords(knownHosts.map((item) => item.toJson())),
     };
@@ -960,6 +961,18 @@ class SecureTransferService {
     return idMapping;
   }
 
+  /// Exports [portForward], giving a SOCKS rule a placeholder destination.
+  ///
+  /// Versions without SOCKS forwards require a non-empty remote host and would
+  /// reject the whole import; with the placeholder they keep an inert rule.
+  Map<String, dynamic> _exportedPortForwardJson(PortForward portForward) {
+    final json = portForward.toJson();
+    if (isDynamicPortForwardType(portForward.forwardType)) {
+      json['remoteHost'] = dynamicPortForwardLegacyRemoteHost;
+    }
+    return json;
+  }
+
   Future<void> _importPortForwards(
     List<Map<String, dynamic>> rawPortForwards, {
     required Map<int, int> hostMapping,
@@ -977,19 +990,23 @@ class SecureTransferService {
         continue;
       }
 
+      final forwardType = _requiredString(item, 'forwardType');
+      final isDynamic = isDynamicPortForwardType(forwardType);
       await _db
           .into(_db.portForwards)
           .insert(
             PortForwardsCompanion.insert(
               name: _requiredString(item, 'name'),
               hostId: mappedHostId,
-              forwardType: _requiredString(item, 'forwardType'),
+              forwardType: forwardType,
               localHost: Value(
                 _optionalString(item['localHost']) ?? '127.0.0.1',
               ),
               localPort: _optionalInt(item['localPort']) ?? 0,
-              remoteHost: _requiredString(item, 'remoteHost'),
-              remotePort: _optionalInt(item['remotePort']) ?? 0,
+              // A SOCKS forward has no fixed destination, whatever an export
+              // carries in these fields.
+              remoteHost: isDynamic ? '' : _requiredString(item, 'remoteHost'),
+              remotePort: isDynamic ? 0 : _optionalInt(item['remotePort']) ?? 0,
               autoStart: Value((item['autoStart'] as bool?) ?? false),
               createdAt: Value(
                 _optionalDateTime(item['createdAt']) ?? DateTime.now(),

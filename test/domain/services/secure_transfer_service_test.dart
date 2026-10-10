@@ -864,6 +864,53 @@ void main() {
       },
     );
 
+    test('exports SOCKS rules so older versions can still import', () async {
+      final hostId = await hostRepository.insert(
+        HostsCompanion.insert(
+          label: 'Production',
+          hostname: 'prod.example.com',
+          username: 'root',
+        ),
+      );
+      await db
+          .into(db.portForwards)
+          .insert(
+            PortForwardsCompanion.insert(
+              name: 'office',
+              hostId: hostId,
+              forwardType: 'dynamic',
+              localPort: 0,
+              remoteHost: '',
+              remotePort: 0,
+            ),
+          );
+
+      final migrationData = await transferService.createMigrationData();
+      final exported = Map<String, dynamic>.from(
+        (migrationData['portForwards'] as List).single as Map,
+      );
+      // Older importers require a non-empty remote host.
+      expect(exported['forwardType'], 'dynamic');
+      expect(exported['remoteHost'], isNotEmpty);
+
+      final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(importedDb.close);
+      final importedEncryptionService = SecretEncryptionService.forTesting();
+      await SecureTransferService(
+        importedDb,
+        KeyRepository(importedDb, importedEncryptionService),
+        HostRepository(importedDb, importedEncryptionService),
+      ).importMigrationData(
+        data: migrationData,
+        mode: MigrationImportMode.replace,
+      );
+      final imported = await importedDb
+          .select(importedDb.portForwards)
+          .getSingle();
+      expect(imported.forwardType, 'dynamic');
+      expect(imported.remoteHost, isEmpty);
+    });
+
     test(
       'includes referenced key data when requested for host export',
       () async {
@@ -1290,6 +1337,48 @@ void main() {
         expect(portForwards, isEmpty);
       },
     );
+
+    test('imports SOCKS forwards, which have no destination', () async {
+      await transferService.importMigrationData(
+        mode: MigrationImportMode.replace,
+        data: {
+          'hosts': [
+            {
+              'id': 301,
+              'label': 'A',
+              'hostname': 'a.example.com',
+              'username': 'root',
+            },
+          ],
+          'portForwards': [
+            {
+              'name': 'socks',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+              'localPort': 1080,
+              // What an export writes for older versions; discarded here.
+              'remoteHost': 'socks',
+              'remotePort': 9,
+            },
+            {
+              'name': 'socks without destination fields',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+            },
+          ],
+        },
+      );
+
+      final portForwards = await db.select(db.portForwards).get();
+      expect(portForwards, hasLength(2));
+      expect(portForwards.map((forward) => forward.forwardType), [
+        'dynamic',
+        'dynamic',
+      ]);
+      expect(portForwards.map((forward) => forward.remoteHost), ['', '']);
+      expect(portForwards.map((forward) => forward.remotePort), [0, 0]);
+      expect(portForwards.map((forward) => forward.localPort), [1080, 0]);
+    });
 
     test(
       'imports full migration in replace mode with self references',
