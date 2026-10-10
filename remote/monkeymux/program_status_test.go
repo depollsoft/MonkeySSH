@@ -283,14 +283,14 @@ func TestProgramStatusResetAppliesInByteOrder(t *testing.T) {
 }
 
 func TestProgramStatusEndsWhenItsSenderExits(t *testing.T) {
-	originalForeground := foregroundProcessGroupForWindow
+	originalOwner := programStatusReportOwner
 	originalExited := programStatusOwnerExited
 	t.Cleanup(func() {
-		foregroundProcessGroupForWindow = originalForeground
+		programStatusReportOwner = originalOwner
 		programStatusOwnerExited = originalExited
 	})
 	foreground := 100
-	foregroundProcessGroupForWindow = func(*muxWindow) int { return foreground }
+	programStatusReportOwner = func(*muxWindow) int { return foreground }
 	exited := map[int]bool{}
 	programStatusOwnerExited = func(pgrp int) bool { return exited[pgrp] }
 
@@ -325,6 +325,48 @@ func TestProgramStatusEndsWhenItsSenderExits(t *testing.T) {
 	}
 	if got := strings.Count(control.String(), `"type":"window_updated"`); got != 1 {
 		t.Fatalf("window updates = %d, want 1", got)
+	}
+}
+
+// Windows reports arrive unattributed; the timer resolves them off the lock
+// to the shell's child and then ends them when it exits.
+func TestProgramStatusAttributesReportsLaterWithoutProcessGroups(t *testing.T) {
+	originalOwner := programStatusReportOwner
+	originalResolve := resolveProgramStatusOwner
+	originalExited := programStatusOwnerExited
+	t.Cleanup(func() {
+		programStatusReportOwner = originalOwner
+		resolveProgramStatusOwner = originalResolve
+		programStatusOwnerExited = originalExited
+	})
+	programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerUnattributed }
+	child := 4242
+	resolveProgramStatusOwner = func(int) int { return child }
+	exited := map[int]bool{}
+	programStatusOwnerExited = func(owner int) bool { return exited[owner] }
+
+	server := newMuxServer("program-status-windows")
+	window := &muxWindow{id: "@1", name: "pwsh", lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.handleWindowOutput("@1", []byte(programStatusOsc("state=working:app=claude-code")))
+
+	server.dropExitedProgramStatus()
+	server.mu.Lock()
+	owner := window.programStatus[""].owner
+	server.mu.Unlock()
+	if owner != child {
+		t.Fatalf("owner = %d, want the resolved child %d", owner, child)
+	}
+
+	// A later resolution must not reassign an attributed record.
+	child = 5151
+	exited[4242] = true
+	server.dropExitedProgramStatus()
+	server.mu.Lock()
+	remaining := len(window.programStatus)
+	server.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("records = %d, want the exited child's record dropped", remaining)
 	}
 }
 

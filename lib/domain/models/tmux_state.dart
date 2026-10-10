@@ -244,8 +244,14 @@ class TmuxWindow {
 
   /// Progress to draw for this window: work a program reported through OSC
   /// 7501, otherwise its OSC 9;4 progress.
-  TerminalProgress? get activityProgress =>
-      programStatus?.terminalProgress ?? terminalProgress;
+  ///
+  /// Any OSC 7501 status replaces OSC 9;4, as the spec asks, so a reported
+  /// state without a bar (done, or blocked without a percentage) hides a
+  /// stale one rather than drawing it.
+  TerminalProgress? get activityProgress {
+    final status = programStatus;
+    return status == null ? terminalProgress : status.terminalProgress;
+  }
 
   /// tmux's `window_activity` epoch seconds, if available.
   final int? lastActivityEpochSeconds;

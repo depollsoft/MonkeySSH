@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -38,11 +37,17 @@ const (
 // anything the program sent.
 var programStatusQueryReply = []byte("\x1b]7501;?\x1b\\")
 
-// programStatusOwnerExited reports whether the process group that sent a
-// record has exited. Windows has no foreground process group to watch, so
-// there records end only at a prompt, a reset, or with the window.
-var programStatusOwnerExited = func(pgrp int) bool {
-	return runtime.GOOS != "windows" && pgrp > 0 && !processGroupAlive(pgrp)
+// Record owners: the process a report is attributed to. Unattributed records
+// wait for dropExitedProgramStatus to resolve them; untracked ones never end
+// by the exit rule.
+const (
+	programStatusOwnerUnattributed = 0
+	programStatusOwnerUntracked    = -1
+)
+
+// programStatusOwnerExited reports whether a record's owner has exited.
+var programStatusOwnerExited = func(owner int) bool {
+	return owner > 0 && !programStatusOwnerAlive(owner)
 }
 
 type programStatusRecord struct {
@@ -52,8 +57,9 @@ type programStatusRecord struct {
 	app      string
 	title    string
 	msg      string
-	// owner is the window's foreground process group when the record was
-	// reported. Idle, working and blocked records end when it exits.
+	// owner is the process the record is attributed to (see
+	// programStatusReportOwner). Idle, working and blocked records end when
+	// it exits.
 	owner   int
 	updated uint64
 }
@@ -287,7 +293,7 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 		w.clearProgramStatusLocked(id)
 		return
 	}
-	record.owner = w.foregroundProcessGroupLocked()
+	record.owner = programStatusReportOwner(w)
 	w.programStatusClock++
 	record.updated = w.programStatusClock
 	if w.programStatus == nil {
@@ -468,11 +474,54 @@ func (w *muxWindow) takeProgramStatusRepliesLocked() []byte {
 	return replies
 }
 
+// attributeProgramStatusLocked gives every unattributed record owner.
+func (w *muxWindow) attributeProgramStatusLocked(owner int) {
+	for _, record := range w.programStatus {
+		if record.owner == programStatusOwnerUnattributed {
+			record.owner = owner
+		}
+	}
+}
+
+func (w *muxWindow) hasUnattributedProgramStatusLocked() bool {
+	for _, record := range w.programStatus {
+		if record.owner == programStatusOwnerUnattributed {
+			return true
+		}
+	}
+	return false
+}
+
 // dropExitedProgramStatus drops the records of senders that have exited and
 // broadcasts the windows that changed. Output may stop for good once a
-// program dies, so this runs on a timer rather than on output.
+// program dies, so this runs on a timer rather than on output. Records that
+// arrived unattributed are resolved first, off the server lock, because that
+// reads the process table.
 func (s *muxServer) dropExitedProgramStatus() {
+	type unattributed struct {
+		window *muxWindow
+		pid    int
+	}
 	s.mu.Lock()
+	var pending []unattributed
+	for _, window := range s.windows {
+		if !window.closed && window.hasUnattributedProgramStatusLocked() {
+			pending = append(pending, unattributed{window, window.processID()})
+		}
+	}
+	s.mu.Unlock()
+	owners := make([]int, len(pending))
+	for index, entry := range pending {
+		owners[index] = resolveProgramStatusOwner(entry.pid)
+	}
+
+	s.mu.Lock()
+	for index, entry := range pending {
+		if s.windowByIDLocked(entry.window.id) == entry.window &&
+			!entry.window.closed && entry.window.processID() == entry.pid {
+			entry.window.attributeProgramStatusLocked(owners[index])
+		}
+	}
 	var snapshots []windowSnapshot
 	for _, window := range s.windows {
 		if window.closed || !window.dropExitedProgramStatusLocked() {

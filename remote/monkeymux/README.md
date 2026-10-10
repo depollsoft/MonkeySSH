@@ -211,7 +211,9 @@ inheritance and limits, and window snapshots carry the most urgent one as
 `programStatus` (blocked, then error, working, done, idle). Idle, working and
 blocked records end at an OSC 133 or 633 `A` prompt, on RIS, or when the process group
 that sent them has exited (checked every two seconds, so a crashed agent in a
-shell without prompt marks does not stay "working"). Done and error records
+shell without prompt marks does not stay "working"). Windows has no process
+groups, so there the sender is the window shell's only child process, found on
+the next check. Done and error records
 outlive their program. Restored shell history drops OSC 7501 like OSC 9;4. It
 also tracks the PTY foreground process group for snapshots,
 so shell-launched tools

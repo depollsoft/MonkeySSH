@@ -654,6 +654,17 @@ void main() {
         workingQuietly.copyWith(isActive: true).programStatus,
         workingQuietly.programStatus,
       );
+      // A reported state without a bar hides a stale OSC 9;4 one.
+      const doneOverStaleProgress = TmuxWindow(
+        index: 3,
+        name: 'deploy',
+        isActive: false,
+        terminalProgress: TerminalProgress(
+          state: TerminalProgressState.indeterminate,
+        ),
+        programStatus: TerminalProgramStatus(state: TerminalProgramState.done),
+      );
+      expect(doneOverStaleProgress.activityProgress, isNull);
     });
 
     test(

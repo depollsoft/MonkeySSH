@@ -1648,8 +1648,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   TerminalProgramStatus? get _programStatus => _observedSession?.programStatus;
 
   /// Work a program reported through OSC 7501, otherwise OSC 9;4 progress.
-  TerminalProgress? get _terminalProgress =>
-      _programStatus?.terminalProgress ?? _observedSession?.terminalProgress;
+  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar.
+  TerminalProgress? get _terminalProgress {
+    final status = _programStatus;
+    return status == null
+        ? _observedSession?.terminalProgress
+        : status.terminalProgress;
+  }
 
   bool get _shouldReviewTerminalCommandInsertion =>
       shouldReviewTerminalCommandInsertion(
