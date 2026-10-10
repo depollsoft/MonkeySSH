@@ -275,7 +275,21 @@ void main() {
       tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
       isFalse,
     );
-    expect(find.textContaining('open to every app'), findsOneWidget);
+    expect(find.textContaining('any app on this device'), findsOneWidget);
+
+    // Looking at SOCKS and switching back keeps the earlier auto-start.
+    await tester.tap(find.text('Local'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
+    await tester.tap(find.text('SOCKS'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isFalse,
+    );
     // Only the name and listener port remain: no bind host, no destination.
     final fields = find.byType(TextFormField);
     expect(fields, findsNWidgets(2));
