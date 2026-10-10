@@ -620,6 +620,12 @@ class WorkflowContractsTest(unittest.TestCase):
         steps = deploy['steps']
         names = [step.get('name') for step in steps]
         self.assertLess(names.index('Install and test'), names.index('Deploy'))
+        # firebase-tools can exit 0 with a function missing, so the job checks
+        # every deployed endpoint after the deploy.
+        self.assertLess(names.index('Deploy'), names.index('Verify deployment'))
+        verify = steps[names.index('Verify deployment')]['run']
+        for function in ('pushNotify', 'registerPushDevice'):
+            self.assertIn(function, verify)
         auth = next(s for s in steps if s.get('uses', '').startswith('google-github-actions/auth@'))
         self.assertNotIn('credentials_json', auth['with'])
         self.assertIn('workload_identity_provider', auth['with'])

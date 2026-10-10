@@ -272,7 +272,9 @@ CI owns deploys. The `functions-test` job in `ci.yml` builds and tests
 `.github/workflows/deploy-functions.yml` tests the same commit again and runs
 `firebase deploy --only functions --force` on every push to `main` that changes
 the paths in `FUNCTIONS_PATHS` (`scripts/ci_changes.py`). It can also be run by
-hand on `main`.
+hand on `main`. The deploy then checks that `pushNotify` answers `{}` with 400
+and `registerPushDevice` answers a call without App Check with 401, because
+firebase-tools can exit 0 with a function missing (a missing one answers 404).
 
 - **Identity:** the workflow holds no key. GitHub's OIDC token is exchanged
   through the `github` Workload Identity pool for `functions-deployer@`, and
