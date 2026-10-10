@@ -861,6 +861,13 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
 
   // -- Hardware key event handling --
 
+  KeyEventResult _leaveKeyToTextInput(TerminalKey key, KeyEvent event) {
+    if (key == TerminalKey.space && event is! KeyUpEvent) {
+      _ime.noteSpaceKey();
+    }
+    return KeyEventResult.skipRemainingHandlers;
+  }
+
   KeyEventResult _onKeyEvent(FocusNode focusNode, KeyEvent event) {
     if (widget.readOnly) {
       _stopHardwareKeyRepeat();
@@ -891,9 +898,6 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
     if (key == null) {
       return KeyEventResult.ignored;
     }
-    if (key == TerminalKey.space && event is! KeyUpEvent) {
-      _ime.noteSpaceKey();
-    }
     final type = _terminalKeyEventType(event);
     final isNativePhysicalEvent =
         _AndroidTerminalImeKeyBridge.consumePhysicalEvent(key, type);
@@ -906,7 +910,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       return KeyEventResult.skipRemainingHandlers;
     }
     if (!_ime.editingValue.composing.isCollapsed && !hasShortcutModifier) {
-      return KeyEventResult.skipRemainingHandlers;
+      return _leaveKeyToTextInput(key, event);
     }
 
     if (event is KeyUpEvent) {
@@ -921,7 +925,7 @@ class _TerminalTextInputHandlerState extends State<TerminalTextInputHandler>
       key,
       hasShortcutModifier: hasShortcutModifier,
     )) {
-      return KeyEventResult.skipRemainingHandlers;
+      return _leaveKeyToTextInput(key, event);
     }
 
     final toolbarModifiers = widget.resolveTerminalKeyModifiers?.call();

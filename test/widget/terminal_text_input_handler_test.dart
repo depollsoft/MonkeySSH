@@ -773,6 +773,57 @@ void main() {
       await disposeTerminalInputHarness(tester, harness);
     });
 
+    testWidgets('a Space the terminal takes leaves no typed-space mark', (
+      tester,
+    ) async {
+      final harness = await pumpTerminalInputHarness(tester);
+      final writes = <(String, bool)>[];
+      harness.terminal.onOutput = (data) =>
+          writes.add((data, isWritingKeyboardSpace));
+
+      Future<void> commit(String text) async {
+        tester.testTextInput.updateEditingValue(
+          _editingValue(text, selectionOffset: text.length),
+        );
+        await tester.pump();
+      }
+
+      await commit('ok.');
+      // Ctrl+Space goes out as NUL; the IME commits nothing for it.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await commit('ok. ');
+
+      expect(writes, [('ok.', false), ('\x00', false), (' ', true)]);
+
+      await disposeTerminalInputHarness(tester, harness);
+    });
+
+    testWidgets('marks no space as the keyboard\'s in a password prompt', (
+      tester,
+    ) async {
+      final harness = await pumpTerminalInputHarness(
+        tester,
+        sensitiveInput: true,
+      );
+      final writes = <(String, bool)>[];
+      harness.terminal.onOutput = (data) =>
+          writes.add((data, isWritingKeyboardSpace));
+
+      for (final text in ['ok.', 'ok. ']) {
+        tester.testTextInput.updateEditingValue(
+          _editingValue(text, selectionOffset: text.length),
+        );
+        await tester.pump();
+      }
+
+      expect(writes, [('ok.', false), (' ', false)]);
+
+      await disposeTerminalInputHarness(tester, harness);
+    });
+
     testWidgets('hardware Shift+Enter sends legacy LF newline', (tester) async {
       final harness = await pumpTerminalInputHarness(tester);
 

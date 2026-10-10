@@ -284,8 +284,9 @@ class TerminalImeEngine {
   /// Stops tracking a native Android backspace gesture.
   void cancelAndroidBackspace() => _activeAndroidImeBackspace = null;
 
-  /// Records a Space key press, so the space the IME commits for it counts as
-  /// typed rather than as the keyboard's own; see [writeKeyboardSpace].
+  /// Records a Space key left to the IME, so the space it commits for the key
+  /// counts as typed rather than as the keyboard's own; see
+  /// [writeKeyboardSpace].
   void noteSpaceKey() => _spaceKeyPressed = true;
 
   /// Coalesces a toolbar-modified hardware Enter with its later IME commit.
@@ -434,6 +435,11 @@ class TerminalImeEngine {
             meta: meta,
             type: type,
           );
+    if (key == TerminalKey.space && type != TerminalKeyEventType.release) {
+      // A Space the terminal did not take, such as Ctrl+Space, goes on to
+      // the IME, which commits its space.
+      _spaceKeyPressed = !handled;
+    }
 
     if (handled) {
       // Hardware Enter and control keys bypass the IME commit/reset path.
@@ -1203,6 +1209,7 @@ class TerminalImeEngine {
     _clearPendingComposingEnterAction();
     _pendingPerformedEnterText = null;
     _hardwareEnterAt = null;
+    _spaceKeyPressed = false;
     _pendingEnterActionSuppressions = 0;
     _pendingAndroidHardwareBackspaces = 0;
     _activeAndroidImeBackspace = null;
@@ -1632,8 +1639,12 @@ class TerminalImeEngine {
     final input = _applyTerminalTextInputModifiers(text);
     // A lone space committed right after punctuation with no Space key
     // behind it is the one the keyboard added there itself. A paste of
-    // spaces, or of a space with a line break, is the user's.
+    // spaces, or of a space with a line break, is the user's, and nothing is
+    // treated as the keyboard's in a password prompt. A single space pasted
+    // from the keyboard's clipboard looks the same; the pacer drops it only
+    // if Return lands within its hold, two taps under 50 ms apart.
     final keyboardSpace =
+        !options.sensitiveInput &&
         !_spaceKeyPressed &&
         text == ' ' &&
         input == text &&
