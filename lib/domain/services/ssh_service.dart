@@ -3872,6 +3872,22 @@ class SshSession {
     bool v6Only = false,
   }) => ServerSocket.bind(host, port, v6Only: v6Only);
 
+  /// Live connection bookkeeping of a dynamic forward, or null when it is not
+  /// running.
+  @visibleForTesting
+  ({int connections, int stopSignals, bool accepting})?
+  dynamicForwardBookkeeping(int portForwardId) {
+    final tunnel = _activeTunnels[portForwardId];
+    if (tunnel == null || !tunnel.isDynamic) {
+      return null;
+    }
+    return (
+      connections: tunnel.connections.length,
+      stopSignals: tunnel.connectionStops.length,
+      accepting: !(tunnel.subscription?.isPaused ?? true),
+    );
+  }
+
   /// Whether this session owns an active tunnel for [portForwardId].
   bool isPortForwardActive(int portForwardId) =>
       activeTunnels.any((tunnel) => tunnel.portForwardId == portForwardId);
@@ -6303,6 +6319,9 @@ while($true){
     final tunnel = _activeTunnels.remove(portForwardId);
     if (tunnel != null) {
       tunnel.stopped.complete();
+      for (final stop in tunnel.connectionStops.toList(growable: false)) {
+        if (!stop.isCompleted) stop.complete();
+      }
       await tunnel.subscription?.cancel();
       for (final browserSubscription in tunnel.browserSubscriptions) {
         await browserSubscription.cancel();
@@ -6669,6 +6688,18 @@ class _ActiveTunnel {
 
   /// Whether a dynamic forward already logged reaching its connection cap.
   bool connectionLimitLogged = false;
+
+  /// Per-connection stop signals of a dynamic forward, completed on stop.
+  ///
+  /// Each connection waits on its own completer rather than on [stopped], so
+  /// a finished connection leaves nothing attached to a future that lives as
+  /// long as the forward.
+  final connectionStops = <Completer<void>>{};
+
+  /// When a dynamic forward last logged a failed connection, and how many it
+  /// skipped since, so a page probing ports cannot flood diagnostics.
+  DateTime? lastFailureLoggedAt;
+  int suppressedFailureLogs = 0;
   // Cancelled in SshSession.stopForward().
   // ignore: cancel_subscriptions
   StreamSubscription<dynamic>? subscription;

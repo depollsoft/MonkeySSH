@@ -17,6 +17,10 @@ const dynamicPortForwardType = 'dynamic';
 /// device's IPv4 loopback interface.
 const dynamicPortForwardBindHost = '127.0.0.1';
 
+/// Remote host written into exported SOCKS rules so app versions that require
+/// one still import them; importers that know SOCKS forwards discard it.
+const dynamicPortForwardLegacyRemoteHost = 'socks';
+
 /// Whether [forwardType] is a SOCKS5 dynamic forward.
 bool isDynamicPortForwardType(String forwardType) =>
     forwardType == dynamicPortForwardType;

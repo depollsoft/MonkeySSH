@@ -14,6 +14,9 @@ const _dynamicForwardHandshakeTimeout = Duration(seconds: 10);
 /// destroyed.
 const _dynamicForwardFailureReplyGrace = Duration(seconds: 1);
 
+/// Shortest gap between two logged client failures of one dynamic forward.
+const _dynamicForwardFailureLogInterval = Duration(seconds: 30);
+
 /// SOCKS5 (`ssh -D`) forwarding for [SshSession].
 ///
 /// Lives in a part file so it shares the session's tunnel bookkeeping without
@@ -94,8 +97,23 @@ extension _SshSessionDynamicForward on SshSession {
       socket.destroy();
       return;
     }
-    if (tunnel.connections.length >= dynamicPortForwardMaxConnections) {
-      socket.destroy();
+    final stop = Completer<void>();
+    tunnel.connectionStops.add(stop);
+    final connection = _handleDynamicForwardConnection(
+      socket,
+      tunnel,
+      stop.future,
+    );
+    tunnel.connections.add(connection);
+    // The tunnel's own listener, cancelled by stopForward.
+    // ignore: cancel_subscriptions
+    final listener = tunnel.subscription;
+    if (tunnel.connections.length >= dynamicPortForwardMaxConnections &&
+        listener != null &&
+        !listener.isPaused) {
+      // Stop accepting instead of resetting clients: the kernel queues new
+      // connections in the listen backlog until a slot frees up.
+      listener.pause();
       if (!tunnel.connectionLimitLogged) {
         tunnel.connectionLimitLogged = true;
         DiagnosticsLogService.instance.warning(
@@ -108,18 +126,31 @@ extension _SshSessionDynamicForward on SshSession {
           },
         );
       }
-      return;
     }
-    final connection = _handleDynamicForwardConnection(socket, tunnel);
-    tunnel.connections.add(connection);
     unawaited(
-      connection.whenComplete(() => tunnel.connections.remove(connection)),
+      connection.whenComplete(() {
+        tunnel.connections.remove(connection);
+        tunnel.connectionStops.remove(stop);
+        // ignore: cancel_subscriptions
+        final listener = tunnel.subscription;
+        if (!tunnel.stopped.isCompleted &&
+            listener != null &&
+            listener.isPaused &&
+            tunnel.connections.length < dynamicPortForwardMaxConnections) {
+          listener.resume();
+        }
+      }),
     );
   }
 
+  /// Serves one SOCKS client until it closes or [stopped] completes.
+  ///
+  /// [stopped] belongs to this connection alone, so nothing here outlives the
+  /// connection by waiting on a forward- or session-lifetime future.
   Future<void> _handleDynamicForwardConnection(
     Socket socket,
     _ActiveTunnel tunnel,
+    Future<void> stopped,
   ) async {
     final Socks5ConnectRequest request;
     try {
@@ -127,7 +158,7 @@ extension _SshSessionDynamicForward on SshSession {
         socket,
         write: socket.add,
         timeout: _dynamicForwardHandshakeTimeout,
-        cancel: tunnel.stopped.future,
+        cancel: stopped,
       );
     } on Socks5HandshakeException catch (error) {
       switch (error.failure) {
@@ -172,16 +203,16 @@ extension _SshSessionDynamicForward on SshSession {
     );
     final SSHForwardChannel? channel;
     try {
+      // Closing the session stops every forward, which completes [stopped].
       channel = await Future.any<SSHForwardChannel?>([
         opening,
-        tunnel.stopped.future.then((_) => null),
-        _closeStarted.future.then((_) => null),
+        stopped.then((_) => null),
       ]).timeout(portForwardStartTimeout);
     } on Object catch (error) {
       if (error is! Exception && error is! SSHError) rethrow;
       _destroyLateDynamicForwardChannel(opening);
       await request.discard();
-      _logDynamicForwardFailure(error);
+      _logDynamicForwardFailure(error, tunnel);
       if (_tryAddToSocket(
         socket,
         encodeSocks5Reply(_socks5ReplyForDialError(error)),
@@ -211,7 +242,7 @@ extension _SshSessionDynamicForward on SshSession {
         socket,
         () => channel,
         clientData: request.upload,
-        stopped: tunnel.stopped.future,
+        stopped: stopped,
         destroyChannel: _destroyLocalForwardChannel,
       );
     } on Object catch (error) {
@@ -220,7 +251,7 @@ extension _SshSessionDynamicForward on SshSession {
           !_isClosedForwardSinkError(error)) {
         rethrow;
       }
-      _logDynamicForwardFailure(error);
+      _logDynamicForwardFailure(error, tunnel);
     }
   }
 
@@ -255,12 +286,32 @@ extension _SshSessionDynamicForward on SshSession {
     );
   }
 
-  void _logDynamicForwardFailure(Object error) {
-    _logDynamicForwardEvent('dynamic_connection_failed', error: error);
+  /// Logs a failed client at most once per [_dynamicForwardFailureLogInterval]
+  /// per forward, with a count of the failures skipped since.
+  void _logDynamicForwardFailure(Object error, _ActiveTunnel tunnel) {
     _reportConnectionHealthFailureIfClosed(error, operation: 'forward_dynamic');
+    final now = DateTime.now();
+    final last = tunnel.lastFailureLoggedAt;
+    if (last != null &&
+        now.difference(last) < _dynamicForwardFailureLogInterval) {
+      tunnel.suppressedFailureLogs++;
+      return;
+    }
+    tunnel.lastFailureLoggedAt = now;
+    final suppressed = tunnel.suppressedFailureLogs;
+    tunnel.suppressedFailureLogs = 0;
+    _logDynamicForwardEvent(
+      'dynamic_connection_failed',
+      error: error,
+      extraFields: {'suppressedCount': suppressed},
+    );
   }
 
-  void _logDynamicForwardEvent(String event, {Object? error}) {
+  void _logDynamicForwardEvent(
+    String event, {
+    Object? error,
+    Map<String, Object?> extraFields = const {},
+  }) {
     DiagnosticsLogService.instance.warning(
       'ssh.forward',
       event,
@@ -268,6 +319,7 @@ extension _SshSessionDynamicForward on SshSession {
         'connectionId': connectionId,
         'hostId': hostId,
         if (error != null) ..._diagnosticSshExecErrorFields(error),
+        ...extraFields,
       },
     );
   }

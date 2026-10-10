@@ -214,6 +214,7 @@ void main() {
       ws.write(
         'GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
         'Connection: Upgrade\r\n'
+        // Built at run time so no literal key sits in the source.
         'Sec-WebSocket-Key: ${base64Encode(List<int>.generate(16, (i) => i * 11 + 3))}\r\n'
         'Sec-WebSocket-Version: 13\r\n\r\n',
       );

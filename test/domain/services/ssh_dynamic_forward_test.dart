@@ -204,6 +204,34 @@ class _ClosableServerSocket extends Stream<Socket> implements ServerSocket {
   Future<ServerSocket> close() async => this;
 }
 
+/// A WebSocket handshake key built at run time, so no literal key sits in the
+/// source for secret scanners to flag.
+String _webSocketKey() =>
+    base64Encode(List<int>.generate(16, (index) => index * 11 + 3));
+
+/// A channel that only records whether it was destroyed.
+class _ClosableChannel implements SSHForwardChannel {
+  bool destroyed = false;
+
+  @override
+  Stream<Uint8List> get stream => const Stream.empty();
+
+  @override
+  StreamSink<List<int>> get sink => throw UnimplementedError();
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<void> get done async {}
+
+  @override
+  void destroy() => destroyed = true;
+
+  @override
+  Future<void> flush() async {}
+}
+
 PortForward _socksForward({String localHost = '127.0.0.1'}) => PortForward(
   id: 7,
   name: 'Office',
@@ -337,7 +365,7 @@ void main() {
       'Host: ws.internal:8080\r\n'
       'Upgrade: websocket\r\n'
       'Connection: Upgrade\r\n'
-      'Sec-WebSocket-Key: ${base64Encode(List<int>.generate(16, (i) => i * 11 + 3))}\r\n'
+      'Sec-WebSocket-Key: ${_webSocketKey()}\r\n'
       'Sec-WebSocket-Version: 13\r\n\r\n',
     );
     expect(await peer.readHeaders(), startsWith('HTTP/1.1 101'));
@@ -383,26 +411,81 @@ void main() {
     expect(session.activeTunnels, hasLength(1));
   });
 
-  test('caps simultaneous SOCKS clients', () async {
+  test('queues clients over the cap instead of resetting them', () async {
     final proxyPort = await startSocks();
     final waiting = <_Peer>[];
     for (var i = 0; i < dynamicPortForwardMaxConnections; i++) {
       final peer = await _Peer.connect(proxyPort);
-      waiting.add(peer);
       addTearDown(peer.dispose);
+      // A method selection proves the listener accepted this client.
+      peer.socket.add([0x05, 0x01, 0x00]);
+      expect(await peer.read(2), [0x05, 0x00]);
+      waiting.add(peer);
     }
-    // Let the listener accept every pending client before the next one.
-    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(session.dynamicForwardBookkeeping(7), (
+      connections: dynamicPortForwardMaxConnections,
+      stopSignals: dynamicPortForwardMaxConnections,
+      accepting: false,
+    ));
 
     final overflow = await _Peer.connect(proxyPort);
     addTearDown(overflow.dispose);
-    await overflow.untilClosed();
+    overflow.socket.add([0x05, 0x01, 0x00]);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(overflow.isClosed, isFalse);
+
+    await waiting.removeAt(0).dispose();
+    expect(await overflow.read(2), [0x05, 0x00]);
     expect(waiting.where((peer) => peer.isClosed), isEmpty);
 
     await session.stopForward(7);
-    for (final peer in waiting) {
+    for (final peer in [...waiting, overflow]) {
       await peer.untilClosed();
     }
+  });
+
+  test('finished clients leave no stop hooks behind', () async {
+    when(() => client.forwardLocal(any(), any()))
+        .thenThrow(SSHChannelOpenError(2, 'Connection refused'));
+    final proxyPort = await startSocks();
+    for (var i = 0; i < 5; i++) {
+      final peer = await _Peer.connect(proxyPort);
+      addTearDown(peer.dispose);
+      expect(
+        await peer.socksConnect('db.internal', 5432),
+        Socks5Reply.connectionRefused.code,
+      );
+      await peer.untilClosed();
+    }
+    await pumpEventQueue();
+    expect(session.dynamicForwardBookkeeping(7), (
+      connections: 0,
+      stopSignals: 0,
+      accepting: true,
+    ));
+  });
+
+  test('stopping the forward abandons a pending channel open', () async {
+    final opening = Completer<SSHForwardChannel>();
+    when(() => client.forwardLocal(any(), any()))
+        .thenAnswer((_) => opening.future);
+    final proxyPort = await startSocks();
+    final peer = await _Peer.connect(proxyPort);
+    addTearDown(peer.dispose);
+    peer.socket
+      ..add([0x05, 0x01, 0x00])
+      ..add([0x05, 0x01, 0x00, 0x03, 2, ...ascii.encode('db'), 0x15, 0x38]);
+    expect(await peer.read(2), [0x05, 0x00]);
+    await untilCalled(() => client.forwardLocal(any(), any()));
+
+    await session.stopForward(7);
+    await peer.untilClosed();
+
+    // A channel that opens afterwards is closed rather than leaked.
+    final late = _ClosableChannel();
+    opening.complete(late);
+    await pumpEventQueue();
+    expect(late.destroyed, isTrue);
   });
 
   test('stopping the forward ends pending handshakes promptly', () async {
