@@ -290,11 +290,16 @@ func pushRejectionFor(state pushStateFile, deviceID string, ticket string) strin
 // on a sidecar file. Readers reload when the file changed, checking at most
 // once per pushStoreRecheckInterval.
 type pushStore struct {
-	mu         sync.Mutex
-	now        func() time.Time
-	loaded     bool
-	modTime    time.Time
-	size       int64
+	mu      sync.Mutex
+	now     func() time.Time
+	loaded  bool
+	modTime time.Time
+	size    int64
+	// file identifies the loaded file. Every write renames a fresh temp file
+	// into place, so a changed identity means a new version even when the
+	// size and modification time match: moving a registration to another
+	// session keeps the size, and coarse timestamps can repeat.
+	file       os.FileInfo
 	lastCheck  time.Time
 	state      pushStateFile
 	hasRecords atomic.Bool
@@ -349,6 +354,13 @@ func readPushStateFile(path string) (pushStateFile, error) {
 	if parsed.Version > pushStateSchemaVersion {
 		return empty, errPushStateVersion
 	}
+	if parsed.Version == 1 {
+		// Version 1 registrations named no session and are dropped, but the
+		// tickets the function refused stay refused.
+		empty.Salt = parsed.Salt
+		empty.Rejected = parsed.Rejected
+		return empty, nil
+	}
 	if parsed.Version != pushStateSchemaVersion {
 		return empty, nil
 	}
@@ -375,10 +387,12 @@ func (st *pushStore) refreshLocked() {
 		st.loaded = true
 		st.modTime = time.Time{}
 		st.size = 0
+		st.file = nil
 		st.setStateLocked(pushStateFile{Version: pushStateSchemaVersion})
 		return
 	}
-	if st.loaded && info.ModTime().Equal(st.modTime) && info.Size() == st.size {
+	if st.loaded && info.ModTime().Equal(st.modTime) && info.Size() == st.size &&
+		st.file != nil && os.SameFile(st.file, info) {
 		// Expiry still applies to an unchanged file.
 		state := st.state
 		prunePushState(&state, now)
@@ -394,6 +408,7 @@ func (st *pushStore) refreshLocked() {
 	if info, err := os.Stat(path); err == nil {
 		st.modTime = info.ModTime()
 		st.size = info.Size()
+		st.file = info
 	}
 	st.loaded = true
 	prunePushState(&state, now)
@@ -489,6 +504,7 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 		if info, err := os.Stat(path); err == nil {
 			st.modTime = info.ModTime()
 			st.size = info.Size()
+			st.file = info
 		}
 		st.setStateLocked(state)
 		return nil
@@ -508,6 +524,7 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 	st.lastCheck = now
 	st.modTime = info.ModTime()
 	st.size = info.Size()
+	st.file = info
 	st.setStateLocked(state)
 	return nil
 }

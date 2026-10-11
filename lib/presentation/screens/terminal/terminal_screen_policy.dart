@@ -288,17 +288,22 @@ RemoteMuxBackend resolveRemoteMuxStartupBackend(
 typedef MuxSessionConnection = ({
   int connectionId,
   int hostId,
+  RemoteMuxBackend? muxBackend,
   String? muxSessionName,
+  bool hasTerminal,
 });
 
-/// Chooses the connection for a terminal route that names a mux session but
-/// no connection, such as a push or alert notification tap.
+/// Chooses the connection for a terminal route that names a MonkeyMux
+/// session but no connection, such as a push notification tap.
 ///
-/// Only a connection already attached to that session may be reused. Reusing
-/// another connection to the same host showed a different session's
-/// terminal, and the named window was then ignored, so without a match the
-/// terminal opens a new connection, which attaches to the named session.
-/// A route without a session keeps the usual host-wide reuse.
+/// A connection already attached to that session is reused. Reusing another
+/// connection to the same host showed a different session's terminal, and
+/// the named window was then ignored. A connection that has no terminal yet
+/// is reused too: an earlier tap may have left it behind when this one
+/// replaced its terminal, and opening its first terminal attaches it to the
+/// named session. Otherwise the terminal opens a new connection, which
+/// attaches to the named session. A route without a session keeps the usual
+/// host-wide reuse.
 ({int? connectionId, bool forceNew}) resolveMuxSessionConnection({
   required int hostId,
   required String? sessionName,
@@ -308,12 +313,18 @@ typedef MuxSessionConnection = ({
   if (name == null || name.isEmpty) {
     return (connectionId: null, forceNew: false);
   }
+  int? unopened;
   for (final connection in connections) {
-    if (connection.hostId == hostId &&
+    if (connection.hostId != hostId) continue;
+    if (connection.muxBackend == RemoteMuxBackend.monkeyMux &&
         connection.muxSessionName?.trim() == name) {
       return (connectionId: connection.connectionId, forceNew: false);
     }
+    if (!connection.hasTerminal && connection.muxBackend == null) {
+      unopened ??= connection.connectionId;
+    }
   }
+  if (unopened != null) return (connectionId: unopened, forceNew: false);
   return (connectionId: null, forceNew: true);
 }
 

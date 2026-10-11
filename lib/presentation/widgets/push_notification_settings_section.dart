@@ -164,9 +164,9 @@ class _SendTestTileState extends State<_SendTestTile> {
 String pushHostStatus(PushNotificationState state, int hostId) {
   if (state.disabledHostIds.contains(hostId)) return 'Off';
   if (state.registeredHostIds.contains(hostId)) {
-    return 'On for the MonkeyMux sessions you open here';
+    return 'On for the MonkeyMux session this host opens';
   }
-  return 'On once you open a MonkeyMux session on it';
+  return 'On once this host opens a MonkeyMux session';
 }
 
 /// User-facing text for a test notification outcome.

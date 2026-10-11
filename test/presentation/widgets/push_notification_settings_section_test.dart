@@ -185,7 +185,7 @@ void main() {
     expect(
       find.descendant(
         of: first,
-        matching: find.text('On for the MonkeyMux sessions you open here'),
+        matching: find.text('On for the MonkeyMux session this host opens'),
       ),
       findsOneWidget,
     );
@@ -267,11 +267,11 @@ void main() {
     );
     expect(
       pushHostStatus(state, 1),
-      'On for the MonkeyMux sessions you open here',
+      'On for the MonkeyMux session this host opens',
     );
     expect(
       pushHostStatus(state, 2),
-      'On once you open a MonkeyMux session on it',
+      'On once this host opens a MonkeyMux session',
     );
     expect(pushHostStatus(state, 3), 'Off');
   });

@@ -1024,7 +1024,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     if (response.isError) {
       return MonkeyMuxPushControlResult(
         ok: false,
-        unsupported: response.error?.startsWith('unsupported command') ?? false,
+        // A helper older than the registration file (it refuses a file a
+        // newer MonkeyMux wrote) cannot take part until it is updated.
+        unsupported:
+            (response.error?.startsWith('unsupported command') ?? false) ||
+            (response.error?.contains('written by a newer MonkeyMux') ?? false),
       );
     }
     return MonkeyMuxPushControlResult(ok: true, result: response.pushResult);

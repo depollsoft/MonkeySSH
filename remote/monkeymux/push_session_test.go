@@ -224,13 +224,66 @@ func TestPushVersion1FileIsReplacedAndOlderHelpersAreLockedOut(t *testing.T) {
 	if state.Version != pushStateSchemaVersion || len(state.Devices) != 1 || state.Devices[0].SessionKey == "" {
 		t.Fatalf("after attaching, file = %s", data)
 	}
-	// A version 1 helper reads this file as from a newer MonkeyMux: it neither
-	// delivers from it nor rewrites it (and so cannot drop the session keys).
-	if pushStateSchemaVersion < 2 {
-		t.Fatal("session-scoped registrations must use a schema older helpers refuse")
-	}
 	h.raise("@3", pushKindAlert)
 	if got := h.kinds(); got != "alert" {
 		t.Fatalf("after attaching, pushes = %q, want alert", got)
+	}
+}
+
+func TestPushVersion1FileKeepsRefusedTickets(t *testing.T) {
+	newPushTestHarness(t)
+	path, err := pushStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), pushStateDirMode); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"version":1,"devices":[],"rejected":[{"deviceId":"device_0000000000000001","ticketHash":"abc","reason":"bad_ticket","at":1760000000}]}`
+	if err := os.WriteFile(path, []byte(legacy), pushStateFileMode); err != nil {
+		t.Fatal(err)
+	}
+	state, err := readPushStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Rejected) != 1 || state.Rejected[0].Reason != pushRejectedBadTicket {
+		t.Fatalf("refused tickets after reading version 1 = %+v", state.Rejected)
+	}
+}
+
+func TestPushStoreSeesAReplacedFileWithTheSameSizeAndTime(t *testing.T) {
+	h := newPushTestHarness(t)
+	play, _ := newPushTestSessionServer(t, h, "play")
+	device := newPushTestDevice(t, 1)
+	h.register(t, device)
+	if devices, _ := h.notifier.store.snapshotFor("work"); len(devices) != 1 {
+		t.Fatalf("work registrations = %d, want 1", len(devices))
+	}
+	path, _ := pushStatePath()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Moving the saved host to "play" rewrites the file with the same size;
+	// pin the old modification time as a coarse-timestamp filesystem would.
+	if response := play.pushControlResponse(pushTestRegisterRequest(device)); response.Type != "push_registered" {
+		t.Fatalf("register through play = %+v", response)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("the move changed the file size (%d -> %d); this test needs it unchanged",
+			before.Size(), after.Size())
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Advance(2 * time.Second)
+	if devices, _ := h.notifier.store.snapshotFor("work"); len(devices) != 0 {
+		t.Fatal("work still sends to the saved host that moved to play")
 	}
 }

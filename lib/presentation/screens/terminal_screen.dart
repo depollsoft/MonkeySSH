@@ -4471,7 +4471,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               (
                 connectionId: session.connectionId,
                 hostId: session.hostId,
+                muxBackend: session.remoteMuxBackend,
                 muxSessionName: session.remoteMuxSessionName,
+                hasTerminal: session.terminal != null,
               ),
         ],
       );

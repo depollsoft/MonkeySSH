@@ -117,6 +117,46 @@ final pushHostIdsProvider = Provider<Future<List<int>> Function()>((ref) {
   return () async => [for (final host in await repository.getAll()) host.id];
 });
 
+/// Each saved host's configured MonkeyMux session, null when it has none.
+final pushHostSessionNamesProvider =
+    Provider<Future<Map<int, String?>> Function()>((ref) {
+      final repository = ref.watch(hostRepositoryProvider);
+      return () async => {
+        for (final host in await repository.getAll())
+          host.id: switch (host.tmuxSessionName?.trim()) {
+            final String name when name.isNotEmpty => name,
+            _ => null,
+          },
+      };
+    });
+
+/// Picks the connection that registers each saved host with its machine.
+///
+/// The machine keeps one registration per saved host and moves it to the
+/// session that registered last, so two live connections of one saved host
+/// on different sessions would take it from each other in turn, and the one
+/// that lost would stay silent. The connection on the saved host's configured
+/// session registers; when none is on it (or nothing is configured), the
+/// most recently opened connection does.
+Set<int> pushRegistrantConnections(
+  Iterable<PushHostLink> links,
+  Map<int, String?> configuredSessions,
+) {
+  final best = <int, PushHostLink>{};
+  bool onConfigured(PushHostLink link) =>
+      link.sessionName == configuredSessions[link.hostId];
+  for (final link in links) {
+    final current = best[link.hostId];
+    if (current == null ||
+        (onConfigured(link) && !onConfigured(current)) ||
+        (onConfigured(link) == onConfigured(current) &&
+            link.connectionId > current.connectionId)) {
+      best[link.hostId] = link;
+    }
+  }
+  return {for (final link in best.values) link.connectionId};
+}
+
 /// Lists the live MonkeyMux attachments push can reach right now.
 final pushHostLinksProvider = Provider<List<PushHostLink> Function()>((ref) {
   final sshService = ref.watch(sshServiceProvider);
@@ -313,6 +353,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   late TelemetryService _telemetry;
   late List<PushHostLink> Function() _links;
   late Future<List<int>> Function() _hostIds;
+  late Future<Map<int, String?>> Function() _hostSessionNames;
   late Future<void> Function() _installChannel;
   late DateTime Function() _now;
   late bool _localPresenceSupported;
@@ -359,6 +400,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _telemetry = ref.watch(telemetryServiceProvider);
     _links = ref.watch(pushHostLinksProvider);
     _hostIds = ref.watch(pushHostIdsProvider);
+    _hostSessionNames = ref.watch(pushHostSessionNamesProvider);
     _installChannel = ref.watch(pushNotificationChannelInstallerProvider);
     _now = ref.watch(pushClockProvider);
     _localPresenceSupported = ref.watch(pushLocalPresenceSupportedProvider);
@@ -811,17 +853,24 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       return PushTestOutcome.hostNeedsUpdate;
     }
     try {
-      final result = await link.send(<String, Object?>{
+      final command = <String, Object?>{
         'type': 'push_test',
         'push': {'deviceId': secrets.deviceId},
-      });
+      };
+      var result = await link.send(command);
+      if (result.result == 'not_registered') {
+        // The machine holds no registration for this saved host's session:
+        // it moved to another session, or the helper started a fresh file.
+        // The ticket is fine, so register again rather than renew it.
+        _registered.remove(_keyOf(link));
+        await syncNow();
+        result = await link.send(command);
+      }
       if (result.unsupported) return PushTestOutcome.hostNeedsUpdate;
       final outcome = switch (result.result) {
         'sent' => PushTestOutcome.sent,
         'rate_limited' || 'capped' => PushTestOutcome.rateLimited,
-        'bad_ticket' ||
-        'unregistered' ||
-        'not_registered' => PushTestOutcome.registrationRejected,
+        'bad_ticket' || 'unregistered' => PushTestOutcome.registrationRejected,
         _ => PushTestOutcome.failed,
       };
       _log.info(
@@ -1083,6 +1132,13 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (pending.isEmpty) _pendingUnregister.remove(link.hostId);
     }
 
+    Map<int, String?> configuredSessions;
+    try {
+      configuredSessions = await _hostSessionNames();
+    } on Object {
+      configuredSessions = const {};
+    }
+    final registrants = pushRegistrantConnections(links, configuredSessions);
     for (final link in links) {
       final secrets = _secrets;
       if (!state.enabled ||
@@ -1095,7 +1151,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (state.disabledHostIds.contains(link.hostId)) continue;
       final key = _keyOf(link);
       if (_unsupported.containsKey(key)) continue;
-      if (_registered[key] != secrets.ticket) {
+      if (_registered[key] != secrets.ticket &&
+          registrants.contains(link.connectionId)) {
         if (secrets.ticket == _refusedTicket) continue;
         if (!await _registerLink(link, secrets)) continue;
         if (_optingOut || state.disabledHostIds.contains(link.hostId)) {
