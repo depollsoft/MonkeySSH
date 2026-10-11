@@ -12,7 +12,9 @@
 #                        provider only accepts this repository, refs/heads/main
 #                        and deploy-functions.yml.
 #
-# The PUSH_TICKET_KEYS secret itself must already exist.
+# It also keeps the functions' Cloud Run request logs, which hold caller IP
+# addresses, out of the _Default log bucket. The PUSH_TICKET_KEYS secret
+# itself must already exist.
 set -euo pipefail
 
 P=monkeyssh
@@ -86,6 +88,14 @@ fi
 gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER" --project "$P" \
   --member "principalSet://iam.googleapis.com/projects/$NUM/locations/global/workloadIdentityPools/github/attribute.repository_id/$REPO_ID" \
   --role roles/iam.workloadIdentityUser --format=none
+
+# Do not store Cloud Run request logs (caller IP addresses) for the push
+# functions; their own outcome logs carry no IP and stay.
+if ! gcloud logging sinks describe _Default --project "$P" --format='value(exclusions[].name)' |
+    tr ';' '\n' | grep -qx push-request-logs; then
+  gcloud logging sinks update _Default --project="$P" \
+    --add-exclusion='name=push-request-logs,description=Drop Cloud Run request logs (caller IPs) for the push functions; outcome logs stay,filter=resource.type="cloud_run_revision" AND resource.labels.service_name=("pushnotify" OR "registerpushdevice") AND log_id("run.googleapis.com/requests")'
+fi
 
 echo "Done. The deploy workflow uses:"
 echo "  provider: projects/$NUM/locations/global/workloadIdentityPools/github/providers/monkeyssh-functions"

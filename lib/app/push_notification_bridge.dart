@@ -93,9 +93,17 @@ class _PushNotificationBridgeState
   StreamSubscription<PushRemoteMessage>? _foregroundMessages;
   StreamSubscription<PushRemoteMessage>? _openedMessages;
   ProviderSubscription<AuthState>? _authSubscription;
+  ProviderSubscription<GoRouter>? _routerSubscription;
   GoRouter? _router;
   bool _active = false;
   bool _foreground = true;
+
+  /// Payloads of the taps already opened. When FCM started the process just
+  /// before the tap, Android delivers that tap through both
+  /// `onMessageOpenedApp` and `getInitialMessage`, and opening it twice
+  /// stacked two terminals that each connected to the host. A payload is
+  /// unique to its message (fresh key and nonce), so it identifies the tap.
+  final _openedPayloads = <String>{};
 
   late final _navigation = NotificationNavigationScheduler<_PushTap>(
     canNavigate: () {
@@ -123,9 +131,15 @@ class _PushNotificationBridgeState
     _foregroundMessages = gateway.onMessage.listen(_handleForegroundMessage);
     _openedMessages = gateway.onMessageOpenedApp.listen(_handleOpenedMessage);
     unawaited(_handleInitialMessage(gateway));
-    final router = ref.read(routerProvider);
-    router.routerDelegate.addListener(_reportVisibility);
-    _router = router;
+    // The router is rebuilt on auth transitions, which happen while the app
+    // starts. Following only the first one left presence on a discarded
+    // router whose location stayed `/`, so no device ever reported watching
+    // a terminal and hosts pushed alerts for the window on screen.
+    _routerSubscription = ref.listenManual<GoRouter>(
+      routerProvider,
+      (previous, next) => _followRouter(next, report: previous != null),
+      fireImmediately: true,
+    );
     _authSubscription = ref.listenManual<AuthState>(
       authStateProvider,
       (_, _) => _navigation.flush(),
@@ -137,12 +151,24 @@ class _PushNotificationBridgeState
   void dispose() {
     if (_active) {
       _lifecycle?.dispose();
+      _routerSubscription?.close();
       _router?.routerDelegate.removeListener(_reportVisibility);
       unawaited(_foregroundMessages?.cancel());
       unawaited(_openedMessages?.cancel());
       _authSubscription?.close();
     }
     super.dispose();
+  }
+
+  /// Moves the visibility listener to [router], the one the app now shows.
+  void _followRouter(GoRouter router, {required bool report}) {
+    if (identical(router, _router)) return;
+    _router?.routerDelegate.removeListener(_reportVisibility);
+    router.routerDelegate.addListener(_reportVisibility);
+    _router = router;
+    if (report) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _reportVisibility());
+    }
   }
 
   void _handleLifecycle(AppLifecycleState state) {
@@ -201,7 +227,11 @@ class _PushNotificationBridgeState
   }
 
   Future<void> _handleOpenedMessage(PushRemoteMessage message) async {
-    if (message.encryptedPayload == null) return;
+    final payload = message.encryptedPayload;
+    if (payload == null || !_openedPayloads.add(payload)) return;
+    if (_openedPayloads.length > 32) {
+      _openedPayloads.remove(_openedPayloads.first);
+    }
     final target = await ref
         .read(pushNotificationControllerProvider.notifier)
         .resolve(message);

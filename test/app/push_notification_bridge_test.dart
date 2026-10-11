@@ -89,6 +89,10 @@ class _Controller extends PushNotificationController {
 
 const _message = PushRemoteMessage(data: {'v': '1', 'p': 'sealed'});
 
+/// Notification taps whose terminal page was built. A real terminal starts
+/// connecting when it is built, even if a later navigation replaces it.
+final _terminalTaps = <String?>{};
+
 GoRouter _router() => GoRouter(
   routes: [
     GoRoute(
@@ -98,10 +102,25 @@ GoRouter _router() => GoRouter(
     ),
     GoRoute(
       path: '/terminal/:hostId',
-      builder: (context, state) =>
-          Scaffold(body: Text('terminal ${state.uri}')),
+      builder: (context, state) {
+        _terminalTaps.add(state.uri.queryParameters['notificationTap']);
+        return Scaffold(body: Text('terminal ${state.uri}'));
+      },
     ),
   ],
+);
+
+/// Stands in for the app's router provider, which builds a new router on
+/// auth transitions.
+class _RouterHolder extends Notifier<GoRouter> {
+  @override
+  GoRouter build() => _router();
+
+  void rebuild() => state = _router();
+}
+
+final _routerHolder = NotifierProvider<_RouterHolder, GoRouter>(
+  _RouterHolder.new,
 );
 
 Future<(_Gateway, _Controller, GoRouter)> _pump(
@@ -192,6 +211,70 @@ void main() {
   ) async {
     await _pump(tester, initial: _message, target: target);
     expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
+  });
+
+  testWidgets('a tap delivered as both initial and opened opens once', (
+    tester,
+  ) async {
+    // When FCM started the process just before the tap, Android reports it
+    // through getInitialMessage and onMessageOpenedApp. Opening it twice
+    // built two terminals; the first was replaced but had already opened a
+    // second connection to the host.
+    _terminalTaps.clear();
+    final (gateway, _, _) = await _pump(
+      tester,
+      initial: _message,
+      target: target,
+    );
+    gateway.opened.add(_message);
+    await tester.pumpAndSettle();
+    expect(_terminalTaps, hasLength(1));
+
+    // A different message is a different tap.
+    gateway.opened.add(const PushRemoteMessage(data: {'v': '1', 'p': 'next'}));
+    await tester.pumpAndSettle();
+    expect(_terminalTaps, hasLength(2));
+    expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
+  });
+
+  testWidgets('watching follows the router the app rebuilds', (tester) async {
+    final gateway = _Gateway();
+    addTearDown(gateway.close);
+    final controller = _Controller();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pushNotificationsAvailableProvider.overrideWithValue(true),
+          pushMessagingGatewayProvider.overrideWithValue(gateway),
+          pushNotificationControllerProvider.overrideWith(() => controller),
+          routerProvider.overrideWith((ref) => ref.watch(_routerHolder)),
+          authStateProvider.overrideWith(_UnlockedAuth.new),
+        ],
+        child: PushNotificationBridge(
+          child: Consumer(
+            builder: (context, ref, _) =>
+                MaterialApp.router(routerConfig: ref.watch(routerProvider)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Auth transitions while the app starts replace the router. A bridge
+    // still listening to the first one never saw a terminal, so every host
+    // was told no one was watching.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PushNotificationBridge)),
+    );
+    container.read(_routerHolder.notifier).rebuild();
+    await tester.pumpAndSettle();
+    unawaited(
+      container.read(routerProvider).push('/terminal/4?connectionId=21'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.visibility.last, (true, 4));
+    expect(controller.connections.last, 21);
   });
 
   testWidgets('an unreadable tap opens Connections', (tester) async {
