@@ -89,6 +89,10 @@ class _Controller extends PushNotificationController {
 
 const _message = PushRemoteMessage(data: {'v': '1', 'p': 'sealed'});
 
+/// Notification taps whose terminal page was built. A real terminal starts
+/// connecting when it is built, even if a later navigation replaces it.
+final _terminalTaps = <String?>{};
+
 GoRouter _router() => GoRouter(
   routes: [
     GoRoute(
@@ -98,8 +102,10 @@ GoRouter _router() => GoRouter(
     ),
     GoRoute(
       path: '/terminal/:hostId',
-      builder: (context, state) =>
-          Scaffold(body: Text('terminal ${state.uri}')),
+      builder: (context, state) {
+        _terminalTaps.add(state.uri.queryParameters['notificationTap']);
+        return Scaffold(body: Text('terminal ${state.uri}'));
+      },
     ),
   ],
 );
@@ -191,6 +197,30 @@ void main() {
     tester,
   ) async {
     await _pump(tester, initial: _message, target: target);
+    expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
+  });
+
+  testWidgets('a tap delivered as both initial and opened opens once', (
+    tester,
+  ) async {
+    // When FCM started the process just before the tap, Android reports it
+    // through getInitialMessage and onMessageOpenedApp. Opening it twice
+    // built two terminals; the first was replaced but had already opened a
+    // second connection to the host.
+    _terminalTaps.clear();
+    final (gateway, _, _) = await _pump(
+      tester,
+      initial: _message,
+      target: target,
+    );
+    gateway.opened.add(_message);
+    await tester.pumpAndSettle();
+    expect(_terminalTaps, hasLength(1));
+
+    // A different message is a different tap.
+    gateway.opened.add(const PushRemoteMessage(data: {'v': '1', 'p': 'next'}));
+    await tester.pumpAndSettle();
+    expect(_terminalTaps, hasLength(2));
     expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
   });
 

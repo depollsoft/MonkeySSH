@@ -97,6 +97,13 @@ class _PushNotificationBridgeState
   bool _active = false;
   bool _foreground = true;
 
+  /// Payloads of the taps already opened. When FCM started the process just
+  /// before the tap, Android delivers that tap through both
+  /// `onMessageOpenedApp` and `getInitialMessage`, and opening it twice
+  /// stacked two terminals that each connected to the host. A payload is
+  /// unique to its message (fresh key and nonce), so it identifies the tap.
+  final _openedPayloads = <String>{};
+
   late final _navigation = NotificationNavigationScheduler<_PushTap>(
     canNavigate: () {
       final auth = ref.read(authStateProvider);
@@ -201,7 +208,11 @@ class _PushNotificationBridgeState
   }
 
   Future<void> _handleOpenedMessage(PushRemoteMessage message) async {
-    if (message.encryptedPayload == null) return;
+    final payload = message.encryptedPayload;
+    if (payload == null || !_openedPayloads.add(payload)) return;
+    if (_openedPayloads.length > 32) {
+      _openedPayloads.remove(_openedPayloads.first);
+    }
     final target = await ref
         .read(pushNotificationControllerProvider.notifier)
         .resolve(message);
