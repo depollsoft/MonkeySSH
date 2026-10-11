@@ -1865,6 +1865,78 @@ void main() {
     });
   });
 
+  group('MonkeyMux push control', () {
+    setUpAll(() => registerFallbackValue(Uint8List(0)));
+
+    test('an older helper is unsupported, except for an unregister it '
+        'refused', () async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client);
+      final outputs = <StreamController<Uint8List>>[];
+      final errors = <String, String>{
+        'push_register': 'push registrations were written by a newer MonkeyMux',
+        'push_unregister':
+            'push registrations were written by a newer MonkeyMux',
+        'push_test': 'unsupported command "push_test"',
+      };
+      // Each command runs in its own one-shot exec.
+      SSHSession answeringControl() {
+        final output = StreamController<Uint8List>();
+        outputs.add(output);
+        final control = _buildSilentControlSession(output);
+        when(() => control.write(any())).thenAnswer((invocation) {
+          final data = invocation.positionalArguments.single as List<int>;
+          final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+          final response = jsonEncode({
+            'id': request['id'],
+            'type': 'error',
+            'status': 'error',
+            'error': errors[request['type']],
+          });
+          scheduleMicrotask(
+            () => output.add(Uint8List.fromList(utf8.encode('$response\n'))),
+          );
+        });
+        return control;
+      }
+
+      when(
+        () => installer.ensureInstalled(
+          session,
+          priority: SshExecPriority.normal,
+        ),
+      ).thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => answeringControl());
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+      );
+      addTearDown(() async {
+        await service.clearCache(session.connectionId);
+        for (final output in outputs) {
+          await output.close();
+        }
+      });
+
+      final register = await service.runPushControl(session, 'work', {
+        'type': 'push_register',
+      });
+      expect((register.ok, register.unsupported), (false, true));
+      // The registration is still in the file, so the unregister stays
+      // pending for an updated session.
+      final unregister = await service.runPushControl(session, 'work', {
+        'type': 'push_unregister',
+      });
+      expect((unregister.ok, unregister.unsupported), (false, false));
+      final test = await service.runPushControl(session, 'work', {
+        'type': 'push_test',
+      });
+      expect((test.ok, test.unsupported), (false, true));
+    });
+  });
+
   group('MonkeyMuxService.detectedVersion', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));
 

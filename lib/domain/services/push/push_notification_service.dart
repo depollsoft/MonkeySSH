@@ -1138,7 +1138,18 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     } on Object {
       configuredSessions = const {};
     }
-    final registrants = pushRegistrantConnections(links, configuredSessions);
+    // A helper too old for push cannot hold the registration, so another
+    // connection of its saved host registers instead.
+    final registrants = pushRegistrantConnections(
+      links.where((link) => !_unsupported.containsKey(_keyOf(link))),
+      configuredSessions,
+    );
+    // A connection that is no longer its saved host's registrant may have
+    // lost the registration to the one that is, so it registers again if it
+    // becomes the registrant later. Send test only picks registrants.
+    _registered.removeWhere(
+      (key, _) => !registrants.contains(key.connectionId),
+    );
     for (final link in links) {
       final secrets = _secrets;
       if (!state.enabled ||

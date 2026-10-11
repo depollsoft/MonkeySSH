@@ -603,6 +603,44 @@ void main() {
     expect(older.types, isNot(contains('push_register')));
   });
 
+  test(
+    'a connection that becomes the registrant again registers again',
+    () async {
+      // The older connection registered first; the newer one then took the
+      // registration to its session. When the newer one closes, the older one
+      // must register again rather than trust what it sent before.
+      final older = _FakeLink(connectionId: 21, hostId: 2, sessionName: 'one');
+      final newer = _FakeLink(connectionId: 22, hostId: 2, sessionName: 'two');
+      h.links.add(older);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      h.links.add(newer);
+      await h.controller.syncNow();
+      expect(newer.types, contains('push_register'));
+      older.commands.clear();
+
+      h.links.remove(newer);
+      await h.controller.syncNow();
+      expect(older.types, contains('push_register'));
+    },
+  );
+
+  test('a connection to a helper too old for push leaves the registration '
+      'to another connection of its saved host', () async {
+    final current = _FakeLink(connectionId: 21, hostId: 2, sessionName: 'one');
+    final outdated = _FakeLink(connectionId: 22, hostId: 2, sessionName: 'two')
+      ..unsupported = true;
+    h.links.addAll([current, outdated]);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    await h.controller.syncNow();
+    expect(outdated.types, contains('push_register'));
+    expect(current.types, contains('push_register'));
+    expect(await h.controller.sendTest(), PushTestOutcome.sent);
+  });
+
   test('a test the machine has no registration for registers again without '
       'renewing the ticket', () async {
     final link = _FakeLink(connectionId: 10, hostId: 1);

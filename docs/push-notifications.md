@@ -331,10 +331,13 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   server's session; `not_registered` means the device has none here (another
   connection of the same saved host may have moved it to its session), so the
   app registers through that connection again and retries once.
-- A helper older than the registration file answers `push_register` with an
-  error that names a newer MonkeyMux (see Storage). The app treats it like a
-  helper without `push-v1`: it skips that connection and Send test reports
-  that the host needs a MonkeyMux update.
+- A helper older than the registration file answers with an error that names
+  a newer MonkeyMux (see Storage). The app treats it like a helper without
+  `push-v1`, which answers `unsupported command`: it skips that connection
+  (another connection of the saved host registers instead, if there is one)
+  and Send test reports that the host needs a MonkeyMux update. An unregister
+  such a helper refuses stays pending, because the registration is still in
+  the file; an updated session removes it on its next attach.
 
 ### Storage
 

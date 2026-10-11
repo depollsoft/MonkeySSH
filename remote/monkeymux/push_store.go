@@ -367,6 +367,20 @@ func readPushStateFile(path string) (pushStateFile, error) {
 	return parsed, nil
 }
 
+// statPushStateFile describes the file refreshLocked compares against, so
+// it is called under the lock, right after reading or writing the file. It
+// stats an open handle because on Windows os.Stat loads the file's identity
+// only when os.SameFile first needs it, by reopening the path: by then that
+// is the file that replaced this one, and the comparison would always match.
+func statPushStateFile(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
 func (st *pushStore) setStateLocked(state pushStateFile) {
 	st.state = state
 	st.hasRecords.Store(len(state.Devices) > 0)
@@ -405,7 +419,7 @@ func (st *pushStore) refreshLocked() {
 	}
 	defer unlock()
 	state, _ := readPushStateFile(path)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := statPushStateFile(path); err == nil {
 		st.modTime = info.ModTime()
 		st.size = info.Size()
 		st.file = info
@@ -501,7 +515,7 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 	if !change(&state, now) {
 		st.loaded = true
 		st.lastCheck = now
-		if info, err := os.Stat(path); err == nil {
+		if info, err := statPushStateFile(path); err == nil {
 			st.modTime = info.ModTime()
 			st.size = info.Size()
 			st.file = info
@@ -516,7 +530,7 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 	if err := writePushStateFile(path, state); err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
+	info, err := statPushStateFile(path)
 	if err != nil {
 		return fmt.Errorf("push registrations written but unreadable: %w", err)
 	}
