@@ -185,7 +185,11 @@ class _FakeLink implements PushHostLink {
   }) async {
     commands.add(command);
     if (unsupported) {
-      return const MonkeyMuxPushControlResult(ok: false, unsupported: true);
+      // As runPushControl: an unregister an older helper refused only fails.
+      return MonkeyMuxPushControlResult(
+        ok: false,
+        unsupported: command['type'] != 'push_unregister',
+      );
     }
     if (command['type'] == 'push_register') {
       await registerGate?.future;
@@ -467,6 +471,34 @@ void main() {
     await h.restart();
     expect(h.state.disabledHostIds, {1});
     expect(h.state.enabled, isTrue);
+  });
+
+  test('an unregister an older helper refused stays pending', () async {
+    // The saved host registered through an updated session; only a session
+    // on an older helper is connected when it is turned off.
+    final updated = _FakeLink(connectionId: 10, hostId: 1, sessionName: 'a');
+    h.links.add(updated);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    h.links.remove(updated);
+    final older = _FakeLink(connectionId: 11, hostId: 1, sessionName: 'b')
+      ..unsupported = true;
+    h.links.add(older);
+
+    await h.controller.setHostEnabled(1, enabled: false);
+    await h.controller.syncNow();
+    expect(
+      older.types.where((type) => type == 'push_unregister'),
+      hasLength(2),
+    );
+
+    // An updated session removes it.
+    older.unsupported = false;
+    await h.controller.syncNow();
+    older.commands.clear();
+    await h.controller.syncNow();
+    expect(older.commands, isEmpty);
   });
 
   test(

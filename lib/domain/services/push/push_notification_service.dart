@@ -817,7 +817,9 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         final result = await link
             .send(_unregisterCommand(entryFor(link)))
             .timeout(const Duration(seconds: 8));
-        if (result.ok || result.unsupported) reached.add(link.hostId);
+        // A helper that refused it may share the machine with a newer one
+        // that holds the registration, so only a removal counts.
+        if (result.ok) reached.add(link.hostId);
       } on Object catch (error) {
         _log.debug(
           _diagnosticsCategory,
@@ -1121,7 +1123,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       for (final entry in pending.toList()) {
         try {
           final result = await link.send(_unregisterCommand(entry));
-          if (result.ok || result.unsupported) {
+          if (result.ok) {
             pending.remove(entry);
             bookkeepingChanged = true;
           }

@@ -1027,14 +1027,15 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       // The helper answered with an error. One too old for push does not
       // know the command; one older than the registration file refuses a
       // file a newer MonkeyMux wrote. Neither can take part until it is
-      // updated. An unregister it refused still fails: the registration is
-      // still in the file, so it stays pending for an updated session.
+      // updated. An unregister either refused still fails: another session
+      // on the machine may run a newer helper that holds the registration,
+      // so it stays pending for an updated session to remove.
       final message = error.message;
       return MonkeyMuxPushControlResult(
         ok: false,
         unsupported:
-            message.startsWith('unsupported command') ||
-            (command['type'] != 'push_unregister' &&
+            command['type'] != 'push_unregister' &&
+            (message.startsWith('unsupported command') ||
                 message.contains('written by a newer MonkeyMux')),
       );
     }

@@ -1868,18 +1868,13 @@ void main() {
   group('MonkeyMux push control', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));
 
-    test('an older helper is unsupported, except for an unregister it '
-        'refused', () async {
+    test('an older helper is unsupported, except for an unregister, which '
+        'stays pending', () async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client);
       final outputs = <StreamController<Uint8List>>[];
-      final errors = <String, String>{
-        'push_register': 'push registrations were written by a newer MonkeyMux',
-        'push_unregister':
-            'push registrations were written by a newer MonkeyMux',
-        'push_test': 'unsupported command "push_test"',
-      };
+      late String Function(Object? type) helperError;
       // Each command runs in its own one-shot exec.
       SSHSession answeringControl() {
         final output = StreamController<Uint8List>();
@@ -1892,7 +1887,7 @@ void main() {
             'id': request['id'],
             'type': 'error',
             'status': 'error',
-            'error': errors[request['type']],
+            'error': helperError(request['type']),
           });
           scheduleMicrotask(
             () => output.add(Uint8List.fromList(utf8.encode('$response\n'))),
@@ -1920,20 +1915,25 @@ void main() {
         }
       });
 
-      final register = await service.runPushControl(session, 'work', {
-        'type': 'push_register',
-      });
-      expect((register.ok, register.unsupported), (false, true));
-      // The registration is still in the file, so the unregister stays
-      // pending for an updated session.
-      final unregister = await service.runPushControl(session, 'work', {
-        'type': 'push_unregister',
-      });
-      expect((unregister.ok, unregister.unsupported), (false, false));
-      final test = await service.runPushControl(session, 'work', {
-        'type': 'push_test',
-      });
-      expect((test.ok, test.unsupported), (false, true));
+      // A helper older than the registration file, then one without push.
+      for (final error in <String Function(Object? type)>[
+        (_) => 'push registrations were written by a newer MonkeyMux',
+        (type) => 'unsupported command "$type"',
+      ]) {
+        helperError = error;
+        for (final type in ['push_register', 'push_test']) {
+          final result = await service.runPushControl(session, 'work', {
+            'type': type,
+          });
+          expect((result.ok, result.unsupported), (false, true));
+        }
+        // Another session may run a newer helper that holds the
+        // registration, so the unregister stays pending.
+        final unregister = await service.runPushControl(session, 'work', {
+          'type': 'push_unregister',
+        });
+        expect((unregister.ok, unregister.unsupported), (false, false));
+      }
     });
   });
 
