@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -180,5 +182,55 @@ func TestPushSessionKeyIsStableAndOpaque(t *testing.T) {
 	}
 	if len(work) != 32 || strings.Contains(work, "work") {
 		t.Fatalf("session key = %q", work)
+	}
+}
+
+func TestPushVersion1FileIsReplacedAndOlderHelpersAreLockedOut(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	path, err := pushStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), pushStateDirMode); err != nil {
+		t.Fatal(err)
+	}
+	// A 0.1.228 helper wrote a host-wide registration.
+	legacy := fmt.Sprintf(`{"version":1,"salt":"","devices":[{"deviceId":%q,"ticket":%q,"publicKey":%q,"hostRef":%q,"registeredAt":%d,"updatedAt":%d}]}`,
+		device.id, device.record.Ticket, device.record.PublicKey, device.record.HostRef,
+		h.clock.Now().Unix(), h.clock.Now().Unix())
+	if err := os.WriteFile(path, []byte(legacy), pushStateFileMode); err != nil {
+		t.Fatal(err)
+	}
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "" {
+		t.Fatalf("a version 1 registration received %q", got)
+	}
+
+	h.register(t, device)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Version int `json:"version"`
+		Devices []struct {
+			SessionKey string `json:"sessionKey"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != pushStateSchemaVersion || len(state.Devices) != 1 || state.Devices[0].SessionKey == "" {
+		t.Fatalf("after attaching, file = %s", data)
+	}
+	// A version 1 helper reads this file as from a newer MonkeyMux: it neither
+	// delivers from it nor rewrites it (and so cannot drop the session keys).
+	if pushStateSchemaVersion < 2 {
+		t.Fatal("session-scoped registrations must use a schema older helpers refuse")
+	}
+	h.raise("@3", pushKindAlert)
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("after attaching, pushes = %q, want alert", got)
 	}
 }

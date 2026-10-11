@@ -348,9 +348,13 @@ two servers could both read, change and rename, and one change would be lost.
   machine user and session (LAN and Tailscale, say) register separately and
   can be turned off separately; an event still goes to each device once,
   through its most recently updated registration for that session.
-- A record without a `sessionKey`, written by a helper before 0.1.229, receives
-  nothing. The next `push_register` from that device and saved host replaces
-  it.
+- The file is schema version 2 since 0.1.229, which added `sessionKey`. A
+  helper that only knows version 1 treats a version 2 file as written by a
+  newer MonkeyMux: it neither sends from it nor writes it, so a session still
+  running an older helper cannot strip the session keys (it sends nothing
+  until the app updates it on the next attach). A version 1 file reads as
+  empty: its records named no session and are replaced by the next
+  `push_register`.
 - Caps: 8 devices and 16 saved hosts per device; the least recently updated is
   evicted.
 - A registration the app has not refreshed for 30 days expires. The app

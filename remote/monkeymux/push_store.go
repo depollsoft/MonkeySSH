@@ -18,7 +18,12 @@ import (
 )
 
 const (
-	pushStateSchemaVersion = 1
+	// Version 2 (0.1.229) scopes registrations to a session. Helpers that
+	// only know version 1 would drop sessionKey when they rewrite the shared
+	// file, unscoping every registration, so they must not touch it: they
+	// treat a newer file as unreadable and never write it. A version 1 file
+	// reads as empty here; its records named no session and received nothing.
+	pushStateSchemaVersion = 2
 	pushStateFileMode      = 0o600
 	pushStateDirMode       = 0o700
 	pushMaxDevices         = 8
