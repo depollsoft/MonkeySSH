@@ -95,6 +95,16 @@ func encryptPushPayloadWith(
 	return base64.RawURLEncoding.EncodeToString(out), nil
 }
 
+// pushSessionKey names a MonkeyMux session in the registration file without
+// writing its name: the first 32 hex characters of
+// HMAC-SHA256(hostSalt, "session\n" + name).
+func pushSessionKey(salt []byte, session string) string {
+	mac := hmac.New(sha256.New, salt)
+	mac.Write([]byte("session\n"))
+	mac.Write([]byte(session))
+	return hex.EncodeToString(mac.Sum(nil))[:32]
+}
+
 // pushCollapseKey derives the opaque per-device, per-window collapse key.
 func pushCollapseKey(salt []byte, deviceID string, session string, windowID string) string {
 	mac := hmac.New(sha256.New, salt)

@@ -77,7 +77,7 @@ func TestPushStoreLocksTheFileAcrossServers(t *testing.T) {
 	<-paused
 	secondDone := make(chan error, 1)
 	go func() {
-		_, err := other.register(second.record)
+		_, err := other.register(second.record, "work")
 		secondDone <- err
 	}()
 	select {
@@ -319,7 +319,7 @@ func TestPushNeverOverwritesANewerStateFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	newer := []byte(`{"version":2,"devices":[{"future":true}]}`)
+	newer := []byte(fmt.Sprintf(`{"version":%d,"devices":[{"future":true}]}`, pushStateSchemaVersion+1))
 	if err := os.WriteFile(path, newer, 0o600); err != nil {
 		t.Fatal(err)
 	}

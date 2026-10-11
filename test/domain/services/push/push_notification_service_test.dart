@@ -169,6 +169,9 @@ class _FakeLink implements PushHostLink {
   final commands = <Map<String, Object?>>[];
   bool unsupported = false;
   String testResult = 'sent';
+
+  /// Answers to the next push_test commands, before [testResult].
+  final testResults = <String>[];
   String? registerResult;
   Completer<void>? registerGate;
 
@@ -182,7 +185,11 @@ class _FakeLink implements PushHostLink {
   }) async {
     commands.add(command);
     if (unsupported) {
-      return const MonkeyMuxPushControlResult(ok: false, unsupported: true);
+      // As runPushControl: an unregister an older helper refused only fails.
+      return MonkeyMuxPushControlResult(
+        ok: false,
+        unsupported: command['type'] != 'push_unregister',
+      );
     }
     if (command['type'] == 'push_register') {
       await registerGate?.future;
@@ -194,7 +201,9 @@ class _FakeLink implements PushHostLink {
     }
     return MonkeyMuxPushControlResult(
       ok: true,
-      result: command['type'] == 'push_test' ? testResult : null,
+      result: command['type'] == 'push_test'
+          ? (testResults.isEmpty ? testResult : testResults.removeAt(0))
+          : null,
     );
   }
 }
@@ -213,6 +222,9 @@ class _Harness {
   final links = <_FakeLink>[];
   DateTime now = DateTime.utc(2026, 10, 9, 12);
   List<int> Function() hostIds = () => [1, 2, 3];
+
+  /// Configured MonkeyMux session per saved host; absent means none.
+  final hostSessions = <int, String?>{};
   bool localPresenceSupported = true;
   final alertListeners = <int>{};
   final bridgesByHost = <int, List<String>>{};
@@ -229,6 +241,9 @@ class _Harness {
       diagnosticsLoggerProvider.overrideWithValue(logger),
       pushHostLinksProvider.overrideWithValue(() => List.of(links)),
       pushHostIdsProvider.overrideWithValue(() async => hostIds()),
+      pushHostSessionNamesProvider.overrideWithValue(
+        () async => Map.of(hostSessions),
+      ),
       pushNotificationChannelInstallerProvider.overrideWithValue(() async {}),
       pushClockProvider.overrideWithValue(() => now),
       pushLocalPresenceSupportedProvider.overrideWithValue(
@@ -458,6 +473,34 @@ void main() {
     expect(h.state.enabled, isTrue);
   });
 
+  test('an unregister an older helper refused stays pending', () async {
+    // The saved host registered through an updated session; only a session
+    // on an older helper is connected when it is turned off.
+    final updated = _FakeLink(connectionId: 10, hostId: 1, sessionName: 'a');
+    h.links.add(updated);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    h.links.remove(updated);
+    final older = _FakeLink(connectionId: 11, hostId: 1, sessionName: 'b')
+      ..unsupported = true;
+    h.links.add(older);
+
+    await h.controller.setHostEnabled(1, enabled: false);
+    await h.controller.syncNow();
+    expect(
+      older.types.where((type) => type == 'push_unregister'),
+      hasLength(2),
+    );
+
+    // An updated session removes it.
+    older.unsupported = false;
+    await h.controller.syncNow();
+    older.commands.clear();
+    await h.controller.syncNow();
+    expect(older.commands, isEmpty);
+  });
+
   test(
     'a refreshed FCM token is registered again and resent to hosts',
     () async {
@@ -549,6 +592,104 @@ void main() {
     expect(await h.controller.sendTest(), PushTestOutcome.rateLimited);
     link.testResult = 'unregistered';
     expect(await h.controller.sendTest(), PushTestOutcome.registrationRejected);
+  });
+
+  test(
+    'one connection per saved host registers: its configured session',
+    () async {
+      // Saved host 1 is configured for "alpha"; a notification tap opened a
+      // second connection to "beta". The machine keeps one registration per
+      // saved host, so only the configured session's connection registers and
+      // the two never take the registration from each other.
+      h.hostSessions[1] = 'alpha';
+      final beta = _FakeLink(connectionId: 12, hostId: 1, sessionName: 'beta');
+      final alpha = _FakeLink(
+        connectionId: 11,
+        hostId: 1,
+        sessionName: 'alpha',
+      );
+      h.links.addAll([beta, alpha]);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(alpha.types, contains('push_register'));
+      expect(beta.types, isNot(contains('push_register')));
+      expect(beta.types, contains('push_presence'));
+
+      // Without a connection on the configured session, the newest registers.
+      h.links.remove(alpha);
+      await h.controller.syncNow();
+      expect(beta.types, contains('push_register'));
+    },
+  );
+
+  test('a saved host without a configured session registers its newest '
+      'connection only', () async {
+    final older = _FakeLink(connectionId: 21, hostId: 2, sessionName: 'one');
+    final newer = _FakeLink(connectionId: 22, hostId: 2, sessionName: 'two');
+    h.links.addAll([older, newer]);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    expect(newer.types, contains('push_register'));
+    expect(older.types, isNot(contains('push_register')));
+  });
+
+  test(
+    'a connection that becomes the registrant again registers again',
+    () async {
+      // The older connection registered first; the newer one then took the
+      // registration to its session. When the newer one closes, the older one
+      // must register again rather than trust what it sent before.
+      final older = _FakeLink(connectionId: 21, hostId: 2, sessionName: 'one');
+      final newer = _FakeLink(connectionId: 22, hostId: 2, sessionName: 'two');
+      h.links.add(older);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      h.links.add(newer);
+      await h.controller.syncNow();
+      expect(newer.types, contains('push_register'));
+      older.commands.clear();
+
+      h.links.remove(newer);
+      await h.controller.syncNow();
+      expect(older.types, contains('push_register'));
+    },
+  );
+
+  test('a connection to a helper too old for push leaves the registration '
+      'to another connection of its saved host', () async {
+    final current = _FakeLink(connectionId: 21, hostId: 2, sessionName: 'one');
+    final outdated = _FakeLink(connectionId: 22, hostId: 2, sessionName: 'two')
+      ..unsupported = true;
+    h.links.addAll([current, outdated]);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    await h.controller.syncNow();
+    expect(outdated.types, contains('push_register'));
+    expect(current.types, contains('push_register'));
+    expect(await h.controller.sendTest(), PushTestOutcome.sent);
+  });
+
+  test('a test the machine has no registration for registers again without '
+      'renewing the ticket', () async {
+    final link = _FakeLink(connectionId: 10, hostId: 1);
+    h.links.add(link);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    final renewals = h.gateway.registrations.length;
+    link.commands.clear();
+    link.testResults.add('not_registered');
+
+    expect(await h.controller.sendTest(), PushTestOutcome.sent);
+    expect(
+      link.types,
+      containsAllInOrder(['push_test', 'push_register', 'push_test']),
+    );
+    expect(h.gateway.registrations, hasLength(renewals));
   });
 
   group('review round 1', () {
@@ -845,6 +986,7 @@ void main() {
           diagnosticsLoggerProvider.overrideWithValue(harness.logger),
           pushHostLinksProvider.overrideWithValue(() => const []),
           pushHostIdsProvider.overrideWithValue(() async => [1]),
+          pushHostSessionNamesProvider.overrideWithValue(() async => {}),
           pushLocalBridgesProvider.overrideWithValue((_) => const []),
           pushNotificationChannelInstallerProvider.overrideWithValue(
             () async {},

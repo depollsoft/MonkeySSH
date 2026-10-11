@@ -4459,7 +4459,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       if (!mounted) return;
     }
-    await _connect(preferredConnectionId: connectionId);
+    var forceNew = false;
+    if (connectionId == null && nativeTarget == null) {
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final choice = resolveMuxSessionConnection(
+        hostId: widget.hostId,
+        sessionName: _initialTmuxSessionName,
+        connections: [
+          for (final id in ref.read(activeSessionsProvider).keys)
+            if (sessions.getSession(id) case final session?)
+              (
+                connectionId: session.connectionId,
+                hostId: session.hostId,
+                muxBackend: session.remoteMuxBackend,
+                muxSessionName: session.remoteMuxSessionName,
+                hasTerminal: session.terminal != null,
+              ),
+        ],
+      );
+      connectionId = choice.connectionId;
+      forceNew = choice.forceNew;
+    }
+    await _connect(preferredConnectionId: connectionId, forceNew: forceNew);
   }
 
   Future<void> _loadTheme({

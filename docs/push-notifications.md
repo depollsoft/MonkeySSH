@@ -55,6 +55,11 @@ vectors include a non-canonical ticket that every implementation must refuse.
   `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window)`, where
   `hostSalt` is 32 random bytes kept in the host's registration file. Accepted
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
+- **Session key.** Names a MonkeyMux session in the host's registration file
+  without writing the name there: the first 32 hex characters of
+  `HMAC-SHA256(hostSalt, "session\n" + session)`. The server that receives
+  `push_register` computes it from its own session name; the app never sends
+  one.
 
 ## Ticket
 
@@ -322,7 +327,18 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
 - `push_test` answers `push_test_result` with `{"push": {"result":
   "<result>"}}`: `sent`, `not_registered`, `bad_ticket`, `unregistered`,
   `rate_limited`, `capped` or `failed`. A test is sent once, without retries,
-  because the app waits for the answer.
+  because the app waits for the answer. It only finds a registration for this
+  server's session; `not_registered` means the device has none here (another
+  connection of the same saved host may have moved it to its session), so the
+  app registers through that connection again and retries once.
+- A helper older than the registration file answers with an error that names
+  a newer MonkeyMux (see Storage). The app treats it like a helper without
+  `push-v1`, which answers `unsupported command`: it skips that connection
+  (another connection of the saved host registers instead, if there is one)
+  and Send test reports that the host needs a MonkeyMux update. An unregister
+  that either kind of helper refuses stays pending, because another session on
+  the machine may run a newer helper that holds the registration; an updated
+  session removes it on its next attach.
 
 ### Storage
 
@@ -332,12 +348,33 @@ shares it, so each read and each read-modify-write holds an exclusive lock on
 `push-devices.json.lock` (`flock` on POSIX, `LockFileEx` on Windows); without it
 two servers could both read, change and rename, and one change would be lost.
 
-- A registration is a device as reached through one saved host:
-  `(deviceId, hostRef)`. Two saved hosts that reach the same machine user (LAN
-  and Tailscale, say) register separately and can be turned off separately; an
-  event still goes to each device once, through its most recently updated
-  registration.
-- Caps: 8 devices and 4 saved hosts per device; the least recently updated is
+- A registration is a device as reached through one saved host, for the one
+  MonkeyMux session that saved host attaches to: `(deviceId, hostRef,
+  sessionKey)`. Only that session's server sends to it. Saved hosts that reach
+  the same machine with different session names (one per project, say) are
+  therefore separate: none receives another's events, and every notification
+  names the saved host and session the app opens on a tap. Attaching a saved
+  host through another session (its session setting changed) moves its
+  registration rather than adding one. A saved host attached to two sessions
+  at once (by hand, or by a tap on a notification from its old session) would
+  move it back and forth, so the app registers one connection per saved host:
+  the one on the saved host's configured session, or else the newest. Two saved hosts that reach the same
+  machine user and session (LAN and Tailscale, say) register separately and
+  can be turned off separately; an event still goes to each device once,
+  through its most recently updated registration for that session.
+- The file is schema version 2 since 0.1.230, which added `sessionKey`. A
+  helper that only knows version 1 treats a version 2 file as written by a
+  newer MonkeyMux: it neither sends from it nor writes it, and its
+  `push_register` fails, so a session still running an older helper cannot
+  strip the session keys. It sends nothing until the app updates it on the
+  next attach. A version 1 file reads as having no registrations: its records
+  named no session and are replaced by the next `push_register`. Its salt and
+  refused tickets are kept.
+- Each server rereads the file when its size, modification time or identity
+  changed, at most once a second. Every write renames a new file into place,
+  so the identity check catches a rewrite of the same size within the
+  filesystem's timestamp granularity.
+- Caps: 8 devices and 16 saved hosts per device; the least recently updated is
   evicted.
 - A registration the app has not refreshed for 30 days expires. The app
   re-registers on every attach, so this only drops hosts the user deleted or
@@ -403,8 +440,9 @@ is kept for 2 minutes and sent if the coverage lapses first.
 
 The ACP bridge reports monotonic counters of permission requests, input
 requests and completed prompt turns, plus how many permission and input
-requests are pending right now. While at least one device is registered, each
-server polls the bridges behind its native agent windows every 2 seconds.
+requests are pending right now. While at least one device is registered for
+its session, each server polls the bridges behind its native agent windows
+every 2 seconds.
 
 - `finished` is raised when the completed-turn counter grows.
 - `permission` and `input` are raised while a request of that kind is pending,
@@ -447,8 +485,11 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   token, create the X25519 key pair and the host reference key in secure
   storage, call `registerPushDevice` with a limited-use App Check token, and
   store the device id, the ticket and when it was issued.
-- **Attach:** for each live MonkeyMux connection whose host has push enabled,
-  send `push_register` once per connection, then presence (see Attendance).
+- **Attach:** for each saved host with push enabled, send `push_register`
+  through one of its live MonkeyMux connections (see Storage for which), once
+  per connection, then presence for every connection (see Attendance). The
+  registration is for that connection's MonkeyMux session: each saved host
+  receives only the events of the session it attaches to.
   The viewed connection comes from the route's `connectionId`. When that id
   matches no live connection (the terminal reconnected) or is absent, a host
   with a single MonkeyMux connection is unambiguous and two are treated as not
@@ -481,8 +522,13 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   a refresh).
 - **Tap:** decrypt `p`, map `hostRef` back to a host by recomputing the HMAC for
   each saved host, and open `/terminal/<hostId>` at that MonkeyMux session and
-  window, reconnecting if needed. A native agent window opens its chat. A
-  payload that does not decrypt opens the app on Connections.
+  window. A live connection is reused only when it is attached to that
+  MonkeyMux session, or when it has no terminal yet (an earlier tap replaced
+  the terminal that was opening it), see `resolveMuxSessionConnection`.
+  Otherwise the terminal opens a new connection that attaches to the session,
+  rather than showing another session's terminal on a connection to the same
+  host. A native agent window opens its chat. A payload
+  that does not decrypt opens the app on Connections.
 - **Foreground:** iOS presents nothing while the app is open (the AppDelegate
   answers `willPresent` with no options, as before the app had a notification
   delegate, and runs each completion handler once). `onMessage` drops the push

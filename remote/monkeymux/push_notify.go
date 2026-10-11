@@ -276,7 +276,9 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 			PublicKey: strings.TrimSpace(push.PublicKey),
 			HostRef:   strings.TrimSpace(push.HostRef),
 		}
-		result, err := notifier.register(record)
+		// The session is this server's, never the app's claim: the
+		// registration only receives this session's events.
+		result, err := notifier.register(record, s.session)
 		if err != nil {
 			return fail(err)
 		}
@@ -332,11 +334,12 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 
 // register stores a registration, or reports that the offered ticket was
 // already refused by the function.
-func (n *pushNotifier) register(record pushDeviceRecord) (string, error) {
+func (n *pushNotifier) register(record pushDeviceRecord, session string) (string, error) {
 	if err := validatePushRecord(record); err != nil {
 		return "", err
 	}
 	result := pushResultRegistered
+	var saltErr error
 	err := n.store.mutate(func(state *pushStateFile, now time.Time) bool {
 		switch pushRejectionFor(*state, record.DeviceID, record.Ticket) {
 		case pushRejectedBadTicket:
@@ -346,9 +349,18 @@ func (n *pushNotifier) register(record pushDeviceRecord) (string, error) {
 			result = pushResultTokenUnregistered
 			return false
 		}
+		salt, err := ensurePushSalt(state)
+		if err != nil {
+			saltErr = err
+			return false
+		}
+		record.SessionKey = pushSessionKey(salt, session)
 		upsertPushRecord(state, record, now)
 		return true
 	})
+	if err == nil {
+		err = saltErr
+	}
 	return result, err
 }
 
@@ -607,7 +619,7 @@ func (s *muxServer) notePushAlert(windowID string) {
 // the native agent bridge behind a finished turn.
 func (s *muxServer) raisePushEvent(windowID string, kind string, bridgeID string) {
 	notifier := s.pushNotifier()
-	devices, salt := notifier.store.snapshot()
+	devices, salt := notifier.store.snapshotFor(s.session)
 	if len(devices) == 0 || windowID == "" {
 		return
 	}
@@ -669,7 +681,7 @@ func (s *muxServer) raisePushAttention(
 	bridgeDelivered map[string]uint64,
 ) {
 	notifier := s.pushNotifier()
-	devices, salt := notifier.store.snapshot()
+	devices, salt := notifier.store.snapshotFor(s.session)
 	if len(devices) == 0 || windowID == "" || generation == 0 {
 		return
 	}
@@ -764,7 +776,7 @@ func (n *pushNotifier) post(job pushJob, done func(string)) {
 
 // sendTest posts a test event to one device and waits for the outcome.
 func (n *pushNotifier) sendTest(deviceID string, session string) string {
-	devices, salt := n.store.snapshot()
+	devices, salt := n.store.snapshotFor(session)
 	var device *pushDeviceRecord
 	for _, candidate := range pushDevicesByID(devices) {
 		if candidate.DeviceID == deviceID {
@@ -955,7 +967,7 @@ func (s *muxServer) startPushLoop() {
 
 func (s *muxServer) pollPushBridges() {
 	notifier := s.pushNotifier()
-	if !notifier.store.hasDevices() {
+	if devices, _ := notifier.store.snapshotFor(s.session); len(devices) == 0 {
 		notifier.mu.Lock()
 		clear(notifier.bridges)
 		clear(notifier.delivered)
@@ -1061,7 +1073,7 @@ func (s *muxServer) flushPushDeferred() {
 		return
 	}
 	notifier.mu.Unlock()
-	devices, salt := notifier.store.snapshot()
+	devices, salt := notifier.store.snapshotFor(s.session)
 	view := s.pushView(notifier.presenceClientIDs())
 	now := notifier.now()
 	byID := map[string]pushDeviceRecord{}

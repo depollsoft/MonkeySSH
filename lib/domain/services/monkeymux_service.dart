@@ -1015,16 +1015,28 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     if (isAppReviewDemoSession(session)) {
       return const MonkeyMuxPushControlResult(ok: false, unsupported: true);
     }
-    final response = await _runControlCommand(
-      session,
-      sessionName,
-      command,
-      priority: priority,
-    );
-    if (response.isError) {
+    final _MonkeyMuxControlResponse response;
+    try {
+      response = await _runControlCommand(
+        session,
+        sessionName,
+        command,
+        priority: priority,
+      );
+    } on _MonkeyMuxControlCommandException catch (error) {
+      // The helper answered with an error. One too old for push does not
+      // know the command; one older than the registration file refuses a
+      // file a newer MonkeyMux wrote. Neither can take part until it is
+      // updated. An unregister either refused still fails: another session
+      // on the machine may run a newer helper that holds the registration,
+      // so it stays pending for an updated session to remove.
+      final message = error.message;
       return MonkeyMuxPushControlResult(
         ok: false,
-        unsupported: response.error?.startsWith('unsupported command') ?? false,
+        unsupported:
+            command['type'] != 'push_unregister' &&
+            (message.startsWith('unsupported command') ||
+                message.contains('written by a newer MonkeyMux')),
       );
     }
     return MonkeyMuxPushControlResult(ok: true, result: response.pushResult);

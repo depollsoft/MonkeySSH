@@ -18,11 +18,18 @@ import (
 )
 
 const (
-	pushStateSchemaVersion   = 1
-	pushStateFileMode        = 0o600
-	pushStateDirMode         = 0o700
-	pushMaxDevices           = 8
-	pushMaxRecordsPerDevice  = 4
+	// Version 2 (0.1.229) scopes registrations to a session. Helpers that
+	// only know version 1 would drop sessionKey when they rewrite the shared
+	// file, unscoping every registration, so they must not touch it: they
+	// treat a newer file as unreadable and never write it. A version 1 file
+	// reads as empty here; its records named no session and received nothing.
+	pushStateSchemaVersion = 2
+	pushStateFileMode      = 0o600
+	pushStateDirMode       = 0o700
+	pushMaxDevices         = 8
+	// Registrations per device: one per saved host (each attaches to one
+	// MonkeyMux session); the least recently refreshed are dropped first.
+	pushMaxRecordsPerDevice  = 16
 	pushMaxTicketLength      = 2048
 	pushStoreRecheckInterval = time.Second
 	// A registration the app has not refreshed in this long belongs to a
@@ -55,13 +62,20 @@ var (
 )
 
 // pushDeviceRecord is one registration: a device, as reached through one of
-// the app's saved hosts. Two saved hosts that reach the same machine user
-// register separately and can be turned off separately.
+// the app's saved hosts, for one MonkeyMux session it attached to. Two saved
+// hosts that reach the same machine user register separately and can be
+// turned off separately, and only the session a record names sends to it, so
+// a notification always names a session the app opened and can reopen.
 type pushDeviceRecord struct {
-	DeviceID     string `json:"deviceId"`
-	Ticket       string `json:"ticket"`
-	PublicKey    string `json:"publicKey"`
-	HostRef      string `json:"hostRef"`
+	DeviceID  string `json:"deviceId"`
+	Ticket    string `json:"ticket"`
+	PublicKey string `json:"publicKey"`
+	HostRef   string `json:"hostRef"`
+	// SessionKey names the MonkeyMux session without writing its name here:
+	// pushSessionKey of the session whose server received push_register
+	// (never the app's claim). Records written before sessions were recorded
+	// have none and receive nothing; the next attach replaces them.
+	SessionKey   string `json:"sessionKey,omitempty"`
 	RegisteredAt int64  `json:"registeredAt"`
 	UpdatedAt    int64  `json:"updatedAt"`
 }
@@ -136,13 +150,27 @@ func prunePushState(state *pushStateFile, now time.Time) {
 func upsertPushRecord(state *pushStateFile, record pushDeviceRecord, now time.Time) {
 	record.UpdatedAt = now.Unix()
 	record.RegisteredAt = record.UpdatedAt
+	// A saved host attaches to one MonkeyMux session (its configured one), so
+	// it keeps one registration: attaching through another session moves it.
+	// Saved hosts that reach the same machine on different sessions stay
+	// apart, and none receives another's events. This also replaces a record
+	// from before sessions were recorded, which covered every session.
+	others := state.Devices[:0]
+	for _, existing := range state.Devices {
+		if existing.DeviceID == record.DeviceID && existing.HostRef == record.HostRef &&
+			existing.SessionKey != record.SessionKey {
+			continue
+		}
+		others = append(others, existing)
+	}
+	state.Devices = others
 	replaced := false
 	for index := range state.Devices {
 		existing := state.Devices[index]
 		if existing.DeviceID != record.DeviceID {
 			continue
 		}
-		if existing.HostRef == record.HostRef {
+		if existing.HostRef == record.HostRef && existing.SessionKey == record.SessionKey {
 			record.RegisteredAt = existing.RegisteredAt
 			state.Devices[index] = record
 			replaced = true
@@ -262,11 +290,16 @@ func pushRejectionFor(state pushStateFile, deviceID string, ticket string) strin
 // on a sidecar file. Readers reload when the file changed, checking at most
 // once per pushStoreRecheckInterval.
 type pushStore struct {
-	mu         sync.Mutex
-	now        func() time.Time
-	loaded     bool
-	modTime    time.Time
-	size       int64
+	mu      sync.Mutex
+	now     func() time.Time
+	loaded  bool
+	modTime time.Time
+	size    int64
+	// file identifies the loaded file. Every write renames a fresh temp file
+	// into place, so a changed identity means a new version even when the
+	// size and modification time match: moving a registration to another
+	// session keeps the size, and coarse timestamps can repeat.
+	file       os.FileInfo
 	lastCheck  time.Time
 	state      pushStateFile
 	hasRecords atomic.Bool
@@ -321,10 +354,31 @@ func readPushStateFile(path string) (pushStateFile, error) {
 	if parsed.Version > pushStateSchemaVersion {
 		return empty, errPushStateVersion
 	}
+	if parsed.Version == 1 {
+		// Version 1 registrations named no session and are dropped, but the
+		// tickets the function refused stay refused.
+		empty.Salt = parsed.Salt
+		empty.Rejected = parsed.Rejected
+		return empty, nil
+	}
 	if parsed.Version != pushStateSchemaVersion {
 		return empty, nil
 	}
 	return parsed, nil
+}
+
+// statPushStateFile describes the file refreshLocked compares against, so
+// it is called under the lock, right after reading or writing the file. It
+// stats an open handle because on Windows os.Stat loads the file's identity
+// only when os.SameFile first needs it, by reopening the path: by then that
+// is the file that replaced this one, and the comparison would always match.
+func statPushStateFile(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
 }
 
 func (st *pushStore) setStateLocked(state pushStateFile) {
@@ -347,10 +401,12 @@ func (st *pushStore) refreshLocked() {
 		st.loaded = true
 		st.modTime = time.Time{}
 		st.size = 0
+		st.file = nil
 		st.setStateLocked(pushStateFile{Version: pushStateSchemaVersion})
 		return
 	}
-	if st.loaded && info.ModTime().Equal(st.modTime) && info.Size() == st.size {
+	if st.loaded && info.ModTime().Equal(st.modTime) && info.Size() == st.size &&
+		st.file != nil && os.SameFile(st.file, info) {
 		// Expiry still applies to an unchanged file.
 		state := st.state
 		prunePushState(&state, now)
@@ -363,9 +419,10 @@ func (st *pushStore) refreshLocked() {
 	}
 	defer unlock()
 	state, _ := readPushStateFile(path)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := statPushStateFile(path); err == nil {
 		st.modTime = info.ModTime()
 		st.size = info.Size()
+		st.file = info
 	}
 	st.loaded = true
 	prunePushState(&state, now)
@@ -380,6 +437,37 @@ func (st *pushStore) snapshot() ([]pushDeviceRecord, []byte) {
 	devices := append([]pushDeviceRecord(nil), st.state.Devices...)
 	salt, _ := decodePushBase64(st.state.Salt)
 	return devices, salt
+}
+
+// snapshotFor returns the registrations made through session, the only ones
+// that session's server sends to, and the collapse-key salt.
+func (st *pushStore) snapshotFor(session string) ([]pushDeviceRecord, []byte) {
+	devices, salt := st.snapshot()
+	if len(salt) == 0 {
+		return nil, salt
+	}
+	key := pushSessionKey(salt, session)
+	kept := devices[:0]
+	for _, record := range devices {
+		if record.SessionKey == key {
+			kept = append(kept, record)
+		}
+	}
+	return kept, salt
+}
+
+// ensurePushSalt returns the file's collapse and session key salt, creating
+// it on the first registration.
+func ensurePushSalt(state *pushStateFile) ([]byte, error) {
+	if salt, err := decodePushBase64(state.Salt); err == nil && len(salt) == 32 {
+		return salt, nil
+	}
+	fresh := make([]byte, 32)
+	if _, err := rand.Read(fresh); err != nil {
+		return nil, err
+	}
+	state.Salt = base64.RawURLEncoding.EncodeToString(fresh)
+	return fresh, nil
 }
 
 // rejection reports whether ticket was rejected for deviceID.
@@ -427,25 +515,22 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 	if !change(&state, now) {
 		st.loaded = true
 		st.lastCheck = now
-		if info, err := os.Stat(path); err == nil {
+		if info, err := statPushStateFile(path); err == nil {
 			st.modTime = info.ModTime()
 			st.size = info.Size()
+			st.file = info
 		}
 		st.setStateLocked(state)
 		return nil
 	}
 	state.Version = pushStateSchemaVersion
-	if salt, err := decodePushBase64(state.Salt); err != nil || len(salt) != 32 {
-		fresh := make([]byte, 32)
-		if _, err := rand.Read(fresh); err != nil {
-			return err
-		}
-		state.Salt = base64.RawURLEncoding.EncodeToString(fresh)
+	if _, err := ensurePushSalt(&state); err != nil {
+		return err
 	}
 	if err := writePushStateFile(path, state); err != nil {
 		return err
 	}
-	info, err := os.Stat(path)
+	info, err := statPushStateFile(path)
 	if err != nil {
 		return fmt.Errorf("push registrations written but unreadable: %w", err)
 	}
@@ -453,6 +538,7 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 	st.lastCheck = now
 	st.modTime = info.ModTime()
 	st.size = info.Size()
+	st.file = info
 	st.setStateLocked(state)
 	return nil
 }

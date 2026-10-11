@@ -159,11 +159,14 @@ class _SendTestTileState extends State<_SendTestTile> {
   );
 }
 
-/// Status line for one host: whether it will alert this device yet.
+/// Status line for one host: whether it will alert this device yet. A host
+/// alerts only from the MonkeyMux sessions this device opened on it.
 String pushHostStatus(PushNotificationState state, int hostId) {
   if (state.disabledHostIds.contains(hostId)) return 'Off';
-  if (state.registeredHostIds.contains(hostId)) return 'On';
-  return 'On once you connect to it with MonkeyMux';
+  if (state.registeredHostIds.contains(hostId)) {
+    return 'On for the MonkeyMux session this host opens';
+  }
+  return 'On once this host opens a MonkeyMux session';
 }
 
 /// User-facing text for a test notification outcome.
