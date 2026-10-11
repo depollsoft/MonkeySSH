@@ -110,6 +110,19 @@ GoRouter _router() => GoRouter(
   ],
 );
 
+/// Stands in for the app's router provider, which builds a new router on
+/// auth transitions.
+class _RouterHolder extends Notifier<GoRouter> {
+  @override
+  GoRouter build() => _router();
+
+  void rebuild() => state = _router();
+}
+
+final _routerHolder = NotifierProvider<_RouterHolder, GoRouter>(
+  _RouterHolder.new,
+);
+
 Future<(_Gateway, _Controller, GoRouter)> _pump(
   WidgetTester tester, {
   bool available = true,
@@ -222,6 +235,46 @@ void main() {
     await tester.pumpAndSettle();
     expect(_terminalTaps, hasLength(2));
     expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
+  });
+
+  testWidgets('watching follows the router the app rebuilds', (tester) async {
+    final gateway = _Gateway();
+    addTearDown(gateway.close);
+    final controller = _Controller();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pushNotificationsAvailableProvider.overrideWithValue(true),
+          pushMessagingGatewayProvider.overrideWithValue(gateway),
+          pushNotificationControllerProvider.overrideWith(() => controller),
+          routerProvider.overrideWith((ref) => ref.watch(_routerHolder)),
+          authStateProvider.overrideWith(_UnlockedAuth.new),
+        ],
+        child: PushNotificationBridge(
+          child: Consumer(
+            builder: (context, ref, _) =>
+                MaterialApp.router(routerConfig: ref.watch(routerProvider)),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Auth transitions while the app starts replace the router. A bridge
+    // still listening to the first one never saw a terminal, so every host
+    // was told no one was watching.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(PushNotificationBridge)),
+    );
+    container.read(_routerHolder.notifier).rebuild();
+    await tester.pumpAndSettle();
+    unawaited(
+      container.read(routerProvider).push('/terminal/4?connectionId=21'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.visibility.last, (true, 4));
+    expect(controller.connections.last, 21);
   });
 
   testWidgets('an unreadable tap opens Connections', (tester) async {
