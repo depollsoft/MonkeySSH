@@ -18,11 +18,13 @@ import (
 )
 
 const (
-	pushStateSchemaVersion   = 1
-	pushStateFileMode        = 0o600
-	pushStateDirMode         = 0o700
-	pushMaxDevices           = 8
-	pushMaxRecordsPerDevice  = 4
+	pushStateSchemaVersion = 1
+	pushStateFileMode      = 0o600
+	pushStateDirMode       = 0o700
+	pushMaxDevices         = 8
+	// Registrations per device: one per saved host and MonkeyMux session it
+	// attached to; the least recently refreshed are dropped first.
+	pushMaxRecordsPerDevice  = 16
 	pushMaxTicketLength      = 2048
 	pushStoreRecheckInterval = time.Second
 	// A registration the app has not refreshed in this long belongs to a
@@ -55,13 +57,20 @@ var (
 )
 
 // pushDeviceRecord is one registration: a device, as reached through one of
-// the app's saved hosts. Two saved hosts that reach the same machine user
-// register separately and can be turned off separately.
+// the app's saved hosts, for one MonkeyMux session it attached to. Two saved
+// hosts that reach the same machine user register separately and can be
+// turned off separately, and only the session a record names sends to it, so
+// a notification always names a session the app opened and can reopen.
 type pushDeviceRecord struct {
-	DeviceID     string `json:"deviceId"`
-	Ticket       string `json:"ticket"`
-	PublicKey    string `json:"publicKey"`
-	HostRef      string `json:"hostRef"`
+	DeviceID  string `json:"deviceId"`
+	Ticket    string `json:"ticket"`
+	PublicKey string `json:"publicKey"`
+	HostRef   string `json:"hostRef"`
+	// SessionKey names the MonkeyMux session without writing its name here:
+	// pushSessionKey of the session whose server received push_register
+	// (never the app's claim). Records written before sessions were recorded
+	// have none and receive nothing; the next attach replaces them.
+	SessionKey   string `json:"sessionKey,omitempty"`
 	RegisteredAt int64  `json:"registeredAt"`
 	UpdatedAt    int64  `json:"updatedAt"`
 }
@@ -136,13 +145,26 @@ func prunePushState(state *pushStateFile, now time.Time) {
 func upsertPushRecord(state *pushStateFile, record pushDeviceRecord, now time.Time) {
 	record.UpdatedAt = now.Unix()
 	record.RegisteredAt = record.UpdatedAt
+	if record.SessionKey != "" {
+		// A record from before sessions were recorded covered the whole
+		// saved host; this session's registration replaces it.
+		kept := state.Devices[:0]
+		for _, existing := range state.Devices {
+			if existing.DeviceID == record.DeviceID && existing.HostRef == record.HostRef &&
+				existing.SessionKey == "" {
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		state.Devices = kept
+	}
 	replaced := false
 	for index := range state.Devices {
 		existing := state.Devices[index]
 		if existing.DeviceID != record.DeviceID {
 			continue
 		}
-		if existing.HostRef == record.HostRef {
+		if existing.HostRef == record.HostRef && existing.SessionKey == record.SessionKey {
 			record.RegisteredAt = existing.RegisteredAt
 			state.Devices[index] = record
 			replaced = true
@@ -382,6 +404,37 @@ func (st *pushStore) snapshot() ([]pushDeviceRecord, []byte) {
 	return devices, salt
 }
 
+// snapshotFor returns the registrations made through session, the only ones
+// that session's server sends to, and the collapse-key salt.
+func (st *pushStore) snapshotFor(session string) ([]pushDeviceRecord, []byte) {
+	devices, salt := st.snapshot()
+	if len(salt) == 0 {
+		return nil, salt
+	}
+	key := pushSessionKey(salt, session)
+	kept := devices[:0]
+	for _, record := range devices {
+		if record.SessionKey == key {
+			kept = append(kept, record)
+		}
+	}
+	return kept, salt
+}
+
+// ensurePushSalt returns the file's collapse and session key salt, creating
+// it on the first registration.
+func ensurePushSalt(state *pushStateFile) ([]byte, error) {
+	if salt, err := decodePushBase64(state.Salt); err == nil && len(salt) == 32 {
+		return salt, nil
+	}
+	fresh := make([]byte, 32)
+	if _, err := rand.Read(fresh); err != nil {
+		return nil, err
+	}
+	state.Salt = base64.RawURLEncoding.EncodeToString(fresh)
+	return fresh, nil
+}
+
 // rejection reports whether ticket was rejected for deviceID.
 func (st *pushStore) rejection(deviceID string, ticket string) string {
 	st.mu.Lock()
@@ -435,12 +488,8 @@ func (st *pushStore) mutate(change func(state *pushStateFile, now time.Time) boo
 		return nil
 	}
 	state.Version = pushStateSchemaVersion
-	if salt, err := decodePushBase64(state.Salt); err != nil || len(salt) != 32 {
-		fresh := make([]byte, 32)
-		if _, err := rand.Read(fresh); err != nil {
-			return err
-		}
-		state.Salt = base64.RawURLEncoding.EncodeToString(fresh)
+	if _, err := ensurePushSalt(&state); err != nil {
+		return err
 	}
 	if err := writePushStateFile(path, state); err != nil {
 		return err

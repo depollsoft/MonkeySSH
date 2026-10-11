@@ -77,7 +77,7 @@ func TestPushStoreLocksTheFileAcrossServers(t *testing.T) {
 	<-paused
 	secondDone := make(chan error, 1)
 	go func() {
-		_, err := other.register(second.record)
+		_, err := other.register(second.record, "work")
 		secondDone <- err
 	}()
 	select {

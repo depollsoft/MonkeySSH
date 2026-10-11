@@ -183,7 +183,10 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.descendant(of: first, matching: find.text('On')),
+      find.descendant(
+        of: first,
+        matching: find.text('On for the MonkeyMux sessions you open here'),
+      ),
       findsOneWidget,
     );
 
@@ -262,10 +265,13 @@ void main() {
       disabledHostIds: {3},
       registeredHostIds: {1, 3},
     );
-    expect(pushHostStatus(state, 1), 'On');
+    expect(
+      pushHostStatus(state, 1),
+      'On for the MonkeyMux sessions you open here',
+    );
     expect(
       pushHostStatus(state, 2),
-      'On once you connect to it with MonkeyMux',
+      'On once you open a MonkeyMux session on it',
     );
     expect(pushHostStatus(state, 3), 'Off');
   });

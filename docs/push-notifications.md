@@ -55,6 +55,11 @@ vectors include a non-canonical ticket that every implementation must refuse.
   `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window)`, where
   `hostSalt` is 32 random bytes kept in the host's registration file. Accepted
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
+- **Session key.** Names a MonkeyMux session in the host's registration file
+  without writing the name there: the first 32 hex characters of
+  `HMAC-SHA256(hostSalt, "session\n" + session)`. The server that receives
+  `push_register` computes it from its own session name; the app never sends
+  one.
 
 ## Ticket
 
@@ -332,13 +337,19 @@ shares it, so each read and each read-modify-write holds an exclusive lock on
 `push-devices.json.lock` (`flock` on POSIX, `LockFileEx` on Windows); without it
 two servers could both read, change and rename, and one change would be lost.
 
-- A registration is a device as reached through one saved host:
-  `(deviceId, hostRef)`. Two saved hosts that reach the same machine user (LAN
-  and Tailscale, say) register separately and can be turned off separately; an
+- A registration is a device as reached through one saved host, for one
+  MonkeyMux session it attached to: `(deviceId, hostRef, sessionKey)`. Only that
+  session's server sends to it, so a device hears from the sessions it opened
+  on that host and from no others, and every notification names a session the
+  app can open again. Two saved hosts that reach the same machine user (LAN and
+  Tailscale, say) register separately and can be turned off separately; an
   event still goes to each device once, through its most recently updated
-  registration.
-- Caps: 8 devices and 4 saved hosts per device; the least recently updated is
-  evicted.
+  registration for that session.
+- A record without a `sessionKey`, written by a helper before 0.1.229, receives
+  nothing. The next `push_register` from that device and saved host replaces
+  it.
+- Caps: 8 devices and 16 registrations (saved host and session pairs) per
+  device; the least recently updated is evicted.
 - A registration the app has not refreshed for 30 days expires. The app
   re-registers on every attach, so this only drops hosts the user deleted or
   stopped using.
@@ -449,6 +460,8 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   store the device id, the ticket and when it was issued.
 - **Attach:** for each live MonkeyMux connection whose host has push enabled,
   send `push_register` once per connection, then presence (see Attendance).
+  The registration is for that connection's MonkeyMux session, so attaching to
+  another session on the same host registers it separately.
   The viewed connection comes from the route's `connectionId`. When that id
   matches no live connection (the terminal reconnected) or is absent, a host
   with a single MonkeyMux connection is unambiguous and two are treated as not
@@ -481,8 +494,11 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   a refresh).
 - **Tap:** decrypt `p`, map `hostRef` back to a host by recomputing the HMAC for
   each saved host, and open `/terminal/<hostId>` at that MonkeyMux session and
-  window, reconnecting if needed. A native agent window opens its chat. A
-  payload that does not decrypt opens the app on Connections.
+  window. A live connection is reused only when it is attached to that session
+  (`resolveMuxSessionConnection`); otherwise the terminal opens a new connection
+  that attaches to it, rather than showing another session's terminal on a
+  connection to the same host. A native agent window opens its chat. A payload
+  that does not decrypt opens the app on Connections.
 - **Foreground:** iOS presents nothing while the app is open (the AppDelegate
   answers `willPresent` with no options, as before the app had a notification
   delegate, and runs each completion handler once). `onMessage` drops the push
