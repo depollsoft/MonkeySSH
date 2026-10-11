@@ -337,19 +337,22 @@ shares it, so each read and each read-modify-write holds an exclusive lock on
 `push-devices.json.lock` (`flock` on POSIX, `LockFileEx` on Windows); without it
 two servers could both read, change and rename, and one change would be lost.
 
-- A registration is a device as reached through one saved host, for one
-  MonkeyMux session it attached to: `(deviceId, hostRef, sessionKey)`. Only that
-  session's server sends to it, so a device hears from the sessions it opened
-  on that host and from no others, and every notification names a session the
-  app can open again. Two saved hosts that reach the same machine user (LAN and
-  Tailscale, say) register separately and can be turned off separately; an
-  event still goes to each device once, through its most recently updated
-  registration for that session.
+- A registration is a device as reached through one saved host, for the one
+  MonkeyMux session that saved host attaches to: `(deviceId, hostRef,
+  sessionKey)`. Only that session's server sends to it. Saved hosts that reach
+  the same machine with different session names (one per project, say) are
+  therefore separate: none receives another's events, and every notification
+  names the saved host and session the app opens on a tap. Attaching a saved
+  host through another session (its session setting changed) moves its
+  registration rather than adding one. Two saved hosts that reach the same
+  machine user and session (LAN and Tailscale, say) register separately and
+  can be turned off separately; an event still goes to each device once,
+  through its most recently updated registration for that session.
 - A record without a `sessionKey`, written by a helper before 0.1.229, receives
   nothing. The next `push_register` from that device and saved host replaces
   it.
-- Caps: 8 devices and 16 registrations (saved host and session pairs) per
-  device; the least recently updated is evicted.
+- Caps: 8 devices and 16 saved hosts per device; the least recently updated is
+  evicted.
 - A registration the app has not refreshed for 30 days expires. The app
   re-registers on every attach, so this only drops hosts the user deleted or
   stopped using.
@@ -460,8 +463,8 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   store the device id, the ticket and when it was issued.
 - **Attach:** for each live MonkeyMux connection whose host has push enabled,
   send `push_register` once per connection, then presence (see Attendance).
-  The registration is for that connection's MonkeyMux session, so attaching to
-  another session on the same host registers it separately.
+  The registration is for that connection's MonkeyMux session: each saved host
+  receives only the events of the session it attaches to.
   The viewed connection comes from the route's `connectionId`. When that id
   matches no live connection (the terminal reconnected) or is absent, a host
   with a single MonkeyMux connection is unambiguous and two are treated as not

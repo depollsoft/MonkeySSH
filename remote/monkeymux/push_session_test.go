@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -39,35 +40,54 @@ func pushTestRegisterRequest(device pushTestDevice) controlMessage {
 func TestPushRegistrationsAreScopedToTheirSession(t *testing.T) {
 	h := newPushTestHarness(t)
 	play, playNotifier := newPushTestSessionServer(t, h, "play")
-	device := newPushTestDevice(t, 1)
+	// Two saved hosts reach the same machine, one per MonkeyMux session.
+	work := newPushTestDevice(t, 1)
+	other := work
+	other.record.HostRef = "hostref-play"
 
-	// The app attached to "work" only, so "play" has nothing to send: a
-	// notification must name a session the app opened and can reopen.
-	h.register(t, device)
+	// Only "work" has been attached: "play" has nothing to send to.
+	h.register(t, work)
 	play.raisePushEvent("@2", pushKindAlert, "")
 	playNotifier.inflight.Wait()
 	if got := h.kinds(); got != "" {
 		t.Fatalf("play pushed %q to a device registered through work", got)
 	}
-	if result := playNotifier.sendTest(device.id, "play"); result != pushResultNotRegistered {
+	if result := playNotifier.sendTest(work.id, "play"); result != pushResultNotRegistered {
 		t.Fatalf("test through play = %q, want %q", result, pushResultNotRegistered)
 	}
-	h.raise("@2", pushKindAlert)
-	if got := h.kinds(); got != "alert" {
-		t.Fatalf("work pushed %q, want alert", got)
-	}
 
-	// Attaching to "play" registers that session separately.
-	if response := play.pushControlResponse(pushTestRegisterRequest(device)); response.Type != "push_registered" {
+	// Attaching the second saved host to "play" registers it separately.
+	if response := play.pushControlResponse(pushTestRegisterRequest(other)); response.Type != "push_registered" {
 		t.Fatalf("register through play = %+v", response)
 	}
+	if ids := h.registeredIDs(t); len(ids) != 2 {
+		t.Fatalf("registrations = %v, want one per saved host", ids)
+	}
+	h.raise("@2", pushKindAlert)
 	play.raisePushEvent("@3", pushKindAlert, "")
 	playNotifier.inflight.Wait()
-	if got := h.kinds(); got != "alert,alert" {
-		t.Fatalf("after attaching to play, pushes = %q", got)
+	requests := h.endpoint.received()
+	if len(requests) != 2 {
+		t.Fatalf("pushes = %d, want one per session", len(requests))
 	}
-	if ids := h.registeredIDs(t); len(ids) != 2 {
-		t.Fatalf("registrations = %v, want one per session", ids)
+	// Each session's event names its own saved host and session, so a tap
+	// opens that saved host on that session and never the other.
+	for index, want := range []struct{ hostRef, session, window string }{
+		{"hostref1", "work", "@2"},
+		{"hostref-play", "play", "@3"},
+	} {
+		var event struct {
+			HostRef   string `json:"hostRef"`
+			SessionID string `json:"sessionId"`
+			Window    string `json:"window"`
+		}
+		plain := openPushPayloadForTest(t, work.private, requests[index].Payload)
+		if err := json.Unmarshal(plain, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.HostRef != want.hostRef || event.SessionID != want.session || event.Window != want.window {
+			t.Fatalf("push %d = %+v, want %+v", index, event, want)
+		}
 	}
 
 	// The shared file names sessions by key, never by name.
@@ -80,16 +100,42 @@ func TestPushRegistrationsAreScopedToTheirSession(t *testing.T) {
 		t.Fatalf("registration file names a session: %s", data)
 	}
 
-	// Turning off the saved host removes it from every session.
+	// Turning off one saved host leaves the other.
 	response := h.control(t, controlMessage{
 		Type: "push_unregister",
-		Push: &pushControlRequest{DeviceID: device.id, HostRef: device.record.HostRef},
+		Push: &pushControlRequest{DeviceID: work.id, HostRef: work.record.HostRef},
 	})
 	if response.Type != "push_unregistered" {
 		t.Fatalf("unregister = %+v", response)
 	}
-	if ids := h.registeredIDs(t); len(ids) != 0 {
-		t.Fatalf("registrations after unregister = %v", ids)
+	if ids := h.registeredIDs(t); len(ids) != 1 {
+		t.Fatalf("registrations after unregister = %v, want the play saved host", ids)
+	}
+}
+
+func TestPushSavedHostAttachingToAnotherSessionMovesItsRegistration(t *testing.T) {
+	h := newPushTestHarness(t)
+	play, playNotifier := newPushTestSessionServer(t, h, "play")
+	device := newPushTestDevice(t, 1)
+
+	h.register(t, device)
+	// The saved host's session setting changed: it now attaches to "play".
+	if response := play.pushControlResponse(pushTestRegisterRequest(device)); response.Type != "push_registered" {
+		t.Fatalf("register through play = %+v", response)
+	}
+	if ids := h.registeredIDs(t); len(ids) != 1 {
+		t.Fatalf("registrations = %v, want the saved host moved, not copied", ids)
+	}
+	// Each server rereads the shared file at most once a second.
+	h.clock.Advance(2 * time.Second)
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "" {
+		t.Fatalf("work still pushed %q after the saved host moved to play", got)
+	}
+	play.raisePushEvent("@3", pushKindAlert, "")
+	playNotifier.inflight.Wait()
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("play pushed %q, want alert", got)
 	}
 }
 

@@ -22,8 +22,8 @@ const (
 	pushStateFileMode      = 0o600
 	pushStateDirMode       = 0o700
 	pushMaxDevices         = 8
-	// Registrations per device: one per saved host and MonkeyMux session it
-	// attached to; the least recently refreshed are dropped first.
+	// Registrations per device: one per saved host (each attaches to one
+	// MonkeyMux session); the least recently refreshed are dropped first.
 	pushMaxRecordsPerDevice  = 16
 	pushMaxTicketLength      = 2048
 	pushStoreRecheckInterval = time.Second
@@ -145,19 +145,20 @@ func prunePushState(state *pushStateFile, now time.Time) {
 func upsertPushRecord(state *pushStateFile, record pushDeviceRecord, now time.Time) {
 	record.UpdatedAt = now.Unix()
 	record.RegisteredAt = record.UpdatedAt
-	if record.SessionKey != "" {
-		// A record from before sessions were recorded covered the whole
-		// saved host; this session's registration replaces it.
-		kept := state.Devices[:0]
-		for _, existing := range state.Devices {
-			if existing.DeviceID == record.DeviceID && existing.HostRef == record.HostRef &&
-				existing.SessionKey == "" {
-				continue
-			}
-			kept = append(kept, existing)
+	// A saved host attaches to one MonkeyMux session (its configured one), so
+	// it keeps one registration: attaching through another session moves it.
+	// Saved hosts that reach the same machine on different sessions stay
+	// apart, and none receives another's events. This also replaces a record
+	// from before sessions were recorded, which covered every session.
+	others := state.Devices[:0]
+	for _, existing := range state.Devices {
+		if existing.DeviceID == record.DeviceID && existing.HostRef == record.HostRef &&
+			existing.SessionKey != record.SessionKey {
+			continue
 		}
-		state.Devices = kept
+		others = append(others, existing)
 	}
+	state.Devices = others
 	replaced := false
 	for index := range state.Devices {
 		existing := state.Devices[index]
