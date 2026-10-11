@@ -253,17 +253,17 @@ failures `fcmCode`, a fixed enum such as `third-party-auth-error` (anything
 outside `[a-z0-9-]` is logged as `unknown`). Tickets, tokens, device ids,
 collapse keys and payloads are never logged.
 
-Cloud Run request logs record the caller's IP address and are kept for the
-`_Default` bucket's 30 days, which is what the privacy policy states. The
-owner can go further and stop storing them with a Cloud Logging exclusion:
+Cloud Run request logs record the caller's IP address. They are not stored:
+the `_Default` sink has the exclusion `push-request-logs` (applied 2026-10-10,
+and by `scripts/setup_functions_iam.sh`), so only the outcome logs above are
+kept, for the bucket's default 30 days. The privacy policy's 30-day limit on
+request logs therefore still holds. To check it:
 
 ```sh
-gcloud logging sinks update _Default --project=monkeyssh \
-  --add-exclusion='name=push-request-logs,filter=resource.type="cloud_run_revision" AND resource.labels.service_name=("pushnotify" OR "registerpushdevice") AND log_id("run.googleapis.com/requests")'
+gcloud logging sinks describe _Default --project=monkeyssh --format='value(exclusions[].name)'
 ```
 
-The function's own outcome logs carry no IP address and keep the default 30-day
-retention.
+Do not lengthen `_Default` retention: the privacy policy relies on 30 days.
 
 ### Deployment
 
