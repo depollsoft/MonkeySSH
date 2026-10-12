@@ -39,15 +39,17 @@ var programStatusQueryReply = []byte("\x1b]7501;?\x1b\\")
 
 // Record owners: the process a report is attributed to. Unattributed records
 // wait for dropExitedProgramStatus to resolve them; untracked ones never end
-// by the exit rule.
+// by the exit rule; gone ones were sent by a program that exited before they
+// could be attributed, and end like those of any exited owner.
 const (
 	programStatusOwnerUnattributed = 0
 	programStatusOwnerUntracked    = -1
+	programStatusOwnerGone         = -2
 )
 
 // programStatusOwnerExited reports whether a record's owner has exited.
 var programStatusOwnerExited = func(owner int) bool {
-	return owner > 0 && !programStatusOwnerAlive(owner)
+	return owner == programStatusOwnerGone || owner > 0 && !programStatusOwnerAlive(owner)
 }
 
 type programStatusRecord struct {
@@ -60,6 +62,16 @@ type programStatusRecord struct {
 	// owner is the process the record is attributed to (see
 	// programStatusReportOwner). Idle, working and blocked records end when
 	// it exits.
+	owner   int
+	updated uint64
+}
+
+// programStatusReporter is the program that last spoke OSC 7501 in a window:
+// it asked the feature query or sent a report. While it runs, clients show
+// what it reports, or nothing, instead of guessing from output timing, and
+// ignore OSC 9;4 progress as the spec asks. It ends with its owner, like a
+// running record, or on RIS.
+type programStatusReporter struct {
 	owner   int
 	updated uint64
 }
@@ -290,10 +302,13 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 		return
 	}
 	if record.state == "clear" {
+		// A clear does not renew the reporter: a program usually sends one as
+		// it exits, when its output may be read after the shell has taken the
+		// terminal back.
 		w.clearProgramStatusLocked(id)
 		return
 	}
-	record.owner = programStatusReportOwner(w)
+	record.owner = w.noteProgramStatusReporterLocked()
 	w.programStatusClock++
 	record.updated = w.programStatusClock
 	if w.programStatus == nil {
@@ -309,6 +324,30 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 		}
 		delete(w.programStatus, oldestID)
 	}
+}
+
+// noteProgramStatusReporterLocked records the window's foreground program as
+// one that speaks OSC 7501 and returns the owner it was attributed to.
+//
+// The owner can be the window's own process: a program launched directly or
+// exec'd in place of the shell, but also the shell itself, or a program whose
+// last output was read after it exited and the shell took the terminal back.
+// The shell outlives what it runs, so dropExitedProgramStatusLocked also ends
+// such a reporter once another job has the terminal.
+func (w *muxWindow) noteProgramStatusReporterLocked() int {
+	owner := programStatusReportOwner(w)
+	w.programStatusClock++
+	w.programStatusReporter = &programStatusReporter{
+		owner:   owner,
+		updated: w.programStatusClock,
+	}
+	return owner
+}
+
+// resetProgramStatusLocked applies RIS: every record and the reporter go.
+func (w *muxWindow) resetProgramStatusLocked() {
+	w.programStatus = nil
+	w.programStatusReporter = nil
 }
 
 // clearProgramStatusLocked removes the record id names and its descendants;
@@ -348,20 +387,31 @@ func (w *muxWindow) dropRunningProgramStatusLocked(exited func(owner int) bool) 
 }
 
 // dropExitedProgramStatusLocked applies the spec's process-exit rule per
-// sender, which also covers shells that never mark a prompt with OSC 133.
+// sender, which also covers shells that never mark a prompt with OSC 133,
+// and ends the reporter when it exits or, when it is the window's own process,
+// once another job has the terminal.
 func (w *muxWindow) dropExitedProgramStatusLocked() bool {
-	if len(w.programStatus) == 0 {
+	if len(w.programStatus) == 0 && w.programStatusReporter == nil {
 		return false
 	}
 	exitedOwners := map[int]bool{}
-	return w.dropRunningProgramStatusLocked(func(owner int) bool {
+	exited := func(owner int) bool {
 		exited, checked := exitedOwners[owner]
 		if !checked {
 			exited = programStatusOwnerExited(owner)
 			exitedOwners[owner] = exited
 		}
 		return exited
-	})
+	}
+	dropped := w.dropRunningProgramStatusLocked(exited)
+	if reporter := w.programStatusReporter; reporter != nil &&
+		(exited(reporter.owner) ||
+			reporter.owner > 0 && reporter.owner == w.processID() &&
+				!programStatusWindowProcessInForeground(w)) {
+		w.programStatusReporter = nil
+		dropped = true
+	}
+	return dropped
 }
 
 // programStatusSummaryLocked returns the window's most urgent record: blocked,
@@ -476,16 +526,33 @@ func (w *muxWindow) takeProgramStatusRepliesLocked() []byte {
 
 // attributeProgramStatusLocked gives owner to the unattributed records
 // updated at or before clock. Later reports arrived after the owner was looked
-// up and wait for the next lookup.
-func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
+// up and wait for the next lookup. It reports whether the reporter was
+// dropped, which the caller must broadcast.
+func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) bool {
 	for _, record := range w.programStatus {
 		if record.owner == programStatusOwnerUnattributed && record.updated <= clock {
 			record.owner = owner
 		}
 	}
+	if reporter := w.programStatusReporter; reporter != nil &&
+		reporter.owner == programStatusOwnerUnattributed && reporter.updated <= clock {
+		// resolveProgramStatusOwner falls back to the window process when it
+		// cannot name the program, and that process, the shell, outlives it.
+		// A direct window's process is the program, so it keeps the reporter.
+		if owner > 0 && owner == w.processID() && !w.directProcess {
+			w.programStatusReporter = nil
+			return true
+		}
+		reporter.owner = owner
+	}
+	return false
 }
 
 func (w *muxWindow) hasUnattributedProgramStatusLocked() bool {
+	if reporter := w.programStatusReporter; reporter != nil &&
+		reporter.owner == programStatusOwnerUnattributed {
+		return true
+	}
 	for _, record := range w.programStatus {
 		if record.owner == programStatusOwnerUnattributed {
 			return true
@@ -505,14 +572,21 @@ func (s *muxServer) dropExitedProgramStatus() {
 		pid    int
 		clock  uint64
 	}
+	changed := map[*muxWindow]bool{}
 	s.mu.Lock()
 	var pending []unattributed
 	for _, window := range s.windows {
-		if !window.closed && window.hasUnattributedProgramStatusLocked() {
-			pending = append(pending, unattributed{
-				window, window.processID(), window.programStatusClock,
-			})
+		if window.closed || !window.hasUnattributedProgramStatusLocked() {
+			continue
 		}
+		if window.directProcess {
+			// The program is the window process itself; no lookup needed.
+			window.attributeProgramStatusLocked(window.processID(), window.programStatusClock)
+			continue
+		}
+		pending = append(pending, unattributed{
+			window, window.processID(), window.programStatusClock,
+		})
 	}
 	s.mu.Unlock()
 	owners := make([]int, len(pending))
@@ -523,13 +597,17 @@ func (s *muxServer) dropExitedProgramStatus() {
 	s.mu.Lock()
 	for index, entry := range pending {
 		if s.windowByIDLocked(entry.window.id) == entry.window &&
-			!entry.window.closed && entry.window.processID() == entry.pid {
-			entry.window.attributeProgramStatusLocked(owners[index], entry.clock)
+			!entry.window.closed && entry.window.processID() == entry.pid &&
+			entry.window.attributeProgramStatusLocked(owners[index], entry.clock) {
+			changed[entry.window] = true
 		}
 	}
 	var snapshots []windowSnapshot
 	for _, window := range s.windows {
-		if window.closed || !window.dropExitedProgramStatusLocked() {
+		if window.closed {
+			continue
+		}
+		if dropped := window.dropExitedProgramStatusLocked(); !dropped && !changed[window] {
 			continue
 		}
 		snapshots = append(snapshots, s.snapshotLocked(window))

@@ -582,6 +582,21 @@ void main() {
         ),
       );
       expect(window.statusLabel, 'approval');
+      expect(window.programStatusReporter, isFalse);
+    });
+
+    test('maps a program status reporter without a status', () {
+      final window = parseMonkeyMuxWindowSnapshotForTesting({
+        'id': '@3',
+        'index': 2,
+        'name': 'claude',
+        'active': false,
+        'programStatusReporter': true,
+      });
+
+      expect(window!.programStatus, isNull);
+      expect(window.programStatusReporter, isTrue);
+      expect(window.statusLabel, 'no status');
     });
 
     test('ignores invalid helper terminal progress metadata', () {

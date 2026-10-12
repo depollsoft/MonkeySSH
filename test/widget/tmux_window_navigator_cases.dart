@@ -210,6 +210,40 @@ void registerTmuxWindowNavigatorTests() {
         );
       });
 
+      testWidgets('shows a neutral badge for a reporter without a status', (
+        tester,
+      ) async {
+        final window = TmuxWindow(
+          index: 2,
+          name: 'claude',
+          isActive: true,
+          currentCommand: 'claude',
+          lastActivityEpochSeconds:
+              DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          programStatusReporter: true,
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Center(child: TmuxWindowStatusBadge(window: window)),
+            ),
+          ),
+        );
+
+        final semantics = tester.ensureSemantics();
+        expect(find.text('no status'), findsOneWidget);
+        expect(find.text('running'), findsNothing);
+        expect(find.byIcon(Icons.more_horiz), findsOneWidget);
+        expect(
+          find.bySemanticsLabel(
+            RegExp('^terminal window has not reported a status'),
+          ),
+          findsOneWidget,
+        );
+        semantics.dispose();
+      });
+
       testWidgets('shows reported working and done states', (tester) async {
         for (final (status, label, icon) in [
           (
