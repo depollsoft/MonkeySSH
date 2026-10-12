@@ -3520,11 +3520,12 @@ class SshSession {
   RemoteMuxBackend? get remoteMuxBackend => _remoteMuxBackend;
   set remoteMuxBackend(RemoteMuxBackend? value) {
     if (_remoteMuxBackend == value) return;
-    final hadProgramStatus = programStatus != null;
+    final hadProgramStatus = programStatus != null || programStatusReporter;
     _remoteMuxBackend = value;
     _programStatusRecords.clear();
     _plainProgramStatus = null;
     _muxProgramStatus = null;
+    _muxProgramStatusReporter = false;
     if (hadProgramStatus) _notifyMetadataChanged();
   }
 
@@ -3643,6 +3644,7 @@ class SshSession {
   final _programStatusRecords = TerminalProgramStatusRecords();
   TerminalProgramStatus? _plainProgramStatus;
   TerminalProgramStatus? _muxProgramStatus;
+  bool _muxProgramStatusReporter = false;
   SftpClient? _sftpClient;
   Future<SftpClient>? _sftpClientFuture;
 
@@ -3746,15 +3748,25 @@ class SshSession {
   TerminalProgramStatus? get programStatus =>
       remoteMuxBackend == null ? _plainProgramStatus : _muxProgramStatus;
 
-  /// Synchronizes the active multiplexer window's OSC 7501 status.
+  /// Whether the active multiplexer window's program speaks OSC 7501, so
+  /// its OSC 9;4 progress is ignored even while it reports no status.
+  bool get programStatusReporter =>
+      remoteMuxBackend != null && _muxProgramStatusReporter;
+
+  /// Synchronizes the active multiplexer window's OSC 7501 status and whether
+  /// its program is a [programStatusReporter].
   ///
   /// Returns whether it changed. Metadata listeners are notified only when
   /// this call changes the session state.
-  bool synchronizeProgramStatus(TerminalProgramStatus? status) {
-    if (_muxProgramStatus == status) {
+  bool synchronizeProgramStatus(
+    TerminalProgramStatus? status, {
+    bool reporter = false,
+  }) {
+    if (_muxProgramStatus == status && _muxProgramStatusReporter == reporter) {
       return false;
     }
     _muxProgramStatus = status;
+    _muxProgramStatusReporter = reporter;
     _notifyMetadataChanged();
     return true;
   }
@@ -4093,6 +4105,7 @@ class SshSession {
         _lastExitCode != null ||
         _terminalProgress != null ||
         programStatus != null ||
+        programStatusReporter ||
         terminalCommandMarkTracker.markCount > 0 ||
         _windowTitle != null ||
         _terminalColorOverrides.isNotEmpty;
@@ -4112,6 +4125,7 @@ class SshSession {
     _programStatusRecords.clear();
     _plainProgramStatus = null;
     _muxProgramStatus = null;
+    _muxProgramStatusReporter = false;
     _terminalPreview = null;
     _terminalPreviewSnapshot = null;
     _windowTitle = null;

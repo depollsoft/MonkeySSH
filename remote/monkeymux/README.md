@@ -250,7 +250,11 @@ that sent them has exited (checked every two seconds, so a crashed agent in a
 shell without prompt marks does not stay "working"). Windows has no process
 groups, so there the sender is the window shell's only child process, found on
 the next check. Done and error records
-outlive their program. Restored shell history drops OSC 7501 like OSC 9;4. It
+outlive their program. Restored shell history drops OSC 7501 like OSC 9;4.
+A window whose program asked the feature query or sent a report also carries
+`programStatusReporter` until that program exits (or RIS). Clients then show
+only what it reports, or a neutral status when it reports nothing, instead of
+guessing from output timing, and ignore its OSC 9;4 progress. MonkeyMux
 also tracks the PTY foreground process group for snapshots,
 so shell-launched tools
 such as Codex can be surfaced as agent windows even when the terminal title is
