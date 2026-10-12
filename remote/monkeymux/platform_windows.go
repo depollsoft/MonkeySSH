@@ -846,20 +846,36 @@ var resolveProgramStatusOwner = func(windowPID int) int {
 	if windowPID <= 0 {
 		return programStatusOwnerUntracked
 	}
-	child := 0
-	for _, process := range cachedProcessTable(time.Now()) {
-		if process.ppid != windowPID || process.pid == windowPID {
+	child, several := onlyChildProcess(cachedProcessTable(time.Now()), windowPID)
+	if child == 0 && !several {
+		// The cached table can predate a program that just started, so a
+		// missing child is confirmed against a fresh one before its sender
+		// is treated as gone.
+		child, several = onlyChildProcess(readProcessTable(), windowPID)
+	}
+	switch {
+	case several:
+		return windowPID
+	case child == 0:
+		return programStatusOwnerGone
+	default:
+		return child
+	}
+}
+
+// onlyChildProcess returns parentPID's child when it has exactly one, and
+// whether it has several.
+func onlyChildProcess(processes map[int]processInfo, parentPID int) (child int, several bool) {
+	for _, process := range processes {
+		if process.ppid != parentPID || process.pid == parentPID {
 			continue
 		}
 		if child != 0 {
-			return windowPID
+			return 0, true
 		}
 		child = process.pid
 	}
-	if child == 0 {
-		return programStatusOwnerGone
-	}
-	return child
+	return child, false
 }
 
 func programStatusOwnerAlive(pid int) bool { return processIDAlive(pid) }

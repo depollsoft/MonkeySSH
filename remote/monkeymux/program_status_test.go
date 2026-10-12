@@ -448,6 +448,43 @@ func TestProgramStatusReporterFollowsTheProgram(t *testing.T) {
 	}
 }
 
+// A window started from args runs the program as its own process: it owns the
+// reports without a lookup and keeps the reporter, also on Windows, where a
+// shell's missing child would mean the sender exited.
+func TestProgramStatusDirectWindowOwnsItsReports(t *testing.T) {
+	originalOwner := programStatusReportOwner
+	originalResolve := resolveProgramStatusOwner
+	originalExited := programStatusOwnerExited
+	t.Cleanup(func() {
+		programStatusReportOwner = originalOwner
+		resolveProgramStatusOwner = originalResolve
+		programStatusOwnerExited = originalExited
+	})
+	programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerUnattributed }
+	resolveProgramStatusOwner = func(int) int {
+		t.Error("a direct window looked up its owner")
+		return programStatusOwnerGone
+	}
+	programStatusOwnerExited = func(int) bool { return false }
+
+	server := newMuxServer("program-status-direct")
+	window := &muxWindow{
+		id: "@1", name: "claude", pty: &recordingPty{}, directProcess: true,
+		proc: bindingTestProcess{pid: 5000}, lastActivity: time.Now(),
+	}
+	server.windows = []*muxWindow{window}
+	server.handleWindowOutput("@1", []byte("\x1b]7501;?\x1b\\"+programStatusOsc("state=working:app=claude-code")))
+	server.dropExitedProgramStatus()
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if reporter := window.programStatusReporter; reporter == nil || reporter.owner != 5000 {
+		t.Fatalf("reporter = %#v, want the window process 5000", reporter)
+	}
+	if record := window.programStatus[""]; record == nil || record.owner != 5000 {
+		t.Fatalf("record = %#v, want it owned by the window process 5000", record)
+	}
+}
+
 // A reporter can be the window's own process: a program launched directly or
 // exec'd in place of the shell keeps it while it has the terminal. The same
 // process can also be the shell, so it ends once the shell runs another job.

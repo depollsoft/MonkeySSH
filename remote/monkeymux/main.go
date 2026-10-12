@@ -801,6 +801,9 @@ type muxWindow struct {
 	// interactiveShell marks a window started as the user's shell rather than
 	// with a command.
 	interactiveShell bool
+	// directProcess marks a window whose process is the program itself,
+	// started from args rather than through a shell.
+	directProcess bool
 	// inPlaceRedrawPid is the foreground process group that last moved the
 	// cursor back up to redraw what it had drawn.
 	inPlaceRedrawPid int
@@ -6675,6 +6678,7 @@ func (s *muxServer) createWindowWithStarter(
 		foregroundCommand:         filepath.Base(cmd.Path),
 		foregroundCommandPid:      proc.Pid(),
 		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
+		directProcess:             len(options.args) > 0,
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,

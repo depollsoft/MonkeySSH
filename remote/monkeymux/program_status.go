@@ -538,7 +538,8 @@ func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) bool {
 		reporter.owner == programStatusOwnerUnattributed && reporter.updated <= clock {
 		// resolveProgramStatusOwner falls back to the window process when it
 		// cannot name the program, and that process, the shell, outlives it.
-		if owner > 0 && owner == w.processID() {
+		// A direct window's process is the program, so it keeps the reporter.
+		if owner > 0 && owner == w.processID() && !w.directProcess {
 			w.programStatusReporter = nil
 			return true
 		}
@@ -571,14 +572,21 @@ func (s *muxServer) dropExitedProgramStatus() {
 		pid    int
 		clock  uint64
 	}
+	changed := map[*muxWindow]bool{}
 	s.mu.Lock()
 	var pending []unattributed
 	for _, window := range s.windows {
-		if !window.closed && window.hasUnattributedProgramStatusLocked() {
-			pending = append(pending, unattributed{
-				window, window.processID(), window.programStatusClock,
-			})
+		if window.closed || !window.hasUnattributedProgramStatusLocked() {
+			continue
 		}
+		if window.directProcess {
+			// The program is the window process itself; no lookup needed.
+			window.attributeProgramStatusLocked(window.processID(), window.programStatusClock)
+			continue
+		}
+		pending = append(pending, unattributed{
+			window, window.processID(), window.programStatusClock,
+		})
 	}
 	s.mu.Unlock()
 	owners := make([]int, len(pending))
@@ -587,7 +595,6 @@ func (s *muxServer) dropExitedProgramStatus() {
 	}
 
 	s.mu.Lock()
-	changed := map[*muxWindow]bool{}
 	for index, entry := range pending {
 		if s.windowByIDLocked(entry.window.id) == entry.window &&
 			!entry.window.closed && entry.window.processID() == entry.pid &&
