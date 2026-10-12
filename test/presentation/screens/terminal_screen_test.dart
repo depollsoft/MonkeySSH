@@ -945,6 +945,11 @@ Host _buildHost({
   autoForwardPorts: false,
   remoteMuxBackend: remoteMuxBackend?.storageValue,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 const _proMonetizationState = MonetizationState(

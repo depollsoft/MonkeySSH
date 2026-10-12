@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,98 @@ const (
 	pushResponseBodyLimit  = 4096
 	pushEventQueueSize     = 64
 )
+
+// Event categories a registration can ask for (push_register's events).
+// Permission and input requests are "attention"; a window alert is "bell"
+// when a BEL raised it and "notice" when a desktop notification (OSC 9, 777
+// notify, 99) did. Test pushes are always sent.
+const (
+	pushEventAttention = "attention"
+	pushEventFinished  = "finished"
+	pushEventBell      = "bell"
+	pushEventNotice    = "notice"
+)
+
+// pushEventCategories is every category, in the order records store them.
+var pushEventCategories = []string{pushEventAttention, pushEventFinished, pushEventBell, pushEventNotice}
+
+// pushAlertCategories says what raised a window alert. A window's pending
+// alert can carry both.
+type pushAlertCategories uint8
+
+const (
+	pushAlertBell pushAlertCategories = 1 << iota
+	pushAlertNotice
+	// pushAlertAny is an alert whose cause was not recorded.
+	pushAlertAny = pushAlertBell | pushAlertNotice
+)
+
+// normalizePushEvents keeps the known categories of a push_register events
+// list, once each and in canonical order. Nil (no list) stays nil, meaning
+// every category.
+func normalizePushEvents(events *[]string) *[]string {
+	if events == nil {
+		return nil
+	}
+	known := make([]string, 0, len(pushEventCategories))
+	for _, category := range pushEventCategories {
+		if slices.Contains(*events, category) {
+			known = append(known, category)
+		}
+	}
+	return &known
+}
+
+// wants reports whether the record asked for category. A record from an app
+// that sent no events list wants everything.
+func (r pushDeviceRecord) wants(category string) bool {
+	return r.Events == nil || slices.Contains(*r.Events, category)
+}
+
+// wantedAlerts is the part of an alert's categories the record asked for.
+func (r pushDeviceRecord) wantedAlerts(categories pushAlertCategories) pushAlertCategories {
+	var wanted pushAlertCategories
+	if categories&pushAlertBell != 0 && r.wants(pushEventBell) {
+		wanted |= pushAlertBell
+	}
+	if categories&pushAlertNotice != 0 && r.wants(pushEventNotice) {
+		wanted |= pushAlertNotice
+	}
+	return wanted
+}
+
+// wantsEvent reports whether the record asked for an event of kind; alerts
+// are the categories an alert carries.
+func (r pushDeviceRecord) wantsEvent(kind string, alerts pushAlertCategories) bool {
+	switch kind {
+	case pushKindPermission, pushKindInput:
+		return r.wants(pushEventAttention)
+	case pushKindFinished:
+		return r.wants(pushEventFinished)
+	case pushKindAlert:
+		return r.wantedAlerts(alerts) != 0
+	default:
+		return true
+	}
+}
+
+// pushRecipients keeps the registrations that want an event, one per device
+// (see pushDevicesByID).
+func pushRecipients(devices []pushDeviceRecord, kind string, alerts pushAlertCategories) []pushDeviceRecord {
+	wanted := make([]pushDeviceRecord, 0, len(devices))
+	for _, record := range devices {
+		if record.wantsEvent(kind, alerts) {
+			wanted = append(wanted, record)
+		}
+	}
+	return pushDevicesByID(wanted)
+}
+
+// pushAlertEvent is a window alert queued by the PTY reader.
+type pushAlertEvent struct {
+	windowID   string
+	categories pushAlertCategories
+}
 
 // Results reported by push_test and push_register.
 const (
@@ -107,17 +200,22 @@ var pushRecordBridgeDelivered = recordAcpBridgePushDelivered
 
 // pushControlRequest carries push fields on a control message.
 type pushControlRequest struct {
-	DeviceID   string `json:"deviceId,omitempty"`
-	Ticket     string `json:"ticket,omitempty"`
-	PublicKey  string `json:"publicKey,omitempty"`
-	HostRef    string `json:"hostRef,omitempty"`
-	Foreground bool   `json:"foreground,omitempty"`
+	DeviceID  string `json:"deviceId,omitempty"`
+	Ticket    string `json:"ticket,omitempty"`
+	PublicKey string `json:"publicKey,omitempty"`
+	HostRef   string `json:"hostRef,omitempty"`
+	// Events lists the categories push_register asks for
+	// (pushEventCategories); absent means all of them.
+	Events     *[]string `json:"events,omitempty"`
+	Foreground bool      `json:"foreground,omitempty"`
 	// Local reports that the app is alive in the background with this attach.
-	// Alerts says it raises its own window alerts for this connection (its
-	// window bar is mounted); Bridges lists the native agent bridges whose
-	// events it raises itself.
+	// Alerts says it raises its own bell alerts for this connection (its
+	// window bar is mounted) and Notices its own desktop notifications;
+	// without Notices (an older app), Alerts covers both. Bridges lists the
+	// native agent bridges whose events it raises itself.
 	Local   bool     `json:"local,omitempty"`
 	Alerts  bool     `json:"alerts,omitempty"`
+	Notices *bool    `json:"notices,omitempty"`
 	Bridges []string `json:"bridges,omitempty"`
 }
 
@@ -128,10 +226,13 @@ type pushControlResult struct {
 
 // pushPresence is what one device last told this server about itself.
 type pushPresence struct {
-	clientID    string
-	foreground  bool
-	local       bool
-	localAlerts bool
+	clientID   string
+	foreground bool
+	local      bool
+	// localBells and localNotices say the backgrounded app raises a window's
+	// bell alerts and desktop notifications itself.
+	localBells   bool
+	localNotices bool
 	// localBridges are the bridges the backgrounded app raises events for.
 	localBridges map[string]bool
 	reportedAt   time.Time
@@ -170,7 +271,9 @@ type pushDeferred struct {
 	windowID string
 	bridgeID string
 	kind     string
-	at       time.Time
+	// alerts are the alert categories the device was skipped for.
+	alerts pushAlertCategories
+	at     time.Time
 }
 
 // pushServerView is the server state attendance depends on, captured under
@@ -201,7 +304,7 @@ type pushNotifier struct {
 	posts    chan struct{}
 	// alerts queues windows whose output rang the bell or posted a desktop
 	// notification, so the PTY reader never waits on push work.
-	alerts chan string
+	alerts chan pushAlertEvent
 
 	mu           sync.Mutex
 	presence     map[string]*pushPresence
@@ -228,7 +331,7 @@ func newPushNotifier() *pushNotifier {
 		now:          time.Now,
 		sleep:        time.Sleep,
 		posts:        make(chan struct{}, pushMaxConcurrentPosts),
-		alerts:       make(chan string, pushEventQueueSize),
+		alerts:       make(chan pushAlertEvent, pushEventQueueSize),
 		presence:     map[string]*pushPresence{},
 		lastSent:     map[pushCoalesceKey]time.Time{},
 		sentTimes:    map[pushBudgetKey][]time.Time{},
@@ -275,6 +378,7 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 			Ticket:    strings.TrimSpace(push.Ticket),
 			PublicKey: strings.TrimSpace(push.PublicKey),
 			HostRef:   strings.TrimSpace(push.HostRef),
+			Events:    normalizePushEvents(push.Events),
 		}
 		// The session is this server's, never the app's claim: the
 		// registration only receives this session's events.
@@ -482,7 +586,12 @@ func (n *pushNotifier) recordPresence(
 	presence.clientID = clientID
 	presence.foreground = foreground
 	presence.local = report.Local && !foreground
-	presence.localAlerts = presence.local && report.Alerts
+	presence.localBells = presence.local && report.Alerts
+	notices := report.Alerts
+	if report.Notices != nil {
+		notices = *report.Notices
+	}
+	presence.localNotices = presence.local && notices
 	presence.localBridges = map[string]bool{}
 	if presence.local {
 		for _, bridgeID := range report.Bridges {
@@ -520,11 +629,14 @@ func (n *pushNotifier) attendingLocked(
 // coveredLocallyLocked reports whether the app on that device is alive in the
 // background with this attach and says it raises this event itself: window
 // alerts while its window bar is mounted, and native agent events from a
-// bridge it is attached to. The claim lapses after pushLocalTTL.
+// bridge it is attached to. For an alert, alerts are the categories the
+// device would be told about, and the app must cover each of them. The claim
+// lapses after pushLocalTTL.
 func (n *pushNotifier) coveredLocallyLocked(
 	deviceID string,
 	kind string,
 	bridgeID string,
+	alerts pushAlertCategories,
 	view pushServerView,
 	now time.Time,
 ) bool {
@@ -535,7 +647,12 @@ func (n *pushNotifier) coveredLocallyLocked(
 		return false
 	}
 	if kind == pushKindAlert {
-		return presence.localAlerts
+		if alerts == 0 ||
+			(alerts&pushAlertBell != 0 && !presence.localBells) ||
+			(alerts&pushAlertNotice != 0 && !presence.localNotices) {
+			return false
+		}
+		return true
 	}
 	return bridgeID != "" && presence.localBridges[bridgeID]
 }
@@ -603,21 +720,39 @@ func pushDevicesByID(devices []pushDeviceRecord) []pushDeviceRecord {
 
 // notePushAlert queues a window alert from the PTY reader without blocking
 // it. Nothing is queued while no device is registered.
-func (s *muxServer) notePushAlert(windowID string) {
+func (s *muxServer) notePushAlert(windowID string, categories pushAlertCategories) {
 	notifier := s.pushNotifier()
-	if !notifier.store.mayHaveDevices() {
+	if categories == 0 || !notifier.store.mayHaveDevices() {
 		return
 	}
 	select {
-	case notifier.alerts <- windowID:
+	case notifier.alerts <- pushAlertEvent{windowID: windowID, categories: categories}:
 	default:
 	}
 }
 
 // raisePushEvent sends a one-off event (a finished turn or a window alert) for
 // windowID to every device that is not already covering it. bridgeID names
-// the native agent bridge behind a finished turn.
+// the native agent bridge behind a finished turn. An alert raised here has no
+// recorded cause and counts as both a bell and a notice; raisePushAlert
+// passes the cause.
 func (s *muxServer) raisePushEvent(windowID string, kind string, bridgeID string) {
+	var alerts pushAlertCategories
+	if kind == pushKindAlert {
+		alerts = pushAlertAny
+	}
+	s.raisePush(windowID, kind, bridgeID, alerts)
+}
+
+// raisePushAlert sends a window alert raised by categories.
+func (s *muxServer) raisePushAlert(windowID string, categories pushAlertCategories) {
+	if categories == 0 {
+		return
+	}
+	s.raisePush(windowID, pushKindAlert, "", categories)
+}
+
+func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, alerts pushAlertCategories) {
 	notifier := s.pushNotifier()
 	devices, salt := notifier.store.snapshotFor(s.session)
 	if len(devices) == 0 || windowID == "" {
@@ -636,16 +771,18 @@ func (s *muxServer) raisePushEvent(windowID string, kind string, bridgeID string
 		}
 	}
 	admitted := make([]pushDeviceRecord, 0, len(devices))
-	for _, device := range pushDevicesByID(devices) {
+	for _, device := range pushRecipients(devices, kind, alerts) {
 		if notifier.attendingLocked(device.DeviceID, windowID, view, now) {
 			continue
 		}
-		if notifier.coveredLocallyLocked(device.DeviceID, kind, bridgeID, view, now) {
+		wanted := device.wantedAlerts(alerts)
+		if notifier.coveredLocallyLocked(device.DeviceID, kind, bridgeID, wanted, view, now) {
 			notifier.deferLocked(pushDeferred{
 				deviceID: device.DeviceID,
 				windowID: windowID,
 				bridgeID: bridgeID,
 				kind:     kind,
+				alerts:   wanted,
 				at:       now,
 			})
 			continue
@@ -695,7 +832,7 @@ func (s *muxServer) raisePushAttention(
 	}
 	notifier.mu.Lock()
 	admitted := make([]admittedDevice, 0, len(devices))
-	for _, device := range pushDevicesByID(devices) {
+	for _, device := range pushRecipients(devices, kind, 0) {
 		key := pushAttentionKey{deviceID: device.DeviceID, bridgeID: bridgeID, kind: kind}
 		previous := max(notifier.delivered[key], bridgeDelivered[acpPushDeliveredKey(device.DeviceID, kind)])
 		if previous >= generation {
@@ -703,7 +840,7 @@ func (s *muxServer) raisePushAttention(
 			continue
 		}
 		if notifier.attendingLocked(device.DeviceID, windowID, view, now) ||
-			notifier.coveredLocallyLocked(device.DeviceID, kind, bridgeID, view, now) {
+			notifier.coveredLocallyLocked(device.DeviceID, kind, bridgeID, 0, view, now) {
 			continue
 		}
 		coalesceKey := pushCoalesceKey{deviceID: device.DeviceID, windowID: windowID, kind: kind}
@@ -913,14 +1050,24 @@ func (n *pushNotifier) backOff(deviceID string, budget pushBudget, retryAfter ti
 	n.backoffUntil[pushBudgetKey{deviceID: deviceID, budget: budget}] = n.now().Add(retryAfter)
 }
 
-// isPushAlertOutput reports whether a window's output carried a bell or a
-// desktop notification: OSC 9 text, OSC 777;notify, or an OSC 99 notification
-// that is not a query or a close request. Shell-integration OSC 777 marks
-// (precmd, preexec) and progress reports do not count.
-func isPushAlertOutput(bell bool, completedOscs [][]byte) bool {
+// pushAlertOutputCategories reports whether a window's output carried a bell
+// or a desktop notification: OSC 9 text, OSC 777;notify, or an OSC 99
+// notification that is not a query or a close request. Shell-integration OSC
+// 777 marks (precmd, preexec) and progress reports do not count.
+func pushAlertOutputCategories(bell bool, completedOscs [][]byte) pushAlertCategories {
+	var categories pushAlertCategories
 	if bell {
-		return true
+		categories |= pushAlertBell
 	}
+	if isPushNoticeOutput(completedOscs) {
+		categories |= pushAlertNotice
+	}
+	return categories
+}
+
+// isPushNoticeOutput reports whether completedOscs hold a desktop
+// notification.
+func isPushNoticeOutput(completedOscs [][]byte) bool {
 	for _, payload := range completedOscs {
 		if !isForwardableOscNotification(payload) {
 			continue
@@ -953,8 +1100,8 @@ func (s *muxServer) startPushLoop() {
 		defer ticker.Stop()
 		for {
 			select {
-			case windowID := <-notifier.alerts:
-				s.raisePushEvent(windowID, pushKindAlert, "")
+			case alert := <-notifier.alerts:
+				s.raisePushAlert(alert.windowID, alert.categories)
 			case <-ticker.C:
 				if s.isClosed() {
 					return
@@ -1051,9 +1198,10 @@ func pushPendingCounts(info acpBridgeInfo) (permission bool, input bool) {
 }
 
 func (n *pushNotifier) deferLocked(event pushDeferred) {
-	for _, existing := range n.deferred {
+	for index, existing := range n.deferred {
 		if existing.deviceID == event.deviceID && existing.windowID == event.windowID &&
 			existing.kind == event.kind {
+			n.deferred[index].alerts |= event.alerts
 			return
 		}
 	}
@@ -1076,9 +1224,15 @@ func (s *muxServer) flushPushDeferred() {
 	devices, salt := notifier.store.snapshotFor(s.session)
 	view := s.pushView(notifier.presenceClientIDs())
 	now := notifier.now()
-	byID := map[string]pushDeviceRecord{}
-	for _, device := range pushDevicesByID(devices) {
-		byID[device.DeviceID] = device
+	// recipient is the registration a deferred event goes through, if the
+	// device still wants it.
+	recipient := func(event pushDeferred) (pushDeviceRecord, bool) {
+		for _, device := range pushRecipients(devices, event.kind, event.alerts) {
+			if device.DeviceID == event.deviceID {
+				return device, true
+			}
+		}
+		return pushDeviceRecord{}, false
 	}
 
 	notifier.mu.Lock()
@@ -1088,29 +1242,33 @@ func (s *muxServer) flushPushDeferred() {
 		if now.Sub(event.at) > pushDeferWindow {
 			continue
 		}
-		if notifier.coveredLocallyLocked(event.deviceID, event.kind, event.bridgeID, view, now) {
+		if notifier.coveredLocallyLocked(event.deviceID, event.kind, event.bridgeID, event.alerts, view, now) {
 			kept = append(kept, event)
 			continue
 		}
 		due = append(due, event)
 	}
 	notifier.deferred = kept
-	admitted := make([]pushDeferred, 0, len(due))
+	type admittedEvent struct {
+		event  pushDeferred
+		record pushDeviceRecord
+	}
+	admitted := make([]admittedEvent, 0, len(due))
 	for _, event := range due {
-		if _, ok := byID[event.deviceID]; !ok ||
-			notifier.attendingLocked(event.deviceID, event.windowID, view, now) {
+		record, ok := recipient(event)
+		if !ok || notifier.attendingLocked(event.deviceID, event.windowID, view, now) {
 			continue
 		}
 		key := pushCoalesceKey{deviceID: event.deviceID, windowID: event.windowID, kind: event.kind}
 		if notifier.admitLocked(key, now, true) != "" {
 			continue
 		}
-		admitted = append(admitted, event)
+		admitted = append(admitted, admittedEvent{event, record})
 	}
 	notifier.mu.Unlock()
 
-	for _, event := range admitted {
-		job, err := buildPushJob(byID[event.deviceID], salt, view.session, event.windowID, event.kind, event.at)
+	for _, entry := range admitted {
+		job, err := buildPushJob(entry.record, salt, view.session, entry.event.windowID, entry.event.kind, entry.event.at)
 		if err != nil {
 			continue
 		}

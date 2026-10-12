@@ -2,13 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../data/database/database.dart' show HostsCompanion;
 import '../../../data/repositories/host_repository.dart';
 import '../../models/acp_session_state.dart';
+import '../../models/host_notifications.dart';
 import '../../models/remote_multiplexer.dart';
 import '../acp_session_manager.dart';
 import '../diagnostics_log_service.dart';
@@ -53,7 +56,6 @@ const pushRegistrationRetryMax = Duration(hours: 1);
 const pushUnsupportedRetryInterval = Duration(minutes: 10);
 
 const _enabledSettingKey = 'push_notifications_enabled';
-const _disabledHostsSettingKey = 'push_notifications_disabled_hosts';
 const _registeredHostsSettingKey = 'push_notifications_registered_hosts';
 const _pendingUnregisterSettingKey = 'push_notifications_pending_unregister';
 const _tokenDeletePendingKey = 'push_notifications_token_delete_pending';
@@ -117,18 +119,51 @@ final pushHostIdsProvider = Provider<Future<List<int>> Function()>((ref) {
   return () async => [for (final host in await repository.getAll()) host.id];
 });
 
-/// Each saved host's configured MonkeyMux session, null when it has none.
-final pushHostSessionNamesProvider =
-    Provider<Future<Map<int, String?>> Function()>((ref) {
+/// A saved host's configured MonkeyMux session (null when it has none) and
+/// its notification preferences.
+typedef PushHostSettings = ({String? sessionName, HostNotificationPrefs prefs});
+
+/// Every saved host's [PushHostSettings].
+final pushHostSettingsProvider =
+    Provider<Future<Map<int, PushHostSettings>> Function()>((ref) {
       final repository = ref.watch(hostRepositoryProvider);
       return () async => {
         for (final host in await repository.getAll())
-          host.id: switch (host.tmuxSessionName?.trim()) {
-            final String name when name.isNotEmpty => name,
-            _ => null,
-          },
+          host.id: (
+            sessionName: switch (host.tmuxSessionName?.trim()) {
+              final String name when name.isNotEmpty => name,
+              _ => null,
+            },
+            prefs: HostNotificationPrefs.fromHost(host),
+          ),
       };
     });
+
+/// Saves whether a host may push while MonkeySSH is closed.
+final pushHostPushWriterProvider =
+    Provider<Future<void> Function(int hostId, {required bool enabled})>((ref) {
+      final repository = ref.watch(hostRepositoryProvider);
+      return (hostId, {required enabled}) async {
+        await repository.updateFields(
+          hostId,
+          HostsCompanion(pushWhenClosed: Value(enabled)),
+        );
+      };
+    });
+
+/// Fires whenever saved hosts change, including their notification
+/// preferences.
+final pushHostChangesProvider = Provider<Stream<void> Function()>((ref) {
+  final repository = ref.watch(hostRepositoryProvider);
+  return () => repository.watchAll().map((_) {});
+});
+
+/// Whether the app shows notifications that remote programs post, the
+/// app-wide switch in Settings.
+final pushTerminalNotificationsEnabledProvider = Provider<bool Function()>(
+  (ref) =>
+      () => ref.read(terminalNotificationsNotifierProvider),
+);
 
 /// Picks the connection that registers each saved host with its machine.
 ///
@@ -353,7 +388,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   late TelemetryService _telemetry;
   late List<PushHostLink> Function() _links;
   late Future<List<int>> Function() _hostIds;
-  late Future<Map<int, String?>> Function() _hostSessionNames;
+  late Future<Map<int, PushHostSettings>> Function() _hostSettings;
+  late Future<void> Function(int hostId, {required bool enabled})
+  _writeHostPush;
+  late bool Function() _terminalNotificationsEnabled;
+  StreamSubscription<void>? _hostChanges;
   late Future<void> Function() _installChannel;
   late DateTime Function() _now;
   late bool _localPresenceSupported;
@@ -400,7 +439,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _telemetry = ref.watch(telemetryServiceProvider);
     _links = ref.watch(pushHostLinksProvider);
     _hostIds = ref.watch(pushHostIdsProvider);
-    _hostSessionNames = ref.watch(pushHostSessionNamesProvider);
+    _hostSettings = ref.watch(pushHostSettingsProvider);
+    _writeHostPush = ref.watch(pushHostPushWriterProvider);
+    _terminalNotificationsEnabled = ref.watch(
+      pushTerminalNotificationsEnabledProvider,
+    );
     _installChannel = ref.watch(pushNotificationChannelInstallerProvider);
     _now = ref.watch(pushClockProvider);
     _localPresenceSupported = ref.watch(pushLocalPresenceSupportedProvider);
@@ -411,9 +454,14 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       _disposed = true;
       _heartbeat?.cancel();
       unawaited(_tokenRefresh?.cancel());
+      unawaited(_hostChanges?.cancel());
     });
     if (available) {
       Future.microtask(_load);
+      // A host's settings change in its edit screen as well as here.
+      _hostChanges = ref.watch(pushHostChangesProvider)().listen((_) {
+        if (state.loaded) unawaited(_reconcileHostPush());
+      });
     }
     return PushNotificationState(available: available);
   }
@@ -436,9 +484,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   Future<void> _load() async {
     if (_disposed) return;
     final enabled = await _settings.getBool(_enabledSettingKey);
-    final disabledHosts = _decodeIds(
-      await _settings.getString(_disabledHostsSettingKey),
-    );
+    final disabledHosts = await _readDisabledHosts() ?? const <int>{};
     _registeredHostIds = _decodeIds(
       await _settings.getString(_registeredHostsSettingKey),
     );
@@ -737,12 +783,55 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
   });
 
-  /// Turns push on or off for one saved host.
-  Future<void> setHostEnabled(
+  /// Turns push on or off for one saved host, saving it on the host.
+  Future<void> setHostEnabled(int hostId, {required bool enabled}) async {
+    await _writeHostPush(hostId, enabled: enabled);
+    await _applyHostEnabled(hostId, enabled: enabled);
+  }
+
+  /// The saved hosts that may not push while MonkeySSH is closed, or null
+  /// when the hosts cannot be read.
+  Future<Set<int>?> _readDisabledHosts() async {
+    try {
+      return {
+        for (final MapEntry(:key, :value) in (await _hostSettings()).entries)
+          if (!value.prefs.pushWhenClosed) key,
+      };
+    } on Object catch (error) {
+      _log.debug(
+        _diagnosticsCategory,
+        'hosts_unreadable',
+        fields: {'errorType': error.runtimeType},
+      );
+      return null;
+    }
+  }
+
+  /// Applies host changes made elsewhere, such as the host edit screen:
+  /// push turned off or on, and notification kinds, which a registration
+  /// carries (the next sync registers again when they change).
+  Future<void> _reconcileHostPush() async {
+    final disabled = await _readDisabledHosts();
+    if (disabled == null || _disposed) return;
+    final current = state.disabledHostIds;
+    for (final hostId in disabled.difference(current)) {
+      await _applyHostEnabled(hostId, enabled: false);
+    }
+    for (final hostId in current.difference(disabled)) {
+      await _applyHostEnabled(hostId, enabled: true);
+    }
+    scheduleSync();
+  }
+
+  Future<void> _applyHostEnabled(
     int hostId, {
     required bool enabled,
   }) => _operations.run(() async {
     final disabled = {...state.disabledHostIds};
+    if (enabled == !disabled.contains(hostId)) {
+      if (enabled) scheduleSync();
+      return;
+    }
     if (enabled) {
       disabled.remove(hostId);
       state = state.copyWith(disabledHostIds: disabled);
@@ -782,10 +871,6 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       );
       await _persistHostBookkeeping();
     }
-    await _settings.setString(
-      _disabledHostsSettingKey,
-      jsonEncode(disabled.toList()..sort()),
-    );
     _restartHeartbeat();
     if (enabled) scheduleSync();
   });
@@ -1134,12 +1219,16 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (pending.isEmpty) _pendingUnregister.remove(link.hostId);
     }
 
-    Map<int, String?> configuredSessions;
+    Map<int, PushHostSettings> hostSettings;
     try {
-      configuredSessions = await _hostSessionNames();
+      hostSettings = await _hostSettings();
     } on Object {
-      configuredSessions = const {};
+      hostSettings = const {};
     }
+    final configuredSessions = {
+      for (final MapEntry(:key, :value) in hostSettings.entries)
+        key: value.sessionName,
+    };
     // A helper too old for push cannot hold the registration, so another
     // connection of its saved host registers instead.
     final registrants = pushRegistrantConnections(
@@ -1164,17 +1253,22 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (state.disabledHostIds.contains(link.hostId)) continue;
       final key = _keyOf(link);
       if (_unsupported.containsKey(key)) continue;
-      if (_registered[key] != secrets.ticket &&
+      final prefs =
+          hostSettings[link.hostId]?.prefs ?? const HostNotificationPrefs();
+      // The registration carries the host's notification kinds, so a change
+      // to them registers again.
+      final registration = '${secrets.ticket}#${prefs.pushEvents.join(',')}';
+      if (_registered[key] != registration &&
           registrants.contains(link.connectionId)) {
         if (secrets.ticket == _refusedTicket) continue;
-        if (!await _registerLink(link, secrets)) continue;
+        if (!await _registerLink(link, secrets, prefs)) continue;
         if (_optingOut || state.disabledHostIds.contains(link.hostId)) {
           continue;
         }
-        _registered[key] = secrets.ticket!;
+        _registered[key] = registration;
         if (_registeredHostIds.add(link.hostId)) bookkeepingChanged = true;
       }
-      await _sendPresence(link, links, secrets);
+      await _sendPresence(link, links, secrets, prefs);
     }
     if (bookkeepingChanged) await _persistHostBookkeeping();
     if (_pendingUnregister.isEmpty &&
@@ -1189,6 +1283,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   Future<bool> _registerLink(
     PushHostLink link,
     PushDeviceSecrets secrets,
+    HostNotificationPrefs prefs,
   ) async {
     try {
       final result = await link.send(<String, Object?>{
@@ -1201,6 +1296,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
             hostRefKey: secrets.hostRefKey,
             hostId: link.hostId,
           ),
+          'events': prefs.pushEvents,
         },
       });
       if (result.unsupported) {
@@ -1249,18 +1345,28 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     PushHostLink link,
     List<PushHostLink> links,
     PushDeviceSecrets secrets,
+    HostNotificationPrefs prefs,
   ) async {
     final key = _keyOf(link);
     final localBridges = !_foreground && _localPresenceSupported
         ? _localBridges(link.hostId)
         : const <String>[];
-    final localAlerts =
+    final windowBar =
         !_foreground &&
         _localPresenceSupported &&
         _hasAlertListener(link.connectionId);
+    // Claim only what the window bar will really raise: a bell when the
+    // host's window alerts are on, a program's notification when both its
+    // shell notifications and the app-wide switch are on. The host pushes
+    // whatever is not claimed.
+    final localAlerts = windowBar && prefs.windowAlerts;
+    final localNotices =
+        windowBar &&
+        prefs.shellNotifications &&
+        _terminalNotificationsEnabled();
     final presence = _foreground
         ? (_isViewed(link, links) ? _Presence.viewing : _Presence.idle)
-        : (localAlerts || localBridges.isNotEmpty)
+        : (localAlerts || localNotices || localBridges.isNotEmpty)
         ? _Presence.local
         : _Presence.idle;
     if (presence == _Presence.idle && _lastPresence[key] == _Presence.idle) {
@@ -1275,6 +1381,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           'foreground': presence == _Presence.viewing,
           'local': presence == _Presence.local,
           if (presence == _Presence.local) 'alerts': localAlerts,
+          if (presence == _Presence.local) 'notices': localNotices,
           if (presence == _Presence.local) 'bridges': localBridges,
         },
       }, lowPriority: true);
@@ -1307,12 +1414,6 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     if (_registeredHostIds.length != registeredBefore ||
         _pendingUnregister.length != pendingBefore) {
       await _persistHostBookkeeping();
-    }
-    if (pruned.length != disabledHosts.length) {
-      await _settings.setString(
-        _disabledHostsSettingKey,
-        jsonEncode(pruned.toList()..sort()),
-      );
     }
     return pruned;
   }

@@ -18,12 +18,15 @@ import (
 )
 
 const (
-	// Version 2 (0.1.229) scopes registrations to a session. Helpers that
-	// only know version 1 would drop sessionKey when they rewrite the shared
-	// file, unscoping every registration, so they must not touch it: they
-	// treat a newer file as unreadable and never write it. A version 1 file
-	// reads as empty here; its records named no session and received nothing.
-	pushStateSchemaVersion = 2
+	// Version 2 (0.1.229) scopes registrations to a session, and version 3
+	// (0.1.233) records which events each one wants. Helpers that only know
+	// an older version would drop the newer fields when they rewrite the
+	// shared file (unscoping every registration, or sending events the user
+	// turned off), so they must not touch it: they treat a newer file as
+	// unreadable and never write it. A version 2 file reads as is; its
+	// records predate the events list and want everything. A version 1 file
+	// reads as empty; its records named no session and received nothing.
+	pushStateSchemaVersion = 3
 	pushStateFileMode      = 0o600
 	pushStateDirMode       = 0o700
 	pushMaxDevices         = 8
@@ -75,9 +78,13 @@ type pushDeviceRecord struct {
 	// pushSessionKey of the session whose server received push_register
 	// (never the app's claim). Records written before sessions were recorded
 	// have none and receive nothing; the next attach replaces them.
-	SessionKey   string `json:"sessionKey,omitempty"`
-	RegisteredAt int64  `json:"registeredAt"`
-	UpdatedAt    int64  `json:"updatedAt"`
+	SessionKey string `json:"sessionKey,omitempty"`
+	// Events lists the event categories this saved host wants pushed
+	// (pushEventCategories). Nil, from an app that sent no list, means all
+	// of them; an empty list means none.
+	Events       *[]string `json:"events,omitempty"`
+	RegisteredAt int64     `json:"registeredAt"`
+	UpdatedAt    int64     `json:"updatedAt"`
 }
 
 // pushRejectedTicket remembers a ticket the function refused for good.
@@ -353,6 +360,12 @@ func readPushStateFile(path string) (pushStateFile, error) {
 	}
 	if parsed.Version > pushStateSchemaVersion {
 		return empty, errPushStateVersion
+	}
+	if parsed.Version == 2 {
+		// Already session-scoped; its records want every event until the
+		// app registers them again. The next write stamps version 3.
+		parsed.Version = pushStateSchemaVersion
+		return parsed, nil
 	}
 	if parsed.Version == 1 {
 		// Version 1 registrations named no session and are dropped, but the

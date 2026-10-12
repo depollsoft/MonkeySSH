@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.230"
+	monkeyMuxVersion                  = "0.1.233"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -6941,7 +6941,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
-	pushAlert := isPushAlertOutput(terminalBell, completedOscs)
+	pushAlert := pushAlertOutputCategories(terminalBell, completedOscs)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
@@ -7100,8 +7100,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.queueWindowReply(window, capabilityHintData)
 	}
 	s.mu.Unlock()
-	if pushAlert {
-		s.notePushAlert(windowID)
+	if pushAlert != 0 {
+		s.notePushAlert(windowID, pushAlert)
 	}
 
 	if shouldWrite {

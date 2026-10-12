@@ -5,6 +5,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
@@ -225,6 +226,19 @@ class _Harness {
 
   /// Configured MonkeyMux session per saved host; absent means none.
   final hostSessions = <int, String?>{};
+
+  /// Notification preferences per saved host; absent means all on.
+  final hostPrefs = <int, HostNotificationPrefs>{};
+  final hostChanges = StreamController<void>.broadcast();
+  bool terminalNotifications = true;
+
+  /// Changes a host's preferences as its edit screen would.
+  Future<void> editHost(int hostId, HostNotificationPrefs prefs) async {
+    hostPrefs[hostId] = prefs;
+    hostChanges.add(null);
+    await pumpEventQueue();
+  }
+
   bool localPresenceSupported = true;
   final alertListeners = <int>{};
   final bridgesByHost = <int, List<String>>{};
@@ -241,8 +255,26 @@ class _Harness {
       diagnosticsLoggerProvider.overrideWithValue(logger),
       pushHostLinksProvider.overrideWithValue(() => List.of(links)),
       pushHostIdsProvider.overrideWithValue(() async => hostIds()),
-      pushHostSessionNamesProvider.overrideWithValue(
-        () async => Map.of(hostSessions),
+      pushHostSettingsProvider.overrideWithValue(
+        () async => {
+          for (final id in hostIds())
+            id: (
+              sessionName: hostSessions[id],
+              prefs: hostPrefs[id] ?? const HostNotificationPrefs(),
+            ),
+        },
+      ),
+      pushHostPushWriterProvider.overrideWithValue((
+        hostId, {
+        required enabled,
+      }) async {
+        hostPrefs[hostId] = (hostPrefs[hostId] ?? const HostNotificationPrefs())
+            .withPushWhenClosed(enabled: enabled);
+        hostChanges.add(null);
+      }),
+      pushHostChangesProvider.overrideWithValue(() => hostChanges.stream),
+      pushTerminalNotificationsEnabledProvider.overrideWithValue(
+        () => terminalNotifications,
       ),
       pushNotificationChannelInstallerProvider.overrideWithValue(() async {}),
       pushClockProvider.overrideWithValue(() => now),
@@ -278,6 +310,7 @@ class _Harness {
   Future<void> dispose() async {
     await pumpEventQueue();
     _container?.dispose();
+    await hostChanges.close();
     await gateway.close();
     await database.close();
   }
@@ -488,9 +521,10 @@ void main() {
 
     await h.controller.setHostEnabled(1, enabled: false);
     await h.controller.syncNow();
+    // Refused when turned off, and retried by the next sync.
     expect(
-      older.types.where((type) => type == 'push_unregister'),
-      hasLength(2),
+      older.types.where((type) => type == 'push_unregister').length,
+      greaterThanOrEqualTo(2),
     );
 
     // An updated session removes it.
@@ -571,6 +605,100 @@ void main() {
     second.commands.clear();
     await h.controller.syncNow();
     expect(second.types, ['push_presence']);
+  });
+
+  group('per-host notification settings', () {
+    Map<String, Object?> lastOf(_FakeLink link, String type) =>
+        link.commands.lastWhere((command) => command['type'] == type)['push']!
+            as Map<String, Object?>;
+
+    test('a registration carries the host\'s notification kinds', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(agentFinished: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'bell',
+        'notice',
+      ]);
+
+      // Turning a kind back on in the host's edit screen registers again.
+      link.commands.clear();
+      await h.editHost(1, const HostNotificationPrefs());
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'finished',
+        'bell',
+        'notice',
+      ]);
+      link.commands.clear();
+      await h.controller.syncNow();
+      expect(link.types, isNot(contains('push_register')));
+    });
+
+    test(
+      'turning push off in the host\'s edit screen unregisters it',
+      () async {
+        final link = _FakeLink(connectionId: 10, hostId: 1);
+        h.links.add(link);
+        await h.start();
+        await h.controller.enable();
+        await h.controller.syncNow();
+        expect(h.state.registeredHostIds, {1});
+
+        await h.editHost(
+          1,
+          const HostNotificationPrefs().withPushWhenClosed(enabled: false),
+        );
+        await h.controller.syncNow();
+        expect(h.state.disabledHostIds, {1});
+        expect(link.types, contains('push_unregister'));
+        expect(h.state.registeredHostIds, isEmpty);
+
+        // And back on.
+        link.commands.clear();
+        await h.editHost(1, const HostNotificationPrefs());
+        await h.controller.syncNow();
+        expect(h.state.disabledHostIds, isEmpty);
+        expect(link.types, contains('push_register'));
+      },
+    );
+
+    test('setHostEnabled saves the choice on the host', () async {
+      await h.start();
+      await h.controller.enable();
+      await h.controller.setHostEnabled(2, enabled: false);
+      expect(h.hostPrefs[2]!.pushWhenClosed, isFalse);
+      await h.restart();
+      expect(h.state.disabledHostIds, {2});
+    });
+
+    test('the background claims follow the host\'s kinds and the app-wide '
+        'switch for program notifications', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.alertListeners.add(10);
+      await h.start();
+      await h.controller.enable();
+      h.controller.reportVisibility(foreground: false);
+      await pumpEventQueue();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_presence'), containsPair('alerts', true));
+      expect(lastOf(link, 'push_presence'), containsPair('notices', true));
+
+      // The app shows no program notifications while the app-wide switch is
+      // off, so the host keeps pushing them.
+      h.terminalNotifications = false;
+      await h.editHost(1, const HostNotificationPrefs(windowAlerts: false));
+      await h.controller.syncNow();
+      final presence = lastOf(link, 'push_presence');
+      expect(presence['local'], isFalse);
+      expect(presence, isNot(contains('alerts')));
+    });
   });
 
   test('sendTest reports what happened', () async {
@@ -986,7 +1114,14 @@ void main() {
           diagnosticsLoggerProvider.overrideWithValue(harness.logger),
           pushHostLinksProvider.overrideWithValue(() => const []),
           pushHostIdsProvider.overrideWithValue(() async => [1]),
-          pushHostSessionNamesProvider.overrideWithValue(() async => {}),
+          pushHostSettingsProvider.overrideWithValue(() async => {}),
+          pushHostChangesProvider.overrideWithValue(Stream<void>.empty),
+          pushHostPushWriterProvider.overrideWithValue(
+            (_, {required enabled}) async {},
+          ),
+          pushTerminalNotificationsEnabledProvider.overrideWithValue(
+            () => true,
+          ),
           pushLocalBridgesProvider.overrideWithValue((_) => const []),
           pushNotificationChannelInstallerProvider.overrideWithValue(
             () async {},

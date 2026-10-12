@@ -34,6 +34,7 @@ import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
+import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
@@ -8754,9 +8755,12 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     String? tmuxWindowSubtitle,
   }) async {
     if (!ref.mounted) return;
-    if (request.action == TerminalNotificationAction.show &&
-        !ref.read(terminalNotificationsNotifierProvider)) {
-      return;
+    if (request.action == TerminalNotificationAction.show) {
+      if (!ref.read(terminalNotificationsNotifierProvider)) return;
+      final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
+        session.hostId,
+      );
+      if (!ref.mounted || !prefs.shellNotifications) return;
     }
     final notificationService = ref.read(localNotificationServiceProvider);
     final notificationId = buildTerminalNotificationId(

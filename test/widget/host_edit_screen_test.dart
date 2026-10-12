@@ -54,6 +54,11 @@ Host _testHost({
   terminalThemeDarkId: terminalThemeDarkId,
   terminalFontFamily: terminalFontFamily,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 Snippet _testSnippet({

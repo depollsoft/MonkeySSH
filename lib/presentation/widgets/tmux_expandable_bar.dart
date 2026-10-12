@@ -857,9 +857,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       windowIndex: windowIndex,
       windowId: stableWindowId,
     );
-    unawaited(HapticFeedback.mediumImpact());
-    unawaited(
-      _localNotifications.showTmuxAlert(
+    _showIfHostAllows(
+      HostNotificationKind.windowAlerts,
+      () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
         title: content.title,
         subtitle: content.subtitle,
@@ -867,6 +867,23 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         payload: payload,
       ),
     );
+  }
+
+  /// Buzzes and runs [show] only when this host's notification preferences
+  /// allow [kind]. Callers record the alert as seen either way, so turning
+  /// the kind back on does not replay it.
+  void _showIfHostAllows(
+    HostNotificationKind kind,
+    Future<void> Function() show,
+  ) {
+    final readPrefs = widget.ref.read(hostNotificationPrefsReaderProvider);
+    final hostId = widget.session.hostId;
+    unawaited(() async {
+      final prefs = await readPrefs(hostId);
+      if (!mounted || !prefs.allows(kind)) return;
+      unawaited(HapticFeedback.mediumImpact());
+      await show();
+    }());
   }
 
   void _clearSeenAlertNotifications() {
@@ -1007,9 +1024,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       title: request.title,
       body: request.body,
     );
-    unawaited(HapticFeedback.mediumImpact());
-    unawaited(
-      _localNotifications.showTmuxAlert(
+    _showIfHostAllows(
+      HostNotificationKind.shellNotifications,
+      () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
         title: content.title,
         subtitle: content.subtitle,

@@ -309,9 +309,9 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
 `push` object on the control message.
 
 ```json
-{"id": "1", "type": "push_register",   "push": {"deviceId": "...", "ticket": "v1....", "publicKey": "<32 bytes>", "hostRef": "..."}}
+{"id": "1", "type": "push_register",   "push": {"deviceId": "...", "ticket": "v1....", "publicKey": "<32 bytes>", "hostRef": "...", "events": ["attention", "finished", "bell", "notice"]}}
 {"id": "2", "type": "push_unregister", "push": {"deviceId": "...", "hostRef": "<optional>"}}
-{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "bridges": ["<bridge id>"]}}
+{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "notices": true, "bridges": ["<bridge id>"]}}
 {"id": "4", "type": "push_test",       "push": {"deviceId": "..."}}
 ```
 
@@ -320,6 +320,21 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   `push_register_rejected` with result `stale_ticket` (after a 401) or
   `token_unregistered` (after a 410) and stores nothing. The app then fetches a
   new ticket, and for `token_unregistered` a new FCM token first.
+- `events` on `push_register` lists the event categories this saved host
+  wants pushed. Without it (an app from before the list) the
+  registration wants all of them; an empty list wants none; unknown entries
+  are ignored. Registering again replaces the list. The categories are:
+  - `attention`: `permission` and `input`.
+  - `finished`: `finished`.
+  - `bell`: an `alert` raised by a BEL.
+  - `notice`: an `alert` raised by a desktop notification (OSC 9 text, OSC
+    777 `notify`, or an OSC 99 notification that is not a query or close).
+
+  One chunk of output can raise both; such an alert goes to a registration
+  that wants either. `test` is always sent: it checks the path, not a
+  preference. When a device has two registrations for the session (two saved
+  hosts, see Storage), an event goes once, through the newest registration
+  that wants it.
 - `push_unregister` with a `hostRef` removes that one saved host's
   registration; without one it removes every registration of the device. It
   answers `push_unregistered`.
@@ -350,7 +365,7 @@ two servers could both read, change and rename, and one change would be lost.
 
 - A registration is a device as reached through one saved host, for the one
   MonkeyMux session that saved host attaches to: `(deviceId, hostRef,
-  sessionKey)`. Only that session's server sends to it. Saved hosts that reach
+  sessionKey)`, plus the `events` it wants (absent means all). Only that session's server sends to it. Saved hosts that reach
   the same machine with different session names (one per project, say) are
   therefore separate: none receives another's events, and every notification
   names the saved host and session the app opens on a tap. Attaching a saved
@@ -362,14 +377,17 @@ two servers could both read, change and rename, and one change would be lost.
   machine user and session (LAN and Tailscale, say) register separately and
   can be turned off separately; an event still goes to each device once,
   through its most recently updated registration for that session.
-- The file is schema version 2 since 0.1.230, which added `sessionKey`. A
-  helper that only knows version 1 treats a version 2 file as written by a
-  newer MonkeyMux: it neither sends from it nor writes it, and its
-  `push_register` fails, so a session still running an older helper cannot
-  strip the session keys. It sends nothing until the app updates it on the
-  next attach. A version 1 file reads as having no registrations: its records
-  named no session and are replaced by the next `push_register`. Its salt and
-  refused tickets are kept.
+- The file is schema version 3 since 0.1.233, which added `events`; version
+  2 (0.1.230) added `sessionKey`. A helper treats a file with a higher version
+  than its own as written by a newer MonkeyMux: it neither sends from it nor
+  writes it, and its `push_register` fails, so a session still running an
+  older helper cannot strip the session keys or the event lists. It sends
+  nothing until the app updates it on the next attach.
+- A version 2 file is read as it is: its registrations are already scoped to a
+  session and, having no `events`, want everything until the app registers
+  them again. The next write stamps version 3. A version 1 file reads as
+  having no registrations: its records named no session and are replaced by
+  the next `push_register`. Its salt and refused tickets are kept.
 - Each server rereads the file when its size, modification time or identity
   changed, at most once a second. Every write renames a new file into place,
   so the identity check catches a rewrite of the same size within the
@@ -393,20 +411,24 @@ connection's attach client id, and one of three states.
 - **Local** (`local: true`): the app is alive in the background with this
   attach under Android's background service, and raises some notifications
   itself. `alerts` says this connection's window bar is mounted, so the app
-  raises its window alerts; `bridges` lists the native agent bridges whose
-  events it is receiving. Repeated every 20 seconds. iOS suspends a
+  raises its bell alerts; `notices` says it raises desktop notifications
+  itself. Without `notices` (an app from before the field), `alerts`
+  covers desktop notifications too. `bridges` lists the native agent bridges
+  whose events it is receiving. Repeated every 20 seconds. iOS suspends a
   backgrounded app, so iOS reports idle instead.
 - **Idle**: neither. Sent once.
 
 A report counts while it is under 45 seconds old and the attach client is still
 attached. A device **attends** window W when it is viewing and W is the active
 window, or when a report in the last 30 seconds saw it viewing W. A device is
-**covered locally** for window alerts when its last local report said
-`alerts`, and for a native agent event when that report listed the event's
-bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
+**covered locally** for an alert when its last local report covered every
+category of that alert the device wants (`alerts` for a bell, `notices` for a
+desktop notification), and for a native agent event when that report listed
+the event's bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
 slack), so a suspended or killed app stops covering anything within that time.
 A one-off event (`finished`, `alert`) skipped only because of local coverage
-is kept for 2 minutes and sent if the coverage lapses first.
+is kept for 2 minutes and sent if the coverage lapses first; a deferred alert
+remembers its categories, so it is sent when the claim for any of them lapses.
 
 - `permission`, `input` and `finished` skip the devices that attend the window
   or are covered locally.
@@ -433,8 +455,8 @@ is kept for 2 minutes and sent if the coverage lapses first.
 - 401 and 410 delete the registrations carrying that ticket and remember it as
   refused.
 - The PTY reader never waits on any of this: a bell or desktop notification is
-  queued (64 deep, dropped when full, and only while a device is registered)
-  for the notifier goroutine.
+  queued with what raised it (64 deep, dropped when full, and only while a
+  device is registered) for the notifier goroutine.
 
 ### Native agent signals
 

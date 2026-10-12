@@ -798,6 +798,17 @@ class SecureTransferService {
     autoConnectRequiresConfirmation: Value(requiresAutoConnectReview),
     autoForwardPorts: Value((item['autoForwardPorts'] as bool?) ?? false),
     portProxyName: Value(_importedPortProxyName(item['portProxyName'])),
+    // Payloads from before per-host notification settings carry none, and
+    // everything was on then.
+    notifyAgentAttention: Value(
+      (item['notifyAgentAttention'] as bool?) ?? true,
+    ),
+    notifyAgentFinished: Value((item['notifyAgentFinished'] as bool?) ?? true),
+    notifyWindowAlerts: Value((item['notifyWindowAlerts'] as bool?) ?? true),
+    notifyShellNotifications: Value(
+      (item['notifyShellNotifications'] as bool?) ?? true,
+    ),
+    pushWhenClosed: Value((item['pushWhenClosed'] as bool?) ?? true),
     sortOrder: sortOrder,
   );
 

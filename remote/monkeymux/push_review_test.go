@@ -335,7 +335,7 @@ func TestPushNeverOverwritesANewerStateFile(t *testing.T) {
 
 func TestPushAlertQueueNeverBlocksTheReader(t *testing.T) {
 	h := newPushTestHarness(t)
-	h.server.notePushAlert("@1")
+	h.server.notePushAlert("@1", pushAlertBell)
 	if got := len(h.notifier.alerts); got != 0 {
 		t.Fatalf("queued %d alerts with nothing registered", got)
 	}
@@ -343,7 +343,7 @@ func TestPushAlertQueueNeverBlocksTheReader(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for index := 0; index < pushEventQueueSize*4; index++ {
-			h.server.notePushAlert("@1")
+			h.server.notePushAlert("@1", pushAlertBell)
 		}
 		close(done)
 	}()
