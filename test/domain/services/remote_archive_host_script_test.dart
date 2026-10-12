@@ -288,13 +288,84 @@ void main() {
     expect(victim.listSync(), isEmpty);
   }, skip: hasTools ? false : 'tar is not available');
 
+  test(
+    'a folder find cannot read is refused rather than trusted',
+    () async {
+      // The archive carries a mode 000 folder holding a link. tar restores the
+      // folder's mode last, so the link lands inside, and `find` then cannot
+      // enter the folder: it reports an error and lists nothing. The pipeline
+      // used to report only `head`'s status, which promoted the tree.
+      Directory('$root/outside').createSync();
+      const buildArchive =
+          'import sys, tarfile\n'
+          'with tarfile.open(sys.argv[1], "w") as tar:\n'
+          '    folder = tarfile.TarInfo("docs")\n'
+          '    folder.type = tarfile.DIRTYPE\n'
+          '    folder.mode = 0\n'
+          '    tar.addfile(folder)\n'
+          '    link = tarfile.TarInfo("docs/link")\n'
+          '    link.type = tarfile.SYMTYPE\n'
+          '    link.linkname = "../../outside"\n'
+          '    tar.addfile(link)\n';
+      final build = Process.runSync('python3', [
+        '-I',
+        '-c',
+        buildArchive,
+        '$root/locked.tar',
+      ]);
+      expect(build.exitCode, 0, reason: '${build.stderr}');
+      // Play a listing that shows only a plain file, as the hidden-link test
+      // does, so the shell-side check after extraction is what decides.
+      host.fakeResult = (script) {
+        if (!script.contains('tar -tf') && !script.contains('tar -tvf')) {
+          return null;
+        }
+        final marker = RegExp("m='([^']+)'").firstMatch(script)!.group(1);
+        final listing = script.contains('tar -tvf')
+            ? '-rw-r--r-- me/me 0 2026-10-01 12:00 docs'
+            : 'docs';
+        return RemoteCommandResult(
+          exitCode: 0,
+          stdout: '$listing\n$marker 0\n',
+        );
+      };
+
+      try {
+        await expectLater(
+          extract('$root/locked.tar', RemoteArchiveKind.tar),
+          throwsA(
+            isA<RemoteArchiveException>().having(
+              (error) => error.message,
+              'message',
+              contains('could not be checked'),
+            ),
+          ),
+        );
+        expect(
+          FileSystemEntity.typeSync('$root/docs', followLinks: false),
+          FileSystemEntityType.notFound,
+        );
+      } finally {
+        // The unreadable folder also defeats the host-side rm -rf; make the
+        // leftovers deletable before tearDown.
+        Process.runSync('chmod', ['-R', 'u+rwx', root]);
+      }
+    },
+    skip: hasTools && _has('python3') && !_isRoot
+        ? false
+        : 'needs tar, python3 and a non-root user',
+  );
+
   test('the login PATH survives missing and broken startup files', () {
     final home = host.home.path;
     Directory('$home/profile-bin').createSync();
+    Directory('$home/zprofile-bin').createSync();
     File('$home/.profile')
         .writeAsStringSync('PATH="\$HOME/profile-bin:\$PATH"\n');
+    File('$home/.zprofile')
+        .writeAsStringSync('PATH="\$HOME/zprofile-bin:\$PATH"\n');
     // A zsh-only file with a syntax error for /bin/sh, while .bash_profile
-    // and .zprofile do not exist.
+    // does not exist.
     File('$home/.zshrc').writeAsStringSync('if then fi\n');
 
     final result = Process.runSync(
@@ -305,6 +376,17 @@ void main() {
     );
 
     expect(result.exitCode, 0);
-    expect((result.stdout as String).split(':'), contains('$home/profile-bin'));
+    final entries = (result.stdout as String).split(':');
+    // Each file's result already holds the earlier entries, so a file adds
+    // its own entry once instead of doubling the whole PATH.
+    expect(entries.where((e) => e == '$home/profile-bin'), hasLength(1));
+    expect(entries.where((e) => e == '$home/zprofile-bin'), hasLength(1));
+    expect(
+      entries.indexOf('$home/zprofile-bin'),
+      lessThan(entries.indexOf('$home/profile-bin')),
+    );
   });
 }
+
+final bool _isRoot =
+    Process.runSync('id', ['-u']).stdout.toString().trim() == '0';

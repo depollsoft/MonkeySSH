@@ -417,6 +417,7 @@ class RemoteArchiveExtractor {
         // Only plain files and folders may come out. A zip entry can list
         // without type bits yet carry a link mode in an extra field.
         _findUnsafeOutput,
+        r'[ "$bad" != "?" ] || finish 22',
         r'[ -z "$bad" ] || finish 21',
       ], timeout: _extractTimeout);
       DiagnosticsLogService.instance.info(
@@ -429,6 +430,8 @@ class RemoteArchiveExtractor {
           break;
         case 21:
           throw const RemoteArchiveException(_linksMessage);
+        case 22:
+          throw const RemoteArchiveException(_uncheckedMessage);
         case 20:
           throw const RemoteArchiveException(
             'The archive could not be extracted. It may be damaged, or the '
@@ -585,10 +588,15 @@ class RemoteArchiveExtractor {
 const _printFirstArgument = r'''printf '%s' "$1"''';
 
 /// Prints the first output entry that is a link, a device or another
-/// non-file, or a file with more than one hard link.
+/// non-file, or a file with more than one hard link, or `?` when `find`
+/// failed. A pipeline reports only `head`'s status, so without that marker
+/// a folder `find` could not read (an archive can carry mode 000) would pass
+/// as clean and hide a link. Entries always start with `out/`, so a bare
+/// `?` is never a real name.
 const _findUnsafeOutput =
-    r'bad=$(find out \( -type l -o \( ! -type f ! -type d \) '
-    r'-o \( -type f -links +1 \) \) -print | head -n 1)';
+    r'bad=$({ find out \( -type l -o \( ! -type f ! -type d \) '
+    r'-o \( -type f -links +1 \) \) -print || printf "?\n"; } 2>/dev/null '
+    '| head -n 1)';
 
 const _privateFolderMessage =
     'A private folder for the extraction could not be made beside the '
@@ -596,6 +604,9 @@ const _privateFolderMessage =
 const _linksMessage =
     'The archive contains links or special files, which are not extracted '
     'here.';
+const _uncheckedMessage =
+    'The extracted files could not be checked for links, so they were not '
+    'kept.';
 
 /// Runs the extraction's scripts with a shared marker and checks that each
 /// later step is still inside the private folder the first step made.

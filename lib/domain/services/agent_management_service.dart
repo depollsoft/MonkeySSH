@@ -142,9 +142,12 @@ const _profilePrefix =
     // Each startup file is sourced in its own subshell and only when it is
     // readable: POSIX sh (dash, macOS /bin/sh) leaves the whole subshell when
     // `.` names a missing file or hits a syntax error, which would otherwise
-    // drop every PATH entry the other files add.
+    // drop every PATH entry the other files add. The subshell starts from the
+    // current PATH, so its result already holds every earlier entry and is
+    // exported as is; appending the old value again would double PATH per
+    // file.
     r'for __fl_profile in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zprofile" "$(if [ "${SHELL##*/}" = zsh ]; then printf %s "$HOME/.zshrc"; elif [ "${SHELL##*/}" = bash ]; then printf %s "$HOME/.bashrc"; fi)"; do '
-    r'[ -n "$__fl_profile" ] && [ -r "$__fl_profile" ] && __fl_profile_path=$( set +e; . "$__fl_profile" >/dev/null 2>&1; printf "%s" "$PATH" ) && [ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path:$PATH"; '
+    r'[ -n "$__fl_profile" ] && [ -r "$__fl_profile" ] && __fl_profile_path=$( set +e; . "$__fl_profile" >/dev/null 2>&1; printf "%s" "$PATH" ) && [ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; '
     'done; unset __fl_profile __fl_profile_path; '
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
 
