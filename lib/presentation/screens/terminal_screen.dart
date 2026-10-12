@@ -10344,6 +10344,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }) async {
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
+    // The server may select the new window during the request, so a snippet
+    // key sequence stops before it, not after (see _switchTmuxWindow).
+    _muxWindowChangeGeneration++;
 
     final heldInput = _terminalEnterPacer?.idle;
     if (heldInput != null) await heldInput;
@@ -10427,6 +10430,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }) async {
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
+    // Closing the active window selects another one on the server during the
+    // request, so a snippet key sequence stops before it, not after.
+    _muxWindowChangeGeneration++;
 
     final heldInput = _terminalEnterPacer?.idle;
     if (heldInput != null) await heldInput;

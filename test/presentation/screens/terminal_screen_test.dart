@@ -4808,6 +4808,65 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    testWidgets('a snippet key sequence stops while a window is created', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final createWindowCompleter = Completer<void>();
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(tester, tmuxService);
+      when(
+        () => tmuxService.createWindow(
+          session,
+          'work',
+          command: any(named: 'command'),
+          name: any(named: 'name'),
+          workingDirectory: any(named: 'workingDirectory'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) => createWindowCompleter.future);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      // The server can select the new window while the create request is
+      // still in flight, so the sequence must stop before the request ends.
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('New window'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Empty terminal'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      createWindowCompleter.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     for (final interruption in ['none', 'typing', 'window', 'partial']) {
       testWidgets('clipboard content URI upload handles $interruption', (
         tester,
