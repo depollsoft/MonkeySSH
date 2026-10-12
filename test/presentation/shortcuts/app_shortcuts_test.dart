@@ -573,6 +573,48 @@ void main() {
         isFalse,
       );
     });
+
+    test('a key the program saw pressed keeps its repeats and release', () {
+      final filter = AppShortcutKeyFilter();
+      const physical = PhysicalKeyboardKey.keyW;
+      // Plain W goes to the terminal.
+      expect(
+        filter.withhold(
+          _down(LogicalKeyboardKey.keyW),
+          keyboard: _Keyboard(),
+          platform: android,
+        ),
+        isFalse,
+      );
+      // Ctrl+Shift pressed while W is held: the repeat now spells the close
+      // chord, but the program already has W down, so it keeps the repeat
+      // and the release instead of being left with a stuck key.
+      final chord = _Keyboard(control: true, shift: true);
+      expect(
+        filter.withhold(
+          const KeyRepeatEvent(
+            physicalKey: physical,
+            logicalKey: LogicalKeyboardKey.keyW,
+            timeStamp: Duration.zero,
+          ),
+          keyboard: chord,
+          platform: android,
+        ),
+        isFalse,
+      );
+      expect(
+        filter.withhold(
+          const KeyUpEvent(
+            physicalKey: physical,
+            logicalKey: LogicalKeyboardKey.keyW,
+            timeStamp: Duration.zero,
+          ),
+          keyboard: chord,
+          platform: android,
+        ),
+        isFalse,
+      );
+    });
   });
 
   test('activators fire on key down, and on repeat only when repeating', () {

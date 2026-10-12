@@ -648,14 +648,18 @@ class AppShortcutKeyFilter {
     if (event is KeyUpEvent) {
       return _withheld.remove(event.physicalKey);
     }
+    // Only a key down starts withholding. A key the program saw pressed keeps
+    // its repeats and release even when a modifier pressed since makes the
+    // repeat spell a chord; withholding them would leave a kitty-protocol
+    // program with that key held down.
+    if (event is KeyRepeatEvent) {
+      return _withheld.contains(event.physicalKey);
+    }
     final reserved =
         matchAppShortcut(event, keyboard: keyboard, platform: platform) != null;
     if (reserved) {
       _withheld.add(event.physicalKey);
       return true;
-    }
-    if (event is KeyRepeatEvent) {
-      return _withheld.contains(event.physicalKey);
     }
     _withheld.remove(event.physicalKey);
     return false;
