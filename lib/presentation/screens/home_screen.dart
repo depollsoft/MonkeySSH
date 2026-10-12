@@ -3813,7 +3813,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     required Widget status,
   }) {
     final title = window.displayTitle;
-    final secondaryTitle = window.secondaryTitle;
+    final secondaryTitle =
+        window.programStatus?.attentionMessage ?? window.secondaryTitle;
     final iconColor = agentWindowIdentityColor(
       theme.colorScheme,
       isActive: window.isActive,
