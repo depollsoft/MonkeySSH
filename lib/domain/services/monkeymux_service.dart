@@ -2816,6 +2816,7 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
     programStatus: TerminalProgramStatus.fromJson(value['programStatus']),
+    programStatusReporter: value['programStatusReporter'] == true,
     lastActivityEpochSeconds: value['lastActivityEpochSeconds'] as int?,
     pendingNotifications: _muxWindowNotificationsFromJson(
       value['notifications'],
