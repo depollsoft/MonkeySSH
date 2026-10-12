@@ -26,6 +26,10 @@
 	<false/>
 	<key>FirebaseCrashlyticsCollectionEnabled</key>
 	<false/>
+	<key>FirebaseMessagingAutoInitEnabled</key>
+	<false/>
+	<key>FirebaseAppCheckTokenAutoRefreshEnabled</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
