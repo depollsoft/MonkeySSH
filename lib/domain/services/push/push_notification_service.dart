@@ -1237,6 +1237,17 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           if (result.ok) {
             pending.remove(entry);
             bookkeepingChanged = true;
+            // The host no longer holds any registration this app sent for
+            // the saved host, perhaps including one made after the
+            // unregister was queued. Registering again below restores it
+            // while the host is on.
+            final hostConnections = {
+              for (final other in links)
+                if (other.hostId == link.hostId) other.connectionId,
+            };
+            _registered.removeWhere(
+              (key, _) => hostConnections.contains(key.connectionId),
+            );
           }
         } on Object {
           // Retried on the next sync.

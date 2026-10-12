@@ -733,6 +733,30 @@ void main() {
       );
     });
 
+    test('a queued unregister that lands late does not leave a turned-back-on '
+        'host unregistered', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      // Turned off while the unregister cannot get through, then on again.
+      link.failUnregister = true;
+      await h.controller.setHostEnabled(1, enabled: false);
+      await h.controller.setHostEnabled(1, enabled: true);
+      await h.controller.syncNow();
+      // The queued unregister finally lands; the host must be registered
+      // again in the same sync, not left without a registration.
+      link
+        ..failUnregister = false
+        ..commands.clear();
+      await h.controller.syncNow();
+      expect(
+        link.types.where((t) => t != 'push_presence'),
+        containsAllInOrder(['push_unregister', 'push_register']),
+      );
+    });
+
     test('a host turned off by a run that ended mid-way is unregistered at '
         'the next start', () async {
       final link = _FakeLink(connectionId: 10, hostId: 1);
