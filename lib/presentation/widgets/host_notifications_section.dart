@@ -66,7 +66,7 @@ class HostNotificationsSection extends ConsumerWidget {
         ),
         const SizedBox(height: 4),
         AnimatedSize(
-          duration: animate ? const Duration(milliseconds: 180) : Duration.zero,
+          duration: animate ? const Duration(milliseconds: 150) : Duration.zero,
           curve: Curves.easeOutCubic,
           alignment: Alignment.topCenter,
           child: Column(

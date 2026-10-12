@@ -41,6 +41,8 @@ func (h *pushTestHarness) ticketsSent() string {
 	for _, request := range requests {
 		tickets = append(tickets, strings.TrimPrefix(request.Ticket, "v1.k1.ticket"))
 	}
+	// Each push is posted from its own goroutine, so arrival order varies.
+	slices.Sort(tickets)
 	return strings.Join(tickets, ",")
 }
 

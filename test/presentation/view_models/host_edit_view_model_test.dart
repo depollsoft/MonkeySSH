@@ -94,6 +94,17 @@ void main() {
         );
       });
 
+      test('a clash on a long name keeps the suffix within the limit', () {
+        final base = suggestMuxSessionName(label: 'x' * 60, hostname: 'h');
+        final next = suggestMuxSessionName(
+          label: 'x' * 60,
+          hostname: 'h',
+          taken: [base],
+        );
+        expect(next.length, lessThanOrEqualTo(32));
+        expect(next, endsWith('-2'));
+      });
+
       test('stays short and free of characters tmux rejects', () {
         final name = suggestMuxSessionName(
           label: 'a.b:c ${'x' * 60}',

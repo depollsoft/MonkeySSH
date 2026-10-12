@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	// Version 2 (0.1.229) scopes registrations to a session, and version 3
+	// Version 2 (0.1.230) scopes registrations to a session, and version 3
 	// (0.1.233) records which events each one wants. Helpers that only know
 	// an older version would drop the newer fields when they rewrite the
 	// shared file (unscoping every registration, or sending events the user

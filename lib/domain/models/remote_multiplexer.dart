@@ -80,7 +80,12 @@ String suggestMuxSessionName({
   final used = {for (final name in taken) name.trim().toLowerCase()};
   if (!used.contains(base)) return base;
   for (var suffix = 2; ; suffix++) {
-    final candidate = '$base-$suffix';
+    // Trim the stem so the suffix still fits within 32 characters.
+    final tail = '-$suffix';
+    final stem = base.length + tail.length > 32
+        ? base.substring(0, 32 - tail.length).replaceAll(RegExp(r'-+$'), '')
+        : base;
+    final candidate = '$stem$tail';
     if (!used.contains(candidate)) return candidate;
   }
 }
