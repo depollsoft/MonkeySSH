@@ -13636,7 +13636,6 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		}
 		if programStatusQuery {
 			w.programStatusQueries++
-			w.noteProgramStatusReporterLocked()
 		}
 		if output == nil {
 			output = make([]byte, 0, len(data)-(sequenceEnd-i))
@@ -16787,11 +16786,16 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 			w.storePartialOscLocked(data[sequenceStart:])
 			return observedThemeQueries
 		}
+		payload := data[payloadStart : payloadStart+payloadEnd]
+		// MonkeyMux answers 7-bit OSC 7501 queries (C1 ones are left for the
+		// attached terminal), and the asker becomes the window's reporter.
+		// Noted here, in byte order with RIS and the reports around it.
+		if payloadStart-sequenceStart == 2 && isProgramStatusQueryPayload(payload) {
+			w.noteProgramStatusReporterLocked()
+		}
 		observedThemeQueries = appendThemeQueryKeys(
 			observedThemeQueries,
-			w.applyOscPayloadLocked(
-				string(data[payloadStart:payloadStart+payloadEnd]),
-			),
+			w.applyOscPayloadLocked(string(payload)),
 		)
 		data = data[payloadStart+payloadEnd+terminatorLength:]
 		leadingUtf8Prefix = 0

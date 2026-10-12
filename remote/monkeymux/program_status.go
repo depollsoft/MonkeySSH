@@ -299,11 +299,14 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 	if !ok || query {
 		return
 	}
-	record.owner = w.noteProgramStatusReporterLocked()
 	if record.state == "clear" {
+		// A clear does not renew the reporter: a program usually sends one as
+		// it exits, when its output may be read after the shell has taken the
+		// terminal back.
 		w.clearProgramStatusLocked(id)
 		return
 	}
+	record.owner = w.noteProgramStatusReporterLocked()
 	w.programStatusClock++
 	record.updated = w.programStatusClock
 	if w.programStatus == nil {
@@ -323,8 +326,16 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 
 // noteProgramStatusReporterLocked records the window's foreground program as
 // one that speaks OSC 7501 and returns the owner it was attributed to.
+//
+// Output attributed to the window's own process came from its shell, or from
+// a program that exited before its output was read, once the shell had the
+// terminal back. The shell outlives the program, so it never becomes the
+// reporter: that would hold the window at "no status" for good.
 func (w *muxWindow) noteProgramStatusReporterLocked() int {
 	owner := programStatusReportOwner(w)
+	if owner > 0 && owner == w.processID() {
+		return owner
+	}
 	w.programStatusClock++
 	w.programStatusReporter = &programStatusReporter{
 		owner:   owner,
@@ -520,7 +531,13 @@ func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
 	}
 	if reporter := w.programStatusReporter; reporter != nil &&
 		reporter.owner == programStatusOwnerUnattributed && reporter.updated <= clock {
-		reporter.owner = owner
+		// resolveProgramStatusOwner falls back to the window process, which
+		// outlives the program (see noteProgramStatusReporterLocked).
+		if owner > 0 && owner == w.processID() {
+			w.programStatusReporter = nil
+		} else {
+			reporter.owner = owner
+		}
 	}
 }
 
