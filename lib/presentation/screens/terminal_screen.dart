@@ -1649,12 +1649,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   TerminalProgramStatus? get _programStatus => _observedSession?.programStatus;
 
   /// Work a program reported through OSC 7501, otherwise OSC 9;4 progress.
-  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar.
+  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar, and
+  /// so does a program that speaks OSC 7501 but reports nothing right now.
   TerminalProgress? get _terminalProgress {
-    final status = _programStatus;
-    return status == null
-        ? _observedSession?.terminalProgress
-        : status.terminalProgress;
+    final session = _observedSession;
+    final status = session?.programStatus;
+    if (status != null) return status.terminalProgress;
+    return (session?.programStatusReporter ?? false)
+        ? null
+        : session?.terminalProgress;
   }
 
   bool get _shouldReviewTerminalCommandInsertion =>
@@ -10466,7 +10469,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final activeWindow = activeTmuxWindow(windows);
     session
       ..synchronizeTerminalProgress(activeWindow?.terminalProgress)
-      ..synchronizeProgramStatus(activeWindow?.programStatus);
+      ..synchronizeProgramStatus(
+        activeWindow?.programStatus,
+        reporter: activeWindow?.programStatusReporter ?? false,
+      );
   }
 
   void _prepareTerminalForMuxWindowChange({
