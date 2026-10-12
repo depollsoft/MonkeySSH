@@ -20,6 +20,7 @@ import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -129,6 +130,10 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   // Whether the session name field holds a name suggested from the label. It
   // follows label edits until the user types a name of their own.
   bool _sessionNameFollowsLabel = false;
+
+  // Sessions that agent-startup hosts keep in their launch presets, by host
+  // id, so a suggested name avoids them too.
+  Map<int, String> _presetSessionNames = const {};
   final _startupSectionKey = GlobalKey();
 
   List<PortForward> _portForwards = [];
@@ -187,6 +192,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       c.addListener(_updateDirtyState);
     }
     _labelController.addListener(_followLabelInSessionName);
+    unawaited(_loadPresetSessionNames());
 
     if (widget.hostId != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1795,6 +1801,23 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     }
   }
 
+  Future<void> _loadPresetSessionNames() async {
+    try {
+      final presets = await ref
+          .read(agentLaunchPresetServiceProvider)
+          .getAllPresets();
+      if (!mounted) return;
+      _presetSessionNames = {
+        for (final MapEntry(:key, :value) in presets.entries)
+          if (value.tmuxSessionName?.trim() case final name?
+              when name.isNotEmpty)
+            key: name,
+      };
+    } on Object {
+      // Suggestions then avoid only the hosts' own session names.
+    }
+  }
+
   /// A session name for this host from its label, distinct from the
   /// sessions of other saved hosts that reach the same machine.
   String _suggestedMuxSessionName() {
@@ -1808,8 +1831,10 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         for (final host in hosts)
           if (host.id != widget.hostId &&
               host.hostname.trim().toLowerCase() == hostname &&
-              host.port == port)
+              host.port == port) ...[
             ?host.tmuxSessionName,
+            ?_presetSessionNames[host.id],
+          ],
       ],
     );
   }

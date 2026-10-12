@@ -393,6 +393,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   _writeHostPush;
   late bool Function() _terminalNotificationsEnabled;
   StreamSubscription<void>? _hostChanges;
+  Map<int, PushHostSettings>? _lastHostSettings;
   late Future<void> Function() _installChannel;
   late DateTime Function() _now;
   late bool _localPresenceSupported;
@@ -461,6 +462,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       // A host's settings change in its edit screen as well as here.
       _hostChanges = ref.watch(pushHostChangesProvider)().listen((_) {
         if (state.loaded) unawaited(_reconcileHostPush());
+      });
+      // The app-wide switch for program notifications changes what every
+      // registration asks for.
+      ref.listen(terminalNotificationsNotifierProvider, (_, _) {
+        if (state.loaded) scheduleSync();
       });
     }
     return PushNotificationState(available: available);
@@ -1224,12 +1230,17 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (pending.isEmpty) _pendingUnregister.remove(link.hostId);
     }
 
-    Map<int, PushHostSettings> hostSettings;
+    Map<int, PushHostSettings>? hostSettings;
     try {
       hostSettings = await _hostSettings();
+      _lastHostSettings = hostSettings;
     } on Object {
-      hostSettings = const {};
+      // Registering from defaults would turn kinds and hosts back on; keep
+      // the last good read, and register nothing until there is one.
+      hostSettings = _lastHostSettings;
     }
+    final canRegister = hostSettings != null;
+    hostSettings ??= const {};
     final configuredSessions = {
       for (final MapEntry(:key, :value) in hostSettings.entries)
         key: value.sessionName,
@@ -1260,13 +1271,15 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (_unsupported.containsKey(key)) continue;
       final prefs =
           hostSettings[link.hostId]?.prefs ?? const HostNotificationPrefs();
+      final events = _pushEventsFor(prefs);
       // The registration carries the host's notification kinds, so a change
       // to them registers again.
-      final registration = '${secrets.ticket}#${prefs.pushEvents.join(',')}';
-      if (_registered[key] != registration &&
+      final registration = '${secrets.ticket}#${events.join(',')}';
+      if (canRegister &&
+          _registered[key] != registration &&
           registrants.contains(link.connectionId)) {
         if (secrets.ticket == _refusedTicket) continue;
-        if (!await _registerLink(link, secrets, prefs)) continue;
+        if (!await _registerLink(link, secrets, events)) continue;
         if (_optingOut || state.disabledHostIds.contains(link.hostId)) {
           continue;
         }
@@ -1285,10 +1298,18 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
   }
 
+  /// The event categories a host's registration asks for. Shell
+  /// notifications also need the app-wide switch in Settings, which turns
+  /// them off for every host.
+  List<String> _pushEventsFor(HostNotificationPrefs prefs) => [
+    for (final event in prefs.pushEvents)
+      if (event != 'notice' || _terminalNotificationsEnabled()) event,
+  ];
+
   Future<bool> _registerLink(
     PushHostLink link,
     PushDeviceSecrets secrets,
-    HostNotificationPrefs prefs,
+    List<String> events,
   ) async {
     try {
       final hostRef = await derivePushHostRef(
@@ -1302,7 +1323,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           'ticket': secrets.ticket,
           'publicKey': secrets.keyPair.encodedPublicKey,
           'hostRef': hostRef,
-          'events': prefs.pushEvents,
+          'events': events,
         },
       });
       if (result.unsupported) {
@@ -1332,7 +1353,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       final deviceId = secrets.deviceId;
       if (result.ok &&
           result.events == null &&
-          prefs.pushEvents.length < pushEventCategoryCount &&
+          events.length < pushEventCategoryCount &&
           deviceId != null) {
         // A helper before 0.1.233 ignores the kinds this host turned off
         // and would push them anyway. Take the registration back and treat

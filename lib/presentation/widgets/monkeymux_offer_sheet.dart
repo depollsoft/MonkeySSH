@@ -9,6 +9,7 @@ import '../../app/theme.dart';
 /// separate install prompt is not shown for a fresh install.
 Future<bool> showMonkeyMuxOfferSheet(
   BuildContext context, {
+  required String hostLabel,
   required String sessionName,
 }) async {
   final accepted = await showModalBottomSheet<bool>(
@@ -16,7 +17,8 @@ Future<bool> showMonkeyMuxOfferSheet(
     useSafeArea: true,
     showDragHandle: true,
     isScrollControlled: true,
-    builder: (context) => MonkeyMuxOfferSheet(sessionName: sessionName),
+    builder: (context) =>
+        MonkeyMuxOfferSheet(hostLabel: hostLabel, sessionName: sessionName),
   );
   return accepted ?? false;
 }
@@ -24,7 +26,14 @@ Future<bool> showMonkeyMuxOfferSheet(
 /// The body of [showMonkeyMuxOfferSheet]; pops true when MonkeyMux is chosen.
 class MonkeyMuxOfferSheet extends StatelessWidget {
   /// Creates the sheet for the session it would open.
-  const MonkeyMuxOfferSheet({required this.sessionName, super.key});
+  const MonkeyMuxOfferSheet({
+    required this.hostLabel,
+    required this.sessionName,
+    super.key,
+  });
+
+  /// The saved host being offered MonkeyMux.
+  final String hostLabel;
 
   /// The MonkeyMux session the host would open.
   final String sessionName;
@@ -53,7 +62,7 @@ class MonkeyMuxOfferSheet extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Use MonkeyMux on this host?',
+            'Use MonkeyMux on $hostLabel?',
             style: FluttyTheme.displayMono(
               fontSize: 18,
               color: colorScheme.onSurface,

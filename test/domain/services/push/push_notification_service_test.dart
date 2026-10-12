@@ -723,6 +723,21 @@ void main() {
       expect(h.state.registeredHostIds, isEmpty);
     });
 
+    test('program notifications are left out of every registration while '
+        'the app-wide switch is off', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.terminalNotifications = false;
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'finished',
+        'bell',
+      ]);
+    });
+
     test('setHostEnabled saves the choice on the host', () async {
       await h.start();
       await h.controller.enable();

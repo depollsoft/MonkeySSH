@@ -11,6 +11,7 @@ void main() {
           builder: (context) => TextButton(
             onPressed: () async => result = await showMonkeyMuxOfferSheet(
               context,
+              hostLabel: 'Proj Alpha',
               sessionName: 'proj-alpha',
             ),
             child: const Text('open'),
@@ -20,7 +21,7 @@ void main() {
     );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
-    expect(find.text('Use MonkeyMux on this host?'), findsOneWidget);
+    expect(find.text('Use MonkeyMux on Proj Alpha?'), findsOneWidget);
     // The upload and the session it opens are stated before agreeing.
     expect(find.textContaining('~/.monkeyssh', findRichText: true), findsOne);
     expect(find.textContaining('proj-alpha', findRichText: true), findsOne);

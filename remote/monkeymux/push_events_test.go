@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,14 @@ func (h *pushTestHarness) ticketsSent() string {
 
 func pushTestEvents(events ...string) *[]string { return &events }
 
+// sortedKinds is kinds in a fixed order: each push is posted from its own
+// goroutine, so pushes raised together arrive in any order.
+func (h *pushTestHarness) sortedKinds() string {
+	kinds := strings.Split(h.kinds(), ",")
+	slices.Sort(kinds)
+	return strings.Join(kinds, ",")
+}
+
 func TestPushEventsFilterEachCategory(t *testing.T) {
 	cases := []struct {
 		events []string
@@ -61,7 +70,7 @@ func TestPushEventsFilterEachCategory(t *testing.T) {
 			h := newPushTestHarness(t)
 			h.registerEvents(t, newPushTestDevice(t, 1), pushTestEvents(tc.events...))
 			h.raiseEveryCategory()
-			if got := h.kinds(); got != tc.want {
+			if got := h.sortedKinds(); got != sortKinds(tc.want) {
 				t.Fatalf("pushes = %q, want %q", got, tc.want)
 			}
 		})
@@ -118,7 +127,7 @@ func TestPushRegistrationWithoutEventsWantsEverything(t *testing.T) {
 	h := newPushTestHarness(t)
 	h.registerEvents(t, newPushTestDevice(t, 1), nil)
 	h.raiseEveryCategory()
-	if got := h.kinds(); got != "alert,alert,finished,permission,input" {
+	if got := h.sortedKinds(); got != "alert,alert,finished,input,permission" {
 		t.Fatalf("pushes = %q, want every category", got)
 	}
 	path, _ := pushStatePath()
@@ -232,7 +241,7 @@ func TestPushNoticesClaimCoversDesktopNotificationsSeparately(t *testing.T) {
 	// An alert carrying both needs both covered.
 	h.server.raisePushAlert("@4", pushAlertBell|pushAlertNotice)
 	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "alert,alert" {
+	if got := h.sortedKinds(); got != "alert,alert" {
 		t.Fatalf("a bell+notice alert half covered = %q, want it sent", got)
 	}
 
@@ -241,7 +250,7 @@ func TestPushNoticesClaimCoversDesktopNotificationsSeparately(t *testing.T) {
 	h.server.raisePushAlert("@5", pushAlertNotice)
 	h.server.raisePushAlert("@6", pushAlertBell)
 	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "alert,alert,alert" {
+	if got := h.sortedKinds(); got != "alert,alert,alert" {
 		t.Fatalf("with notices covered, pushes = %q, want the bell only added", got)
 	}
 }
@@ -305,7 +314,7 @@ func TestPushVersion2FileKeepsItsRegistrations(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.raiseEveryCategory()
-	if got := h.kinds(); got != "alert,alert,finished,permission,input" {
+	if got := h.sortedKinds(); got != "alert,alert,finished,input,permission" {
 		t.Fatalf("a version 2 registration received %q, want everything", got)
 	}
 
@@ -352,4 +361,10 @@ func TestPushRegisteredEchoesTheEventsItWillSend(t *testing.T) {
 	if got := echo(pushTestEvents()); got != `{"result":"registered","events":[]}` {
 		t.Fatalf("echo with no events = %s", got)
 	}
+}
+
+func sortKinds(kinds string) string {
+	list := strings.Split(kinds, ",")
+	slices.Sort(list)
+	return strings.Join(list, ",")
 }

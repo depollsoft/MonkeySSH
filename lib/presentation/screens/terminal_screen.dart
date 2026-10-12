@@ -6299,13 +6299,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (_configuredRemoteMuxBackend(host) == RemoteMuxBackend.tmux) {
         return (command: null, handled: false);
       }
-      final attachCommand = await _prepareRemoteMuxAttachCommand(
-        session,
-        host,
-        tmuxSession,
-      );
-      // The offer's consent covered this attach only.
-      _monkeyMuxInstallPreApproved = false;
+      final _PreparedRemoteMuxCommand? attachCommand;
+      try {
+        attachCommand = await _prepareRemoteMuxAttachCommand(
+          session,
+          host,
+          tmuxSession,
+        );
+      } finally {
+        // The offer's consent covered this attach only, whatever happened.
+        _monkeyMuxInstallPreApproved = false;
+      }
       if (attachCommand == null) {
         _suppressRemoteMuxDetectionConnectionId = session.connectionId;
         return (command: null, handled: true);
@@ -6340,6 +6344,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!await offers.takePending(host.id) || !mounted) return null;
     final repository = ref.read(hostRepositoryProvider);
     final hostname = host.hostname.trim().toLowerCase();
+    Map<int, AgentLaunchPreset> presets;
+    try {
+      presets = await ref
+          .read(agentLaunchPresetServiceProvider)
+          .getAllPresets();
+    } on Object {
+      presets = const {};
+    }
     final sessionName = suggestMuxSessionName(
       label: host.label,
       hostname: host.hostname,
@@ -6347,8 +6359,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         for (final other in await repository.getAll())
           if (other.id != host.id &&
               other.hostname.trim().toLowerCase() == hostname &&
-              other.port == host.port)
+              other.port == host.port) ...[
             ?other.tmuxSessionName,
+            ?presets[other.id]?.tmuxSessionName,
+          ],
       ],
     );
     if (!mounted) return null;
@@ -6359,6 +6373,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     final accepted = await showMonkeyMuxOfferSheet(
       context,
+      hostLabel: host.label,
       sessionName: sessionName,
     );
     DiagnosticsLogService.instance.info(

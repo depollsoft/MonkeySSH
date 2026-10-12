@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../domain/services/auth_service.dart';
+import '../domain/services/host_notification_prefs_reader.dart';
 import '../domain/services/push/push_event.dart';
 import '../domain/services/push/push_messaging_gateway.dart';
 import '../domain/services/push/push_notification_service.dart';
@@ -245,6 +246,12 @@ class _PushNotificationBridgeState
     final target = await controller.resolve(message);
     if (!mounted || target == null) return;
     if (controller.shouldSuppressInForeground(target)) return;
+    // A registration can lag a change to the host's kinds until the host is
+    // reached again; what the user turned off does not show here either.
+    final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
+      target.hostId,
+    );
+    if (!mounted || !pushKindAllowedByHost(target.kind, prefs)) return;
     final navigatorContext = ref
         .read(routerProvider)
         .routerDelegate

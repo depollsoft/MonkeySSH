@@ -6,7 +6,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:monkeyssh/app/push_notification_bridge.dart';
 import 'package:monkeyssh/app/router.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
+import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
@@ -128,6 +130,7 @@ Future<(_Gateway, _Controller, GoRouter)> _pump(
   bool available = true,
   PushRemoteMessage? initial,
   PushNavigationTarget? target,
+  HostNotificationPrefs prefs = const HostNotificationPrefs(),
 }) async {
   final gateway = _Gateway()..initial = initial;
   addTearDown(gateway.close);
@@ -141,6 +144,9 @@ Future<(_Gateway, _Controller, GoRouter)> _pump(
         pushNotificationControllerProvider.overrideWith(() => controller),
         routerProvider.overrideWithValue(router),
         authStateProvider.overrideWith(_UnlockedAuth.new),
+        hostNotificationPrefsReaderProvider.overrideWithValue(
+          (_) async => prefs,
+        ),
       ],
       child: PushNotificationBridge(
         child: MaterialApp.router(routerConfig: router),
@@ -249,6 +255,9 @@ void main() {
           pushNotificationControllerProvider.overrideWith(() => controller),
           routerProvider.overrideWith((ref) => ref.watch(_routerHolder)),
           authStateProvider.overrideWith(_UnlockedAuth.new),
+          hostNotificationPrefsReaderProvider.overrideWithValue(
+            (_) async => const HostNotificationPrefs(),
+          ),
         ],
         child: PushNotificationBridge(
           child: Consumer(
@@ -296,6 +305,19 @@ void main() {
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
     expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
+  });
+
+  testWidgets('a foreground push of a kind the host turned off is dropped', (
+    tester,
+  ) async {
+    final (gateway, _, _) = await _pump(
+      tester,
+      target: target,
+      prefs: const HostNotificationPrefs(agentAttention: false),
+    );
+    gateway.messages.add(_message);
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
   });
 
   testWidgets('a foreground push for what is on screen is dropped', (

@@ -549,6 +549,17 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   reference now, or on its next attach if it is not connected. Deleting a saved
   host leaves its registration on the machine until it expires (30 days without
   a refresh).
+- **Kinds per host:** each saved host stores which kinds it may raise (agent
+  needs you, agent finished, window alerts, shell notifications) and whether
+  it pushes while MonkeySSH is closed; they live on the host row and travel
+  with transfers. The app applies them at once to what it shows, including
+  the foreground snackbar. A registration carries them as `events` and is
+  sent again when they change, so a connected host follows within one sync
+  and one that is not connected on its next attach. The app-wide Desktop
+  notifications switch in Settings removes `notice` from every
+  registration. Presence is per device and session: two saved hosts on one
+  session with different kinds share the claim the last report made, which
+  can let an alert through twice.
 - **Tap:** decrypt `p`, map `hostRef` back to a host by recomputing the HMAC for
   each saved host, and open `/terminal/<hostId>` at that MonkeyMux session and
   window. A live connection is reused only when it is attached to that

@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/repositories/host_repository.dart';
 import '../models/host_notifications.dart';
+import 'push/push_event.dart';
 
 /// Reads a saved host's notification preferences at the moment a
 /// notification is about to show. A host that is gone or cannot be read
@@ -34,3 +35,14 @@ final hostNotificationPrefsProvider =
         return const HostNotificationPrefs();
       });
     });
+
+/// Whether a host's preferences allow a push of [kind]. An `alert` is a bell
+/// or a program's notification, which the payload does not tell apart, so it
+/// shows while either is on. A test is always allowed.
+bool pushKindAllowedByHost(PushEventKind kind, HostNotificationPrefs prefs) =>
+    switch (kind) {
+      PushEventKind.permission || PushEventKind.input => prefs.agentAttention,
+      PushEventKind.finished => prefs.agentFinished,
+      PushEventKind.alert => prefs.windowAlerts || prefs.shellNotifications,
+      PushEventKind.test => true,
+    };
