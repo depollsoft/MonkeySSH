@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   file_selector_windows
+  firebase_app_check
   firebase_core
   flutter_secure_storage_windows
   local_auth_windows

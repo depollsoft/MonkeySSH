@@ -210,22 +210,102 @@ void main() {
       fakeAsync((async) {
         final clock = async.getClock(DateTime(2026));
         final written = <String>[];
-        // A soft keyboard commits the word and its space with the Return.
+        // A soft keyboard commits the word being typed with the Return.
         final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
-          ..add('what?', enter: false)
-          ..add(' ', enter: false)
+          ..add('what', enter: false)
           ..add('\r', enter: true);
-        expect(written, ['what?', ' ']);
+        expect(written, ['what']);
 
         async.elapse(const Duration(milliseconds: 110));
         // Anything typed meanwhile waits behind the Enter.
         pacer.add('n', enter: false);
-        expect(written, ['what?', ' ']);
+        expect(written, ['what']);
 
         async.elapse(const Duration(milliseconds: 39));
-        expect(written, ['what?', ' ']);
+        expect(written, ['what']);
         async.elapse(const Duration(milliseconds: 1));
-        expect(written, ['what?', ' ', '\r', 'n']);
+        expect(written, ['what', '\r', 'n']);
+      });
+    });
+
+    test('drops the space a keyboard commits with a Return', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('what?', enter: false);
+        async.elapse(const Duration(milliseconds: 500));
+
+        // Gboard adds its space after punctuation only once Return is
+        // pressed, a few milliseconds before the key itself.
+        pacer.add(' ', enter: false, keyboardSpace: true);
+        async.elapse(const Duration(milliseconds: 4));
+        pacer.add('\r', enter: true);
+        expect(written, ['what?', '\r']);
+
+        // Right after the text, the Enter still keeps its gap from it.
+        pacer
+          ..add('ok.', enter: false)
+          ..add(' ', enter: false, keyboardSpace: true)
+          ..add('\r', enter: true);
+        expect(written, ['what?', '\r', 'ok.']);
+        async.elapse(TerminalEnterPacer.defaultGap);
+        expect(written, ['what?', '\r', 'ok.', '\r']);
+        expect(async.pendingTimers, isEmpty);
+      });
+    });
+
+    test('sends the keyboard\'s space once no Enter follows it', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('Done.', enter: false)
+          ..add(' ', enter: false, keyboardSpace: true);
+        expect(written, ['Done.']);
+
+        async.elapse(const Duration(milliseconds: 49));
+        expect(written, ['Done.']);
+        async.elapse(const Duration(milliseconds: 1));
+        expect(written, ['Done.', ' ']);
+
+        // Once sent it is text like any other, so the Enter keeps its gap.
+        pacer.add('\r', enter: true);
+        expect(written, ['Done.', ' ']);
+        async.elapse(TerminalEnterPacer.defaultGap);
+        expect(written, ['Done.', ' ', '\r']);
+
+        // Text after the space sends the space first, then itself at once.
+        pacer
+          ..add('Hi,', enter: false)
+          ..add(' ', enter: false, keyboardSpace: true)
+          ..add('there', enter: false);
+        expect(written, ['Done.', ' ', '\r', 'Hi,', ' ', 'there']);
+        expect(async.pendingTimers, isEmpty);
+      });
+    });
+
+    test('keeps a typed space before an Enter', () {
+      fakeAsync((async) {
+        final clock = async.getClock(DateTime(2026));
+        final written = <String>[];
+        // Toggling a checklist item and confirming it, pressed quickly.
+        final pacer = TerminalEnterPacer(write: written.add, now: clock.now)
+          ..add('\x1b[B', enter: false)
+          ..add(' ', enter: false)
+          ..add('\r', enter: true);
+        expect(written, ['\x1b[B', ' ']);
+        async.elapse(TerminalEnterPacer.defaultGap);
+        expect(written, ['\x1b[B', ' ', '\r']);
+
+        // A password that ends in a space keeps it.
+        pacer
+          ..add('pass.', enter: false)
+          ..add(' ', enter: false)
+          ..add('\r', enter: true);
+        async.elapse(TerminalEnterPacer.defaultGap);
+        expect(written.skip(3), ['pass.', ' ', '\r']);
+        expect(async.pendingTimers, isEmpty);
       });
     });
 
@@ -268,6 +348,17 @@ void main() {
         expect(idle, isTrue);
         expect(written, ['a', '\r']);
         expect(pacer.idle, isNull);
+
+        idle = false;
+        pacer
+          ..add('ok.', enter: false)
+          ..add(' ', enter: false, keyboardSpace: true);
+        unawaited(pacer.idle!.then((_) => idle = true));
+        async
+          ..elapse(TerminalEnterPacer.defaultSpaceHold)
+          ..flushMicrotasks();
+        expect(idle, isTrue);
+        expect(written, ['a', '\r', 'ok.', ' ']);
 
         idle = false;
         pacer
