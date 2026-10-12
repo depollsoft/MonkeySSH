@@ -16,6 +16,7 @@ import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/monkeymux_offer_service.dart';
 import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -346,6 +347,24 @@ void main() {
             'private key for SSH key "Deploy key"',
             'passphrase for SSH key "Deploy key"',
           ]),
+        );
+      });
+
+      test('the MonkeyMux offer list stays on this device', () async {
+        await db
+            .into(db.settings)
+            .insert(
+              SettingsCompanion.insert(
+                key: monkeyMuxOfferPendingSettingKey,
+                value: '[1]',
+              ),
+            );
+        final data = await transferService.createMigrationData();
+        expect(
+          (data['settings']! as Map).containsKey(
+            monkeyMuxOfferPendingSettingKey,
+          ),
+          isFalse,
         );
       });
 

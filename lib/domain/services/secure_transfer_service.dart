@@ -18,6 +18,7 @@ import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
 import 'key_service.dart';
+import 'monkeymux_offer_service.dart';
 import 'port_forward_browser_service.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
@@ -229,6 +230,10 @@ class SecureTransferService {
     SettingKeys.hostCliLaunchPreferences,
   };
 
+  /// Settings that belong to this device's own onboarding and never travel:
+  /// their host ids would point at other hosts on another device.
+  static const _deviceLocalSettingsKeys = {monkeyMuxOfferPendingSettingKey};
+
   /// Creates an encrypted host transfer payload.
   Future<String> createHostPayload({
     required Host host,
@@ -358,7 +363,9 @@ class SecureTransferService {
     }
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
-      for (final setting in settings) setting.key: setting.value,
+      for (final setting in settings)
+        if (!_deviceLocalSettingsKeys.contains(setting.key))
+          setting.key: setting.value,
     };
 
     return {
@@ -1162,6 +1169,7 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
+      if (_deviceLocalSettingsKeys.contains(entry.key)) continue;
       if (!_hostScopedSettingsKeys.contains(entry.key)) {
         preparedSettings[entry.key] = entry.value;
         continue;

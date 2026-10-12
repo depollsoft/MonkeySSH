@@ -229,6 +229,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   List<TmuxWindow>? _windows;
   AgentLaunchTool? _preferredLaunchTool;
   final _alertTracker = TmuxAlertTracker();
+  HostNotificationPrefs _hostPrefs = const HostNotificationPrefs();
+  ProviderSubscription<AsyncValue<HostNotificationPrefs>>?
+  _hostPrefsSubscription;
   // Kitty identifiers are chosen by each program, so multipart assembly is
   // kept per window.
   final _forwardedNotificationParsersByWindowKey =
@@ -330,7 +333,21 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     _windowLoader.load();
     _subscribeToWindowChanges();
     _subscribeToNativeAcpSessions();
+    _watchHostNotificationPrefs();
     pushLocalAlertListeners.add(widget.session.connectionId);
+  }
+
+  /// Keeps [_hostPrefs] current so an alert is decided synchronously, in
+  /// order with the close requests that may follow it in the same snapshot.
+  void _watchHostNotificationPrefs() {
+    _hostPrefsSubscription?.close();
+    _hostPrefsSubscription = widget.ref.listenManual(
+      hostNotificationPrefsProvider(widget.session.hostId),
+      (_, next) {
+        if (next.value case final prefs?) _hostPrefs = prefs;
+      },
+      fireImmediately: true,
+    );
   }
 
   @override
@@ -340,6 +357,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       pushLocalAlertListeners
         ..remove(oldWidget.session.connectionId)
         ..add(widget.session.connectionId);
+    }
+    if (oldWidget.session.hostId != widget.session.hostId) {
+      _hostPrefs = const HostNotificationPrefs();
+      _watchHostNotificationPrefs();
     }
     final sessionChanged =
         oldWidget.session.connectionId != widget.session.connectionId ||
@@ -397,6 +418,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   @override
   void dispose() {
     pushLocalAlertListeners.remove(widget.session.connectionId);
+    _hostPrefsSubscription?.close();
     _clearPendingSelectedWindow(notify: false);
     _windowLoader.dispose();
     unawaited(_windowChangeSubscription?.cancel());
@@ -870,20 +892,16 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   /// Buzzes and runs [show] only when this host's notification preferences
-  /// allow [kind]. Callers record the alert as seen either way, so turning
-  /// the kind back on does not replay it.
+  /// allow [kind]. It decides synchronously, so a show stays ahead of a close
+  /// for the same notification. Callers record the alert as seen either way,
+  /// so turning the kind back on does not replay it.
   void _showIfHostAllows(
     HostNotificationKind kind,
     Future<void> Function() show,
   ) {
-    final readPrefs = widget.ref.read(hostNotificationPrefsReaderProvider);
-    final hostId = widget.session.hostId;
-    unawaited(() async {
-      final prefs = await readPrefs(hostId);
-      if (!mounted || !prefs.allows(kind)) return;
-      unawaited(HapticFeedback.mediumImpact());
-      await show();
-    }());
+    if (!_hostPrefs.allows(kind)) return;
+    unawaited(HapticFeedback.mediumImpact());
+    unawaited(show());
   }
 
   void _clearSeenAlertNotifications() {

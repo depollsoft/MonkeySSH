@@ -241,14 +241,10 @@ class _ShellNotificationsSubtitle extends StatelessWidget {
           TextSpan(
             style: style,
             children: [
-              const TextSpan(text: 'Posted by remote programs ('),
-              // Kept on one line.
-              TextSpan(text: 'OSC\u00A09', style: code),
-              const TextSpan(text: ', '),
-              TextSpan(text: '777', style: code),
-              const TextSpan(text: ', '),
-              TextSpan(text: '99', style: code),
-              const TextSpan(text: ')'),
+              const TextSpan(text: 'Posted by remote programs '),
+              // One unit, so the codes never leave a fragment on a line of
+              // their own.
+              TextSpan(text: '(OSC\u00A09,\u00A0777,\u00A099)', style: code),
             ],
           ),
         ),

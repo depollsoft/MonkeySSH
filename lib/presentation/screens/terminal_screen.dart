@@ -6304,6 +6304,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         host,
         tmuxSession,
       );
+      // The offer's consent covered this attach only.
+      _monkeyMuxInstallPreApproved = false;
       if (attachCommand == null) {
         _suppressRemoteMuxDetectionConnectionId = session.connectionId;
         return (command: null, handled: true);

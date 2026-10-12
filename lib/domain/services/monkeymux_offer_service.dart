@@ -5,7 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'serial_task_queue.dart';
 import 'settings_service.dart';
 
-const _pendingKey = 'monkeymux_offer_pending_hosts';
+/// The setting that lists hosts still to be offered MonkeyMux.
+const monkeyMuxOfferPendingSettingKey = 'monkeymux_offer_pending_hosts';
 
 /// Remembers which new hosts should be offered MonkeyMux on their first
 /// connection.
@@ -36,7 +37,7 @@ class MonkeyMuxOfferService {
   });
 
   Future<Set<int>> _read() async {
-    final raw = await _settings.getString(_pendingKey);
+    final raw = await _settings.getString(monkeyMuxOfferPendingSettingKey);
     if (raw == null) return <int>{};
     try {
       final decoded = jsonDecode(raw);
@@ -46,8 +47,10 @@ class MonkeyMuxOfferService {
     }
   }
 
-  Future<void> _write(Set<int> pending) =>
-      _settings.setString(_pendingKey, jsonEncode(pending.toList()..sort()));
+  Future<void> _write(Set<int> pending) => _settings.setString(
+    monkeyMuxOfferPendingSettingKey,
+    jsonEncode(pending.toList()..sort()),
+  );
 }
 
 /// The [MonkeyMuxOfferService].

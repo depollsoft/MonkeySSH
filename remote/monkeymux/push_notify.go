@@ -222,6 +222,10 @@ type pushControlRequest struct {
 // pushControlResult carries push fields on a control response.
 type pushControlResult struct {
 	Result string `json:"result,omitempty"`
+	// Events echoes, on push_registered, the categories the registration
+	// will receive. Helpers before 0.1.233 ignore the request's events and
+	// echo nothing, which tells the app they cannot filter.
+	Events *[]string `json:"events,omitempty"`
 }
 
 // pushPresence is what one device last told this server about itself.
@@ -394,11 +398,15 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 				Push:   &pushControlResult{Result: result},
 			}
 		}
+		events := pushEventCategories
+		if record.Events != nil {
+			events = *record.Events
+		}
 		return controlResponse{
 			ID:     request.ID,
 			Type:   "push_registered",
 			Status: "ok",
-			Push:   &pushControlResult{Result: result},
+			Push:   &pushControlResult{Result: result, Events: &events},
 		}
 	case "push_unregister":
 		if !pushDeviceIDPattern.MatchString(deviceID) {

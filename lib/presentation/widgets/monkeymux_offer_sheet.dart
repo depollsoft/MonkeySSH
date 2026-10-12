@@ -41,7 +41,14 @@ class MonkeyMuxOfferSheet extends StatelessWidget {
       color: colorScheme.onSurface,
     );
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+      // useSafeArea guards only the top; keep the buttons clear of the home
+      // indicator and gesture bar.
+      padding: EdgeInsets.fromLTRB(
+        24,
+        0,
+        24,
+        16 + MediaQuery.viewPaddingOf(context).bottom,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -116,7 +123,14 @@ class _Benefit extends StatelessWidget {
         children: [
           Icon(icon, size: 20, color: theme.colorScheme.onSurfaceVariant),
           const SizedBox(width: 12),
-          Expanded(child: Text(text, style: theme.textTheme.bodyMedium)),
+          Expanded(
+            child: Text(
+              text,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+          ),
         ],
       ),
     );

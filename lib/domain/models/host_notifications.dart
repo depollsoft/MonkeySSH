@@ -48,6 +48,9 @@ extension HostSessionKindNotifications on HostSessionKind {
   bool get canPushWhenClosed => this == HostSessionKind.monkeyMux;
 }
 
+/// How many push event categories exist: attention, finished, bell, notice.
+const pushEventCategoryCount = 4;
+
 /// A saved host's notification preferences. Each kind applies to every
 /// notification from the host, shown by the app or pushed while it is closed.
 @immutable

@@ -176,6 +176,10 @@ class _FakeLink implements PushHostLink {
   String? registerResult;
   Completer<void>? registerGate;
 
+  /// Whether the helper applies registration events (0.1.233+) and echoes
+  /// them on push_registered.
+  bool filtersEvents = true;
+
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
 
@@ -199,6 +203,12 @@ class _FakeLink implements PushHostLink {
         registerResult = null;
         return MonkeyMuxPushControlResult(ok: true, result: result);
       }
+      final push = command['push']! as Map<String, Object?>;
+      return MonkeyMuxPushControlResult(
+        ok: true,
+        result: 'registered',
+        events: filtersEvents ? (push['events']! as List<String>) : null,
+      );
     }
     return MonkeyMuxPushControlResult(
       ok: true,
@@ -667,6 +677,51 @@ void main() {
         expect(link.types, contains('push_register'));
       },
     );
+
+    test('a helper that cannot filter is not left sending what was turned '
+        'off', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1)
+        ..filtersEvents = false;
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(windowAlerts: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(
+        link.types,
+        containsAllInOrder(['push_register', 'push_unregister']),
+      );
+      expect(h.state.registeredHostIds, isEmpty);
+      expect(await h.controller.sendTest(), PushTestOutcome.hostNeedsUpdate);
+
+      // With nothing turned off, the same helper is fine.
+      final allOn = _FakeLink(connectionId: 11, hostId: 2)
+        ..filtersEvents = false;
+      h.links.add(allOn);
+      await h.controller.syncNow();
+      expect(allOn.types, contains('push_register'));
+      expect(allOn.types, isNot(contains('push_unregister')));
+    });
+
+    test('a host turned off by a run that ended mid-way is unregistered at '
+        'the next start', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(h.state.registeredHostIds, {1});
+      // The host row says off, but the app stopped before unregistering.
+      h.hostPrefs[1] = const HostNotificationPrefs().withPushWhenClosed(
+        enabled: false,
+      );
+      link.commands.clear();
+      await h.restart();
+      await h.controller.syncNow();
+      expect(link.types, contains('push_unregister'));
+      expect(h.state.disabledHostIds, {1});
+      expect(h.state.registeredHostIds, isEmpty);
+    });
 
     test('setHostEnabled saves the choice on the host', () async {
       await h.start();

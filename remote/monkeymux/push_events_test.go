@@ -324,3 +324,32 @@ func TestPushVersion2FileKeepsItsRegistrations(t *testing.T) {
 		t.Fatalf("after a write, file = %s", data)
 	}
 }
+
+func TestPushRegisteredEchoesTheEventsItWillSend(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	echo := func(events *[]string) string {
+		t.Helper()
+		request := pushTestRegisterRequest(device)
+		request.Push.Events = events
+		response := h.control(t, request)
+		if response.Type != "push_registered" {
+			t.Fatalf("register response = %+v", response)
+		}
+		data, err := json.Marshal(response.Push)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// The app reads the echo to know this helper can filter.
+	if got := echo(nil); got != `{"result":"registered","events":["attention","finished","bell","notice"]}` {
+		t.Fatalf("echo without events = %s", got)
+	}
+	if got := echo(pushTestEvents(pushEventNotice, "bogus")); got != `{"result":"registered","events":["notice"]}` {
+		t.Fatalf("echo with events = %s", got)
+	}
+	if got := echo(pushTestEvents()); got != `{"result":"registered","events":[]}` {
+		t.Fatalf("echo with no events = %s", got)
+	}
+}

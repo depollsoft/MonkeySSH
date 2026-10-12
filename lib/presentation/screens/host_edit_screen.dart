@@ -936,7 +936,13 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Launch After Connect', style: theme.textTheme.titleMedium),
+        Text(
+          'launch after connect',
+          style: FluttyTheme.displayMono(
+            fontSize: 15,
+            color: colorScheme.onSurface,
+          ),
+        ),
         const SizedBox(height: 8),
         Text(
           'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',

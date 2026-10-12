@@ -335,6 +335,13 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   preference. When a device has two registrations for the session (two saved
   hosts, see Storage), an event goes once, through the newest registration
   that wants it.
+- `push_registered` echoes the categories the registration will receive in
+  `push.events`. Helpers before 0.1.233 ignore `events` and echo nothing, so
+  they would push everything. When a saved host has any kind turned off and
+  the answer has no echo, the app sends `push_unregister` for that saved host
+  and treats the helper like one without push support (retried later; Send
+  test reports that the host needs a MonkeyMux update). It never leaves a
+  registration in place that sends what the user turned off.
 - `push_unregister` with a `hostRef` removes that one saved host's
   registration; without one it removes every registration of the device. It
   answers `push_unregistered`.

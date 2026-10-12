@@ -20,3 +20,17 @@ final hostNotificationPrefsReaderProvider =
         }
       };
     });
+
+/// A saved host's notification preferences as they change, for code that
+/// must decide synchronously, such as the window bar keeping its alerts in
+/// order with their close requests. A host that is gone allows everything.
+final hostNotificationPrefsProvider =
+    StreamProvider.family<HostNotificationPrefs, int>((ref, hostId) {
+      final repository = ref.watch(hostRepositoryProvider);
+      return repository.watchAll().map((hosts) {
+        for (final host in hosts) {
+          if (host.id == hostId) return HostNotificationPrefs.fromHost(host);
+        }
+        return const HostNotificationPrefs();
+      });
+    });

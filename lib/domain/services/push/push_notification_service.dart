@@ -511,12 +511,17 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       }
     }
     if (_disposed) return;
+    // A host turned off whose registration is still on the books was turned
+    // off by a run that ended before it could unregister; leave it out here
+    // so the reconcile below unregisters it.
+    final unfinished = prunedHosts.intersection(_registeredHostIds);
     state = state.copyWith(
       loaded: true,
       enabled: registered,
-      disabledHostIds: prunedHosts,
+      disabledHostIds: prunedHosts.difference(unfinished),
       registeredHostIds: Set.unmodifiable(_registeredHostIds),
     );
+    if (unfinished.isNotEmpty) unawaited(_reconcileHostPush());
     if (registered) {
       // A token that rotated while the app was not running never reaches
       // onTokenRefresh, so compare the current token at every start.
@@ -1286,16 +1291,17 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     HostNotificationPrefs prefs,
   ) async {
     try {
+      final hostRef = await derivePushHostRef(
+        hostRefKey: secrets.hostRefKey,
+        hostId: link.hostId,
+      );
       final result = await link.send(<String, Object?>{
         'type': 'push_register',
         'push': {
           'deviceId': secrets.deviceId,
           'ticket': secrets.ticket,
           'publicKey': secrets.keyPair.encodedPublicKey,
-          'hostRef': await derivePushHostRef(
-            hostRefKey: secrets.hostRefKey,
-            hostId: link.hostId,
-          ),
+          'hostRef': hostRef,
           'events': prefs.pushEvents,
         },
       });
@@ -1321,6 +1327,28 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         // The host remembers that the function refused this ticket.
         _refusedTicket = secrets.ticket;
         _requestRefresh(newToken: result.result == 'token_unregistered');
+        return false;
+      }
+      final deviceId = secrets.deviceId;
+      if (result.ok &&
+          result.events == null &&
+          prefs.pushEvents.length < pushEventCategoryCount &&
+          deviceId != null) {
+        // A helper before 0.1.233 ignores the kinds this host turned off
+        // and would push them anyway. Take the registration back and treat
+        // the helper as needing an update rather than send what the user
+        // turned off.
+        _unsupported[_keyOf(link)] = _now();
+        _log.info(
+          _diagnosticsCategory,
+          'host_register_unfiltered',
+          fields: {'connectionId': link.connectionId},
+        );
+        try {
+          await link.send(_unregisterCommand(_pendingEntry(deviceId, hostRef)));
+        } on Object {
+          // The next attempt after the retry interval takes it back again.
+        }
         return false;
       }
       return result.ok;
