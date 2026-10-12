@@ -129,6 +129,20 @@ type acpBridgeInfo struct {
 	NextSequence   uint64 `json:"nextSequence"`
 	// Writer is the client holding the input lease, when one is attached.
 	Writer *acpWriterInfo `json:"writer,omitempty"`
+	// Push notification signals; see acp_bridge_push.go.
+	PermissionRequests uint64 `json:"permissionRequestCount,omitempty"`
+	InputRequests      uint64 `json:"inputRequestCount,omitempty"`
+	CompletedTurns     uint64 `json:"completedTurnCount,omitempty"`
+	PendingPermission  int    `json:"pendingPermissionCount,omitempty"`
+	PendingInput       int    `json:"pendingInputCount,omitempty"`
+	// LegacyPendingAttention is the combined count an earlier build of this
+	// branch reported; read only so a bridge preserved across an upgrade keeps
+	// raising its pending requests.
+	LegacyPendingAttention int `json:"pendingAttentionCount,omitempty"`
+	// PushDelivered records, per "deviceId:kind", the newest pending-request
+	// generation a server has pushed. It lives in the bridge so a server that
+	// restarts or is replaced does not push the same request again.
+	PushDelivered map[string]uint64 `json:"pushDelivered,omitempty"`
 }
 
 // acpLaunchConfig is sent once through the detached daemon's private stdin
@@ -233,6 +247,7 @@ type acpBridge struct {
 	providerOutputDone   chan struct{}
 	beforeClientVisible  func()
 	beforePublishVisible func(acpWireMessage)
+	push                 acpBridgePushSignals
 	stopOnce             sync.Once
 	done                 chan struct{}
 }
@@ -1049,6 +1064,7 @@ func (b *acpBridge) trackClientRequest(envelope acpEnvelope) (string, bool) {
 	id := acpRequestKey(envelope.ID)
 	b.mu.Lock()
 	b.inFlightTurns[id] = struct{}{}
+	b.push.trackClientRequestLocked(envelope.method, id)
 	if isAcpSessionSetupMethod(envelope.method) {
 		b.sessionSetupRequests[id] = acpSessionID(envelope.Params)
 	}
@@ -1067,6 +1083,7 @@ func (b *acpBridge) untrackClientRequest(id string) {
 	delete(b.inFlightTurns, id)
 	delete(b.sessionSetupRequests, id)
 	delete(b.initializeRequestIDs, id)
+	b.push.forgetClientRequestLocked(id)
 	b.mu.Unlock()
 }
 
@@ -1271,6 +1288,7 @@ func (b *acpBridge) publish(
 	}
 	if pendingID != "" {
 		b.pendingRequests[pendingID] = struct{}{}
+		b.push.observeProviderRequestLocked(envelope.method, pendingID)
 		// A reused id names a new request; only an older one was cancelled.
 		b.forgetCancelledRequestLocked(pendingID)
 	}
@@ -1280,6 +1298,7 @@ func (b *acpBridge) publish(
 	}
 	if providerResponseID != "" {
 		delete(b.inFlightTurns, providerResponseID)
+		b.push.observeProviderResponseLocked(providerResponseID)
 		if _, ok := b.initializeRequestIDs[providerResponseID]; ok {
 			if len(envelope.Error) == 0 && len(envelope.Result) > 0 && string(envelope.Result) != "null" {
 				b.initializeResult = envelope.Result
@@ -1497,6 +1516,8 @@ func (b *acpBridge) handleCommand(conn net.Conn, message acpWireMessage) {
 		if b.shouldIdleShutdown(time.Now()) {
 			b.stop()
 		}
+	case acpPushDeliveredCommand:
+		b.handlePushDeliveredCommand(conn, message)
 	case "stop":
 		_ = writeAcpWireFrame(conn, acpWireMessage{
 			Version:  acpBridgeProtocolVersion,
@@ -1998,7 +2019,7 @@ func (b *acpBridge) snapshot() acpBridgeInfo {
 }
 
 func (b *acpBridge) snapshotLocked() acpBridgeInfo {
-	return acpBridgeInfo{
+	info := acpBridgeInfo{
 		ID:             b.id,
 		ProviderID:     b.providerID,
 		SessionID:      b.sessionID,
@@ -2013,7 +2034,14 @@ func (b *acpBridge) snapshotLocked() acpBridgeInfo {
 		StartedAt:      b.startedAt.Unix(),
 		NextSequence:   b.nextSequence,
 		Writer:         b.writerInfoLocked(b.clock()),
+
+		PermissionRequests: b.push.permissionRequests,
+		InputRequests:      b.push.inputRequests,
+		CompletedTurns:     b.push.completedTurns,
 	}
+	info.PendingPermission, info.PendingInput = b.push.pendingAttentionLocked(b.pendingRequests)
+	info.PushDelivered = b.push.deliveredSnapshotLocked()
+	return info
 }
 
 func (b *acpBridge) shouldIdleShutdown(now time.Time) bool {
