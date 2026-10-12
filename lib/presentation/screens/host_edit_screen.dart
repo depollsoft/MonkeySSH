@@ -973,7 +973,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Startup behavior',
             prefixIcon: Icon(Icons.play_circle_outline),
-            helperText: 'Pick what MonkeySSH starts after connecting. MonkeyMux is recommended: windows survive reconnects, and it adds native agent chats and alerts when MonkeySSH is closed. Choose tmux for an existing remote tmux setup.',
+            helperText: 'MonkeyMux is recommended: windows survive reconnects, and it adds native agent chats and alerts when MonkeySSH is closed.',
             helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: _hostStartupModeOptions
