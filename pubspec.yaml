@@ -93,6 +93,8 @@ dependencies:
   firebase_core: ^4.15.0
   firebase_analytics: ^12.6.0
   firebase_crashlytics: ^5.4.0
+  firebase_messaging: ^16.7.0
+  firebase_app_check: ^0.4.8
   mime: ^2.1.0
 
 dependency_overrides:

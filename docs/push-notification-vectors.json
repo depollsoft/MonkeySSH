@@ -1,0 +1,64 @@
+{
+  "description": "Shared test vectors for docs/push-notifications.md. Every key and nonce is derived at test time as SHA-256 of a public label (nonces take the first 12 bytes), so this file holds no key material. Binary values are unpadded base64url; *Digest values are hex SHA-256 of an intermediate result. Consumed by the Go (remote/monkeymux), TypeScript (functions/) and Dart (test/) suites; regenerate all three together if this file changes.",
+  "payload": {
+    "info": "monkeyssh-push-v1",
+    "deviceLabel": "monkeyssh push vector device key",
+    "ephemeralLabel": "monkeyssh push vector ephemeral key",
+    "nonceLabel": "monkeyssh push vector payload nonce",
+    "devicePublic": "kNVNDuf-azvVpdDradyv-Jr3GhcLonhkgTfqU8NT_gM",
+    "ephemeralPublic": "fa9IetCBu9bClPKRFAYi9V0_fjoAkmt9fRyiD7cgdws",
+    "sharedDigest": "cecf4e1a4ac55fd20644d0290de42279c3af1f4a31517aed63959f6e3ea98fd1",
+    "derivedDigest": "9acc4815c347f114c81b47ecd5cafa0cb9d5ce4d16bae16df7b65254a00a45ac",
+    "plaintext": "{\"v\":1,\"hostRef\":\"Vv2a6mQZbW3x9R1c\",\"window\":\"@3\",\"sessionId\":\"main\",\"kind\":\"permission\",\"ts\":1760000000}",
+    "payload": "fa9IetCBu9bClPKRFAYi9V0_fjoAkmt9fRyiD7cgdwuRvN8t3B3OksI-DKmO-ngsZJCKKMrZq5o81pxzPk__2oIko1WUdRYZj_sB9GHkFzvfSr0-7az1gZ3WvbqNMI7KczdIydn2_PUSVRS8X1M7Q1bOBVKE7Xlkra2bzfubtlZ8c9NmOTEv1fZevsHZCds-BK8m1vwDVe8PUFCMiIzARd_qUOXd",
+    "rejected": [
+      {
+        "reason": "ciphertext byte 50 flipped",
+        "payload": "fa9IetCBu9bClPKRFAYi9V0_fjoAkmt9fRyiD7cgdwuRvN8t3B3OksI-DKmO-ngsZJCLKMrZq5o81pxzPk__2oIko1WUdRYZj_sB9GHkFzvfSr0-7az1gZ3WvbqNMI7KczdIydn2_PUSVRS8X1M7Q1bOBVKE7Xlkra2bzfubtlZ8c9NmOTEv1fZevsHZCds-BK8m1vwDVe8PUFCMiIzARd_qUOXd"
+      },
+      {
+        "reason": "shorter than ephemeral key, nonce and tag",
+        "payload": "fa9IetCBu9bClPKRFAYi9V0_fjoAkmt9fRyiD7cgdwuRvN8t3B3OksI-DKmO-ngsZJCKKMrZq5o81pxz"
+      },
+      {
+        "reason": "not base64url",
+        "payload": "fa9IetCBu9bClPKR+AYi9V0/fjoAkmt9fRyiD7cgdws="
+      }
+    ]
+  },
+  "ticket": {
+    "keyId": "k1",
+    "sealingLabel": "monkeyssh push vector ticket key",
+    "nonceLabel": "monkeyssh push vector ticket nonce",
+    "aad": "v1.k1",
+    "plaintext": "{\"t\":\"fcm-vector-token:APA91bExampleTokenForTestVectorsOnly\",\"d\":\"pX7cQe2LrV0sNw4yJk9aTg\",\"i\":1760000000,\"p\":\"ios\"}",
+    "ticket": "v1.k1.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40",
+    "rejected": [
+      {
+        "reason": "sealed byte 20 flipped",
+        "ticket": "v1.k1.48ZmHjXl3WB85npqIAa8_-6obH02YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40"
+      },
+      {
+        "reason": "key id swapped, so the AAD no longer matches",
+        "ticket": "v1.k2.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40",
+        "extraKeyId": "k2"
+      },
+      {
+        "reason": "unknown key id",
+        "ticket": "v1.k9.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40"
+      },
+      {
+        "reason": "unsupported version",
+        "ticket": "v2.k1.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40"
+      },
+      {
+        "reason": "missing sealed part",
+        "ticket": "v1.k1."
+      },
+      {
+        "reason": "non-canonical base64url: unused trailing bits set on the last character",
+        "ticket": "v1.k1.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy41"
+      }
+    ]
+  }
+}
