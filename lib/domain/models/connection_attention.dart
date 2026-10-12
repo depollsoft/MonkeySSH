@@ -2,23 +2,26 @@ import 'package:flutter/foundation.dart';
 
 import 'acp_session_state.dart';
 import 'monkeymux_acp_bridge.dart';
+import 'terminal_program_status.dart';
 import 'terminal_progress.dart';
 import 'tmux_state.dart';
 
 /// Why a window or native session asks for the user, most urgent first.
 ///
 /// Every reason is reported by a program or the host: a native agent's
-/// pending request, a bell, a desktop notification escape, OSC 9;4 progress,
-/// or an account allowance. None is guessed from screen contents or keyed on
-/// an agent's name.
+/// pending request, an OSC 7501 program status, a bell, a desktop
+/// notification escape, OSC 9;4 progress, or an account allowance. None is
+/// guessed from screen contents or keyed on an agent's name.
 enum AttentionReason {
-  /// A native agent asked to run a tool or write a file.
+  /// A native agent asked to run a tool or write a file, or a terminal
+  /// program reported it is blocked on permission.
   permission,
 
-  /// A native agent asked a question (`elicitation/create`).
+  /// A native agent asked a question (`elicitation/create`), or a terminal
+  /// program reported it is blocked on a question.
   input,
 
-  /// A native agent needs the user to sign in.
+  /// A native agent or a terminal program needs the user to sign in.
   signIn,
 
   /// The host reports a native agent request with no attached client.
@@ -26,13 +29,18 @@ enum AttentionReason {
   /// The request's kind is unknown until the session is opened.
   hostRequest,
 
+  /// A terminal program reported it cannot continue until the user acts,
+  /// without saying what it needs.
+  blocked,
+
   /// A terminal window rang the bell or raised a multiplexer alert flag.
   alert,
 
   /// A terminal window sent a desktop notification escape in the background.
   notification,
 
-  /// A terminal program reported OSC 9;4 progress in its error state.
+  /// A terminal program reported an error: OSC 9;4 progress in its error
+  /// state, or an OSC 7501 error status.
   progressError,
 
   /// A terminal program reported OSC 9;4 progress paused or in warning.
@@ -42,11 +50,11 @@ enum AttentionReason {
   lowQuota;
 
   /// Whether the agent is blocked until the user answers.
-  bool get isWaitingOnYou => index <= hostRequest.index;
+  bool get isWaitingOnYou => index <= blocked.index;
 
   /// Sort tier: blocked agents, then alerts, then warnings.
   int get tier => switch (this) {
-    permission || input || signIn || hostRequest => 0,
+    permission || input || signIn || hostRequest || blocked => 0,
     alert || notification || progressError => 1,
     progressPaused || lowQuota => 2,
   };
@@ -155,18 +163,38 @@ DateTime acpSessionWaitingSince(AcpSessionState session) {
 
 /// Returns the most urgent generic signal a terminal [window] reports.
 ///
-/// Uses only multiplexer flags, forwarded notification escapes and OSC 9;4
-/// progress, plus [lowQuota] from the account allowance rings. Output timing
-/// is activity, not attention, and never produces a reason here.
+/// Uses only the program's OSC 7501 status, multiplexer flags, forwarded
+/// notification escapes and OSC 9;4 progress, plus [lowQuota] from the
+/// account allowance rings. Output timing is activity, not attention, and
+/// never produces a reason here.
+///
+/// A blocked program outranks an alert, as the status badges rank them; any
+/// other reported status yields to an alert, and replaces OSC 9;4 progress.
 AttentionReason? terminalWindowAttentionReason(
   TmuxWindow window, {
   bool lowQuota = false,
 }) {
+  switch (window.reportedStatus) {
+    case TerminalProgramStatus(
+      state: TerminalProgramState.blocked,
+      :final kind,
+    ):
+      return switch (kind) {
+        TerminalProgramBlockedKind.permission => AttentionReason.permission,
+        TerminalProgramBlockedKind.question => AttentionReason.input,
+        TerminalProgramBlockedKind.auth => AttentionReason.signIn,
+        null => AttentionReason.blocked,
+      };
+    case TerminalProgramStatus(state: TerminalProgramState.error):
+      return AttentionReason.progressError;
+    case _:
+      break;
+  }
   if (window.hasAlert) return AttentionReason.alert;
   if (window.pendingNotifications.isNotEmpty) {
     return AttentionReason.notification;
   }
-  switch (window.terminalProgress?.state) {
+  switch (window.activityProgress?.state) {
     case TerminalProgressState.error:
       return AttentionReason.progressError;
     case TerminalProgressState.pausedOrWarning:
@@ -286,4 +314,23 @@ bool terminalWindowRecentlyActive(TmuxWindow window, {DateTime? now}) {
   final last = terminalWindowLastActivity(window, now: reference);
   if (last == null) return false;
   return reference.difference(last).inSeconds <= terminalQuietAfterSeconds;
+}
+
+/// Whether OSC 9;4 progress, or the OSC 7501 status that replaces it, reports
+/// work underway.
+bool terminalProgressIsRunning(TerminalProgress? progress) =>
+    progress?.state == TerminalProgressState.normal ||
+    progress?.state == TerminalProgressState.indeterminate;
+
+/// Whether a terminal [window] is working now.
+///
+/// A program's OSC 7501 status is authoritative: it says working or it does
+/// not. Without one, OSC 9;4 progress counts as work, and so does output
+/// within [terminalQuietAfterSeconds] of [now].
+bool terminalWindowWorking(TmuxWindow window, {DateTime? now}) {
+  if (window.reportedStatus case final status?) {
+    return status.state == TerminalProgramState.working;
+  }
+  return terminalProgressIsRunning(window.activityProgress) ||
+      terminalWindowRecentlyActive(window, now: now);
 }

@@ -5,6 +5,7 @@ import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/connection_attention.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
+import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 
@@ -278,6 +279,160 @@ void main() {
         ),
         isNull,
         reason: 'Normal progress is activity, not attention.',
+      );
+    });
+
+    test('reads a program\'s OSC 7501 status', () {
+      TmuxWindow reporting(
+        TerminalProgramState state, {
+        TerminalProgramBlockedKind? kind,
+        String? flags,
+        TerminalProgress? progress,
+      }) => TmuxWindow(
+        index: 0,
+        name: 'claude',
+        isActive: false,
+        flags: flags,
+        terminalProgress: progress,
+        programStatus: TerminalProgramStatus(state: state, kind: kind),
+      );
+
+      expect(
+        terminalWindowAttentionReason(
+          reporting(
+            TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.permission,
+          ),
+        ),
+        AttentionReason.permission,
+      );
+      expect(
+        terminalWindowAttentionReason(
+          reporting(
+            TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.question,
+          ),
+        ),
+        AttentionReason.input,
+      );
+      expect(
+        terminalWindowAttentionReason(
+          reporting(
+            TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.auth,
+          ),
+        ),
+        AttentionReason.signIn,
+      );
+      expect(
+        terminalWindowAttentionReason(
+          reporting(TerminalProgramState.blocked, flags: '#'),
+        ),
+        AttentionReason.blocked,
+        reason: 'A blocked program outranks the alert flag.',
+      );
+      expect(
+        terminalWindowAttentionReason(reporting(TerminalProgramState.error)),
+        AttentionReason.progressError,
+      );
+      expect(
+        terminalWindowAttentionReason(
+          reporting(TerminalProgramState.working, flags: '#'),
+        ),
+        AttentionReason.alert,
+        reason: 'Other reported states yield to the alert flag.',
+      );
+      expect(
+        terminalWindowAttentionReason(
+          reporting(
+            TerminalProgramState.idle,
+            progress: const TerminalProgress(
+              state: TerminalProgressState.error,
+            ),
+          ),
+        ),
+        isNull,
+        reason: 'A reported status replaces stale OSC 9;4 progress.',
+      );
+      expect(
+        terminalWindowAttentionReason(reporting(TerminalProgramState.done)),
+        isNull,
+      );
+      for (final reason in [
+        AttentionReason.permission,
+        AttentionReason.input,
+        AttentionReason.signIn,
+        AttentionReason.blocked,
+      ]) {
+        expect(reason.isWaitingOnYou, isTrue);
+        expect(reason.tier, 0);
+      }
+    });
+  });
+
+  group('terminalWindowWorking', () {
+    final now = DateTime(2026, 1, 1, 12);
+    final recent = now.subtract(const Duration(seconds: 2));
+
+    test('a reported status overrides inferred activity', () {
+      TmuxWindow reporting(TerminalProgramState state) => TmuxWindow(
+        index: 0,
+        name: 'claude',
+        isActive: false,
+        lastActivityEpochSeconds: recent.millisecondsSinceEpoch ~/ 1000,
+        programStatus: TerminalProgramStatus(state: state),
+      );
+      expect(
+        terminalWindowWorking(
+          reporting(TerminalProgramState.working),
+          now: now,
+        ),
+        isTrue,
+      );
+      expect(
+        terminalWindowWorking(reporting(TerminalProgramState.idle), now: now),
+        isFalse,
+        reason: 'The program said it is idle, however recent its output.',
+      );
+      expect(
+        terminalWindowWorking(reporting(TerminalProgramState.done), now: now),
+        isFalse,
+      );
+    });
+
+    test('falls back to progress, then output timing', () {
+      expect(
+        terminalWindowWorking(
+          const TmuxWindow(
+            index: 0,
+            name: 'build',
+            isActive: false,
+            terminalProgress: TerminalProgress(
+              state: TerminalProgressState.indeterminate,
+            ),
+          ),
+          now: now,
+        ),
+        isTrue,
+      );
+      expect(
+        terminalWindowWorking(
+          TmuxWindow(
+            index: 0,
+            name: 'build',
+            isActive: false,
+            lastActivityEpochSeconds: recent.millisecondsSinceEpoch ~/ 1000,
+          ),
+          now: now,
+        ),
+        isTrue,
+      );
+      expect(
+        terminalWindowWorking(
+          const TmuxWindow(index: 0, name: 'build', isActive: false),
+          now: now,
+        ),
+        isFalse,
       );
     });
   });

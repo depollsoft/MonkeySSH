@@ -16,6 +16,7 @@ extension AttentionReasonPresentation on AttentionReason {
     AttentionReason.input => 'input',
     AttentionReason.signIn => 'sign-in',
     AttentionReason.hostRequest => 'request',
+    AttentionReason.blocked => 'blocked',
     AttentionReason.alert => 'alert',
     AttentionReason.notification => 'notification',
     AttentionReason.progressError => 'error',
@@ -29,6 +30,7 @@ extension AttentionReasonPresentation on AttentionReason {
     AttentionReason.input => 'asked a question',
     AttentionReason.signIn => 'needs sign-in',
     AttentionReason.hostRequest => 'has a request pending',
+    AttentionReason.blocked => 'is waiting for you',
     AttentionReason.alert => 'rang the bell',
     AttentionReason.notification => 'sent a notification',
     AttentionReason.progressError => 'reported an error',
@@ -42,6 +44,7 @@ extension AttentionReasonPresentation on AttentionReason {
     AttentionReason.input => Icons.help_outline,
     AttentionReason.signIn => Icons.lock_outline,
     AttentionReason.hostRequest => Icons.pending_actions,
+    AttentionReason.blocked => Icons.front_hand_outlined,
     AttentionReason.alert => Icons.notifications_active,
     AttentionReason.notification => Icons.mark_chat_unread_outlined,
     AttentionReason.progressError => Icons.error_outline,
@@ -58,6 +61,7 @@ extension AttentionReasonPresentation on AttentionReason {
     AttentionReason.input ||
     AttentionReason.signIn ||
     AttentionReason.hostRequest ||
+    AttentionReason.blocked ||
     AttentionReason.progressPaused ||
     AttentionReason.lowQuota => AcpStatusTone.warning,
   };

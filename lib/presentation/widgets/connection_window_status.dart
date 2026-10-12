@@ -19,7 +19,7 @@ import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_usage_rings.dart';
 import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
-import '../../domain/models/terminal_progress.dart';
+import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/connection_attention_provider.dart';
@@ -206,9 +206,7 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
                 null => false,
               },
             ),
-            active:
-                terminalProgressIsRunning(window.terminalProgress) ||
-                terminalWindowRecentlyActive(window, now: reference),
+            active: terminalWindowWorking(window, now: reference),
             lastActivity: terminalWindowLastActivity(window, now: reference),
           ),
         ),
@@ -299,7 +297,9 @@ Duration? connectionWindowsNextResort(
   for (final entry in entries) {
     final window = entry.window;
     if (entry.isNative || window == null || entry.reason != null) continue;
-    if (terminalProgressIsRunning(window.terminalProgress)) continue;
+    // A reported status fixes the row; only inferred activity rolls over.
+    if (window.reportedStatus != null) continue;
+    if (terminalProgressIsRunning(window.activityProgress)) continue;
     final epoch = window.lastActivityEpochSeconds;
     if (epoch == null) continue;
     final age = now.difference(
@@ -322,11 +322,6 @@ DateTime? _latest(Iterable<DateTime?> times) {
   }
   return latest;
 }
-
-/// Whether OSC 9;4 progress reports work underway.
-bool terminalProgressIsRunning(TerminalProgress? progress) =>
-    progress?.state == TerminalProgressState.normal ||
-    progress?.state == TerminalProgressState.indeterminate;
 
 /// Compact status chip for a [ConnectionWindowEntry].
 ///
@@ -436,7 +431,31 @@ ConnectionWindowStatus connectionWindowStatus(
     }
   }
   final window = entry.window!;
-  final progress = window.terminalProgress;
+  switch (window.reportedStatus?.state) {
+    case TerminalProgramState.idle:
+      return ConnectionWindowStatus(
+        label: 'idle',
+        icon: Icons.circle_outlined,
+        tone: AcpStatusTone.neutral,
+        reported: true,
+        semanticsLabel: '$kind idle, reported by the program',
+      );
+    case TerminalProgramState.done:
+      return ConnectionWindowStatus(
+        label: 'done',
+        icon: Icons.check_circle_outline,
+        tone: AcpStatusTone.warning,
+        reported: true,
+        semanticsLabel: '$kind done, reported by the program',
+      );
+    // Blocked and error states are attention reasons, handled above.
+    case TerminalProgramState.working ||
+        TerminalProgramState.blocked ||
+        TerminalProgramState.error ||
+        null:
+      break;
+  }
+  final progress = window.activityProgress;
   if (terminalProgressIsRunning(progress)) {
     final percentage = progress!.percentage;
     final label = percentage == null ? 'working' : '$percentage%';
@@ -481,7 +500,8 @@ String? _coarseAge(Duration age) {
 Duration? _nextLabelChange(ConnectionWindowEntry entry, DateTime now) {
   if (entry.isNative || entry.reason != null) return null;
   final window = entry.window!;
-  if (terminalProgressIsRunning(window.terminalProgress)) return null;
+  if (window.reportedStatus != null) return null;
+  if (terminalProgressIsRunning(window.activityProgress)) return null;
   // An idle-only snapshot never ages, so only a reported epoch can roll over.
   final epoch = window.lastActivityEpochSeconds;
   if (epoch == null) return null;
