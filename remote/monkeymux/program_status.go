@@ -64,6 +64,16 @@ type programStatusRecord struct {
 	updated uint64
 }
 
+// programStatusReporter is the program that last spoke OSC 7501 in a window:
+// it asked the feature query or sent a report. While it runs, clients show
+// what it reports, or nothing, instead of guessing from output timing, and
+// ignore OSC 9;4 progress as the spec asks. It ends with its owner, like a
+// running record, or on RIS.
+type programStatusReporter struct {
+	owner   int
+	updated uint64
+}
+
 // programStatusSummary is the record a window publishes: its most urgent one,
 // with app inherited from the nearest ancestor. It is comparable so a window
 // broadcast can tell when it changed.
@@ -289,11 +299,11 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 	if !ok || query {
 		return
 	}
+	record.owner = w.noteProgramStatusReporterLocked()
 	if record.state == "clear" {
 		w.clearProgramStatusLocked(id)
 		return
 	}
-	record.owner = programStatusReportOwner(w)
 	w.programStatusClock++
 	record.updated = w.programStatusClock
 	if w.programStatus == nil {
@@ -309,6 +319,24 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 		}
 		delete(w.programStatus, oldestID)
 	}
+}
+
+// noteProgramStatusReporterLocked records the window's foreground program as
+// one that speaks OSC 7501 and returns the owner it was attributed to.
+func (w *muxWindow) noteProgramStatusReporterLocked() int {
+	owner := programStatusReportOwner(w)
+	w.programStatusClock++
+	w.programStatusReporter = &programStatusReporter{
+		owner:   owner,
+		updated: w.programStatusClock,
+	}
+	return owner
+}
+
+// resetProgramStatusLocked applies RIS: every record and the reporter go.
+func (w *muxWindow) resetProgramStatusLocked() {
+	w.programStatus = nil
+	w.programStatusReporter = nil
 }
 
 // clearProgramStatusLocked removes the record id names and its descendants;
@@ -348,20 +376,27 @@ func (w *muxWindow) dropRunningProgramStatusLocked(exited func(owner int) bool) 
 }
 
 // dropExitedProgramStatusLocked applies the spec's process-exit rule per
-// sender, which also covers shells that never mark a prompt with OSC 133.
+// sender, which also covers shells that never mark a prompt with OSC 133,
+// and ends the reporter when it exits.
 func (w *muxWindow) dropExitedProgramStatusLocked() bool {
-	if len(w.programStatus) == 0 {
+	if len(w.programStatus) == 0 && w.programStatusReporter == nil {
 		return false
 	}
 	exitedOwners := map[int]bool{}
-	return w.dropRunningProgramStatusLocked(func(owner int) bool {
+	exited := func(owner int) bool {
 		exited, checked := exitedOwners[owner]
 		if !checked {
 			exited = programStatusOwnerExited(owner)
 			exitedOwners[owner] = exited
 		}
 		return exited
-	})
+	}
+	dropped := w.dropRunningProgramStatusLocked(exited)
+	if reporter := w.programStatusReporter; reporter != nil && exited(reporter.owner) {
+		w.programStatusReporter = nil
+		dropped = true
+	}
+	return dropped
 }
 
 // programStatusSummaryLocked returns the window's most urgent record: blocked,
@@ -483,9 +518,17 @@ func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
 			record.owner = owner
 		}
 	}
+	if reporter := w.programStatusReporter; reporter != nil &&
+		reporter.owner == programStatusOwnerUnattributed && reporter.updated <= clock {
+		reporter.owner = owner
+	}
 }
 
 func (w *muxWindow) hasUnattributedProgramStatusLocked() bool {
+	if reporter := w.programStatusReporter; reporter != nil &&
+		reporter.owner == programStatusOwnerUnattributed {
+		return true
+	}
 	for _, record := range w.programStatus {
 		if record.owner == programStatusOwnerUnattributed {
 			return true

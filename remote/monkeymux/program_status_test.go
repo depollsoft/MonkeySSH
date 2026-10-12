@@ -375,6 +375,69 @@ func TestProgramStatusAttributesReportsLaterWithoutProcessGroups(t *testing.T) {
 	if remaining != 1 || window.programStatus["late"] == nil {
 		t.Fatalf("records = %v, want only the late report, now owned by the new child", window.programStatus)
 	}
+	if reporter := window.programStatusReporter; reporter == nil || reporter.owner != child {
+		t.Fatalf("reporter = %#v, want it attributed to the new child %d", reporter, child)
+	}
+}
+
+// A program that speaks OSC 7501 keeps clients from guessing its state while
+// it runs, even when it reports nothing (Claude Code clears its status while
+// a job is parked), and stops doing so when it exits or the terminal resets.
+func TestProgramStatusReporterFollowsTheProgram(t *testing.T) {
+	originalOwner := programStatusReportOwner
+	originalExited := programStatusOwnerExited
+	t.Cleanup(func() {
+		programStatusReportOwner = originalOwner
+		programStatusOwnerExited = originalExited
+	})
+	programStatusReportOwner = func(*muxWindow) int { return 100 }
+	exited := map[int]bool{}
+	programStatusOwnerExited = func(owner int) bool { return exited[owner] }
+
+	server := newMuxServer("program-status-reporter")
+	control := newControlRecorder(server)
+	server.controls[newControlClient(control)] = struct{}{}
+	window := &muxWindow{id: "@1", name: "claude", pty: &recordingPty{}, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	broadcast := func(output string) string {
+		_ = control.String()
+		control.Reset()
+		if output == "" {
+			server.dropExitedProgramStatus()
+		} else {
+			server.handleWindowOutput("@1", []byte(output))
+		}
+		return control.String()
+	}
+
+	if got := broadcast("\x1b]7501;?\x1b\\"); !strings.Contains(got, `"programStatusReporter":true`) ||
+		strings.Contains(got, `"programStatus":`) {
+		t.Fatalf("after the feature query broadcast = %s, want a reporter without a status", got)
+	}
+	broadcast(programStatusOsc("state=working:app=claude-code"))
+	if got := broadcast(programStatusOsc("state=clear")); !strings.Contains(got, `"programStatusReporter":true`) ||
+		strings.Contains(got, `"programStatus":`) {
+		t.Fatalf("after clear broadcast = %s, want the reporter kept without a status", got)
+	}
+	if got := broadcast(""); got != "" {
+		t.Fatalf("broadcast while the reporter runs = %s, want none", got)
+	}
+
+	exited[100] = true
+	if got := broadcast(""); !strings.Contains(got, `"type":"window_updated"`) ||
+		strings.Contains(got, `"programStatusReporter"`) {
+		t.Fatalf("after the reporter exited broadcast = %s, want an update without it", got)
+	}
+
+	exited[100] = false
+	broadcast("\x1b]7501;?\x1b\\")
+	broadcast("\x1bc")
+	server.mu.Lock()
+	reporter := window.programStatusReporter
+	server.mu.Unlock()
+	if reporter != nil {
+		t.Fatalf("reporter after RIS = %#v, want none", reporter)
+	}
 }
 
 func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {

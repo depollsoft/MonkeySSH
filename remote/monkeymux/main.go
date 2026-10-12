@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.230"
+	monkeyMuxVersion                  = "0.1.231"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -588,6 +588,10 @@ type windowSnapshot struct {
 	// ProgramStatus is the window's most urgent OSC 7501 record, absent when
 	// no program has reported one.
 	ProgramStatus *programStatusSnapshot `json:"programStatus,omitempty"`
+	// ProgramStatusReporter reports that the window's program speaks OSC
+	// 7501, so clients show what it reports (or nothing) instead of guessing
+	// its state from output timing.
+	ProgramStatusReporter bool `json:"programStatusReporter,omitempty"`
 	// Notifications holds unacknowledged desktop notification escapes
 	// captured from this window while it ran in the background, oldest
 	// first. Absent for plain shells and older clients ignore it.
@@ -853,9 +857,10 @@ type muxWindow struct {
 	// programStatus holds the window's OSC 7501 records by id; the root
 	// record's id is "". programStatusClock orders their updates, and
 	// programStatusQueries counts feature-detection queries owed a reply.
-	programStatus        map[string]*programStatusRecord
-	programStatusClock   uint64
-	programStatusQueries int
+	programStatus         map[string]*programStatusRecord
+	programStatusClock    uint64
+	programStatusQueries  int
+	programStatusReporter *programStatusReporter
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -983,6 +988,7 @@ type windowBroadcastIdentity struct {
 	progressPercentage    int
 	progressHasPercentage bool
 	programStatus         programStatusSummary
+	programStatusReporter bool
 }
 
 type controlClient struct {
@@ -9808,6 +9814,7 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		PrivateModes:              copyPrivateModes(window.privateModes),
 		TerminalProgress:          copyTerminalProgressSnapshot(window.terminalProgress),
 		ProgramStatus:             window.programStatusSummaryLocked().snapshot(),
+		ProgramStatusReporter:     window.programStatusReporter != nil,
 	}
 }
 
@@ -13629,6 +13636,7 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		}
 		if programStatusQuery {
 			w.programStatusQueries++
+			w.noteProgramStatusReporterLocked()
 		}
 		if output == nil {
 			output = make([]byte, 0, len(data)-(sequenceEnd-i))
@@ -15915,6 +15923,7 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 		alert:              w.alert,
 		programStatus:      w.programStatusSummaryLocked(),
 	}
+	identity.programStatusReporter = w.programStatusReporter != nil
 	if progress := w.terminalProgress; progress != nil {
 		identity.progressActive = true
 		identity.progressState = progress.State
@@ -16756,7 +16765,7 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 					// RIS removes every OSC 7501 record. Handled in this scan,
 					// not with the other modes, so it applies in byte order
 					// with the reports around it.
-					w.programStatus = nil
+					w.resetProgramStatusLocked()
 				}
 			case 0x9d:
 				if index >= leadingUtf8Prefix &&
