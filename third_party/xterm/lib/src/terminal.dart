@@ -62,6 +62,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// the bell. If not set, the terminal will do nothing.
   void Function()? onBell;
 
+  /// Function that is called after a full reset (RIS, `ESC c`) so state kept
+  /// outside the terminal, such as program status records, can reset too.
+  void Function()? onFullReset;
+
   /// Function that is called when the program requests the terminal to change
   /// the title of the window to [title].
   void Function(String title)? onTitleChange;
@@ -850,6 +854,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     }
 
     notifyListeners();
+    onFullReset?.call();
   }
 
   @override
