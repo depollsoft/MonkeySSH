@@ -778,7 +778,11 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 			}
 		}
 	}
-	admitted := make([]pushDeviceRecord, 0, len(devices))
+	type admittedDevice struct {
+		record pushDeviceRecord
+		alerts pushAlertCategories
+	}
+	admitted := make([]admittedDevice, 0, len(devices))
 	for _, device := range pushRecipients(devices, kind, alerts) {
 		if notifier.attendingLocked(device.DeviceID, windowID, view, now) {
 			continue
@@ -799,12 +803,12 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 		if notifier.admitLocked(key, now, true) != "" {
 			continue
 		}
-		admitted = append(admitted, device)
+		admitted = append(admitted, admittedDevice{device, wanted})
 	}
 	notifier.mu.Unlock()
 
-	for _, device := range admitted {
-		job, err := buildPushJob(device, salt, view.session, windowID, kind, now)
+	for _, entry := range admitted {
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, kind, entry.alerts, now)
 		if err != nil {
 			continue
 		}
@@ -861,7 +865,7 @@ func (s *muxServer) raisePushAttention(
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, kind, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, kind, 0, now)
 		if err != nil {
 			continue
 		}
@@ -940,7 +944,7 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 		return refused
 	}
 	// A test opens the host, not a window, so the payload names neither.
-	job, err := buildPushJob(*device, salt, "", "", pushKindTest, now)
+	job, err := buildPushJob(*device, salt, "", "", pushKindTest, 0, now)
 	if err != nil {
 		return pushResultFailed
 	}
@@ -955,20 +959,31 @@ func buildPushJob(
 	session string,
 	windowID string,
 	kind string,
+	alerts pushAlertCategories,
 	now time.Time,
 ) (pushJob, error) {
 	publicKey, err := parsePushPublicKey(device.PublicKey)
 	if err != nil {
 		return pushJob{}, err
 	}
+	// An alert says whether it was a bell, a program's notification, or
+	// both, so the app can honour each of the host's switches on its own.
+	var alertNames []string
+	if alerts&pushAlertBell != 0 {
+		alertNames = append(alertNames, pushEventBell)
+	}
+	if alerts&pushAlertNotice != 0 {
+		alertNames = append(alertNames, pushEventNotice)
+	}
 	plaintext, err := json.Marshal(struct {
-		V         int    `json:"v"`
-		HostRef   string `json:"hostRef"`
-		Window    string `json:"window"`
-		SessionID string `json:"sessionId"`
-		Kind      string `json:"kind"`
-		TS        int64  `json:"ts"`
-	}{1, device.HostRef, windowID, session, kind, now.Unix()})
+		V         int      `json:"v"`
+		HostRef   string   `json:"hostRef"`
+		Window    string   `json:"window"`
+		SessionID string   `json:"sessionId"`
+		Kind      string   `json:"kind"`
+		Alert     []string `json:"alert,omitempty"`
+		TS        int64    `json:"ts"`
+	}{1, device.HostRef, windowID, session, kind, alertNames, now.Unix()})
 	if err != nil {
 		return pushJob{}, err
 	}
@@ -1276,7 +1291,7 @@ func (s *muxServer) flushPushDeferred() {
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, entry.event.windowID, entry.event.kind, entry.event.at)
+		job, err := buildPushJob(entry.record, salt, view.session, entry.event.windowID, entry.event.kind, entry.event.alerts, entry.event.at)
 		if err != nil {
 			continue
 		}

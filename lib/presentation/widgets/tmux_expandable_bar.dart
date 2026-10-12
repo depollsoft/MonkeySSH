@@ -341,6 +341,21 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   /// order with the close requests that may follow it in the same snapshot.
   void _watchHostNotificationPrefs() {
     _hostPrefsSubscription?.close();
+    // The app keeps the hosts list loaded, which settles the preferences
+    // before the first window snapshot can arrive over SSH. Otherwise the
+    // stream below delivers them within milliseconds of opening, still long
+    // before a snapshot; until then everything is allowed, as before
+    // per-host preferences existed.
+    _hostPrefs = const HostNotificationPrefs();
+    if (widget.ref.exists(allHostsProvider)) {
+      final hostId = widget.session.hostId;
+      for (final host
+          in widget.ref.read(allHostsProvider).value ?? const <Host>[]) {
+        if (host.id == hostId) {
+          _hostPrefs = HostNotificationPrefs.fromHost(host);
+        }
+      }
+    }
     _hostPrefsSubscription = widget.ref.listenManual(
       hostNotificationPrefsProvider(widget.session.hostId),
       (_, next) {
@@ -359,7 +374,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         ..add(widget.session.connectionId);
     }
     if (oldWidget.session.hostId != widget.session.hostId) {
-      _hostPrefs = const HostNotificationPrefs();
       _watchHostNotificationPrefs();
     }
     final sessionChanged =

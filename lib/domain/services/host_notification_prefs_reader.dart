@@ -36,13 +36,22 @@ final hostNotificationPrefsProvider =
       });
     });
 
-/// Whether a host's preferences allow a push of [kind]. An `alert` is a bell
-/// or a program's notification, which the payload does not tell apart, so it
-/// shows while either is on. A test is always allowed.
-bool pushKindAllowedByHost(PushEventKind kind, HostNotificationPrefs prefs) =>
-    switch (kind) {
-      PushEventKind.permission || PushEventKind.input => prefs.agentAttention,
-      PushEventKind.finished => prefs.agentFinished,
-      PushEventKind.alert => prefs.windowAlerts || prefs.shellNotifications,
-      PushEventKind.test => true,
-    };
+/// Whether a host's preferences allow a push of [kind]. An `alert` from a
+/// helper that names its [alertCategories] shows when any of them is on;
+/// one from an older helper, which does not say, shows only while both
+/// window alerts and shell notifications are on. A test is always allowed.
+bool pushKindAllowedByHost(
+  PushEventKind kind,
+  HostNotificationPrefs prefs, {
+  Set<String>? alertCategories,
+}) => switch (kind) {
+  PushEventKind.permission || PushEventKind.input => prefs.agentAttention,
+  PushEventKind.finished => prefs.agentFinished,
+  PushEventKind.alert => switch (alertCategories) {
+    final Set<String> categories when categories.isNotEmpty =>
+      (categories.contains('bell') && prefs.windowAlerts) ||
+          (categories.contains('notice') && prefs.shellNotifications),
+    _ => prefs.windowAlerts && prefs.shellNotifications,
+  },
+  PushEventKind.test => true,
+};

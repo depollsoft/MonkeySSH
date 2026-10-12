@@ -518,16 +518,31 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
     if (_disposed) return;
     // A host turned off whose registration is still on the books was turned
-    // off by a run that ended before it could unregister; leave it out here
-    // so the reconcile below unregisters it.
+    // off by a run that ended before it could unregister. It stays off, and
+    // its unregister is queued like any other that could not be sent.
     final unfinished = prunedHosts.intersection(_registeredHostIds);
+    final deviceId = _secrets?.deviceId;
+    final hostRefKey = _secrets?.hostRefKey;
+    if (unfinished.isNotEmpty && deviceId != null && hostRefKey != null) {
+      for (final hostId in unfinished) {
+        final hostRef = await derivePushHostRef(
+          hostRefKey: hostRefKey,
+          hostId: hostId,
+        );
+        _pendingUnregister
+            .putIfAbsent(hostId, () => <String>{})
+            .add(_pendingEntry(deviceId, hostRef));
+      }
+      _registeredHostIds.removeAll(unfinished);
+      await _persistHostBookkeeping();
+    }
+    if (_disposed) return;
     state = state.copyWith(
       loaded: true,
       enabled: registered,
-      disabledHostIds: prunedHosts.difference(unfinished),
+      disabledHostIds: prunedHosts,
       registeredHostIds: Set.unmodifiable(_registeredHostIds),
     );
-    if (unfinished.isNotEmpty) unawaited(_reconcileHostPush());
     if (registered) {
       // A token that rotated while the app was not running never reaches
       // onTokenRefresh, so compare the current token at every start.
@@ -1365,10 +1380,19 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           'host_register_unfiltered',
           fields: {'connectionId': link.connectionId},
         );
+        final entry = _pendingEntry(deviceId, hostRef);
+        var removed = false;
         try {
-          await link.send(_unregisterCommand(_pendingEntry(deviceId, hostRef)));
+          removed = (await link.send(_unregisterCommand(entry))).ok;
         } on Object {
-          // The next attempt after the retry interval takes it back again.
+          // Queued below.
+        }
+        if (!removed) {
+          // Retried from later syncs and attaches, like any opt-out.
+          _pendingUnregister
+              .putIfAbsent(link.hostId, () => <String>{})
+              .add(entry);
+          await _persistHostBookkeeping();
         }
         return false;
       }
@@ -1542,6 +1566,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       sessionName: event.sessionName,
       windowId: event.windowId,
       connectionId: connectionId,
+      alertCategories: event.alertCategories,
     );
   }
 

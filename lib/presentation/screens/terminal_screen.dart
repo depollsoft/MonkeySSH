@@ -90,6 +90,7 @@ import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
 import '../providers/connection_actions.dart';
+import '../providers/entity_list_providers.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';

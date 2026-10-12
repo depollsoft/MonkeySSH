@@ -40,6 +40,7 @@ class PushEvent {
     required this.timestamp,
     this.windowId,
     this.sessionName,
+    this.alertCategories,
   });
 
   /// The host reference this device registered on the host.
@@ -56,6 +57,10 @@ class PushEvent {
 
   /// MonkeyMux session owning [windowId], when the event names one.
   final String? sessionName;
+
+  /// For an `alert`, whether it was a `bell`, a program's `notice`, or both.
+  /// Null from helpers before 0.1.233, which do not say.
+  final Set<String>? alertCategories;
 
   /// Parses decrypted payload bytes, returning null for anything malformed.
   static PushEvent? tryParse(List<int> plaintext) {
@@ -88,12 +93,19 @@ class PushEvent {
     final sessionName = session is String && session.trim().isNotEmpty
         ? session
         : null;
+    final alert = decoded['alert'];
     return PushEvent(
       hostRef: hostRef,
       kind: kind,
       timestamp: DateTime.fromMillisecondsSinceEpoch(ts * 1000, isUtc: true),
       windowId: windowId,
       sessionName: sessionName,
+      alertCategories: alert is List
+          ? {
+              for (final category in alert.whereType<String>())
+                if (category == 'bell' || category == 'notice') category,
+            }
+          : null,
     );
   }
 }
@@ -108,6 +120,7 @@ class PushNavigationTarget {
     this.sessionName,
     this.windowId,
     this.connectionId,
+    this.alertCategories,
   });
 
   /// The saved host.
@@ -124,6 +137,10 @@ class PushNavigationTarget {
 
   /// An existing connection to reuse, when one is attached to that session.
   final int? connectionId;
+
+  /// For an `alert`, its categories when the host said; see
+  /// [PushEvent.alertCategories].
+  final Set<String>? alertCategories;
 
   /// Whether the target names a specific window.
   bool get hasWindow => sessionName != null && windowId != null;

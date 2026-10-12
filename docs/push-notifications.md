@@ -129,6 +129,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `window` | MonkeyMux window id such as `@3`, empty for a test |
 | `sessionId` | MonkeyMux session name that owns the window, empty for a test |
 | `kind` | One of the kinds below |
+| `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
 | `ts` | Event time, Unix seconds |
 
 Decoders ignore unknown fields. The app trusts the decrypted `kind` over the

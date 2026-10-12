@@ -180,6 +180,9 @@ class _FakeLink implements PushHostLink {
   /// them on push_registered.
   bool filtersEvents = true;
 
+  /// Whether push_unregister fails, as when the connection drops mid-way.
+  bool failUnregister = false;
+
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
 
@@ -195,6 +198,9 @@ class _FakeLink implements PushHostLink {
         ok: false,
         unsupported: command['type'] != 'push_unregister',
       );
+    }
+    if (command['type'] == 'push_unregister' && failUnregister) {
+      return const MonkeyMuxPushControlResult(ok: false);
     }
     if (command['type'] == 'push_register') {
       await registerGate?.future;
@@ -701,6 +707,30 @@ void main() {
       await h.controller.syncNow();
       expect(allOn.types, contains('push_register'));
       expect(allOn.types, isNot(contains('push_unregister')));
+    });
+
+    test('a take-back that fails is retried until it lands', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1)
+        ..filtersEvents = false
+        ..failUnregister = true;
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(windowAlerts: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(
+        await h.settings.getString('push_notifications_pending_unregister'),
+        contains('"1"'),
+      );
+      link
+        ..failUnregister = false
+        ..commands.clear();
+      await h.controller.syncNow();
+      expect(link.types, contains('push_unregister'));
+      expect(
+        await h.settings.getString('push_notifications_pending_unregister'),
+        '{}',
+      );
     });
 
     test('a host turned off by a run that ended mid-way is unregistered at '

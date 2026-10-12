@@ -368,3 +368,30 @@ func sortKinds(kinds string) string {
 	slices.Sort(list)
 	return strings.Join(list, ",")
 }
+
+func TestPushAlertPayloadNamesItsCategory(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, nil)
+	h.server.raisePushAlert("@2", pushAlertBell)
+	h.server.raisePushAlert("@3", pushAlertNotice)
+	h.server.raisePushAlert("@4", pushAlertBell|pushAlertNotice)
+	h.notifier.inflight.Wait()
+	got := map[string]string{}
+	for _, request := range h.endpoint.received() {
+		var event struct {
+			Window string   `json:"window"`
+			Alert  []string `json:"alert"`
+		}
+		if err := json.Unmarshal(openPushPayloadForTest(t, device.private, request.Payload), &event); err != nil {
+			t.Fatal(err)
+		}
+		got[event.Window] = strings.Join(event.Alert, ",")
+	}
+	want := map[string]string{"@2": "bell", "@3": "notice", "@4": "bell,notice"}
+	for window, alert := range want {
+		if got[window] != alert {
+			t.Fatalf("alert categories = %v, want %v", got, want)
+		}
+	}
+}

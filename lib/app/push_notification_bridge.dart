@@ -251,7 +251,14 @@ class _PushNotificationBridgeState
     final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
       target.hostId,
     );
-    if (!mounted || !pushKindAllowedByHost(target.kind, prefs)) return;
+    if (!mounted ||
+        !pushKindAllowedByHost(
+          target.kind,
+          prefs,
+          alertCategories: target.alertCategories,
+        )) {
+      return;
+    }
     final navigatorContext = ref
         .read(routerProvider)
         .routerDelegate
