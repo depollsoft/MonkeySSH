@@ -16,6 +16,7 @@ import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/host_setup_checklist_service.dart';
 import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -1661,6 +1662,63 @@ void main() {
         expect(importedPreset?.additionalArguments, '--model gpt-5.4');
         expect(localPreferences.startInYoloMode, isTrue);
         expect(importedPreferences.startInYoloMode, isTrue);
+      },
+    );
+
+    test(
+      'merge import remaps and preserves host setup checklist state',
+      () async {
+        final sourceStore = HostSetupChecklistStore(SettingsService(db));
+        final sourceHostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Imported Host',
+            hostname: 'imported.example.com',
+            username: 'root',
+          ),
+        );
+        await sourceStore.markDone(sourceHostId, {HostSetupStep.monkeyMux});
+        final migrationData = await transferService.createMigrationData();
+
+        final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(importedDb.close);
+        final importedEncryptionService = SecretEncryptionService.forTesting();
+        final importedHostRepository = HostRepository(
+          importedDb,
+          importedEncryptionService,
+        );
+        final importedTransferService = SecureTransferService(
+          importedDb,
+          KeyRepository(importedDb, importedEncryptionService),
+          importedHostRepository,
+        );
+        final importedStore = HostSetupChecklistStore(
+          SettingsService(importedDb),
+        );
+        final localHostId = await importedHostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Local Host',
+            hostname: 'local.example.com',
+            username: 'root',
+          ),
+        );
+        await importedStore.dismiss(localHostId);
+
+        await importedTransferService.importMigrationData(
+          data: migrationData,
+          mode: MigrationImportMode.merge,
+        );
+
+        final importedHost = await (importedDb.select(
+          importedDb.hosts,
+        )..where((host) => host.label.equals('Imported Host'))).getSingle();
+        final states = await importedStore.load();
+
+        expect(importedHost.id, isNot(localHostId));
+        expect(states[localHostId]?.dismissed, isTrue);
+        expect(states[localHostId]?.done, isEmpty);
+        expect(states[importedHost.id]?.done, {HostSetupStep.monkeyMux});
+        expect(states[importedHost.id]?.dismissed, isFalse);
+        expect(states.keys, {localHostId, importedHost.id});
       },
     );
 

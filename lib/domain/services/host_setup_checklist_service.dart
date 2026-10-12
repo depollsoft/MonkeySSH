@@ -20,7 +20,10 @@ import 'ssh_service.dart';
 import 'tmux_service.dart';
 
 /// Settings key holding completed and dismissed checklist state per host.
-const hostSetupChecklistSettingKey = 'host_setup_checklist';
+///
+/// The value is a JSON object keyed by host ID, so migration import remaps
+/// and merges it like the other host-scoped settings.
+const hostSetupChecklistSettingKey = SettingKeys.hostSetupChecklist;
 
 /// One checklist step, in the order the checklist suggests them.
 enum HostSetupStep {

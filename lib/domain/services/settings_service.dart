@@ -97,6 +97,10 @@ abstract final class SettingKeys {
   /// Saved host-scoped coding CLI launch preferences.
   static const hostCliLaunchPreferences = 'host_cli_launch_preferences';
 
+  /// Host-scoped post-connect setup checklist state: completed steps and
+  /// whether the checklist is hidden, keyed by host ID.
+  static const hostSetupChecklist = 'host_setup_checklist';
+
   /// App-wide default for ACP-capable agent windows.
   static const agentWindowModePreference = 'agent_window_mode_preference';
 

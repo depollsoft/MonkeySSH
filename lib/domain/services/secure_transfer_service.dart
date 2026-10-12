@@ -227,6 +227,7 @@ class SecureTransferService {
   static const _hostScopedSettingsKeys = {
     SettingKeys.agentLaunchPresets,
     SettingKeys.hostCliLaunchPreferences,
+    SettingKeys.hostSetupChecklist,
   };
 
   /// Creates an encrypted host transfer payload.
