@@ -75,6 +75,17 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
         }
       },
     );
+    // The listener only reports later changes. The app may have left the
+    // foreground between the foreground check that allowed this prompt and
+    // this frame, so refuse right away rather than wait for a change that
+    // already happened. An unknown state (null) has not been reported yet
+    // and is left to the listener.
+    final currentState = WidgetsBinding.instance.lifecycleState;
+    if (currentState != null && currentState != AppLifecycleState.resumed) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _close(SshAgentSignatureDecision.declined),
+      );
+    }
     unawaited(
       widget.request.connectionClosed.then(
         (_) => _close(SshAgentSignatureDecision.declined),

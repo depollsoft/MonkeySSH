@@ -158,6 +158,25 @@ void main() {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     });
 
+    testWidgets('refuses a prompt opened after the app went inactive', (
+      tester,
+    ) async {
+      // The foreground check passed, then the app lost focus before the
+      // dialog's first frame; the listener never sees that change.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      addTearDown(
+        () => tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        ),
+      );
+
+      final result = await showPrompt(tester, _request());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AgentSignatureDialog), findsNothing);
+      expect(await result, SshAgentSignatureDecision.declined);
+    });
+
     testWidgets('refuses when the connection closes', (tester) async {
       final closed = Completer<void>();
       final result = await showPrompt(
