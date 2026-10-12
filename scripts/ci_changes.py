@@ -12,8 +12,17 @@ PLATFORMS = ('android', 'ios', 'macos', 'windows', 'linux')
 # inputs such as pubspec.lock). CI uses it to keep the expensive Apple/Windows
 # builds off the pull_request path unless the platform itself changed.
 NATIVE_OUTPUTS = tuple(f'{platform}_native' for platform in PLATFORMS)
-OUTPUTS = ('run_check', 'go', 'tooling', 'third_party', 'deps',
+OUTPUTS = ('run_check', 'go', 'tooling', 'third_party', 'deps', 'functions',
            *PLATFORMS, *NATIVE_OUTPUTS)
+
+# Inputs of the Cloud Functions in functions/. deploy-functions.yml deploys on
+# the same paths; the regression test checks its trigger against this list.
+FUNCTIONS_PATHS = [
+    'functions/**',
+    'firebase.json',
+    '.firebaserc',
+    '.github/workflows/deploy-functions.yml',
+]
 
 # Lockfiles that key the Apple compilation caches. Only a run on main can write
 # a cache that later PR and merge-queue runs restore, so CI keeps the otherwise
@@ -120,6 +129,11 @@ def classify(paths):
         result['windows'] |= windows_test_input
         result['windows_native'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
+        result['functions'] |= (
+            path.startswith('functions/')
+            or path in FUNCTIONS_PATHS
+            or path == '.github/workflows/ci.yml'
+        )
 
         # Changes to the CI builder itself must exercise all its build jobs.
         # Other workflow/tooling edits use the independent tooling job.
