@@ -1797,12 +1797,12 @@ class MuxWindowPresentation {
        subtitle = displayTitle != null
            ? null
            : session == null
-           ? window.secondaryTitle
+           ? window.programStatus?.attentionMessage ?? window.secondaryTitle
            : '${session.providerLabel} · ${acpCwdSummary(session.cwd)} · ${acpSessionActivityDisplay(session).label}',
        progress = !showProgress
            ? null
            : session == null
-           ? window.terminalProgress
+           ? window.activityProgress
            : acpActivityTerminalProgress(acpSessionActivityDisplay(session));
 
   /// Projects a tracked native session that has no server window.
