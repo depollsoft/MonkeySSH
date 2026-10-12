@@ -44,6 +44,7 @@ import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/snippet_variables.dart';
 import '../../domain/models/terminal_capability_hint.dart';
+import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/terminal_progress.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
@@ -67,6 +68,7 @@ import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
+import '../../domain/services/push/push_local_alerts.dart';
 import '../../domain/services/remote_clipboard_sync_service.dart';
 import '../../domain/services/remote_file_service.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
@@ -1652,7 +1654,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   int? get _lastExitCode => _observedSession?.lastExitCode;
 
-  TerminalProgress? get _terminalProgress => _observedSession?.terminalProgress;
+  TerminalProgramStatus? get _programStatus => _observedSession?.programStatus;
+
+  /// Work a program reported through OSC 7501, otherwise OSC 9;4 progress.
+  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar.
+  TerminalProgress? get _terminalProgress {
+    final status = _programStatus;
+    return status == null
+        ? _observedSession?.terminalProgress
+        : status.terminalProgress;
+  }
 
   bool get _shouldReviewTerminalCommandInsertion =>
       shouldReviewTerminalCommandInsertion(
@@ -4456,7 +4467,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       if (!mounted) return;
     }
-    await _connect(preferredConnectionId: connectionId);
+    var forceNew = false;
+    if (connectionId == null && nativeTarget == null) {
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      final choice = resolveMuxSessionConnection(
+        hostId: widget.hostId,
+        sessionName: _initialTmuxSessionName,
+        connections: [
+          for (final id in ref.read(activeSessionsProvider).keys)
+            if (sessions.getSession(id) case final session?)
+              (
+                connectionId: session.connectionId,
+                hostId: session.hostId,
+                muxBackend: session.remoteMuxBackend,
+                muxSessionName: session.remoteMuxSessionName,
+                hasTerminal: session.terminal != null,
+              ),
+        ],
+      );
+      connectionId = choice.connectionId;
+      forceNew = choice.forceNew;
+    }
+    await _connect(preferredConnectionId: connectionId, forceNew: forceNew);
   }
 
   Future<void> _loadTheme({
@@ -4985,7 +5017,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       _clearDetectedSensitiveKeyboardPromptAfterInput(output);
       _handleTerminalOutputForShellCompletion(output);
-      enterPacer.add(output, enter: isWritingTerminalEnterKey);
+      enterPacer.add(
+        output,
+        enter: isWritingTerminalEnterKey,
+        keyboardSpace: isWritingKeyboardSpace,
+      );
     }
 
     _terminalOutputHandler = handleTerminalOutput;
@@ -5152,10 +5188,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  /// Releases the terminal callbacks this screen installed. A Return the
-  /// pacer still holds back goes out on its own once its gap has passed, since
-  /// the session can outlive this screen; [dropHeldInput] discards it instead,
-  /// for a session that is being replaced or has been lost.
+  /// Releases the terminal callbacks this screen installed. Input the pacer
+  /// still holds back goes out on its own once its wait has passed, since the
+  /// session can outlive this screen; [dropHeldInput] discards it instead, for
+  /// a session that is being replaced or has been lost.
   void _clearOwnedTerminalCallbacks({bool dropHeldInput = false}) {
     if (dropHeldInput) {
       _terminalEnterPacer?.dispose();
@@ -10122,7 +10158,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
 
-    // A Return still held back belongs to the window it was typed in.
+    // Input still held back belongs to the window it was typed in.
     final heldInput = _terminalEnterPacer?.idle;
     if (heldInput != null) await heldInput;
     final backend = _activeTerminalConnectionBackend(session);
@@ -10134,7 +10170,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       windowId: targetWindowId,
     );
     if (backend.remoteMuxBackend == RemoteMuxBackend.monkeyMux) {
-      session.clearTerminalProgress();
+      session
+        ..clearTerminalProgress()
+        ..synchronizeProgramStatus(null);
     }
     if (targetWindowId == null) {
       await backend.selectWindow(
@@ -10434,7 +10472,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     Iterable<TmuxWindow> windows,
   ) {
     final activeWindow = activeTmuxWindow(windows);
-    session.synchronizeTerminalProgress(activeWindow?.terminalProgress);
+    session
+      ..synchronizeTerminalProgress(activeWindow?.terminalProgress)
+      ..synchronizeProgramStatus(activeWindow?.programStatus);
   }
 
   void _prepareTerminalForMuxWindowChange({
@@ -10442,7 +10482,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool clearTerminalProgress = true,
   }) {
     if (clearTerminalProgress) {
-      _observedSession?.clearTerminalProgress();
+      _observedSession
+        ?..clearTerminalProgress()
+        ..synchronizeProgramStatus(null);
     }
     _terminalTextInputController.resetImeCompletions();
     _clearTerminalFollowPauseForMuxWindowChange();
@@ -11276,6 +11318,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           label: shellStatusLabel,
           tooltip:
               'Shell integration status for the current prompt or command.',
+        ),
+      if (_programStatus case final status?)
+        (
+          icon: Icons.monitor_heart_outlined,
+          label: status.app == null
+              ? status.label
+              : '${status.app} · ${status.label}',
+          tooltip: 'Status the running program reports to the terminal.',
         ),
       if (_isUsingAltBuffer)
         (
