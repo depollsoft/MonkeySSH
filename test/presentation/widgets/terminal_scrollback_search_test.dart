@@ -53,6 +53,34 @@ void main() {
       expect(search.hitsForRow(rows[2]), isEmpty);
     });
 
+    test('a local resize moves the hits onto the reflowed rows', () async {
+      final terminal = Terminal()
+        ..resize(20, 4)
+        ..write('0123456789 needle');
+      final search = _search(terminal)..setQuery('needle');
+      addTearDown(search.dispose);
+      await _settle(search);
+      expect(search.hitsForRow(terminal.buffer.lines[0]), [
+        (startColumn: 11, endColumn: 17, isCurrent: true),
+      ]);
+
+      // Terminal.resize reflows the line over two rows without notifying
+      // listeners; the screen reports it instead.
+      terminal.resize(14, 4);
+      search.terminalResized();
+      await _settle(search);
+
+      expect(search.matchCount, 1);
+      final rows = terminal.buffer.lines;
+      expect(search.hitsForRow(rows[0]), [
+        (startColumn: 11, endColumn: 14, isCurrent: true),
+      ]);
+      expect(search.hitsForRow(rows[1]), [
+        (startColumn: 0, endColumn: 3, isCurrent: true),
+      ]);
+      expect(search.currentMatchRow, 0);
+    });
+
     test('maps hits onto wide glyphs and skipped cells', () async {
       final terminal = Terminal()
         ..resize(20, 2)

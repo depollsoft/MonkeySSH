@@ -78,7 +78,9 @@ class _RowHits {
 ///   visible screen is searched; [searchesAlternateScreen] reports this. The
 ///   main buffer is searched again once the app exits.
 /// - While the query is set, new output refreshes the results after
-///   [refreshDelay], keeping the current match where possible.
+///   [refreshDelay], keeping the current match where possible. A local resize
+///   reflows the rows without notifying listeners, so the screen reports it
+///   through [terminalResized] for the same refresh.
 /// - Literal queries are matched on the UI isolate in slices that yield to the
 ///   event loop between frames. Regular expressions run on a worker isolate
 ///   that is killed after [regexBudget].
@@ -189,6 +191,14 @@ class TerminalScrollbackSearchController extends ChangeNotifier
       _handleTerminalChanged();
     }
   }
+
+  /// Refreshes the results after the terminal was resized locally, as for
+  /// new output. [Terminal.resize] reflows the buffer without notifying
+  /// listeners, so the matches would otherwise keep the old rows until the
+  /// next output: the count stays while the highlights vanish, and stepping
+  /// reveals the wrong row. [Terminal.onResize] fires before the reflow; the
+  /// refresh waits [refreshDelay], so it reads the reflowed rows.
+  void terminalResized() => _handleTerminalChanged();
 
   /// Bumped by [requestFocus], so the bar can move focus to its field.
   int get focusRequest => _focusRequest;

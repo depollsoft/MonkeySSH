@@ -3076,6 +3076,66 @@ void main() {
       expect(terminalView().searchHits, isNull);
     });
 
+    testWidgets('find results follow a local terminal resize', (tester) async {
+      tester.view
+        ..physicalSize = const Size(2400, 1800)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      // A long line whose needle sits at its end, so a narrower viewport
+      // wraps the needle onto a new row.
+      final terminal = session.terminal!..write('${'x' * 50}needle\r\n');
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final wideColumns = terminal.viewWidth;
+      expect(wideColumns, greaterThan(56));
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'needle',
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('1/1'), findsOneWidget);
+
+      List<int> rowsWithHits() {
+        final hits = terminalView().searchHits!;
+        final rows = terminal.buffer.lines;
+        return [
+          for (var row = 0; row < rows.length; row++)
+            if (hits.hitsForRow(rows[row]).isNotEmpty) row,
+        ];
+      }
+
+      expect(rowsWithHits(), [0]);
+
+      // Narrow the window: the terminal reflows the line over two rows.
+      tester.view.physicalSize = const Size(1200, 1800);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(terminal.viewWidth, lessThan(wideColumns));
+      expect(terminal.viewWidth, lessThan(56));
+
+      // Past the refresh delay, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 600));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(rowsWithHits(), isNotEmpty);
+      expect(rowsWithHits(), isNot([0]));
+    });
+
     for (final (updateAgents, adapters) in [
       (false, false),
       (true, false),

@@ -5032,6 +5032,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       int pixelWidth,
       int pixelHeight,
     ) {
+      // The buffer reflows right after this callback without notifying
+      // listeners, so an open search refreshes on its own timer.
+      _scrollbackSearch?.terminalResized();
       session.updateTerminalWindowMetrics(
         columns: width,
         rows: height,
