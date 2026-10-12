@@ -327,15 +327,13 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 // noteProgramStatusReporterLocked records the window's foreground program as
 // one that speaks OSC 7501 and returns the owner it was attributed to.
 //
-// Output attributed to the window's own process came from its shell, or from
-// a program that exited before its output was read, once the shell had the
-// terminal back. The shell outlives the program, so it never becomes the
-// reporter: that would hold the window at "no status" for good.
+// The owner can be the window's own process: a program launched directly or
+// exec'd in place of the shell, but also the shell itself, or a program whose
+// last output was read after it exited and the shell took the terminal back.
+// The shell outlives what it runs, so dropExitedProgramStatusLocked also ends
+// such a reporter once another job has the terminal.
 func (w *muxWindow) noteProgramStatusReporterLocked() int {
 	owner := programStatusReportOwner(w)
-	if owner > 0 && owner == w.processID() {
-		return owner
-	}
 	w.programStatusClock++
 	w.programStatusReporter = &programStatusReporter{
 		owner:   owner,
@@ -388,7 +386,8 @@ func (w *muxWindow) dropRunningProgramStatusLocked(exited func(owner int) bool) 
 
 // dropExitedProgramStatusLocked applies the spec's process-exit rule per
 // sender, which also covers shells that never mark a prompt with OSC 133,
-// and ends the reporter when it exits.
+// and ends the reporter when it exits or, when it is the window's own process,
+// once another job has the terminal.
 func (w *muxWindow) dropExitedProgramStatusLocked() bool {
 	if len(w.programStatus) == 0 && w.programStatusReporter == nil {
 		return false
@@ -403,7 +402,10 @@ func (w *muxWindow) dropExitedProgramStatusLocked() bool {
 		return exited
 	}
 	dropped := w.dropRunningProgramStatusLocked(exited)
-	if reporter := w.programStatusReporter; reporter != nil && exited(reporter.owner) {
+	if reporter := w.programStatusReporter; reporter != nil &&
+		(exited(reporter.owner) ||
+			reporter.owner > 0 && reporter.owner == w.processID() &&
+				!programStatusWindowProcessInForeground(w)) {
 		w.programStatusReporter = nil
 		dropped = true
 	}
@@ -522,8 +524,9 @@ func (w *muxWindow) takeProgramStatusRepliesLocked() []byte {
 
 // attributeProgramStatusLocked gives owner to the unattributed records
 // updated at or before clock. Later reports arrived after the owner was looked
-// up and wait for the next lookup.
-func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
+// up and wait for the next lookup. It reports whether the reporter was
+// dropped, which the caller must broadcast.
+func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) bool {
 	for _, record := range w.programStatus {
 		if record.owner == programStatusOwnerUnattributed && record.updated <= clock {
 			record.owner = owner
@@ -531,14 +534,15 @@ func (w *muxWindow) attributeProgramStatusLocked(owner int, clock uint64) {
 	}
 	if reporter := w.programStatusReporter; reporter != nil &&
 		reporter.owner == programStatusOwnerUnattributed && reporter.updated <= clock {
-		// resolveProgramStatusOwner falls back to the window process, which
-		// outlives the program (see noteProgramStatusReporterLocked).
+		// resolveProgramStatusOwner falls back to the window process when it
+		// cannot name the program, and that process, the shell, outlives it.
 		if owner > 0 && owner == w.processID() {
 			w.programStatusReporter = nil
-		} else {
-			reporter.owner = owner
+			return true
 		}
+		reporter.owner = owner
 	}
+	return false
 }
 
 func (w *muxWindow) hasUnattributedProgramStatusLocked() bool {
@@ -581,15 +585,20 @@ func (s *muxServer) dropExitedProgramStatus() {
 	}
 
 	s.mu.Lock()
+	changed := map[*muxWindow]bool{}
 	for index, entry := range pending {
 		if s.windowByIDLocked(entry.window.id) == entry.window &&
-			!entry.window.closed && entry.window.processID() == entry.pid {
-			entry.window.attributeProgramStatusLocked(owners[index], entry.clock)
+			!entry.window.closed && entry.window.processID() == entry.pid &&
+			entry.window.attributeProgramStatusLocked(owners[index], entry.clock) {
+			changed[entry.window] = true
 		}
 	}
 	var snapshots []windowSnapshot
 	for _, window := range s.windows {
-		if window.closed || !window.dropExitedProgramStatusLocked() {
+		if window.closed {
+			continue
+		}
+		if dropped := window.dropExitedProgramStatusLocked(); !dropped && !changed[window] {
 			continue
 		}
 		snapshots = append(snapshots, s.snapshotLocked(window))

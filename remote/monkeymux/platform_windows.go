@@ -863,6 +863,11 @@ var resolveProgramStatusOwner = func(windowPID int) int {
 
 func programStatusOwnerAlive(pid int) bool { return processIDAlive(pid) }
 
+// programStatusWindowProcessInForeground is always true here: Windows has no
+// foreground process group, and a reporter is never left owned by the window
+// process (attributeProgramStatusLocked drops it instead).
+var programStatusWindowProcessInForeground = func(*muxWindow) bool { return true }
+
 // foregroundProcessGroupForWindow approximates the POSIX foreground process
 // group with the window's own process id. Windows has no controlling-terminal
 // foreground group, but pairing this with a parent-based process table lets

@@ -448,66 +448,91 @@ func TestProgramStatusReporterFollowsTheProgram(t *testing.T) {
 	}
 }
 
-// The window's shell outlives the programs it runs, so it never becomes the
-// reporter: not for its own reports, not for a program's report read after
-// the shell took the terminal back, and not as the Windows fallback owner.
-func TestProgramStatusReporterIsNeverTheWindowShell(t *testing.T) {
+// A reporter can be the window's own process: a program launched directly or
+// exec'd in place of the shell keeps it while it has the terminal. The same
+// process can also be the shell, so it ends once the shell runs another job.
+// A program's exit-time clear, read after the shell took the terminal back,
+// does not renew it. On Windows, a reporter the lookup can only attribute to
+// the window process is dropped, and clients are told.
+func TestProgramStatusReporterOwnedByTheWindowProcess(t *testing.T) {
 	originalOwner := programStatusReportOwner
 	originalResolve := resolveProgramStatusOwner
+	originalExited := programStatusOwnerExited
+	originalForeground := programStatusWindowProcessInForeground
 	t.Cleanup(func() {
 		programStatusReportOwner = originalOwner
 		resolveProgramStatusOwner = originalResolve
+		programStatusOwnerExited = originalExited
+		programStatusWindowProcessInForeground = originalForeground
 	})
-	const shell = 4000
-	owner := 4100
+	const root = 4000
+	owner := root
 	programStatusReportOwner = func(*muxWindow) int { return owner }
 	resolveProgramStatusOwner = func(windowPID int) int { return windowPID }
+	programStatusOwnerExited = func(int) bool { return false }
+	rootInForeground := true
+	programStatusWindowProcessInForeground = func(*muxWindow) bool { return rootInForeground }
 
-	server := newMuxServer("program-status-shell")
+	server := newMuxServer("program-status-root")
+	control := newControlRecorder(server)
+	server.controls[newControlClient(control)] = struct{}{}
 	window := &muxWindow{
-		id: "@1", name: "zsh", pty: &recordingPty{},
-		proc: bindingTestProcess{pid: shell}, lastActivity: time.Now(),
+		id: "@1", name: "claude", pty: &recordingPty{},
+		proc: bindingTestProcess{pid: root}, lastActivity: time.Now(),
 	}
 	server.windows = []*muxWindow{window}
-	reporterOwner := func() int {
+	reporter := func() *programStatusReporter {
 		server.mu.Lock()
 		defer server.mu.Unlock()
-		if window.programStatusReporter == nil {
-			return 0
-		}
-		return window.programStatusReporter.owner
+		return window.programStatusReporter
 	}
 
+	// Launched directly: the program is the window process.
+	server.handleWindowOutput("@1", []byte("\x1b]7501;?\x1b\\"))
+	server.dropExitedProgramStatus()
+	if got := reporter(); got == nil || got.owner != root {
+		t.Fatalf("reporter = %#v, want the directly launched program %d", got, root)
+	}
+	// The window process lost the terminal to another job: it was a shell.
+	rootInForeground = false
+	_ = control.String()
+	control.Reset()
+	server.dropExitedProgramStatus()
+	if got := reporter(); got != nil {
+		t.Fatalf("reporter = %#v, want it ended once another job has the terminal", got)
+	}
+	if got := control.String(); !strings.Contains(got, `"type":"window_updated"`) ||
+		strings.Contains(got, `"programStatusReporter"`) {
+		t.Fatalf("broadcast = %s, want an update without the reporter", got)
+	}
+
+	// A program in its own group: its exit-time clear, read after the shell
+	// took the terminal back, does not hand the reporter to the shell.
+	rootInForeground = true
+	owner = 4100
 	server.handleWindowOutput("@1", []byte(programStatusOsc("state=working:app=claude-code")))
-	if got := reporterOwner(); got != owner {
-		t.Fatalf("reporter owner = %d, want the program %d", got, owner)
-	}
-	// The program's last words arrive after it exited and the shell took the
-	// terminal back: a clear does not renew the reporter, and a status
-	// attributed to the shell does not either.
-	owner = shell
+	owner = root
 	server.handleWindowOutput("@1", []byte(programStatusOsc("state=clear")))
-	server.handleWindowOutput("@1", []byte(programStatusOsc("state=done")))
-	if got := reporterOwner(); got != 4100 {
-		t.Fatalf("reporter owner = %d, want it kept on the program", got)
+	if got := reporter(); got == nil || got.owner != 4100 {
+		t.Fatalf("reporter = %#v, want it kept on the program", got)
 	}
 
-	// Windows-style: unattributed until the tick, which falls back to the
-	// window process, so the reporter is dropped rather than kept forever.
+	// Windows-style: unattributed until the tick, which can only name the
+	// window process, so the reporter is dropped and clients are told.
 	server.mu.Lock()
 	window.programStatusReporter = nil
 	server.mu.Unlock()
 	owner = programStatusOwnerUnattributed
 	server.handleWindowOutput("@1", []byte("\x1b]7501;?\x1b\\"))
-	if got := reporterOwner(); got != programStatusOwnerUnattributed {
-		t.Fatalf("reporter owner = %d, want it unattributed", got)
-	}
+	_ = control.String()
+	control.Reset()
 	server.dropExitedProgramStatus()
-	server.mu.Lock()
-	reporter := window.programStatusReporter
-	server.mu.Unlock()
-	if reporter != nil {
-		t.Fatalf("reporter = %#v, want it dropped when only the shell owns it", reporter)
+	if got := reporter(); got != nil {
+		t.Fatalf("reporter = %#v, want it dropped when only the window process owns it", got)
+	}
+	if got := control.String(); !strings.Contains(got, `"type":"window_updated"`) ||
+		strings.Contains(got, `"programStatusReporter"`) {
+		t.Fatalf("broadcast = %s, want an update without the reporter", got)
 	}
 }
 
