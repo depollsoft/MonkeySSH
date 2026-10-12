@@ -39,15 +39,17 @@ var programStatusQueryReply = []byte("\x1b]7501;?\x1b\\")
 
 // Record owners: the process a report is attributed to. Unattributed records
 // wait for dropExitedProgramStatus to resolve them; untracked ones never end
-// by the exit rule.
+// by the exit rule; gone ones were sent by a program that exited before they
+// could be attributed, and end like those of any exited owner.
 const (
 	programStatusOwnerUnattributed = 0
 	programStatusOwnerUntracked    = -1
+	programStatusOwnerGone         = -2
 )
 
 // programStatusOwnerExited reports whether a record's owner has exited.
 var programStatusOwnerExited = func(owner int) bool {
-	return owner > 0 && !programStatusOwnerAlive(owner)
+	return owner == programStatusOwnerGone || owner > 0 && !programStatusOwnerAlive(owner)
 }
 
 type programStatusRecord struct {

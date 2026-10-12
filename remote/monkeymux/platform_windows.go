@@ -839,8 +839,9 @@ var programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerU
 // resolveProgramStatusOwner attributes a report to the window process's only
 // child, which is the program its shell is running. A window launched with a
 // program closes with it, so this matters for programs started in a shell.
-// With no child (the shell reported) or several, the window process owns the
-// record, and it outlives the record.
+// With no child, the program that reported has exited (or the shell itself
+// reported), so its running records end now. With several, the window
+// process owns the records, and it outlives them.
 var resolveProgramStatusOwner = func(windowPID int) int {
 	if windowPID <= 0 {
 		return programStatusOwnerUntracked
@@ -856,7 +857,7 @@ var resolveProgramStatusOwner = func(windowPID int) int {
 		child = process.pid
 	}
 	if child == 0 {
-		return windowPID
+		return programStatusOwnerGone
 	}
 	return child
 }

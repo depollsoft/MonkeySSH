@@ -534,6 +534,29 @@ func TestProgramStatusReporterOwnedByTheWindowProcess(t *testing.T) {
 		strings.Contains(got, `"programStatusReporter"`) {
 		t.Fatalf("broadcast = %s, want an update without the reporter", got)
 	}
+
+	// Windows-style: the program exited before the tick could attribute its
+	// reports, so its running records and the reporter end; done stays.
+	resolveProgramStatusOwner = func(int) int { return programStatusOwnerGone }
+	programStatusOwnerExited = originalExited
+	server.handleWindowOutput("@1", []byte("\x1b]7501;?\x1b\\"+
+		programStatusOsc("state=working:app=claude-code")+programStatusOsc("state=done:id=build")))
+	_ = control.String()
+	control.Reset()
+	server.dropExitedProgramStatus()
+	server.mu.Lock()
+	_, workingKept := window.programStatus[""]
+	_, doneKept := window.programStatus["build"]
+	gone := window.programStatusReporter == nil
+	server.mu.Unlock()
+	if workingKept || !doneKept || !gone {
+		t.Fatalf("records = %v, reporter gone = %v; want only done, without a reporter",
+			window.programStatus, gone)
+	}
+	if got := control.String(); !strings.Contains(got, `"programStatus":{"state":"done"`) ||
+		strings.Contains(got, `"programStatusReporter"`) {
+		t.Fatalf("broadcast = %s, want done without the reporter", got)
+	}
 }
 
 func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {
