@@ -120,6 +120,33 @@ explicitly stopped, like MonkeyMux terminal windows. `gc` performs deliberate
 idle cleanup and removes stale socket artifacts. ACP children use ordinary
 pipes on every platform—never a POSIX PTY or Windows ConPTY.
 
+`status` also reports cumulative counts of permission requests, input
+(elicitation) requests and completed prompt turns, plus how many permission and
+input requests are pending right now. Push notifications use them; see below.
+
+### Push notifications
+
+When the app opts in, it registers each device with the `push_register`
+control operation. Registrations live in `~/.monkeyssh/state/push-devices.json`
+(mode 0600, at most 8 devices and 4 saved hosts per device, expiring after 30
+days without a refresh) and are shared by every MonkeyMux server for the user,
+which lock `push-devices.json.lock` around every read and write. Each entry
+holds a device id, a ticket sealed by the MonkeySSH Firebase Function, the
+device's public key and an opaque host reference; the host never sees the push
+token itself.
+
+A native agent waiting for permission or input, a finished native turn, and a
+bell or desktop notification (OSC 9 text, OSC 777 `notify`, OSC 99) in a window
+raise an event. MonkeyMux skips devices that are looking at that window or did
+so in the last 30 seconds, and devices whose app is alive in the background and
+alerting by itself. A permission or input request that is still pending is
+raised again once that stops being true. Repeats are coalesced, each device has
+separate hourly budgets for approval requests and for routine events, and the
+event is encrypted to the device before it is posted to the function. Only the
+coarse kind is readable outside the device. The full protocol is in
+`docs/push-notifications.md` at the repository root. `MONKEYMUX_PUSH_ENDPOINT`
+overrides the function URL for testing.
+
 ### Terminal session details
 
 `attach` and `new-session` can start a session server. Optional `--cwd`,
@@ -209,7 +236,22 @@ independently. Normal reconnects and live native ACP handoffs retain progress.
 Upgrade restores that relaunch CLI or shell processes start without the old
 process's progress, so an idle resumed agent does not inherit a stuck busy bar.
 Restored shell history also drops old OSC 9;4 markers; normal reconnect history
-is unchanged. It also tracks the PTY foreground process group for snapshots,
+is unchanged.
+
+MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
+(OSC 7501, revision 0.3) as each window's terminal. It answers the `OSC 7501 ; ?`
+feature query itself, even in a window no client is showing, and strips that
+query from what clients receive (it answers exactly the queries it strips, so
+none is answered twice); Claude Code reports nothing until it gets the reply. Each window keeps up to 64 records with the spec's id hierarchy, `app`
+inheritance and limits, and window snapshots carry the most urgent one as
+`programStatus` (blocked, then error, working, done, idle). Idle, working and
+blocked records end at an OSC 133 or 633 `A` prompt, on RIS, or when the process group
+that sent them has exited (checked every two seconds, so a crashed agent in a
+shell without prompt marks does not stay "working"). Windows has no process
+groups, so there the sender is the window shell's only child process, found on
+the next check. Done and error records
+outlive their program. Restored shell history drops OSC 7501 like OSC 9;4. It
+also tracks the PTY foreground process group for snapshots,
 so shell-launched tools
 such as Codex can be surfaced as agent windows even when the terminal title is
 only the current directory. Window replay resets stale local mouse/focus modes
