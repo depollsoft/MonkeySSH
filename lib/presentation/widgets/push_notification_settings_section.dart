@@ -96,6 +96,17 @@ class PushNotificationSettingsSection extends ConsumerWidget {
                       controller.setHostEnabled(host.id, enabled: value),
                     ),
             ),
+          if (hosts.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(72, 4, 16, 8),
+              child: Text(
+                "Each host's own settings choose which notifications it "
+                'sends.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           _SendTestTile(enabled: !state.busy, controller: controller),
         ],
       ],

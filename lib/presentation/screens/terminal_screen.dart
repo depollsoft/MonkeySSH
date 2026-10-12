@@ -66,6 +66,7 @@ import '../../domain/services/host_notification_prefs_reader.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
+import '../../domain/services/monkeymux_offer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -106,6 +107,7 @@ import '../widgets/cursor_block.dart';
 import '../widgets/device_debug_sheet.dart';
 import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
+import '../widgets/monkeymux_offer_sheet.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/system_bottom_inset.dart';
@@ -872,6 +874,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _muxVersion;
   String? _monkeyMuxReconnectSessionName;
   bool _monkeyMuxReconnectAttachPending = false;
+
+  // Set when the user chose MonkeyMux in the first-connect offer, which
+  // described the helper upload; the next fresh install is not asked again.
+  bool _monkeyMuxInstallPreApproved = false;
   bool _monkeyMuxAttachEstablished = false;
   _PendingMonkeyMuxServerReplacement? _pendingMonkeyMuxServerReplacement;
   MonkeyMuxForcedReloadRequest? _forcedMonkeyMuxReloadRequest;
@@ -6239,7 +6245,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   Future<({_PreparedRemoteMuxCommand? command, bool handled})>
   _prepareNewShellInitialAutoConnect(SshSession session) async {
-    final host = _host;
+    var host = _host;
     if (host == null) {
       return (command: null, handled: false);
     }
@@ -6278,7 +6284,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return (command: attachCommand, handled: true);
     }
 
-    final tmuxSession = _initialTmuxSessionName ?? host.tmuxSessionName;
+    var tmuxSession = _initialTmuxSessionName ?? host.tmuxSessionName;
+    if ((tmuxSession == null || tmuxSession.isEmpty) &&
+        _autoConnectAgentPreset == null &&
+        (host.autoConnectCommand?.trim().isEmpty ?? true) &&
+        host.autoConnectSnippetId == null) {
+      final switched = await _offerMonkeyMuxOnFirstConnect(host);
+      if (switched != null) {
+        host = switched;
+        tmuxSession = switched.tmuxSessionName;
+      }
+    }
     if (tmuxSession != null && tmuxSession.isNotEmpty) {
       if (_configuredRemoteMuxBackend(host) == RemoteMuxBackend.tmux) {
         return (command: null, handled: false);
@@ -6311,6 +6327,57 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _applyPreparedRemoteMuxCommand(session, command);
     return (command: command, handled: true);
+  }
+
+  /// On the first connection to a host created as a plain shell, offers to
+  /// switch it to MonkeyMux once. Returns the saved host when the user
+  /// chose MonkeyMux, with a session name of its own.
+  Future<Host?> _offerMonkeyMuxOnFirstConnect(Host host) async {
+    if (isAppReviewDemoHost(host)) return null;
+    final offers = ref.read(monkeyMuxOfferServiceProvider);
+    if (!await offers.takePending(host.id) || !mounted) return null;
+    final repository = ref.read(hostRepositoryProvider);
+    final hostname = host.hostname.trim().toLowerCase();
+    final sessionName = suggestMuxSessionName(
+      label: host.label,
+      hostname: host.hostname,
+      taken: [
+        for (final other in await repository.getAll())
+          if (other.id != host.id &&
+              other.hostname.trim().toLowerCase() == hostname &&
+              other.port == host.port)
+            ?other.tmuxSessionName,
+      ],
+    );
+    if (!mounted) return null;
+    DiagnosticsLogService.instance.info(
+      'terminal',
+      'monkeymux_offer_shown',
+      fields: {'hostId': host.id},
+    );
+    final accepted = await showMonkeyMuxOfferSheet(
+      context,
+      sessionName: sessionName,
+    );
+    DiagnosticsLogService.instance.info(
+      'terminal',
+      'monkeymux_offer_answered',
+      fields: {'hostId': host.id, 'accepted': accepted},
+    );
+    if (!accepted || !mounted) return null;
+    await repository.updateFields(
+      host.id,
+      HostsCompanion(
+        tmuxSessionName: drift.Value(sessionName),
+        remoteMuxBackend: drift.Value(RemoteMuxBackend.monkeyMux.storageValue),
+      ),
+    );
+    final saved = await repository.getById(host.id);
+    if (!mounted || saved == null) return null;
+    // The sheet described the upload, so a fresh install is not asked again.
+    _monkeyMuxInstallPreApproved = true;
+    setState(() => _host = saved);
+    return saved;
   }
 
   Future<void> _runAutoConnectCommand(SshSession session) async {
@@ -7129,6 +7196,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             ? updateStatus.installation
             : null,
       );
+    }
+    if (updateStatus == null && _monkeyMuxInstallPreApproved) {
+      _monkeyMuxInstallPreApproved = false;
+      return (install: true, updatePolicy: null, reuseInstallation: null);
     }
     final title = switch ((updateStatus, bundledVersionIsNewer)) {
       (null, _) => 'Install MonkeyMux helper?',

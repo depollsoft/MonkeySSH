@@ -689,12 +689,136 @@ void main() {
       );
     });
 
+    testWidgets('choosing MonkeyMux names the session after the label', (
+      tester,
+    ) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      await _selectStartupMode(tester, 'MonkeyMux');
+      final session = find.byKey(const Key('host-tmux-session-field'));
+      expect(
+        tester.widget<TextFormField>(session).controller!.text,
+        'new-host',
+      );
+
+      // It follows the label until the user types a name of their own.
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'Build Box',
+      );
+      await tester.pump();
+      expect(
+        tester.widget<TextFormField>(session).controller!.text,
+        'build-box',
+      );
+      await tester.enterText(session, 'mine');
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'Other',
+      );
+      await tester.pump();
+      expect(tester.widget<TextFormField>(session).controller!.text, 'mine');
+    });
+
+    testWidgets('notifications offer only what the startup choice can raise', (
+      tester,
+    ) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final section = find.byKey(const Key('host-notifications-section'));
+      Finder row(String kind) => find.descendant(
+        of: section,
+        matching: find.byKey(ValueKey('host-notify-$kind')),
+      );
+
+      // A plain shell: shell notifications, and what MonkeyMux would add.
+      expect(row('shellNotifications'), findsOneWidget);
+      expect(row('windowAlerts'), findsNothing);
+      expect(row('agentAttention'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('host-notify-monkeymux-note')),
+        findsOneWidget,
+      );
+
+      await _selectStartupMode(tester, 'tmux');
+      expect(row('windowAlerts'), findsOneWidget);
+      expect(row('agentAttention'), findsNothing);
+
+      await _selectStartupMode(tester, 'MonkeyMux');
+      for (final kind in [
+        'agentAttention',
+        'agentFinished',
+        'windowAlerts',
+        'shellNotifications',
+      ]) {
+        expect(row(kind), findsOneWidget, reason: kind);
+      }
+      expect(
+        find.byKey(const ValueKey('host-notify-monkeymux-note')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('Use MonkeyMux switches a plain-shell host and names its '
+        'session', (tester) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final use = find.byKey(const ValueKey('host-notify-use-monkeymux'));
+      await tester.scrollUntilVisible(
+        use,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(use);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        tester
+            .widget<TextFormField>(
+              find.byKey(const Key('host-tmux-session-field')),
+            )
+            .controller!
+            .text,
+        'new-host',
+      );
+      expect(
+        find.byKey(const ValueKey('host-notify-agentAttention')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a turned-off notification kind is saved on the host', (
+      tester,
+    ) async {
+      final harness = await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final shell = find.byKey(
+        const ValueKey('host-notify-shellNotifications'),
+      );
+      await tester.scrollUntilVisible(
+        shell,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(shell);
+      await tester.pump();
+      await _tapBottomSave(tester);
+      final inserted = harness.hostRepository.insertedHost!;
+      expect(inserted.notifyShellNotifications.value, isFalse);
+      expect(inserted.notifyWindowAlerts.value, isTrue);
+    });
+
     testWidgets('scrolls to missing tmux session when saving tmux startup', (
       tester,
     ) async {
       final harness = await _pumpHostCreateScreen(tester);
       await _fillRequiredHostFields(tester);
       await _selectStartupMode(tester, 'tmux');
+      // The suggested name is cleared, as a user might.
+      await tester.enterText(
+        find.byKey(const Key('host-tmux-session-field')),
+        '',
+      );
 
       await _tapBottomSave(tester);
 
