@@ -213,6 +213,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     _terminal!
       ..onTitleChange = _session._handleWindowTitleChange
       ..onIconChange = _session._handleIconNameChange
+      ..onFullReset = _session._handleTerminalFullReset
       ..canResizeFromHost = _session._canTerminalResizeFromHost
       ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty;
     _session.terminalHyperlinkTracker.attach(_terminal!);
