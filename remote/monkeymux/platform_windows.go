@@ -830,6 +830,39 @@ func attachOutputWriter(w io.Writer) io.Writer {
 	return newWin32InputModeRequestStripper(w)
 }
 
+// programStatusReportOwner leaves Windows reports unattributed: there is no
+// foreground process group, and the process table must not be read under the
+// server lock that output handling holds. dropExitedProgramStatus resolves
+// them on its next tick with resolveProgramStatusOwner.
+var programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerUnattributed }
+
+// resolveProgramStatusOwner attributes a report to the window process's only
+// child, which is the program its shell is running. A window launched with a
+// program closes with it, so this matters for programs started in a shell.
+// With no child (the shell reported) or several, the window process owns the
+// record, and it outlives the record.
+var resolveProgramStatusOwner = func(windowPID int) int {
+	if windowPID <= 0 {
+		return programStatusOwnerUntracked
+	}
+	child := 0
+	for _, process := range cachedProcessTable(time.Now()) {
+		if process.ppid != windowPID || process.pid == windowPID {
+			continue
+		}
+		if child != 0 {
+			return windowPID
+		}
+		child = process.pid
+	}
+	if child == 0 {
+		return windowPID
+	}
+	return child
+}
+
+func programStatusOwnerAlive(pid int) bool { return processIDAlive(pid) }
+
 // foregroundProcessGroupForWindow approximates the POSIX foreground process
 // group with the window's own process id. Windows has no controlling-terminal
 // foreground group, but pairing this with a parent-based process table lets
