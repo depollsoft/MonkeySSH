@@ -311,9 +311,26 @@ enum AppShortcutKey {
   final bool isLetter;
 
   /// Whether [event] typed this key's character on the active layout.
-  bool matchesLogical(KeyEvent event, {required bool shiftPressed}) =>
-      event.logicalKey == unshifted ||
-      (shiftPressed && shifted != null && event.logicalKey == shifted);
+  ///
+  /// A digit's shifted alias counts only from the digit's own key. Layouts
+  /// keep digits in place but move symbols: German, Italian and Spanish type
+  /// `*` with ⇧ on the US `]` key, which is the bracket there and not ⇧8.
+  /// Bracket and slash aliases stay free, so Dvorak's `?` on the US `[` key
+  /// is still ⇧/.
+  bool matchesLogical(KeyEvent event, {required bool shiftPressed}) {
+    if (event.logicalKey == unshifted) {
+      return true;
+    }
+    if (!shiftPressed || shifted == null || event.logicalKey != shifted) {
+      return false;
+    }
+    return !_isDigit || event.physicalKey == physical;
+  }
+
+  bool get _isDigit {
+    final id = unshifted.keyId;
+    return id >= 0x30 && id <= 0x39;
+  }
 
   /// Whether [event] came from this key's position on a layout that types
   /// something this table cannot name there.

@@ -298,6 +298,29 @@ void main() {
         )?.action,
         AppShortcutAction.nextWindow,
       );
+      // With Shift held, German types "*" on the US "]" key. On Android that
+      // chord is still the bracket, not Ctrl+Shift+8's shifted alias.
+      expect(
+        _match(
+          LogicalKeyboardKey.asterisk,
+          physical: PhysicalKeyboardKey.bracketRight,
+          platform: android,
+          control: true,
+          shift: true,
+        )?.action,
+        AppShortcutAction.nextWindow,
+      );
+      // Ctrl+Shift+8 on the digit key itself still goes to window 8.
+      expect(
+        _match(
+          LogicalKeyboardKey.asterisk,
+          physical: PhysicalKeyboardKey.digit8,
+          platform: android,
+          control: true,
+          shift: true,
+        )?.windowNumber,
+        8,
+      );
       // German types "ü" on the US "[" key.
       expect(
         _match(
