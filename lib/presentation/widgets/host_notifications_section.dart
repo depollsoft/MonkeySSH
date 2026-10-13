@@ -349,8 +349,8 @@ class _MonkeyMuxNote extends StatelessWidget {
     final body = sessionKind == HostSessionKind.tmux
         ? 'MonkeyMux adds alerts when an agent needs you or finishes, and '
               'reaches you when MonkeySSH is closed.'
-        : 'MonkeyMux keeps windows alive across reconnects, adds window '
-              'and agent alerts, and reaches you when MonkeySSH is closed.';
+        : 'MonkeyMux adds window and agent alerts, and reaches you when '
+              'MonkeySSH is closed.';
     final onUse = onUseMonkeyMux;
     return DecoratedBox(
       key: const ValueKey('host-notify-monkeymux-note'),

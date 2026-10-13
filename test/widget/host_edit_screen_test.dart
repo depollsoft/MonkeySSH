@@ -15,7 +15,6 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
-import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 
 import '../helpers/host_edit_fixture.dart';
@@ -528,12 +527,6 @@ void main() {
 
     testWidgets('lets long host guidance text wrap', (tester) async {
       await _pumpHostCreateScreen(tester, hasPro: true);
-
-      final startupModeField = tester
-          .widget<DropdownButtonFormField<HostStartupMode>>(
-            find.byKey(const Key('host-startup-mode-field')),
-          );
-      expect(startupModeField.decoration.helperMaxLines, greaterThan(1));
 
       await _selectStartupMode(tester, 'Launch coding agent');
 
@@ -1501,7 +1494,7 @@ void main() {
 
       expect(
         find.text(
-          'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',
+          'Choose what MonkeySSH starts after SSH connects. MonkeyMux is recommended: windows survive reconnects, and it adds the window switcher, native agent chats, and alerts when MonkeySSH is closed. Agent, command, and snippet options start a workflow automatically.',
         ),
         findsOneWidget,
       );

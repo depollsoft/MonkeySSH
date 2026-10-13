@@ -951,32 +951,12 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',
+          'Choose what MonkeySSH starts after SSH connects. MonkeyMux is recommended: windows survive reconnects, and it adds the window switcher, native agent chats, and alerts when MonkeySSH is closed. Agent, command, and snippet options start a workflow automatically.',
           style: theme.textTheme.bodySmall?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
         ),
-        const SizedBox(height: 12),
-        CheckboxListTile(
-          key: const Key('host-cli-yolo-mode-checkbox'),
-          value: _startClisInYoloMode,
-          contentPadding: EdgeInsets.zero,
-          controlAffinity: ListTileControlAffinity.leading,
-          title: const Text('Start supported coding CLIs in YOLO mode'),
-          subtitle: Text(
-            hasAgentPresetAccess
-                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
-                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
-          ),
-          onChanged: hasAgentPresetAccess
-              ? (value) {
-                  setState(() => _startClisInYoloMode = value ?? false);
-                  _updateDirtyState();
-                  _syncAutoConnectCommandFromPreset();
-                }
-              : null,
-        ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         DropdownButtonFormField<HostStartupMode>(
           key: const Key('host-startup-mode-field'),
           // ignore: deprecated_member_use
@@ -985,8 +965,6 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Startup behavior',
             prefixIcon: Icon(Icons.play_circle_outline),
-            helperText: 'MonkeyMux is recommended: windows survive reconnects, and it adds native agent chats and alerts when MonkeySSH is closed.',
-            helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: _hostStartupModeOptions
               .map(
@@ -1033,6 +1011,28 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             hasAutomationAccess: hasAutomationAccess,
           ),
         },
+        // A host-wide default for every coding CLI launch on this host, not
+        // only the startup choice above.
+        const SizedBox(height: 12),
+        CheckboxListTile(
+          key: const Key('host-cli-yolo-mode-checkbox'),
+          value: _startClisInYoloMode,
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          title: const Text('Start supported coding CLIs in YOLO mode'),
+          subtitle: Text(
+            hasAgentPresetAccess
+                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
+                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
+          ),
+          onChanged: hasAgentPresetAccess
+              ? (value) {
+                  setState(() => _startClisInYoloMode = value ?? false);
+                  _updateDirtyState();
+                  _syncAutoConnectCommandFromPreset();
+                }
+              : null,
+        ),
       ],
     );
   }
