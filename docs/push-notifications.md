@@ -175,6 +175,12 @@ Errors use the callable error codes: `invalid-argument` for a bad request,
 `unauthenticated` when the App Check token is missing, invalid or already used,
 and `internal` when the ticket keys are not configured.
 
+On Android, App Check uses Play Integrity. Both Play apps must have Cloud
+project `monkeyssh` (529923319565) linked under Play Console > Protected with
+Play > Play Integrity API. Without that link, App Check fails on every real
+device, however the app was installed. Emulator debug builds use a debug token
+and never exercise this path.
+
 App Check settings differ between the two Android apps:
 
 - **Production** (`xyz.depollsoft.monkeyssh`) accepts only installs Google Play
