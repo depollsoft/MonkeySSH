@@ -186,11 +186,13 @@ App Check settings differ between the two Android apps:
 - **Production** (`xyz.depollsoft.monkeyssh`) accepts only installs Google Play
   recognizes (the default for Play Integrity).
 - **β** (`xyz.depollsoft.monkeyssh.private`) also accepts installs Play does not
-  recognize (`appIntegrity.allowUnrecognizedVersion`), so PR previews installed
-  through Internal App Sharing can opt in. Its Firebase app lists two SHA-256
-  certificates: Play's app signing key and the Internal test certificate from
-  Play Console > Test and release > Internal app sharing. A build signed any
-  other way, such as the self-signed APK artifact, is not expected to pass.
+  recognize (`appIntegrity.allowUnrecognizedVersion`), so PR previews can opt
+  in. Its Firebase app lists one SHA-256 certificate per way a β build reaches a
+  phone: Play's app signing key (Play tracks), the Internal test certificate
+  from Play Console > Test and release > Internal app sharing, and the upload
+  key, which signs the APKs sent through Firebase App Distribution. App Check
+  rejects a build whose signing certificate is not on that list with a 403 from
+  `ExchangePlayIntegrityToken`, even though Play Integrity itself succeeded.
 
 ### `pushNotify` (HTTPS)
 
