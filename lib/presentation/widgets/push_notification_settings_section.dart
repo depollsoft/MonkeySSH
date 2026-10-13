@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -205,8 +206,15 @@ String pushSetupFailureMessage(PushSetupFailure failure) => switch (failure) {
         'settings, then try again.',
   PushSetupFailure.tokenUnavailable =>
     'This device did not get a push token. Check the network and try again.',
-  PushSetupFailure.appCheckFailed =>
-    'This copy of the app could not be verified, so push is unavailable.',
+  PushSetupFailure.appCheckFailed => switch (defaultTargetPlatform) {
+    // The Play Integrity check accepts only installs Google Play recognizes,
+    // so side-loaded and Internal App Sharing builds always land here.
+    TargetPlatform.android =>
+      'Google Play could not verify this copy of MonkeySSH. Push works in '
+          'copies installed from Google Play.',
+    _ =>
+      'This copy of MonkeySSH could not be verified, so push is unavailable.',
+  },
   PushSetupFailure.registrationFailed =>
     'Push registration failed. Try again later.',
 };

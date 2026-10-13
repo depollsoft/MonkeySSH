@@ -325,7 +325,7 @@ class _WhenClosedRow extends ConsumerWidget {
         onPressed: !push.loaded || push.busy
             ? null
             : () => unawaited(controller.enable()),
-        child: const Text('Turn on'),
+        child: Text(failure == null ? 'Turn on' : 'Try again'),
       ),
     );
   }
