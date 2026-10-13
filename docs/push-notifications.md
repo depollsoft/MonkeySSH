@@ -175,6 +175,17 @@ Errors use the callable error codes: `invalid-argument` for a bad request,
 `unauthenticated` when the App Check token is missing, invalid or already used,
 and `internal` when the ticket keys are not configured.
 
+App Check settings differ between the two Android apps:
+
+- **Production** (`xyz.depollsoft.monkeyssh`) accepts only installs Google Play
+  recognizes (the default for Play Integrity).
+- **β** (`xyz.depollsoft.monkeyssh.private`) also accepts installs Play does not
+  recognize (`appIntegrity.allowUnrecognizedVersion`), so PR previews installed
+  through Internal App Sharing can opt in. Its Firebase app lists two SHA-256
+  certificates: Play's app signing key and the Internal test certificate from
+  Play Console > Test and release > Internal app sharing. A build signed any
+  other way, such as the self-signed APK artifact, is not expected to pass.
+
 ### `pushNotify` (HTTPS)
 
 `POST` only, `Content-Type: application/json`, no `Content-Encoding`, body at
