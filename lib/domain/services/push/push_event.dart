@@ -6,13 +6,13 @@ import '../../models/tmux_state.dart';
 
 /// Coarse event kinds a host can push (docs/push-notifications.md).
 enum PushEventKind {
-  /// A native agent is waiting for a permission decision.
+  /// A coding agent is waiting for a permission decision.
   permission,
 
-  /// A native agent is waiting for an answer.
+  /// A coding agent is waiting for an answer.
   input,
 
-  /// A native agent finished its turn.
+  /// A coding agent finished its turn.
   finished,
 
   /// A terminal window rang the bell or posted a desktop notification.

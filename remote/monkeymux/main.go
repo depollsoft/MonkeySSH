@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.233"
+	monkeyMuxVersion                  = "0.1.236"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -7022,6 +7022,11 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	after := window.broadcastIdentityLocked()
+	// A native agent window's turns and requests are pushed from its bridge.
+	var statusPush string
+	if !validAcpBridgeID(window.nativeAcpBridgeID) {
+		statusPush = programStatusPushKind(before.programStatus, after.programStatus)
+	}
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
@@ -7112,6 +7117,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	s.mu.Unlock()
 	if pushAlert != 0 {
 		s.notePushAlert(windowID, pushAlert)
+	}
+	if statusPush != "" {
+		s.notePushProgramStatus(windowID, statusPush)
 	}
 
 	if shouldWrite {

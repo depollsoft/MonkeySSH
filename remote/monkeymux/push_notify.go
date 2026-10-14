@@ -139,10 +139,12 @@ func pushRecipients(devices []pushDeviceRecord, kind string, alerts pushAlertCat
 	return pushDevicesByID(wanted)
 }
 
-// pushAlertEvent is a window alert queued by the PTY reader.
+// pushAlertEvent is a window event queued by the PTY reader: an alert with its
+// categories, or, when kind is set, a program status change of that push kind.
 type pushAlertEvent struct {
 	windowID   string
 	categories pushAlertCategories
+	kind       string
 }
 
 // Results reported by push_test and push_register.
@@ -739,6 +741,49 @@ func (s *muxServer) notePushAlert(windowID string, categories pushAlertCategorie
 	}
 }
 
+// notePushProgramStatus queues the push a window's program status change calls
+// for (see programStatusPushKind) without blocking the PTY reader.
+func (s *muxServer) notePushProgramStatus(windowID string, kind string) {
+	notifier := s.pushNotifier()
+	if kind == "" || !notifier.store.mayHaveDevices() {
+		return
+	}
+	select {
+	case notifier.alerts <- pushAlertEvent{windowID: windowID, kind: kind}:
+	default:
+	}
+}
+
+// deliverPushAlertEvent raises the push for an event the PTY reader queued.
+func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
+	if event.kind != "" {
+		s.raisePush(event.windowID, event.kind, "", 0)
+		return
+	}
+	s.raisePushAlert(event.windowID, event.categories)
+}
+
+// programStatusPushKind is the push a terminal program's OSC 7501 status
+// change calls for, or "" for none. A program that stops working with done or
+// idle finished its turn; one that newly blocks needs the user, for a
+// permission or, for any other kind, an answer. Neither the message nor the
+// title is sent: a push carries only its kind.
+func programStatusPushKind(before, after programStatusSummary) string {
+	if after.state == "blocked" {
+		if before.state == "blocked" && before.kind == after.kind {
+			return ""
+		}
+		if after.kind == "permission" {
+			return pushKindPermission
+		}
+		return pushKindInput
+	}
+	if before.state == "working" && (after.state == "done" || after.state == "idle") {
+		return pushKindFinished
+	}
+	return ""
+}
+
 // raisePushEvent sends a one-off event (a finished turn or a window alert) for
 // windowID to every device that is not already covering it. bridgeID names
 // the native agent bridge behind a finished turn. An alert raised here has no
@@ -1124,7 +1169,7 @@ func (s *muxServer) startPushLoop() {
 		for {
 			select {
 			case alert := <-notifier.alerts:
-				s.raisePushAlert(alert.windowID, alert.categories)
+				s.deliverPushAlertEvent(alert)
 			case <-ticker.C:
 				if s.isClosed() {
 					return

@@ -139,9 +139,9 @@ clear-text one.
 
 | Kind | Host signal | Visible text | Priority |
 | --- | --- | --- | --- |
-| `permission` | A native agent asked for permission (`session/request_permission`) and the request is still pending | "Approval needed" / "An agent is waiting for your approval." | high |
-| `input` | A native agent asked for input (`elicitation/create`) and the request is still pending | "Input needed" / "An agent is waiting for your answer." | high |
-| `finished` | A native `session/prompt` turn ended | "Agent finished" / "An agent finished its turn." | normal |
+| `permission` | A native agent asked for permission (`session/request_permission`) and the request is still pending, or a terminal program's status became `blocked` with `kind=permission` | "Approval needed" / "An agent is waiting for your approval." | high |
+| `input` | A native agent asked for input (`elicitation/create`) and the request is still pending, or a terminal program's status became `blocked` with any other kind | "Input needed" / "An agent is waiting for your answer." | high |
+| `finished` | A native `session/prompt` turn ended, or a terminal program's status went from `working` to `done` or `idle` | "Agent finished" / "An agent finished its turn." | normal |
 | `alert` | A bell, an OSC 9 text notification, an OSC 777 `notify`, or an OSC 99 notification (not a `p=?` query or `p=close`) in a window. Shell-integration OSC 777 marks such as `precmd` do not count | "Terminal alert" / "A terminal window wants your attention." | normal |
 | `test` | `push_test` from the app | "MonkeySSH" / "Push notifications are working." | high |
 
@@ -515,6 +515,26 @@ every 2 seconds.
 
 Polling works the same whether the bridge lives in this server, in the outgoing
 server after an upgrade, or in a detached `acp serve` process.
+
+### Terminal agent signals
+
+A program in a terminal window that reports its status with the Program Status
+Protocol (OSC 7501, which Claude Code and Pi send) raises the same kinds from
+0.1.236 on. The PTY reader compares the window's
+published status before and after each chunk:
+
+- `working` to `done` or `idle` raises `finished`.
+- A newly `blocked` status raises `permission` for `kind=permission` and
+  `input` for any other kind (`question`, `auth` or none). A change from one
+  blocked kind to another raises again; the same block reported twice does not.
+- A rejected prompt (`blocked` to `idle`), an `error`, and a status that ends
+  because the program exited raise nothing.
+
+The push carries only its kind and window, never the report's `msg`, `title` or
+`app`. Unlike a native request, a terminal one is raised once, when the status
+changes: if a device was watching that window or the event was coalesced, it is
+not raised again while the program stays blocked. Native agent windows are
+skipped here because their bridge raises the same events.
 
 The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
 `MONKEYMUX_PUSH_ENDPOINT` in the server's environment overrides it for testing.

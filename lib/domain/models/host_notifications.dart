@@ -4,8 +4,8 @@ import '../../data/database/database.dart';
 
 /// What a saved host opens after connecting, as far as notifications go.
 enum HostSessionKind {
-  /// A MonkeyMux session: native agent chats, window alerts, shell
-  /// notifications, and push while MonkeySSH is closed.
+  /// A MonkeyMux session: coding agent turns and requests, window alerts,
+  /// shell notifications, and push while MonkeySSH is closed.
   monkeyMux,
 
   /// A tmux session: window alerts and shell notifications while MonkeySSH
@@ -18,10 +18,11 @@ enum HostSessionKind {
 
 /// One kind of notification a host can raise.
 enum HostNotificationKind {
-  /// A native agent needs approval, a file write, or an answer.
+  /// A coding agent needs approval, a file write, or an answer: a native
+  /// agent chat, or a terminal agent that reports its status (OSC 7501).
   agentAttention,
 
-  /// A native agent finished its turn.
+  /// A coding agent finished its turn, in a native chat or a terminal window.
   agentFinished,
 
   /// A background multiplexer window rang the bell or showed activity.

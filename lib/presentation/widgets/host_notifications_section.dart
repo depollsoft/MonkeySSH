@@ -193,10 +193,10 @@ class _KindRow extends ConsumerWidget {
     };
     final Widget subtitle = switch (kind) {
       HostNotificationKind.agentAttention => const Text(
-        'Approvals, file writes, and questions from native agent chats',
+        'Approvals and questions from coding agents',
       ),
       HostNotificationKind.agentFinished => const Text(
-        'A native agent chat finished its turn',
+        'A coding agent finished its turn',
       ),
       HostNotificationKind.windowAlerts => Text(
         sessionKind == HostSessionKind.tmux
