@@ -730,7 +730,8 @@ The extension ids are `xyz.depollsoft.monkeyssh.NotificationService` and
 `xyz.depollsoft.monkeyssh.private.NotificationService`. The Regenerate iOS
 Provisioning Profiles workflow registers them in the developer portal before
 match creates their profiles. `scripts/test_ios_push_notification_content.sh`
-checks the decryption and text against the shared vectors.
+checks the decryption and text against the shared vectors. The Build iOS CI
+job runs it.
 
 ## Follow-ups
 

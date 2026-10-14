@@ -19,7 +19,9 @@ jobs at 5, and `preview-ios.yml` holds one of them for the same commit.
   the only job that runs the Windows-only tests: `WINDOWS_TEST_INPUTS` count as
   native Windows changes, and `WINDOWS_GATING_INPUTS` (the other inputs of those
   tests, which `test/scripts/ci_changes_test.py` derives from `ci.yml`) build
-  Windows in the merge queue only.
+  Windows in the merge queue only. `build-ios` likewise runs the notification
+  service extension's Swift test, so its inputs outside `ios/`
+  (`IOS_TEST_INPUTS`) count as native iOS changes.
 - **`push` to `main`** is cache warming only. Actions caches written from a
   `gh-readonly-queue/...` ref are scoped to that throwaway ref, so only a run on
   `main` can write caches that later PRs restore. It runs `changes`,
