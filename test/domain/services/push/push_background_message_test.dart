@@ -180,6 +180,14 @@ void main() {
               .body,
           'A terminal window wants your attention.',
         );
+        // The default session is named after the host; it is not repeated.
+        expect(
+          pushNotificationText(
+            event(PushEventKind.alert, session: 'build-box'),
+            hostLabel: 'build-box',
+          ).body,
+          'build-box',
+        );
         expect(
           pushNotificationText(
             event(PushEventKind.test, session: 'main'),

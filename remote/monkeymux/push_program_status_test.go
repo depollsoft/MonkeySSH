@@ -142,6 +142,7 @@ func TestPushPayloadNamesTheWindowsAgent(t *testing.T) {
 		want string
 	}{
 		{"claude", "claude"},
+		{"name:claude", "claude"},
 		{"cursor-agent", "cursor-agent"},
 		{"", ""},
 		{"Claude Code", ""},
@@ -154,7 +155,14 @@ func TestPushPayloadNamesTheWindowsAgent(t *testing.T) {
 			h.registerEvents(t, device, nil)
 			h.addPushStatusWindow("@2", "")
 			h.server.mu.Lock()
-			h.server.windows[len(h.server.windows)-1].agentTool = tc.tool
+			window := h.server.windows[len(h.server.windows)-1]
+			// "name:" puts the tool only in the window's name, as a window
+			// opened as `claude` without a recorded tool is.
+			if name, ok := strings.CutPrefix(tc.tool, "name:"); ok {
+				window.name = name
+			} else {
+				window.agentTool = tc.tool
+			}
 			h.server.mu.Unlock()
 			h.reportStatus("@2", "state=working", "state=done")
 			requests := h.endpoint.received()

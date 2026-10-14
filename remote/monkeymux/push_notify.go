@@ -562,7 +562,9 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 		agents:   map[string]string{},
 	}
 	for _, window := range s.windows {
-		if agent := pushAgentName(window.agentTool); agent != "" {
+		// The resolved tool, as the window bar shows it: the live command, else
+		// what the window retains (its recorded tool, title or name).
+		if agent := pushAgentName(window.agentToolLocked()); agent != "" {
 			view.agents[window.id] = agent
 		}
 	}

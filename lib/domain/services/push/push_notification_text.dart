@@ -65,9 +65,12 @@ PushNotificationText pushNotificationText(
   if (event.kind == PushEventKind.test) return generic;
   final label = hostLabel?.trim();
   if (label == null || label.isEmpty) return (title: title, body: generic.body);
-  final session = event.sessionName;
+  // A session named after its host (the default) would repeat the label.
+  final session = event.sessionName?.trim();
   return (
     title: title,
-    body: session == null || session.isEmpty ? label : '$label · $session',
+    body: session == null || session.isEmpty || session == label
+        ? label
+        : '$label · $session',
   );
 }
