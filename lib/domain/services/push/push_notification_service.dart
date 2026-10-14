@@ -1375,6 +1375,19 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         _lastContext = encoded;
       }
       _contextDirty = false;
+    } on PlatformException catch (error) {
+      if (error.code == 'unavailable') {
+        // An unsigned or simulator iOS build has no keychain group to share
+        // with the extension; pushes keep their generic text there.
+        _contextDirty = false;
+        _log.info(_diagnosticsCategory, 'context_unavailable');
+      } else {
+        _log.warning(
+          _diagnosticsCategory,
+          'context_write_failed',
+          fields: {'errorType': error.runtimeType},
+        );
+      }
     } on Object catch (error) {
       _log.warning(
         _diagnosticsCategory,

@@ -53,12 +53,19 @@ void main() {
       r'/\* ([A-Za-z-]+) \*/ = \{\s*isa = XCBuildConfiguration;'
       r'([\s\S]*?)\n\t\t\};',
     ).allMatches(project);
+    const extensionEntitlements =
+        'NotificationServiceExtension/NotificationServiceExtension.entitlements';
     var checked = 0;
+    var extensionChecked = 0;
     for (final match in configurations) {
       final entitlements = RegExp('CODE_SIGN_ENTITLEMENTS = ([^;]+);')
           .firstMatch(match.group(2)!)
           ?.group(1);
       if (entitlements == null) continue;
+      if (entitlements == extensionEntitlements) {
+        extensionChecked++;
+        continue;
+      }
       checked++;
       final isDebug = match.group(1)!.startsWith('Debug');
       expect(
@@ -70,6 +77,53 @@ void main() {
       );
     }
     expect(checked, 9);
+    expect(extensionChecked, 9);
+  });
+
+  test('the app shares one keychain group with its notification service', () {
+    const pushGroup = r'$(AppIdentifierPrefix)$(MONKEYSSH_APP_BUNDLE_ID).push';
+    List<String> groups(String path) {
+      final array = RegExp(
+        r'<key>keychain-access-groups</key>\s*<array>([\s\S]*?)</array>',
+      ).firstMatch(read(path))!.group(1)!;
+      return [
+        for (final value in RegExp(
+          '<string>([^<]*)</string>',
+        ).allMatches(array))
+          value.group(1)!,
+      ];
+    }
+
+    // The app's own group must stay first: it is the default access group,
+    // so every existing keychain item keeps being written where it was.
+    for (final path in [
+      'ios/Runner/Runner.entitlements',
+      'ios/Runner/RunnerDebug.entitlements',
+    ]) {
+      expect(groups(path), [
+        r'$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)',
+        pushGroup,
+      ], reason: path);
+    }
+    expect(
+      groups(
+        'ios/NotificationServiceExtension/'
+        'NotificationServiceExtension.entitlements',
+      ),
+      [pushGroup],
+    );
+    for (final path in [
+      'ios/Runner/Info.plist',
+      'ios/NotificationServiceExtension/Info.plist',
+    ]) {
+      expect(
+        read(path),
+        contains(
+          '<key>MonkeySSHPushKeychainGroup</key>\n\t<string>$pushGroup</string>',
+        ),
+        reason: path,
+      );
+    }
   });
 
   test('the AppDelegate answers notification callbacks itself', () {
