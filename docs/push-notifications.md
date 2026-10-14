@@ -28,9 +28,10 @@ file, and intermediate secrets are checked by their SHA-256 digests.
 | App (device key holder) | Everything in the payload |
 
 The payload never contains prompts, terminal output, file paths, commands,
-window names or hostnames. The coarse kind is sent in clear text so the
-notification can say something useful without a notification service
-extension.
+window names or hostnames; besides opaque ids it names only the session and,
+when known, the agent's short command name. The coarse kind is sent in clear
+text so a phone that cannot open the payload can still say something useful.
+The phone adds the host's label itself, from its own saved hosts.
 
 ## Encodings
 
@@ -129,6 +130,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `window` | MonkeyMux window id such as `@3`, empty for a test |
 | `sessionId` | MonkeyMux session name that owns the window, empty for a test |
 | `kind` | One of the kinds below |
+| `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
 | `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
 | `ts` | Event time, Unix seconds |
 
@@ -248,6 +250,23 @@ header before reading the body, would close it.
 
 ### FCM message
 
+An Android ticket gets a data-only message. The app decrypts `p` and posts the
+notification itself (see "Notification text" under App); `k` and `c` let it
+post the generic text for the kind, tagged with the collapse key, when the
+payload does not open. Every such push ends in a visible notification, so all
+kinds go at high priority to wake the app:
+
+```json
+{
+  "token": "<from the ticket>",
+  "data": {"v": "1", "p": "<payload>", "k": "finished", "c": "<collapse>"},
+  "android": {"priority": "high", "collapseKey": "<collapse>", "ttl": "3600s"}
+}
+```
+
+An iOS ticket (and a ticket without a platform) gets an alert, which the
+notification service extension rewrites on the phone:
+
 ```json
 {
   "token": "<from the ticket>",
@@ -266,10 +285,10 @@ header before reading the body, would close it.
 }
 ```
 
-Normal-priority kinds use `"priority": "normal"`, `apns-priority: 5`, no
-sound on iOS, and the Android channel `agent-updates-v2` (on Android 8 and
-later the channel, not the message priority, decides sound and heads-up
-display). `mutable-content` lets a later notification service extension replace
+In the alert form, normal-priority kinds use `"priority": "normal"`,
+`apns-priority: 5`, no sound on iOS, and the Android channel
+`agent-updates-v2` (on Android 8 and later the channel, not the message
+priority, decides sound and heads-up display). `mutable-content` lets a later notification service extension replace
 the text with decrypted details (see Follow-ups).
 
 ### Logging
@@ -610,6 +629,36 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   rather than showing another session's terminal on a connection to the same
   host. A native agent window opens its chat. A payload
   that does not decrypt opens the app on Connections.
+- **Notification text:** the phone names the agent, the saved host and the
+  MonkeyMux session, from the decrypted payload and its own host labels:
+  "Claude Code finished" / "build-box · MonkeySSH". Titles are "<Agent> needs
+  approval", "<Agent> has a question" and "<Agent> finished" when the payload
+  names a known agent (otherwise the generic titles in the Kinds table), and
+  "Terminal alert" or "MonkeySSH" for the other kinds. The body is "<host
+  label> · <session>" when the phone knows the host, else the generic body.
+  `lib/domain/services/push/push_notification_text.dart` and the iOS
+  extension build the same strings.
+- **Notification context:** to show that text while MonkeySSH is not running,
+  the app stores the device's private key and every saved host's label by
+  host reference (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"}}`).
+  It is written after opt-in and whenever a sync follows a change to the saved
+  hosts, and deleted on opt-out. Android keeps it in secure storage
+  (`monkeyssh_push_notify_v1`); iOS keeps it in the keychain group
+  `<team>.<bundle id>.push` (service `xyz.depollsoft.monkeyssh.push`, account
+  `notification-context-v1`, readable after first unlock on this device only),
+  which the app and its notification service extension share. It never
+  leaves the phone.
+- **Android:** pushes arrive as data only. A FlutterFire background handler,
+  registered at startup, opens the payload and posts the notification on the
+  channel for the kind, with an id derived from the collapse key so a newer
+  push for the same window and kind replaces the older one. When the payload
+  does not open (no context yet, or a key from an earlier opt-in) it posts the
+  generic text for `k`. A tap comes back through the local notification
+  plugin carrying the encrypted payload and opens like an FCM tap.
+- **iOS:** the notification service extension
+  (`ios/NotificationServiceExtension`) opens the payload with the shared
+  context, rewrites the title and body, and groups a host's notifications by
+  thread. Anything it cannot open is shown unchanged.
 - **Foreground:** iOS presents nothing while the app is open (the AppDelegate
   answers `willPresent` with no options, as before the app had a notification
   delegate, and runs each completion handler once). `onMessage` drops the push
@@ -628,7 +677,4 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
 
 ## Follow-ups
 
-- A notification service extension that shows decrypted text such as "Claude
-  needs approval on build-box". It needs the App Group and keychain access group
-  work in #947.
 - Live Activity push updates for #922.

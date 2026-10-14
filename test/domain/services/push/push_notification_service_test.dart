@@ -12,6 +12,7 @@ import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_device_store.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
+import 'package:monkeyssh/domain/services/push/push_notification_context.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -225,6 +226,23 @@ class _FakeLink implements PushHostLink {
   }
 }
 
+class _MemoryContextStore implements PushNotificationContextStore {
+  String? stored;
+  int writes = 0;
+
+  @override
+  Future<void> write(String encoded) async {
+    stored = encoded;
+    writes++;
+  }
+
+  @override
+  Future<String?> read() async => stored;
+
+  @override
+  Future<void> delete() async => stored = null;
+}
+
 class _Harness {
   _Harness({_FakeGateway? gateway}) : gateway = gateway ?? _FakeGateway() {
     database = AppDatabase.forTesting(NativeDatabase.memory());
@@ -247,6 +265,10 @@ class _Harness {
   final hostPrefs = <int, HostNotificationPrefs>{};
   final hostChanges = StreamController<void>.broadcast();
   bool terminalNotifications = true;
+  final context = _MemoryContextStore();
+
+  /// Saved host labels; absent ids get `host-<id>`.
+  final hostLabels = <int, String>{};
 
   /// Changes a host's preferences as its edit screen would.
   Future<void> editHost(int hostId, HostNotificationPrefs prefs) async {
@@ -293,6 +315,12 @@ class _Harness {
         () => terminalNotifications,
       ),
       pushNotificationChannelInstallerProvider.overrideWithValue(() async {}),
+      pushNotificationContextStoreProvider.overrideWithValue(context),
+      pushHostLabelsProvider.overrideWithValue(
+        () async => {
+          for (final id in hostIds()) id: hostLabels[id] ?? 'host-$id',
+        },
+      ),
       pushClockProvider.overrideWithValue(() => now),
       pushLocalPresenceSupportedProvider.overrideWithValue(
         localPresenceSupported,
@@ -452,6 +480,45 @@ void main() {
     expect(await h.controller.enable(), PushSetupFailure.tokenUnavailable);
     expect(h.gateway.calls, isNot(contains('register')));
     expect(h.secrets.values, isEmpty);
+  });
+
+  test('the phone keeps what it needs to show a push while the app is '
+      'closed, and drops it on opt-out', () async {
+    h.hostLabels[2] = 'build-box';
+    await h.start();
+    expect(h.context.stored, isNull);
+    await h.controller.enable();
+    await h.controller.syncNow();
+
+    final stored = await PushDeviceStore(secrets: h.secrets).load();
+    final context = PushNotificationContext.decode(h.context.stored);
+    expect(context, isNotNull);
+    expect(context!.seed, stored!.keyPair.seed);
+    final buildBox = await derivePushHostRef(
+      hostRefKey: stored.hostRefKey,
+      hostId: 2,
+    );
+    expect(context.hosts[buildBox], 'build-box');
+    expect(context.hosts, hasLength(3));
+
+    // Unchanged hosts are not written again on every sync.
+    final writes = h.context.writes;
+    await h.controller.syncNow();
+    expect(h.context.writes, writes);
+
+    // A renamed host is.
+    h.hostLabels[2] = 'gpu-rig';
+    h.hostChanges.add(null);
+    await pumpEventQueue();
+    await h.controller.syncNow();
+    expect(
+      PushNotificationContext.decode(h.context.stored)!.hosts[buildBox],
+      'gpu-rig',
+    );
+
+    await h.controller.disable();
+    expect(h.context.stored, isNull);
+    h.expectLogsClean();
   });
 
   test('opting out unregisters reachable hosts, remembers the rest and '
@@ -1247,6 +1314,10 @@ void main() {
             () => true,
           ),
           pushLocalBridgesProvider.overrideWithValue((_) => const []),
+          pushNotificationContextStoreProvider.overrideWithValue(
+            _MemoryContextStore(),
+          ),
+          pushHostLabelsProvider.overrideWithValue(() async => {}),
           pushNotificationChannelInstallerProvider.overrideWithValue(
             () async {},
           ),

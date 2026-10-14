@@ -26,6 +26,7 @@ import 'push_device_store.dart';
 import 'push_event.dart';
 import 'push_local_alerts.dart';
 import 'push_messaging_gateway.dart';
+import 'push_notification_context.dart';
 
 /// Android channel for closed-app events that wait on the user (approvals,
 /// questions). The Firebase Function names the same id.
@@ -89,9 +90,9 @@ final pushDeviceStoreProvider = Provider<PushDeviceStore>(
   (ref) => PushDeviceStore(),
 );
 
-/// Creates the Android notification channel FCM posts into.
+/// Creates the Android notification channels pushes are shown on.
 final pushNotificationChannelInstallerProvider =
-    Provider<Future<void> Function()>((ref) => _installAgentAttentionChannel);
+    Provider<Future<void> Function()>((ref) => installPushNotificationChannels);
 
 /// The clock push bookkeeping uses; replaced in tests.
 final pushClockProvider = Provider<DateTime Function()>((ref) => DateTime.now);
@@ -212,7 +213,9 @@ final pushHostLinksProvider = Provider<List<PushHostLink> Function()>((ref) {
   ];
 });
 
-Future<void> _installAgentAttentionChannel() async {
+/// Creates the Android channels pushes are shown on. Safe to call again; it
+/// also runs in the background isolate before a push is posted.
+Future<void> installPushNotificationChannels() async {
   if (defaultTargetPlatform != TargetPlatform.android) return;
   try {
     final android = FlutterLocalNotificationsPlugin()
@@ -404,6 +407,13 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   StreamSubscription<void>? _hostChanges;
   Map<int, PushHostSettings>? _lastHostSettings;
   late Future<void> Function() _installChannel;
+  late PushNotificationContextStore _contextStore;
+  late Future<Map<int, String>> Function() _hostLabels;
+
+  /// Whether the stored notification context may be out of date: after a
+  /// load, an opt-in, or a change to the saved hosts.
+  bool _contextDirty = true;
+  String? _lastContext;
   late DateTime Function() _now;
   late bool _localPresenceSupported;
   late bool Function(int) _hasAlertListener;
@@ -455,6 +465,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       pushTerminalNotificationsEnabledProvider,
     );
     _installChannel = ref.watch(pushNotificationChannelInstallerProvider);
+    _contextStore = ref.watch(pushNotificationContextStoreProvider);
+    _hostLabels = ref.watch(pushHostLabelsProvider);
     _now = ref.watch(pushClockProvider);
     _localPresenceSupported = ref.watch(pushLocalPresenceSupportedProvider);
     _hasAlertListener = ref.watch(pushLocalAlertListenerProvider);
@@ -470,6 +482,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       Future.microtask(_load);
       // A host's settings change in its edit screen as well as here.
       _hostChanges = ref.watch(pushHostChangesProvider)().listen((_) {
+        // A renamed or deleted host changes what its notifications say.
+        _contextDirty = true;
         if (state.loaded) unawaited(_reconcileHostPush());
       });
       // The app-wide switch for program notifications changes what every
@@ -735,6 +749,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
 
   Future<void> _discardLocalRegistration() async {
     await _retireToken();
+    await _clearNotificationContext();
     try {
       await _store.clear();
     } on Object catch (error) {
@@ -790,6 +805,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       _lastPresence.clear();
       await _persistHostBookkeeping();
       await _retireToken();
+      await _clearNotificationContext();
       try {
         await _store.clear();
       } on Object catch (error) {
@@ -1324,12 +1340,63 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       await _sendPresence(link, links, secrets, prefs);
     }
     if (bookkeepingChanged) await _persistHostBookkeeping();
+    if (state.enabled && !_optingOut) await _refreshNotificationContext();
     if (_pendingUnregister.isEmpty &&
         !state.enabled &&
         !_tokenDeletePending &&
         !_autoInitDisablePending) {
       _heartbeat?.cancel();
       _heartbeat = null;
+    }
+  }
+
+  /// Stores what the phone needs to show a push while the app is not running
+  /// (see [PushNotificationContext]) when the saved hosts or the device key
+  /// changed since it was last stored.
+  Future<void> _refreshNotificationContext() async {
+    final secrets = _secrets;
+    if (!_contextDirty || secrets == null) return;
+    try {
+      final labels = await _hostLabels();
+      final hosts = <String, String>{};
+      for (final MapEntry(key: hostId, value: label) in labels.entries) {
+        final hostRef = await derivePushHostRef(
+          hostRefKey: secrets.hostRefKey,
+          hostId: hostId,
+        );
+        hosts[hostRef] = label;
+      }
+      final encoded = PushNotificationContext(
+        seed: secrets.keyPair.seed,
+        hosts: hosts,
+      ).encode();
+      if (encoded != _lastContext) {
+        await _contextStore.write(encoded);
+        _lastContext = encoded;
+      }
+      _contextDirty = false;
+    } on Object catch (error) {
+      _log.warning(
+        _diagnosticsCategory,
+        'context_write_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
+  }
+
+  /// Removes the stored notification context, whose key no longer opens
+  /// anything.
+  Future<void> _clearNotificationContext() async {
+    _lastContext = null;
+    _contextDirty = true;
+    try {
+      await _contextStore.delete();
+    } on Object catch (error) {
+      _log.warning(
+        _diagnosticsCategory,
+        'context_clear_failed',
+        fields: {'errorType': error.runtimeType},
+      );
     }
   }
 

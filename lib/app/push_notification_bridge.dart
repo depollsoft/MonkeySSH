@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../domain/services/auth_service.dart';
 import '../domain/services/host_notification_prefs_reader.dart';
+import '../domain/services/local_notification_service.dart';
 import '../domain/services/push/push_event.dart';
 import '../domain/services/push/push_messaging_gateway.dart';
 import '../domain/services/push/push_notification_service.dart';
@@ -93,6 +94,7 @@ class _PushNotificationBridgeState
   AppLifecycleListener? _lifecycle;
   StreamSubscription<PushRemoteMessage>? _foregroundMessages;
   StreamSubscription<PushRemoteMessage>? _openedMessages;
+  StreamSubscription<String>? _localPushTaps;
   ProviderSubscription<AuthState>? _authSubscription;
   ProviderSubscription<GoRouter>? _routerSubscription;
   GoRouter? _router;
@@ -132,6 +134,13 @@ class _PushNotificationBridgeState
     _foregroundMessages = gateway.onMessage.listen(_handleForegroundMessage);
     _openedMessages = gateway.onMessageOpenedApp.listen(_handleOpenedMessage);
     unawaited(_handleInitialMessage(gateway));
+    // Android shows data-only pushes itself, so their taps come back through
+    // the local notification plugin instead of FCM.
+    final notifications = ref.read(localNotificationServiceProvider);
+    _localPushTaps = notifications.pushNotificationTaps.listen(
+      (payload) => unawaited(_handleOpenedMessage(_localPushMessage(payload))),
+    );
+    unawaited(_handleLaunchPush(notifications));
     // The router is rebuilt on auth transitions, which happen while the app
     // starts. Following only the first one left presence on a discarded
     // router whose location stayed `/`, so no device ever reported watching
@@ -156,6 +165,7 @@ class _PushNotificationBridgeState
       _router?.routerDelegate.removeListener(_reportVisibility);
       unawaited(_foregroundMessages?.cancel());
       unawaited(_openedMessages?.cancel());
+      unawaited(_localPushTaps?.cancel());
       _authSubscription?.close();
     }
     super.dispose();
@@ -226,6 +236,19 @@ class _PushNotificationBridgeState
     }
     if (message != null) await _handleOpenedMessage(message);
   }
+
+  Future<void> _handleLaunchPush(LocalNotificationService notifications) async {
+    final String? payload;
+    try {
+      payload = await notifications.consumeLaunchPushPayload();
+    } on Object {
+      return;
+    }
+    if (payload != null) await _handleOpenedMessage(_localPushMessage(payload));
+  }
+
+  static PushRemoteMessage _localPushMessage(String payload) =>
+      PushRemoteMessage(data: {'v': '1', 'p': payload});
 
   Future<void> _handleOpenedMessage(PushRemoteMessage message) async {
     final payload = message.encryptedPayload;

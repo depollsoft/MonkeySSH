@@ -41,6 +41,7 @@ class PushEvent {
     this.windowId,
     this.sessionName,
     this.alertCategories,
+    this.agent,
   });
 
   /// The host reference this device registered on the host.
@@ -61,6 +62,10 @@ class PushEvent {
   /// For an `alert`, whether it was a `bell`, a program's `notice`, or both.
   /// Null from helpers before 0.1.233, which do not say.
   final Set<String>? alertCategories;
+
+  /// The agent the window runs, as MonkeyMux names it (such as `claude`),
+  /// from 0.1.236 on when it knows.
+  final String? agent;
 
   /// Parses decrypted payload bytes, returning null for anything malformed.
   static PushEvent? tryParse(List<int> plaintext) {
@@ -94,6 +99,7 @@ class PushEvent {
         ? session
         : null;
     final alert = decoded['alert'];
+    final agent = decoded['agent'];
     return PushEvent(
       hostRef: hostRef,
       kind: kind,
@@ -106,9 +112,12 @@ class PushEvent {
                 if (category == 'bell' || category == 'notice') category,
             }
           : null,
+      agent: agent is String && _agentPattern.hasMatch(agent) ? agent : null,
     );
   }
 }
+
+final _agentPattern = RegExp(r'^[a-z0-9-]{1,32}$');
 
 /// Where a push notification tap should land.
 @immutable

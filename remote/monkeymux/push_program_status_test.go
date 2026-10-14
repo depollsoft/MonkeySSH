@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +131,52 @@ func TestPushNativeAgentWindowStatusIsNotPushedTwice(t *testing.T) {
 	h.reportStatus("@2", "state=working", "state=done", "state=blocked:kind=permission")
 	if got := h.kinds(); got != "" {
 		t.Fatalf("pushes = %q, want none from a native agent window's status", got)
+	}
+}
+
+// The payload names the window's agent so the app can say who finished. It
+// is sent only when it is a short lowercase id.
+func TestPushPayloadNamesTheWindowsAgent(t *testing.T) {
+	cases := []struct {
+		tool string
+		want string
+	}{
+		{"claude", "claude"},
+		{"cursor-agent", "cursor-agent"},
+		{"", ""},
+		{"Claude Code", ""},
+		{strings.Repeat("a", 33), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			h := newPushTestHarness(t)
+			device := newPushTestDevice(t, 1)
+			h.registerEvents(t, device, nil)
+			h.addPushStatusWindow("@2", "")
+			h.server.mu.Lock()
+			h.server.windows[len(h.server.windows)-1].agentTool = tc.tool
+			h.server.mu.Unlock()
+			h.reportStatus("@2", "state=working", "state=done")
+			requests := h.endpoint.received()
+			if len(requests) != 1 {
+				t.Fatalf("pushes = %d, want 1", len(requests))
+			}
+			var event struct {
+				Agent *string `json:"agent"`
+			}
+			if err := json.Unmarshal(openPushPayloadForTest(t, device.private, requests[0].Payload), &event); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if event.Agent != nil {
+				got = *event.Agent
+				if got == "" {
+					t.Fatal("payload carries an empty agent")
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("agent = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

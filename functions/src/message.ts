@@ -96,9 +96,28 @@ export interface FcmMessageInput {
 /**
  * Builds the FCM message. Visible text comes from the coarse kind only; the
  * encrypted payload travels as data for the app to open.
+ *
+ * Android gets a data-only message: the app decrypts the payload and posts the
+ * notification itself, naming the host and agent, on the channel for the
+ * kind. `k` (the kind) and `c` (the collapse key) let it post a generic one
+ * when the payload does not open. Every such push must end in a visible
+ * notification, so it is sent at high priority to wake the app. iOS (and a
+ * ticket without a platform) gets an alert the notification service extension
+ * rewrites.
  */
 export function buildFcmMessage(input: FcmMessageInput): TokenMessage {
   const presentation = presentations[input.kind];
+  if (input.platform === "android") {
+    return {
+      token: input.token,
+      data: { v: "1", p: input.payload, k: input.kind, c: input.collapse },
+      android: {
+        priority: "high",
+        collapseKey: input.collapse,
+        ttl: timeToLiveSeconds * 1000,
+      },
+    };
+  }
   return {
     token: input.token,
     notification: { title: presentation.title, body: presentation.body },

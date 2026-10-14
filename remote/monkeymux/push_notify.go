@@ -288,6 +288,9 @@ type pushServerView struct {
 	session  string
 	activeID string
 	attached map[string]bool
+	// agents names the agent each window runs (see pushAgentName), for the
+	// encrypted payload.
+	agents map[string]string
 }
 
 // pushJob is one event addressed to one device.
@@ -556,6 +559,12 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 		session:  s.session,
 		activeID: s.activeID,
 		attached: map[string]bool{},
+		agents:   map[string]string{},
+	}
+	for _, window := range s.windows {
+		if agent := pushAgentName(window.agentTool); agent != "" {
+			view.agents[window.id] = agent
+		}
 	}
 	for _, clientID := range clientIDs {
 		if clientID != "" && s.attachClientByIDLocked(clientID) != nil {
@@ -853,7 +862,7 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, kind, entry.alerts, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], kind, entry.alerts, now)
 		if err != nil {
 			continue
 		}
@@ -910,7 +919,7 @@ func (s *muxServer) raisePushAttention(
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, kind, 0, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], kind, 0, now)
 		if err != nil {
 			continue
 		}
@@ -989,7 +998,7 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 		return refused
 	}
 	// A test opens the host, not a window, so the payload names neither.
-	job, err := buildPushJob(*device, salt, "", "", pushKindTest, 0, now)
+	job, err := buildPushJob(*device, salt, "", "", "", pushKindTest, 0, now)
 	if err != nil {
 		return pushResultFailed
 	}
@@ -998,11 +1007,29 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 	return n.deliverWithRetries(job, nil)
 }
 
+// pushAgentName is a window's detected agent (the command name MonkeyMux
+// tracks, such as "claude" or "cursor-agent") when it is a short lowercase
+// id, so the app can name the agent in the notification it shows. It travels
+// only inside the encrypted payload.
+func pushAgentName(tool string) string {
+	if len(tool) == 0 || len(tool) > 32 {
+		return ""
+	}
+	for index := 0; index < len(tool); index++ {
+		c := tool[index]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return ""
+		}
+	}
+	return tool
+}
+
 func buildPushJob(
 	device pushDeviceRecord,
 	salt []byte,
 	session string,
 	windowID string,
+	agent string,
 	kind string,
 	alerts pushAlertCategories,
 	now time.Time,
@@ -1026,9 +1053,10 @@ func buildPushJob(
 		Window    string   `json:"window"`
 		SessionID string   `json:"sessionId"`
 		Kind      string   `json:"kind"`
+		Agent     string   `json:"agent,omitempty"`
 		Alert     []string `json:"alert,omitempty"`
 		TS        int64    `json:"ts"`
-	}{1, device.HostRef, windowID, session, kind, alertNames, now.Unix()})
+	}{1, device.HostRef, windowID, session, kind, agent, alertNames, now.Unix()})
 	if err != nil {
 		return pushJob{}, err
 	}
@@ -1336,7 +1364,16 @@ func (s *muxServer) flushPushDeferred() {
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, entry.event.windowID, entry.event.kind, entry.event.alerts, entry.event.at)
+		job, err := buildPushJob(
+			entry.record,
+			salt,
+			view.session,
+			entry.event.windowID,
+			view.agents[entry.event.windowID],
+			entry.event.kind,
+			entry.event.alerts,
+			entry.event.at,
+		)
 		if err != nil {
 			continue
 		}

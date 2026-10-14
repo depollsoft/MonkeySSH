@@ -7,6 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/tmux_state.dart';
+import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
 
 /// Local notification channel used for tmux activity alerts.
@@ -705,10 +706,14 @@ class LocalNotificationService {
       StreamController<TerminalNotificationPayload>.broadcast();
   final StreamController<AcpNotificationPayload> _acpNotificationTapController =
       StreamController<AcpNotificationPayload>.broadcast();
+  final StreamController<String> _pushNotificationTapController =
+      StreamController<String>.broadcast();
   Future<bool>? _initializeFuture;
   TmuxAlertNotificationPayload? _launchTmuxAlert;
   TerminalNotificationPayload? _launchTerminalNotification;
   AcpNotificationPayload? _launchAcpNotification;
+  String? _launchPushPayload;
+  bool _didConsumeLaunchPushPayload = false;
   bool _didConsumeLaunchTmuxAlert = false;
   bool _didConsumeLaunchTerminalNotification = false;
   bool _didConsumeLaunchAcpNotification = false;
@@ -725,6 +730,20 @@ class LocalNotificationService {
   Stream<AcpNotificationPayload> get acpNotificationTaps =>
       _acpNotificationTapController.stream;
 
+  /// Emits the encrypted payload whenever the user taps a push notification
+  /// the app posted itself (Android shows data-only pushes locally).
+  Stream<String> get pushNotificationTaps =>
+      _pushNotificationTapController.stream;
+
+  /// Returns the encrypted payload of the push notification that launched the
+  /// app, if one has not been consumed.
+  Future<String?> consumeLaunchPushPayload() async {
+    final didInitialize = await initialize();
+    if (!didInitialize || _didConsumeLaunchPushPayload) return null;
+    _didConsumeLaunchPushPayload = true;
+    return _launchPushPayload;
+  }
+
   /// Ensures the underlying notification plugin is initialized.
   Future<bool> initialize() => _initializeFuture ??= _initializeInternal();
 
@@ -733,6 +752,7 @@ class LocalNotificationService {
     unawaited(_tmuxAlertTapController.close());
     unawaited(_terminalNotificationTapController.close());
     unawaited(_acpNotificationTapController.close());
+    unawaited(_pushNotificationTapController.close());
   }
 
   /// Returns the tmux alert that launched the app, if one has not been consumed.
@@ -979,6 +999,7 @@ class LocalNotificationService {
         launchPayload,
       );
       _launchAcpNotification = AcpNotificationPayload.decode(launchPayload);
+      _launchPushPayload = decodePushTapPayload(launchPayload);
 
       await _plugin.initialize(
         settings: initializationSettings,
@@ -1047,6 +1068,11 @@ class LocalNotificationService {
   }
 
   void _handleNotificationResponse(NotificationResponse response) {
+    final pushPayload = decodePushTapPayload(response.payload);
+    if (pushPayload != null) {
+      _pushNotificationTapController.add(pushPayload);
+      return;
+    }
     final tmuxPayload = TmuxAlertNotificationPayload.decode(response.payload);
     if (tmuxPayload != null) {
       _tmuxAlertTapController.add(tmuxPayload);
