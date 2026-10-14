@@ -269,8 +269,9 @@ header before reading the body, would close it.
 Normal-priority kinds use `"priority": "normal"`, `apns-priority: 5`, no
 sound on iOS, and the Android channel `agent-updates-v2` (on Android 8 and
 later the channel, not the message priority, decides sound and heads-up
-display). `mutable-content` lets a later notification service extension replace
-the text with decrypted details (see Follow-ups).
+display). `mutable-content` lets the iOS notification service extension
+replace the text with decrypted details (see
+[iOS notification service extension](#ios-notification-service-extension)).
 
 ### Logging
 
@@ -626,9 +627,59 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   creates the new id. A message naming a channel the app has not created shows
   on the manifest default, `agent-attention`.
 
+### iOS notification service extension
+
+`ios/NotificationServiceExtension/` decrypts `p` before iOS shows the push and
+replaces the generic text. Android builds the same strings in Dart.
+
+| Kind | Title with a known `agent` | Title otherwise |
+| --- | --- | --- |
+| `permission` | "Claude Code needs approval" | "Approval needed" |
+| `input` | "Claude Code has a question" | "Input needed" |
+| `finished` | "Claude Code finished" | "Agent finished" |
+| `alert` | "Terminal alert" | "Terminal alert" |
+| `test` | "MonkeySSH" | "MonkeySSH" |
+
+Agent labels: `claude` Claude Code, `codex` Codex, `copilot` Copilot,
+`opencode` OpenCode, `antigravity` Antigravity, `cursor-agent` Cursor Agent,
+`pi` Pi, `hermes` Hermes, `openclaw` OpenClaw, `grok` Grok, `muse` Muse Code.
+The body is "Push notifications are working." for a test, otherwise
+"<host label> · <session>" (just the label without a session) when the app
+shared a label for `hostRef`, and the generic body when it did not. The thread
+identifier becomes `hostRef`, so each host's notifications group together.
+`userInfo` is never changed, and any failure (no `p`, no keychain item, a
+payload that does not open) delivers the push as sent.
+
+The extension reads the device key and host labels from a keychain item the
+app writes through the `xyz.depollsoft.monkeyssh/push_notification_context`
+method channel (`write` with `{"json": ...}`, `delete`):
+
+| Attribute | Value |
+| --- | --- |
+| Class | generic password |
+| Service | `xyz.depollsoft.monkeyssh.push` |
+| Account | `notification-context-v1` |
+| Access group | `<AppIdentifierPrefix><app bundle id>.push` |
+| Accessible | after first unlock, this device only |
+| Data | `{"v": 1, "seed": "<base64url device private key>", "hosts": {"<hostRef>": "<label>"}}` |
+
+Both targets name the access group in Info.plist (`MonkeySSHPushKeychainGroup`)
+and list it in `keychain-access-groups`. The app lists its own group,
+`<AppIdentifierPrefix><bundle id>`, first: the first group is the default for
+keychain items written without one, so every secret the app already stores
+keeps its group. Builds re-signed by `fastlane resign_ipa` (TestFlight and
+Firebase builds of the private app) are signed with the profile's
+entitlements, whose first group is `TEAMID.*`; the lane keeps that order,
+appends the push group, and writes the concrete group into both Info.plists,
+because an unsigned build leaves `$(AppIdentifierPrefix)` empty. The extension
+lists the push group alone.
+
+The extension ids are `xyz.depollsoft.monkeyssh.NotificationService` and
+`xyz.depollsoft.monkeyssh.private.NotificationService`. The Regenerate iOS
+Provisioning Profiles workflow registers them in the developer portal before
+match creates their profiles. `scripts/test_ios_push_notification_content.sh`
+checks the decryption and text against the shared vectors.
+
 ## Follow-ups
 
-- A notification service extension that shows decrypted text such as "Claude
-  needs approval on build-box". It needs the App Group and keychain access group
-  work in #947.
 - Live Activity push updates for #922.

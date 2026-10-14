@@ -39,6 +39,8 @@ never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.
 
+The same applies after adding an app extension target: its bundle ID needs a profile before any signed build. `regenerate_profiles` registers missing extension bundle IDs (via the App Store Connect API) before running match.
+
 Refresh once via the **Regenerate iOS Provisioning Profiles** GitHub Actions workflow (`workflow_dispatch`), or run locally:
 
 ```bash
