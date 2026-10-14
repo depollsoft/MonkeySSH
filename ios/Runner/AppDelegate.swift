@@ -22,6 +22,11 @@ import UserNotifications
   private var appleDatabaseChannel: FlutterMethodChannel?
   private var keyboardVisibilityChannel: FlutterMethodChannel?
   private var pushNotificationContextChannel: FlutterMethodChannel?
+  /// Serial, so a delete and a later write reach the keychain in call order.
+  private let pushNotificationContextQueue = DispatchQueue(
+    label: "xyz.depollsoft.monkeyssh.push-notification-context",
+    qos: .utility
+  )
   private var keyboardVisible = false
   private var pendingTransferPayload: String?
 
@@ -170,6 +175,7 @@ import UserNotifications
       name: pushNotificationContextChannelName,
       binaryMessenger: registrar.messenger()
     )
+    let queue = pushNotificationContextQueue
     channel.setMethodCallHandler { call, result in
       let data: Data?
       switch call.method {
@@ -204,7 +210,7 @@ import UserNotifications
         )
         return
       }
-      DispatchQueue.global(qos: .utility).async {
+      queue.async {
         let status = data.map {
           PushNotificationContextKeychain.write($0, accessGroup: accessGroup)
         } ?? PushNotificationContextKeychain.delete(accessGroup: accessGroup)
