@@ -102,8 +102,9 @@ test("normal-priority kinds stay quiet", async () => {
   await handlePushNotify(post({ ...valid, kind: "finished" }), h.deps);
   const message = h.sent[0];
   assert.equal(message.android?.priority, "normal");
-  // The channel decides sound on Android 8+, so routine kinds use a quiet one.
-  assert.equal(message.android?.notification?.channelId, "agent-updates");
+  // The channel decides sound on Android 8+: routine kinds sound without
+  // popping up.
+  assert.equal(message.android?.notification?.channelId, "agent-updates-v2");
   assert.equal(message.apns?.headers?.["apns-priority"], "5");
   assert.equal(message.apns?.payload?.aps.sound, undefined);
   assert.equal(message.notification?.body, "An agent finished its turn.");

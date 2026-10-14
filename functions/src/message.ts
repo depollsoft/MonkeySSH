@@ -72,11 +72,14 @@ const presentations: Record<PushKind, KindPresentation> = {
 /** Android channel the app creates for events that wait on the user. */
 export const androidChannelId = "agent-attention";
 /**
- * Quiet Android channel for routine events (finished turns, window alerts).
- * On Android 8+ the channel, not the message priority, decides sound and
- * heads-up display.
+ * Android channel for routine events (finished turns, window alerts): default
+ * importance, so they sound and show in the status bar without popping up. On
+ * Android 8+ the channel, not the message priority, decides sound and heads-up
+ * display. It replaced the low-importance "agent-updates", whose finished
+ * turns sat collapsed in the Silent section; an app without this channel
+ * shows the message on the manifest's default, "agent-attention".
  */
-export const androidRoutineChannelId = "agent-updates";
+export const androidRoutineChannelId = "agent-updates-v2";
 const androidIcon = "ic_notification_monkey";
 const timeToLiveSeconds = 3600;
 

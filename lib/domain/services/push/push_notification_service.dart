@@ -31,9 +31,16 @@ import 'push_messaging_gateway.dart';
 /// questions). The Firebase Function names the same id.
 const pushAgentAttentionChannelId = 'agent-attention';
 
-/// Quiet Android channel for routine closed-app events (finished turns,
-/// window alerts). The Firebase Function names the same id.
-const pushAgentUpdatesChannelId = 'agent-updates';
+/// Android channel for routine closed-app events (finished turns, window
+/// alerts), at the default importance: they sound and show in the status bar
+/// but do not pop up. The Firebase Function names the same id.
+const pushAgentUpdatesChannelId = 'agent-updates-v2';
+
+/// The first routine channel, created at low importance, which put finished
+/// turns in the collapsed Silent section next to the SSH connection
+/// notification. Android never lets an app raise an existing channel's
+/// importance, so it is replaced and deleted.
+const _legacyPushAgentUpdatesChannelId = 'agent-updates';
 
 /// How often the app refreshes its presence with hosts. MonkeyMux treats a
 /// report older than 45 seconds as stale.
@@ -230,8 +237,10 @@ Future<void> _installAgentAttentionChannel() async {
         description:
             'Finished agent turns and terminal alerts while MonkeySSH is '
             'closed.',
-        importance: Importance.low,
       ),
+    );
+    await android?.deleteNotificationChannel(
+      channelId: _legacyPushAgentUpdatesChannelId,
     );
   } on MissingPluginException {
     // Tests run without platform plugins.

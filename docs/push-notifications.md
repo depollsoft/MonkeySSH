@@ -267,8 +267,9 @@ header before reading the body, would close it.
 ```
 
 Normal-priority kinds use `"priority": "normal"`, `apns-priority: 5`, no
-sound, and the quiet Android channel `agent-updates` (on Android 8 and later
-the channel, not the message priority, decides sound and heads-up display). `mutable-content` lets a later notification service extension replace
+sound on iOS, and the Android channel `agent-updates-v2` (on Android 8 and
+later the channel, not the message priority, decides sound and heads-up
+display). `mutable-content` lets a later notification service extension replace
 the text with decrypted details (see Follow-ups).
 
 ### Logging
@@ -615,9 +616,15 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   when the terminal on screen shows that window, or when it is an `alert` from
   the session on screen, whose window bar raises its own alert. Anything else
   shows a snackbar with an Open action.
-- **Android channels:** "Agent attention" (`agent-attention`, high importance)
-  for approvals and questions, and "Agent updates" (`agent-updates`, low
-  importance, no sound) for finished turns and window alerts.
+- **Android channels:** "Agent attention" (`agent-attention`, high importance,
+  pops up) for approvals and questions, and "Agent updates"
+  (`agent-updates-v2`, default importance: sound and the status bar, no pop-up)
+  for finished turns and window alerts. The first "Agent updates" channel
+  (`agent-updates`) was low importance, which put finished turns in the
+  collapsed Silent section beside the SSH connection notification. Android
+  never raises an existing channel's importance, so the app deletes it and
+  creates the new id. A message naming a channel the app has not created shows
+  on the manifest default, `agent-attention`.
 
 ## Follow-ups
 
