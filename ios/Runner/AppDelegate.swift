@@ -1,4 +1,5 @@
 import Flutter
+import Security
 import UIKit
 import UserNotifications
 
@@ -13,11 +14,14 @@ import UserNotifications
   private let appleDatabaseChannelName = "xyz.depollsoft.monkeyssh/apple_file_protection"
   private let keyboardVisibilityChannelName =
     "xyz.depollsoft.monkeyssh/keyboard_visibility"
+  private let pushNotificationContextChannelName =
+    "xyz.depollsoft.monkeyssh/push_notification_context"
   private let maxTransferPayloadBytes = 10 * 1024 * 1024
   private var backgroundSshChannel: FlutterMethodChannel?
   private var transferChannel: FlutterMethodChannel?
   private var appleDatabaseChannel: FlutterMethodChannel?
   private var keyboardVisibilityChannel: FlutterMethodChannel?
+  private var pushNotificationContextChannel: FlutterMethodChannel?
   private var keyboardVisible = false
   private var pendingTransferPayload: String?
 
@@ -35,6 +39,7 @@ import UserNotifications
       setupTransferChannel(with: registrar)
       setupAppleDatabaseChannel(with: registrar)
       setupKeyboardVisibilityChannel(with: registrar)
+      setupPushNotificationContextChannel(with: registrar)
     } else {
       NSLog("Failed to configure AppDelegate method channels.")
     }
@@ -156,6 +161,69 @@ import UserNotifications
       result(self?.keyboardVisible ?? false)
     }
     keyboardVisibilityChannel = channel
+  }
+
+  // Shares the push device key and host labels with the notification service
+  // extension through PushNotificationContextKeychain.
+  private func setupPushNotificationContextChannel(with registrar: FlutterPluginRegistrar) {
+    let channel = FlutterMethodChannel(
+      name: pushNotificationContextChannelName,
+      binaryMessenger: registrar.messenger()
+    )
+    channel.setMethodCallHandler { call, result in
+      let data: Data?
+      switch call.method {
+      case "write":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let json = arguments["json"] as? String
+        else {
+          result(
+            FlutterError(
+              code: "invalid_args",
+              message: "Missing push notification context",
+              details: nil
+            )
+          )
+          return
+        }
+        data = Data(json.utf8)
+      case "delete":
+        data = nil
+      default:
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      guard let accessGroup = PushNotificationContextKeychain.accessGroup() else {
+        result(
+          FlutterError(
+            code: "unavailable",
+            message: "This build has no push keychain access group",
+            details: nil
+          )
+        )
+        return
+      }
+      DispatchQueue.global(qos: .utility).async {
+        let status = data.map {
+          PushNotificationContextKeychain.write($0, accessGroup: accessGroup)
+        } ?? PushNotificationContextKeychain.delete(accessGroup: accessGroup)
+        DispatchQueue.main.async {
+          if status == errSecSuccess {
+            result(true)
+          } else {
+            result(
+              FlutterError(
+                code: "keychain_error",
+                message: "Push notification context keychain update failed",
+                details: Int(status)
+              )
+            )
+          }
+        }
+      }
+    }
+    pushNotificationContextChannel = channel
   }
 
   @objc private func keyboardWillShow(_ notification: Notification) {
