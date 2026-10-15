@@ -109,39 +109,31 @@ final gitWorkingTreeServiceFactoryProvider =
 
 /// Reads git status and per-file diffs through a [GitCommandRunner].
 class GitWorkingTreeService {
-  /// Creates a service that runs commands through [run].
+  /// Creates a service that runs commands through [run], and the untracked
+  /// line counts, which nothing waits on, through [backgroundRun] (or [run]).
   GitWorkingTreeService(
     GitCommandRunner run, {
+    GitCommandRunner? backgroundRun,
     String Function()? markerFactory,
     DateTime Function()? clock,
   }) : _run = run,
+       _backgroundRun = backgroundRun ?? run,
        _markerFactory = markerFactory ?? _randomMarker,
        _clock = clock ?? DateTime.now;
 
   /// Creates a service that runs scripts over [session]'s exec queue.
   ///
   /// Opening the channel and reading its output share one [kGitCommandTimeout]
-  /// budget.
+  /// budget. Untracked line counts run at low priority, so they never hold
+  /// both of the connection's exec slots alongside a diff.
   factory GitWorkingTreeService.ssh(SshSession session) =>
       GitWorkingTreeService(
-        (script, {required maxBytes, required timeout}) =>
-            session.runQueuedExec(() async {
-              final elapsed = Stopwatch()..start();
-              final exec = await openSshExec(
-                session.execute(kGitHostCommandLine),
-                timeout,
-              );
-              final remaining = timeout - elapsed.elapsed;
-              return collectCappedSshExecOutput(
-                exec,
-                stdin: utf8.encode(script),
-                maxBytes: maxBytes,
-                timeout: remaining > Duration.zero ? remaining : Duration.zero,
-              );
-            }),
+        _sshRunner(session, SshExecPriority.normal),
+        backgroundRun: _sshRunner(session, SshExecPriority.low),
       );
 
   final GitCommandRunner _run;
+  final GitCommandRunner _backgroundRun;
   final String Function() _markerFactory;
   final DateTime Function() _clock;
 
@@ -188,12 +180,17 @@ class GitWorkingTreeService {
     final output = await _runOrTimeout(
       request.script,
       maxBytes: kGitUntrackedCountMaxBytes,
+      run: _backgroundRun,
     );
     final payload = _gitSections(output.stdout, request.marker)['counts'];
     if (payload == null) {
       return const <String, GitLineCounts>{};
     }
-    return parseGitNumstatZ(payload);
+    // The script names every path as `./<path>`, and git reports it so.
+    return {
+      for (final MapEntry(:key, :value) in parseGitNumstatZ(payload).entries)
+        key.startsWith('./') ? key.substring(2) : key: value,
+    };
   }
 
   /// Reads and parses the diff for [file] in [repositoryRoot].
@@ -211,6 +208,14 @@ class GitWorkingTreeService {
       maxBytes: kGitDiffMaxBytes,
     );
     final sections = _gitSections(output.stdout, marker);
+    final linkTarget = sections['link'];
+    if (linkTarget != null) {
+      return _untrackedDirectoryLinkDiff(
+        file.path,
+        linkTarget,
+        exitCode: _sectionExitCode(sections, 'exit'),
+      );
+    }
     final diff = sections['diff'];
     if (diff == null) {
       return GitFileDiff(
@@ -254,9 +259,10 @@ class GitWorkingTreeService {
   Future<GitCommandOutput> _runOrTimeout(
     String script, {
     required int maxBytes,
+    GitCommandRunner? run,
   }) async {
     try {
-      return await _run(
+      return await (run ?? _run)(
         script,
         maxBytes: maxBytes,
         timeout: kGitCommandTimeout,
@@ -270,6 +276,54 @@ class GitWorkingTreeService {
       throw const GitWorkingTreeTimeoutException();
     }
   }
+}
+
+GitCommandRunner _sshRunner(SshSession session, SshExecPriority priority) =>
+    (script, {required maxBytes, required timeout}) =>
+        session.runQueuedExec(() async {
+          final elapsed = Stopwatch()..start();
+          final exec = await openSshExec(
+            session.execute(kGitHostCommandLine),
+            timeout,
+          );
+          final remaining = timeout - elapsed.elapsed;
+          return collectCappedSshExecOutput(
+            exec,
+            stdin: utf8.encode(script),
+            maxBytes: maxBytes,
+            timeout: remaining > Duration.zero ? remaining : Duration.zero,
+          );
+        }, priority: priority);
+
+/// The diff git would show once the untracked symlink [path] is added: one
+/// line holding its [target]. `git diff --no-index` follows a symlink to a
+/// directory instead, so the script reads the target itself.
+GitFileDiff _untrackedDirectoryLinkDiff(
+  String path,
+  String target, {
+  required int? exitCode,
+}) {
+  if (exitCode != 0 || target.isEmpty) {
+    return GitFileDiff(
+      headerLines: const <String>[],
+      hunks: const <GitDiffHunk>[],
+      binary: false,
+      truncated: false,
+      failed: true,
+    );
+  }
+  return parseGitUnifiedDiff(
+    [
+      'diff --git a/$path b/$path',
+      'new file mode 120000',
+      '--- /dev/null',
+      '+++ b/$path',
+      '@@ -0,0 +1 @@',
+      '+$target',
+      r'\ No newline at end of file',
+    ].join('\n'),
+    truncated: false,
+  );
 }
 
 String _randomMarker() {
@@ -416,10 +470,18 @@ String buildGitWorkingTreeStatusScript(
   r'''command -v git >/dev/null 2>&1 || { printf '%s:no-git\n' "$m"; exit 0; }''',
   'cd ${gitShellPathArgument(directory)} 2>/dev/null || $_reportNoDir',
   r'if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then',
-  // English messages, so the safe.directory refusal is recognisable.
-  r'  case "$(LC_ALL=C git rev-parse --git-dir 2>&1)" in',
+  // English messages, so the safe.directory refusal and "not a git
+  // repository" are recognisable. Any other failure (a git that cannot run,
+  // such as macOS's before the Xcode licence is accepted) is reported with
+  // its exit code instead of as a missing repository.
+  r'  probe=$(LC_ALL=C git rev-parse --git-dir 2>&1)',
+  r'  probe_exit=$?',
+  r'  case "$probe" in',
   r"""  *dubious*) printf '%s:unsafe\n' "$m" ;;""",
-  r"""  *) printf '%s:not-repo\n' "$m" ;;""",
+  r"""  *[Nn]'ot a git repository'*) printf '%s:not-repo\n' "$m" ;;""",
+  // `--git-dir` succeeds inside `.git` or a bare repository: no work tree.
+  r"""  *) if [ "$probe_exit" -eq 0 ]; then printf '%s:not-repo\n' "$m";""",
+  r"""     else printf '%s:git-failed:%s\n' "$m" "$probe_exit"; fi ;;""",
   '  esac',
   '  exit 0',
   'fi',
@@ -444,25 +506,42 @@ String buildGitFileDiffScript({
   required GitChangedFile file,
   required String marker,
 }) {
+  final cd =
+      'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || $_reportNoDir';
+  const printDiff = r"""printf '%s:diff\n' "$m" """;
+  const printExit = r"""printf '\n%s:exit:%s\n' "$m" "$?" """;
+  if (file.group == GitChangeGroup.untracked) {
+    // `./` keeps a file named `-` from being read as stdin. A symlink to a
+    // directory would be diffed as that directory, so it reports its target.
+    return _gitScript(marker, [
+      cd,
+      'p=${shellEscapePosix('./${file.path}')}',
+      r'if [ -L "$p" ] && [ -d "$p" ]; then',
+      r"""  printf '%s:link\n' "$m" """,
+      r'  t=$(readlink "$p" 2>/dev/null)',
+      r'  e=$?',
+      r"""  printf '%s\n%s:exit:%s\n' "$t" "$m" "$e" """,
+      'else',
+      '  $printDiff',
+      '  $_gitDiff --no-index $_gitDiffFlags -- /dev/null "\$p" 2>/dev/null',
+      '  $printExit',
+      'fi',
+    ]);
+  }
   final path = shellEscapePosix(file.path);
   final original = file.originalPath;
   final pathspec = original == null
       ? path
       : '$path ${shellEscapePosix(original)}';
   final diff = switch (file.group) {
-    GitChangeGroup.untracked =>
-      '$_gitDiff --no-index $_gitDiffFlags -- /dev/null $path',
     GitChangeGroup.staged =>
       '$_gitDiff --cached $_gitDiffFlags -M -- $pathspec',
     GitChangeGroup.unstaged => '$_gitDiff $_gitDiffFlags -M -- $pathspec',
-    GitChangeGroup.conflicted => '$_gitDiff $_gitDiffFlags -- $path',
+    // Untracked files returned above.
+    GitChangeGroup.conflicted ||
+    GitChangeGroup.untracked => '$_gitDiff $_gitDiffFlags -- $path',
   };
-  return _gitScript(marker, [
-    'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || $_reportNoDir',
-    r"""printf '%s:diff\n' "$m" """,
-    '$diff 2>/dev/null',
-    r"""printf '\n%s:exit:%s\n' "$m" "$?" """,
-  ]);
+  return _gitScript(marker, [cd, printDiff, '$diff 2>/dev/null', printExit]);
 }
 
 /// Builds the read-only `/bin/sh` script that prints numstat for each
@@ -485,7 +564,8 @@ String buildGitFileDiffScript({
     if (path.endsWith('/')) {
       continue;
     }
-    final argument = shellEscapePosix(path);
+    // `./` keeps a file named `-` from being read as stdin.
+    final argument = shellEscapePosix('./$path');
     if (length + argument.length + 1 > kGitUntrackedCountMaxScriptChars) {
       break;
     }
@@ -500,7 +580,10 @@ String buildGitFileDiffScript({
       'cd ${gitShellPathArgument(repositoryRoot)} 2>/dev/null || exit 0',
       r"""printf '%s:counts\n' "$m" """,
       'for f in ${quoted.join(' ')}; do',
-      '  $_gitDiff --no-index --numstat -z -- /dev/null "\$f" 2>/dev/null',
+      // A symlink to a directory adds one line, its target.
+      r'''  if [ -L "$f" ] && [ -d "$f" ]; then printf '1\t0\t%s\0' "$f"''',
+      '  else $_gitDiff --no-index --numstat -z -- /dev/null "\$f" 2>/dev/null',
+      '  fi',
       'done',
       r"""printf '\n%s:end\n' "$m" """,
     ]),
@@ -556,6 +639,14 @@ GitWorkingTreeSnapshot parseGitWorkingTreeOutput(
   }
   if (sections.containsKey('not-repo')) {
     return early(GitWorkingTreeState.notRepository);
+  }
+  final probeExitCode = _sectionExitCode(sections, 'git-failed');
+  if (probeExitCode != null) {
+    return GitWorkingTreeSnapshot(
+      state: GitWorkingTreeState.failed,
+      refreshedAt: refreshedAt,
+      exitCode: probeExitCode,
+    );
   }
   final status = sections['status'];
   if (status == null) {
@@ -755,6 +846,12 @@ parseGitStatusPorcelainV2Z(
     }
     // `!` (ignored) entries are not requested and are skipped if present.
   }
+  // One record can add two entries (staged and unstaged), so the last one
+  // read may have overshot the cap.
+  if (files.length > maxEntries) {
+    files.removeRange(maxEntries, files.length);
+    truncated = true;
+  }
   files.sort(_compareChangedFiles);
   return (
     files: files,
@@ -932,10 +1029,13 @@ String gitChangeGroupLabel(GitChangeGroup group) => switch (group) {
 /// caret after it for the user's question.
 ///
 /// Long hunks are cut to [kGitHunkPromptMaxLines] lines and
-/// [kGitHunkPromptMaxChars] characters, with a note saying so.
+/// [kGitHunkPromptMaxChars] characters, with a note saying so. [cutOff]
+/// marks the last hunk of a diff that stopped at [kGitDiffMaxBytes], which
+/// may be incomplete, and the prompt says so.
 String buildGitHunkPrompt({
   required GitChangedFile file,
   required GitDiffHunk hunk,
+  bool cutOff = false,
 }) {
   final quoted = <String>[hunk.header];
   var chars = hunk.header.length;
@@ -975,6 +1075,12 @@ String buildGitHunkPrompt({
     ..writeln(fence);
   if (omitted > 0) {
     buffer.writeln('($omitted more lines of this hunk not shown)');
+  }
+  if (cutOff) {
+    buffer.writeln(
+      '(the diff was cut off at ${kGitDiffMaxBytes ~/ 1024} KB, so this hunk '
+      'may be incomplete)',
+    );
   }
   buffer.writeln();
   return buffer.toString();

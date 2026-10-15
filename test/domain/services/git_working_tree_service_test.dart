@@ -10,6 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
+import 'package:monkeyssh/domain/services/remote_file_service.dart'
+    show shellEscapePosix;
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
@@ -77,6 +79,8 @@ const _hostileNames = [
   r"e\';touch CANARY6;'\.txt",
 ];
 
+class _FakeSshClient extends Fake implements SSHClient {}
+
 /// Records what an SSH session was asked to run and what reached stdin.
 class _RecordingSshSession extends Fake implements SshSession {
   _RecordingSshSession(this.reply);
@@ -85,12 +89,19 @@ class _RecordingSshSession extends Fake implements SshSession {
   final String Function(String script) reply;
   final commandLines = <String>[];
   final scripts = <String>[];
+  final priorities = <SshExecPriority>[];
+
+  @override
+  SSHClient get client => _FakeSshClient();
 
   @override
   Future<T> runQueuedExec<T>(
     Future<T> Function() operation, {
     SshExecPriority priority = SshExecPriority.normal,
-  }) => operation();
+  }) {
+    priorities.add(priority);
+    return operation();
+  }
 
   @override
   Future<SSHSession> execute(String command, {SSHPtyConfig? pty}) async {
@@ -149,6 +160,12 @@ void _write(Directory repo, String path, String contents) {
     ..createSync(recursive: true)
     ..writeAsStringSync(contents);
 }
+
+GitChangedFile _untracked(String path) => GitChangedFile(
+  path: path,
+  group: GitChangeGroup.untracked,
+  kind: GitChangeKind.untracked,
+);
 
 GitChangedFile _file(
   GitWorkingTreeSnapshot snapshot,
@@ -264,6 +281,15 @@ void main() {
       expect(parsed.files, hasLength(4));
       expect(parsed.truncated, isTrue);
     });
+
+    test('keeps the cap when one record adds two entries', () {
+      final parsed = parseGitStatusPorcelainV2Z(
+        [ordinary('AM', 'a.txt'), ordinary('AM', 'b.txt'), ''].join('\u0000'),
+        maxEntries: 3,
+      );
+      expect(parsed.files, hasLength(3));
+      expect(parsed.truncated, isTrue);
+    });
   });
 
   group('parseGitWorkingTreeOutput', () {
@@ -297,6 +323,17 @@ void main() {
       );
       expect(snapshot.state, GitWorkingTreeState.failed);
       expect(snapshot.exitCode, 128);
+    });
+
+    test('reports a git that cannot run with its exit code', () {
+      final snapshot = parseGitWorkingTreeOutput(
+        '$_marker:git-failed:69\n',
+        marker: _marker,
+        outputTruncated: false,
+        refreshedAt: at,
+      );
+      expect(snapshot.state, GitWorkingTreeState.failed);
+      expect(snapshot.exitCode, 69);
     });
 
     test('drops a cut-off numstat path instead of misattributing it', () {
@@ -440,6 +477,21 @@ void main() {
       expect(prompt, isNot(contains('+line 200\n')));
       expect(prompt, contains('(300 more lines of this hunk not shown)'));
     });
+
+    test('says when the diff cap may have cut the hunk short', () {
+      final hunk = GitDiffHunk(header: '@@ -1 +1 @@', lines: const ['+a']);
+      expect(
+        buildGitHunkPrompt(file: file, hunk: hunk, cutOff: true),
+        endsWith(
+          '```\n(the diff was cut off at 512 KB, so this hunk may be '
+          'incomplete)\n\n',
+        ),
+      );
+      expect(
+        buildGitHunkPrompt(file: file, hunk: hunk),
+        isNot(contains('cut off')),
+      );
+    });
   });
 
   group('gitShellPathArgument', () {
@@ -573,8 +625,33 @@ void main() {
       }
       final scripts = session.scripts.join();
       for (final name in _hostileNames) {
-        expect(scripts, contains(gitShellPathArgument(name)));
+        expect(scripts, contains(shellEscapePosix('./$name')));
       }
+    });
+
+    test('reads untracked line counts at low priority', () async {
+      final session = _RecordingSshSession((script) {
+        final marker = RegExp(
+          r"^m='([^']+)'$",
+          multiLine: true,
+        ).firstMatch(script)!.group(1)!;
+        return '$marker:counts\n2\t0\t\u0000/dev/null\u0000./-\u0000\n'
+            '$marker:end\n';
+      });
+      final service = GitWorkingTreeService.ssh(session);
+
+      await service.loadStatus('/srv/x');
+      await service.loadDiff('/srv/x', _untracked('-'));
+      final counts = await service.loadUntrackedCounts('/srv/x', ['-']);
+
+      // Counts are background work; status and diffs are what the user
+      // waits on.
+      expect(session.priorities, [
+        SshExecPriority.normal,
+        SshExecPriority.normal,
+        SshExecPriority.low,
+      ]);
+      expect(counts, {'-': const GitLineCounts(added: 2, removed: 0)});
     });
   });
 
@@ -823,6 +900,75 @@ void main() {
         (await service.loadStatus('${temp.path}/missing')).state,
         GitWorkingTreeState.missingDirectory,
       );
+      // Inside `.git` git finds a repository but no work tree.
+      expect(
+        (await service.loadStatus('${repo.path}/.git')).state,
+        GitWorkingTreeState.notRepository,
+      );
+    });
+
+    test('a git that cannot run is not reported as a missing repo', () async {
+      // macOS's /usr/bin/git refuses every command until the Xcode licence
+      // is accepted.
+      final bin = Directory('${temp.path}/bin')..createSync();
+      final git = File('${bin.path}/git')
+        ..writeAsStringSync(
+          '#!/bin/sh\necho "You have not agreed to the Xcode license." >&2\n'
+          'exit 69\n',
+        );
+      await Process.run('chmod', ['+x', git.path]);
+      final broken = GitWorkingTreeService(
+        _localRunner(
+          home: temp.path,
+          environment: {'PATH': '${bin.path}:/usr/bin:/bin'},
+        ),
+        markerFactory: () => _marker,
+      );
+
+      final snapshot = await broken.loadStatus(repo.path);
+      expect(snapshot.state, GitWorkingTreeState.failed);
+      expect(snapshot.exitCode, 69);
+    });
+
+    test('an untracked file named - shows its own content', () async {
+      _write(repo, '-', 'dash one\ndash two\n');
+      final snapshot = await service.loadStatus(repo.path);
+      final file = _file(snapshot, GitChangeGroup.untracked, '-');
+
+      final diff = await service.loadDiff(snapshot.repositoryRoot!, file);
+      expect(diff.failed, isFalse);
+      expect(diff.hunks.single.lines, ['+dash one', '+dash two']);
+
+      final counts = await service.loadUntrackedCounts(
+        snapshot.repositoryRoot!,
+        ['-', 'untracked.txt'],
+      );
+      expect(counts['-'], const GitLineCounts(added: 2, removed: 0));
+      expect(
+        counts['untracked.txt'],
+        const GitLineCounts(added: 2, removed: 0),
+      );
+    });
+
+    test('an untracked symlink to a directory shows its target', () async {
+      _write(repo, 'real dir/inner.txt', 'inside\n');
+      Link('${repo.path}/dir link').createSync('real dir');
+      final snapshot = await service.loadStatus(repo.path);
+      final link = _file(snapshot, GitChangeGroup.untracked, 'dir link');
+
+      final diff = await service.loadDiff(snapshot.repositoryRoot!, link);
+      expect(diff.failed, isFalse);
+      expect(diff.headerLines, contains('new file mode 120000'));
+      expect(diff.hunks.single.lines, [
+        '+real dir',
+        r'\ No newline at end of file',
+      ]);
+
+      final counts = await service.loadUntrackedCounts(
+        snapshot.repositoryRoot!,
+        ['dir link'],
+      );
+      expect(counts['dir link'], const GitLineCounts(added: 1, removed: 0));
     });
 
     test('expands a tilde directory through HOME', () async {
