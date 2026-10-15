@@ -37,6 +37,7 @@ import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
+import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
@@ -8755,6 +8756,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       try {
         await _showTerminalNotification(
           session,
+          queue,
           entry.request,
           tmuxSessionName: entry.tmuxSessionName,
           tmuxWindowIndex: entry.tmuxWindowIndex,
@@ -8784,6 +8786,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   Future<void> _showTerminalNotification(
     SshSession session,
+    _TerminalNotificationQueue queue,
     TerminalNotificationRequest request, {
     required String? tmuxSessionName,
     required int? tmuxWindowIndex,
@@ -8792,9 +8795,21 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     String? tmuxWindowSubtitle,
   }) async {
     if (!ref.mounted) return;
-    if (request.action == TerminalNotificationAction.show &&
-        !ref.read(terminalNotificationsNotifierProvider)) {
-      return;
+    if (request.action == TerminalNotificationAction.show) {
+      if (!ref.read(terminalNotificationsNotifierProvider)) return;
+      final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
+        session.hostId,
+      );
+      // A disconnect while the read was pending removed the queue, and with
+      // it the generations that would otherwise catch this.
+      if (!ref.mounted ||
+          !identical(
+            _terminalNotificationQueues[session.connectionId],
+            queue,
+          ) ||
+          !prefs.shellNotifications) {
+        return;
+      }
     }
     final notificationService = ref.read(localNotificationServiceProvider);
     final notificationId = buildTerminalNotificationId(

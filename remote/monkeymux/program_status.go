@@ -31,6 +31,8 @@ const (
 	// The spec requires at least 64 records per terminal. Over the cap the
 	// least recently updated record is evicted.
 	programStatusMaxRecords = 64
+	// A PTY read keeps at most this many status changes for pushes.
+	programStatusMaxSteps = 16
 )
 
 // programStatusQueryReply answers feature detection. The reply never echoes
@@ -324,6 +326,28 @@ func (w *muxWindow) applyProgramStatusPayloadLocked(body string) {
 		}
 		delete(w.programStatus, oldestID)
 	}
+}
+
+// noteProgramStatusStepLocked records the window's summary after an OSC 7501
+// report or prompt mark while handleWindowOutput applies a PTY read. Only a
+// change of state or kind is kept, since only those raise pushes, and at most
+// programStatusMaxSteps, the last replacing the newest beyond that.
+func (w *muxWindow) noteProgramStatusStepLocked() {
+	if !w.programStatusStepping {
+		return
+	}
+	summary := w.programStatusSummaryLocked()
+	if n := len(w.programStatusSteps); n > 0 {
+		last := w.programStatusSteps[n-1]
+		if last.state == summary.state && last.kind == summary.kind {
+			return
+		}
+		if n >= programStatusMaxSteps {
+			w.programStatusSteps[n-1] = summary
+			return
+		}
+	}
+	w.programStatusSteps = append(w.programStatusSteps, summary)
 }
 
 // noteProgramStatusReporterLocked records the window's foreground program as

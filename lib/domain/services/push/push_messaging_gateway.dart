@@ -7,6 +7,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../diagnostics_log_service.dart';
+
 /// Region the push functions are deployed to.
 const pushFunctionsRegion = 'us-central1';
 
@@ -94,21 +96,28 @@ abstract interface class PushMessagingGateway {
   /// Returns the message whose notification launched the app, once.
   Future<PushRemoteMessage?> getInitialMessage();
 
-  /// Calls `registerPushDevice` with an App Check token.
+  /// Calls `registerPushDevice` with an App Check token. With
+  /// [appNotifications] the ticket says this app posts its own notifications
+  /// from data-only messages, which builds before that could not show.
   Future<PushRegistration> register({
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   });
 }
 
 /// [PushMessagingGateway] backed by Firebase.
 class FirebasePushMessagingGateway implements PushMessagingGateway {
   /// Creates the gateway. Nothing touches Firebase until a method is called.
-  FirebasePushMessagingGateway({http.Client? httpClient})
-    : _httpClient = httpClient ?? http.Client();
+  FirebasePushMessagingGateway({
+    http.Client? httpClient,
+    DiagnosticsLogger? diagnosticsLog,
+  }) : _httpClient = httpClient ?? http.Client(),
+       _log = diagnosticsLog ?? DiagnosticsLogService.instance;
 
   final http.Client _httpClient;
+  final DiagnosticsLogger _log;
   bool _appCheckActivated = false;
 
   static const _apnsTokenAttempts = 20;
@@ -185,7 +194,12 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
         throw const PushSetupException(PushSetupFailure.appCheckFailed);
       }
       return token;
-    } on FirebaseException {
+    } on FirebaseException catch (error) {
+      _log.warning(
+        'push',
+        'app_check_failed',
+        fields: appCheckFailureFields(error),
+      );
       throw const PushSetupException(PushSetupFailure.appCheckFailed);
     }
   }
@@ -195,6 +209,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     final appCheckToken = await _appCheckToken();
     final projectId = Firebase.app().options.projectId;
@@ -216,6 +231,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
                 'token': token,
                 'platform': platform,
                 'deviceId': ?deviceId,
+                if (appNotifications) 'appNotifications': true,
               },
             }),
           )
@@ -225,6 +241,25 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
     }
     return parsePushRegistrationResponse(response.statusCode, response.body);
   }
+}
+
+/// Diagnostics fields for an App Check failure. The message is free text, so
+/// only the error code and the numbers in it that name the cause are kept: a
+/// Play Integrity error code (for example -16 for an unlinked Cloud project)
+/// and the HTTP status the App Check token exchange returned.
+@visibleForTesting
+Map<String, Object> appCheckFailureFields(FirebaseException error) {
+  final message = error.message ?? '';
+  final integrityError = RegExp(r'Integrity API error \((-?\d+)\)')
+      .firstMatch(message)
+      ?.group(1);
+  final httpStatus = RegExp(r'\bcode: (\d{3})\b').firstMatch(message)?.group(1);
+  final code = error.code.replaceAll(RegExp('[^A-Za-z0-9_-]'), '');
+  return {
+    'code': code.length > 40 ? code.substring(0, 40) : code,
+    'integrityError': ?int.tryParse(integrityError ?? ''),
+    'httpStatus': ?int.tryParse(httpStatus ?? ''),
+  };
 }
 
 /// Parses the callable protocol response from `registerPushDevice`.
