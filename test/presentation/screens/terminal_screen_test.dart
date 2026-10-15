@@ -759,7 +759,10 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   }) : reconnectSession = reconnectSession ?? session;
 
   SshSession session;
-  final SshSession reconnectSession;
+
+  /// The session the next [connect] returns. A test can swap it so a retry
+  /// gets a fresh session, as a real reconnect does.
+  SshSession reconnectSession;
   final Completer<void>? connectCompleter;
   final disconnectedConnectionIds = <int>[];
   final connectForceNewValues = <bool>[];
@@ -11016,14 +11019,18 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
     }
 
-    for (final (workspaceRunning, attachFindsWorkspace) in [
-      (true, true),
+    for (final (workspaceRunning, attachFindsWorkspace, imported) in [
+      (true, true, false),
       // The workspace stopped between the status probe and the attach.
-      (true, false),
-      (false, true),
+      (true, false, false),
+      (false, true, false),
+      // The link's sheet was the review, so an imported host is not asked
+      // again about the attach that starts the agent.
+      (false, true, true),
     ]) {
       testWidgets('a confirmed preset starts its agent once, running: '
-          '$workspaceRunning, attached: $attachFindsWorkspace', (tester) async {
+          '$workspaceRunning, attached: $attachFindsWorkspace, '
+          'imported: $imported', (tester) async {
         final settingsService = SettingsService(db);
         final presetService = AgentLaunchPresetService(settingsService);
         final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
@@ -11041,7 +11048,11 @@ void main() {
           client: sshClient,
           config: session.config,
         );
-        host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'copilot',
+          autoConnectRequiresConfirmation: imported,
+        );
         await presetService.setPresetForHost(
           host.id,
           const AgentLaunchPreset(
@@ -11146,6 +11157,9 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
         await tester.pump();
 
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        // Skipping the review once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
         final attachCommand = executedCommands.singleWhere(
           (command) => command.contains(' attach'),
         );
@@ -11183,6 +11197,262 @@ void main() {
         await tester.pump();
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
     }
+
+    testWidgets(
+      'a confirmed direct preset runs on an imported host without a second '
+      'review',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'claude',
+          autoConnectRequiresConfirmation: true,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(tool: AgentLaunchTool.claudeCode),
+        );
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), contains('claude\r'));
+        // Skipping the review once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a confirmed preset never starts its agent again when a failed '
+        'reconnect is retried', (tester) async {
+      final settingsService = SettingsService(db);
+      final presetService = AgentLaunchPresetService(settingsService);
+      final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
+      final monkeyMuxService = _MockMonkeyMuxService()
+        ..runningStatus = const MonkeyMuxServerStatus(
+          version: '0.1.10',
+          capabilities: <String>{},
+        );
+      final tmuxService = _MockTmuxService();
+      final reconnectClient = _MockSshClient();
+      final reconnectShell = _MockShellChannel();
+      final reconnectDone = Completer<void>();
+      final reconnectStdout = StreamController<Uint8List>.broadcast();
+      final reconnectCommands = <String>[];
+      addTearDown(() async {
+        await reconnectStdout.close();
+        if (!reconnectDone.isCompleted) {
+          reconnectDone.complete();
+        }
+      });
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+      final reconnectSession = SshSession(
+        connectionId: 8,
+        hostId: host.id,
+        client: reconnectClient,
+        config: session.config,
+      );
+      final retrySession = SshSession(
+        connectionId: 9,
+        hostId: host.id,
+        client: reconnectClient,
+        config: session.config,
+      );
+      host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+      await presetService.setPresetForHost(
+        host.id,
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.copilotCli,
+          workingDirectory: '/work/project',
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        ),
+      );
+      when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+      when(() => monkeyMuxService.clearCache(any())).thenAnswer((_) async {});
+      // The first reconnect cannot reach MonkeyMux; the retry can.
+      for (final testSession in <SshSession>[
+        session,
+        reconnectSession,
+        retrySession,
+      ]) {
+        when(
+          () => monkeyMuxInstallerService.ensureInstalled(
+            testSession,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer((_) async {
+          if (identical(testSession, reconnectSession)) {
+            throw Exception('MonkeyMux unreachable');
+          }
+          return const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          );
+        });
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => true);
+        when(
+          () => monkeyMuxService.listWindows(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'Copilot CLI', isActive: true),
+          ],
+        );
+        when(
+          () => monkeyMuxService.watchWindowChanges(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(
+          () => monkeyMuxService.refreshTerminalTheme(
+            testSession,
+            'agents',
+            any(),
+            extraFlags: any(named: 'extraFlags'),
+            forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+          ),
+        ).thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(testSession))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(testSession))
+            .thenAnswer((_) async {});
+      }
+      Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+        any(),
+        'agents',
+        command: any(named: 'command'),
+        name: any(named: 'name'),
+        workingDirectory: any(named: 'workingDirectory'),
+        extraFlags: any(named: 'extraFlags'),
+      );
+      when(createAgentWindow).thenAnswer((_) async {});
+      when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shellChannel);
+      when(
+        () => reconnectClient.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        reconnectCommands.add(invocation.positionalArguments.single as String);
+        return reconnectShell;
+      });
+      when(() => reconnectShell.stdout)
+          .thenAnswer((_) => reconnectStdout.stream);
+      when(() => reconnectShell.stderr)
+          .thenAnswer((_) => const Stream<Uint8List>.empty());
+      when(() => reconnectShell.done).thenAnswer((_) => reconnectDone.future);
+      when(() => reconnectShell.write(any())).thenAnswer((_) {});
+      when(() => reconnectShell.resizeTerminal(any(), any(), any(), any()))
+          .thenAnswer((_) {});
+      when(reconnectShell.close).thenAnswer((_) {});
+      final activeSessions = _TestActiveSessionsNotifier(
+        session,
+        reconnectSession: reconnectSession,
+      )..disconnectedConnectionIds.add(reconnectSession.connectionId);
+
+      await tester.pumpWidget(
+        buildScreen(
+          activeSessions: activeSessions,
+          overrides: [
+            settingsServiceProvider.overrideWithValue(settingsService),
+            monkeyMuxInstallerServiceProvider.overrideWithValue(
+              monkeyMuxInstallerService,
+            ),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              startPresetAgent: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      // The workspace was running, so Run opened the agent in a window.
+      verify(createAgentWindow).called(1);
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Reconnect'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(
+        find.text('Could not reconnect to the MonkeyMux session. Try again.'),
+        findsOneWidget,
+      );
+
+      activeSessions.reconnectSession = retrySession;
+      await tester.tap(find.text('Reconnect'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+
+      // The retry attaches like any terminal: a running workspace ignores
+      // the attach-time agent, and no second agent window opens.
+      final retryAttach = reconnectCommands.singleWhere(
+        (command) => command.contains(' attach'),
+      );
+      expect(retryAttach, isNot(contains('--existing')));
+      for (var second = 0; second < 60; second++) {
+        await tester.pump(const Duration(seconds: 1));
+      }
+      verifyNever(createAgentWindow);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets(
       'reconnects a lost MonkeyMux session without launching a new agent',

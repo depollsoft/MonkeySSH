@@ -741,8 +741,10 @@ class TerminalScreen extends ConsumerStatefulWidget {
   /// window that no longer exists is reported, not ignored.
   final bool openedFromLink;
 
-  /// Whether the user just confirmed this host's launch preset, so its agent
-  /// must start even when its MonkeyMux workspace is already running.
+  /// Whether the user just confirmed this host's launch preset in a link's
+  /// review, so the screen's first connection runs it without asking again
+  /// and starts its agent even when its MonkeyMux workspace is already
+  /// running. Later reconnects on the same screen run like any terminal.
   final bool startPresetAgent;
 
   /// Whether the tmux window selector should start expanded.
@@ -1179,6 +1181,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String? workingDirectory,
   })?
   _pendingPresetAgentWindow;
+
+  /// Whether the launch confirmed through [TerminalScreen.startPresetAgent]
+  /// is still owed. The first auto-connect that runs the preset spends it,
+  /// so a reconnect or a retry never starts the agent a second time.
+  late bool _confirmedPresetLaunchPending = widget.startPresetAgent;
   bool _linkPortForwardsReleased = false;
   bool _linkPortForwardOfferShown = false;
   bool _restoreKeyboardAfterAppResume = false;
@@ -6292,6 +6299,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       (widget.openedFromLink || widget.startPresetAgent) &&
       !_linkPortForwardsReleased;
 
+  /// Spends the launch the user confirmed in a link's preset review and
+  /// reports whether it was still owed.
+  bool _takeConfirmedPresetLaunch() {
+    final pending = _confirmedPresetLaunchPending;
+    _confirmedPresetLaunchPending = false;
+    return pending;
+  }
+
   /// Offers, once per screen and after any command review, the port
   /// forwarding a link held back: auto-start forwards and open-port
   /// detection.
@@ -6626,9 +6641,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    // The user reviewed this preset's command in the link's sheet just now.
+    final confirmedLaunch =
+        _takeConfirmedPresetLaunch() &&
+        agentPreset != null &&
+        host.autoConnectSnippetId == null;
     final review = assessAutoConnectCommandExecution(
       command,
-      importedNeedsReview: host.autoConnectRequiresConfirmation,
+      importedNeedsReview:
+          host.autoConnectRequiresConfirmation && !confirmedLaunch,
       openedFromLink: widget.openedFromLink,
     );
     if (review.requiresReview &&
@@ -7485,6 +7506,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     late String attachCommand;
     var agentInNewWindow = false;
+    var confirmedLaunch = false;
     try {
       MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
       MonkeyMuxInstallation? deferredInstallation;
@@ -7522,7 +7544,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // preset launch attaches to it with --existing and no command, then
       // opens its agent in a new window. If the workspace stops before the
       // attach, the attach fails rather than starting the agent twice.
-      if (launchesAgent && widget.startPresetAgent) {
+      confirmedLaunch = launchesAgent && _takeConfirmedPresetLaunch();
+      if (confirmedLaunch) {
         final running = await _monkeyMuxService.runningServerStatus(
           session,
           installation,
@@ -7593,12 +7616,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     // An attach without the agent is not the imported command, so it must
     // neither ask about nor clear the host's imported-command review. A
-    // confirmed preset's agent window was reviewed in the link's sheet.
+    // confirmed preset's agent was just reviewed in the link's sheet, which
+    // never offers Always run, so it is not asked about again either.
     final attachStartsAgent = launchesAgent && !agentInNewWindow;
     final review = assessAutoConnectCommandExecution(
       attachCommand,
       importedNeedsReview:
-          attachStartsAgent && host.autoConnectRequiresConfirmation,
+          attachStartsAgent &&
+          !confirmedLaunch &&
+          host.autoConnectRequiresConfirmation,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
