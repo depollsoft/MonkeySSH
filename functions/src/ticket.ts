@@ -19,6 +19,11 @@ export interface TicketContents {
   readonly deviceId: string;
   readonly issuedAt: number;
   readonly platform?: TicketPlatform;
+  /**
+   * The app posts its own notifications from data-only messages. Android
+   * builds before that could not show them, so their tickets lack it.
+   */
+  readonly appNotifications?: boolean;
 }
 
 const ticketVersion = "v1";
@@ -99,6 +104,7 @@ export function sealTicket(
       d: contents.deviceId,
       i: contents.issuedAt,
       ...(contents.platform === undefined ? {} : { p: contents.platform }),
+      ...(contents.appNotifications === true ? { a: 1 } : {}),
     }),
     "utf8",
   );
@@ -166,7 +172,7 @@ export function openTicket(
   if (typeof decoded !== "object" || decoded === null) {
     return null;
   }
-  const { t, d, i, p } = decoded as Record<string, unknown>;
+  const { t, d, i, p, a } = decoded as Record<string, unknown>;
   if (
     typeof t !== "string" ||
     t.length === 0 ||
@@ -185,7 +191,13 @@ export function openTicket(
     return null;
   }
   const platform = p === "ios" || p === "android" ? p : undefined;
-  return { token: t, deviceId: d, issuedAt: i, platform };
+  return {
+    token: t,
+    deviceId: d,
+    issuedAt: i,
+    platform,
+    ...(a === 1 ? { appNotifications: true } : {}),
+  };
 }
 
 /** Whether [value] is an acceptable device id. */

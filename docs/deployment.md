@@ -84,13 +84,18 @@ project `monkeyssh`:
    bundle exec fastlane match init
    ```
 
-3. Generate certificates for every shipped iOS bundle ID, including the Live Activity extension:
+3. Generate certificates for every shipped iOS bundle ID, including the Live
+   Activity and notification service extensions. `bundle exec fastlane
+   regenerate_profiles` does this for both apps and also registers any
+   extension bundle ID the developer portal lacks; by hand:
 
     ```bash
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.private
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.ConnectionStatusLiveActivity
     bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.private.ConnectionStatusLiveActivity
+    bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.NotificationService
+    bundle exec fastlane match appstore --app_identifier xyz.depollsoft.monkeyssh.private.NotificationService
     ```
 
 ### Android Upload Keystore

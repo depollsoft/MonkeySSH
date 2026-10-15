@@ -80,6 +80,11 @@ Host _host({int? keyId, String? password = 'secret'}) => Host(
   autoConnectRequiresConfirmation: false,
   autoForwardPorts: false,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 void main() {

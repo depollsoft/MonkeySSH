@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart';
 
 const _channelUploadLoopFrame = 'SSHChannelController._uploadLoop';
 const _channelCloseFrame = 'SSHChannelController._sendEOFIfNeeded';
+const _socketWriteFrame = '_Socket.add';
 
 /// Whether [error] is a late channel write after the SSH transport closed.
 ///
@@ -11,8 +12,12 @@ const _channelCloseFrame = 'SSHChannelController._sendEOFIfNeeded';
 /// futures. A transport disconnect can therefore race a queued write and reach
 /// the platform error handler. Closing a channel after the same disconnect can
 /// also try to send EOF over the closed transport. Both are expected teardown.
+/// When the socket closes before the transport notices, dart:io rejects the
+/// write with a plain [StateError] instead of dartssh2's [SSHStateError].
 bool isExpectedSshChannelTeardownError(Object error, StackTrace stackTrace) =>
-    error is SSHStateError &&
+    (error is SSHStateError ||
+        (error is StateError &&
+            _containsFrame(stackTrace, _socketWriteFrame))) &&
     (_containsFrame(stackTrace, _channelUploadLoopFrame) ||
         _containsFrame(stackTrace, _channelCloseFrame));
 

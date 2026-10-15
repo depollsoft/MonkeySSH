@@ -278,6 +278,11 @@ Host secret-alias
       autoConnectRequiresConfirmation: false,
       autoForwardPorts: false,
       sortOrder: id,
+      notifyAgentAttention: true,
+      notifyAgentFinished: true,
+      notifyWindowAlerts: true,
+      notifyShellNotifications: true,
+      pushWhenClosed: true,
     );
     final plan = _plan('''
 Host nouser

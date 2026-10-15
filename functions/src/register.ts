@@ -50,7 +50,10 @@ export function handleRegisterPushDevice(
     deps.log({ outcome: "malformed" });
     throw new RegisterError("invalid-argument", "Expected an object.");
   }
-  const { token, platform, deviceId } = data as Record<string, unknown>;
+  const { token, platform, deviceId, appNotifications } = data as Record<
+    string,
+    unknown
+  >;
   if (typeof token !== "string" || !tokenPattern.test(token)) {
     deps.log({ outcome: "malformed" });
     throw new RegisterError("invalid-argument", "Invalid token.");
@@ -79,6 +82,7 @@ export function handleRegisterPushDevice(
     deviceId: resolvedDeviceId,
     issuedAt: deps.nowSeconds(),
     platform: platform as TicketPlatform,
+    ...(appNotifications === true ? { appNotifications: true } : {}),
   });
   deps.log({ outcome: "registered", platform });
   return { deviceId: resolvedDeviceId, ticket };

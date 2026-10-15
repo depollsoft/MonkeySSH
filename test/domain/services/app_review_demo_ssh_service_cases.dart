@@ -16,6 +16,7 @@ import 'package:monkeyssh/domain/services/app_review_demo_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
+import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 void registerAppReviewDemoSshServiceTests() {
@@ -186,6 +187,30 @@ void registerAppReviewDemoSshServiceTests() {
         expect(await file.readBytes(), [128, 255]);
       },
     );
+
+    test('demo exec and shell channels close like abandoned execs', () async {
+      final hostId = await database
+          .into(database.hosts)
+          .insert(
+            HostsCompanion.insert(
+              label: '${AppReviewDemoService.demoHostLabelPrefix} Close tests',
+              hostname: '127.0.0.1',
+              port: const Value(2201),
+              username: 'reviewer',
+              tags: const Value('app-review,demo,monkeymux'),
+            ),
+          );
+      final result = await service.connectToHost(hostId);
+      final client = service.getSession(result.connectionId!)!.client;
+
+      final exec = await client.execute('uname -a');
+      await closeAbandonedSshExec(exec);
+      await exec.done;
+
+      final shell = await client.shell();
+      await closeAbandonedSshExec(shell, grace: Duration.zero);
+      await shell.done.timeout(const Duration(seconds: 1));
+    });
 
     test('connectToHost creates a usable local App Review demo session', () async {
       final hostId = await database
