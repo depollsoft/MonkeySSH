@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -227,6 +229,39 @@ void main() {
     // Connections sits underneath, as when opening the host by hand.
     expect(router.canPop(), isTrue);
   });
+
+  for (final newerLink in [false, true]) {
+    testWidgets('a lock during the lookup keeps the link waiting, '
+        'newer link: $newerLink', (tester) async {
+      final lookup = Completer<Host?>();
+      when(() => hosts.getById(3)).thenAnswer((_) => lookup.future);
+      when(() => hosts.getById(4)).thenAnswer((_) async => _host(4));
+      final auth = await pumpBridge(tester);
+
+      links.receive(Uri.parse('monkeyssh://open?host=3'));
+      await tester.pump();
+      await tester.pump();
+      verify(() => hosts.getById(3)).called(1);
+
+      auth.current = AuthState.locked;
+      if (newerLink) {
+        links.receive(Uri.parse('monkeyssh://open?host=4'));
+      }
+      lookup.complete(_host(3));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('terminal'), findsNothing);
+
+      when(() => hosts.getById(3)).thenAnswer((_) async => _host(3));
+      auth.current = AuthState.unlocked;
+      await tester.pumpAndSettle();
+
+      // The newest link wins, as it does for links that arrive while locked.
+      expect(
+        find.textContaining('terminal /terminal/${newerLink ? 4 : 3}?linkTap='),
+        findsOneWidget,
+      );
+    });
+  }
 
   testWidgets('an unknown host shows a clear message', (tester) async {
     await pumpBridge(tester);

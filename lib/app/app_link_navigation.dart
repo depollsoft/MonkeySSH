@@ -11,6 +11,7 @@ import '../domain/services/acp_recent_sessions_service.dart';
 import '../domain/services/agent_launch_preset_service.dart';
 import '../domain/services/app_link_service.dart';
 import '../domain/services/auth_service.dart';
+import '../domain/services/diagnostics_log_service.dart';
 import '../domain/services/host_cli_launch_preferences_service.dart';
 import '../domain/services/monetization_service.dart';
 import '../domain/services/ssh_service.dart';
@@ -54,6 +55,10 @@ class _AppLinkNavigationBridgeState
   AppLink? _next;
   bool _handling = false;
 
+  /// Set when an effect could not run because the app locked while the
+  /// handler was still looking its link up.
+  bool _blockedByLock = false;
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +84,14 @@ class _AppLinkNavigationBridgeState
 
   bool _canNavigate() =>
       mounted && appLinkNavigationAllowed(ref.read(authStateProvider));
+
+  /// Whether an effect may run now. When the app locked during the
+  /// handler's lookups, records it so [_drain] keeps the link waiting.
+  bool _effectAllowed() {
+    if (_canNavigate()) return true;
+    _blockedByLock = true;
+    return false;
+  }
 
   void _takePendingLink() {
     final link = _links.takePending();
@@ -107,6 +120,7 @@ class _AppLinkNavigationBridgeState
           _scheduler.add(link);
           break;
         }
+        _blockedByLock = false;
         try {
           await _handler().handle(link);
         } on Object catch (error, stackTrace) {
@@ -118,6 +132,16 @@ class _AppLinkNavigationBridgeState
               context: ErrorDescription('while handling an app link'),
             ),
           );
+        }
+        // The app locked while the handler looked the link up, so nothing
+        // opened. Keep it behind the lock, unless a newer link replaced it.
+        if (_blockedByLock && _next == null) {
+          DiagnosticsLogService.instance.info(
+            'app_link',
+            'deferred_by_lock',
+            fields: {'action': link.diagnosticsAction},
+          );
+          _scheduler.restore(link);
         }
       }
     } finally {
@@ -140,14 +164,14 @@ class _AppLinkNavigationBridgeState
 
   @override
   void openTerminal(String location) {
-    if (!_canNavigate()) return;
+    if (!_effectAllowed()) return;
     final router = _router..go(buildTmuxAlertHomeLocation());
     unawaited(router.push<void>(location));
   }
 
   @override
   void openNewHostForm(String sshUrl) {
-    if (!_canNavigate()) return;
+    if (!_effectAllowed()) return;
     final router = _router..go('/');
     unawaited(router.push<void>(buildAppLinkHostFormLocation(sshUrl)));
   }
@@ -155,7 +179,7 @@ class _AppLinkNavigationBridgeState
   @override
   void showMessage(String message) {
     final context = _navigatorContext;
-    if (!_canNavigate() || context == null) return;
+    if (!_effectAllowed() || context == null) return;
     ScaffoldMessenger.maybeOf(context)
         ?.showSnackBar(SnackBar(content: Text(message)));
   }
@@ -163,7 +187,7 @@ class _AppLinkNavigationBridgeState
   @override
   Future<bool> confirmPresetLaunch(AppLinkPresetReview review) async {
     final context = _navigatorContext;
-    if (!_canNavigate() || context == null) return false;
+    if (!_effectAllowed() || context == null) return false;
     final confirmed = await showAppLinkPresetSheet(context, review);
     // The sheet closes when the app locks; never act on a stale answer.
     return confirmed && _canNavigate();
@@ -172,7 +196,7 @@ class _AppLinkNavigationBridgeState
   @override
   Future<bool> launchPreset(Host host) async {
     final context = _navigatorContext;
-    if (!_canNavigate() || context == null) return false;
+    if (!_effectAllowed() || context == null) return false;
     // The review sheet showed only the agent command, so open-port detection
     // waits for the terminal's Start action like any link-opened connection.
     ref
