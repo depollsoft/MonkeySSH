@@ -1,6 +1,8 @@
 default_platform(:ios)
 
 require 'fileutils'
+require 'json'
+require 'open3'
 require 'shellwords'
 require 'tmpdir'
 require_relative '../../scripts/preview_release_notes'
@@ -22,6 +24,22 @@ platform :ios do
     'Private' => 'xyz.depollsoft.monkeyssh.private.ConnectionStatusLiveActivity',
     'Production' => 'xyz.depollsoft.monkeyssh.ConnectionStatusLiveActivity',
   }.freeze
+
+  NOTIFICATION_SERVICE_APP_IDS = {
+    'Private' => 'xyz.depollsoft.monkeyssh.private.NotificationService',
+    'Production' => 'xyz.depollsoft.monkeyssh.NotificationService',
+  }.freeze
+
+  # Every app extension embedded in Runner.app, by Xcode target. Each one is
+  # signed with its own match profile.
+  EXTENSION_APP_IDS = {
+    'ConnectionStatusLiveActivityExtension' => LIVE_ACTIVITY_APP_IDS,
+    'NotificationServiceExtension' => NOTIFICATION_SERVICE_APP_IDS,
+  }.freeze
+
+  # Extensions that read the keychain item the app shares for push text
+  # (ios/Runner/PushNotificationContextKeychain.swift).
+  PUSH_KEYCHAIN_EXTENSIONS = ['NotificationServiceExtension'].freeze
 
   METADATA_DIRS = {
     'xyz.depollsoft.monkeyssh.private' => './fastlane/metadata-private',
@@ -228,49 +246,79 @@ platform :ios do
     )
   end
 
+  # The app's bundle id followed by its extensions', for one scheme.
+  private_lane :signing_app_ids do |options|
+    scheme = options[:scheme]
+    app_ids = [APP_IDS[scheme], *EXTENSION_APP_IDS.values.map { |ids| ids[scheme] }]
+    if app_ids.any?(&:nil?)
+      UI.user_error!("Unknown scheme '#{scheme}'. Supported schemes: #{APP_IDS.keys.join(', ')}")
+    end
+    app_ids
+  end
+
+  # match creates profiles but not App IDs, so a new extension's bundle id
+  # has to be registered first. It needs no capabilities: profiles allow
+  # every keychain access group under the team prefix.
+  private_lane :ensure_bundle_ids do |options|
+    get_api_key
+    options[:identifiers].each do |identifier|
+      next if Spaceship::ConnectAPI::BundleId.find(identifier)
+
+      # App ID names allow only letters, digits and spaces.
+      name = "MonkeySSH #{identifier.delete_prefix(APP_IDS['Production']).tr('.', ' ')}"
+             .gsub(/[^A-Za-z0-9 ]/, ' ').squeeze(' ').strip
+      UI.important("Registering bundle id #{identifier} as '#{name}'")
+      Spaceship::ConnectAPI::BundleId.create(
+        name: name,
+        platform: Spaceship::ConnectAPI::Platform::IOS,
+        identifier: identifier,
+      )
+    end
+  end
+
   private_lane :build_and_sign do |options|
     scheme = options[:scheme]
     export_method = options[:export_method] || 'app-store'
     match_type = export_method == 'ad-hoc' ? 'adhoc' : 'appstore'
     match_profile_prefix = export_method == 'ad-hoc' ? 'AdHoc' : 'AppStore'
     app_id = APP_IDS[scheme]
-    live_activity_app_id = LIVE_ACTIVITY_APP_IDS[scheme]
 
     sync_certs(
-      app_identifier: [app_id, live_activity_app_id],
+      app_identifier: signing_app_ids(scheme: scheme),
       type: match_type,
       readonly: match_type == 'appstore',
     )
 
-    profile_name = ENV["sigh_#{app_id}_#{match_type}_profile-name"] ||
-                   ENV["sigh_#{app_id}_#{match_type}_profile_name"] ||
-                   "match #{match_profile_prefix} #{app_id}"
-    live_activity_profile_name =
-      ENV["sigh_#{live_activity_app_id}_#{match_type}_profile-name"] ||
-      ENV["sigh_#{live_activity_app_id}_#{match_type}_profile_name"] ||
-      "match #{match_profile_prefix} #{live_activity_app_id}"
+    profile_name = lambda do |identifier|
+      ENV["sigh_#{identifier}_#{match_type}_profile-name"] ||
+        ENV["sigh_#{identifier}_#{match_type}_profile_name"] ||
+        "match #{match_profile_prefix} #{identifier}"
+    end
 
     update_code_signing_settings(
       use_automatic_signing: false,
       team_id: TEAM_ID,
       code_sign_identity: 'Apple Distribution',
-      profile_name: profile_name,
+      profile_name: profile_name.call(app_id),
       bundle_identifier: app_id,
       path: 'Runner.xcodeproj',
       targets: ['Runner'],
       build_configurations: ["Release-#{scheme}"],
     )
 
-    update_code_signing_settings(
-      use_automatic_signing: false,
-      team_id: TEAM_ID,
-      code_sign_identity: 'Apple Distribution',
-      profile_name: live_activity_profile_name,
-      bundle_identifier: live_activity_app_id,
-      path: 'Runner.xcodeproj',
-      targets: ['ConnectionStatusLiveActivityExtension'],
-      build_configurations: ["Release-#{scheme}"],
-    )
+    EXTENSION_APP_IDS.each do |target, extension_app_ids|
+      extension_app_id = extension_app_ids[scheme]
+      update_code_signing_settings(
+        use_automatic_signing: false,
+        team_id: TEAM_ID,
+        code_sign_identity: 'Apple Distribution',
+        profile_name: profile_name.call(extension_app_id),
+        bundle_identifier: extension_app_id,
+        path: 'Runner.xcodeproj',
+        targets: [target],
+        build_configurations: ["Release-#{scheme}"],
+      )
+    end
 
     build_app(
       workspace: 'Runner.xcworkspace',
@@ -340,6 +388,62 @@ platform :ios do
     )
 
     output_path
+  end
+
+  # A plist value, or nil when the key is absent. Strings and numbers come
+  # back as text (`raw`), arrays and dictionaries parsed (`json`).
+  private_lane :plist_value do |options|
+    format = options[:format] || 'raw'
+    output, _error, status = Open3.capture3(
+      'plutil', '-extract', options[:key], format, '-o', '-', options[:path],
+    )
+    next nil unless status.success?
+
+    format == 'json' ? JSON.parse(output) : output.chomp
+  end
+
+  # The keychain access group the app shares with its notification service
+  # extension: `<AppIdentifierPrefix><app bundle id>.push`, the value Xcode
+  # writes into both Info.plists and entitlements when it signs.
+  private_lane :push_keychain_group do |options|
+    app_id = options[:app_identifier]
+    application_identifier = options[:application_identifier].to_s
+    prefix = application_identifier.delete_suffix(".#{app_id}")
+    if prefix.empty? || prefix == application_identifier
+      UI.user_error!("Profile application-identifier '#{application_identifier}' does not name #{app_id}")
+    end
+    "#{prefix}.#{app_id}.push"
+  end
+
+  # The keychain-access-groups a re-signed bundle gets. Re-signing uses the
+  # profile's entitlements, whose first group (`TEAMID.*`) has always been
+  # the app's default access group, the one items written without a group
+  # land in. The app therefore keeps the profile's groups in order and only
+  # appends the push group, so its existing secrets stay where they are. An
+  # extension gets the push group alone.
+  private_lane :resign_keychain_groups do |options|
+    push_group = options[:push_group]
+    next [push_group] unless options[:keep_profile_groups]
+
+    (Array(options[:profile_groups]) + [push_group]).uniq
+  end
+
+  # Gives a re-signed bundle the push keychain group: in its entitlements, and
+  # in Info.plist, where an unsigned build left `$(AppIdentifierPrefix)` empty.
+  private_lane :apply_push_keychain_group do |options|
+    entitlements_path = options[:entitlements_path]
+    group = options[:group]
+    groups = resign_keychain_groups(
+      profile_groups: plist_value(path: entitlements_path, key: 'keychain-access-groups', format: 'json'),
+      push_group: group,
+      keep_profile_groups: options[:keep_profile_groups],
+    )
+    sh(
+      ['plutil', '-replace', 'keychain-access-groups', '-json', JSON.generate(groups), entitlements_path]
+        .shelljoin,
+    )
+    info_plist_path = File.join(options[:bundle_path], 'Info.plist')
+    sh(['plutil', '-replace', 'MonkeySSHPushKeychainGroup', '-string', group, info_plist_path].shelljoin)
   end
 
   private_lane :bundle_executable_path do |options|
@@ -431,21 +535,21 @@ platform :ios do
   end
 
   desc 'Force-regenerate provisioning profiles for both bundle IDs and their ' \
-       'live activity extensions. Run this after enabling a new App ID ' \
-       'capability (e.g. Access WiFi Information) so the new entitlement is ' \
-       'baked into the profile stored in the match git repo. Pass type:adhoc ' \
+       'app extensions, registering any extension bundle ID the developer ' \
+       'portal does not have yet. Run this after enabling a new App ID ' \
+       'capability (e.g. Access WiFi Information) or adding an extension, so ' \
+       'the profile stored in the match git repo is current. Pass type:adhoc ' \
        'to refresh the Firebase App Distribution profiles (e.g. after ' \
        'registering a new tester device).'
   lane :regenerate_profiles do |options|
     schemes = options[:scheme] ? [options[:scheme]] : APP_IDS.keys
     match_type = options[:type] || 'appstore'
     schemes.each do |scheme|
-      app_id = APP_IDS[scheme]
-      live_activity_app_id = LIVE_ACTIVITY_APP_IDS[scheme]
-      UI.user_error!("Unknown scheme '#{scheme}'") unless app_id && live_activity_app_id
+      app_ids = signing_app_ids(scheme: scheme)
+      ensure_bundle_ids(identifiers: app_ids)
 
       sync_certs(
-        app_identifier: [app_id, live_activity_app_id],
+        app_identifier: app_ids,
         type: match_type,
         readonly: false,
         force: true,
@@ -468,12 +572,9 @@ platform :ios do
     match_type = 'appstore' if match_type.empty?
     match_readonly = options[:match_readonly].to_s == 'true'
     UI.user_error!("Unsupported match_type '#{match_type}'") unless %w[appstore adhoc].include?(match_type)
-    supported_schemes = APP_IDS.keys & LIVE_ACTIVITY_APP_IDS.keys
-    unless APP_IDS.key?(scheme) && LIVE_ACTIVITY_APP_IDS.key?(scheme)
-      UI.user_error!("Unknown scheme '#{scheme}'. Supported schemes: #{supported_schemes.join(', ')}")
-    end
-    app_id = APP_IDS[scheme]
-    live_activity_app_id = LIVE_ACTIVITY_APP_IDS[scheme]
+    app_ids = signing_app_ids(scheme: scheme)
+    app_id = app_ids.first
+    extension_targets = EXTENSION_APP_IDS.to_h { |target, ids| [ids[scheme], target] }
 
     UI.user_error!('unsigned_ipa_path is required') if unsigned_ipa_path.empty?
     unsigned_ipa_path = File.expand_path(unsigned_ipa_path)
@@ -481,7 +582,7 @@ platform :ios do
     UI.user_error!("IPA not found at #{unsigned_ipa_path}") unless File.exist?(unsigned_ipa_path)
 
     sync_certs(
-      app_identifier: [app_id, live_activity_app_id],
+      app_identifier: app_ids,
       type: match_type,
       readonly: match_type == 'appstore' || match_readonly,
       force_for_new_devices: match_type == 'adhoc' && !match_readonly,
@@ -499,10 +600,6 @@ platform :ios do
       type: match_type,
     )
     app_profile_path = resolved_profile_path(app_identifier: app_id, type: match_type)
-    live_activity_profile_path = resolved_profile_path(
-      app_identifier: live_activity_app_id,
-      type: match_type,
-    )
 
     Dir.mktmpdir('flutty-resign-ipa') do |tmpdir|
       sh("unzip -q #{resigned_ipa_path.shellescape} -d #{tmpdir.shellescape}")
@@ -512,38 +609,65 @@ platform :ios do
       UI.user_error!("Expected exactly one .app in #{payload_dir}, found #{app_paths.size}") unless app_paths.size == 1
       app_path = app_paths.first
 
-      live_activity_paths = Dir[File.join(app_path, 'PlugIns', 'ConnectionStatusLiveActivityExtension.appex')].sort
-      if live_activity_paths.size != 1
-        live_activity_paths = Dir[File.join(app_path, 'PlugIns', '*.appex')].sort
-      end
-      UI.user_error!("Expected exactly one live activity extension in #{app_path}/PlugIns, found #{live_activity_paths.size}") unless live_activity_paths.size == 1
-      live_activity_path = live_activity_paths.first
-
       app_entitlements_path = File.join(tmpdir, 'app-entitlements.plist')
-      live_activity_entitlements_path = File.join(tmpdir, 'live-activity-entitlements.plist')
-
       extract_profile_entitlements(
         profile_path: app_profile_path,
         output_path: app_entitlements_path,
       )
-      extract_profile_entitlements(
-        profile_path: live_activity_profile_path,
-        output_path: live_activity_entitlements_path,
+      push_group = push_keychain_group(
+        app_identifier: app_id,
+        application_identifier: plist_value(path: app_entitlements_path, key: 'application-identifier'),
       )
 
+      # Each extension is signed with its own profile and entitlements.
+      appex_paths = Dir[File.join(app_path, 'PlugIns', '*.appex')].sort
+      UI.user_error!("Expected app extensions in #{app_path}/PlugIns, found none") if appex_paths.empty?
+      extensions = appex_paths.map do |appex_path|
+        extension_app_id = plist_value(path: File.join(appex_path, 'Info.plist'), key: 'CFBundleIdentifier')
+        target = extension_targets[extension_app_id]
+        unless target
+          UI.user_error!(
+            "Unexpected app extension #{File.basename(appex_path)} (#{extension_app_id}); " \
+            "expected #{extension_targets.keys.join(', ')}",
+          )
+        end
+
+        profile_path = resolved_profile_path(app_identifier: extension_app_id, type: match_type)
+        entitlements_path = File.join(tmpdir, "#{target}-entitlements.plist")
+        extract_profile_entitlements(profile_path: profile_path, output_path: entitlements_path)
+        if PUSH_KEYCHAIN_EXTENSIONS.include?(target)
+          apply_push_keychain_group(
+            bundle_path: appex_path,
+            entitlements_path: entitlements_path,
+            group: push_group,
+            keep_profile_groups: false,
+          )
+        end
+        FileUtils.cp(profile_path, File.join(appex_path, 'embedded.mobileprovision'))
+        UI.message("Re-signing #{File.basename(appex_path)} as #{extension_app_id}")
+        [appex_path, entitlements_path]
+      end
+
+      apply_push_keychain_group(
+        bundle_path: app_path,
+        entitlements_path: app_entitlements_path,
+        group: push_group,
+        keep_profile_groups: true,
+      )
       FileUtils.cp(app_profile_path, File.join(app_path, 'embedded.mobileprovision'))
-      FileUtils.cp(live_activity_profile_path, File.join(live_activity_path, 'embedded.mobileprovision'))
 
       populate_swift_support(
         app_path: app_path,
         package_root: tmpdir,
       )
 
-      codesign_path(
-        path: live_activity_path,
-        signing_identity: signing_identity,
-        entitlements_path: live_activity_entitlements_path,
-      )
+      extensions.each do |appex_path, entitlements_path|
+        codesign_path(
+          path: appex_path,
+          signing_identity: signing_identity,
+          entitlements_path: entitlements_path,
+        )
+      end
 
       Dir[File.join(app_path, 'Frameworks', '*.framework')].sort.each do |framework_path|
         codesign_path(path: framework_path, signing_identity: signing_identity)

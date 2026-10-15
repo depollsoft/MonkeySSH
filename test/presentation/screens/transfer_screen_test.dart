@@ -20,6 +20,7 @@ class _MockXFile extends Mock implements XFile {}
 
 class _TransferFilePicker extends FilePickerPlatform {
   PlatformFile? selectedFile;
+  PlatformException? pickError;
   int selections = 0;
   Future<Uri?> Function(Uint8List)? save;
 
@@ -38,6 +39,7 @@ class _TransferFilePicker extends FilePickerPlatform {
     WebOptions webOptions = const WebOptions(),
   }) async {
     selections++;
+    if (pickError case final error?) throw error;
     return selectedFile;
   }
 
@@ -119,7 +121,15 @@ void main() {
       expect(await pickTransferPayloadFromFile(context), 'ok');
       picker.selectedFile = null;
       expect(await pickTransferPayloadFromFile(context), isNull);
-      expect(picker.selections, 2);
+      // Android reports a busy picker as an error, not a cancellation.
+      picker.pickError = PlatformException(code: 'already_active');
+      expect(await pickTransferPayloadFromFile(context), isNull);
+      await tester.pump();
+      expect(
+        find.text('Could not open the file picker. Try again.'),
+        findsOneWidget,
+      );
+      expect(picker.selections, 3);
     });
 
     for (final failure in ['utf8', 'oversize', 'read']) {

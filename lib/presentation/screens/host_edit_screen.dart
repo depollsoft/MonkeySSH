@@ -13,6 +13,7 @@ import '../../data/repositories/key_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/auto_connect_command.dart';
+import '../../domain/models/host_notifications.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/port_forward_type.dart';
 import '../../domain/models/port_proxy_name.dart';
@@ -20,6 +21,7 @@ import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -33,6 +35,7 @@ import '../view_models/host_edit_view_model.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
+import '../widgets/host_notifications_section.dart';
 import '../widgets/host_port_forward_editor_sheet.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
@@ -43,8 +46,8 @@ import 'transfer_screen.dart';
 
 const _hostFieldHelperMaxLines = 4;
 const _hostStartupModeOptions = <HostStartupMode>[
-  HostStartupMode.none,
   HostStartupMode.monkeyMux,
+  HostStartupMode.none,
   HostStartupMode.tmux,
   HostStartupMode.agent,
   HostStartupMode.customCommand,
@@ -123,6 +126,16 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   bool _disableAgentTmuxStatusBar = false;
   bool _startClisInYoloMode = false;
   bool _autoForwardPorts = false;
+  HostNotificationPrefs _notificationPrefs = const HostNotificationPrefs();
+
+  // Whether the session name field holds a name suggested from the label. It
+  // follows label edits until the user types a name of their own.
+  bool _sessionNameFollowsLabel = false;
+
+  // Sessions that agent-startup hosts keep in their launch presets, by host
+  // id, so a suggested name avoids them too.
+  Map<int, String> _presetSessionNames = const {};
+  final _startupSectionKey = GlobalKey();
 
   List<PortForward> _portForwards = [];
 
@@ -179,6 +192,12 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     ]) {
       c.addListener(_updateDirtyState);
     }
+    // The suggestion avoids sessions other saved hosts use on the same
+    // destination, so it follows the hostname and port as well as the label.
+    for (final c in [_labelController, _hostnameController, _portController]) {
+      c.addListener(_followSuggestedSessionName);
+    }
+    unawaited(_loadPresetSessionNames());
 
     if (widget.hostId != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -259,6 +278,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       _disableAgentTmuxStatusBar = preset?.tmuxDisableStatusBar ?? false;
       _startClisInYoloMode = cliLaunchPreferences.startInYoloMode;
       _autoForwardPorts = host.autoForwardPorts;
+      _notificationPrefs = HostNotificationPrefs.fromHost(host);
       _portProxyNameController.text = host.portProxyName ?? '';
       _selectedAutoConnectMode = resolveAutoConnectCommandMode(
         command: host.autoConnectCommand,
@@ -370,6 +390,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     disableAgentTmuxStatusBar: _disableAgentTmuxStatusBar,
     startClisInYoloMode: _startClisInYoloMode,
     autoForwardPorts: _autoForwardPorts,
+    notificationPrefs: _notificationPrefs,
   );
 
   void _closeWithoutUnsavedPrompt(SnackBar snackBar) {
@@ -671,11 +692,19 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                         ),
                         const SizedBox(height: 24),
 
-                        _buildStartupSection(
-                          context: context,
-                          hasAutomationAccess: hasAutomationAccess,
+                        KeyedSubtree(
+                          key: _startupSectionKey,
+                          child: _buildStartupSection(
+                            context: context,
+                            hasAutomationAccess: hasAutomationAccess,
+                            hasAgentPresetAccess: hasAgentPresetAccess,
+                            snippetsAsync: snippetsAsync,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+
+                        _buildNotificationsSection(
                           hasAgentPresetAccess: hasAgentPresetAccess,
-                          snippetsAsync: snippetsAsync,
                         ),
                         const SizedBox(height: 24),
 
@@ -918,35 +947,21 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Launch After Connect', style: theme.textTheme.titleMedium),
+        Text(
+          'launch after connect',
+          style: FluttyTheme.displayMono(
+            fontSize: 15,
+            color: colorScheme.onSurface,
+          ),
+        ),
         const SizedBox(height: 8),
         Text(
-          'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',
+          'Choose what MonkeySSH starts after SSH connects. MonkeyMux is recommended: windows survive reconnects, and it adds the window switcher, native agent chats, and alerts when MonkeySSH is closed. Agent, command, and snippet options start a workflow automatically.',
           style: theme.textTheme.bodySmall?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
         ),
-        const SizedBox(height: 12),
-        CheckboxListTile(
-          key: const Key('host-cli-yolo-mode-checkbox'),
-          value: _startClisInYoloMode,
-          contentPadding: EdgeInsets.zero,
-          controlAffinity: ListTileControlAffinity.leading,
-          title: const Text('Start supported coding CLIs in YOLO mode'),
-          subtitle: Text(
-            hasAgentPresetAccess
-                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
-                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
-          ),
-          onChanged: hasAgentPresetAccess
-              ? (value) {
-                  setState(() => _startClisInYoloMode = value ?? false);
-                  _updateDirtyState();
-                  _syncAutoConnectCommandFromPreset();
-                }
-              : null,
-        ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         DropdownButtonFormField<HostStartupMode>(
           key: const Key('host-startup-mode-field'),
           // ignore: deprecated_member_use
@@ -955,16 +970,26 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Startup behavior',
             prefixIcon: Icon(Icons.play_circle_outline),
-            helperText: 'Pick the startup flow for this host. Choose MonkeyMux for the bundled window manager, or tmux for an existing remote tmux setup.',
-            helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: _hostStartupModeOptions
               .map(
                 (mode) => DropdownMenuItem<HostStartupMode>(
                   value: mode,
-                  child: Text(mode.label),
+                  child: mode == HostStartupMode.monkeyMux
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(mode.label),
+                            const SizedBox(width: 8),
+                            const _RecommendedBadge(),
+                          ],
+                        )
+                      : Text(mode.label),
                 ),
               )
+              .toList(growable: false),
+          selectedItemBuilder: (context) => _hostStartupModeOptions
+              .map((mode) => Text(mode.label))
               .toList(growable: false),
           onChanged: (value) {
             if (value == null) {
@@ -991,6 +1016,28 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             hasAutomationAccess: hasAutomationAccess,
           ),
         },
+        // A host-wide default for every coding CLI launch on this host, not
+        // only the startup choice above.
+        const SizedBox(height: 12),
+        CheckboxListTile(
+          key: const Key('host-cli-yolo-mode-checkbox'),
+          value: _startClisInYoloMode,
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          title: const Text('Start supported coding CLIs in YOLO mode'),
+          subtitle: Text(
+            hasAgentPresetAccess
+                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
+                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
+          ),
+          onChanged: hasAgentPresetAccess
+              ? (value) {
+                  setState(() => _startClisInYoloMode = value ?? false);
+                  _updateDirtyState();
+                  _syncAutoConnectCommandFromPreset();
+                }
+              : null,
+        ),
       ],
     );
   }
@@ -1040,7 +1087,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               helperMaxLines: _hostFieldHelperMaxLines,
             ),
             autocorrect: false,
-            onChanged: (_) => setState(() {}),
+            onChanged: (_) => setState(() => _sessionNameFollowsLabel = false),
             validator: (value) {
               if (!_selectedStartupMode.usesRemoteMultiplexer) {
                 return null;
@@ -1747,11 +1794,117 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         case HostStartupMode.snippet:
           _selectedAutoConnectMode = AutoConnectCommandMode.snippet;
       }
+      if (value.usesRemoteMultiplexer &&
+          _tmuxSessionController.text.trim().isEmpty) {
+        _tmuxSessionController.text = _suggestedMuxSessionName();
+        _sessionNameFollowsLabel = true;
+      }
     });
     _updateDirtyState();
     if (value == HostStartupMode.agent) {
       _syncAutoConnectCommandFromPreset();
     }
+  }
+
+  Future<void> _loadPresetSessionNames() async {
+    try {
+      final presets = await ref
+          .read(agentLaunchPresetServiceProvider)
+          .getAllPresets();
+      if (!mounted) return;
+      _presetSessionNames = {
+        for (final MapEntry(:key, :value) in presets.entries)
+          if (value.tmuxSessionName?.trim() case final name?
+              when name.isNotEmpty)
+            key: name,
+      };
+    } on Object {
+      // Suggestions then avoid only the hosts' own session names.
+    }
+  }
+
+  /// A session name for this host from its label, distinct from the
+  /// sessions of other saved hosts that reach the same machine.
+  String _suggestedMuxSessionName() {
+    final hostname = _hostnameController.text.trim().toLowerCase();
+    final port = int.tryParse(_portController.text.trim()) ?? 22;
+    final hosts = ref.read(allHostsProvider).asData?.value ?? const <Host>[];
+    return suggestMuxSessionName(
+      label: _labelController.text,
+      hostname: _hostnameController.text,
+      taken: [
+        for (final host in hosts)
+          if (host.id != widget.hostId &&
+              host.hostname.trim().toLowerCase() == hostname &&
+              host.port == port) ...[
+            ?host.tmuxSessionName,
+            ?_presetSessionNames[host.id],
+          ],
+      ],
+    );
+  }
+
+  void _followSuggestedSessionName() {
+    if (!_sessionNameFollowsLabel ||
+        !_selectedStartupMode.usesRemoteMultiplexer) {
+      return;
+    }
+    final suggestion = _suggestedMuxSessionName();
+    if (_tmuxSessionController.text != suggestion) {
+      setState(() => _tmuxSessionController.text = suggestion);
+    }
+  }
+
+  Widget _buildNotificationsSection({required bool hasAgentPresetAccess}) {
+    final isAgent = _selectedStartupMode == HostStartupMode.agent;
+    final sessionName =
+        (isAgent ? _agentTmuxSessionController : _tmuxSessionController).text
+            .trim();
+    return HostNotificationsSection(
+      key: const Key('host-notifications-section'),
+      sessionKind: hostSessionKindForStartup(
+        mode: _selectedStartupMode,
+        agentMuxBackend: _selectedAgentMuxBackend,
+        agentSessionName: _agentTmuxSessionController.text,
+      ),
+      sessionName: sessionName.isEmpty ? null : sessionName,
+      prefs: _notificationPrefs,
+      onChanged: (prefs) {
+        setState(() => _notificationPrefs = prefs);
+        _updateDirtyState();
+      },
+      // Agent startup fields are Pro; without it the note points at them.
+      onUseMonkeyMux: isAgent && !hasAgentPresetAccess
+          ? null
+          : () => unawaited(_useMonkeyMux()),
+    );
+  }
+
+  /// Switches the host to MonkeyMux from the notifications section, then
+  /// brings Startup behavior into view so the change is visible.
+  Future<void> _useMonkeyMux() async {
+    if (_selectedStartupMode == HostStartupMode.agent) {
+      setState(() {
+        _selectedAgentMuxBackend = RemoteMuxBackend.monkeyMux;
+        if (_agentTmuxSessionController.text.trim().isEmpty) {
+          _agentTmuxSessionController.text = _suggestedMuxSessionName();
+        }
+      });
+      _updateDirtyState();
+      _syncAutoConnectCommandFromPreset();
+    } else {
+      await _handleStartupModeSelection(HostStartupMode.monkeyMux);
+    }
+    final startup = _startupSectionKey.currentContext;
+    if (!mounted || startup == null || !startup.mounted) return;
+    await Scrollable.ensureVisible(
+      startup,
+      duration: MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
+      alignment: 0.05,
+    );
   }
 
   void _carryWindowConfigAcrossModeChange(
@@ -2720,4 +2873,30 @@ class _SsidPromptDialogState extends State<_SsidPromptDialog> {
       ),
     ],
   );
+}
+
+/// Marks MonkeyMux as the recommended startup choice in the menu.
+class _RecommendedBadge extends StatelessWidget {
+  const _RecommendedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        child: Text(
+          'recommended',
+          style: FluttyTheme.monoStyle.copyWith(
+            fontSize: 11,
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
 }
