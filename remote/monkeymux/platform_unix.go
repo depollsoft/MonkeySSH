@@ -605,6 +605,13 @@ var resolveProgramStatusOwner = func(int) int { return programStatusOwnerUntrack
 
 func programStatusOwnerAlive(pgrp int) bool { return processGroupAlive(pgrp) }
 
+// programStatusWindowProcessInForeground reports whether the window's own
+// process still has the terminal; a shell that started another job does not.
+var programStatusWindowProcessInForeground = func(window *muxWindow) bool {
+	foreground := foregroundProcessGroupForWindow(window)
+	return foreground <= 0 || foreground == window.processID()
+}
+
 var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	if window == nil || window.pty == nil {
 		return 0
