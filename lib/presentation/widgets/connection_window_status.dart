@@ -1,9 +1,10 @@
 /// Attention-first ordering and status chips for a connection's window list.
 ///
 /// Native rows show state reported by the app or the host bridge. Terminal
-/// rows show what the program reported (bell, notification escape, OSC 9;4
-/// progress) and otherwise output timing, which is drawn as an outlined chip
-/// so inferred activity never looks like a reported state.
+/// rows show what the program reported (OSC 7501 status, bell, notification
+/// escape, OSC 9;4 progress) and otherwise output timing, which is drawn as an
+/// outlined chip so inferred activity never looks like a reported state. A
+/// program that speaks OSC 7501 never gets the output-timing guess.
 library;
 
 import 'dart:async';
@@ -298,7 +299,7 @@ Duration? connectionWindowsNextResort(
     final window = entry.window;
     if (entry.isNative || window == null || entry.reason != null) continue;
     // A reported status fixes the row; only inferred activity rolls over.
-    if (window.reportedStatus != null) continue;
+    if (terminalWindowReportsOwnStatus(window)) continue;
     if (terminalProgressIsRunning(window.activityProgress)) continue;
     final epoch = window.lastActivityEpochSeconds;
     if (epoch == null) continue;
@@ -455,6 +456,17 @@ ConnectionWindowStatus connectionWindowStatus(
         null:
       break;
   }
+  // The program speaks OSC 7501 and reports nothing now; its output timing
+  // is not a status, so say so instead of guessing, as the navigator does.
+  if (window.programStatusReporter && window.programStatus == null) {
+    return ConnectionWindowStatus(
+      label: 'no status',
+      icon: Icons.more_horiz,
+      tone: AcpStatusTone.neutral,
+      reported: true,
+      semanticsLabel: '$kind has not reported a status',
+    );
+  }
   final progress = window.activityProgress;
   if (terminalProgressIsRunning(progress)) {
     final percentage = progress!.percentage;
@@ -500,7 +512,7 @@ String? _coarseAge(Duration age) {
 Duration? _nextLabelChange(ConnectionWindowEntry entry, DateTime now) {
   if (entry.isNative || entry.reason != null) return null;
   final window = entry.window!;
-  if (window.reportedStatus != null) return null;
+  if (terminalWindowReportsOwnStatus(window)) return null;
   if (terminalProgressIsRunning(window.activityProgress)) return null;
   // An idle-only snapshot never ages, so only a reported epoch can roll over.
   final epoch = window.lastActivityEpochSeconds;

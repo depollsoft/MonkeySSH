@@ -431,6 +431,32 @@ void main() {
       expect(find.text('error'), findsOneWidget);
     });
 
+    testWidgets('an OSC 7501 reporter with no status is not guessed', (
+      tester,
+    ) async {
+      final entry = _single(
+        TmuxWindow(
+          index: 0,
+          name: 'claude',
+          isActive: false,
+          lastActivityEpochSeconds: _epochSecondsAgo(2),
+          programStatusReporter: true,
+        ),
+      );
+      expect(entry.sortKey.active, isFalse);
+      expect(connectionWindowsNextResort([entry], now: _now), isNull);
+      await _pumpChip(tester, entry);
+      expect(find.text('no status'), findsOneWidget);
+      expect(find.text('active'), findsNothing);
+      expect(find.byType(InferredActivityChip), findsNothing);
+      expect(
+        find.bySemanticsLabel(
+          RegExp('^terminal window has not reported a status'),
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('day-old labels keep advancing', (tester) async {
       var now = _now;
       await tester.pumpWidget(

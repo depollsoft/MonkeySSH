@@ -400,6 +400,25 @@ void main() {
       );
     });
 
+    test('a program that speaks OSC 7501 is never guessed busy', () {
+      final reporter = TmuxWindow(
+        index: 0,
+        name: 'claude',
+        isActive: false,
+        lastActivityEpochSeconds: recent.millisecondsSinceEpoch ~/ 1000,
+        terminalProgress: const TerminalProgress(
+          state: TerminalProgressState.indeterminate,
+        ),
+        programStatusReporter: true,
+      );
+      expect(
+        terminalWindowWorking(reporter, now: now),
+        isFalse,
+        reason: 'A redraw of a reporter with no status is not work.',
+      );
+      expect(terminalWindowReportsOwnStatus(reporter), isTrue);
+    });
+
     test('falls back to progress, then output timing', () {
       expect(
         terminalWindowWorking(

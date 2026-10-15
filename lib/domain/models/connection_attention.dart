@@ -325,12 +325,20 @@ bool terminalProgressIsRunning(TerminalProgress? progress) =>
 /// Whether a terminal [window] is working now.
 ///
 /// A program's OSC 7501 status is authoritative: it says working or it does
-/// not. Without one, OSC 9;4 progress counts as work, and so does output
-/// within [terminalQuietAfterSeconds] of [now].
+/// not. A program that speaks OSC 7501 but reports nothing now is not
+/// working, since a redraw (such as the one entering its window causes)
+/// would otherwise read as work. Without either, OSC 9;4 progress counts as
+/// work, and so does output within [terminalQuietAfterSeconds] of [now].
 bool terminalWindowWorking(TmuxWindow window, {DateTime? now}) {
-  if (window.reportedStatus case final status?) {
+  if (window.programStatus case final status?) {
     return status.state == TerminalProgramState.working;
   }
+  if (window.programStatusReporter) return false;
   return terminalProgressIsRunning(window.activityProgress) ||
       terminalWindowRecentlyActive(window, now: now);
 }
+
+/// Whether a terminal [window]'s state comes from its program alone, so
+/// nothing about it is inferred from output timing.
+bool terminalWindowReportsOwnStatus(TmuxWindow window) =>
+    window.programStatus != null || window.programStatusReporter;
