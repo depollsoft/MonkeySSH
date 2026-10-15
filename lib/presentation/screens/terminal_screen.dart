@@ -16400,7 +16400,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       ),
                     ),
                     subtitle: Text(
-                      snippet.command.replaceAll('\n', ' '),
+                      snippetLiteralText(snippet.command).replaceAll('\n', ' '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: FluttyTheme.monoStyle.copyWith(

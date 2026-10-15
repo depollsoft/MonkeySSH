@@ -2725,7 +2725,9 @@ class _SnippetRow extends ConsumerWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      snippet.command.replaceAll('\n', ' '),
+                      // What the snippet types: an escaped `\{key:1}` from
+                      // the key-token upgrade shows as the text it sends.
+                      snippetLiteralText(snippet.command).replaceAll('\n', ' '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: FluttyTheme.monoStyle.copyWith(

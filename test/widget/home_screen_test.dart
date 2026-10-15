@@ -736,7 +736,7 @@ void main() {
       verify(() => hostRepository.reorderByIds([2, 1])).called(1);
     });
 
-    testWidgets('Copy command copies an upgraded snippet as it reads', (
+    testWidgets('an upgraded snippet shows and copies as it reads', (
       tester,
     ) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -795,6 +795,10 @@ void main() {
       await tester.tap(find.text('Snippets').first);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
+
+      // The row shows the text the snippet types, without the escape.
+      expect(find.text('db.c.createIndex({key:1})'), findsOneWidget);
+      expect(find.text(r'db.c.createIndex(\{key:1})'), findsNothing);
 
       await tester.tap(find.byTooltip('Snippet actions'));
       await tester.pumpAndSettle();
