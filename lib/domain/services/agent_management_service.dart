@@ -137,23 +137,54 @@ if [ -z "$version_output" ]; then
 fi;
 ''';
 
-const _profilePrefix =
-    r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
-    // Each startup file is sourced in its own subshell and only when it is
-    // readable: POSIX sh (dash, macOS /bin/sh) leaves the whole subshell when
-    // `.` names a missing file or hits a syntax error, which would otherwise
-    // drop every PATH entry the other files add. The subshell starts from the
-    // current PATH, so its result already holds every earlier entry and is
-    // exported as is; appending the old value again would double PATH per
-    // file.
-    r'for __fl_profile in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zprofile" "$(if [ "${SHELL##*/}" = zsh ]; then printf %s "$HOME/.zshrc"; elif [ "${SHELL##*/}" = bash ]; then printf %s "$HOME/.bashrc"; fi)"; do '
-    r'[ -n "$__fl_profile" ] && [ -r "$__fl_profile" ] && __fl_profile_path=$( set +e; . "$__fl_profile" >/dev/null 2>&1; printf "%s" "$PATH" ) && [ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; '
-    'done; unset __fl_profile __fl_profile_path; '
+const _defaultPathExport =
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
+
+/// Startup files whose PATH the host scripts take, in login order. The
+/// last is the interactive file of the user's shell, if bash or zsh.
+const _profileFiles = [
+  r'"$HOME/.profile"',
+  r'"$HOME/.bash_profile"',
+  r'"$HOME/.zprofile"',
+  r'"$__fl_rc"',
+];
+
+/// Sources [_profileFiles] from [index] on, each inside the subshell of the
+/// one before, so a later file still sees what an earlier one exported (a
+/// `.zshrc` that builds on `$HOMEBREW_PREFIX` from `.zprofile`), and prints
+/// the resulting PATH.
+///
+/// A missing file is skipped. A file that ends its subshell early (POSIX sh
+/// leaves on a syntax error, such as zsh syntax in `.zshrc`, and a file may
+/// `exit` or `exec` another shell) prints nothing, and the files after it
+/// then run without it, so one bad file never drops the others. Startup
+/// files read `/dev/null`, so one that waits for input cannot stall.
+String _profileSourcing([int index = 0]) {
+  const printPath = r'printf "%s" "$PATH"';
+  if (index == _profileFiles.length) return printPath;
+  final file = _profileFiles[index];
+  final rest = _profileSourcing(index + 1);
+  return '__fl_p=\$( [ -n $file ] && [ -r $file ] && '
+      '. $file >/dev/null 2>&1 </dev/null; $rest ); '
+      r'if [ -n "$__fl_p" ]; then printf "%s" "$__fl_p"; '
+      'else $rest; fi';
+}
+
+final String _profilePrefix = [
+  _defaultPathExport,
+  r'__fl_rc=; case "${SHELL##*/}" in zsh) __fl_rc="$HOME/.zshrc";; ',
+  r'bash) __fl_rc="$HOME/.bashrc";; esac; ',
+  // The result starts from the current PATH, so it already holds every
+  // earlier entry and is exported as is.
+  '__fl_profile_path=\$( set +e; ${_profileSourcing()} ); ',
+  r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; ',
+  'unset __fl_rc __fl_p __fl_profile_path; ',
+  _defaultPathExport,
+].join();
 
 /// The login PATH setup above, for other host scripts that must find tools
 /// installed through profile files (Homebrew, `~/.local/bin`, nix).
-const remoteProfilePathPrefix = _profilePrefix;
+final String remoteProfilePathPrefix = _profilePrefix;
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';

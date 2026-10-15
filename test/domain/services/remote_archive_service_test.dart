@@ -712,7 +712,7 @@ void main() {
         expect(host.scripts, hasLength(6));
         for (final script in host.scripts) {
           expect(script, startsWith('{\n'));
-          expect(script, contains(r'[ -r "$__fl_profile" ]'));
+          expect(script, contains(r'[ -r "$HOME/.zprofile" ]'));
           expect(script, endsWith('finish 0\n} </dev/null\n'));
         }
       },

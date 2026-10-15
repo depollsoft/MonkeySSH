@@ -456,6 +456,41 @@ void main() {
       lessThan(entries.indexOf('$home/profile-bin')),
     );
   });
+
+  test('the login PATH keeps what an earlier startup file exported', () {
+    final home = host.home.path;
+    // .zprofile sets a prefix that .zshrc builds on, as `brew shellenv`
+    // does, and .bash_profile replaces the shell, as some setups do to
+    // reach zsh; the files around it still count.
+    File('$home/.zprofile').writeAsStringSync(
+      'export MY_PREFIX="\$HOME/brew"\nPATH="\$MY_PREFIX/bin:\$PATH"\n',
+    );
+    File('$home/.zshrc')
+        .writeAsStringSync('PATH="\$MY_PREFIX/opt/python/bin:\$PATH"\n');
+    File('$home/.bash_profile').writeAsStringSync('exec /bin/sh\n');
+    File('$home/.profile')
+        .writeAsStringSync('read line\nPATH="\$HOME/profile-bin:\$PATH"\n');
+
+    for (final shell in ['/bin/sh', '/bin/bash', '/bin/zsh']) {
+      if (!File(shell).existsSync()) continue;
+      final result = Process.runSync(
+        shell,
+        ['-c', '${remoteProfilePathPrefix}printf %s "\$PATH"'],
+        environment: {
+          'HOME': home,
+          'PATH': '/usr/bin:/bin',
+          'SHELL': '/bin/zsh',
+        },
+        includeParentEnvironment: false,
+      );
+
+      expect(result.exitCode, 0, reason: shell);
+      final entries = (result.stdout as String).split(':');
+      expect(entries, contains('$home/brew/opt/python/bin'), reason: shell);
+      expect(entries, contains('$home/brew/bin'), reason: shell);
+      expect(entries, contains('$home/profile-bin'), reason: shell);
+    }
+  });
 }
 
 final bool _isRoot =

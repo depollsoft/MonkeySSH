@@ -3365,7 +3365,8 @@ exit "$result"
       expect(command, contains('__monkeyssh_agent_runtime__='));
       expect(command, contains("'cli:claude'"));
       expect(command, contains("'cli:copilot'"));
-      expect(RegExp(r'\$HOME/\.zprofile').allMatches(command), hasLength(1));
+      // The login PATH is set up once for the whole batch.
+      expect(RegExp('__fl_profile_path=').allMatches(command), hasLength(1));
     });
   });
 
