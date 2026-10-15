@@ -180,14 +180,15 @@ class SocksBrowserProxyService {
   /// Returns false when the last release could not reach the sink. The proxy
   /// then still targets the forward's port, so the caller must keep that
   /// forward listening rather than free the port for another app.
+  ///
+  /// While another browser holds the proxy, the result waits for any apply
+  /// already queued (that browser's [hold] or [reroute]), so the proxy has
+  /// moved to its port before the caller stops its own forward.
   Future<bool> release() {
     if (_holders == 0) {
       return Future<bool>.value(true);
     }
     _holders--;
-    if (_holders > 0) {
-      return Future<bool>.value(true);
-    }
     return _queue.run(() async => _holders > 0 || await _blockUnlocked());
   }
 

@@ -184,6 +184,7 @@ class _PortForwardBrowserScreenState
 
   // SOCKS mode only.
   late final SocksBrowserProxyService _socksProxy;
+  late final SocksForwardBrowserLeases _socksLeases;
   SocksForwardRouteSource? _socksRoute;
   var _socksStatus = SocksBrowserRouteStatus.connecting;
   String? _socksMessage;
@@ -191,8 +192,6 @@ class _PortForwardBrowserScreenState
   var _socksGeneration = 0;
   // Port the browser is being pointed at, while that is in flight.
   int? _socksRoutingPort;
-  // Whether this browser started the forward, and so stops it on close.
-  var _socksStartedForward = false;
   // A loopback browser could not remove a leftover SOCKS proxy.
   var _directProxyBlocked = false;
 
@@ -209,8 +208,11 @@ class _PortForwardBrowserScreenState
   void initState() {
     super.initState();
     _socksProxy = ref.read(socksBrowserProxyServiceProvider);
+    _socksLeases = ref.read(socksForwardBrowserLeasesProvider);
     _addressFocusNode.addListener(_handleAddressFocusChanged);
     if (_isSocksBrowser) {
+      // Released in [_tearDownSocksBrowser].
+      _socksLeases.acquire(widget.socksForward!.id);
       WidgetsBinding.instance.addObserver(this);
       ref.listenManual(
         activeSessionsProvider,
@@ -640,8 +642,8 @@ class _PortForwardBrowserScreenState
   ///
   /// The native web views can outlive this widget (Android's platform view
   /// does not destroy its WebView), so the pages are blanked first, then the
-  /// proxy goes to the sink, and only then does a forward this browser started
-  /// stop and free its port.
+  /// proxy goes to the sink, and only then does a forward a browser started
+  /// stop and free its port, if no other browser uses it.
   void _tearDownSocksBrowser() {
     final source = _socksRoute;
     source?.removeListener(_handleSocksRouteChanged);
@@ -653,26 +655,28 @@ class _PortForwardBrowserScreenState
     final released = _socksProxyHeld
         ? _socksProxy.release()
         : Future<bool>.value(true);
-    if (source != null) {
-      final startedForward = _socksStartedForward;
-      unawaited(
-        released
-            .then((sunk) async {
-              if (!startedForward) return;
-              if (sunk) {
-                await source.stopForward();
-              } else {
-                // The proxy still targets the forward's port. Keep listening
-                // there, or another app could bind the freed port.
-                DiagnosticsLogService.instance.warning(
-                  'browser.socks',
-                  'forward_kept_after_sink_failed',
-                );
-              }
-            })
-            .whenComplete(source.dispose),
-      );
-    }
+    final leases = _socksLeases;
+    final forwardId = widget.socksForward!.id;
+    unawaited(
+      released
+          .then((sunk) async {
+            // The lease is dropped only now, so a browser opened during the
+            // close (reopening the same rule) still counts as a user.
+            final stopOn = leases.release(forwardId);
+            if (stopOn.isEmpty || source == null) return;
+            if (sunk) {
+              await source.stopForward(stopOn);
+            } else {
+              // The proxy still targets the forward's port. Keep listening
+              // there, or another app could bind the freed port.
+              DiagnosticsLogService.instance.warning(
+                'browser.socks',
+                'forward_kept_after_sink_failed',
+              );
+            }
+          })
+          .whenComplete(() => source?.dispose()),
+    );
   }
 
   Future<void> _restartSocksRoute() async {
@@ -686,19 +690,23 @@ class _PortForwardBrowserScreenState
       _socksStatus = SocksBrowserRouteStatus.connecting;
       _socksMessage = null;
     });
-    final wasStopped = source.route == null;
     final result = await source.restart();
     // Decided from the start result: a browser closed meanwhile has disposed
     // [source], whose cached route no longer updates.
-    if (wasStopped && result.route != null) {
-      if (!mounted) {
-        // Closed while the forward was starting; nothing will use it.
-        unawaited(source.stopForward());
-        return;
-      }
-      _socksStartedForward = true;
+    final forwardId = widget.socksForward!.id;
+    if (result.startedOnConnectionId case final connectionId?) {
+      _socksLeases.recordStart(forwardId, connectionId);
     }
-    if (!mounted || !identical(source, _socksRoute)) {
+    if (!mounted) {
+      // Closed while the forward was starting. Stop it unless a browser
+      // opened since uses it; that browser stops it on close instead.
+      final stopOn = _socksLeases.takeUnused(forwardId);
+      if (stopOn.isNotEmpty) {
+        unawaited(source.stopForward(stopOn));
+      }
+      return;
+    }
+    if (!identical(source, _socksRoute)) {
       return;
     }
     if (source.route == null) {

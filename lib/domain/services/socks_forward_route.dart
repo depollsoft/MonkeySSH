@@ -63,22 +63,36 @@ SocksForwardRoute? findSocksForwardRoute(
 /// Result of starting a SOCKS forward for the in-app browser.
 @immutable
 class SocksForwardStartResult {
-  const SocksForwardStartResult._({this.route, this.errorMessage});
+  const SocksForwardStartResult._({
+    this.route,
+    this.errorMessage,
+    this.startedOnConnectionId,
+  });
 
-  /// A result for a forward running at [route].
+  /// A result for a forward running at [route]; [startedOnConnectionId] is
+  /// set when this call started it.
   @visibleForTesting
-  const SocksForwardStartResult.running(SocksForwardRoute this.route)
-    : errorMessage = null;
+  const SocksForwardStartResult.running(
+    SocksForwardRoute this.route, {
+    this.startedOnConnectionId,
+  }) : errorMessage = null;
 
   /// A result for a forward that did not start, because of [errorMessage].
   @visibleForTesting
-  const SocksForwardStartResult.failed(String this.errorMessage) : route = null;
+  const SocksForwardStartResult.failed(String this.errorMessage)
+    : route = null,
+      startedOnConnectionId = null;
 
   /// The running forward, when it started.
   final SocksForwardRoute? route;
 
   /// Why the forward is not running, when it did not start.
   final String? errorMessage;
+
+  /// Connection this call started the forward on, or null when it reused a
+  /// forward that was already running (started by another browser, an
+  /// auto-start rule or the user).
+  final int? startedOnConnectionId;
 }
 
 /// Starts [portForward] so the browser can route through it.
@@ -133,7 +147,13 @@ Future<SocksForwardStartResult> startSocksForwardRoute(
   );
   final route = findRoute();
   if (route != null) {
-    return SocksForwardStartResult._(route: route);
+    return SocksForwardStartResult._(
+      route: route,
+      startedOnConnectionId:
+          activation.status == PortForwardActivationStatus.started
+          ? activation.connectionId
+          : null,
+    );
   }
   return SocksForwardStartResult._(
     errorMessage: switch (activation.status) {
@@ -169,12 +189,12 @@ abstract interface class SocksForwardRouteSource implements Listenable {
   /// checks after the app resumes.
   Future<bool> probe();
 
-  /// Stops the forward wherever it runs.
+  /// Stops the forward on each of [connectionIds] where it runs.
   ///
-  /// The browser calls this on close for a forward it started, so the
-  /// unauthenticated listener only runs while something uses it. Still works
-  /// after [dispose].
-  Future<void> stopForward();
+  /// The last browser to close calls this for the connections a browser
+  /// started the forward on, so the unauthenticated listener only runs while
+  /// something uses it. Still works after [dispose].
+  Future<void> stopForward(Set<int> connectionIds);
 
   /// Stops listening to the sessions.
   void dispose();
@@ -292,12 +312,12 @@ class SessionSocksForwardRouteSource extends ChangeNotifier
   }
 
   @override
-  Future<void> stopForward() async {
-    for (final connectionId in _sessions.getConnectionsForHost(
-      portForward.hostId,
-    )) {
+  Future<void> stopForward(Set<int> connectionIds) async {
+    for (final connectionId in connectionIds) {
       final session = _sessions.getSession(connectionId);
-      if (session != null && session.isPortForwardActive(portForward.id)) {
+      if (session != null &&
+          session.hostId == portForward.hostId &&
+          session.isPortForwardActive(portForward.id)) {
         await session.stopForward(portForward.id);
       }
     }
@@ -313,6 +333,55 @@ class SessionSocksForwardRouteSource extends ChangeNotifier
     super.dispose();
   }
 }
+
+/// Which SOCKS forwards open in-app browsers use, and where a browser started
+/// each one.
+///
+/// A browser stops a forward on close only when a browser started it and no
+/// other browser still uses it, so closing one browser never takes the tunnel
+/// from another, and a forward started by an auto-start rule or the user is
+/// never stopped by a browser.
+class SocksForwardBrowserLeases {
+  final _users = <int, int>{};
+  final _startedOn = <int, Set<int>>{};
+
+  /// Records that a browser uses [portForwardId]. Balance with [release].
+  void acquire(int portForwardId) =>
+      _users.update(portForwardId, (users) => users + 1, ifAbsent: () => 1);
+
+  /// Records that a browser started [portForwardId] on [connectionId].
+  void recordStart(int portForwardId, int connectionId) =>
+      (_startedOn[portForwardId] ??= <int>{}).add(connectionId);
+
+  /// Drops a use taken by [acquire].
+  ///
+  /// Returns the connections to stop the forward on: those a browser started
+  /// it on, once no browser uses it. Otherwise returns an empty set.
+  Set<int> release(int portForwardId) {
+    final users = (_users[portForwardId] ?? 0) - 1;
+    if (users > 0) {
+      _users[portForwardId] = users;
+      return const {};
+    }
+    _users.remove(portForwardId);
+    return _startedOn.remove(portForwardId) ?? const {};
+  }
+
+  /// The connections to stop [portForwardId] on when its start finished
+  /// after every browser using it closed, or an empty set while a browser
+  /// still uses it (that browser stops it on close instead).
+  Set<int> takeUnused(int portForwardId) {
+    if ((_users[portForwardId] ?? 0) > 0) {
+      return const {};
+    }
+    return _startedOn.remove(portForwardId) ?? const {};
+  }
+}
+
+/// App-wide record of which SOCKS forwards in-app browsers use.
+final socksForwardBrowserLeasesProvider = Provider<SocksForwardBrowserLeases>(
+  (ref) => SocksForwardBrowserLeases(),
+);
 
 /// Creates the route source the SOCKS browser watches; overridable in tests.
 final socksForwardRouteSourceFactoryProvider =

@@ -98,6 +98,32 @@ void main() {
     },
   );
 
+  test('a release behind another browser waits for its queued apply', () async {
+    final gate = Completer<void>();
+    handle((call) async {
+      if (call.method == 'apply' && (call.arguments as Map)['port'] == 41090) {
+        await gate.future;
+      }
+      return null;
+    });
+    final proxy = service();
+
+    await proxy.hold(41080);
+    // A second browser takes the proxy for another forward.
+    final second = proxy.hold(41090);
+    bool? released;
+    unawaited(proxy.release().then((sunk) => released = sunk));
+    await pumpEventQueue();
+    // Until the proxy has moved, the first browser must not free its port.
+    expect(released, isNull);
+
+    gate.complete();
+    await second;
+    await pumpEventQueue();
+    expect(released, isTrue);
+    expect(calls, ['apply:41080', 'apply:41090']);
+  });
+
   test('block points a held proxy at the sink until it is re-routed', () async {
     handle((_) async => null);
     final proxy = service();

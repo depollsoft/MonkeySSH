@@ -148,6 +148,10 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   SocksForwardRoute? _route;
   int restarts = 0;
   bool probeResult = true;
+
+  /// Whether a restart of a stopped forward starts it, rather than finding it
+  /// started elsewhere (an auto-start rule, another browser).
+  bool startsForward = true;
   SocksForwardRoute? Function()? onRestart;
   String? restartError;
   Completer<void>? restartGate;
@@ -168,11 +172,17 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   @override
   Future<SocksForwardStartResult> restart() async {
     restarts++;
+    final wasStopped = _route == null;
     await restartGate?.future;
     final next = onRestart?.call();
     if (next != null) {
       route = next;
-      return SocksForwardStartResult.running(next);
+      return SocksForwardStartResult.running(
+        next,
+        startedOnConnectionId: wasStopped && startsForward
+            ? next.connectionId
+            : null,
+      );
     }
     return SocksForwardStartResult.failed(restartError ?? 'failed');
   }
@@ -187,8 +197,8 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   Future<bool> probe() async => probeResult;
 
   @override
-  Future<void> stopForward() async {
-    _events.add('stop-forward');
+  Future<void> stopForward(Set<int> connectionIds) async {
+    _events.add('stop-forward:${(connectionIds.toList()..sort()).join(',')}');
   }
 }
 
@@ -287,6 +297,56 @@ void main() {
     for (var i = 0; i < 5; i++) {
       await tester.pump();
     }
+  }
+
+  Future<void> settle(WidgetTester tester) async {
+    for (var i = 0; i < 5; i++) {
+      await tester.pump();
+    }
+  }
+
+  /// Shows a SOCKS browser for each name in [visible], stacked; a browser
+  /// dropped from it is disposed, as when its route pops. Each new browser
+  /// takes the next of [sources].
+  Future<void> pumpBrowsers(
+    WidgetTester tester,
+    ValueNotifier<List<String>> visible,
+    List<_RouteSource> sources,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          settingsServiceProvider.overrideWithValue(settings),
+          activeSessionsProvider.overrideWith(_NoSessions.new),
+          socksBrowserProxyServiceProvider.overrideWithValue(
+            SocksBrowserProxyService(
+              platform: TargetPlatform.iOS,
+              sinkPort: () async => _sinkPort,
+            ),
+          ),
+          socksForwardRouteSourceFactoryProvider.overrideWithValue(
+            (_) => sources.removeAt(0),
+          ),
+        ],
+        child: MaterialApp(
+          home: ValueListenableBuilder<List<String>>(
+            valueListenable: visible,
+            builder: (context, names, _) => Stack(
+              children: [
+                for (final name in names)
+                  Positioned.fill(
+                    key: ValueKey(name),
+                    child: PortForwardBrowserScreen.socks(
+                      socksForward: _forward,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await settle(tester);
   }
 
   Future<void> pumpBrowser(WidgetTester tester, _RouteSource source) =>
@@ -528,14 +588,94 @@ void main() {
     await tester.pump();
     await closeBrowser(tester);
     expect(source.disposed, isTrue);
-    expect(_events, isNot(contains('stop-forward')));
+    expect(_events, isNot(contains(startsWith('stop-forward'))));
 
     // The start completes after the browser and its source are gone.
     gate.complete();
     await tester.pump();
     await tester.pump();
     expect(source.route, isNull);
-    expect(_events, contains('stop-forward'));
+    expect(_events, contains('stop-forward:1'));
+  });
+
+  testWidgets('closing one of two browsers leaves the other its forward', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    const route = SocksForwardRoute(connectionId: 1, port: 41080);
+    final visible = ValueNotifier(['first']);
+    addTearDown(visible.dispose);
+    await pumpBrowsers(tester, visible, [
+      _RouteSource(null)..onRestart = () => route,
+      _RouteSource(route),
+    ]);
+    // The first browser started the forward.
+    expect(_events, ['apply:41080', 'webview']);
+
+    // The rule is browsed again while the first browser's route is still
+    // popping, so both are mounted for a moment.
+    visible.value = ['first', 'second'];
+    await settle(tester);
+    visible.value = ['second'];
+    await settle(tester);
+    expect(_events, isNot(contains(startsWith('stop-forward'))));
+    expect(find.text('browse via Office'), findsOneWidget);
+
+    _events.clear();
+    visible.value = [];
+    await settle(tester);
+    // The last browser out stops the forward a browser started.
+    expect(_events, ['apply:$_sinkPort', 'stop-forward:1']);
+  });
+
+  testWidgets('a start finishing after its browser closed spares a new one', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    const route = SocksForwardRoute(connectionId: 1, port: 41080);
+    final gate = Completer<void>();
+    final visible = ValueNotifier(['closing']);
+    addTearDown(visible.dispose);
+    await pumpBrowsers(tester, visible, [
+      _RouteSource(null)
+        ..restartGate = gate
+        ..onRestart = () => route,
+      _RouteSource(route),
+    ]);
+    expect(find.text('starting tunnel'), findsOneWidget);
+
+    visible.value = [];
+    await settle(tester);
+    // Reopened before the first start finished; it finds the forward up.
+    visible.value = ['reopened'];
+    await settle(tester);
+    expect(find.text('browse via Office'), findsOneWidget);
+
+    gate.complete();
+    await settle(tester);
+    expect(_events, isNot(contains(startsWith('stop-forward'))));
+
+    _events.clear();
+    visible.value = [];
+    await settle(tester);
+    expect(_events, ['apply:$_sinkPort', 'stop-forward:1']);
+  });
+
+  testWidgets('leaves running a forward it found started elsewhere', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    // Stopped when the browser opens; by the time its start runs, an
+    // auto-start rule has brought it up on the session.
+    final source = _RouteSource(null)
+      ..startsForward = false
+      ..onRestart = () => const SocksForwardRoute(connectionId: 1, port: 41080);
+    await pumpBrowser(tester, source);
+    expect(find.text('browse via Office'), findsOneWidget);
+
+    _events.clear();
+    await closeBrowser(tester);
+    expect(_events, ['apply:$_sinkPort']);
   });
 
   testWidgets('a forward that drops while the proxy is applied ends down', (
@@ -597,7 +737,7 @@ void main() {
     _events.clear();
     await closeBrowser(tester);
     // Only once the proxy points at the sink does the forward free its port.
-    expect(_events, ['apply:$_sinkPort', 'stop-forward']);
+    expect(_events, ['apply:$_sinkPort', 'stop-forward:1']);
   });
 
   testWidgets('restarts a listener lost while the app was suspended', (
