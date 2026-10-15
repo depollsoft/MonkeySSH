@@ -13780,13 +13780,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  // Pointer routing keeps the hit-test path from pointer down, so move, up and
+  // cancel can still reach this listener after the terminal was disposed.
   void _handleTerminalPointerMove(PointerMoveEvent event) {
+    if (!mounted) return;
     _handleTerminalTargetPointerMove(event);
     _handleTerminalDoubleTapPointerMove(event);
     _handleTerminalMouseTapPointerMove(event);
   }
 
   void _handleTerminalPointerUp(PointerUpEvent event) {
+    if (!mounted) return;
     if (!_handleTerminalTargetPointerUp(event)) {
       _handleTerminalDoubleTapPointerUp(event);
       _handleTerminalMouseTapPointerUp(event);
@@ -13798,6 +13802,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _handleTerminalPointerCancel(PointerCancelEvent event) {
+    if (!mounted) return;
     if (_pendingTerminalTargetTapPointer == event.pointer) {
       _clearPendingTerminalTargetTap();
     }
