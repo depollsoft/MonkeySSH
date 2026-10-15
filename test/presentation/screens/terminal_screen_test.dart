@@ -53,6 +53,7 @@ import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
+import 'package:monkeyssh/domain/services/mux_session_end_holds.dart';
 import 'package:monkeyssh/domain/services/remote_clipboard_sync_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
@@ -7164,11 +7165,18 @@ void main() {
 
         expect(find.text('Remove worktree?'), findsOneWidget);
         expect(activeSessions.disconnectedConnectionIds, isEmpty);
+        // The hold is shared, so the home badge beneath a terminal opened
+        // from Connections waits for it too.
+        final holds = ProviderScope.containerOf(
+          tester.element(find.byType(TerminalScreen)),
+        ).read(muxSessionEndHoldsProvider);
+        expect(holds.isHeld(session.connectionId), isTrue);
 
         await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
 
+        expect(holds.isHeld(session.connectionId), isFalse);
         expect(worktrees.removed, [worktree]);
         expect(registry.records, isEmpty);
         expect(activeSessions.disconnectedConnectionIds, [

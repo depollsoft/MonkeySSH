@@ -69,6 +69,7 @@ import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/monkeymux_offer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
 import '../../domain/services/push/push_local_alerts.dart';
@@ -878,12 +879,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _muxVersion;
   String? _monkeyMuxReconnectSessionName;
 
-  /// Set while closing the session's last window still needs the
-  /// connection, for example to offer removing the window's worktree.
-  /// Session-end handling waits for it, because MonkeyMux announces the empty
-  /// window list before it answers the close.
-  Future<void>? _muxSessionEndHold;
-
   /// The worktree a MonkeyMux preset launch created, from when its attach
   /// command is ready until that command reaches the host (kept and then
   /// checked) or the launch is given up (rolled back).
@@ -1152,6 +1147,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   ActiveSessionsNotifier? _sessionsNotifier;
   late final TmuxService _tmuxService;
   late final MonkeyMuxService _monkeyMuxService;
+  late final MuxSessionEndHolds _muxSessionEndHolds;
   late final MonkeyMuxInstallerService _monkeyMuxInstallerService;
   late final Listenable _uploadProgressListenable;
   late final TerminalConnectionBackendService _terminalBackendService;
@@ -1792,6 +1788,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ..consumeSendModifier = _toolbarController.consumeOneShot;
     _tmuxService = ref.read(tmuxServiceProvider);
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);
+    _muxSessionEndHolds = ref.read(muxSessionEndHoldsProvider);
     _monkeyMuxInstallerService = ref.read(monkeyMuxInstallerServiceProvider);
     _uploadProgressListenable = Listenable.merge([
       _pasteUploadProgress,
@@ -10406,8 +10403,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     String sessionName,
   ) async {
-    final hold = _muxSessionEndHold;
-    if (hold != null) await hold;
+    await _muxSessionEndHolds.released(session.connectionId);
     if (!mounted ||
         _activeMuxBackend != RemoteMuxBackend.monkeyMux ||
         _connectionId != session.connectionId ||
@@ -10457,16 +10453,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       return false;
     }
-  }
-
-  bool _isExpectedMonkeyMuxFinalCloseError(Object error) {
-    if (error is! MonkeyMuxInstallException) {
-      return false;
-    }
-    final message = error.message.toLowerCase();
-    return message.contains('control channel closed') ||
-        message.contains('control channel unavailable') ||
-        message.contains('closed without a response');
   }
 
   /// Switches to a different tmux window via exec channel.
@@ -10799,20 +10785,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           windowId: windowId,
         );
     // The session ends with this window, and ending it disconnects, so
-    // anything that still needs the connection runs first. The window bar
-    // sees the empty window list before the close returns; the hold keeps
-    // its session-end handling waiting until then.
-    final sessionEndHold =
+    // anything that still needs the connection runs first. Every observer of
+    // the session (this window bar, and the home badge beneath a terminal
+    // opened from it) sees the empty window list before the close returns;
+    // the hold keeps their session-end handling waiting until then.
+    final releaseSessionEnd =
         closesLastMonkeyMuxWindow && beforeSessionEnds != null
-        ? Completer<void>()
-        : null;
-    void releaseSessionEnd() {
-      if (sessionEndHold == null || sessionEndHold.isCompleted) return;
-      sessionEndHold.complete();
-      if (identical(_muxSessionEndHold, sessionEndHold.future)) {
-        _muxSessionEndHold = null;
-      }
-    }
+        ? _muxSessionEndHolds.hold(session.connectionId)
+        : () {};
 
     Future<void> endSession() async {
       try {
@@ -10823,9 +10803,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       await _handleMuxSessionEnded(session, sessionName);
     }
 
-    if (sessionEndHold != null) {
-      _muxSessionEndHold = sessionEndHold.future;
-    }
     try {
       try {
         await _activeTerminalConnectionBackend(session)
@@ -10836,7 +10813,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
         if (closesLastMonkeyMuxWindow &&
             _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
-            _isExpectedMonkeyMuxFinalCloseError(error)) {
+            isExpectedMonkeyMuxFinalCloseError(error)) {
           DiagnosticsLogService.instance.info(
             'tmux.ui',
             'monkeymux_final_close_control_closed',

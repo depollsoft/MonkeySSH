@@ -29,7 +29,9 @@ const agentWorktreeKeepButtonKey = Key('agent-worktree-keep-button');
 /// or when another window in [remainingWindowDirectories] still uses it. A
 /// folder that is no longer the recorded worktree has its record forgotten.
 /// [liveWindowDirectories], when given, is asked again right before removal,
-/// so a window that entered the worktree while the dialog was open keeps it.
+/// so a window that entered the worktree while the dialog was open keeps it;
+/// if it cannot answer, the worktree is kept too. Leave it null when the
+/// closed window was the session's last.
 /// Never throws: closing the window has already succeeded.
 Future<void> offerAgentWorktreeRemoval({
   required BuildContext context,
@@ -118,8 +120,12 @@ Future<void> _offerRemoval({
     return;
   }
   String message;
-  if (await _stillInUse(record, liveWindowDirectories)) {
-    message = 'Worktree not removed. Another window is using it.';
+  final inUse = await _stillInUse(record, liveWindowDirectories);
+  if (inUse != false) {
+    message = inUse == null
+        ? 'Worktree not removed. MonkeySSH couldn’t check whether another '
+              'window is using it.'
+        : 'Worktree not removed. Another window is using it.';
   } else {
     try {
       final removal = await service.remove(shell, record);
@@ -146,11 +152,13 @@ Future<void> _offerRemoval({
   }
 }
 
-/// Whether a window entered [record]'s worktree after the offer started.
+/// Whether a window entered [record]'s worktree after the offer started, or
+/// null when the windows could not be listed.
 ///
-/// A listing that fails (for example because the session just ended) counts
-/// as no window: the closed window was the one in the worktree.
-Future<bool> _stillInUse(
+/// [liveWindowDirectories] is only given while the session stays up, so a
+/// failed listing is not an ended session: some window may be using the
+/// worktree, and it is kept.
+Future<bool?> _stillInUse(
   AgentWorktreeRecord record,
   Future<Iterable<String?>> Function()? liveWindowDirectories,
 ) async {
@@ -165,7 +173,7 @@ Future<bool> _stillInUse(
       'live_windows_failed',
       fields: {'hostId': record.hostId, 'errorType': error.runtimeType},
     );
-    return false;
+    return null;
   }
 }
 

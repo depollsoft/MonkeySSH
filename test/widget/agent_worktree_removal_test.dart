@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -302,14 +304,41 @@ void main() {
       );
     });
 
-    testWidgets('a failed live check does not block removal', (tester) async {
+    testWidgets('keeps the worktree when the live check fails', (tester) async {
+      // The live check only runs while the session stays up, so a listing
+      // that times out says nothing about the other windows.
       final service = _FakeService(_clean);
       await offer(
         tester,
         service,
         closed: _record.path,
-        live: () async => throw StateError('session ended'),
+        live: () async => throw TimeoutException('listing'),
       );
+
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pumpAndSettle();
+
+      expect(service.removed, isEmpty);
+      expect(
+        find.text(
+          'Worktree not removed. MonkeySSH couldn’t check whether another '
+          'window is using it.',
+        ),
+        findsOneWidget,
+      );
+      expect(await tester.runAsync(() => registry.recordsForHost(1)), [
+        _record,
+      ]);
+    });
+
+    testWidgets('removes without a live check when the session ended', (
+      tester,
+    ) async {
+      final service = _FakeService(_clean);
+      await offer(tester, service, closed: _record.path);
 
       await tester.runAsync(() async {
         await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));

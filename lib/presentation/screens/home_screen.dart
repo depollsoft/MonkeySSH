@@ -27,6 +27,7 @@ import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
 import '../../domain/services/secure_transfer_service.dart';
 import '../../domain/services/settings_service.dart';
@@ -2950,6 +2951,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     onWindowsChanged: _syncConnectionSessionTitle,
     disconnect: (session) =>
         disconnectConnectionAndClearMuxCaches(ref, session.connectionId),
+    sessionEndHolds: ref.read(muxSessionEndHoldsProvider),
   )..addListener(_badgeChanged);
 
   void _badgeChanged() {
@@ -3414,7 +3416,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final closesLastMonkeyMuxWindow =
         _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
         (_badge.windows?.length ?? 0) <= 1;
-    final releaseSessionEnd = _badge.holdSessionEnd();
+    final releaseSessionEnd = _badge.holdSessionEnd(session.connectionId);
     final closing = () async {
       if (window.isNativeAcp) {
         await ref
@@ -3424,15 +3426,24 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               bridgeId: window.nativeAcpBridgeId!,
             );
       }
-      await mux.killWindow(
-        session,
-        _badge.sessionName!,
-        window.index,
-        windowId: window.id,
-        extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
-            ? widget.tmuxExtraFlags
-            : null,
-      );
+      try {
+        await mux.killWindow(
+          session,
+          _badge.sessionName!,
+          window.index,
+          windowId: window.id,
+          extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
+              ? widget.tmuxExtraFlags
+              : null,
+        );
+      } on Object catch (error) {
+        // The session ended with its last window and closed the control
+        // channel before answering: the close worked.
+        if (!closesLastMonkeyMuxWindow ||
+            !isExpectedMonkeyMuxFinalCloseError(error)) {
+          rethrow;
+        }
+      }
       if (mounted) {
         await offerAgentWorktreeRemoval(
           context: context,
