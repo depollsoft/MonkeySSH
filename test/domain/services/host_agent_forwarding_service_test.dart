@@ -56,6 +56,11 @@ Host _host({int id = 3, String label = 'build box'}) => Host(
   sortOrder: 0,
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 SshAgentSignatureRequest _request({
