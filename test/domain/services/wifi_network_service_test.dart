@@ -70,7 +70,7 @@ void main() {
       'surfaces a missing channel handler instead of reading it as denied',
       () async {
         // An unregistered channel is a build bug; reporting it as the user's
-        // denial would hide it behind "Location permission is required".
+        // denial would hide it behind "Location permission is needed".
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
 
         await expectLater(

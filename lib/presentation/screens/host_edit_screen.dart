@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -2682,55 +2683,52 @@ class _SkipJumpHostOnWifiSectionState
 
   bool _detecting = false;
 
+  /// What the last "Add current Wi-Fi" tap found, shown under the buttons
+  /// until the next tap or until a network is added.
+  _WifiLookupNotice? _notice;
+
   Future<void> _addCurrentSsid() async {
-    setState(() => _detecting = true);
-    final messenger = ScaffoldMessenger.of(context);
-    // Read before any await: the Settings action can outlive this widget.
-    final permissions = ref.read(appPermissionServiceProvider);
+    setState(() {
+      _detecting = true;
+      _notice = null;
+    });
+    // Read before any await: the widget can be gone when the reply arrives.
+    final telemetry = ref.read(telemetryServiceProvider);
     try {
       final wifiService = ref.read(wifiNetworkServiceProvider);
-      final permission = await wifiService.requestPermission().timeout(
-        _permissionTimeout,
-        onTimeout: () => WifiPermissionStatus.denied,
-      );
+      var timedOut = false;
+      final WifiPermissionStatus permission;
+      try {
+        permission = await wifiService.requestPermission().timeout(
+          _permissionTimeout,
+          onTimeout: () {
+            timedOut = true;
+            return WifiPermissionStatus.denied;
+          },
+        );
+      } on MissingPluginException catch (error, stackTrace) {
+        // The permissions channel was never registered, a build bug. Report
+        // it and say so instead of letting the tap fail silently.
+        unawaited(telemetry.recordError(error, stackTrace, fatal: false));
+        _showNotice(_WifiLookupNotice.unavailable);
+        return;
+      }
       if (!mounted) return;
       if (permission != WifiPermissionStatus.granted) {
-        final approximate = permission == WifiPermissionStatus.approximate;
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(
-              approximate
-                  ? 'Precise location is required to read the current Wi-Fi '
-                        'network name. Turn it on in Settings, or add the '
-                        'SSID manually.'
-                  : 'Location permission is required to read the current '
-                        'Wi-Fi network name. You can also add the SSID '
-                        'manually.',
-            ),
-            action:
-                approximate ||
-                    permission == WifiPermissionStatus.permanentlyDenied
-                ? SnackBarAction(
-                    label: 'Settings',
-                    onPressed: () => unawaited(permissions.openAppSettings()),
-                  )
-                : null,
-          ),
-        );
+        _showNotice(switch (permission) {
+          _ when timedOut => _WifiLookupNotice.noAnswer,
+          WifiPermissionStatus.approximate =>
+            _WifiLookupNotice.preciseLocationOff,
+          WifiPermissionStatus.permanentlyDenied =>
+            _WifiLookupNotice.permissionOff,
+          _ => _WifiLookupNotice.permissionDenied,
+        });
         return;
       }
       final ssid = await wifiService.getCurrentSsid();
       if (!mounted) return;
       if (ssid == null) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not detect the current Wi-Fi network. Make sure you '
-              'are connected to Wi-Fi and try again, or add the SSID '
-              'manually.',
-            ),
-          ),
-        );
+        _showNotice(_WifiLookupNotice.notDetected);
         return;
       }
       _addSsid(ssid);
@@ -2738,6 +2736,13 @@ class _SkipJumpHostOnWifiSectionState
       if (mounted) setState(() => _detecting = false);
     }
   }
+
+  void _showNotice(_WifiLookupNotice notice) {
+    if (mounted) setState(() => _notice = notice);
+  }
+
+  void _openAppSettings() =>
+      unawaited(ref.read(appPermissionServiceProvider).openAppSettings());
 
   Future<void> _promptForSsid() async {
     final entered = await showDialog<String>(
@@ -2753,6 +2758,7 @@ class _SkipJumpHostOnWifiSectionState
   void _addSsid(String ssid) {
     final sanitized = sanitizeSsidInput(ssid);
     if (sanitized.isEmpty) return;
+    if (_notice != null) setState(() => _notice = null);
     if (widget.ssids.contains(sanitized)) return;
     widget.onChanged([...widget.ssids, sanitized]);
   }
@@ -2827,7 +2833,10 @@ class _SkipJumpHostOnWifiSectionState
                     ? const SizedBox(
                         width: 16,
                         height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          semanticsLabel: 'Reading the Wi-Fi network',
+                        ),
                       )
                     : const Icon(Icons.my_location, size: 18),
                 label: const Text('Add current Wi-Fi'),
@@ -2840,7 +2849,118 @@ class _SkipJumpHostOnWifiSectionState
             ),
           ],
         ),
+        if (_notice case final notice?)
+          _WifiLookupNoticeRow(
+            notice: notice,
+            onOpenSettings: notice.opensSettings ? _openAppSettings : null,
+          ),
       ],
+    );
+  }
+}
+
+/// Outcomes of "Add current Wi-Fi" that need the user's attention.
+enum _WifiLookupNotice {
+  permissionDenied(
+    Icons.location_off_outlined,
+    'Location permission is needed to read the Wi-Fi network name. You can '
+    'also add it manually.',
+  ),
+  permissionOff(
+    Icons.location_off_outlined,
+    'Location permission is off. Turn it on in Settings to read the Wi-Fi '
+    'network name.',
+    opensSettings: true,
+  ),
+  preciseLocationOff(
+    Icons.location_off_outlined,
+    'Precise location is off. Turn it on in Settings to read the Wi-Fi '
+    'network name.',
+    opensSettings: true,
+  ),
+  noAnswer(
+    Icons.info_outline,
+    'No answer from the location prompt. Tap Add current Wi-Fi to try again.',
+  ),
+  unavailable(
+    Icons.info_outline,
+    'Location access is not available in this build. Add the network '
+    'manually.',
+  ),
+  notDetected(
+    Icons.info_outline,
+    'Could not detect the current Wi-Fi network. Connect to Wi-Fi and try '
+    'again, or add it manually.',
+  );
+
+  const _WifiLookupNotice(
+    this.icon,
+    this.message, {
+    this.opensSettings = false,
+  });
+
+  final IconData icon;
+  final String message;
+
+  /// Whether only the app's system settings can fix it.
+  final bool opensSettings;
+}
+
+/// The last "Add current Wi-Fi" outcome, under the button that produced it,
+/// with a way to the app's settings when only they can fix it.
+class _WifiLookupNoticeRow extends StatelessWidget {
+  const _WifiLookupNoticeRow({required this.notice, this.onOpenSettings});
+
+  final _WifiLookupNotice notice;
+  final VoidCallback? onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.onSurfaceVariant;
+    return Padding(
+      key: const Key('skip-jump-wifi-notice'),
+      padding: const EdgeInsets.only(top: 8),
+      // Announced when it appears, as the snackbar it replaces was.
+      child: Semantics(
+        liveRegion: true,
+        container: true,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(notice.icon, size: 16, color: color),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    notice.message,
+                    style: theme.textTheme.bodySmall?.copyWith(color: color),
+                  ),
+                  if (onOpenSettings != null)
+                    TextButton(
+                      key: const Key('skip-jump-open-settings'),
+                      onPressed: onOpenSettings,
+                      // Lined up with the message; 44 pt keeps the target
+                      // thumb-sized without a gap above the link.
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(48, 44),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        alignment: Alignment.centerLeft,
+                      ),
+                      child: const Text('Open Settings'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
