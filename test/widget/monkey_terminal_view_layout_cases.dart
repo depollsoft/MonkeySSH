@@ -236,6 +236,144 @@ void registerMonkeyTerminalViewLayoutTests() {
       });
     });
 
+    group('bottom-aligned grid', () {
+      const theme = TerminalThemes.defaultDarkTheme;
+
+      Widget buildTerminal({
+        required Terminal terminal,
+        required Size size,
+        required GlobalKey<MonkeyTerminalViewState> viewKey,
+        Size? screenSize,
+        GlobalKey? boundaryKey,
+        bool resizeTerminalToViewport = true,
+      }) => MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(size: screenSize ?? size),
+          child: Center(
+            child: RepaintBoundary(
+              key: boundaryKey,
+              child: SizedBox(
+                width: size.width,
+                height: size.height,
+                child: MonkeyTerminalView(
+                  terminal,
+                  key: viewKey,
+                  theme: theme.toXtermTheme(),
+                  hardwareKeyboardOnly: true,
+                  readOnly: true,
+                  resizeTerminalToViewport: resizeTerminalToViewport,
+                  notifyPixelSizeChanges: resizeTerminalToViewport,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      testWidgets(
+        'blanks the partial top row of a full-screen grid taller than the view',
+        (tester) async {
+          const phone = Size(390, 844);
+          final viewKey = GlobalKey<MonkeyTerminalViewState>();
+          final boundaryKey = GlobalKey();
+          // A MonkeyMux shared grid keeps the app's 10 rows in a view with
+          // room for 9.5, so the grid sits bottom-aligned with row 0 cut.
+          const columns = 20;
+          const rows = 10;
+          final terminal = Terminal()
+            ..resize(columns, rows)
+            ..write('\x1b[?1049h');
+          for (var row = 0; row < rows; row++) {
+            terminal.write(
+              '\x1b[${row + 1};1H\x1b[48;2;255;0;0m${' ' * columns}\x1b[0m',
+            );
+          }
+          await tester.pumpWidget(
+            buildTerminal(
+              terminal: terminal,
+              size: const Size(300, 200),
+              screenSize: phone,
+              viewKey: viewKey,
+              resizeTerminalToViewport: false,
+            ),
+          );
+          final cellHeight = viewKey.currentState!.renderTerminal.lineHeight;
+          final size = Size(300, cellHeight * (rows - 0.5));
+          await tester.pumpWidget(
+            buildTerminal(
+              terminal: terminal,
+              size: size,
+              screenSize: phone,
+              viewKey: viewKey,
+              boundaryKey: boundaryKey,
+              resizeTerminalToViewport: false,
+            ),
+          );
+          expect(terminal.viewHeight, rows);
+          expect(terminal.isUsingAltBuffer, isTrue);
+
+          final boundary =
+              boundaryKey.currentContext!.findRenderObject()!
+                  as RenderRepaintBoundary;
+          final data = (await tester.runAsync(() async {
+            final image = await boundary.toImage();
+            try {
+              return await image.toByteData();
+            } finally {
+              image.dispose();
+            }
+          }))!;
+          final width = size.width.round();
+          Color sample(double y) => _rawRgbaPixel(data, width, 2, y.floor());
+
+          // The last row sits on the bottom edge.
+          final rowColor = sample(size.height - cellHeight / 2);
+          expect(rowColor, isNot(theme.background));
+          // Row 0 straddles the top edge: its visible half stays blank.
+          expect(sample(1), theme.background);
+          expect(sample(cellHeight / 2 - 2), theme.background);
+          // Row 1 is whole and painted.
+          expect(sample(cellHeight / 2 + 1), rowColor);
+        },
+      );
+
+      testWidgets(
+        'keeps the last row on screen when landscape slack is at the top',
+        (tester) async {
+          final viewKey = GlobalKey<MonkeyTerminalViewState>();
+          final terminal = Terminal();
+          await tester.pumpWidget(
+            buildTerminal(
+              terminal: terminal,
+              size: const Size(600, 300),
+              viewKey: viewKey,
+            ),
+          );
+          final cellHeight = viewKey.currentState!.renderTerminal.lineHeight;
+          // Leave half a cell of slack, which landscape moves above the grid.
+          final size = Size(600, cellHeight * 10.5);
+          await tester.pumpWidget(
+            buildTerminal(terminal: terminal, size: size, viewKey: viewKey),
+          );
+          expect(terminal.viewHeight, 10);
+          for (var line = 0; line < 30; line++) {
+            terminal.write('line $line\r\n');
+          }
+          terminal.write(r'$ ');
+          await tester.pump();
+
+          final render = viewKey.currentState!.renderTerminal;
+          final lastRow = terminal.buffer.lines.length - 1;
+          final lastRowTop = render.getOffset(CellOffset(0, lastRow)).dy;
+          expect(lastRowTop + cellHeight, closeTo(size.height, 0.01));
+          final screenTop = render
+              .getOffset(CellOffset(0, lastRow - terminal.viewHeight + 1))
+              .dy;
+          expect(screenTop, closeTo(cellHeight / 2, 0.01));
+        },
+      );
+    });
+
     group('resolveTerminalHorizontalFillScale', () {
       test('fills the final horizontal remainder without shrinking', () {
         expect(

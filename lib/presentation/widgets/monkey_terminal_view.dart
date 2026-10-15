@@ -4211,8 +4211,12 @@ class MonkeyRenderTerminal extends RenderBox
 
   double get _viewportHeight => size.height;
 
+  // The grid starts at the content origin, which sits below the top edge when
+  // landscape alignment moves the partial-cell slack there. Scrolling to the
+  // bottom has to cover that offset too, or the last row (usually the prompt)
+  // is pushed below the viewport by the slack.
   double get _maxScrollExtent =>
-      math.max(_terminalHeight - _viewportHeight, 0.0);
+      math.max(_contentOrigin.dy + _terminalHeight - _viewportHeight, 0.0);
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
 
@@ -4288,8 +4292,31 @@ class MonkeyRenderTerminal extends RenderBox
     final lastLineOffset = _scrollOffset - origin.dy + size.height;
     final firstLine = firstLineOffset ~/ charHeight;
     final lastLine = lastLineOffset ~/ charHeight;
-    final effectFirstLine = firstLine.clamp(0, lines.length - 1);
+    var effectFirstLine = firstLine.clamp(0, lines.length - 1);
     final effectLastLine = lastLine.clamp(0, lines.length - 1);
+    // A full-screen app's grid has no history above it. When a shared grid is
+    // taller than the viewport it stays bottom-aligned so the app's prompt
+    // remains visible, which cuts off the top of the first visible row. The
+    // rest of that row reads as a stray line above the app (such as above
+    // Claude Code's pinned header), so skip it and blank its strip, glyph
+    // descenders and images included.
+    final hidesPartialTopRow =
+        _terminal.isUsingAltBuffer &&
+        effectFirstLine < effectLastLine &&
+        _linePaintOffset(offset, effectFirstLine).dy < offset.dy;
+    if (hidesPartialTopRow) {
+      effectFirstLine++;
+      canvas
+        ..save()
+        ..clipRect(
+          Rect.fromLTRB(
+            offset.dx,
+            _linePaintOffset(offset, effectFirstLine).dy,
+            offset.dx + size.width,
+            offset.dy + size.height,
+          ),
+        );
+    }
     final visiblePhysicalPlacements = _terminal.graphics.placementsInRows(
       lines,
       effectFirstLine,
@@ -4369,6 +4396,10 @@ class MonkeyRenderTerminal extends RenderBox
     // Keep link affordances visible over opaque selection fills while
     // preserving each cell's own underline styling.
     _paintInlineUnderlines(canvas, offset, effectFirstLine, effectLastLine);
+
+    if (hidesPartialTopRow) {
+      canvas.restore();
+    }
 
     _paintSelectionHandleLayers(context, offset);
   }
