@@ -20,6 +20,7 @@ import 'domain/services/push/push_background_message.dart';
 import 'domain/services/settings_service.dart';
 import 'domain/services/ssh_error_policy.dart';
 import 'domain/services/telemetry_service.dart';
+import 'presentation/widgets/terminal_scrollback_export.dart';
 
 /// Entry point for the MonkeySSH client.
 Future<void> main() async {
@@ -54,6 +55,9 @@ Future<void> main() async {
       child: const FluttyApp(),
     ),
   );
+  // Scrollback exports left from an earlier run stay in temporary storage
+  // only until the next start.
+  unawaited(cleanUpTerminalScrollbackExports().catchError((Object _) => 0));
 }
 
 /// Registers bundled licenses without starting the app in tests.

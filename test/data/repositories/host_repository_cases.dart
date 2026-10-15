@@ -9,6 +9,7 @@ import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/port_proxy_name.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
+import 'package:monkeyssh/domain/services/settings_service.dart';
 
 import '../../helpers/pausing_secret_encryption_service.dart';
 
@@ -1016,6 +1017,38 @@ void registerHostRepositoryTests() {
         final portForwards = await db.select(db.portForwards).get();
         expect(deleted, 1);
         expect(portForwards, isEmpty);
+      });
+
+      test('delete removes the host\'s saved chat drafts only', () async {
+        final id = await repository.insert(
+          HostsCompanion.insert(
+            label: 'Test Server',
+            hostname: '192.168.1.1',
+            username: 'admin',
+          ),
+        );
+        String row(String prefix, int hostId) => '$prefix[$hostId,"p","s"]';
+        final doomed = [
+          row(SettingKeys.acpComposerDraftPrefix, id),
+          row(SettingKeys.acpComposerDraftChipsPrefix, id),
+        ];
+        final kept = [
+          // Another host whose id starts with the same digit.
+          row(SettingKeys.acpComposerDraftPrefix, id * 10),
+          row(SettingKeys.acpComposerDraftChipsPrefix, id * 10),
+          // `_` in the prefix must not act as a wildcard.
+          row('acpXcomposer_draft:', id),
+        ];
+        for (final key in [...doomed, ...kept]) {
+          await db
+              .into(db.settings)
+              .insert(SettingsCompanion.insert(key: key, value: 'x'));
+        }
+
+        expect(await repository.delete(id), 1);
+
+        final remaining = await db.select(db.settings).get();
+        expect(remaining.map((row) => row.key), unorderedEquals(kept));
       });
 
       test('delete returns 0 when host not exists', () async {
