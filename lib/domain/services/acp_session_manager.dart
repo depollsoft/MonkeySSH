@@ -513,14 +513,6 @@ class AcpSessionManager {
       }
       return AcpSessionLaunchStarted(key);
     }
-    if (existing != null && heldElsewhere) {
-      // Another device held the input. Open afresh like any device joining a
-      // live bridge: its pending requests replay to the new attachment, and
-      // the history this frozen view is missing reloads.
-      _controllers.remove(key.value);
-      await existing.disposeLocal(permanent: false);
-    }
-
     // Re-attach an existing (detached) controller in place when possible.
     if (existing != null && !heldElsewhere) {
       // Re-send this workspace on the reattached session's load/resume.
@@ -557,6 +549,11 @@ class AcpSessionManager {
       return AcpSessionLaunchStarted(key);
     }
 
+    // Another device held the input. Open afresh like any device joining a
+    // live bridge: its pending requests replay to the new attachment, and the
+    // history the frozen view is missing reloads. The frozen view stays until
+    // the new attach is ready, and comes back if it fails or finds the input
+    // still held.
     return _attachAndOpen(
       hostId: hostId,
       launch: resolved,
@@ -570,6 +567,7 @@ class AcpSessionManager {
       liveBridge: remoteBridge,
       selectOnSuccess: selectOnSuccess,
       takeOver: takeOver,
+      replacing: heldElsewhere ? existing : null,
     );
   });
 
@@ -1048,6 +1046,7 @@ class AcpSessionManager {
     bool startedBridge = false,
     DateTime? bridgeStartedAt,
     bool takeOver = false,
+    _SessionController? replacing,
   }) async {
     final bridgeKey = AcpBridgeKey(
       host: AcpHostKey(hostId),
@@ -1104,8 +1103,28 @@ class AcpSessionManager {
     }
 
     // Another device holds the input. Keep the session as a read-only view
-    // that offers to take over, instead of failing the open.
-    AcpSessionLaunchResult? keepHeldController() {
+    // that offers to take over, instead of failing the open. A frozen view
+    // being replaced is kept instead, with its transcript, naming the holder
+    // the new attach found.
+    Future<AcpSessionLaunchResult?> keepHeldController() async {
+      if (replacing != null) {
+        final writer = controller.state.remoteWriter;
+        if (writer == null) return null;
+        await controller.disposeLocal(permanent: false);
+        replacing.refreshRemoteWriter(
+          MonkeyMuxAcpLeaseHolder(
+            label: writer.label,
+            lastActiveAt: writer.lastActiveAt,
+            stale: false,
+          ),
+        );
+        if (selectOnSuccess) {
+          _select(replacing.state.key.value);
+        } else {
+          _emit();
+        }
+        return AcpSessionLaunchStarted(replacing.state.key);
+      }
       final value = provisionalKeyValue;
       if (!controller.isHeldElsewhere ||
           value == null ||
@@ -1135,11 +1154,12 @@ class AcpSessionManager {
         liveBridge: liveBridge,
         chooseAuthentication: chooseAuthentication,
       );
-      if (existingSessionId != null) {
+      if (existingSessionId != null && replacing == null) {
         // The reconnect identity is already stable. Publish its connecting
         // state before session/load replays history so the real conversation
         // shell can replace the terminal immediately while history rebuilds
-        // atomically off-screen from its final tail.
+        // atomically off-screen from its final tail. A frozen view being
+        // replaced keeps showing its transcript until the attach is ready.
         provisionalKeyValue = controller.state.key.value;
         controller._commitPublishedState();
         _controllers[provisionalKeyValue] = controller;
@@ -1156,6 +1176,13 @@ class AcpSessionManager {
           previousPublishedKey != key.value &&
           identical(_controllers[previousPublishedKey], controller)) {
         _controllers.remove(previousPublishedKey);
+      }
+      if (replacing != null) {
+        final replacedKeyValue = replacing.state.key.value;
+        if (identical(_controllers[replacedKeyValue], replacing)) {
+          _controllers.remove(replacedKeyValue);
+        }
+        await replacing.disposeLocal(permanent: false);
       }
       _controllers[key.value] = controller;
       provisionalKeyValue = key.value;
@@ -1184,7 +1211,7 @@ class AcpSessionManager {
       }
       return AcpSessionLaunchStarted(key);
     } on _LaunchException catch (error) {
-      if (keepHeldController() case final held?) return held;
+      if (await keepHeldController() case final held?) return held;
       discardProvisionalController();
       await controller.disposeLocal();
       await _maybeStopOrphanBridge(
@@ -1199,7 +1226,7 @@ class AcpSessionManager {
         terminalAuthentication: error.terminalAuthentication,
       );
     } on Object catch (error) {
-      if (keepHeldController() case final held?) return held;
+      if (await keepHeldController() case final held?) return held;
       discardProvisionalController();
       await controller.disposeLocal();
       final mapped = _mapBridgeError(error);
@@ -3027,6 +3054,15 @@ class _SessionController {
     if (_disposed) {
       return Future<AcpPromptResult>.error(
         const AcpConnectionClosedException(),
+      );
+    }
+    // A send that finished preparing after another device took the input
+    // cannot be queued here: this read-only view never drains its queue.
+    if (isHeldElsewhere) {
+      return Future<AcpPromptResult>.error(
+        const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.notSent,
+        ),
       );
     }
     final snapshot = List<AcpContentBlock>.unmodifiable(content);

@@ -107,6 +107,13 @@ class _Connector implements AcpBridgeConnector {
   /// When set, an attach that does not take over finds this writer.
   MonkeyMuxAcpRemoteWriter? heldBy;
 
+  /// When set, even a take-over attach finds this writer, as when another
+  /// device took the chat back in the meantime.
+  MonkeyMuxAcpRemoteWriter? heldDespiteTakeOver;
+
+  /// When set, the next attach drops before answering anything.
+  bool failNextAttach = false;
+
   /// What each attach reports about prompts once the input moved.
   final promptDeliveries = <String, AcpInputDelivery>{};
   var _bridges = 0;
@@ -182,9 +189,13 @@ class _Connector implements AcpBridgeConnector {
     takeOvers.add(takeOver);
     final stateController =
         StreamController<MonkeyMuxAcpTransportState>.broadcast(sync: true);
-    final writer = heldBy;
+    final writer = takeOver ? heldDespiteTakeOver : heldBy;
+    final fail = failNextAttach;
+    failNextAttach = false;
     final agent = _Agent(
-      onFirstRequest: writer == null || takeOver
+      onFirstRequest: fail
+          ? (agent) => unawaited(agent.close())
+          : writer == null
           ? null
           : (agent) {
               // Like the real transport: report the writer, then end the
@@ -360,6 +371,101 @@ void main() {
     // from itself.
     expect(connector.agents, hasLength(attaches));
   });
+
+  /// Starts a chat, sends one prompt the agent receives, then loses the
+  /// input to an iPhone.
+  Future<AcpSessionKey> loseLeaseAfterOnePrompt() async {
+    final started = (await manager.startNewSession(
+      hostId: 1,
+      providerId: AcpBuiltinProviderIds.copilotCli,
+      cwd: '/repo',
+    )) as AcpSessionLaunchStarted;
+    final key = started.key;
+    connector.promptDeliveries[key.acpSessionId] = AcpInputDelivery.delivered;
+    final sent = manager.prompt(key, const [AcpTextContent('kept')]);
+    unawaited(sent.then<void>((_) {}, onError: (Object _) {}));
+    await _pump();
+    connector.states.single.add(
+      MonkeyMuxAcpTransportState(
+        status: MonkeyMuxAcpTransportStatus.heldElsewhere,
+        bridgeId: key.bridgeId,
+        lastDeliveredSequence: 0,
+        writer: MonkeyMuxAcpRemoteWriter(
+          label: 'iPhone',
+          lastActiveAt: DateTime(2026, 10, 9, 12),
+          leaseLost: true,
+        ),
+      ),
+    );
+    await _pump();
+    return key;
+  }
+
+  Future<AcpSessionLaunchResult> takeBack(AcpSessionKey key) =>
+      manager.reconnectSession(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        bridgeId: key.bridgeId,
+        acpSessionId: key.acpSessionId,
+        cwd: '/repo',
+        takeOver: true,
+      );
+
+  test(
+    'a send that finishes after the lease moved is refused at once',
+    () async {
+      final key = await loseLeaseAfterOnePrompt();
+
+      // An attachment upload finished after the lease frame; the composer
+      // still hands over the prompt.
+      await expectLater(
+        manager.prompt(key, const [AcpTextContent('late')]),
+        throwsA(
+          isA<AcpInputHeldElsewhereException>().having(
+            (error) => error.delivery,
+            'delivery',
+            AcpInputDelivery.notSent,
+          ),
+        ),
+      );
+      expect(_timelineTexts(stateOf(key)), ['kept']);
+    },
+  );
+
+  test('a take over that fails keeps the read-only transcript', () async {
+    final key = await loseLeaseAfterOnePrompt();
+    connector.failNextAttach = true;
+
+    final result = await takeBack(key);
+
+    expect(result, isA<AcpSessionLaunchFailed>());
+    final state = stateOf(key);
+    expect(_timelineTexts(state), ['kept']);
+    expect(state.remoteWriter!.label, 'iPhone');
+    expect(state.remoteWriter!.leaseLost, isTrue);
+    expect(manager.state.selectedKey, key.value);
+  });
+
+  test(
+    'a take over that finds the chat taken again keeps the transcript',
+    () async {
+      final key = await loseLeaseAfterOnePrompt();
+      connector.heldDespiteTakeOver = MonkeyMuxAcpRemoteWriter(
+        label: 'iPad',
+        lastActiveAt: DateTime(2026, 10, 9, 12, 30),
+        leaseLost: false,
+      );
+
+      final result = await takeBack(key);
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      final state = stateOf(key);
+      expect(_timelineTexts(state), ['kept']);
+      expect(state.remoteWriter!.label, 'iPad');
+      expect(state.remoteWriter!.lastActiveAt, DateTime(2026, 10, 9, 12, 30));
+      expect(state.remoteWriter!.leaseLost, isTrue);
+    },
+  );
 
   test('a device that lost the chat keeps its transcript on return', () async {
     final started = (await manager.startNewSession(
