@@ -204,6 +204,58 @@ void registerAcpTranscriptToolsTests() {
       expect(search.isOpen, isFalse);
     });
 
+    testWidgets(
+      'a short thread leaves its overlays out and reveals the match',
+      (tester) async {
+        final entries = _longTranscript();
+        final controller = ScrollController();
+        addTearDown(controller.dispose);
+        Widget thread(AcpThreadSearchFocus? focus) => _app(
+          Align(
+            alignment: Alignment.topCenter,
+            // A phone in landscape with the keyboard and find bar up.
+            child: SizedBox(
+              height: 70,
+              child: AcpMessageThread(
+                entries: entries,
+                controller: controller,
+                searchFocus: focus,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpWidget(thread(null));
+        await tester.pumpAndSettle();
+        controller.jumpTo(controller.position.maxScrollExtent / 2);
+        await tester.pumpAndSettle();
+        // Neither the sticky prompt summary nor the prompt navigation fits.
+        expect(tester.takeException(), isNull);
+        expect(
+          find.byKey(const ValueKey('acp-user-prompt-navigation')),
+          findsNothing,
+        );
+        expect(find.textContaining('you · '), findsNothing);
+
+        await tester.pumpWidget(
+          thread(
+            const AcpThreadSearchFocus(
+              entryIndex: 3,
+              childKey: 'agent-3',
+              entryId: 'agent-3',
+              serial: 1,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        // With no summary over it, the match is revealed at the top.
+        final match = tester.getRect(find.text('The needle is here.'));
+        final viewport = tester.getRect(find.byType(AcpMessageThread));
+        expect(match.top, greaterThanOrEqualTo(viewport.top));
+        expect(match.bottom, lessThanOrEqualTo(viewport.bottom));
+      },
+    );
+
     testWidgets('the thread scrolls to and outlines the focused match', (
       tester,
     ) async {

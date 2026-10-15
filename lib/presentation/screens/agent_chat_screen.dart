@@ -116,6 +116,16 @@ typedef AcpChatScrollChanged = void Function(
 /// Wide-layout breakpoint for the session rail.
 const double kAgentChatWideBreakpoint = 840;
 
+/// Height of the chat below which the composer folds away while the search
+/// field has focus: a phone with its keyboard up, where both would leave the
+/// transcript a sliver.
+const double kAgentChatSearchFoldsComposerBelow = 520;
+
+/// Height of the chat below which the search bar folds away while the
+/// composer has focus: a phone in landscape with its keyboard up, where the
+/// two do not fit together.
+const double kAgentChatComposerFoldsSearchBelow = 300;
+
 /// Clamps native agent text to the same supported range as terminal text.
 double clampAgentChatFontSize(num size) => clampFontSize(size);
 
@@ -223,6 +233,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
   final AcpSftpClientCache _sftpCache = AcpSftpClientCache();
   final AcpTranscriptSearchController _search = AcpTranscriptSearchController();
+  var _composerFocused = false;
   Timer? _previewPublishTimer;
   AcpSessionState? _pendingPreviewSession;
   List<ui.AcpTimelineEntry>? _pendingPreviewEntries;
@@ -1293,34 +1304,70 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               SafeArea(
                 top: false,
                 bottom: !widget.embedded,
-                child: Column(
-                  children: [
-                    ?_buildBanner(session, activity),
-                    Expanded(child: _buildTranscript(session, entries)),
-                    if (prompts.isNotEmpty ||
-                        session.pendingElicitations.isNotEmpty ||
-                        session.awaitingElicitations.isNotEmpty)
-                      _buildPendingPanel(session, prompts, toolTitles),
-                    // Search sits just above the composer, in thumb reach. While
-                    // its field has focus the composer folds away to leave the
-                    // transcript room above the keyboard, but stays mounted
-                    // and focusable: the terminal shell's keyboard, extra keys
-                    // and paste still reach it, and focusing it brings it back.
-                    if (_search.isOpen)
-                      AcpTranscriptSearchBar(controller: _search),
-                    Visibility(
-                      visible: !(_search.isOpen && _search.fieldFocused),
-                      maintainState: true,
-                      maintainFocusability: true,
-                      child: AcpComposer(
-                        controller: _composer,
-                        attachmentActions: _attachmentActions(session),
-                        focusController: widget.composerFocusController,
-                        controls: _buildQuickConfigControls(session),
-                        useBottomSafeArea: !widget.embedded,
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Column(
+                    children: [
+                      ?_buildBanner(session, activity),
+                      Expanded(child: _buildTranscript(session, entries)),
+                      if (prompts.isNotEmpty ||
+                          session.pendingElicitations.isNotEmpty ||
+                          session.awaitingElicitations.isNotEmpty)
+                        _buildPendingPanel(session, prompts, toolTitles),
+                      // Search sits just above the composer, in thumb reach.
+                      // In a short chat (a phone with its keyboard up) the
+                      // composer folds away while the search field has
+                      // focus, to leave the transcript room. In a very short
+                      // one (a phone in landscape) the bar folds too while
+                      // the composer has focus, since both would not fit.
+                      // Both stay mounted and focusable: the terminal
+                      // shell's keyboard, extra keys and paste still reach
+                      // the composer, opening search again reaches the
+                      // field, and focusing either brings it back. A tall
+                      // chat keeps both, so the layout holds still as focus
+                      // moves between them. Keyed, so the bar appearing
+                      // above the composer never takes over the composer's
+                      // element and remounts it.
+                      if (_search.isOpen)
+                        Visibility(
+                          key: const ValueKey('acp-chat-search-slot'),
+                          visible:
+                              !(_composerFocused &&
+                                  !_search.fieldFocusPending &&
+                                  constraints.maxHeight <
+                                      kAgentChatComposerFoldsSearchBelow),
+                          maintainState: true,
+                          maintainFocusability: true,
+                          child: AcpTranscriptSearchBar(controller: _search),
+                        ),
+                      Visibility(
+                        key: const ValueKey('acp-chat-composer-slot'),
+                        visible:
+                            !(_search.isOpen &&
+                                (_search.fieldFocused ||
+                                    _search.fieldFocusPending) &&
+                                constraints.maxHeight <
+                                    kAgentChatSearchFoldsComposerBelow),
+                        maintainState: true,
+                        maintainFocusability: true,
+                        child: Focus(
+                          canRequestFocus: false,
+                          skipTraversal: true,
+                          onFocusChange: (focused) {
+                            if (focused != _composerFocused) {
+                              setState(() => _composerFocused = focused);
+                            }
+                          },
+                          child: AcpComposer(
+                            controller: _composer,
+                            attachmentActions: _attachmentActions(session),
+                            focusController: widget.composerFocusController,
+                            controls: _buildQuickConfigControls(session),
+                            useBottomSafeArea: !widget.embedded,
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1467,7 +1514,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             ),
           ),
         ),
-      if (_showJumpToLatest)
+      // Search steers the scroll position while it is open, and the button
+      // would sit over the newest match.
+      if (_showJumpToLatest && !_search.isOpen)
         Positioned(
           right: FluttyTheme.spacingMd,
           bottom: FluttyTheme.spacingMd,

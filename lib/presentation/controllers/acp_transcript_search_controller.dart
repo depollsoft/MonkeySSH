@@ -40,6 +40,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   var _index = AcpTranscriptSearchIndex();
   var _focusRequest = 0;
   var _fieldFocused = false;
+  var _focusPending = false;
   var _announcement = 0;
   var _disposed = false;
 
@@ -88,11 +89,19 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   /// Whether the search field has keyboard focus.
   bool get fieldFocused => _fieldFocused;
 
+  /// Reports the search field's focus. The first report after [open] also
+  /// ends [fieldFocusPending], whatever it says.
   set fieldFocused(bool value) {
-    if (value == _fieldFocused) return;
+    if (value == _fieldFocused && !_focusPending) return;
     _fieldFocused = value;
+    _focusPending = false;
     _notify();
   }
+
+  /// Whether search has just opened and its field is about to take focus.
+  /// Layout can treat the field as focused already, so the first frame of
+  /// the bar is laid out as the next one will be.
+  bool get fieldFocusPending => _focusPending;
 
   /// Grows when the result should be announced: a new search or a step.
   /// Re-searching streamed output keeps the active match and stays quiet.
@@ -103,6 +112,8 @@ class AcpTranscriptSearchController extends ChangeNotifier {
   void open() {
     if (_open) {
       _focusRequest++;
+    } else {
+      _focusPending = true;
     }
     _open = true;
     _notify();
@@ -119,6 +130,7 @@ class AcpTranscriptSearchController extends ChangeNotifier {
     _index = AcpTranscriptSearchIndex();
     _open = false;
     _fieldFocused = false;
+    _focusPending = false;
     _query = '';
     _resultQuery = null;
     _result = AcpTranscriptSearchResult.empty;

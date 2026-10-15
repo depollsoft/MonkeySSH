@@ -378,5 +378,25 @@ void registerAcpTranscriptSearchTests() {
         controller.dispose();
       });
     });
+
+    test('a new search counts its field as focused until it reports', () {
+      final controller = AcpTranscriptSearchController()..open();
+      expect(controller.fieldFocusPending, isTrue);
+      // Even a failed focus request ends the wait.
+      controller.fieldFocused = false;
+      expect(controller.fieldFocusPending, isFalse);
+      expect(controller.fieldFocused, isFalse);
+
+      // Opening it again only asks for focus; nothing is pending.
+      controller.open();
+      expect(controller.fieldFocusPending, isFalse);
+      controller
+        ..close()
+        ..open();
+      expect(controller.fieldFocusPending, isTrue);
+      controller.fieldFocused = true;
+      expect(controller.fieldFocusPending, isFalse);
+      controller.dispose();
+    });
   });
 }

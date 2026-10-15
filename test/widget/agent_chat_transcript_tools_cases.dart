@@ -17,6 +17,7 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/controllers/acp_chat_actions_controller.dart';
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
+import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 
 import '../support/fake_acp_session_manager.dart';
@@ -51,6 +52,20 @@ AcpSessionState _session() => fakeAcpSession(
         role: AcpMessageRole.agent,
         content: const [AcpTextContent('The widget test raced a timer.')],
       ),
+    ],
+  ),
+);
+
+AcpSessionState _longSession() => fakeAcpSession(
+  title: 'Long hunt',
+  timeline: AcpTimeline(
+    entries: [
+      for (var i = 0; i < 40; i++)
+        AcpMessageEntry(
+          order: i,
+          role: i.isEven ? AcpMessageRole.user : AcpMessageRole.agent,
+          content: [AcpTextContent('Message $i about the flaky test')],
+        ),
     ],
   ),
 );
@@ -104,8 +119,19 @@ void registerAgentChatTranscriptToolsTests() {
     testWidgets('search finds tool output and reveals the tool call', (
       tester,
     ) async {
+      tester.view
+        ..physicalSize = const Size(390, 800)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
       await tester.pumpWidget(
-        _chat(FakeAcpSessionManager(sessions: [_session()])),
+        _chat(
+          FakeAcpSessionManager(sessions: [_session()]),
+          // A phone with its keyboard up.
+          media: const MediaQueryData(
+            size: Size(390, 800),
+            viewInsets: EdgeInsets.only(bottom: 320),
+          ),
+        ),
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('haystack-needle'), findsNothing);
@@ -117,8 +143,8 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.tap(find.byTooltip('Search chat'));
       await tester.pumpAndSettle();
       expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
-      // While the search field has focus the composer folds away, still
-      // mounted, keeping its draft.
+      // While the search field has focus in a short chat the composer folds
+      // away, still mounted, keeping its draft.
       expect(find.byType(AcpComposer), findsNothing);
       expect(find.byType(AcpComposer, skipOffstage: false), findsOneWidget);
       await tester.enterText(
@@ -284,6 +310,96 @@ void registerAgentChatTranscriptToolsTests() {
 
       await tester.pumpWidget(const SizedBox());
       expect(actions.isAttached, isFalse);
+    });
+
+    testWidgets('the standalone chat fits phone landscape with the keyboard', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(844, 390)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _chat(
+          FakeAcpSessionManager(sessions: [_session()]),
+          media: const MediaQueryData(
+            size: Size(844, 390),
+            viewInsets: EdgeInsets.only(bottom: 200),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The search bar's first frame already has the composer folded.
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('acp-transcript-search-field')),
+        'needle',
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('1/1'), findsOneWidget);
+
+      // The two do not fit together: the composer, once focused, takes the
+      // bar's place, and opening search again swaps them back.
+      await tester.showKeyboard(
+        find.byKey(const ValueKey('acp-composer-field'), skipOffstage: false),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.byType(AcpComposer), findsOneWidget);
+      expect(find.byType(AcpTranscriptSearchBar), findsNothing);
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+      expect(find.byType(AcpComposer), findsNothing);
+      expect(find.text('1/1'), findsOneWidget);
+    });
+
+    testWidgets('a tall chat keeps the composer while searching', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(1024, 1366)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _chat(
+          FakeAcpSessionManager(sessions: [_session()]),
+          media: const MediaQueryData(size: Size(1024, 1366)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('acp-transcript-search-field')),
+      );
+      expect(field.focusNode!.hasFocus, isTrue);
+      expect(find.byType(AcpComposer), findsOneWidget);
+    });
+
+    testWidgets('jump to latest stays hidden while search is open', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _chat(FakeAcpSessionManager(sessions: [_longSession()])),
+      );
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(AcpMessageThread), const Offset(0, 300));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Jump to latest'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Jump to latest'), findsNothing);
+      await tester.tap(find.byTooltip('Close search'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Jump to latest'), findsOneWidget);
     });
 
     testWidgets('search waits for the session instead of opening later', (

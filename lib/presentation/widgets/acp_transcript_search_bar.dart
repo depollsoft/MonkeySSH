@@ -1,6 +1,8 @@
 /// Find bar shown above a native agent chat transcript.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -44,7 +46,13 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
     _focus.addListener(_onFocusChanged);
     _search.addListener(_onSearchChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _focus.requestFocus();
+      if (!mounted) return;
+      _focus.requestFocus();
+      // Focus moves in a microtask; report where it landed even if the
+      // request failed, which ends the controller's pending focus.
+      scheduleMicrotask(() {
+        if (mounted) _search.fieldFocused = _focus.hasFocus;
+      });
     });
   }
 

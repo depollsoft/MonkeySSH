@@ -27,6 +27,15 @@ const int _earlierTranscriptPageChildren = 8;
 /// Height of the pinned prompt summary that can cover the viewport top.
 const double _stickyPromptHeight = 44;
 
+/// Shortest viewport that shows the sticky prompt summary. A shorter one,
+/// such as a phone in landscape with its keyboard and find bar up, is left
+/// to the transcript, which the summary would mostly cover.
+const double kAcpThreadStickyPromptMinHeight = 2 * _stickyPromptHeight;
+
+/// Shortest viewport that shows the prompt navigation, which is three
+/// 48 pt buttons tall.
+const double kAcpThreadPromptNavigationMinHeight = 160;
+
 /// The transcript child a search wants revealed and highlighted.
 @immutable
 final class AcpThreadSearchFocus {
@@ -166,6 +175,9 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _searchRevealGeneration = 0;
   bool _searchRevealSeeking = false;
 
+  /// Whether the last layout had room for the sticky prompt summary.
+  bool _stickyPromptFits = true;
+
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
 
@@ -223,7 +235,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         _scrollEntryIntoView(
           focus.entryIndex,
           childKey: focus.childKey,
-          topInset: _stickyPromptHeight,
+          topInset: _stickyPromptFits ? _stickyPromptHeight : 0,
           isCurrent: () => generation == _searchRevealGeneration,
         ).whenComplete(() {
           if (generation == _searchRevealGeneration) {
@@ -1028,34 +1040,50 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
               ),
             ),
           ),
-          if (stickyPrompt != null)
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _StickyUserPromptSummary(
-                summary: acpUserPromptSummary(stickyPrompt),
-                onTap: () => _navigateToPrompt(stickyIndex),
-              ),
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final height = constraints.maxHeight;
+                _stickyPromptFits = height >= kAcpThreadStickyPromptMinHeight;
+                return Stack(
+                  children: [
+                    if (stickyPrompt != null && _stickyPromptFits)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: _StickyUserPromptSummary(
+                          summary: acpUserPromptSummary(stickyPrompt),
+                          onTap: () => _navigateToPrompt(stickyIndex),
+                        ),
+                      ),
+                    if ((userPromptCount > 1 || _awayFromTop) &&
+                        height >= kAcpThreadPromptNavigationMinHeight)
+                      Positioned.fill(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: Padding(
+                            padding: const EdgeInsets.only(
+                              right: FluttyTheme.spacingSm,
+                            ),
+                            child: _UserPromptNavigation(
+                              visible: _promptNavigationVisible,
+                              topEnabled: _awayFromTop,
+                              previousEnabled: previousPromptIndex != null,
+                              nextEnabled: nextPromptIndex != null,
+                              onTop: _scrollToTop,
+                              onPrevious: () =>
+                                  _navigateToPrompt(previousPromptIndex),
+                              onNext: () => _navigateToPrompt(nextPromptIndex),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
             ),
-          if (userPromptCount > 1 || _awayFromTop)
-            Positioned.fill(
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(right: FluttyTheme.spacingSm),
-                  child: _UserPromptNavigation(
-                    visible: _promptNavigationVisible,
-                    topEnabled: _awayFromTop,
-                    previousEnabled: previousPromptIndex != null,
-                    nextEnabled: nextPromptIndex != null,
-                    onTop: _scrollToTop,
-                    onPrevious: () => _navigateToPrompt(previousPromptIndex),
-                    onNext: () => _navigateToPrompt(nextPromptIndex),
-                  ),
-                ),
-              ),
-            ),
+          ),
         ],
       ),
     );
