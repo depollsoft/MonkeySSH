@@ -503,7 +503,7 @@ void main() {
       expect(effects.terminals, isEmpty);
     });
 
-    test('use the form when several saved hosts match', () async {
+    test('ask the user to pick when several saved hosts match', () async {
       when(
         () => hosts.getAll(),
       ).thenAnswer((_) async => [_host(id: 1, username: 'root'), _host(id: 2)]);
@@ -512,8 +512,11 @@ void main() {
         const SshHostAppLink(hostname: 'build.example.com'),
       );
 
-      expect(outcome, AppLinkOutcome.hostFormOpened);
-      expect(effects.hostForms, ['ssh://build.example.com']);
+      // The add-host form would only save a duplicate.
+      expect(outcome, AppLinkOutcome.hostAmbiguous);
+      expect(effects.hostForms, isEmpty);
+      expect(effects.terminals, isEmpty);
+      expect(effects.messages, [AppLinkMessages.sshHostAmbiguous]);
     });
   });
 

@@ -49,6 +49,11 @@ abstract final class AppLinkMessages {
   /// The preset would run as auto-connect automation, which needs Pro.
   static const presetNeedsPro =
       'Running this launch preset needs MonkeySSH Pro.';
+
+  /// An `ssh://` link matches more than one saved host.
+  static const sshHostAmbiguous =
+      'More than one saved host matches that link. Open the one you want '
+      'from Connections.';
 }
 
 /// How a link was resolved. Names are safe to log.
@@ -82,6 +87,9 @@ enum AppLinkOutcome {
 
   /// An `ssh://` link opened the reviewed add-host form.
   hostFormOpened,
+
+  /// An `ssh://` link matched more than one saved host, so nothing opened.
+  hostAmbiguous,
 }
 
 /// Side effects the [AppLinkHandler] asks the app to perform.
@@ -109,7 +117,8 @@ abstract interface class AppLinkEffects {
 ///
 /// A link never starts anything on its own: open and chat links only
 /// navigate, a preset link always shows the preset's exact command first,
-/// and an `ssh://` link for an unknown host opens the add-host form unsaved.
+/// an `ssh://` link for an unknown host opens the add-host form unsaved, and
+/// one that matches several saved hosts asks the user to pick one.
 class AppLinkHandler {
   /// Creates a link handler.
   AppLinkHandler({
@@ -287,6 +296,11 @@ class AppLinkHandler {
         ),
       );
       return AppLinkOutcome.opened;
+    }
+    // The form would save a duplicate of a host the user already has.
+    if (matches.length > 1) {
+      _effects.showMessage(AppLinkMessages.sshHostAmbiguous);
+      return AppLinkOutcome.hostAmbiguous;
     }
     _effects.openNewHostForm(link.toSanitizedUrl());
     return AppLinkOutcome.hostFormOpened;
