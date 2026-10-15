@@ -173,8 +173,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _wasUsingAltBuffer = value.isUsingAltBuffer;
     _searchesAlternateScreen = value.isUsingAltBuffer;
     value.addListener(_handleTerminalChanged);
-    // Not a user action, so the view stays where it is.
-    _scheduleSearch(Duration.zero, reveal: false);
+    _restartForNewBuffer();
   }
 
   /// Whether output is ignored, for example while a native chat covers the
@@ -369,16 +368,10 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     if (usingAltBuffer != _wasUsingAltBuffer) {
       _wasUsingAltBuffer = usingAltBuffer;
       _searchesAlternateScreen = usingAltBuffer;
-      // A program entering or leaving the alternate screen is not a user
-      // action, so the view stays where it is.
-      _scheduleSearch(Duration.zero, reveal: false);
+      _restartForNewBuffer();
       return;
     }
-    // Errors wait for the user to change the query: a pattern that timed out
-    // would only time out again on every refresh.
-    if (_query.isEmpty ||
-        (_status != TerminalSearchStatus.ready &&
-            _status != TerminalSearchStatus.searching)) {
+    if (_query.isEmpty || _holdsError) {
       return;
     }
     if (_running) {
@@ -391,6 +384,31 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _refreshTimer ??= Timer(refreshDelay, () {
       _refreshTimer = null;
       unawaited(_search(reveal: false));
+    });
+  }
+
+  // Errors wait for the user to change the query or options: a pattern that
+  // timed out would only time out again, burning its budget each time.
+  bool get _holdsError => switch (_status) {
+    TerminalSearchStatus.invalidPattern ||
+    TerminalSearchStatus.tooSlow ||
+    TerminalSearchStatus.failed => true,
+    _ => false,
+  };
+
+  // Searches the buffer again after the terminal was swapped or switched
+  // screens. Neither is a user action, so the view stays where it is. An
+  // error stays until the user changes the query; listeners still hear of
+  // the new screen, a turn later because this can run during a build.
+  void _restartForNewBuffer() {
+    if (!_holdsError) {
+      _scheduleSearch(Duration.zero, reveal: false);
+      return;
+    }
+    Timer.run(() {
+      if (!_disposed) {
+        notifyListeners();
+      }
     });
   }
 

@@ -304,6 +304,52 @@ void main() {
     });
 
     test(
+      'an error stays when the screen switches or the terminal is swapped',
+      () async {
+        final terminal = Terminal()
+          ..resize(80, 10)
+          ..write('${'a' * 40}b\r\n');
+        final search = TerminalScrollbackSearchController(
+          terminal: terminal,
+          typingDebounce: Duration.zero,
+          refreshDelay: const Duration(milliseconds: 20),
+          regexBudget: const Duration(milliseconds: 150),
+        );
+        addTearDown(search.dispose);
+        search
+          ..setRegex(value: true)
+          ..setQuery(r'(a+)+$');
+        await _until(() => search.status == TerminalSearchStatus.tooSlow);
+        var updates = 0;
+        search.addListener(() => updates++);
+
+        // Both screens' text would match at once, so only a rerun of the
+        // pattern could find anything.
+        terminal.write('\x1b[?1049h\x1b[Haaa');
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        expect(search.status, TerminalSearchStatus.tooSlow);
+        expect(search.matchCount, 0);
+        expect(search.searchesAlternateScreen, isTrue);
+        expect(updates, 1, reason: 'the bar still hears of the new screen');
+
+        search.terminal = Terminal()
+          ..resize(80, 10)
+          ..write('aaa');
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        expect(search.status, TerminalSearchStatus.tooSlow);
+        expect(search.matchCount, 0);
+        expect(search.searchesAlternateScreen, isFalse);
+        expect(updates, 2);
+
+        // Changing the query searches again.
+        search.setQuery('a+');
+        await _settle(search);
+        expect(search.status, TerminalSearchStatus.ready);
+        expect(search.matchCount, 1);
+      },
+    );
+
+    test(
       'a screen switch while typing keeps the jump to the first match',
       () async {
         final terminal = Terminal()
