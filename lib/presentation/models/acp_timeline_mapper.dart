@@ -1441,7 +1441,17 @@ List<AcpStatusEntry> _mapStatuses(d.AcpSessionState state) {
     );
   }
 
-  final connectionStatus = _connectionStatusMessage(state.status);
+  // A chat another device controls is explained by the banner above the
+  // composer; "detached" would contradict it. Only an empty transcript gets
+  // a line, saying where its history is.
+  final connectionStatus = state.remoteWriter != null
+      ? (state.timeline.entries.isEmpty
+            ? (
+                'Earlier messages load when you take over.',
+                AcpStatusSeverity.info,
+              )
+            : null)
+      : _connectionStatusMessage(state.status);
   if (connectionStatus != null) {
     statuses.add(
       AcpStatusEntry(

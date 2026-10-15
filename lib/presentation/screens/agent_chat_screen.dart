@@ -210,6 +210,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   var _userDraggingTranscript = false;
   var _connecting = true;
   var _takingOver = false;
+  var _takeOverFailed = false;
   AcpSessionError? _connectError;
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
@@ -346,8 +347,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     try {
       final recents = await manager.loadRecentSessions();
       final match = recents.where((r) => r.key.value == _key.value).firstOrNull;
+      // A chat first opened read-only from a native window is tracked but
+      // not recorded as recent; its tracked directory is the session's own.
       final result = await _reconnect(
-        cwd: match?.cwd ?? '~',
+        cwd: existing?.cwd ?? match?.cwd ?? '~',
         takeOver: takeOver,
       );
       if (!mounted) {
@@ -415,11 +418,21 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   Future<void> _takeOver() async {
     if (_takingOver) return;
-    setState(() => _takingOver = true);
+    setState(() {
+      _takingOver = true;
+      _takeOverFailed = false;
+    });
     try {
       await _ensureConnected(takeOver: true);
     } finally {
-      if (mounted) setState(() => _takingOver = false);
+      if (mounted) {
+        setState(() {
+          _takingOver = false;
+          // The read-only view is kept on failure, so the banner reports it
+          // and offers to try again.
+          _takeOverFailed = _connectError != null;
+        });
+      }
     }
   }
 
@@ -1222,6 +1235,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                       AcpWriterLeaseBanner(
                         writer: writer,
                         busy: _takingOver,
+                        failed: _takeOverFailed,
                         onTakeOver: () => unawaited(_takeOver()),
                         onRefresh: () => ref
                             .read(acpSessionManagerProvider)

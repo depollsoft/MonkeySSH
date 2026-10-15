@@ -42,18 +42,25 @@ Widget _banner(
   MonkeyMuxAcpRemoteWriter writer, {
   VoidCallback? onTakeOver,
   bool busy = false,
+  bool failed = false,
   ThemeData? theme,
+  DateTime Function()? clock,
+  String localDeviceLabel = 'Mac',
 }) => MaterialApp(
   theme: theme ?? FluttyTheme.light,
   home: Scaffold(
     body: AcpWriterLeaseBanner(
       writer: writer,
       busy: busy,
-      clock: () => _now,
+      failed: failed,
+      clock: clock ?? () => _now,
+      localDeviceLabel: localDeviceLabel,
       onTakeOver: onTakeOver ?? () {},
     ),
   ),
 );
+
+const _liveLabel = 'Controlled by iPad. Read-only on this device.';
 
 AcpSessionState _heldSession(MonkeyMuxAcpRemoteWriter writer) {
   final session = fakeAcpSession(status: AcpConnectionStatus.detached);
@@ -117,21 +124,83 @@ void main() {
   testWidgets('names the device holding the chat and takes over in one tap', (
     tester,
   ) async {
+    final handle = tester.ensureSemantics();
     var taps = 0;
     await tester.pumpWidget(_banner(_writer(), onTakeOver: () => taps++));
 
     expect(find.text('controlled by iPad'), findsOneWidget);
-    expect(find.text('active 3 min ago · read-only here'), findsOneWidget);
+    expect(find.text('active 3 min ago'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, 'Take over'));
     expect(taps, 1);
     expect(
-      tester.getSemantics(find.byType(AcpWriterLeaseBanner)),
-      matchesSemantics(
-        label:
-            'Controlled by iPad, active 3 min ago. Read-only on this device.',
-        isLiveRegion: true,
-      ),
+      tester.getSemantics(find.bySemanticsLabel(_liveLabel)),
+      matchesSemantics(label: _liveLabel, isLiveRegion: true),
     );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Active 3 min ago')),
+      matchesSemantics(label: 'Active 3 min ago'),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('the live region stays put as the activity time moves on', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    var now = _now;
+    await tester.pumpWidget(_banner(_writer(), clock: () => now));
+
+    now = now.add(const Duration(minutes: 2));
+    await tester.pump(const Duration(seconds: 31));
+
+    // The time is visible and readable, but only the stable sentence is
+    // announced, so a screen reader does not repeat the banner each minute.
+    expect(find.text('active 5 min ago'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel(_liveLabel)),
+      matchesSemantics(label: _liveLabel, isLiveRegion: true),
+    );
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Active 5 min ago')),
+      matchesSemantics(label: 'Active 5 min ago'),
+    );
+    handle.dispose();
+  });
+
+  testWidgets('a device of the same kind reads as another one', (tester) async {
+    await tester.pumpWidget(_banner(_writer(), localDeviceLabel: 'iPad'));
+
+    expect(find.text('controlled by another iPad'), findsOneWidget);
+  });
+
+  testWidgets('a failed take over says so and offers to try again', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    var taps = 0;
+    await tester.pumpWidget(
+      _banner(_writer(), failed: true, onTakeOver: () => taps++),
+    );
+
+    expect(find.text("couldn't take over"), findsOneWidget);
+    expect(find.byIcon(Icons.error_outline), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('$_liveLabel Could not take over.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Try again'));
+    expect(taps, 1);
+    await expectLater(tester, meetsGuideline(textContrastGuideline));
+    handle.dispose();
+  });
+
+  testWidgets('the button keeps its width while connecting', (tester) async {
+    await tester.pumpWidget(_banner(_writer()));
+    final idle = tester.getSize(find.byType(FilledButton));
+    await tester.pumpWidget(_banner(_writer(), busy: true));
+    final busy = tester.getSize(find.byType(FilledButton));
+
+    expect(busy.width, idle.width);
   });
 
   testWidgets('offers take back after this device lost the chat', (
@@ -142,7 +211,7 @@ void main() {
     );
 
     expect(find.text('controlled by another device'), findsOneWidget);
-    expect(find.text('active just now · read-only here'), findsOneWidget);
+    expect(find.text('active just now'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Take back'), findsOneWidget);
   });
 
@@ -151,6 +220,7 @@ void main() {
       body: AcpWriterLeaseBanner(
         writer: _writer(),
         clock: () => _now,
+        localDeviceLabel: 'Mac',
         onTakeOver: () {},
         onRefresh: onRefresh,
       ),
@@ -167,6 +237,40 @@ void main() {
     expect(refreshes, 1);
     await tester.pump(const Duration(minutes: 1));
     expect(refreshes, 2);
+  });
+
+  testWidgets('asks again when the app returns to the foreground', (
+    tester,
+  ) async {
+    var refreshes = 0;
+    await tester.pumpWidget(pollingBanner(() async => refreshes++));
+    addTearDown(
+      () => tester.binding.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      ),
+    );
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(refreshes, 0);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(refreshes, 1);
+  });
+
+  testWidgets('asks again when the chat is shown again', (tester) async {
+    var refreshes = 0;
+    Widget build({required bool visible}) => TickerMode(
+      enabled: visible,
+      child: pollingBanner(() async => refreshes++),
+    );
+    await tester.pumpWidget(build(visible: true));
+    await tester.pumpWidget(build(visible: false));
+    expect(refreshes, 0);
+
+    await tester.pumpWidget(build(visible: true));
+    await tester.pump();
+    expect(refreshes, 1);
   });
 
   testWidgets('does not ask while the app is in the background', (
@@ -222,8 +326,34 @@ void main() {
       _banner(_writer(), busy: true, onTakeOver: () => taps++),
     );
 
-    await tester.tap(find.widgetWithText(FilledButton, 'Connecting'));
+    expect(find.text('connecting…'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Take over'));
     expect(taps, 0);
+  });
+
+  testWidgets('with large text on a phone the button moves under the text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MediaQuery.withClampedTextScaling(
+        minScaleFactor: 2,
+        maxScaleFactor: 2,
+        child: _banner(_writer(label: 'Android tablet')),
+      ),
+    );
+
+    final name = find.text('controlled by Android tablet');
+    final button = find.widgetWithText(FilledButton, 'Take over');
+    expect(
+      tester.getTopLeft(button).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(name).dy),
+    );
+    // The device name keeps the full width instead of a sliver beside the
+    // button.
+    expect(tester.getSize(name).width, greaterThan(250));
   });
 
   for (final (name, theme) in [
@@ -274,5 +404,46 @@ void main() {
 
     expect(manager.reconnectTakeOvers, [true]);
     expect(manager.reconnects.single.bridgeId, fakeAcpKey().bridgeId);
+    // Opened read-only from a native window, the chat is in no recent list;
+    // the take over still attaches in the session's own directory.
+    expect(manager.reconnects.single.cwd, '/home/dev/project');
+  });
+
+  testWidgets('a failed take over keeps the read-only chat and says so', (
+    tester,
+  ) async {
+    final manager = FakeAcpSessionManager(
+      sessions: [_heldSession(_writer(idle: Duration.zero))],
+    );
+    addTearDown(manager.dispose);
+    await tester.pumpWidget(_chat(manager));
+    await tester.pump();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Take over'));
+    await tester.pump();
+    await tester.pump();
+
+    // The manager kept the frozen view, so the chat stays on screen with an
+    // inline failure instead of a full-screen error.
+    expect(find.byType(AcpWriterLeaseBanner), findsOneWidget);
+    expect(find.text("couldn't take over"), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Try again'), findsOneWidget);
+    expect(find.text('No resume.'), findsNothing);
+  });
+
+  testWidgets('an empty held chat says where its history is', (tester) async {
+    final manager = FakeAcpSessionManager(
+      sessions: [_heldSession(_writer(idle: Duration.zero))],
+    );
+    addTearDown(manager.dispose);
+    await tester.pumpWidget(_chat(manager));
+    await tester.pump();
+
+    expect(
+      find.text('Earlier messages load when you take over.'),
+      findsOneWidget,
+    );
+    // The banner explains the state; "detached" would contradict it.
+    expect(find.text('Detached from this session.'), findsNothing);
   });
 }
