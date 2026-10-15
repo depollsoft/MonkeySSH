@@ -237,9 +237,15 @@ class SecureTransferService {
     SettingKeys.sftpBrowserFilters,
   };
 
-  /// Settings that belong to this device's own onboarding and never travel:
-  /// their host ids would point at other hosts on another device.
-  static const _deviceLocalSettingsKeys = {monkeyMuxOfferPendingSettingKey};
+  /// Settings that stay on this device and never travel. The MonkeyMux offer
+  /// list belongs to this device's onboarding, and its host ids would point
+  /// at other hosts elsewhere. Agent forwarding hands a host this phone's
+  /// keys, so it is an opt-in made again on each device; an import never
+  /// turns it on.
+  static const _deviceLocalSettingsKeys = {
+    monkeyMuxOfferPendingSettingKey,
+    SettingKeys.hostAgentForwarding,
+  };
 
   /// Whether [key] is a setting that stays on this device: onboarding state
   /// in [_deviceLocalSettingsKeys], and unsent chat drafts, which are user
@@ -1270,7 +1276,9 @@ class SecureTransferService {
     }
     final result = <String, String>{};
     for (final entry in rawSettings.entries) {
-      if (entry.key is String && entry.value is String) {
+      if (entry.key is String &&
+          entry.value is String &&
+          !_deviceLocalSettingsKeys.contains(entry.key)) {
         result[entry.key as String] = entry.value as String;
       }
     }

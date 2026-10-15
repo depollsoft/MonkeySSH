@@ -107,6 +107,10 @@ abstract final class SettingKeys {
   /// Saved host-scoped coding CLI launch preferences.
   static const hostCliLaunchPreferences = 'host_cli_launch_preferences';
 
+  /// Per-host SSH agent forwarding opt-ins. Kept on this device only: never
+  /// exported or imported with migration data.
+  static const hostAgentForwarding = 'host_agent_forwarding';
+
   /// Each host's SFTP browser sort and hidden-file choices, by host id.
   static const sftpBrowserViews = 'sftp_browser_views';
 
