@@ -428,6 +428,8 @@ void main() {
       final session = await _openSession(server);
       server
         ..deleteFile(_path)
+        // A host whose umask keeps new files private.
+        ..createMode = 0x180
         ..mkdirFailure = SftpStatusError(
           SftpStatusCode.permissionDenied,
           'no mkdir',
@@ -480,6 +482,242 @@ void main() {
       );
       expect(_text(server, _path), 'agent again\n');
     });
+  });
+
+  group('pre-merge review regressions', () {
+    const copy = '/home/demo/notes (copy).txt';
+    late InMemorySftpClient server;
+
+    setUp(() {
+      server = InMemorySftpClient()
+        ..writeFile(_path, _bytes('host version\n'), mode: 0x180);
+    });
+
+    Iterable<String> scratchFolders() =>
+        server.directories.where((d) => d.contains('.monkeyssh-save-'));
+
+    test(
+      'recreate through a link whose target is gone restores the target',
+      () async {
+        const link = '/home/demo/CLAUDE.md';
+        const target = '/home/demo/AGENTS.md';
+        server
+          ..writeFile(target, _bytes('rules\n'), mode: 0x1ED)
+          ..links[link] = target;
+        final session = await _openSession(server, path: link);
+        server.deleteFile(target);
+        expect(await session.checkForChanges(server), RemoteFileChange.deleted);
+
+        await session.recreate(server, _bytes('phone rules\n'));
+
+        expect(_text(server, target), 'phone rules\n');
+        expect(server.modes[target], 0x1ED);
+        expect(server.links[link], target);
+        expect(
+          await session.checkForChanges(server),
+          RemoteFileChange.unchanged,
+        );
+      },
+    );
+
+    test(
+      'without posix-rename a change during the refused rename is kept',
+      () async {
+        server.posixRename = false;
+        final session = await _openSession(server);
+        expect(
+          await session.checkForChanges(server),
+          RemoteFileChange.unchanged,
+        );
+        server.onRefusedRename = (_, newPath) {
+          if (newPath != _path) return;
+          server
+            ..onRefusedRename = null
+            ..writeFile(_path, _bytes('agent\n'), modifyTime: server.now + 3);
+        };
+
+        await expectLater(
+          session.save(server, _bytes('phone\n')),
+          throwsA(isA<RemoteFileChangedDuringSaveException>()),
+        );
+        expect(_text(server, _path), 'agent\n');
+        expect(scratchFolders(), isEmpty);
+
+        // With nothing moving, the save goes through the aside path.
+        expect(
+          await session.checkForChanges(server),
+          RemoteFileChange.modified,
+        );
+        await session.save(server, _bytes('phone\n'), force: true);
+        expect(_text(server, _path), 'phone\n');
+        expect(server.modes[_path], 0x180);
+        expect(scratchFolders(), isEmpty);
+      },
+    );
+
+    test(
+      'without posix-rename a copy replaces only its own placeholder',
+      () async {
+        server.posixRename = false;
+        final session = await _openSession(server);
+
+        final saved = await session.saveCopy(server, _bytes('phone\n'));
+
+        expect(saved, copy);
+        expect(_text(server, copy), 'phone\n');
+        expect(server.modes[copy], 0x180);
+        expect(_text(server, _path), 'host version\n');
+        expect(scratchFolders(), isEmpty);
+
+        server
+          ..deleteFile(copy)
+          ..onRefusedRename = (_, newPath) {
+            if (newPath != copy) return;
+            server
+              ..onRefusedRename = null
+              ..writeFile(copy, _bytes('other program\n'));
+          };
+        await expectLater(
+          session.saveCopy(server, _bytes('phone\n')),
+          throwsA(isA<RemoteFileRefusedException>()),
+        );
+        expect(_text(server, copy), 'other program\n');
+        expect(scratchFolders(), isEmpty);
+      },
+    );
+
+    test(
+      'a placeholder with no reported size is read before it is replaced',
+      () async {
+        final session = await _openSession(server);
+        server
+          ..omitMetadata = true
+          ..afterClose = (path) {
+            if (path != copy) return;
+            server
+              ..afterClose = null
+              ..writeFile(copy, _bytes('other program\n'));
+          };
+
+        await expectLater(
+          session.saveCopy(server, _bytes('phone\n')),
+          throwsA(isA<RemoteFileRefusedException>()),
+        );
+        expect(_text(server, copy), 'other program\n');
+
+        // An empty placeholder still takes the copy.
+        server.deleteFile(copy);
+        final saved = await session.saveCopy(server, _bytes('phone\n'));
+        expect(_text(server, saved), 'phone\n');
+      },
+    );
+
+    test('without fstat the mode still comes from the path', () async {
+      server
+        ..writeFile(_path, _bytes('#!/bin/sh\n'), mode: 0x1ED)
+        ..rejectFstat = true;
+      final session = await _openSession(server);
+      server.deleteFile(_path);
+
+      await session.recreate(server, _bytes('#!/bin/sh\necho hi\n'));
+
+      expect(server.modes[_path], 0x1ED);
+    });
+
+    test('a copy is never open to a group the original was not', () async {
+      // 0640 in group 2000, while new files land in group 1000.
+      server.writeFile(_path, _bytes('team notes\n'), mode: 0x1A0, group: 2000);
+      final session = await _openSession(server);
+
+      final outsider = await session.saveCopy(server, _bytes('a\n'));
+      expect(server.groups[outsider], 1000);
+      expect(server.modes[outsider], 0x180);
+      expect(server.modeAtFirstWrite.values, everyElement(0x180));
+
+      server
+        ..deleteFile(outsider)
+        ..memberGroups.add(2000);
+      final member = await session.saveCopy(server, _bytes('b\n'));
+      expect(server.groups[member], 2000);
+      expect(server.modes[member], 0x1A0);
+    });
+
+    test('a copy in the same group keeps group access', () async {
+      // 0664 in the group new files land in, as with user private groups.
+      server.writeFile(_path, _bytes('shared\n'), mode: 0x1B4);
+      final session = await _openSession(server);
+
+      final saved = await session.saveCopy(server, _bytes('a\n'));
+
+      expect(server.groups[saved], 1000);
+      expect(server.modes[saved], 0x1B4);
+    });
+
+    test(
+      'a recreated file is never open to a group the original was not',
+      () async {
+        server.writeFile(
+          _path,
+          _bytes('team notes\n'),
+          mode: 0x1A0,
+          group: 2000,
+        );
+        final session = await _openSession(server);
+        server.deleteFile(_path);
+
+        await session.recreate(server, _bytes('phone\n'));
+        expect(server.groups[_path], 1000);
+        expect(server.modes[_path], 0x180);
+
+        server
+          ..deleteFile(_path)
+          ..memberGroups.add(2000);
+        await session.recreate(server, _bytes('phone\n'));
+        expect(server.groups[_path], 2000);
+        expect(server.modes[_path], 0x1A0);
+      },
+    );
+
+    test(
+      'a file the host creates wider than the original is refused in place',
+      () async {
+        final session = await _openSession(server);
+        server
+          ..deleteFile(_path)
+          // umask 022: new files start 0644, wider than the 0600 original.
+          ..createMode = 0x1A4
+          ..mkdirFailure = SftpStatusError(
+            SftpStatusCode.permissionDenied,
+            'no mkdir',
+          );
+
+        await expectLater(
+          session.recreate(server, _bytes('phone\n')),
+          throwsA(isA<RemoteFileRefusedException>()),
+        );
+        expect(server.files.containsKey(_path), isFalse);
+        expect(server.writes, isEmpty);
+
+        // A 0644 original may start 0644.
+        final public = RemoteFileEditSession(remotePath: _path)
+          ..accept(
+            RemoteFileSnapshot(
+              _bytes('x'),
+              RemoteFileVersion.of(
+                _bytes('x'),
+                SftpFileAttrs(
+                  mode: const SftpFileMode.value(0x81A4),
+                  userID: 1000,
+                  groupID: 1000,
+                ),
+              ),
+            ),
+          );
+        await public.recreate(server, _bytes('phone\n'));
+        expect(_text(server, _path), 'phone\n');
+        expect(server.modes[_path], 0x1A4);
+      },
+    );
   });
 
   group('remoteFileCopyPath', () {

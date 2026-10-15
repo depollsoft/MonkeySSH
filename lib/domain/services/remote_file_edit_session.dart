@@ -49,8 +49,8 @@ class RemoteFileChangedDuringSaveException implements Exception {
   String toString() => 'The file changed on the host while saving';
 }
 
-/// One version of a remote file: the server's size, modified time and
-/// permission bits, plus a SHA-256 of the bytes that were read.
+/// One version of a remote file: the server's size, modified time,
+/// permission bits and group, plus a SHA-256 of the bytes that were read.
 @immutable
 class RemoteFileVersion {
   /// Creates a version record.
@@ -60,6 +60,7 @@ class RemoteFileVersion {
     required this.length,
     required this.digest,
     this.mode,
+    this.groupID,
   });
 
   /// Records [bytes] as read, with the server's [attrs] when they are known.
@@ -70,6 +71,7 @@ class RemoteFileVersion {
         length: bytes.length,
         digest: crypto.sha256.convert(bytes),
         mode: _permissionsOf(attrs),
+        groupID: attrs?.groupID,
       );
 
   /// Size the server reported, or the byte count read when it reported none.
@@ -86,6 +88,9 @@ class RemoteFileVersion {
 
   /// Permission bits (`0777` range), when the server reported them.
   final int? mode;
+
+  /// Group the file belonged to, when the server reported it.
+  final int? groupID;
 
   /// Whether [attrs] reports a different size. Content of a different size
   /// cannot match, so this is decisive.
@@ -108,6 +113,19 @@ class RemoteFileVersion {
     length: length,
     digest: digest,
     mode: _permissionsOf(attrs) ?? mode,
+    groupID: attrs.groupID ?? groupID,
+  );
+
+  /// The version [bytes] were written as, keeping this version's
+  /// permissions and group. The modified time is left unknown so a later
+  /// check compares content, whatever another writer did after the write.
+  RemoteFileVersion written(Uint8List bytes) => RemoteFileVersion(
+    size: bytes.length,
+    modifyTime: null,
+    length: bytes.length,
+    digest: crypto.sha256.convert(bytes),
+    mode: mode,
+    groupID: groupID,
   );
 }
 
@@ -140,13 +158,13 @@ class RemoteFileSnapshot {
 /// whether something else changed the file in the meantime.
 ///
 /// SFTP has no conditional write. [save] re-checks size and modified time
-/// immediately before its final rename. A change is still missed when it
-/// lands in the single round trip between that stat and the rename, when it
-/// keeps both size and modified time on a file too large to re-read, or when
-/// it keeps the size and lands within the same second as the file's
-/// previous write: SFTP v3 modified times have one-second resolution, so
-/// the final stat cannot tell such a write from the version that was
-/// checked.
+/// immediately before its final rename, and again before moving the
+/// original aside on servers without posix-rename. A change is still missed
+/// when it lands in the single round trip between that stat and the rename,
+/// when it keeps both size and modified time on a file too large to re-read,
+/// or when it keeps the size and lands within the same second as the file's
+/// previous write: SFTP v3 modified times have one-second resolution, so the
+/// final stat cannot tell such a write from the version that was checked.
 class RemoteFileEditSession {
   /// Creates a session for [remotePath].
   RemoteFileEditSession({
@@ -187,13 +205,31 @@ class RemoteFileEditSession {
         try {
           attrs = await file.stat();
         } on SftpStatusError {
-          // Without fstat the content hash alone identifies the version.
+          // Without fstat the content hash alone identifies the version. A
+          // path stat still gives the permissions and group that a
+          // recreated file or a copy should get.
+          attrs = await _accessOf(sftp);
         }
       }
       final bytes = await file.readBytes(length: maxBytes);
       return RemoteFileSnapshot(bytes, RemoteFileVersion.of(bytes, attrs));
     } finally {
       await file.close();
+    }
+  }
+
+  /// The permissions and group at [remotePath], without the size and time
+  /// that could pair another version with the bytes read.
+  Future<SftpFileAttrs?> _accessOf(SftpClient sftp) async {
+    try {
+      final attrs = await sftp.stat(remotePath);
+      return SftpFileAttrs(
+        mode: attrs.mode,
+        userID: attrs.userID,
+        groupID: attrs.groupID,
+      );
+    } on SftpStatusError {
+      return null;
     }
   }
 
@@ -263,21 +299,20 @@ class RemoteFileEditSession {
   /// difference throws [RemoteFileChangedDuringSaveException] with the file
   /// untouched. [force] skips that comparison, for an overwrite the user
   /// chose. A file that no longer exists is recreated with the permission
-  /// bits it had when loaded, or owner-only access when they are unknown.
+  /// bits and group it had when loaded, or owner-only access when they are
+  /// unknown.
   Future<void> save(
     SftpClient sftp,
     Uint8List bytes, {
     bool force = false,
   }) async {
     final checked = force ? null : _checkedAttrs;
-    final loadedMode = _baseline?.mode;
     await service.replaceFileBytes(
       sftp: sftp,
       remotePath: remotePath,
       bytes: bytes,
-      newFileMode: loadedMode == null
-          ? remoteUploadFileMode
-          : SftpFileMode.value(loadedMode),
+      newFileMode: _loadedMode,
+      newFileGroupID: _baseline?.groupID,
       beforeReplace: checked == null
           ? null
           : () async {
@@ -294,29 +329,32 @@ class RemoteFileEditSession {
               }
             },
     );
-    // The modified time is left unknown so a later check compares content,
-    // whatever another writer did after the rename.
-    _baseline = RemoteFileVersion(
-      size: bytes.length,
-      modifyTime: null,
-      length: bytes.length,
-      digest: crypto.sha256.convert(bytes),
-      mode: loadedMode,
-    );
+    _baseline = _baseline?.written(bytes) ?? RemoteFileVersion.of(bytes);
     _checkedAttrs = null;
   }
 
+  /// Permission bits for a new file standing in for the loaded one:
+  /// the loaded bits, or owner-only access when they are unknown.
+  SftpFileMode get _loadedMode => switch (_baseline?.mode) {
+    final mode? => SftpFileMode.value(mode),
+    null => remoteUploadFileMode,
+  };
+
   /// Recreates a file that was deleted on the host, with the permission bits
-  /// it loaded with (owner-only when unknown).
+  /// and group it loaded with (owner-only when unknown).
   ///
-  /// Unlike a forced [save], this never replaces a file: if something
-  /// recreated the path in the meantime, it throws
-  /// [RemoteFileChangedDuringSaveException] so the editor checks again.
+  /// Unlike a forced [save], this checks that the path is still missing
+  /// before it starts and again just before the final rename. When
+  /// something is back, it throws [RemoteFileChangedDuringSaveException] so
+  /// the editor checks again. A file that appears within the single round
+  /// trip between that check and the rename is still replaced: with
+  /// posix-rename, a rename replaces its target, and dartssh2 offers no
+  /// rename that refuses to. A link whose target is gone counts as missing,
+  /// as it does for [checkForChanges], and its target is recreated.
   Future<void> recreate(SftpClient sftp, Uint8List bytes) async {
-    final loadedMode = _baseline?.mode;
     Future<void> ensureStillMissing() async {
       try {
-        await sftp.stat(remotePath, followLink: false);
+        await sftp.stat(remotePath);
       } on SftpStatusError catch (error) {
         if (error.code == SftpStatusCode.noSuchFile) return;
         rethrow;
@@ -329,18 +367,11 @@ class RemoteFileEditSession {
       sftp: sftp,
       remotePath: remotePath,
       bytes: bytes,
-      newFileMode: loadedMode == null
-          ? remoteUploadFileMode
-          : SftpFileMode.value(loadedMode),
+      newFileMode: _loadedMode,
+      newFileGroupID: _baseline?.groupID,
       beforeReplace: ensureStillMissing,
     );
-    _baseline = RemoteFileVersion(
-      size: bytes.length,
-      modifyTime: null,
-      length: bytes.length,
-      digest: crypto.sha256.convert(bytes),
-      mode: loadedMode,
-    );
+    _baseline = _baseline?.written(bytes) ?? RemoteFileVersion.of(bytes);
     _checkedAttrs = null;
   }
 
@@ -350,23 +381,23 @@ class RemoteFileEditSession {
   /// replaced. A name is reserved with an empty, exclusively created
   /// placeholder. The content is written to a file in a private (0700)
   /// scratch folder, restricted on its open handle to the original's
-  /// permission bits (the loaded ones when the path is no longer a file, or
-  /// owner-only), and renamed over the placeholder only while the
-  /// placeholder is still that empty file. Renames act on names, so a
-  /// placeholder swapped for a link is refused rather than followed. There
-  /// is no in-place fallback: a host that refuses the scratch folder refuses
-  /// the copy.
+  /// permission bits and group (the loaded ones when the path is no longer
+  /// a file, or owner-only; see [applyNewRemoteFileAccess]), and renamed
+  /// over the placeholder only while the placeholder is still that empty
+  /// file. Renames act on names, so a placeholder swapped for a link is
+  /// refused rather than followed. There is no in-place fallback: a host
+  /// that refuses the scratch folder refuses the copy.
   Future<String> saveCopy(SftpClient sftp, Uint8List bytes) async {
-    int? currentMode;
+    SftpFileAttrs? current;
     try {
-      final attrs = await sftp.stat(remotePath);
-      if (attrs.isFile) currentMode = _permissionsOf(attrs);
+      current = await sftp.stat(remotePath);
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
-    final mode = SftpFileMode.value(
-      currentMode ?? _baseline?.mode ?? remoteUploadFileMode.value,
-    );
+    final source = (current?.isFile ?? false)
+        ? (mode: _permissionsOf(current), groupID: current?.groupID)
+        : (mode: _baseline?.mode, groupID: _baseline?.groupID);
+    final mode = SftpFileMode.value(source.mode ?? remoteUploadFileMode.value);
     for (var attempt = 1; attempt <= _maxCopyAttempts; attempt++) {
       final candidate = remoteFileCopyPath(remotePath, attempt);
       if (await _exists(sftp, candidate)) continue;
@@ -393,7 +424,7 @@ class RemoteFileEditSession {
         } finally {
           await placeholder.close();
         }
-        await _installCopy(sftp, candidate, bytes, mode);
+        await _installCopy(sftp, candidate, bytes, mode, source.groupID);
       } on Object {
         await _removePlaceholderQuietly(sftp, candidate);
         rethrow;
@@ -410,6 +441,7 @@ class RemoteFileEditSession {
     String candidate,
     Uint8List bytes,
     SftpFileMode mode,
+    int? groupID,
   ) async {
     final scratch =
         '${candidate.substring(0, candidate.lastIndexOf('/') + 1)}'
@@ -428,24 +460,32 @@ class RemoteFileEditSession {
             SftpFileOpenMode.exclusive,
       );
       try {
-        await file.setStat(SftpFileAttrs(mode: mode));
+        await applyNewRemoteFileAccess(
+          setStat: file.setStat,
+          created: await _statOrNull(sftp, staged),
+          permissions: mode.value,
+          groupID: groupID,
+        );
         await file.writeBytes(bytes);
       } finally {
         await file.close();
       }
-      final reserved = await sftp.stat(candidate, followLink: false);
-      if (reserved.isSymbolicLink ||
-          reserved.isDirectory ||
-          (reserved.size ?? 0) != 0) {
-        throw const RemoteFileRefusedException(
-          'Another program took the name chosen for the copy.',
-        );
+      Future<void> ensurePlaceholder() async {
+        if (!await _isEmptyFile(sftp, candidate)) {
+          throw const RemoteFileRefusedException(
+            'Another program took the name chosen for the copy.',
+          );
+        }
       }
+
+      await ensurePlaceholder();
       try {
         await sftp.rename(staged, candidate);
       } on SftpStatusError catch (error) {
         if (error.code != SftpStatusCode.failure) rethrow;
-        // Without posix-rename the placeholder name must be free first.
+        // Without posix-rename the placeholder name must be free first. The
+        // refused rename was another round trip, so check it again.
+        await ensurePlaceholder();
         final aside = '$scratch/placeholder';
         await sftp.rename(candidate, aside);
         try {
@@ -479,6 +519,29 @@ class RemoteFileEditSession {
     }
   }
 
+  Future<SftpFileAttrs?> _statOrNull(SftpClient sftp, String path) async {
+    try {
+      return await sftp.stat(path, followLink: false);
+    } on SftpStatusError {
+      return null;
+    }
+  }
+
+  /// Whether [path] is still an empty regular file, as a reserved copy name
+  /// is until the copy lands. A link, folder or pipe never is. Without a
+  /// size from the server, one byte is read to tell.
+  Future<bool> _isEmptyFile(SftpClient sftp, String path) async {
+    final attrs = await sftp.stat(path, followLink: false);
+    if (attrs.mode != null && !attrs.isFile) return false;
+    if (attrs.size case final size?) return size == 0;
+    final file = await sftp.open(path);
+    try {
+      return (await file.readBytes(length: 1)).isEmpty;
+    } finally {
+      await file.close();
+    }
+  }
+
   Future<bool> _exists(SftpClient sftp, String path) async {
     try {
       await sftp.stat(path, followLink: false);
@@ -493,8 +556,7 @@ class RemoteFileEditSession {
   /// copy that did land is never deleted.
   Future<void> _removePlaceholderQuietly(SftpClient sftp, String path) async {
     try {
-      final attrs = await sftp.stat(path, followLink: false);
-      if (attrs.isFile && attrs.size == 0) await sftp.remove(path);
+      if (await _isEmptyFile(sftp, path)) await sftp.remove(path);
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       DiagnosticsLogService.instance.warning(

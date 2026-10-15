@@ -8,8 +8,9 @@ const _regularFileType = 0x8000;
 const _directoryType = 0x4000;
 const _symlinkType = 0xA000;
 
-/// In-memory SFTP server with POSIX-rename semantics, per-file permission
-/// bits and whole-second modified times.
+/// In-memory SFTP server with POSIX-rename semantics (unless [posixRename]
+/// is cleared), per-file permission bits and groups, and whole-second
+/// modified times.
 ///
 /// Writes stamp files with [now]; tests move [now] forward or call
 /// [writeFile] to play another program editing the host.
@@ -27,6 +28,27 @@ class InMemorySftpClient extends Fake implements SftpClient {
 
   /// Permission bits by file path.
   final modes = <String, int>{};
+
+  /// Group IDs by file path; files without an entry are in group 1000.
+  final groups = <String, int>{};
+
+  /// Group that files this client creates land in.
+  int newFileGroup = 1000;
+
+  /// Groups this client's user belongs to, and so can move files into.
+  final memberGroups = <int>{1000};
+
+  /// Permission bits of a file this client creates, before any setstat.
+  int createMode = 0x1A4;
+
+  /// Whether rename replaces an existing file, as with OpenSSH's
+  /// posix-rename extension. Without it, renaming onto an existing file
+  /// fails with a generic failure, as plain SFTP v3 rename does.
+  bool posixRename = true;
+
+  /// Runs when a rename is refused because its target exists, so a test can
+  /// change the host during that round trip.
+  void Function(String oldPath, String newPath)? onRefusedRename;
 
   /// Modified times by file path, in seconds since the epoch.
   final modifyTimes = <String, int>{};
@@ -81,10 +103,17 @@ class InMemorySftpClient extends Fake implements SftpClient {
   int now = 1700000000;
 
   /// Writes [bytes] to [path] as another program on the host would.
-  void writeFile(String path, List<int> bytes, {int? modifyTime, int? mode}) {
+  void writeFile(
+    String path,
+    List<int> bytes, {
+    int? modifyTime,
+    int? mode,
+    int? group,
+  }) {
     files[path] = Uint8List.fromList(bytes);
     modifyTimes[path] = modifyTime ?? now;
     modes[path] = mode ?? modes[path] ?? 0x1A4;
+    groups[path] = group ?? groups[path] ?? 1000;
   }
 
   /// Removes [path] as another program on the host would.
@@ -92,6 +121,21 @@ class InMemorySftpClient extends Fake implements SftpClient {
     files.remove(path);
     modes.remove(path);
     modifyTimes.remove(path);
+    groups.remove(path);
+  }
+
+  /// Applies [attrs] to the file at [path], refusing to move it into a
+  /// group this client's user is not a member of.
+  void _applyAttrs(String path, SftpFileAttrs attrs) {
+    if (!files.containsKey(path)) return;
+    if (attrs.groupID case final group? when attrs.userID != null) {
+      if (!memberGroups.contains(group)) {
+        // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+        throw SftpStatusError(SftpStatusCode.permissionDenied, 'Not a member');
+      }
+      groups[path] = group;
+    }
+    if (attrs.mode case final mode?) modes[path] = mode.value & 0xFFF;
   }
 
   String _resolve(String path) => links[path] ?? path;
@@ -110,7 +154,7 @@ class InMemorySftpClient extends Fake implements SftpClient {
         accessTime: omitMetadata ? null : modifyTimes[path],
         modifyTime: omitMetadata ? null : modifyTimes[path],
         userID: 1000,
-        groupID: 1000,
+        groupID: groups[path] ?? 1000,
       );
     }
     if (directories.contains(path)) {
@@ -181,7 +225,7 @@ class InMemorySftpClient extends Fake implements SftpClient {
       if (!directories.contains(target.substring(0, target.lastIndexOf('/')))) {
         _missing(target);
       }
-      writeFile(target, const [], mode: 0x1A4);
+      writeFile(target, const [], mode: createMode, group: newFileGroup);
     } else if (has(SftpFileOpenMode.truncate)) {
       writeFile(target, const []);
     }
@@ -193,10 +237,7 @@ class InMemorySftpClient extends Fake implements SftpClient {
     // ignore: only_throw_errors, dartssh2 models protocol errors this way.
     if (setStatFailure case final failure?) throw failure;
     setStats.add(path);
-    final target = _resolve(path);
-    if (attrs.mode case final mode? when files.containsKey(target)) {
-      modes[target] = mode.value & 0xFFF;
-    }
+    _applyAttrs(_resolve(path), attrs);
   }
 
   @override
@@ -240,13 +281,22 @@ class InMemorySftpClient extends Fake implements SftpClient {
         files[moved(path)] = files.remove(path)!;
         modes[moved(path)] = modes.remove(path) ?? 0x1A4;
         modifyTimes[moved(path)] = modifyTimes.remove(path) ?? now;
+        groups[moved(path)] = groups.remove(path) ?? 1000;
       }
       return;
     }
+    if (!posixRename &&
+        (files.containsKey(newPath) || links.containsKey(newPath))) {
+      onRefusedRename?.call(oldPath, newPath);
+      // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+      throw SftpStatusError(SftpStatusCode.failure, 'Failure');
+    }
     final bytes = files.remove(oldPath) ?? _missing(oldPath);
+    links.remove(newPath);
     files[newPath] = bytes;
     modes[newPath] = modes.remove(oldPath) ?? 0x1A4;
     modifyTimes[newPath] = modifyTimes.remove(oldPath) ?? now;
+    groups[newPath] = groups.remove(oldPath) ?? 1000;
   }
 
   @override
@@ -282,8 +332,9 @@ class InMemorySftpFile extends Fake implements SftpFile {
   Future<void> setStat(SftpFileAttrs attrs) async {
     // ignore: only_throw_errors, dartssh2 models protocol errors this way.
     if (_server.setStatFailure case final failure?) throw failure;
-    _server.setStats.add(_path);
-    if (attrs.mode case final mode?) _server.modes[_path] = mode.value & 0xFFF;
+    _server
+      ..setStats.add(_path)
+      .._applyAttrs(_path, attrs);
   }
 
   @override
