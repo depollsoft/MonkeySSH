@@ -4372,7 +4372,12 @@ class AgentSessionDiscoveryService {
         ? snapshotSegmentMaxBytes(fileCount, withTail: tailLines != null)
         : null;
     if (session.remoteIsWindows) {
-      for (final batchPaths in windowsSnapshotPathBatches(uniquePaths)) {
+      for (final batchPaths in windowsSnapshotPathBatches(
+        uniquePaths,
+        maxLines: maxLines,
+        maxBytes: maxBytes,
+        tailLines: tailLines,
+      )) {
         final ceiling = lineCeiling(batchPaths.length);
         final output = await _execWindowsPowerShell(
           session,
@@ -5210,31 +5215,41 @@ String buildOpenCodeSessionListCommand(int limit, {String? workingDirectory}) =>
     r'"$__fl_opencode" session list --format json -n '
     '$limit 2>/dev/null; fi';
 
-/// Splits [paths] into snapshot batches whose generated PowerShell stays well
-/// under cmd.exe's ~8191-character command-line limit once wrapped as
-/// `powershell -EncodedCommand` (base64 of the UTF-16LE script roughly triples
-/// its length, and Windows OpenSSH runs exec commands via `cmd.exe /c`). Each
-/// batch also respects [_remoteFileSnapshotBatchSize].
+/// Splits [paths] into snapshot batches whose [windowsFileSnapshotScript],
+/// with the same options, stays within [windowsCommandMaxLength] once wrapped
+/// as `powershell -EncodedCommand`. Base64 of the UTF-16LE script is about
+/// 8/3 of its length, and a tail read roughly doubles the per-file script, so
+/// each batch is measured as built. Each batch also respects
+/// [_remoteFileSnapshotBatchSize], and a path too long to share a batch gets
+/// one of its own.
 @visibleForTesting
-List<List<String>> windowsSnapshotPathBatches(List<String> paths) {
-  // Keep the summed quoted-path length per batch small enough that the
-  // fixed-overhead script (~700 chars) plus paths stays under ~2600 chars, so
-  // its base64 payload stays well below 8191.
-  const maxBatchPathChars = 1800;
+List<List<String>> windowsSnapshotPathBatches(
+  List<String> paths, {
+  int? maxLines,
+  int? maxBytes,
+  int? tailLines,
+}) {
+  bool fits(List<String> batch) =>
+      windowsPowerShellCommandLength(
+        windowsFileSnapshotScript(
+          batch,
+          maxLines: maxLines,
+          maxBytes: maxBytes,
+          tailLines: tailLines,
+        ),
+      ) <=
+      windowsCommandMaxLength;
   final batches = <List<String>>[];
   var current = <String>[];
-  var currentChars = 0;
   for (final path in paths) {
-    final pathChars = path.length + 4;
+    final candidate = [...current, path];
     if (current.isNotEmpty &&
-        (current.length >= _remoteFileSnapshotBatchSize ||
-            currentChars + pathChars > maxBatchPathChars)) {
+        (current.length >= _remoteFileSnapshotBatchSize || !fits(candidate))) {
       batches.add(current);
-      current = <String>[];
-      currentChars = 0;
+      current = [path];
+    } else {
+      current = candidate;
     }
-    current.add(path);
-    currentChars += pathChars;
   }
   if (current.isNotEmpty) {
     batches.add(current);

@@ -3531,6 +3531,66 @@ branch refs/heads/main
       expect(promptScript, contains(r'if($n -ge 8)'));
     });
 
+    test('Cursor names many untitled chats on Windows within cmd.exe limits', () async {
+      final client = _MockSshClient();
+      when(() => client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+      const workspace =
+          'C:/Users/firstname.lastname/.cursor/chats/'
+          '0123456789abcdef0123456789abcdef';
+      String chatDirectory(int index) =>
+          '$workspace/${'$index'.padLeft(8, '0')}-1111-4222-8333-444455556666';
+      final chats = List.generate(24, chatDirectory);
+      final commandLengths = <int>[];
+      _stubDiscoveryExec(client, (rawCommand) async {
+        commandLengths.add(rawCommand.length);
+        final command = decodeEncodedPowerShell(rawCommand);
+        if (command.contains('[char]0x1f')) {
+          return _buildExecSession(
+            stdout: [
+              for (final (index, chat) in chats.indexed)
+                if (command.contains("'$chat/prompt_history.json'"))
+                  '$chat/prompt_history.json'
+                      '\x1f${base64Encode(utf8.encode('[\n'))}'
+                      '\x1f${base64Encode(utf8.encode('  "Prompt $index"\n]'))}\n'
+                else if (command.contains("'$chat/meta.json'"))
+                  _remoteSnapshotLine(
+                    '$chat/meta.json',
+                    '{"schemaVersion":1,"createdAtMs":1787302131000,'
+                        '"hasConversation":true}',
+                  ),
+            ].join(),
+          );
+        }
+        if (command.contains('.cursor')) {
+          return _buildExecSession(
+            stdout: [
+              for (final (index, chat) in chats.indexed)
+                _listedFileLine('$chat/meta.json', mtime: 1787302132 - index),
+            ].join('\n'),
+          );
+        }
+        return _buildExecSession();
+      });
+
+      final result = await AgentSessionDiscoveryService()
+          .discoverSessionsStream(
+            _buildDiscoverySession(client),
+            toolName: 'Cursor Agent',
+          )
+          .last;
+
+      expect(result.sessions, isNotEmpty);
+      for (final info in result.sessions) {
+        expect(
+          info.summary,
+          'Prompt ${int.parse(info.sessionId.substring(0, 8))}',
+        );
+      }
+      // Windows OpenSSH runs exec commands through cmd.exe.
+      expect(commandLengths, everyElement(lessThanOrEqualTo(8191)));
+    });
+
     for (final indexTitle in [null, '', 'Renamed session']) {
       test(
         'Muse discovery reads fresh logs with indexTitle=$indexTitle',
