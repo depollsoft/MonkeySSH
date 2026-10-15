@@ -271,6 +271,9 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                       ),
                       maxLines: 6,
                       style: FluttyTheme.monoStyle.copyWith(fontSize: 14),
+                      // Token errors show as the command is typed, like the
+                      // notes under it, not only on Save.
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a command';
@@ -280,12 +283,15 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                       },
                     ),
                     const SizedBox(height: 8),
-                    Text(
-                      'Use {{variable}} placeholders, such as {{container}}. '
-                      'Press keys with {key:esc}, {key:ctrl+c} or '
-                      '{key:shift+tab}, and pause with {delay:100}.',
+                    Text.rich(
+                      _withCode(
+                        'Use `{{variable}}` placeholders, such as '
+                        '`{{container}}`. Press keys with `{key:esc}`, '
+                        '`{key:ctrl+c}` or `{key:shift+tab}`, and pause with '
+                        '`{delay:100}`.',
+                      ),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.outline,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
                     for (final warning in snippetEditorWarnings(
@@ -305,8 +311,8 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                           ),
                           const SizedBox(width: 8),
                           Expanded(
-                            child: Text(
-                              warning,
+                            child: Text.rich(
+                              _withTokensInMono(warning),
                               style: Theme.of(context).textTheme.bodySmall
                                   ?.copyWith(
                                     color: Theme.of(context)
@@ -536,66 +542,148 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   void _showVariablesHelp() {
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Snippet Syntax'),
-        content: const SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Use {{variable}} syntax to create placeholders.'),
-              SizedBox(height: 16),
-              Text('Examples:', style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 8),
-              Text('• ssh {{user}}@{{host}}'),
-              Text('• tail -f {{log_file}}'),
-              Text('• docker restart {{container}}'),
-              Text('• git pull && {{restart_command}}'),
-              SizedBox(height: 16),
-              Text('When executing, you\'ll be prompted to fill in values.'),
-              SizedBox(height: 16),
-              Text(
-                'Keys and pauses',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              SizedBox(height: 8),
-              Text(
-                'In the terminal, {key:...} presses a key and {delay:N} '
-                'waits N milliseconds (up to 5000).',
-              ),
-              SizedBox(height: 8),
-              Text('• {key:esc}{key:esc}'),
-              Text('• {key:ctrl+c}'),
-              Text('• {key:shift+tab}'),
-              Text('• {key:esc}:wq{key:enter}'),
-              SizedBox(height: 8),
-              Text(
-                'Keys: esc, tab, enter, backspace, delete, space, up, down, '
-                'left, right, home, end, pageup, pagedown, f1-f12, or one '
-                'character. Add ctrl+, alt+ or shift+ in front. A shifted '
-                'symbol such as ? or + adds Shift itself, and so does a '
-                'capital letter on its own.',
-              ),
-              SizedBox(height: 8),
-              Text(
-                r'Write \{key:esc} to type a token as text. A token right '
-                r'after $, as in ${key:1}, is always text.',
-              ),
-              SizedBox(height: 8),
-              Text(
-                'A sequence stops if the connection drops or you switch '
-                'windows. Snippets with keys do not work in native chat.',
-              ),
-            ],
+      builder: (context) {
+        final theme = Theme.of(context);
+        // In-screen section headers are lowercase display mono.
+        final heading = FluttyTheme.displayMono(
+          fontSize: 13,
+          color: theme.colorScheme.onSurface,
+          letterSpacing: 0,
+        );
+        Widget code(String text) => Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(text, style: FluttyTheme.monoStyle),
+        );
+        return AlertDialog(
+          title: const Text('Snippet Syntax'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('variables', style: heading),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'Use `{{variable}}` to create a placeholder. You fill in '
+                    'its value when you run the snippet.',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                code('ssh {{user}}@{{host}}'),
+                code('tail -f {{log_file}}'),
+                code('docker restart {{container}}'),
+                code('git pull && {{restart_command}}'),
+                const SizedBox(height: 24),
+                Text('keys and pauses', style: heading),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'In the terminal, `{key:name}` presses a key and '
+                    '`{delay:N}` waits N milliseconds (up to 5000).',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                code('{key:esc}{key:esc}'),
+                code('{key:ctrl+c}'),
+                code('{key:shift+tab}'),
+                code('{key:esc}:wq{key:enter}'),
+                const SizedBox(height: 16),
+                const Text('Key names:'),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 4,
+                  children: [
+                    for (final key in _helpKeyNames)
+                      Text(key, style: FluttyTheme.monoStyle),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'Or one character, such as `a`, `/` or `?`. Put `ctrl+`, '
+                    '`alt+` or `shift+` in front. A shifted symbol such as '
+                    '`?` or `+` adds Shift itself, and so does a capital '
+                    'letter on its own.',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text.rich(
+                  _withCode(
+                    // A word joiner keeps `$` and `{key:1}` on one line.
+                    r'Write `\{key:esc}` to type a token as text. A token '
+                    'right after `\$`, as in `\$\u2060{key:1}`, is always '
+                    'text.',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'A sequence stops if the connection drops or you switch '
+                  'windows. Snippets with keys do not work in native chat.',
+                ),
+              ],
+            ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Got it'),
+            ),
+          ],
+        );
+      },
     );
   }
+}
+
+const _helpKeyNames = [
+  'esc',
+  'tab',
+  'enter',
+  'backspace',
+  'delete',
+  'insert',
+  'space',
+  'up',
+  'down',
+  'left',
+  'right',
+  'home',
+  'end',
+  'pageup',
+  'pagedown',
+  'f1-f12',
+];
+
+final _codeStyle = TextStyle(fontFamily: FluttyTheme.monoStyle.fontFamily);
+
+/// [text] as spans, with the runs between backticks set in mono at the
+/// surrounding size: literal syntax such as `{key:esc}` reads as machine
+/// text.
+TextSpan _withCode(String text) => TextSpan(
+  children: [
+    for (final (index, part) in text.split('`').indexed)
+      if (part.isNotEmpty)
+        TextSpan(text: part, style: index.isOdd ? _codeStyle : null),
+  ],
+);
+
+final _quotedToken = RegExp(r'\\?\$?\{(?:key|delay):[^{}\s]+\}');
+
+/// [text], an editor note that quotes tokens, with the tokens in mono.
+TextSpan _withTokensInMono(String text) {
+  final spans = <TextSpan>[];
+  var cursor = 0;
+  for (final match in _quotedToken.allMatches(text)) {
+    if (match.start > cursor) {
+      spans.add(TextSpan(text: text.substring(cursor, match.start)));
+    }
+    spans.add(TextSpan(text: match.group(0), style: _codeStyle));
+    cursor = match.end;
+  }
+  if (cursor < text.length) {
+    spans.add(TextSpan(text: text.substring(cursor)));
+  }
+  return TextSpan(children: spans);
 }

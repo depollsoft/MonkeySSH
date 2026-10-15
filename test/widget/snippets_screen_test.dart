@@ -582,6 +582,43 @@ void main() {
       expect(find.text('{key:esc}{key:esc}'), findsOneWidget);
     });
 
+    testWidgets('full editor checks key tokens as the command is typed', (
+      tester,
+    ) async {
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          ],
+          child: const MaterialApp(home: SnippetEditScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        '{key:escc}',
+      );
+      await tester.pump();
+      expect(find.text('Unknown key: {key:escc}'), findsOneWidget);
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        '{key:esc}',
+      );
+      await tester.pump();
+      expect(find.textContaining('Unknown key'), findsNothing);
+
+      // The syntax help lists every named key.
+      await tester.tap(find.byIcon(Icons.help_outline));
+      await tester.pumpAndSettle();
+      expect(find.text('insert'), findsOneWidget);
+    });
+
     testWidgets('full editor uses snippet prefill values', (tester) async {
       final snippetRepository = _MockSnippetRepository();
       when(snippetRepository.getAllFolders)
