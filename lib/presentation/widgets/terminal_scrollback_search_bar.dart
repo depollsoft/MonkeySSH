@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:xterm/xterm.dart' show TerminalKey;
 
 import '../../app/theme.dart';
 import 'terminal_menu_style.dart';
@@ -203,7 +204,8 @@ class TerminalScrollbackSearchBar extends StatefulWidget {
 }
 
 class _TerminalScrollbackSearchBarState
-    extends State<TerminalScrollbackSearchBar> {
+    extends State<TerminalScrollbackSearchBar>
+    implements TerminalSearchFieldEditor {
   late final TextEditingController _text = TextEditingController(
     text: widget.controller.query,
   );
@@ -219,6 +221,8 @@ class _TerminalScrollbackSearchBarState
   void initState() {
     super.initState();
     widget.controller.addListener(_handleSearchChanged);
+    widget.controller.fieldInput.attach(this);
+    _fieldFocusNode.addListener(_handleFieldFocusChanged);
     // Autofocus does nothing while the terminal holds focus, and the menu
     // that opened the bar hands focus back to the terminal first. Without
     // this the query, and Enter, would go to the remote shell. Only when find
@@ -243,6 +247,10 @@ class _TerminalScrollbackSearchBarState
     if (!identical(oldWidget.controller, widget.controller)) {
       oldWidget.controller.removeListener(_handleSearchChanged);
       widget.controller.addListener(_handleSearchChanged);
+      oldWidget.controller.fieldInput.detach(this);
+      widget.controller.fieldInput
+        ..attach(this)
+        ..fieldFocusChanged(hasFocus: _fieldFocusNode.hasFocus);
       _handledRevealRequest = widget.controller.revealRequest;
       _handledUserUpdate = widget.controller.userUpdateCount;
       _text.text = widget.controller.query;
@@ -252,9 +260,87 @@ class _TerminalScrollbackSearchBarState
   @override
   void dispose() {
     widget.controller.removeListener(_handleSearchChanged);
+    widget.controller.fieldInput.detach(this);
+    _fieldFocusNode
+      ..removeListener(_handleFieldFocusChanged)
+      ..dispose();
     _text.dispose();
-    _fieldFocusNode.dispose();
     super.dispose();
+  }
+
+  void _handleFieldFocusChanged() => widget.controller.fieldInput
+      .fieldFocusChanged(hasFocus: _fieldFocusNode.hasFocus);
+
+  @override
+  void insertText(String text) {
+    if (text.isEmpty) {
+      return;
+    }
+    final value = _text.value;
+    final length = value.text.length;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start.clamp(0, length) : length;
+    final end = selection.isValid ? selection.end.clamp(start, length) : start;
+    _text.value = TextEditingValue(
+      text: value.text.replaceRange(start, end, text),
+      selection: TextSelection.collapsed(offset: start + text.length),
+    );
+    // A change made here, not by typing, does not call onChanged.
+    widget.controller.setQuery(_text.text);
+    _fieldFocusNode.requestFocus();
+  }
+
+  @override
+  void sendSpecialKey(TerminalKey key) {
+    final search = widget.controller;
+    switch (key) {
+      case TerminalKey.escape:
+        widget.onClose();
+        return;
+      case TerminalKey.enter || TerminalKey.arrowUp || TerminalKey.pageUp:
+        search.showPrevious();
+      case TerminalKey.arrowDown || TerminalKey.pageDown:
+        search.showNext();
+      case TerminalKey.arrowLeft:
+        _moveCaret(forward: false);
+      case TerminalKey.arrowRight:
+        _moveCaret(forward: true);
+      case TerminalKey.home:
+        _text.selection = const TextSelection.collapsed(offset: 0);
+      case TerminalKey.end:
+        _text.selection = TextSelection.collapsed(offset: _text.text.length);
+      default:
+        // Tab and the rest mean nothing in a one-line query.
+        break;
+    }
+    _fieldFocusNode.requestFocus();
+  }
+
+  /// Moves the caret one character, or collapses a selection to the edge it
+  /// moves towards, as a text field does for the arrow keys.
+  void _moveCaret({required bool forward}) {
+    final text = _text.text;
+    final selection = _text.selection;
+    if (!selection.isValid) {
+      _text.selection = TextSelection.collapsed(offset: text.length);
+      return;
+    }
+    if (!selection.isCollapsed) {
+      _text.selection = TextSelection.collapsed(
+        offset: forward ? selection.end : selection.start,
+      );
+      return;
+    }
+    final range = CharacterRange.at(text, selection.baseOffset);
+    final moved = forward ? range.moveNext() : range.moveBack();
+    if (!moved) {
+      return;
+    }
+    _text.selection = TextSelection.collapsed(
+      offset: forward
+          ? selection.baseOffset + range.current.length
+          : selection.baseOffset - range.current.length,
+    );
   }
 
   void _handleSearchChanged() {

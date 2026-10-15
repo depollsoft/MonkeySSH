@@ -106,6 +106,80 @@ void main() {
       expect(closes, 2);
     });
 
+    testWidgets('takes keyboard toolbar input while its field has focus', (
+      tester,
+    ) async {
+      final input = search.fieldInput;
+      expect(input.hasFocus, isFalse);
+      var focusChanges = 0;
+      void countFocusChange() => focusChanges++;
+      input.addListener(countFocusChange);
+      addTearDown(() => input.removeListener(countFocusChange));
+      await pumpBar(tester);
+      expect(input.hasFocus, isTrue);
+      expect(focusChanges, 1);
+      final field = tester.widget<TextField>(find.byKey(_field));
+      final text = field.controller!;
+
+      input.insertText('alpha');
+      await _settle(tester);
+      expect(text.text, 'alpha');
+      expect(_statusText(tester), '3/3');
+
+      // Left, Right, Home and End move the caret; text goes in at it.
+      input
+        ..sendSpecialKey(TerminalKey.home)
+        ..insertText('[')
+        ..sendSpecialKey(TerminalKey.end)
+        ..sendSpecialKey(TerminalKey.arrowLeft)
+        ..insertText('_')
+        ..sendSpecialKey(TerminalKey.arrowRight)
+        ..insertText(']');
+      expect(text.text, '[alph_a]');
+      text.selection = const TextSelection(baseOffset: 1, extentOffset: 8);
+      input.pasteText('al\r\npha');
+      await _settle(tester);
+      expect(text.text, '[alpha');
+      expect(_statusText(tester), '0');
+      input
+        ..sendSpecialKey(TerminalKey.home)
+        ..sendSpecialKey(TerminalKey.arrowRight);
+      expect(text.selection, const TextSelection.collapsed(offset: 1));
+      text.value = TextEditingValue.empty;
+      input.insertText('alpha');
+      await _settle(tester);
+      expect(_statusText(tester), '3/3');
+
+      // Enter and Up step to older matches, Down to newer; Tab does nothing.
+      input.sendSpecialKey(TerminalKey.enter);
+      await tester.pump();
+      expect(_statusText(tester), '2/3');
+      input.sendSpecialKey(TerminalKey.arrowUp);
+      await tester.pump();
+      expect(_statusText(tester), '1/3');
+      input
+        ..sendSpecialKey(TerminalKey.arrowDown)
+        ..sendSpecialKey(TerminalKey.tab);
+      await tester.pump();
+      expect(_statusText(tester), '2/3');
+      expect(text.text, 'alpha');
+      expect(field.focusNode!.hasFocus, isTrue);
+
+      input.sendSpecialKey(TerminalKey.escape);
+      expect(closes, 1);
+
+      field.focusNode!.unfocus();
+      await tester.pump();
+      expect(input.hasFocus, isFalse);
+      expect(focusChanges, 2);
+
+      // A bar that left the tree takes no more input.
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(input.hasFocus, isFalse);
+      input.insertText('ignored');
+      expect(search.query, 'alpha');
+    });
+
     testWidgets('disables stepping without matches and says so', (
       tester,
     ) async {

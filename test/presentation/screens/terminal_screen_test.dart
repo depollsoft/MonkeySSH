@@ -3034,6 +3034,112 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets(
+      'with the find field focused the toolbar keys act on the search, not '
+      'the shell',
+      (tester) async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'nee\ndle'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final terminal = session.terminal!;
+        for (var row = 0; row < 80; row += 1) {
+          terminal.write(row == 5 ? 'cat a/needle\r\n' : 'output $row\r\n');
+        }
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final scrollController = tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .scrollController!;
+        String shellText() =>
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+        Future<void> tapKey(String tooltip) async {
+          await tester.ensureVisible(find.byTooltip(tooltip));
+          await tester.tap(find.byTooltip(tooltip));
+          await tester.pump();
+        }
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        TextField textField() => tester.widget<TextField>(field);
+        shellWrites.clear();
+
+        tester.testTextInput.enterText('a');
+        await tester.pump();
+        await tapKey('Slash');
+        expect(textField().controller!.text, 'a/');
+        expect(textField().focusNode!.hasFocus, isTrue);
+
+        // Paste goes into the field, without the line break.
+        await tapKey('Paste');
+        await tester.pumpAndSettle();
+        expect(textField().controller!.text, 'a/needle');
+        await tester.pump(const Duration(milliseconds: 200));
+        for (var turn = 0; turn < 10; turn++) {
+          await tester.pump(Duration.zero);
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('1/1'), findsOneWidget);
+        final revealed = scrollController.offset;
+        expect(revealed, lessThan(scrollController.position.maxScrollExtent));
+
+        // Enter and the arrows step through the matches and move the caret;
+        // none of them reaches the shell or scrolls the terminal back down.
+        for (final key in ['Enter', 'Up', 'Down', 'Left', 'Right']) {
+          await tapKey(key);
+        }
+        await tester.pumpAndSettle();
+        expect(scrollController.offset, revealed);
+        expect(textField().focusNode!.hasFocus, isTrue);
+        expect(textField().controller!.text, 'a/needle');
+        expect(shellText(), isEmpty);
+
+        // With the terminal focused, the toolbar types into the shell again.
+        tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .focusNode!
+            .requestFocus();
+        // The focus change lands after one frame, the toolbar switches in
+        // the next.
+        await tester.pump();
+        await tester.pump();
+        await tapKey('Pipe');
+        await tester.pumpAndSettle();
+        expect(shellText(), '|');
+        expect(textField().controller!.text, 'a/needle');
+
+        // From the field, Escape closes Find.
+        textField().focusNode!.requestFocus();
+        await tester.pump();
+        await tester.pump();
+        shellWrites.clear();
+        await tapKey('Escape');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey<String>('terminal-search-bar')),
+          findsNothing,
+        );
+        expect(shellText(), isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('find searches the scrollback and closes cleanly', (
       tester,
     ) async {

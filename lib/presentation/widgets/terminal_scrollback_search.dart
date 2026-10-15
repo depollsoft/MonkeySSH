@@ -53,6 +53,68 @@ class TerminalSearchMatch {
   int get startOffsetInRow => start - line.rowStarts[_startRowIndex];
 }
 
+/// What the find bar's query field does with keyboard toolbar input. The
+/// find bar implements it.
+abstract interface class TerminalSearchFieldEditor {
+  /// Inserts [text] at the field's selection.
+  void insertText(String text);
+
+  /// Applies a toolbar key to the search; see
+  /// [TerminalSearchFieldInput.sendSpecialKey].
+  void sendSpecialKey(TerminalKey key);
+}
+
+/// Sends the keyboard toolbar to the find bar's query field while the field
+/// has focus, so its symbols, Paste, Enter and arrow keys act on the search
+/// instead of reaching the remote shell. The find bar attaches to it, and
+/// the screen listens to it to switch the toolbar over.
+class TerminalSearchFieldInput extends ChangeNotifier {
+  TerminalSearchFieldEditor? _editor;
+  bool _fieldHasFocus = false;
+
+  /// Whether the query field is shown and has focus.
+  bool get hasFocus => _editor != null && _fieldHasFocus;
+
+  /// Called by the find bar when it is built for this search.
+  // ignore: use_setters_to_change_properties
+  void attach(TerminalSearchFieldEditor editor) => _editor = editor;
+
+  /// Called by the find bar when it leaves the tree. Listeners are not told:
+  /// the bar leaves only when the screen rebuilds without it, and the tree
+  /// is locked at that point.
+  void detach(TerminalSearchFieldEditor editor) {
+    if (identical(_editor, editor)) {
+      _editor = null;
+      _fieldHasFocus = false;
+    }
+  }
+
+  /// Called by the find bar when its field gains or loses focus.
+  void fieldFocusChanged({required bool hasFocus}) {
+    if (hasFocus == _fieldHasFocus) {
+      return;
+    }
+    _fieldHasFocus = hasFocus;
+    notifyListeners();
+  }
+
+  /// Inserts [text] at the field's selection.
+  void insertText(String text) => _editor?.insertText(text);
+
+  /// Pastes [text] into the field. The field holds one line and a match
+  /// never crosses a line break, so line breaks are dropped, as they are when
+  /// the system keyboard pastes into the field.
+  void pasteText(String text) => insertText(text.replaceAll(_lineBreaks, ''));
+
+  static final _lineBreaks = RegExp('[\r\n]');
+
+  /// Applies a toolbar key: Enter, Up and Page Up step to the previous
+  /// (older) match and Down and Page Down to the next one, like the bar's
+  /// own buttons; Left, Right, Home and End move the caret; Escape closes
+  /// Find. Other keys do nothing.
+  void sendSpecialKey(TerminalKey key) => _editor?.sendSpecialKey(key);
+}
+
 class _RowHits {
   _RowHits(this.line, this.rowIndex);
 
@@ -138,6 +200,9 @@ class TerminalScrollbackSearchController extends ChangeNotifier
   // switch that restarts the search in the meantime must not drop the jump
   // to the first match or its announcement.
   bool _revealPending = false;
+
+  /// The find bar's query field, for the keyboard toolbar to type into.
+  final fieldInput = TerminalSearchFieldInput();
 
   /// Whether the bar has taken focus for this search. It does so once, when
   /// find opens; coming back from a native chat must not take focus from the
@@ -712,6 +777,7 @@ class TerminalScrollbackSearchController extends ChangeNotifier
     _debounceTimer?.cancel();
     _refreshTimer?.cancel();
     _terminal.removeListener(_handleTerminalChanged);
+    fieldInput.dispose();
     super.dispose();
   }
 }

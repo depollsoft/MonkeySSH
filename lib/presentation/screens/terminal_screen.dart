@@ -11939,6 +11939,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             // The find bar overlays the terminal area; the terminal gets that
             // much scroll room below its last row. A native chat hides it.
             _scrollbackSearch?.paused = showsNativeAgent;
+            final findField = showsNativeAgent
+                ? null
+                : _scrollbackSearch?.fieldInput;
             _scrollbackSearchClearance =
                 _scrollbackSearch == null || showsNativeAgent
                 ? 0
@@ -11977,42 +11980,77 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       : terminalArea,
                 ),
                 if (showsKeyboardToolbar)
-                  KeyboardToolbar(
-                    controller: _toolbarController,
-                    terminal: _terminal,
-                    onKeyPressed: showsNativeAgent
-                        ? null
-                        : _handleKeyboardToolbarKeyPressed,
-                    onTextInput: showsNativeAgent
-                        ? _nativeComposerFocusController.insertText
-                        : null,
-                    onSpecialKey: showsNativeAgent
-                        ? _nativeComposerFocusController.sendSpecialKey
-                        : null,
-                    onPasteRequested: showsNativeAgent
-                        ? _pasteClipboardIntoNativeComposer
-                        : _pasteClipboard,
-                    onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
-                    onSnippetPasteRequested: showsNativeAgent
-                        ? _pasteSnippetIntoNativeComposer
-                        : _pasteKeyboardToolbarSnippet,
-                    onPasteMediaRequested: showsNativeAgent
-                        ? _nativeComposerFocusController.pickPhotos
-                        : _pastePickedMedia,
-                    onPasteFilesRequested: showsNativeAgent
-                        ? _nativeComposerFocusController.pickFiles
-                        : _pastePickedFiles,
-                    snippets: _keyboardToolbarSnippets,
-                    snippetFolders: _keyboardToolbarSnippetFolders,
-                    terminalFocusNode: showsNativeAgent
-                        ? null
-                        : _terminalFocusNode,
+                  ListenableBuilder(
+                    // Switches the toolbar to the find field while that has
+                    // focus.
+                    listenable: Listenable.merge([findField]),
+                    builder: (context, _) => _buildKeyboardToolbar(
+                      showsNativeAgent: showsNativeAgent,
+                      findField: (findField?.hasFocus ?? false)
+                          ? findField
+                          : null,
+                    ),
                   ),
               ],
             );
           },
         ),
       ),
+    );
+  }
+
+  /// The extra-keys toolbar. It types into the native chat's composer while
+  /// one shows, into the find bar's field while that has focus, and into the
+  /// terminal otherwise.
+  Widget _buildKeyboardToolbar({
+    required bool showsNativeAgent,
+    TerminalSearchFieldInput? findField,
+  }) {
+    if (findField != null) {
+      // Nothing reaches the shell, and the terminal neither takes focus back
+      // nor jumps to the bottom, so the revealed match stays in view.
+      return KeyboardToolbar(
+        controller: _toolbarController,
+        terminal: _terminal,
+        onTextInput: findField.insertText,
+        onSpecialKey: findField.sendSpecialKey,
+        onPasteRequested: () => _pasteClipboardIntoFind(findField),
+        onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
+        onSnippetPasteRequested: (snippet) =>
+            _insertKeyboardToolbarSnippet(snippet, findField.pasteText),
+        snippets: _keyboardToolbarSnippets,
+        snippetFolders: _keyboardToolbarSnippetFolders,
+      );
+    }
+    return KeyboardToolbar(
+      controller: _toolbarController,
+      terminal: _terminal,
+      onKeyPressed: showsNativeAgent ? null : _handleKeyboardToolbarKeyPressed,
+      onTextInput: showsNativeAgent
+          ? _nativeComposerFocusController.insertText
+          : null,
+      onSpecialKey: showsNativeAgent
+          ? _nativeComposerFocusController.sendSpecialKey
+          : null,
+      onPasteRequested: showsNativeAgent
+          ? _pasteClipboardIntoNativeComposer
+          : _pasteClipboard,
+      onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
+      onSnippetPasteRequested: showsNativeAgent
+          ? (snippet) => _insertKeyboardToolbarSnippet(
+              snippet,
+              _nativeComposerFocusController.insertText,
+            )
+          : _pasteKeyboardToolbarSnippet,
+      onPasteMediaRequested: showsNativeAgent
+          ? _nativeComposerFocusController.pickPhotos
+          : _pastePickedMedia,
+      onPasteFilesRequested: showsNativeAgent
+          ? _nativeComposerFocusController.pickFiles
+          : _pastePickedFiles,
+      snippets: _keyboardToolbarSnippets,
+      snippetFolders: _keyboardToolbarSnippetFolders,
+      terminalFocusNode: showsNativeAgent ? null : _terminalFocusNode,
     );
   }
 
@@ -16193,6 +16231,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     });
   }
 
+  Future<void> _pasteClipboardIntoFind(TerminalSearchFieldInput field) async {
+    final text = await _readSystemClipboardText();
+    if (!mounted) {
+      return;
+    }
+    if (text == null || text.isEmpty) {
+      _showClipboardMessage('Clipboard has no text to paste.');
+      return;
+    }
+    field.pasteText(text);
+  }
+
   Future<void> _pasteClipboardIntoNativeComposer() async {
     try {
       final imageBytes = await Pasteboard.image;
@@ -16217,8 +16267,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _nativeComposerFocusController.pasteText(text);
   }
 
-  Future<void> _pasteSnippetIntoNativeComposer(
+  /// Inserts [selectedSnippet]'s command, with its variables filled in,
+  /// through [insert]: the native chat's composer or the find field.
+  Future<void> _insertKeyboardToolbarSnippet(
     KeyboardToolbarSnippet selectedSnippet,
+    ValueChanged<String> insert,
   ) async {
     final repository = ref.read(snippetRepositoryProvider);
     final snippet = await repository.getById(selectedSnippet.id);
@@ -16233,7 +16286,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted || substitution == null || substitution.command.isEmpty) {
       return;
     }
-    _nativeComposerFocusController.insertText(substitution.command);
+    insert(substitution.command);
     unawaited(repository.incrementUsage(snippet.id));
   }
 
