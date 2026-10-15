@@ -843,6 +843,30 @@ void registerAcpUnreadTests() {
       expect(state.earlierHistoryUnavailable, isFalse);
       expect(state.dividerEntryIndex, 3);
     });
+
+    test('a short agent reply is never matched by its whole text', () {
+      // The last seen "Okay" was still streaming and replays as "Okay,
+      // done". An earlier, finished "Okay" must not take its place.
+      final marker = AcpLastSeenMarker.of(
+        _timeline([
+          _user(0, 'Go'),
+          _agent(1, 'Okay'),
+          _user(2, 'And the docs?'),
+          _agent(3, 'Okay'),
+        ], source: Object()),
+      )!;
+      expect(marker.textIsWhole, isFalse);
+      final rebuilt = _timeline([
+        _user(0, 'Go'),
+        _agent(1, 'Okay'),
+        _user(2, 'And the docs?'),
+        _agent(3, 'Okay, the docs are updated.'),
+      ], source: Object());
+      expect(marker.relocateIn(rebuilt.entries), isNull);
+      final state = _unread(marker, rebuilt)!;
+      expect(state.earlierHistoryUnavailable, isTrue);
+      expect(state.digest, isNull);
+    });
   });
 
   group('acpSeenSnapshot', () {

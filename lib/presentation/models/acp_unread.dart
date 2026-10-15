@@ -131,9 +131,12 @@ final class AcpLastSeenMarker {
           // it, so only agent and reasoning identifiers identify a message.
           messageId: role == d.AcpMessageRole.user ? null : messageId,
           textPrefix: _leadingText(seen, _markerTextPrefixChars),
+          // Only a prompt is known to be whole: a short agent or reasoning
+          // reply may still have been streaming.
           textIsWhole:
+              role == d.AcpMessageRole.user &&
               _leadingText(seen, _markerTextPrefixChars + 1).length <=
-              _markerTextPrefixChars,
+                  _markerTextPrefixChars,
         ),
     };
   }
@@ -183,18 +186,22 @@ final class AcpLastSeenMarker {
   /// The start of the last seen message's text.
   final String textPrefix;
 
-  /// Whether [textPrefix] is the message's whole text, as with a short
-  /// prompt such as "continue".
+  /// Whether [textPrefix] is the whole text of a user prompt, as with a
+  /// short prompt such as "continue". Prompts do not grow; agent and
+  /// reasoning replies can, so this is never set for them.
   final bool textIsWhole;
 
   /// Where the last seen entry is in a rebuilt [entries], or `null` when it
   /// cannot be told apart from other entries.
   ///
   /// A tool call or an agent message with an identifier is found by that
-  /// identifier. Otherwise a message is found by role and the start of its
+  /// identifier. A replayed message with a different identifier is never
+  /// matched by its text: identifiers are more trustworthy than text, so an
+  /// agent that issues new identifiers on replay gets the fallback rather
+  /// than a guess. Otherwise a message is found by role and the start of its
   /// text: an empty start never matches, and a short one only when a single
-  /// message carries it, or when it was the whole of a finished message and
-  /// matches other messages' whole text exactly. Of several matches, the one
+  /// message carries it, or when it was the whole of a user prompt and
+  /// matches other prompts' whole text exactly. Of several matches, the one
   /// nearest the remembered position wins, and the earlier on a tie, which
   /// errs towards showing more as unread rather than hiding it.
   int? relocateIn(List<d.AcpTimelineEntry> entries) {
