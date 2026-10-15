@@ -26,11 +26,48 @@ import 'package:monkeyssh/domain/services/ssh_service.dart';
 //     test/integration/ssh_agent_forwarding_sshd_e2e_test.dart
 //
 // Needs sshd, ssh, ssh-add and ssh-keygen (stock on macOS); sshd runs as the
-// current user, so no root and no system SSH configuration is involved.
+// current user, so no root is involved and the system sshd is not touched.
+//
+// OpenSSH 10.1 and later create the forwarded agent socket under ~/.ssh/agent
+// in the passwd home directory of the user sshd runs as; $HOME does not move
+// it. On those versions the test would write into your real ~/.ssh, so it
+// also needs MONKEYSSH_AGENT_FORWARDING_E2E_REAL_SSH_DIR=1 there.
 const _sshd = '/usr/sbin/sshd';
 const _sshKeygen = 'ssh-keygen';
 
 final _enabled = Platform.environment['MONKEYSSH_AGENT_FORWARDING_E2E'] == '1';
+final _allowsRealSshDir =
+    Platform.environment['MONKEYSSH_AGENT_FORWARDING_E2E_REAL_SSH_DIR'] == '1';
+
+/// Whether this machine's OpenSSH puts forwarded agent sockets in the real
+/// ~/.ssh/agent (10.1 and later). An unknown version counts as yes.
+bool _agentSocketsInRealSshDir() {
+  try {
+    final result = Process.runSync('ssh', ['-V']);
+    final match = RegExp(r'OpenSSH_(\d+)\.(\d+)')
+        .firstMatch('${result.stderr}${result.stdout}');
+    if (match == null) {
+      return true;
+    }
+    final major = int.parse(match[1]!);
+    final minor = int.parse(match[2]!);
+    return major > 10 || (major == 10 && minor >= 1);
+  } on ProcessException {
+    return true;
+  }
+}
+
+String? _skipReason() {
+  if (!_enabled || !File(_sshd).existsSync()) {
+    return 'Set MONKEYSSH_AGENT_FORWARDING_E2E=1 on a machine with $_sshd.';
+  }
+  if (!_allowsRealSshDir && _agentSocketsInRealSshDir()) {
+    return 'OpenSSH 10.1 and later put the forwarded agent socket in your '
+        'real ~/.ssh/agent. Also set '
+        'MONKEYSSH_AGENT_FORWARDING_E2E_REAL_SSH_DIR=1 to allow that.';
+  }
+  return null;
+}
 
 Future<void> _keygen(String path, String type) async {
   final result = await Process.run(_sshKeygen, [
@@ -229,9 +266,7 @@ AllowAgentForwarding yes
       );
       expect(await run('ssh-add -l 2>&1'), isNot(contains('phone')));
     },
-    skip: _enabled && File(_sshd).existsSync()
-        ? false
-        : 'Set MONKEYSSH_AGENT_FORWARDING_E2E=1 on a machine with $_sshd.',
+    skip: _skipReason() ?? false,
     timeout: const Timeout(Duration(minutes: 2)),
   );
 }
