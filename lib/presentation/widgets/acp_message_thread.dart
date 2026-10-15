@@ -164,6 +164,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _tailAnchorStableFrames = 0;
   double? _lastTailMaxExtent;
   int _searchRevealGeneration = 0;
+  bool _searchRevealSeeking = false;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -195,7 +196,11 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _scheduleStickyUpdate();
     _scheduleTailAnchor(reset: true);
     final focus = widget.searchFocus;
-    if (focus != null && focus.serial != oldWidget.searchFocus?.serial) {
+    if (focus == null) {
+      // Search closed or lost its match: a reveal still seeking stops where
+      // it is.
+      if (oldWidget.searchFocus != null) _stopSearchReveal();
+    } else if (focus.serial != oldWidget.searchFocus?.serial) {
       _revealSearchFocus(focus);
     }
   }
@@ -213,14 +218,35 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         return;
       }
       widget.onStickyPromptTap?.call();
+      _searchRevealSeeking = true;
       unawaited(
         _scrollEntryIntoView(
           focus.entryIndex,
           childKey: focus.childKey,
           topInset: _stickyPromptHeight,
           isCurrent: () => generation == _searchRevealGeneration,
-        ),
+        ).whenComplete(() {
+          if (generation == _searchRevealGeneration) {
+            _searchRevealSeeking = false;
+          }
+        }),
       );
+    });
+  }
+
+  /// Ends a search reveal, halting its scroll animation if one is running.
+  void _stopSearchReveal() {
+    final generation = ++_searchRevealGeneration;
+    if (!_searchRevealSeeking) return;
+    _searchRevealSeeking = false;
+    // After the frame: halting the animation dispatches scroll notifications,
+    // which listeners must not receive during build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          generation == _searchRevealGeneration &&
+          _controller.hasClients) {
+        _controller.jumpTo(_controller.offset);
+      }
     });
   }
 
@@ -596,6 +622,9 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
         notification is UserScrollNotification &&
             notification.direction != ScrollDirection.idle;
     if (userInitiated) {
+      // The user's own scroll wins over a search reveal still seeking.
+      _searchRevealGeneration++;
+      _searchRevealSeeking = false;
       _userOwnsScrollPosition = true;
       _earlierTranscriptAnchorGeneration += 1;
       _earlierTranscriptLoadScheduled = false;

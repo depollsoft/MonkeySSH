@@ -294,6 +294,46 @@ void registerAcpTranscriptToolsTests() {
       expect(find.text('The needle is here.'), findsNothing);
     });
 
+    for (final interruption in ['closing search', 'a drag']) {
+      testWidgets('$interruption stops a seek to a far match', (tester) async {
+        final entries = _longTranscript();
+        final controller = ScrollController();
+        addTearDown(controller.dispose);
+        Widget thread(AcpThreadSearchFocus? focus) => _app(
+          AcpMessageThread(
+            entries: entries,
+            controller: controller,
+            searchFocus: focus,
+          ),
+          disableAnimations: false,
+        );
+        await tester.pumpWidget(thread(null));
+        await tester.pumpAndSettle();
+        controller.jumpTo(controller.position.maxScrollExtent);
+        await tester.pumpAndSettle();
+
+        const far = AcpThreadSearchFocus(
+          entryIndex: 3,
+          childKey: 'agent-3',
+          entryId: 'agent-3',
+          serial: 1,
+        );
+        await tester.pumpWidget(thread(far));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 30));
+        if (interruption == 'closing search') {
+          await tester.pumpWidget(thread(null));
+        } else {
+          await tester.drag(
+            find.byType(AcpMessageThread),
+            const Offset(0, -40),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('The needle is here.'), findsNothing);
+      });
+    }
+
     testWidgets('a focused tool call or reasoning block expands', (
       tester,
     ) async {
