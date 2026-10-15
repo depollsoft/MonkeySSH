@@ -285,5 +285,41 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.pumpWidget(const SizedBox());
       expect(actions.isAttached, isFalse);
     });
+
+    testWidgets('search waits for the session instead of opening later', (
+      tester,
+    ) async {
+      final manager = FakeAcpSessionManager();
+      final actions = AcpChatActionsController();
+      await tester.pumpWidget(
+        _chat(manager, embedded: true, chatActions: actions),
+      );
+      await tester.pump();
+      actions.openSearch();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('Nothing to search yet.'), findsOneWidget);
+
+      manager.emit(AcpSessionManagerState(sessions: [_session()]));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byType(AcpTranscriptSearchBar), findsNothing);
+      expect(find.byType(AcpComposer), findsOneWidget);
+    });
+
+    testWidgets('Android back closes the search bar first', (tester) async {
+      await tester.pumpWidget(
+        _chat(FakeAcpSessionManager(sessions: [_session()])),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpTranscriptSearchBar), findsNothing);
+      expect(find.byType(AgentChatScreen), findsOneWidget);
+    });
   });
 }

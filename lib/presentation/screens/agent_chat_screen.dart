@@ -283,7 +283,20 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     if (mounted) setState(() {});
   }
 
-  void _openSearch() => _search.open();
+  /// Opens the find bar. Until the session has loaded there is nothing to
+  /// search, and a bar opened now would only appear, and take the keyboard,
+  /// once it connects.
+  void _openSearch() {
+    final session = ref
+        .read(acpSessionManagerProvider)
+        .state
+        .byKeyValue(_key.value);
+    if (session == null) {
+      _showSnack('Nothing to search yet.');
+      return;
+    }
+    _search.open();
+  }
 
   /// Opens the Markdown export preview for the loaded transcript.
   Future<void> _exportTranscript() async {
@@ -1102,26 +1115,35 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
-    if (isWide && !widget.embedded) {
-      return Scaffold(
-        body: Row(
-          children: [
-            AcpSessionRail(currentKey: _key),
-            Expanded(
-              child: _buildConversation(
-                session,
-                showBack: true,
-                contentWrapper: wrapContent,
-              ),
+    final conversation = isWide && !widget.embedded
+        ? Scaffold(
+            body: Row(
+              children: [
+                AcpSessionRail(currentKey: _key),
+                Expanded(
+                  child: _buildConversation(
+                    session,
+                    showBack: true,
+                    contentWrapper: wrapContent,
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      );
-    }
-    return _buildConversation(
-      session,
-      showBack: !widget.embedded,
-      contentWrapper: wrapContent,
+          )
+        : _buildConversation(
+            session,
+            showBack: !widget.embedded,
+            contentWrapper: wrapContent,
+          );
+    // Android's back closes the find bar first, as find in page does. Apple
+    // platforms keep their back swipe; the bar has its own close button.
+    return PopScope(
+      canPop:
+          !(_search.isOpen && defaultTargetPlatform == TargetPlatform.android),
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _search.isOpen) _search.close();
+      },
+      child: conversation,
     );
   }
 
@@ -1221,6 +1243,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     required Widget Function(Widget child) contentWrapper,
   }) {
     if (session == null) {
+      // A find bar left open when the session went away would reappear, and
+      // take the keyboard, when it comes back.
+      if (_search.isOpen) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _search.close();
+        });
+      }
       final content = _connectError != null
           ? _buildConnectError(_connectError!)
           : _connecting
