@@ -191,9 +191,9 @@ void main() {
         (key: LogicalKeyboardKey.arrowUp, shift: false, ctrl: false),
         (key: LogicalKeyboardKey.bracketRight, shift: false, ctrl: false),
         (key: LogicalKeyboardKey.digit1, shift: true, ctrl: false),
-        // Hooks for features that are not built yet stay with the terminal.
-        (key: LogicalKeyboardKey.keyF, shift: false, ctrl: false),
-        (key: LogicalKeyboardKey.keyD, shift: true, ctrl: false),
+        // Find and Changes take ⌘F and ⇧⌘D only.
+        (key: LogicalKeyboardKey.keyF, shift: true, ctrl: false),
+        (key: LogicalKeyboardKey.keyD, shift: false, ctrl: false),
       ];
       for (final chord in passthrough) {
         expect(
@@ -434,12 +434,17 @@ void main() {
         ),
         isNull,
       );
+      // Ctrl+F stays with the program (readline's forward-char); find is
+      // Ctrl+Shift+F.
+      expect(
+        _match(LogicalKeyboardKey.keyF, platform: android, control: true),
+        isNull,
+      );
       for (final key in [
         LogicalKeyboardKey.keyC,
         LogicalKeyboardKey.keyV,
         LogicalKeyboardKey.keyZ,
         LogicalKeyboardKey.arrowLeft,
-        LogicalKeyboardKey.keyF,
       ]) {
         expect(
           _match(key, platform: android, control: true, shift: true),
@@ -473,20 +478,47 @@ void main() {
     }
   });
 
-  test('every action has a chord; unbuilt features are hooks only', () {
-    final available = appShortcutsFor(ios).map((s) => s.action).toSet();
+  test('every action has a chord', () {
+    for (final platform in [ios, android]) {
+      expect(
+        appShortcutsFor(platform).map((s) => s.action).toSet(),
+        AppShortcutAction.values.toSet(),
+      );
+    }
+  });
+
+  test('find and changes take ⌘F and ⇧⌘D, or Ctrl+Shift+F and D', () {
     expect(
-      available,
-      AppShortcutAction.values.toSet()..removeAll({
-        AppShortcutAction.findInScrollback,
-        AppShortcutAction.openChanges,
-      }),
+      _match(LogicalKeyboardKey.keyF, platform: ios, meta: true)?.action,
+      AppShortcutAction.find,
     );
-    final hooks = allAppShortcuts.where((s) => !s.available);
-    expect(hooks.map((s) => s.action).toSet(), {
-      AppShortcutAction.findInScrollback,
+    expect(
+      _match(
+        LogicalKeyboardKey.keyD,
+        platform: ios,
+        meta: true,
+        shift: true,
+      )?.action,
       AppShortcutAction.openChanges,
-    });
+    );
+    expect(
+      _match(
+        LogicalKeyboardKey.keyF,
+        platform: android,
+        control: true,
+        shift: true,
+      )?.action,
+      AppShortcutAction.find,
+    );
+    expect(
+      _match(
+        LogicalKeyboardKey.keyD,
+        platform: android,
+        control: true,
+        shift: true,
+      )?.action,
+      AppShortcutAction.openChanges,
+    );
   });
 
   test('describes chords for each platform', () {

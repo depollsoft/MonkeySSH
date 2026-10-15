@@ -62,10 +62,11 @@ enum AppShortcutAction {
   /// Opens the SFTP file browser for the current connection.
   openFiles,
 
-  /// Finds text in the terminal scrollback (#937).
-  findInScrollback,
+  /// Opens find: in the agent chat on screen, otherwise in the terminal
+  /// scrollback.
+  find,
 
-  /// Opens the working tree Changes view (#925).
+  /// Opens the working tree changes sheet.
   openChanges,
 }
 
@@ -382,7 +383,6 @@ class AppShortcut {
     this.control = false,
     this.windowNumber,
     this.repeats = false,
-    this.available = true,
   });
 
   /// What the shortcut does.
@@ -412,11 +412,6 @@ class AppShortcut {
   /// repeats; iPadOS hardware keyboards do not.
   final bool repeats;
 
-  /// False for a hook whose feature is not built yet. Unavailable shortcuts
-  /// are not reserved and not listed, so their chords still reach the
-  /// terminal until the feature lands.
-  final bool available;
-
   /// Whether the pressed modifiers in [keyboard] are this chord's under
   /// [scheme].
   bool modifiersMatch(
@@ -441,7 +436,7 @@ class AppShortcut {
       AppShortcutIntent(action, windowNumber: windowNumber);
 }
 
-/// Every app shortcut, including hooks for features that are not built yet.
+/// Every app shortcut.
 const List<AppShortcut> allAppShortcuts = [
   AppShortcut(
     action: AppShortcutAction.nextWindow,
@@ -560,22 +555,20 @@ const List<AppShortcut> allAppShortcuts = [
     label: 'Browse files (SFTP)',
     key: AppShortcutKey.keyO,
   ),
-  // Hook for #937. Flip `available` when find in scrollback lands.
+  // ⌘F matches the chat's own Cmd+F binding on iPadOS. Android's chat also
+  // keeps Ctrl+F, which in the terminal belongs to the program.
   AppShortcut(
-    action: AppShortcutAction.findInScrollback,
+    action: AppShortcutAction.find,
     group: AppShortcutGroup.session,
-    label: 'Find in scrollback',
+    label: 'Find in terminal or chat',
     key: AppShortcutKey.keyF,
-    available: false,
   ),
-  // Hook for #925. Flip `available` when the Changes view lands.
   AppShortcut(
     action: AppShortcutAction.openChanges,
     group: AppShortcutGroup.session,
     label: 'Working tree changes',
     key: AppShortcutKey.keyD,
     shift: true,
-    available: false,
   ),
   AppShortcut(
     action: AppShortcutAction.showShortcuts,
@@ -585,17 +578,10 @@ const List<AppShortcut> allAppShortcuts = [
   ),
 ];
 
-/// Shortcuts reserved on [platform]: the available entries of
-/// [allAppShortcuts], or none where the platform has no scheme.
-List<AppShortcut> appShortcutsFor(TargetPlatform platform) {
-  if (appShortcutSchemeFor(platform) == null) {
-    return const [];
-  }
-  return [
-    for (final shortcut in allAppShortcuts)
-      if (shortcut.available) shortcut,
-  ];
-}
+/// Shortcuts reserved on [platform]: [allAppShortcuts], or none where the
+/// platform has no scheme.
+List<AppShortcut> appShortcutsFor(TargetPlatform platform) =>
+    appShortcutSchemeFor(platform) == null ? const [] : allAppShortcuts;
 
 /// Returns the app shortcut that [event] forms with the currently pressed
 /// modifiers, or null when the chord belongs to the terminal.

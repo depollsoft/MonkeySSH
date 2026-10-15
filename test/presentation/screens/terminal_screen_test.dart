@@ -74,6 +74,7 @@ import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
+import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
@@ -12367,6 +12368,125 @@ void main() {
             extraFlags: any(named: 'extraFlags'),
           ),
         ).called(1);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      final terminalSearchField = find.byKey(
+        const ValueKey<String>('terminal-search-field'),
+      );
+      bool fieldHasFocus(WidgetTester tester, Finder field) =>
+          tester.widget<TextField>(field).focusNode!.hasFocus;
+
+      testWidgets('⌘F finds in the terminal, or in the native chat on screen', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(fieldHasFocus(tester, terminalSearchField), isTrue);
+        expect(find.byType(AcpTranscriptSearchBar), findsNothing);
+
+        // The find bar's own Esc closes it and hands the keyboard back.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump();
+        expect(terminalSearchField, findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        for (var i = 0; i < 6; i++) {
+          await tester.pump();
+        }
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+        expect(
+          fieldHasFocus(
+            tester,
+            find.byKey(const ValueKey('acp-transcript-search-field')),
+          ),
+          isTrue,
+        );
+        expect(terminalSearchField, findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('Ctrl+Shift+F opens find while Ctrl+F stays with the shell', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        terminalFocus(tester).requestFocus();
+        await tester.pump();
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        expect(terminalSearchField, findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), '\x06');
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(fieldHasFocus(tester, terminalSearchField), isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('⇧⌘D opens working tree changes; Esc hands the keyboard '
+          'back to the terminal', (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          appShortcuts: true,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        terminalFocus(tester).requestFocus();
+        await tester.pump();
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyD);
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
         expect(shellWrites.map(utf8.decode).join(), isEmpty);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     });

@@ -1126,6 +1126,19 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       handlers: {
         AppShortcutAction.focusComposer: (_) =>
             _ownComposerFocusController.requestFocus(),
+        // The content's own Cmd/Ctrl+F binding answers first while focus is
+        // inside the chat; this covers Ctrl+Shift+F on Android and a chord
+        // pressed with nothing focused.
+        AppShortcutAction.find: (_) => _openSearch(),
+        AppShortcutAction.openChanges: (_) {
+          final session = ref
+              .read(acpSessionManagerProvider)
+              .state
+              .byKeyValue(_key.value);
+          if (session != null) {
+            unawaited(_handleAction(_ChatAction.workingTreeChanges, session));
+          }
+        },
       },
       child: screen,
     );
@@ -2009,7 +2022,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     final draft = _composer.text;
     final separator = draft.isEmpty || draft.endsWith('\n') ? '' : '\n\n';
     _composer.setText('$draft$separator$prompt');
-    widget.composerFocusController?.requestFocus();
+    (widget.composerFocusController ?? _ownComposerFocusController)
+        .requestFocus();
   }
 
   Future<bool> _confirmDeleteSession() async {

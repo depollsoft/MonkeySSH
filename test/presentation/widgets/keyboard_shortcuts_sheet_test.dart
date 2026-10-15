@@ -23,9 +23,8 @@ void main() {
     expect(byLabel['Focus composer or terminal']?.chord, '⌘L');
     expect(byLabel['Browse files (SFTP)']?.chord, '⌘O');
     expect(byLabel['Keyboard shortcuts']?.chord, '⌘/');
-    // Hooks for unbuilt features are not listed.
-    expect(byLabel.containsKey('Find in scrollback'), isFalse);
-    expect(byLabel.containsKey('Working tree changes'), isFalse);
+    expect(byLabel['Find in terminal or chat']?.chord, '⌘F');
+    expect(byLabel['Working tree changes']?.chord, '⇧⌘D');
     expect(entries.where((entry) => entry.label.startsWith('Go to window')), [
       isA<KeyboardShortcutListEntry>(),
     ]);
@@ -38,6 +37,8 @@ void main() {
     expect(byLabel['New window']?.chord, 'Ctrl+Shift+T');
     expect(byLabel[_numberedLabel]?.chord, 'Ctrl+Shift+0–9');
     expect(byLabel['Show or hide windows']?.chord, 'Ctrl+Shift+S');
+    expect(byLabel['Find in terminal or chat']?.chord, 'Ctrl+Shift+F');
+    expect(byLabel['Working tree changes']?.chord, 'Ctrl+Shift+D');
   });
 
   test('desktop platforms list nothing', () {

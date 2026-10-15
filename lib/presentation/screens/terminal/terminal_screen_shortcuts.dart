@@ -1,13 +1,14 @@
 part of '../terminal_screen.dart';
 
-/// Hardware keyboard shortcuts for the terminal screen (#931).
-///
-/// Window shortcuts drive the persistent window switcher (the bottom bar, or
-/// the sidebar on wide layouts). With the bar hidden from the Options menu,
-/// only "show or hide windows" works; it opens the window navigator sheet,
-/// which is keyboard navigable. Find in scrollback (#937) and Changes (#925)
-/// have no handler yet, so their chords stay with the terminal (they are not
-/// reserved until `available` is set in `app_shortcuts.dart`).
+// Hardware keyboard shortcuts for the terminal screen (#931).
+//
+// Window shortcuts drive the persistent window switcher (the bottom bar, or
+// the sidebar on wide layouts). With the bar hidden from the Options menu,
+// only "show or hide windows" works; it opens the window navigator sheet,
+// which is keyboard navigable. Find opens the chat's search when a native
+// chat fills the viewport and the scrollback find bar otherwise, as the
+// overflow menu's Search Chat and Find do.
+
 /// Frames to wait for an agent chat's composer before giving up on focusing
 /// it after a keyboard flow.
 const _composerAttachFrames = 10;
@@ -63,6 +64,23 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
       AppShortcutAction.openFiles: connected
           ? (_) => unawaited(_openConnectionFileBrowser())
           : null,
+      // While a native chat is still launching there is nothing to search,
+      // and the terminal under it is hidden.
+      AppShortcutAction.find:
+          _activeNativeAcpSessionKey == null && _nativeAcpLaunchState != null
+          ? null
+          : (_) {
+              // The expanded switcher covers both find bars.
+              _collapseTmuxBarIfExpanded();
+              if (_activeNativeAcpSessionKey != null) {
+                _nativeChatActions.openSearch();
+              } else {
+                _openScrollbackSearch();
+              }
+            },
+      // Always available: without a connection the sheet says why.
+      AppShortcutAction.openChanges: (_) =>
+          _afterKeyboardWindowSwitch(_openWorkingTreeChanges()),
     };
   }
 
