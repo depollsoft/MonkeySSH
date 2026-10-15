@@ -72,11 +72,14 @@ const presentations: Record<PushKind, KindPresentation> = {
 /** Android channel the app creates for events that wait on the user. */
 export const androidChannelId = "agent-attention";
 /**
- * Quiet Android channel for routine events (finished turns, window alerts).
- * On Android 8+ the channel, not the message priority, decides sound and
- * heads-up display.
+ * Android channel for routine events (finished turns, window alerts): default
+ * importance, so they sound and show in the status bar without popping up. On
+ * Android 8+ the channel, not the message priority, decides sound and heads-up
+ * display. It replaced the low-importance "agent-updates", whose finished
+ * turns sat collapsed in the Silent section; an app without this channel
+ * shows the message on the manifest's default, "agent-attention".
  */
-export const androidRoutineChannelId = "agent-updates";
+export const androidRoutineChannelId = "agent-updates-v2";
 const androidIcon = "ic_notification_monkey";
 const timeToLiveSeconds = 3600;
 
@@ -87,15 +90,38 @@ export interface FcmMessageInput {
   readonly collapse: string;
   readonly payload: string;
   readonly platform?: TicketPlatform;
+  /** The ticket says the app posts its own notifications (see TicketContents). */
+  readonly appNotifications?: boolean;
   readonly nowSeconds: number;
 }
 
 /**
  * Builds the FCM message. Visible text comes from the coarse kind only; the
  * encrypted payload travels as data for the app to open.
+ *
+ * An Android app that posts its own notifications gets a data-only message: it
+ * decrypts the payload and posts the notification itself, naming the window,
+ * host and agent, on the channel for the kind. `k` (the kind) and `c` (the
+ * collapse key) let it post a generic one when the payload does not open.
+ * Every such push must end in a visible notification, so it is sent at high
+ * priority to wake the app. iOS, an Android build from before that (its
+ * ticket lacks appNotifications and it has no handler for data-only
+ * messages), and a ticket without a platform get an alert, which the iOS
+ * notification service extension rewrites.
  */
 export function buildFcmMessage(input: FcmMessageInput): TokenMessage {
   const presentation = presentations[input.kind];
+  if (input.platform === "android" && input.appNotifications === true) {
+    return {
+      token: input.token,
+      data: { v: "1", p: input.payload, k: input.kind, c: input.collapse },
+      android: {
+        priority: "high",
+        collapseKey: input.collapse,
+        ttl: timeToLiveSeconds * 1000,
+      },
+    };
+  }
   return {
     token: input.token,
     notification: { title: presentation.title, body: presentation.body },

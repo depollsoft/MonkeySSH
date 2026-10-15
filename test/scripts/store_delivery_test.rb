@@ -99,7 +99,7 @@ class FastfileHarness
 
   def method_missing(name, *args)
     return instance_exec(*args, &@lanes.fetch(name)) if @lanes.key?(name)
-    return @calls << [name, args.first] if %i[pilot match deliver].include?(name)
+    return @calls << [name, args.first] if %i[pilot match deliver update_code_signing_settings build_app].include?(name)
 
     super
   end
@@ -197,6 +197,77 @@ class FastfileDeliveryTest < Minitest::Test
     @harness.sync_certs(app_identifier: ['app'], type: 'adhoc', readonly: true)
     options = @harness.calls.assoc(:match).last
     refute options.key?(:git_basic_authorization)
+  end
+
+  def test_profile_regeneration_registers_and_signs_every_extension
+    registered = []
+    @harness.lanes[:ensure_bundle_ids] = proc { |options| registered << options[:identifiers] }
+    @harness.regenerate_profiles(scheme: 'Private')
+    expected = %w[
+      xyz.depollsoft.monkeyssh.private
+      xyz.depollsoft.monkeyssh.private.ConnectionStatusLiveActivity
+      xyz.depollsoft.monkeyssh.private.NotificationService
+    ]
+    assert_equal [expected], registered
+    options = @harness.calls.assoc(:match).last
+    assert_equal expected, options[:app_identifier]
+    assert options[:force]
+    refute options[:readonly]
+  end
+
+  def test_archive_signs_each_extension_with_its_own_profile
+    @harness.build_and_sign(scheme: 'Production')
+    assert_equal %w[
+      xyz.depollsoft.monkeyssh
+      xyz.depollsoft.monkeyssh.ConnectionStatusLiveActivity
+      xyz.depollsoft.monkeyssh.NotificationService
+    ], @harness.calls.assoc(:match).last[:app_identifier]
+    signing = @harness.calls.select { |name, _| name == :update_code_signing_settings }.map(&:last)
+    assert_equal(
+      {
+        'Runner' => 'match AppStore xyz.depollsoft.monkeyssh',
+        'ConnectionStatusLiveActivityExtension' => 'match AppStore xyz.depollsoft.monkeyssh.ConnectionStatusLiveActivity',
+        'NotificationServiceExtension' => 'match AppStore xyz.depollsoft.monkeyssh.NotificationService',
+      },
+      signing.to_h { |options| [options[:targets].first, options[:profile_name]] },
+    )
+    assert(signing.all? { |options| options[:build_configurations] == ['Release-Production'] })
+  end
+
+  def test_unknown_scheme_is_refused_before_signing
+    assert_raises(RuntimeError) { @harness.signing_app_ids(scheme: 'Staging') }
+  end
+
+  def test_resigned_app_keeps_the_profiles_keychain_groups_first
+    # The first group is where keychain items written without one live, and
+    # re-signed builds have always used the profile's list, so it must not move.
+    groups = @harness.resign_keychain_groups(
+      profile_groups: ['43AWMS3YJX.*', 'com.apple.token'],
+      push_group: '43AWMS3YJX.xyz.depollsoft.monkeyssh.private.push',
+      keep_profile_groups: true,
+    )
+    assert_equal ['43AWMS3YJX.*', 'com.apple.token', '43AWMS3YJX.xyz.depollsoft.monkeyssh.private.push'], groups
+  end
+
+  def test_resigned_notification_service_gets_only_the_push_group
+    groups = @harness.resign_keychain_groups(
+      profile_groups: ['43AWMS3YJX.*', 'com.apple.token'],
+      push_group: '43AWMS3YJX.xyz.depollsoft.monkeyssh.private.push',
+      keep_profile_groups: false,
+    )
+    assert_equal ['43AWMS3YJX.xyz.depollsoft.monkeyssh.private.push'], groups
+  end
+
+  def test_push_keychain_group_uses_the_profiles_app_id_prefix
+    assert_equal '43AWMS3YJX.xyz.depollsoft.monkeyssh.push', @harness.push_keychain_group(
+      app_identifier: 'xyz.depollsoft.monkeyssh',
+      application_identifier: '43AWMS3YJX.xyz.depollsoft.monkeyssh',
+    )
+    ['43AWMS3YJX.xyz.depollsoft.monkeyssh.private', 'xyz.depollsoft.monkeyssh', nil].each do |identifier|
+      assert_raises(RuntimeError) do
+        @harness.push_keychain_group(app_identifier: 'xyz.depollsoft.monkeyssh', application_identifier: identifier)
+      end
+    end
   end
 
   def test_followup_waits_for_and_updates_only_the_requested_build

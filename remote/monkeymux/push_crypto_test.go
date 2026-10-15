@@ -223,18 +223,28 @@ func TestPushPublicKeyValidation(t *testing.T) {
 
 func TestPushCollapseKeyIsStableAndOpaque(t *testing.T) {
 	salt := make([]byte, 32)
-	first := pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3")
-	if first != pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3") {
+	first := pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission)
+	if first != pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission) {
 		t.Fatal("collapse key is not stable")
 	}
 	if len(first) != 32 {
 		t.Fatalf("collapse key length = %d", len(first))
 	}
+	// A question shares the approval's group, and an alert a finished turn's.
+	if pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindInput) != first {
+		t.Fatal("a question does not replace the window's approval")
+	}
+	if pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindAlert) !=
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindFinished) {
+		t.Fatal("routine pushes for a window do not share a collapse key")
+	}
 	for _, other := range []string{
-		pushCollapseKey(salt, "device-bbbbbbbbbbbbbbbb", "main", "@3"),
-		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@4"),
-		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "mai", "n@3"),
-		pushCollapseKey([]byte("other"), "device-aaaaaaaaaaaaaaaa", "main", "@3"),
+		pushCollapseKey(salt, "device-bbbbbbbbbbbbbbbb", "main", "@3", pushKindPermission),
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@4", pushKindPermission),
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "mai", "n@3", pushKindPermission),
+		pushCollapseKey([]byte("other"), "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission),
+		// A routine push does not replace a request waiting on the user.
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindFinished),
 	} {
 		if other == first {
 			t.Fatal("collapse keys collided")
