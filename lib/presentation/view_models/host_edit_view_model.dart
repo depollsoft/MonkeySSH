@@ -9,10 +9,12 @@ import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/agent_worktree.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
+import '../../domain/models/host_notifications.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/monkeymux_offer_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../providers/entity_list_providers.dart';
 
@@ -149,7 +151,25 @@ typedef HostEditDraft = ({
   bool disableAgentTmuxStatusBar,
   bool startClisInYoloMode,
   bool autoForwardPorts,
+  HostNotificationPrefs notificationPrefs,
 });
+
+/// The kind of session a host opens with the startup choices in the form,
+/// which decides the notifications it can raise.
+HostSessionKind hostSessionKindForStartup({
+  required HostStartupMode mode,
+  required RemoteMuxBackend agentMuxBackend,
+  required String agentSessionName,
+}) => switch (mode) {
+  HostStartupMode.muxAuto ||
+  HostStartupMode.monkeyMux => HostSessionKind.monkeyMux,
+  HostStartupMode.tmux => HostSessionKind.tmux,
+  HostStartupMode.agent when agentSessionName.trim().isNotEmpty =>
+    agentMuxBackend == RemoteMuxBackend.tmux
+        ? HostSessionKind.tmux
+        : HostSessionKind.monkeyMux,
+  _ => HostSessionKind.shell,
+};
 
 /// Logical validation targets the UI can scroll to and focus.
 enum HostEditValidationTarget {
@@ -468,6 +488,11 @@ class HostEditViewModel extends Notifier<HostEditState> {
           ),
         );
 
+    // A new plain-shell host is offered MonkeyMux on its first connection.
+    if (hostId == null &&
+        request.draft.selectedStartupMode == HostStartupMode.none) {
+      await ref.read(monkeyMuxOfferServiceProvider).markPending(savedHostId);
+    }
     ref.invalidate(allHostsProvider);
     state = state.copyWith(initialDraft: request.draft);
     return savedHostId;
@@ -597,6 +622,7 @@ class HostEditViewModel extends Notifier<HostEditState> {
       autoForwardPorts: draft.autoForwardPorts,
       portProxyName: portProxyName,
       isFavorite: draft.isFavorite,
+      notificationPrefs: draft.notificationPrefs,
     );
   }
 

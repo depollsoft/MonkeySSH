@@ -19,7 +19,9 @@ jobs at 5, and `preview-ios.yml` holds one of them for the same commit.
   the only job that runs the Windows-only tests: `WINDOWS_TEST_INPUTS` count as
   native Windows changes, and `WINDOWS_GATING_INPUTS` (the other inputs of those
   tests, which `test/scripts/ci_changes_test.py` derives from `ci.yml`) build
-  Windows in the merge queue only.
+  Windows in the merge queue only. `build-ios` likewise runs the notification
+  service extension's Swift test, so its inputs outside `ios/`
+  (`IOS_TEST_INPUTS`) count as native iOS changes.
 - **`push` to `main`** is cache warming only. Actions caches written from a
   `gh-readonly-queue/...` ref are scoped to that throwaway ref, so only a run on
   `main` can write caches that later PRs restore. It runs `changes`,
@@ -38,6 +40,8 @@ never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.
+
+The same applies after adding an app extension target: its bundle ID needs a profile before any signed build. `regenerate_profiles` registers missing extension bundle IDs (via the App Store Connect API) before running match.
 
 Refresh once via the **Regenerate iOS Provisioning Profiles** GitHub Actions workflow (`workflow_dispatch`), or run locally:
 

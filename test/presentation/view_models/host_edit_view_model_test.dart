@@ -10,7 +10,9 @@ import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/auto_connect_command.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/services/monkeymux_offer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
 
@@ -69,10 +71,86 @@ HostEditDraft _draft({
   disableAgentTmuxStatusBar: false,
   startClisInYoloMode: false,
   autoForwardPorts: autoForwardPorts,
+  notificationPrefs: const HostNotificationPrefs(),
 );
 
 void main() {
   group('host_edit_view_model', () {
+    group('suggestMuxSessionName', () {
+      test('slugs the label, falling back to the hostname', () {
+        expect(
+          suggestMuxSessionName(label: 'Proj Alpha!', hostname: 'h'),
+          'proj-alpha',
+        );
+        expect(
+          suggestMuxSessionName(label: '  ', hostname: 'build.example.com'),
+          'build',
+        );
+        expect(suggestMuxSessionName(label: '', hostname: ''), 'main');
+      });
+
+      test('never reuses another saved host\'s session on the machine', () {
+        expect(
+          suggestMuxSessionName(
+            label: 'Work',
+            hostname: 'h',
+            taken: const ['work', 'work-2'],
+          ),
+          'work-3',
+        );
+      });
+
+      test('a clash on a long name keeps the suffix within the limit', () {
+        final base = suggestMuxSessionName(label: 'x' * 60, hostname: 'h');
+        final next = suggestMuxSessionName(
+          label: 'x' * 60,
+          hostname: 'h',
+          taken: [base],
+        );
+        expect(next.length, lessThanOrEqualTo(32));
+        expect(next, endsWith('-2'));
+      });
+
+      test('stays short and free of characters tmux rejects', () {
+        final name = suggestMuxSessionName(
+          label: 'a.b:c ${'x' * 60}',
+          hostname: 'h',
+        );
+        expect(name.length, lessThanOrEqualTo(32));
+        expect(name, matches(RegExp(r'^[a-z0-9]+(-[a-z0-9]+)*$')));
+      });
+    });
+
+    test('hostSessionKindForStartup follows the startup choice', () {
+      HostSessionKind kind(
+        HostStartupMode mode, {
+        RemoteMuxBackend backend = RemoteMuxBackend.monkeyMux,
+        String session = '',
+      }) => hostSessionKindForStartup(
+        mode: mode,
+        agentMuxBackend: backend,
+        agentSessionName: session,
+      );
+      expect(kind(HostStartupMode.monkeyMux), HostSessionKind.monkeyMux);
+      expect(kind(HostStartupMode.muxAuto), HostSessionKind.monkeyMux);
+      expect(kind(HostStartupMode.tmux), HostSessionKind.tmux);
+      expect(kind(HostStartupMode.none), HostSessionKind.shell);
+      expect(kind(HostStartupMode.snippet), HostSessionKind.shell);
+      expect(kind(HostStartupMode.agent), HostSessionKind.shell);
+      expect(
+        kind(HostStartupMode.agent, session: 'a'),
+        HostSessionKind.monkeyMux,
+      );
+      expect(
+        kind(
+          HostStartupMode.agent,
+          backend: RemoteMuxBackend.tmux,
+          session: 'a',
+        ),
+        HostSessionKind.tmux,
+      );
+    });
+
     group('HostEditViewModel', () {
       test(
         'unrelated host saves preserve ignored presets until explicit changes',
@@ -162,6 +240,48 @@ void main() {
             (await settings.getJson(SettingKeys.agentLaunchPresets))!['$id'],
             containsPair('tool', 'codex'),
           );
+        },
+      );
+
+      test(
+        'a new plain-shell host is offered MonkeyMux on first connect',
+        () async {
+          final database = AppDatabase.forTesting(NativeDatabase.memory());
+          addTearDown(database.close);
+          final repository = HostRepository(
+            database,
+            SecretEncryptionService.forTesting(),
+          );
+          final container = ProviderContainer(
+            overrides: [
+              databaseProvider.overrideWithValue(database),
+              hostRepositoryProvider.overrideWithValue(repository),
+            ],
+          );
+          addTearDown(container.dispose);
+          Future<int> create(HostEditDraft draft) => container
+              .read(hostEditViewModelProvider(null).notifier)
+              .save(
+                HostEditSaveRequest(
+                  draft: draft,
+                  hasAutomationAccess: true,
+                  hasAgentPresetAccess: true,
+                ),
+              );
+          final offers = container.read(monkeyMuxOfferServiceProvider);
+
+          final plain = await create(_draft(label: 'Plain'));
+          final mux = await create(
+            _draft(
+              label: 'Mux',
+              startupMode: HostStartupMode.monkeyMux,
+              tmuxSession: 'mux',
+            ),
+          );
+          expect(await offers.takePending(mux), isFalse);
+          expect(await offers.takePending(plain), isTrue);
+          // Once.
+          expect(await offers.takePending(plain), isFalse);
         },
       );
 
