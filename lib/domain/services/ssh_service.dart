@@ -7863,9 +7863,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       // A link's forwarding hold belongs to the connection it opens. When
       // the attempt fails or is cancelled, no session takes it, so nothing
       // else would end it and a later normal connect would inherit it.
-      if (getConnectionsForHost(hostId).isEmpty) {
-        _automaticForwardHeldHostIds.remove(hostId);
-      }
+      _dropUnclaimedAutomaticForwardingHold(hostId);
     }
   }
 
@@ -8454,8 +8452,8 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
   /// it, because a link is about to open the host's first connection.
   ///
   /// A host that already has a connection keeps whatever forwarding it runs.
-  /// The hold ends with [releaseAutomaticForwardingHold] or when the host's
-  /// last connection closes.
+  /// The hold ends with [releaseAutomaticForwardingHold], or once the host
+  /// has neither a connection nor a connection attempt left.
   void holdAutomaticForwardingUntilStarted(int hostId) {
     if (getConnectionsForHost(hostId).isEmpty) {
       _automaticForwardHeldHostIds.add(hostId);
@@ -8476,6 +8474,17 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   bool _allowsAutomaticForwarding(Host host) =>
       host.autoForwardPorts && !_automaticForwardHeldHostIds.contains(host.id);
+
+  /// Ends [hostId]'s forwarding hold once nothing is left to take it: the
+  /// host has no connection and no connection attempt still running. Two
+  /// link taps share one hold, so the first attempt to fail must leave it
+  /// for the other.
+  void _dropUnclaimedAutomaticForwardingHold(int hostId) {
+    if (getConnectionsForHost(hostId).isEmpty &&
+        (_connectionCancellationTokens[hostId]?.isEmpty ?? true)) {
+      _automaticForwardHeldHostIds.remove(hostId);
+    }
+  }
 
   /// Reapplies automatic forwarding for every currently connected saved host.
   Future<void> reconfigureAutomaticPortForwardingForConnectedHosts() async {
@@ -8585,9 +8594,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     int hostId,
     String? endpointKey,
   ) async {
-    if (getConnectionsForHost(hostId).isEmpty) {
-      _automaticForwardHeldHostIds.remove(hostId);
-    }
+    _dropUnclaimedAutomaticForwardingHold(hostId);
     final triggerHost = await _telemetryHostForConnection(hostId);
     if (triggerHost != null && endpointKey != null) {
       await _reconfigureAutomaticPortForwardingEndpoint(

@@ -4539,6 +4539,74 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test(
+      'a failed link connection keeps the hold for another attempt in flight',
+      () async {
+        final sshService = _MockSshService();
+        final telemetry = _MockTelemetryService();
+        when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
+        final attempts = <Completer<SshConnectionResult>>[];
+        when(
+          () => sshService.connectToHost(
+            any(),
+            onProgress: any(named: 'onProgress'),
+            useHostThemeOverrides: any(named: 'useHostThemeOverrides'),
+            cancellationToken: any(named: 'cancellationToken'),
+          ),
+        ).thenAnswer((_) {
+          final attempt = Completer<SshConnectionResult>();
+          attempts.add(attempt);
+          return attempt.future;
+        });
+        when(
+          () => telemetry.logConnectionAttempted(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => telemetry.logConnectionFailed(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+            duration: any(named: 'duration'),
+            failureCategory: any(named: 'failureCategory'),
+          ),
+        ).thenAnswer((_) async {});
+        final failureContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(sshService),
+            telemetryServiceProvider.overrideWithValue(telemetry),
+            hostRepositoryProvider.overrideWithValue(
+              container.read(hostRepositoryProvider),
+            ),
+          ],
+        );
+        addTearDown(failureContainer.dispose);
+        final notifier = failureContainer.read(activeSessionsProvider.notifier)
+          ..holdAutomaticForwardingUntilStarted(42);
+        // The same link tapped twice: both attempts share the host's hold.
+        final first = notifier.connect(42);
+        final second = notifier.connect(42);
+        await pumpEventQueue();
+        expect(attempts, hasLength(2));
+
+        attempts.first.complete(
+          const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        expect((await first).success, isFalse);
+
+        // The second attempt may still open a connection the link held.
+        expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+
+        attempts.last.complete(
+          const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        expect((await second).success, isFalse);
+        expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+      },
+    );
+
     for (final laterChange in [false, true]) {
       testWidgets(
         laterChange
