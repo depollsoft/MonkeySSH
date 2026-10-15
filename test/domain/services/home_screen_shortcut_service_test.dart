@@ -43,6 +43,11 @@ Host _buildHost({
   tmuxWorkingDirectory: null,
   tmuxExtraFlags: null,
   sortOrder: sortOrder,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 void main() {
