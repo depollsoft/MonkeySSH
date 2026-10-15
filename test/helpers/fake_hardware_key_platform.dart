@@ -110,6 +110,10 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
   /// prompt waiting for the user.
   bool holdSigns = false;
 
+  /// Leaves a held prompt up after [cancelSign] until [finishDismissal],
+  /// like a prompt that takes a while to close.
+  bool holdDismissals = false;
+
   /// Every sign request, in order.
   final signRequests = <FakeSignRequest>[];
 
@@ -137,6 +141,13 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
 
   /// Lets the held prompt for [requestId] sign.
   void approve(String requestId) => _heldPrompts.remove(requestId)?.complete();
+
+  /// Closes a prompt that [cancelSign] left up under [holdDismissals].
+  void finishDismissal(String requestId) => _heldPrompts
+      .remove(requestId)
+      ?.completeError(
+        const HardwareKeyException(HardwareKeyErrorCode.cancelled),
+      );
 
   @override
   Future<Map<Object?, Object?>> getCapabilities() async => capabilities;
@@ -191,11 +202,9 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
   @override
   Future<void> cancelSign(String requestId) async {
     cancelledRequests.add(requestId);
-    _heldPrompts
-        .remove(requestId)
-        ?.completeError(
-          const HardwareKeyException(HardwareKeyErrorCode.cancelled),
-        );
+    if (!holdDismissals) {
+      finishDismissal(requestId);
+    }
   }
 
   @override

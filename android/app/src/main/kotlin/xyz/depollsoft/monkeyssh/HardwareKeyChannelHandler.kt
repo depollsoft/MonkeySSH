@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
@@ -62,6 +63,12 @@ object HardwareKeyChannelHandler {
     /** Lets a dismissed prompt's fragment finish before the next one shows. */
     private const val PROMPT_GAP_MS = 300L
 
+    /**
+     * How long a prompt the app cancelled may take to report its dismissal
+     * before its slot is given up anyway.
+     */
+    private const val CANCEL_DISMISS_TIMEOUT_MS = 1000L
+
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var methodChannel: MethodChannel? = null
@@ -71,6 +78,9 @@ object HardwareKeyChannelHandler {
     private val signRequests = HashMap<String, SignRequest>()
     private val promptQueue = ArrayDeque<SignRequest>()
     private var activePrompt: SignRequest? = null
+
+    /** No prompt shows before this [SystemClock.uptimeMillis] time. */
+    private var promptGapEndsAt = 0L
 
     // Executor thread only: the backing does not change while the app runs,
     // and probing StrongBox can take seconds.
@@ -529,9 +539,12 @@ object HardwareKeyChannelHandler {
         }
     }
 
-    /** Main thread: shows the next queued prompt once none is showing. */
+    /**
+     * Main thread: shows the next queued prompt once none is showing and the
+     * last one has had [PROMPT_GAP_MS] to go away.
+     */
     private fun pumpPrompts() {
-        if (activePrompt != null) {
+        if (activePrompt != null || SystemClock.uptimeMillis() < promptGapEndsAt) {
             return
         }
         while (true) {
@@ -554,6 +567,9 @@ object HardwareKeyChannelHandler {
     private fun promptEnded(request: SignRequest) {
         if (activePrompt === request) {
             activePrompt = null
+            // Every pumpPrompts() caller waits out the gap, including a
+            // request that finishes preparing or an activity that resumes.
+            promptGapEndsAt = SystemClock.uptimeMillis() + PROMPT_GAP_MS
             mainHandler.postDelayed({ pumpPrompts() }, PROMPT_GAP_MS)
         }
     }
@@ -589,7 +605,10 @@ object HardwareKeyChannelHandler {
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     promptEnded(request)
-                    finish(request, error = mapPromptError(errorCode))
+                    finish(
+                        request,
+                        error = if (request.cancelled) "cancelled" else mapPromptError(errorCode),
+                    )
                 }
             },
         )
@@ -625,12 +644,22 @@ object HardwareKeyChannelHandler {
                     request.prompt?.cancelAuthentication()
                 } catch (error: Exception) {
                     Log.w(TAG, "Hardware key prompt cancel failed: ${error.javaClass.simpleName}")
+                    promptEnded(request)
+                    finish(request, error = "cancelled")
+                    return
                 }
-                // Finish now rather than wait for the error callback, which
-                // never comes if the prompt's activity is gone; a late
-                // callback finds the request already finished.
-                promptEnded(request)
-                finish(request, error = "cancelled")
+                // Keep the slot, and the reply Dart's prompt queue waits on,
+                // until androidx reports the dismissal through
+                // onAuthenticationError. A prompt built before then (another
+                // key's or the app lock's) takes over the activity's shared
+                // callback and receives this prompt's late ERROR_CANCELED.
+                // The timeout covers a callback that never comes.
+                mainHandler.postDelayed({
+                    if (activePrompt === request) {
+                        promptEnded(request)
+                        finish(request, error = "cancelled")
+                    }
+                }, CANCEL_DISMISS_TIMEOUT_MS)
             }
             promptQueue.remove(request) -> finish(request, error = "cancelled")
             // Still preparing: prepare() sees the flag before queueing.

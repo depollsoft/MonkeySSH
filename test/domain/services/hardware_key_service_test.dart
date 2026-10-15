@@ -606,6 +606,73 @@ void main() {
     );
 
     test(
+      'a timed-out prompt keeps its slot until the platform dismisses it',
+      () async {
+        final quick = HardwareKeyService(
+          platform: platform,
+          isPlatformSupported: true,
+          promptCoordinator: coordinator,
+          promptTimeout: const Duration(milliseconds: 30),
+        );
+        platform
+          ..holdSigns = true
+          ..holdDismissals = true;
+        final identity = quick.identityFor(
+          (await quick.generate(requireUserPresence: true)).reference,
+        );
+
+        final signing = expectLater(
+          identity.sign(Uint8List.fromList([1])),
+          failsWith(HardwareKeyErrorCode.timedOut),
+        );
+        final requestId = await platform.waitForPrompt();
+        var lockPromptShown = false;
+        final lockPrompt = coordinator.run(() async => lockPromptShown = true);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        // Timed out and cancelled, but the prompt is still closing: on
+        // Android a prompt opened now would get its late cancellation.
+        expect(platform.cancelledRequests, [requestId]);
+        expect(lockPromptShown, isFalse);
+
+        platform.finishDismissal(requestId);
+        await lockPrompt.timeout(const Duration(seconds: 1));
+        expect(lockPromptShown, isTrue);
+        await signing;
+      },
+    );
+
+    test(
+      'a timed-out prompt that never reports its dismissal frees the queue',
+      () async {
+        final quick = HardwareKeyService(
+          platform: platform,
+          isPlatformSupported: true,
+          promptCoordinator: coordinator,
+          promptTimeout: const Duration(milliseconds: 30),
+        );
+        platform
+          ..holdSigns = true
+          ..holdDismissals = true;
+        final identity = quick.identityFor(
+          (await quick.generate(requireUserPresence: true)).reference,
+        );
+
+        final signing = expectLater(
+          identity.sign(Uint8List.fromList([1])),
+          failsWith(HardwareKeyErrorCode.timedOut),
+        );
+        await platform.waitForPrompt();
+        final lockPrompt = coordinator.run(() async => 'unlocked');
+
+        expect(
+          await lockPrompt.timeout(const Duration(seconds: 4)),
+          'unlocked',
+        );
+        await signing;
+      },
+    );
+
+    test(
       'a key without confirmation that needs interaction is locked',
       () async {
         final identity = service.identityFor(

@@ -427,6 +427,10 @@ int _nextSignRequest = 0;
 /// How often a request waiting for the app lock checks the app is on screen.
 const _lockPollInterval = Duration(milliseconds: 500);
 
+/// How long a timed-out prompt keeps its slot while the platform dismisses
+/// it; longer than Android's own wait for the dismissal.
+const _dismissGrace = Duration(seconds: 2);
+
 /// Prefix of every keystore alias the app creates.
 const hardwareKeyAliasPrefix = 'xyz.depollsoft.monkeyssh.sshkey.';
 
@@ -578,20 +582,25 @@ class HardwareKeyIdentity extends SSHIdentity {
         const HardwareKeyException(HardwareKeyErrorCode.cancelled),
       );
     }
-    return _platform
-        .sign(
-          alias: reference.alias,
-          data: data,
-          reason: _signReason,
-          requestId: request.id,
-        )
-        .timeout(
-          _promptTimeout,
-          onTimeout: () {
-            _cancelNative(request.id);
-            throw const HardwareKeyException(HardwareKeyErrorCode.timedOut);
-          },
-        );
+    final signing = _platform.sign(
+      alias: reference.alias,
+      data: data,
+      reason: _signReason,
+      requestId: request.id,
+    );
+    return signing.timeout(
+      _promptTimeout,
+      onTimeout: () async {
+        _cancelNative(request.id);
+        // Hold the prompt slot until the platform reports this prompt gone,
+        // so the next one (another key's or the app lock's) never opens
+        // over it. A reply that never comes holds it only briefly.
+        await signing
+            .then<void>((_) {}, onError: (Object _) {})
+            .timeout(_dismissGrace, onTimeout: () {});
+        throw const HardwareKeyException(HardwareKeyErrorCode.timedOut);
+      },
+    );
   }
 
   /// Returns this identity with every signature run through [guard].
