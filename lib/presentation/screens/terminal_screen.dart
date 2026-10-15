@@ -96,6 +96,8 @@ import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
 import '../providers/connection_actions.dart';
 import '../providers/entity_list_providers.dart';
+import '../shortcuts/app_shortcut_scope.dart';
+import '../shortcuts/app_shortcuts.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
@@ -113,6 +115,7 @@ import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/device_debug_sheet.dart';
+import '../widgets/keyboard_list_navigation.dart';
 import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
 import '../widgets/monkeymux_offer_sheet.dart';
@@ -148,6 +151,7 @@ import 'terminal/terminal_screen_policy.dart';
 export 'terminal/terminal_screen_policy.dart';
 
 part '../widgets/tmux_expandable_bar.dart';
+part 'terminal/terminal_screen_shortcuts.dart';
 
 /// Lets the pop transition back to home finish before the rating sheet.
 const _appReviewAfterLeavingDelay = Duration(milliseconds: 700);
@@ -9143,6 +9147,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return;
     }
+    if (!expanded) {
+      _handleTmuxBarCollapsedForKeyboard();
+    }
     if (_isTmuxBarExpanded == expanded && _tmuxSidebarDragOffset == 0) {
       return;
     }
@@ -9269,6 +9276,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           tmuxWorkingDirectory: _tmuxWorkingDirectory,
           sessionWorkingDirectory: session.workingDirectory,
         ),
+        activeNativeAcpSessionKey: _activeNativeAcpSessionKey,
       );
 
       if (!mounted || action == null) return;
@@ -11848,7 +11856,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => AppShortcutScope(
+    handlers: _appShortcutHandlers(
+      ref.watch(activeSessionsProvider.select(_selectTrackedConnectionState)),
+    ),
+    child: _buildScreen(context),
+  );
+
+  Widget _buildScreen(BuildContext context) {
     ref.listen<SshConnectionState>(
       activeSessionsProvider.select(_selectTrackedConnectionState),
       _handleTrackedConnectionStateChange,

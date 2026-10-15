@@ -74,6 +74,9 @@ class AcpComposerFocusController {
   /// Whether the composer currently owns text focus.
   bool get hasFocus => _state?._focusNode.hasFocus ?? false;
 
+  /// Whether a composer is built and attached to this controller.
+  bool get isAttached => _state != null;
+
   /// Focuses the composer and opens the platform keyboard.
   void requestFocus() => _state?._focusNode.requestFocus();
 

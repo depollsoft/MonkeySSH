@@ -55,6 +55,8 @@ import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
 import '../models/acp_transcript_markdown.dart';
 import '../models/acp_unread.dart';
+import '../shortcuts/app_shortcut_scope.dart';
+import '../shortcuts/app_shortcuts.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
@@ -240,6 +242,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
   final AcpSftpClientCache _sftpCache = AcpSftpClientCache();
+  // Standalone chats own a focus controller for the focus-composer shortcut.
+  final _ownComposerFocusController = AcpComposerFocusController();
   final AcpTranscriptSearchController _search = AcpTranscriptSearchController();
   var _composerFocused = false;
   Timer? _previewPublishTimer;
@@ -1113,6 +1117,34 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final screen = _buildScreen(context);
+    // Embedded chats use the terminal screen's shortcuts.
+    if (widget.embedded) {
+      return screen;
+    }
+    return AppShortcutScope(
+      handlers: {
+        AppShortcutAction.focusComposer: (_) =>
+            _ownComposerFocusController.requestFocus(),
+        // The content's own Cmd/Ctrl+F binding answers first while focus is
+        // inside the chat; this covers Ctrl+Shift+F on Android and a chord
+        // pressed with nothing focused.
+        AppShortcutAction.find: (_) => _openSearch(),
+        AppShortcutAction.openChanges: (_) {
+          final session = ref
+              .read(acpSessionManagerProvider)
+              .state
+              .byKeyValue(_key.value);
+          if (session != null) {
+            unawaited(_handleAction(_ChatAction.workingTreeChanges, session));
+          }
+        },
+      },
+      child: screen,
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     final sessionProvider = acpSessionManagerStateProvider.select(
       (state) => state.asData?.value.byKeyValue(_key.value),
     );
@@ -1432,7 +1464,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                           child: AcpComposer(
                             controller: _composer,
                             attachmentActions: _attachmentActions(session),
-                            focusController: widget.composerFocusController,
+                            focusController:
+                                widget.composerFocusController ??
+                                _ownComposerFocusController,
                             controls: _buildQuickConfigControls(session),
                             useBottomSafeArea: !widget.embedded,
                           ),
@@ -1988,7 +2022,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     final draft = _composer.text;
     final separator = draft.isEmpty || draft.endsWith('\n') ? '' : '\n\n';
     _composer.setText('$draft$separator$prompt');
-    widget.composerFocusController?.requestFocus();
+    (widget.composerFocusController ?? _ownComposerFocusController)
+        .requestFocus();
   }
 
   Future<bool> _confirmDeleteSession() async {

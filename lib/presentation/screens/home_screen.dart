@@ -60,6 +60,7 @@ import '../widgets/connections_waiting_section.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
+import '../widgets/keyboard_list_navigation.dart';
 import '../widgets/mux_window_status_badge.dart' show statusPillIconSize;
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
@@ -665,7 +666,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       Expanded(
         child: switch (_selectedIndex) {
           0 => const HostsPanel(),
-          1 => const _ConnectionsPanel(),
+          // Arrows, Return and Esc drive the list from a hardware keyboard.
+          1 => const KeyboardListNavigation(
+            autofocus: true,
+            child: _ConnectionsPanel(),
+          ),
           2 => const _KeysPanel(),
           3 => const SnippetsPanel(),
           _ => const HostsPanel(),

@@ -71,7 +71,10 @@ import 'package:monkeyssh/presentation/controllers/system_keyboard_visibility_co
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
+import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
+import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
+import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
@@ -1730,6 +1733,7 @@ void main() {
       Future<bool> Function()? loadSharedClipboard,
       MonetizationState monetizationState = _proMonetizationState,
       List<Override> overrides = const [],
+      bool appShortcuts = false,
     }) => ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
@@ -1749,6 +1753,9 @@ void main() {
       child:
           child ??
           MaterialApp(
+            builder: appShortcuts
+                ? (context, child) => AppShortcutsHost(child: child!)
+                : null,
             home: TerminalScreen(
               hostId: host.id,
               connectionId: session.connectionId,
@@ -1814,6 +1821,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      bool appShortcuts = false,
       List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
@@ -1857,6 +1865,9 @@ void main() {
             theme: theme ?? ThemeData.light(),
             darkTheme: theme ?? ThemeData.dark(),
             themeMode: themeMode,
+            builder: appShortcuts
+                ? (context, child) => AppShortcutsHost(child: child!)
+                : null,
             home: TerminalScreen(
               hostId: host.id,
               connectionId: resolveConnection ? null : session.connectionId,
@@ -4965,6 +4976,7 @@ void main() {
       bool simulateAttachedTuiSignals = false,
       RemoteFileService? remoteFileServiceOverride,
       Stream<TmuxWindowChangeEvent>? windowEvents,
+      bool appShortcuts = false,
     }) async {
       const tmuxSessionName = 'work';
       const windows = <TmuxWindow>[
@@ -5050,6 +5062,7 @@ void main() {
               ),
           ],
           initialTmuxSessionName: tmuxSessionName,
+          appShortcuts: appShortcuts,
         ),
       );
 
@@ -11768,6 +11781,715 @@ void main() {
 
       expect(tester.getSize(handleFinder).width, tmuxSidebarCollapsedWidth);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    group('hardware keyboard shortcuts (#931)', () {
+      Future<void> pressChord(
+        WidgetTester tester,
+        List<LogicalKeyboardKey> modifiers,
+        LogicalKeyboardKey key,
+      ) async {
+        for (final modifier in modifiers) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyDownEvent(key);
+        await tester.sendKeyUpEvent(key);
+        for (final modifier in modifiers.reversed) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pump();
+      }
+
+      bool focusShows(String text) {
+        final context = FocusManager.instance.primaryFocus?.context;
+        if (context == null) {
+          return false;
+        }
+        return find
+            .descendant(
+              of: find.byElementPredicate(
+                (element) => identical(element, context),
+              ),
+              matching: find.text(text),
+            )
+            .evaluate()
+            .isNotEmpty;
+      }
+
+      /// Whether keyboard focus is on the list row showing [text], not on a
+      /// container that merely holds that row.
+      bool focusIsOnRow(String text) {
+        final context = FocusManager.instance.primaryFocus?.context;
+        if (context == null) {
+          return false;
+        }
+        Element? row;
+        context.visitAncestorElements((element) {
+          if (element.widget is ListTile) {
+            row = element;
+            return false;
+          }
+          return true;
+        });
+        final tile = row;
+        return tile != null &&
+            find
+                .descendant(
+                  of: find.byElementPredicate(
+                    (element) => identical(element, tile),
+                  ),
+                  matching: find.text(text),
+                )
+                .evaluate()
+                .isNotEmpty;
+      }
+
+      FocusNode terminalFocus(WidgetTester tester) => tester
+          .widget<TerminalTextInputHandler>(
+            find.byType(TerminalTextInputHandler),
+          )
+          .focusNode;
+
+      void stubSelect(_MockTmuxService tmuxService, int index) => when(
+        () => tmuxService.selectWindow(
+          session,
+          'work',
+          index,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+        ),
+      ).thenAnswer((_) async {});
+
+      void verifySelected(_MockTmuxService tmuxService, int index) => verify(
+        () => tmuxService.selectWindow(
+          session,
+          'work',
+          index,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+        ),
+      ).called(1);
+
+      testWidgets('⌘ chords switch windows without typing into the shell', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        stubSelect(tmuxService, 0);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit1);
+        verifySelected(tmuxService, 1);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.bracketLeft);
+        verifySelected(tmuxService, 0);
+
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets(
+        '⌃⌘S opens the switcher on the active row; arrows and Return switch',
+        (tester) async {
+          final tmuxService = _MockTmuxService();
+          await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+          shellWrites.clear();
+
+          await pressChord(tester, [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyS);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+
+          expect(find.text('agent'), findsOneWidget);
+          expect(focusShows('shell'), isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+          expect(focusShows('agent'), isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          verifySelected(tmuxService, 1);
+
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(find.text('agent'), findsNothing);
+          expect(terminalFocus(tester).hasFocus, isTrue);
+          expect(shellWrites.map(utf8.decode).join(), isEmpty);
+          await tester.pump(const Duration(seconds: 3));
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+
+      testWidgets('⌃⌘S drives the wide-layout sidebar from the keyboard', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(1100, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        expect(
+          find.byKey(const ValueKey('tmux-sidebar-window-0')),
+          findsOneWidget,
+        );
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyS);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(focusIsOnRow('shell'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        expect(focusIsOnRow('agent'), isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        verifySelected(tmuxService, 1);
+
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('Esc closes the switcher and returns focus to the terminal', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyS);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('agent'), findsOneWidget);
+        expect(focusShows('shell'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('agent'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('⌘N selects the window whose badge shows N', (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        stubSelect(tmuxService, 0);
+
+        // tmux numbers from 0: the second row is badged "1".
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit1);
+        verifySelected(tmuxService, 1);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit0);
+        verifySelected(tmuxService, 0);
+
+        // No window is numbered 5, so nothing happens.
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit5);
+        verifyNever(
+          () => tmuxService.selectWindow(
+            session,
+            'work',
+            5,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('held Ctrl+Shift+] sends only the newest window to tmux', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        final firstSwitch = Completer<void>();
+        when(
+          () => tmuxService.selectWindow(
+            session,
+            'work',
+            1,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+          ),
+        ).thenAnswer((_) => firstSwitch.future);
+        stubSelect(tmuxService, 0);
+        shellWrites.clear();
+
+        // The press switches to window 1. While that is still on its way,
+        // three repeats step 0, 1, 0; only the last needs to be sent.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.bracketRight);
+        await tester.pump();
+        for (var i = 0; i < 3; i++) {
+          await tester.sendKeyRepeatEvent(LogicalKeyboardKey.bracketRight);
+          await tester.pump();
+        }
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.bracketRight);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+
+        firstSwitch.complete();
+        await tester.pump();
+        await tester.pump();
+
+        verifySelected(tmuxService, 1);
+        verifySelected(tmuxService, 0);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('chords do nothing behind a touch-opened picker', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump(const Duration(milliseconds: 400));
+        // The row sits under the extra-keys toolbar in this layout, so run
+        // its tap handler directly; it is the same touch path.
+        tester
+            .widget<ListTile>(
+              find.ancestor(
+                of: find.text('New window'),
+                matching: find.byType(ListTile),
+              ),
+            )
+            .onTap!();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Empty terminal'), findsOneWidget);
+        // Touch-opened sheets leave focus on the terminal underneath.
+        expect(terminalFocus(tester).hasFocus, isTrue);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyT);
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Empty terminal'), findsOneWidget);
+        expect(find.text('Close window?'), findsNothing);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      /// MonkeyMux session "work" with windows build (0, active) and logs
+      /// (1), plus a native session with no server window, numbered 2.
+      Future<
+        ({
+          FakeAcpSessionManager acpManager,
+          _MockMonkeyMuxService monkeyMuxService,
+          AcpSessionKey orphanKey,
+        })
+      >
+      pumpMonkeyMuxWithOrphanSession(WidgetTester tester) async {
+        final orphanKey = fakeAcpKey(
+          hostId: host.id,
+          bridgeId: 'native-session',
+          acpSessionId: 'orphan-session',
+          providerId: AcpBuiltinProviderIds.codex,
+        );
+        final acpManager = FakeAcpSessionManager(
+          sessions: [fakeAcpSession(key: orphanKey, title: 'Orphan chat')],
+        );
+        addTearDown(acpManager.dispose);
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+            .thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+          (_) async => const [
+            TmuxWindow(index: 0, name: 'build', isActive: true),
+            TmuxWindow(index: 1, name: 'logs', isActive: false),
+          ],
+        );
+        when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+            .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        await pumpScreen(
+          tester,
+          tmuxService: tmuxService,
+          monkeyMuxService: monkeyMuxService,
+          acpSessionManager: acpManager,
+          appShortcuts: true,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        return (
+          acpManager: acpManager,
+          monkeyMuxService: monkeyMuxService,
+          orphanKey: orphanKey,
+        );
+      }
+
+      testWidgets('⌘W closes the native session a number key opened', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
+
+        // ⌘1 leaves a pending switch to "logs"; ⌘2 opens the native session.
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit1);
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Close window?'), findsOneWidget);
+        expect(find.textContaining('Orphan chat'), findsWidgets);
+        expect(find.textContaining('“logs”'), findsNothing);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘N on a native session focuses its composer', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        for (var i = 0; i < 6; i++) {
+          await tester.pump();
+        }
+
+        final composerField = find.descendant(
+          of: find.byType(AcpComposer),
+          matching: find.byType(TextField),
+        );
+        expect(composerField, findsOneWidget);
+        expect(
+          tester.widget<TextField>(composerField).focusNode!.hasFocus,
+          isTrue,
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets(
+        '⌘W closes the native session a switcher row opened during a switch',
+        (tester) async {
+          await pumpMonkeyMuxWithOrphanSession(tester);
+
+          // ⌘1 leaves a pending switch to "logs". Return on the native
+          // session's row opens it while that switch is still pending.
+          await pressChord(tester, [
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.digit1);
+          await pressChord(tester, [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyS);
+          await tester.pump(const Duration(milliseconds: 400));
+          for (var i = 0; i < 6 && !focusIsOnRow('Orphan chat'); i++) {
+            await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+            await tester.pump();
+          }
+          expect(focusIsOnRow('Orphan chat'), isTrue);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+
+          await pressChord(tester, [
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyW);
+          await tester.pump(const Duration(milliseconds: 400));
+
+          expect(find.text('Close window?'), findsOneWidget);
+          expect(find.textContaining('Orphan chat'), findsWidgets);
+          expect(find.textContaining('“logs”'), findsNothing);
+          await tester.pump(const Duration(seconds: 3));
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+
+      testWidgets('⌘W on a native session hands the keyboard to the terminal', (
+        tester,
+      ) async {
+        final setup = await pumpMonkeyMuxWithOrphanSession(tester);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Close window?'), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(setup.acpManager.stopped, [setup.orphanKey.value]);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        shellWrites.clear();
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+        await tester.pump();
+        expect(shellWrites.map(utf8.decode).join(), isNotEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘T from a native session focuses the new terminal window', (
+        tester,
+      ) async {
+        final setup = await pumpMonkeyMuxWithOrphanSession(tester);
+        when(
+          () => setup.monkeyMuxService.createWindow(
+            session,
+            'work',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => setup.monkeyMuxService.currentPanePath(
+            session,
+            'work',
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => null);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyT);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Empty terminal'), findsOneWidget);
+        for (var i = 0; i < 16 && !focusIsOnRow('Empty terminal'); i++) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+        }
+        expect(focusIsOnRow('Empty terminal'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        verify(
+          () => setup.monkeyMuxService.createWindow(
+            session,
+            'work',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).called(1);
+        expect(find.text('Empty terminal'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘W asks before closing and Return confirms', (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        when(
+          () => tmuxService.killWindow(
+            session,
+            'work',
+            0,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async {});
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(find.text('Close window?'), findsOneWidget);
+        expect(focusShows('Close window'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        verify(
+          () => tmuxService.killWindow(
+            session,
+            'work',
+            0,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).called(1);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      final terminalSearchField = find.byKey(
+        const ValueKey<String>('terminal-search-field'),
+      );
+      bool fieldHasFocus(WidgetTester tester, Finder field) =>
+          tester.widget<TextField>(field).focusNode!.hasFocus;
+
+      testWidgets('⌘F finds in the terminal, or in the native chat on screen', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(fieldHasFocus(tester, terminalSearchField), isTrue);
+        expect(find.byType(AcpTranscriptSearchBar), findsNothing);
+
+        // The find bar's own Esc closes it and hands the keyboard back.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump();
+        expect(terminalSearchField, findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        for (var i = 0; i < 6; i++) {
+          await tester.pump();
+        }
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+        expect(
+          fieldHasFocus(
+            tester,
+            find.byKey(const ValueKey('acp-transcript-search-field')),
+          ),
+          isTrue,
+        );
+        expect(terminalSearchField, findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('Ctrl+Shift+F opens find while Ctrl+F stays with the shell', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        terminalFocus(tester).requestFocus();
+        await tester.pump();
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        expect(terminalSearchField, findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), '\x06');
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyF);
+        await tester.pump();
+        await tester.pump();
+        expect(fieldHasFocus(tester, terminalSearchField), isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets('⇧⌘D opens working tree changes; Esc hands the keyboard '
+          'back to the terminal', (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          appShortcuts: true,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        terminalFocus(tester).requestFocus();
+        await tester.pump();
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+          LogicalKeyboardKey.shiftLeft,
+        ], LogicalKeyboardKey.keyD);
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    });
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,

@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,7 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/controllers/acp_chat_actions_controller.dart';
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
+import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
@@ -76,6 +78,7 @@ Widget _chat(
   AcpChatActionsController? chatActions,
   AcpComposerFocusController? composerFocusController,
   MediaQueryData media = const MediaQueryData(size: Size(390, 800)),
+  bool appShortcuts = false,
 }) {
   final ssh = _MockSshService();
   final launchPreferences = _MockLaunchPreferences();
@@ -92,6 +95,9 @@ Widget _chat(
       ),
     ],
     child: MaterialApp(
+      builder: appShortcuts
+          ? (context, child) => AppShortcutsHost(child: child!)
+          : null,
       home: MediaQuery(
         data: media,
         child: AgentChatScreen(
@@ -262,6 +268,48 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.pumpAndSettle();
       expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
     });
+
+    testWidgets(
+      'the app find shortcut opens search, as Cmd/Ctrl+F does',
+      (tester) async {
+        await tester.pumpWidget(
+          _chat(
+            FakeAcpSessionManager(sessions: [_session()]),
+            appShortcuts: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        // ⌘F on iPadOS is also the chat's own binding; Android adds
+        // Ctrl+Shift+F to the chat's Ctrl+F.
+        final ios = defaultTargetPlatform == TargetPlatform.iOS;
+        final modifiers = ios
+            ? [LogicalKeyboardKey.metaLeft]
+            : [LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.shiftLeft];
+        for (final modifier in modifiers) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+        for (final modifier in modifiers.reversed) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pumpAndSettle();
+
+        expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+        expect(
+          tester
+              .widget<TextField>(
+                find.byKey(const ValueKey('acp-transcript-search-field')),
+              )
+              .focusNode!
+              .hasFocus,
+          isTrue,
+        );
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      }),
+    );
 
     testWidgets('the overflow menu exports the transcript as Markdown', (
       tester,
