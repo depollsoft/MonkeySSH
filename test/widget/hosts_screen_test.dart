@@ -100,6 +100,11 @@ Host _buildHost({
   autoConnectSnippetId: null,
   autoConnectRequiresConfirmation: false,
   sortOrder: sortOrder,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 ActiveConnection _buildActiveConnection({

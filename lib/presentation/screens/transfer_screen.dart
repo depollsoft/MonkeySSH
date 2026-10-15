@@ -200,7 +200,12 @@ Future<void> _savePayloadToFileDialog({
 /// Imports payload content from an encrypted transfer file.
 Future<String?> pickTransferPayloadFromFile(BuildContext context) async {
   final appName = await loadAppName();
-  final selectedFile = await FilePicker.pickFile(
+  if (!context.mounted) {
+    return null;
+  }
+  final selectedFile = await pickSingleFileOrNotify(
+    context,
+    diagnosticsCategory: 'transfer.import',
     dialogTitle: 'Select encrypted $appName transfer file',
     type: pickerFileTypeForCustomExtension(defaultTargetPlatform),
     allowedExtensions: pickerAllowedExtensionsForCustomExtension(

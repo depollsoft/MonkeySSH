@@ -642,27 +642,28 @@ func TestPushAlertOutputDetection(t *testing.T) {
 		name string
 		bell bool
 		oscs []string
-		want bool
+		want pushAlertCategories
 	}{
-		{"bell", true, nil, true},
-		{"osc 9", false, []string{"9;Build finished"}, true},
-		{"osc 777", false, []string{"777;notify;Title;Body"}, true},
-		{"osc 777 precmd", false, []string{"777;precmd"}, false},
-		{"osc 777 preexec", false, []string{"777;preexec"}, false},
-		{"osc 99", false, []string{"99;;Hello"}, true},
-		{"osc 99 query", false, []string{"99;i=1:p=?;"}, false},
-		{"osc 99 close", false, []string{"99;i=1:p=close;"}, false},
-		{"progress", false, []string{"9;4;1;50"}, false},
-		{"title", false, []string{"0;window title"}, false},
-		{"agent identity", false, []string{"1337;MonkeyMuxPi=1"}, false},
-		{"nothing", false, nil, false},
+		{"bell", true, nil, pushAlertBell},
+		{"osc 9", false, []string{"9;Build finished"}, pushAlertNotice},
+		{"osc 777", false, []string{"777;notify;Title;Body"}, pushAlertNotice},
+		{"osc 777 precmd", false, []string{"777;precmd"}, 0},
+		{"osc 777 preexec", false, []string{"777;preexec"}, 0},
+		{"osc 99", false, []string{"99;;Hello"}, pushAlertNotice},
+		{"osc 99 query", false, []string{"99;i=1:p=?;"}, 0},
+		{"osc 99 close", false, []string{"99;i=1:p=close;"}, 0},
+		{"progress", false, []string{"9;4;1;50"}, 0},
+		{"title", false, []string{"0;window title"}, 0},
+		{"agent identity", false, []string{"1337;MonkeyMuxPi=1"}, 0},
+		{"bell and notification", true, []string{"9;Build finished"}, pushAlertBell | pushAlertNotice},
+		{"nothing", false, nil, 0},
 	}
 	for _, tc := range cases {
 		oscs := make([][]byte, 0, len(tc.oscs))
 		for _, osc := range tc.oscs {
 			oscs = append(oscs, []byte(osc))
 		}
-		if got := isPushAlertOutput(tc.bell, oscs); got != tc.want {
+		if got := pushAlertOutputCategories(tc.bell, oscs); got != tc.want {
 			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
