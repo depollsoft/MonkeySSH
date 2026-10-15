@@ -369,6 +369,39 @@ void main() {
       );
     }
 
+    for (final (tool, arguments) in [
+      (AgentLaunchTool.copilotCli, '--allow-all-tools'),
+      (AgentLaunchTool.claudeCode, '--permission-mode bypassPermissions'),
+      (AgentLaunchTool.codex, '--sandbox danger-full-access'),
+      (AgentLaunchTool.openCode, null),
+    ]) {
+      test(
+        'name only the switches a YOLO command carries: ${tool.name}',
+        () async {
+          stubPreset(
+            AgentLaunchPreset(tool: tool, additionalArguments: arguments),
+            yolo: true,
+          );
+
+          await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+          final review = effects.reviews.single;
+          expect(review.yoloMode, isTrue);
+          expect(review.yoloSwitches, isNotEmpty);
+          // YOLO mode strips the conflicting extra arguments, so the
+          // warning must not name them, and each switch it names is
+          // spelled the way the command writes it.
+          for (final yoloSwitch in review.yoloSwitches) {
+            expect(review.command, contains(yoloSwitch));
+          }
+          if (arguments != null) {
+            expect(review.command, isNot(contains(arguments)));
+            expect(review.yoloSwitches, isNot(contains(arguments)));
+          }
+        },
+      );
+    }
+
     test('never launch when the review is cancelled', () async {
       stubPreset(preset, yolo: true);
 

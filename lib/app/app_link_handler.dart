@@ -293,23 +293,18 @@ class AppLinkHandler {
   }
 }
 
-/// What puts [preset]'s command in YOLO mode, as it appears in that command:
-/// the tool's own YOLO switches when the host prefers YOLO, plus any
-/// permissive switches in the preset's extra arguments.
+/// What puts [preset]'s command in YOLO mode, as that command spells it:
+/// the tool's own YOLO switches when the host prefers YOLO, plus permissive
+/// switches its extra arguments still carry after YOLO mode strips the
+/// conflicting ones.
 List<String> presetYoloSwitches(
   AgentLaunchPreset preset, {
   required bool startInYoloMode,
-}) {
-  final tool = preset.tool;
-  return <String>{
-    if (startInYoloMode && tool.supportsYoloMode) ...[
-      for (final MapEntry(:key, :value) in tool.yoloEnvironment.entries)
-        '$key=$value',
-      ...tool.yoloArguments,
-    ],
-    ...agentYoloSwitchesInArguments(tool, preset.additionalArguments),
-  }.toList(growable: false);
-}
+}) => agentLaunchYoloSwitches(
+  preset.tool,
+  additionalArguments: preset.additionalArguments,
+  startInYoloMode: startInYoloMode,
+);
 
 /// Builds the terminal route for an open-host link.
 String buildAppLinkTerminalLocation({

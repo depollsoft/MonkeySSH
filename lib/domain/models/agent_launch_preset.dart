@@ -563,6 +563,32 @@ List<String> agentYoloSwitchesInArguments(
   return found;
 }
 
+/// The switches that put [tool] in YOLO mode in the command
+/// [buildAgentToolCommand] builds from the same inputs, written as that
+/// command spells them: the tool's own YOLO environment and flags when
+/// [startInYoloMode] is on, then any permissive switch still left in
+/// [additionalArguments]. YOLO mode strips the extra arguments that conflict
+/// with its own flags, so those are not listed.
+List<String> agentLaunchYoloSwitches(
+  AgentLaunchTool tool, {
+  required String? additionalArguments,
+  required bool startInYoloMode,
+}) => <String>{
+  ..._buildAgentToolEnvironmentAssignments(
+    tool,
+    startInYoloMode: startInYoloMode,
+  ),
+  if (startInYoloMode) ...tool.yoloArguments,
+  ...agentYoloSwitchesInArguments(
+    tool,
+    _normalizeAgentToolArguments(
+      tool: tool,
+      additionalArguments: additionalArguments,
+      startInYoloMode: startInYoloMode,
+    ),
+  ),
+}.toList(growable: false);
+
 /// Splits [value] into words the way a POSIX shell would for plain
 /// arguments: quotes group and are removed, and backslashes escape. It never
 /// throws; an unterminated quote runs to the end.
