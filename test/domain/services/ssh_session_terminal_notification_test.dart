@@ -275,9 +275,17 @@ void main() {
     expect(session.synchronizeProgramStatus(status), isTrue);
     expect(session.synchronizeProgramStatus(status), isFalse);
     expect(session.programStatus, status);
+    expect(session.programStatusReporter, isFalse);
+
+    // A reporter that currently reports nothing still counts.
+    expect(session.synchronizeProgramStatus(null, reporter: true), isTrue);
+    expect(session.programStatus, isNull);
+    expect(session.programStatusReporter, isTrue);
+    expect(session.synchronizeProgramStatus(null, reporter: true), isFalse);
 
     session.remoteMuxBackend = null;
     expect(session.programStatus, isNull);
+    expect(session.programStatusReporter, isFalse);
   });
 
   test('attaching a multiplexer drops plain-shell program status', () {

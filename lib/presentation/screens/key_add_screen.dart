@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -14,6 +13,7 @@ import '../../domain/services/hardware_key_service.dart';
 import '../../domain/services/key_service.dart';
 import '../../domain/services/secure_transfer_service.dart';
 import '../../domain/services/telemetry_service.dart';
+import '../widgets/file_picker_helpers.dart';
 import '../widgets/hardware_key_widgets.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
@@ -655,7 +655,10 @@ class _ImportKeyTabState extends ConsumerState<_ImportKeyTab> {
     if (_isImporting) {
       return;
     }
-    final file = await FilePicker.pickFile();
+    final file = await pickSingleFileOrNotify(
+      context,
+      diagnosticsCategory: 'keys.import',
+    );
 
     if (!mounted || file == null) {
       return;

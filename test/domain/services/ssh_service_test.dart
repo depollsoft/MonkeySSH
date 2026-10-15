@@ -26,6 +26,7 @@ import 'package:monkeyssh/data/repositories/known_hosts_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
@@ -33,6 +34,7 @@ import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/background_ssh_service.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
@@ -408,6 +410,11 @@ Host _automaticForwardHost({
   autoForwardPorts: enabled,
   portProxyName: portProxyName,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -4368,6 +4375,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     late _RecordingSessionTelemetry telemetry;
     late _DelayedTerminalNotificationService notificationService;
     late List<MethodCall> methodCalls;
+    var hostPrefs = const HostNotificationPrefs();
+    // Holds every preference read until completed, when set.
+    Completer<void>? prefsGate;
 
     setUp(() {
       fakeSshService = _FakeActiveSessionsSshService();
@@ -4396,11 +4406,17 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           terminalNotificationsNotifierProvider.overrideWith(
             _EnabledTerminalNotificationsNotifier.new,
           ),
+          hostNotificationPrefsReaderProvider.overrideWithValue((_) async {
+            await prefsGate?.future;
+            return hostPrefs;
+          }),
         ],
       );
     });
 
     tearDown(() async {
+      hostPrefs = const HostNotificationPrefs();
+      prefsGate = null;
       BackgroundSshService.debugIsSupportedPlatformOverride = null;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_backgroundSshChannel, null);
@@ -4661,6 +4677,27 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test('a notification whose preference read outlives its connection is '
+        'not shown', () async {
+      final gate = prefsGate = Completer<void>();
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final connectionId = result.connectionId!;
+      final session = notifier.getSession(connectionId)!;
+      notificationService.releaseShow.complete();
+
+      session.debugHandlePrivateOsc('99', const ['i=late', 'Late']);
+      await pumpEventQueue();
+      await notifier.disconnect(connectionId);
+      gate.complete();
+      await pumpEventQueue();
+
+      expect(
+        notificationService.calls.where((call) => call.startsWith('show')),
+        isEmpty,
+      );
+    });
+
     test('disconnect clears native timed notifications', () async {
       final notifier = container.read(activeSessionsProvider.notifier);
       final result = await notifier.connect(42, forceNew: true);
@@ -4718,6 +4755,42 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
       expect(notifier.debugTerminalNotificationExpiryTimerCount, limit);
       expect(notificationService.calls, contains('clear:$oldestId'));
+    });
+
+    test('a host whose shell notifications are off shows none', () async {
+      hostPrefs = const HostNotificationPrefs(shellNotifications: false);
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final session = notifier.getSession(result.connectionId!)!;
+      notificationService.releaseShow.complete();
+
+      session.debugHandlePrivateOsc('99', const ['i=muted', 'Hidden']);
+      for (var attempt = 0; attempt < 20; attempt += 1) {
+        await pumpEventQueue();
+      }
+      expect(
+        notificationService.calls.where((call) => call.startsWith('show')),
+        isEmpty,
+      );
+
+      hostPrefs = const HostNotificationPrefs();
+      session.debugHandlePrivateOsc('99', const ['i=shown', 'Shown']);
+      for (
+        var attempt = 0;
+        attempt < 20 &&
+            !notificationService.calls.any(
+              (call) => call.startsWith('show-finish:'),
+            );
+        attempt += 1
+      ) {
+        await pumpEventQueue();
+      }
+      expect(
+        notificationService.calls.where(
+          (call) => call.startsWith('show-finish:'),
+        ),
+        hasLength(1),
+      );
     });
 
     test('disabled updates preserve an existing native expiry', () async {
