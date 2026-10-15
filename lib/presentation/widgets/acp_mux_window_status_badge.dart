@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../domain/models/acp_session_state.dart';
 import 'acp_session_presentation.dart';
+import 'attention_presentation.dart';
 import 'mux_window_status_badge.dart';
 
 /// Placeholder shown while a native window has no attached local session.
@@ -46,24 +47,10 @@ class AcpMuxWindowStatusBadge extends StatelessWidget {
             tone: AcpStatusTone.neutral,
           )
         : acpSessionMuxStatusDisplay(session!);
-    final (foreground, background) = switch (display.tone) {
-      AcpStatusTone.active => (
-        theme.colorScheme.onPrimaryContainer,
-        theme.colorScheme.primaryContainer,
-      ),
-      AcpStatusTone.warning => (
-        theme.colorScheme.onTertiaryContainer,
-        theme.colorScheme.tertiaryContainer,
-      ),
-      AcpStatusTone.error => (
-        theme.colorScheme.onErrorContainer,
-        theme.colorScheme.errorContainer,
-      ),
-      AcpStatusTone.neutral => (
-        theme.colorScheme.onSurfaceVariant,
-        theme.colorScheme.surfaceContainerHighest,
-      ),
-    };
+    final (foreground, background) = attentionToneColors(
+      theme.colorScheme,
+      display.tone,
+    );
 
     return MuxWindowStatusBadge(
       semanticsLabel: 'native agent ${display.label}',

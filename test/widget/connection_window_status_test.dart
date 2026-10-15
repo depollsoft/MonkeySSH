@@ -10,9 +10,14 @@ import 'package:monkeyssh/domain/models/connection_attention.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
+import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
+import 'package:monkeyssh/presentation/widgets/acp_mux_window_status_badge.dart';
+import 'package:monkeyssh/presentation/widgets/acp_session_presentation.dart';
+import 'package:monkeyssh/presentation/widgets/attention_presentation.dart';
 import 'package:monkeyssh/presentation/widgets/connection_window_status.dart';
 import 'package:monkeyssh/presentation/widgets/mux_window_status_badge.dart';
+import 'package:monkeyssh/presentation/widgets/tmux_window_status_badge.dart';
 
 import '../support/fake_acp_session_manager.dart';
 
@@ -522,6 +527,165 @@ void main() {
       now = now.add(const Duration(seconds: 10));
       await tester.pump(const Duration(seconds: 10));
       expect(find.text('quiet'), findsOneWidget);
+    });
+  });
+
+  group('one colour rule', () {
+    Color fill(WidgetTester tester, Finder badge) {
+      final box = tester.widget<DecoratedBox>(
+        find.descendant(of: badge, matching: find.byType(DecoratedBox)).first,
+      );
+      return (box.decoration as BoxDecoration).color!;
+    }
+
+    Future<void> pumpPair(WidgetTester tester, Widget a, Widget b) =>
+        tester.pumpWidget(
+          MaterialApp(
+            theme: FluttyTheme.dark,
+            home: Scaffold(
+              body: Column(
+                children: [
+                  KeyedSubtree(key: const ValueKey('navigator'), child: a),
+                  KeyedSubtree(key: const ValueKey('connections'), child: b),
+                ],
+              ),
+            ),
+          ),
+        );
+
+    testWidgets('a blocked agent reads the same here and in the navigator', (
+      tester,
+    ) async {
+      for (final kind in [...TerminalProgramBlockedKind.values, null]) {
+        final window = TmuxWindow(
+          index: 1,
+          name: 'claude',
+          isActive: false,
+          programStatus: TerminalProgramStatus(
+            state: TerminalProgramState.blocked,
+            kind: kind,
+          ),
+        );
+        await pumpPair(
+          tester,
+          TmuxWindowStatusBadge(window: window),
+          ConnectionWindowStatusChip(entry: _single(window), now: () => _now),
+        );
+        final navigator = find.byKey(const ValueKey('navigator'));
+        final connections = find.byKey(const ValueKey('connections'));
+        expect(fill(tester, connections), fill(tester, navigator));
+        final icon = tester
+            .widget<Icon>(
+              find.descendant(of: navigator, matching: find.byType(Icon)),
+            )
+            .icon;
+        expect(
+          find.descendant(of: connections, matching: find.byIcon(icon!)),
+          findsOneWidget,
+          reason: 'Blocked kind $kind uses one icon on both screens.',
+        );
+      }
+
+      final waiting = fakeAcpSession(
+        pendingPermissions: [
+          AcpPendingPermission(
+            requestKey: 'r1',
+            sessionId: 'session-1',
+            toolCallId: 't1',
+            options: const [],
+            requestedAt: _now,
+          ),
+        ],
+      );
+      await pumpPair(
+        tester,
+        AcpMuxWindowStatusBadge(session: waiting),
+        ConnectionWindowStatusChip(
+          entry: buildConnectionWindowEntries(
+            windows: const [],
+            sessions: [waiting],
+            now: _now,
+          ).single,
+          now: () => _now,
+        ),
+      );
+      expect(
+        fill(tester, find.byKey(const ValueKey('connections'))),
+        fill(tester, find.byKey(const ValueKey('navigator'))),
+        reason: 'A native agent blocked on a permission is red on both.',
+      );
+    });
+
+    test('no reason is louder than one that sorts above it', () {
+      int loudness(AcpStatusTone tone) => switch (tone) {
+        AcpStatusTone.error => 3,
+        AcpStatusTone.warning => 2,
+        AcpStatusTone.active => 1,
+        AcpStatusTone.neutral => 0,
+      };
+      for (final upper in AttentionReason.values) {
+        for (final lower in AttentionReason.values) {
+          if (upper.tier >= lower.tier) continue;
+          expect(
+            loudness(upper.tone),
+            greaterThanOrEqualTo(loudness(lower.tone)),
+            reason: '${upper.name} sorts above ${lower.name}.',
+          );
+        }
+      }
+    });
+
+    test('pill labels clear 4.5:1 on every app and terminal theme', () {
+      final themes = <String, ThemeData>{
+        'light': FluttyTheme.light,
+        'dark': FluttyTheme.dark,
+        for (final terminal in TerminalThemes.all)
+          for (final brightness in Brightness.values)
+            '${terminal.name} ${brightness.name}':
+                FluttyTheme.fromTerminalTheme(terminal, brightness: brightness),
+      };
+      for (final MapEntry(key: name, value: theme) in themes.entries) {
+        for (final tone in AcpStatusTone.values) {
+          final (foreground, background) = attentionToneColors(
+            theme.colorScheme,
+            tone,
+          );
+          expect(
+            statusPillContrast(foreground, background),
+            greaterThanOrEqualTo(statusPillMinContrast),
+            reason: '${tone.name} on $name',
+          );
+        }
+      }
+    });
+
+    testWidgets('a pill shades a fill its label cannot be read on', (
+      tester,
+    ) async {
+      const red = Color(0xFFFF4757);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: MuxWindowStatusBadge(
+              semanticsLabel: 'terminal window rang the bell',
+              label: 'alert',
+              icon: Icons.notifications_active,
+              foregroundColor: Colors.white,
+              backgroundColor: red,
+            ),
+          ),
+        ),
+      );
+      final background = fill(tester, find.byType(MuxWindowStatusBadge));
+      expect(statusPillContrast(Colors.white, red), lessThan(4.5));
+      expect(
+        statusPillContrast(Colors.white, background),
+        greaterThanOrEqualTo(statusPillMinContrast),
+      );
+      expect(legiblePillColors(Colors.black, red), (
+        Colors.black,
+        red,
+      ), reason: 'A legible pair is left as the theme made it.');
     });
   });
 }

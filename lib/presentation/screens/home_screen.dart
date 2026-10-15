@@ -44,6 +44,7 @@ import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/ai_session_picker.dart';
+import '../widgets/attention_presentation.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
@@ -55,6 +56,7 @@ import '../widgets/connections_waiting_section.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
+import '../widgets/mux_window_status_badge.dart' show statusPillIconSize;
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/reorder_helpers.dart';
@@ -3192,9 +3194,10 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     );
     final totalWindowCount = entries.length;
     // Blocked agents and program-reported alerts; warnings stay in the rows.
-    final alertCount = entries
-        .where((entry) => (entry.reason?.tier ?? attentionQuietTier) <= 1)
-        .length;
+    final alerts = [
+      for (final entry in entries)
+        if (entry.reason case final reason? when reason.tier <= 1) reason,
+    ];
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(56, 0, 16, 8),
@@ -3222,32 +3225,9 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (alertCount > 0) ...[
-                    const SizedBox(width: 4),
-                    Semantics(
-                      label: alertCount == 1
-                          ? '1 window needs attention'
-                          : '$alertCount windows need attention',
-                      excludeSemantics: true,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.notifications_active,
-                            size: 12,
-                            color: theme.colorScheme.error,
-                          ),
-                          const SizedBox(width: 2),
-                          Text(
-                            '$alertCount',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.error,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                  if (alerts.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    _buildAttentionCount(theme, alerts),
                   ],
                   const Spacer(),
                   Icon(
@@ -3802,6 +3782,51 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// The collapsed list's count of rows that need the user, in the pill
+  /// style and with the icon of the most urgent of them.
+  Widget _buildAttentionCount(ThemeData theme, List<AttentionReason> alerts) {
+    final urgent = alerts.reduce((a, b) => a.index <= b.index ? a : b);
+    final (foreground, background) = attentionToneColors(
+      theme.colorScheme,
+      urgent.tone,
+    );
+    final count = alerts.length;
+    return Semantics(
+      label: count == 1
+          ? '1 window needs attention'
+          : '$count windows need attention',
+      excludeSemantics: true,
+      child: DecoratedBox(
+        key: const ValueKey('connection-attention-count'),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                urgent.icon,
+                size: statusPillIconSize(context),
+                color: foreground,
+              ),
+              const SizedBox(width: 2),
+              Text(
+                '$count',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: foreground,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

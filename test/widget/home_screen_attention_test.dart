@@ -342,7 +342,7 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.text('Open'));
+      await tester.tap(find.byKey(const ValueKey('waiting-on-you-chevron')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
       final location = Uri.parse(opened.single);

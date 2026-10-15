@@ -617,7 +617,7 @@ class InferredActivityChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 12, color: color),
+              Icon(icon, size: statusPillIconSize(context), color: color),
               const SizedBox(width: 3),
               Text(
                 label,

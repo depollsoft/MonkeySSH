@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -93,6 +94,8 @@ Widget _harness({
   ),
 );
 
+final _chevron = find.byKey(const ValueKey('waiting-on-you-chevron'));
+
 void main() {
   testWidgets('renders nothing when no session is waiting', (tester) async {
     await tester.pumpWidget(_harness(items: const [], opened: []));
@@ -103,7 +106,7 @@ void main() {
     );
   });
 
-  testWidgets('lists waiting sessions with a labelled reason and Open', (
+  testWidgets('lists waiting sessions with a labelled reason, each opening', (
     tester,
   ) async {
     final opened = <String>[];
@@ -122,17 +125,17 @@ void main() {
     expect(find.text('Fix the flaky test'), findsOneWidget);
     // Reasons carry an icon and a word, never color alone.
     expect(find.text('permission'), findsOneWidget);
-    expect(find.byIcon(Icons.gpp_maybe_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.pending_actions), findsOneWidget);
     expect(find.text('sign-in'), findsOneWidget);
-    expect(find.byIcon(Icons.lock_outline), findsOneWidget);
+    expect(find.byIcon(Icons.key), findsOneWidget);
     expect(find.text('Beta · 5m ago · Claude Code · …/api'), findsOneWidget);
     // The provider is not repeated when it is already the title.
     expect(find.text('Beta · 5m ago · …/api'), findsOneWidget);
-    expect(find.text('Open'), findsNWidgets(2));
+    expect(_chevron, findsNWidgets(2));
 
     await tester.tap(find.text('Fix the flaky test'));
     expect(opened, [permission.chatLocation]);
-    await tester.tap(find.text('Open').last);
+    await tester.tap(_chevron.last);
     expect(opened, [permission.chatLocation, signIn.chatLocation]);
   });
 
@@ -175,7 +178,7 @@ void main() {
     }
   });
 
-  testWidgets('large text stacks Open under the row without overflowing', (
+  testWidgets('large text wraps the details instead of eliding them', (
     tester,
   ) async {
     tester.view
@@ -195,11 +198,53 @@ void main() {
       ),
     );
     expect(tester.takeException(), isNull);
-    expect(
-      tester.getTopLeft(find.text('Open')).dy,
-      greaterThan(tester.getBottomLeft(find.text('permission')).dy),
-      reason: 'Open moves below the content.',
-    );
+    expect(_chevron, findsOneWidget);
+  });
+
+  testWidgets('a host-reported row keeps its working directory in view', (
+    tester,
+  ) async {
+    // A host-reported session is titled by its agent, so the working
+    // directory is what tells two of them apart; it must not be elided on
+    // a phone, even with larger text.
+    for (final scale in [1.0, 1.3]) {
+      tester.view
+        ..physicalSize = const Size(390 * 3, 900 * 3)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.reset);
+      final item = WaitingOnYouItem(
+        reason: AttentionReason.permission,
+        key: AcpSessionKey.of(
+          hostId: 2,
+          providerId: 'builtin:codex',
+          bridgeId: 'bridge-9',
+          acpSessionId: 'remote-session',
+        ),
+        hostLabel: 'Beta',
+        title: 'Codex',
+        providerLabel: 'Codex',
+        cwdSummary: '…/billing-service',
+        since: DateTime(2026, 1, 1, 11, 56),
+        tracked: false,
+      );
+      await tester.pumpWidget(
+        MediaQuery(
+          data: MediaQueryData(
+            size: const Size(390, 900),
+            textScaler: TextScaler.linear(scale),
+          ),
+          child: _harness(items: [item], opened: []),
+        ),
+      );
+      final details = tester.renderObject<RenderParagraph>(
+        find.text('Beta · 4m ago · …/billing-service'),
+      );
+      expect(
+        details.didExceedMaxLines,
+        isFalse,
+        reason: 'At ${scale}x the working directory is cut off.',
+      );
+    }
   });
 
   group('opening an untracked session', () {
@@ -229,7 +274,7 @@ void main() {
       await tester.pumpWidget(
         _harness(items: [item], opened: opened, monkeyMux: monkeyMux),
       );
-      await tester.tap(find.text('Open'));
+      await tester.tap(_chevron);
       await tester.pump();
       expect(
         find.byKey(const ValueKey('waiting-on-you-opening')),
@@ -260,10 +305,10 @@ void main() {
       await tester.pumpWidget(
         _harness(items: [item], opened: opened, monkeyMux: monkeyMux),
       );
-      await tester.tap(find.text('Open'));
+      await tester.tap(_chevron);
       await tester.pump();
       unawaited(
-        Navigator.of(tester.element(find.text('Open'))).push(
+        Navigator.of(tester.element(find.text('waiting on you'))).push(
           MaterialPageRoute<void>(
             builder: (context) => const Scaffold(body: Text('elsewhere')),
           ),

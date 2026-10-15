@@ -21,6 +21,7 @@ import '../providers/connection_attention_provider.dart';
 import 'acp_session_presentation.dart';
 import 'agent_tool_icon.dart';
 import 'attention_presentation.dart';
+import 'mux_window_status_badge.dart';
 
 /// Opens a route for a waiting row.
 typedef WaitingOnYouOpener = void Function(
@@ -155,15 +156,30 @@ class _ConnectionsWaitingSectionState
                       ),
                     ),
                     const SizedBox(width: FluttyTheme.spacingSm),
-                    Text(
-                      '${items.length}',
-                      semanticsLabel: items.length == 1
-                          ? '1 session'
-                          : '${items.length} sessions',
-                      style: FluttyTheme.displayMono(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: scheme.onSurfaceVariant,
+                    // A count pill, so the number does not read as a word
+                    // of the header.
+                    DecoratedBox(
+                      key: const ValueKey('waiting-on-you-count'),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: scheme.outline),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 1,
+                        ),
+                        child: Text(
+                          '${items.length}',
+                          semanticsLabel: items.length == 1
+                              ? '1 session'
+                              : '${items.length} sessions',
+                          style: FluttyTheme.displayMono(
+                            fontSize: 12,
+                            color: scheme.onSurfaceVariant,
+                            letterSpacing: 0,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -247,7 +263,11 @@ class WaitingOnYouRow extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(reason.icon, size: 12, color: reasonForeground),
+            Icon(
+              reason.icon,
+              size: statusPillIconSize(context),
+              color: reasonForeground,
+            ),
             const SizedBox(width: 3),
             Flexible(
               child: Text(
@@ -287,9 +307,11 @@ class WaitingOnYouRow extends StatelessWidget {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             reasonPill,
+            // Two lines, so the working directory, often the only thing
+            // that tells two sessions of one agent apart, is not elided.
             Text(
               details,
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: FluttyTheme.monoStyle.copyWith(
                 fontSize: 11,
@@ -301,45 +323,23 @@ class WaitingOnYouRow extends StatelessWidget {
         ),
       ],
     );
-    final openPill = DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border.all(color: scheme.outline),
-        borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Open',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: scheme.onSurface,
-                fontWeight: FontWeight.w600,
-              ),
+    // The whole row opens the session; the chevron marks it as a way in
+    // without spending a third of a phone row on a button.
+    final trailing = opening
+        ? const Padding(
+            padding: EdgeInsets.all(4),
+            child: SizedBox.square(
+              key: ValueKey('waiting-on-you-opening'),
+              dimension: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
-            const SizedBox(width: 2),
-            if (opening)
-              const Padding(
-                padding: EdgeInsets.all(2),
-                child: SizedBox.square(
-                  key: ValueKey('waiting-on-you-opening'),
-                  dimension: 12,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              )
-            else
-              Icon(
-                Icons.chevron_right,
-                size: 16,
-                color: scheme.onSurfaceVariant,
-              ),
-          ],
-        ),
-      ),
-    );
-    // Large text gets its own line for Open, so the title keeps its width.
-    final largeText = MediaQuery.textScalerOf(context).scale(14) > 14 * 1.3;
+          )
+        : Icon(
+            Icons.chevron_right,
+            key: const ValueKey('waiting-on-you-chevron'),
+            size: 24,
+            color: scheme.onSurfaceVariant,
+          );
     final icon = AgentToolIcon(tool: item.tool, color: scheme.onSurfaceVariant);
     return Semantics(
       container: true,
@@ -355,30 +355,15 @@ class WaitingOnYouRow extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 56),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
-            child: largeText
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          icon,
-                          const SizedBox(width: 12),
-                          Expanded(child: content),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Align(alignment: Alignment.centerRight, child: openPill),
-                    ],
-                  )
-                : Row(
-                    children: [
-                      icon,
-                      const SizedBox(width: 12),
-                      Expanded(child: content),
-                      const SizedBox(width: 8),
-                      openPill,
-                    ],
-                  ),
+            child: Row(
+              children: [
+                icon,
+                const SizedBox(width: 12),
+                Expanded(child: content),
+                const SizedBox(width: 8),
+                trailing,
+              ],
+            ),
           ),
         ),
       ),
