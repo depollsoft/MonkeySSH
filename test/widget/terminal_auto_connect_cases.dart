@@ -31,6 +31,11 @@ void registerTerminalAutoConnectTests() {
           autoConnectRequiresConfirmation: false,
           autoForwardPorts: false,
           sortOrder: 0,
+          notifyAgentAttention: true,
+          notifyAgentFinished: true,
+          notifyWindowAlerts: true,
+          notifyShellNotifications: true,
+          pushWhenClosed: true,
         );
         if (preset == 'unsupported') {
           await settingsService.setJson(SettingKeys.agentLaunchPresets, {

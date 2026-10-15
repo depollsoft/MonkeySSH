@@ -7,6 +7,9 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
+// SSHSession.channel returns this type, but the dartssh2 barrel omits it.
+// ignore: implementation_imports
+import 'package:dartssh2/src/ssh_channel.dart' show SSHChannel;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
@@ -34,6 +37,7 @@ import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
+import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
@@ -3482,11 +3486,12 @@ class SshSession {
   RemoteMuxBackend? get remoteMuxBackend => _remoteMuxBackend;
   set remoteMuxBackend(RemoteMuxBackend? value) {
     if (_remoteMuxBackend == value) return;
-    final hadProgramStatus = programStatus != null;
+    final hadProgramStatus = programStatus != null || programStatusReporter;
     _remoteMuxBackend = value;
     _programStatusRecords.clear();
     _plainProgramStatus = null;
     _muxProgramStatus = null;
+    _muxProgramStatusReporter = false;
     if (hadProgramStatus) _notifyMetadataChanged();
   }
 
@@ -3605,6 +3610,7 @@ class SshSession {
   final _programStatusRecords = TerminalProgramStatusRecords();
   TerminalProgramStatus? _plainProgramStatus;
   TerminalProgramStatus? _muxProgramStatus;
+  bool _muxProgramStatusReporter = false;
   SftpClient? _sftpClient;
   Future<SftpClient>? _sftpClientFuture;
 
@@ -3708,15 +3714,25 @@ class SshSession {
   TerminalProgramStatus? get programStatus =>
       remoteMuxBackend == null ? _plainProgramStatus : _muxProgramStatus;
 
-  /// Synchronizes the active multiplexer window's OSC 7501 status.
+  /// Whether the active multiplexer window's program speaks OSC 7501, so
+  /// its OSC 9;4 progress is ignored even while it reports no status.
+  bool get programStatusReporter =>
+      remoteMuxBackend != null && _muxProgramStatusReporter;
+
+  /// Synchronizes the active multiplexer window's OSC 7501 status and whether
+  /// its program is a [programStatusReporter].
   ///
   /// Returns whether it changed. Metadata listeners are notified only when
   /// this call changes the session state.
-  bool synchronizeProgramStatus(TerminalProgramStatus? status) {
-    if (_muxProgramStatus == status) {
+  bool synchronizeProgramStatus(
+    TerminalProgramStatus? status, {
+    bool reporter = false,
+  }) {
+    if (_muxProgramStatus == status && _muxProgramStatusReporter == reporter) {
       return false;
     }
     _muxProgramStatus = status;
+    _muxProgramStatusReporter = reporter;
     _notifyMetadataChanged();
     return true;
   }
@@ -4055,6 +4071,7 @@ class SshSession {
         _lastExitCode != null ||
         _terminalProgress != null ||
         programStatus != null ||
+        programStatusReporter ||
         terminalCommandMarkTracker.markCount > 0 ||
         _windowTitle != null ||
         _terminalColorOverrides.isNotEmpty;
@@ -4074,6 +4091,7 @@ class SshSession {
     _programStatusRecords.clear();
     _plainProgramStatus = null;
     _muxProgramStatus = null;
+    _muxProgramStatusReporter = false;
     _terminalPreview = null;
     _terminalPreviewSnapshot = null;
     _windowTitle = null;
@@ -6870,6 +6888,10 @@ class _AppReviewDemoSshSession implements SSHSession {
   @override
   Future<void> get done => _done.future;
 
+  // Callers destroy abandoned exec and shell channels through this.
+  @override
+  late final SSHChannel channel = _AppReviewDemoSshChannel(this);
+
   @override
   void write(Uint8List data) {
     if (!_closed) {
@@ -7007,9 +7029,11 @@ class _AppReviewDemoSshSession implements SSHSession {
     }
     _closed = true;
     await _stdinSubscription.cancel();
-    await _stdinController.close();
-    await _stdoutController.close();
-    await _stderrController.close();
+    // Closing a stream nobody listened to never completes, and callers often
+    // ignore exec output, so done must not wait for these.
+    unawaited(_stdinController.close());
+    unawaited(_stdoutController.close());
+    unawaited(_stderrController.close());
     if (!_exitCompleter.isCompleted) {
       _exitCompleter.complete(exitCode);
     }
@@ -7017,6 +7041,21 @@ class _AppReviewDemoSshSession implements SSHSession {
       _done.complete();
     }
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _AppReviewDemoSshChannel implements SSHChannel {
+  _AppReviewDemoSshChannel(this._session);
+
+  final _AppReviewDemoSshSession _session;
+
+  @override
+  Future<void> get done => _session.done;
+
+  @override
+  void destroy() => _session.close();
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -8717,6 +8756,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       try {
         await _showTerminalNotification(
           session,
+          queue,
           entry.request,
           tmuxSessionName: entry.tmuxSessionName,
           tmuxWindowIndex: entry.tmuxWindowIndex,
@@ -8746,6 +8786,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   Future<void> _showTerminalNotification(
     SshSession session,
+    _TerminalNotificationQueue queue,
     TerminalNotificationRequest request, {
     required String? tmuxSessionName,
     required int? tmuxWindowIndex,
@@ -8754,9 +8795,21 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
     String? tmuxWindowSubtitle,
   }) async {
     if (!ref.mounted) return;
-    if (request.action == TerminalNotificationAction.show &&
-        !ref.read(terminalNotificationsNotifierProvider)) {
-      return;
+    if (request.action == TerminalNotificationAction.show) {
+      if (!ref.read(terminalNotificationsNotifierProvider)) return;
+      final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
+        session.hostId,
+      );
+      // A disconnect while the read was pending removed the queue, and with
+      // it the generations that would otherwise catch this.
+      if (!ref.mounted ||
+          !identical(
+            _terminalNotificationQueues[session.connectionId],
+            queue,
+          ) ||
+          !prefs.shellNotifications) {
+        return;
+      }
     }
     final notificationService = ref.read(localNotificationServiceProvider);
     final notificationId = buildTerminalNotificationId(

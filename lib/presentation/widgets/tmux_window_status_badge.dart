@@ -31,6 +31,15 @@ class TmuxWindowStatusBadge extends StatefulWidget {
         backgroundColor: theme.colorScheme.errorContainer,
       );
     }
+    // The program reports its own status and currently reports none, so
+    // nothing is guessed from output timing.
+    if (window.programStatusReporter) {
+      return _TmuxWindowStatusVisual(
+        icon: Icons.more_horiz,
+        foregroundColor: theme.colorScheme.onSurfaceVariant,
+        backgroundColor: theme.colorScheme.surfaceContainerHighest,
+      );
+    }
     if (window.isIdle) {
       return _TmuxWindowStatusVisual(
         icon: Icons.hourglass_bottom,
@@ -127,11 +136,14 @@ class _TmuxWindowStatusBadgeState extends State<TmuxWindowStatusBadge> {
     final theme = Theme.of(context);
     final visual = TmuxWindowStatusBadge._statusVisual(theme, widget.window);
 
-    final reportedStatus = widget.window.reportedStatus;
+    final window = widget.window;
+    final reportedStatus = window.reportedStatus;
     return MuxWindowStatusBadge(
-      semanticsLabel: reportedStatus == null
-          ? 'terminal window ${widget.window.statusLabel}'
-          : 'terminal window ${reportedStatus.semanticsLabel}',
+      semanticsLabel: reportedStatus != null
+          ? 'terminal window ${reportedStatus.semanticsLabel}'
+          : window.programStatusReporter && !window.hasAlert
+          ? 'terminal window has not reported a status'
+          : 'terminal window ${window.statusLabel}',
       label: widget.window.statusLabel,
       icon: visual.icon,
       foregroundColor: visual.foregroundColor,

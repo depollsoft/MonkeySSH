@@ -54,6 +54,15 @@ class ClassificationTest(unittest.TestCase):
                 self.assertTrue(result['run_check'])
                 self.assertFalse(result['windows_native'])
 
+    def test_ios_test_inputs_run_the_ios_build_on_pull_requests(self):
+        for path in sorted(changes.IOS_TEST_INPUTS):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file(), path)
+                result = self.assert_platforms([path], ['ios'])
+                # build-ios needs monkeymux-assets, which run_check enables.
+                self.assertTrue(result['run_check'])
+                self.assertTrue(result['ios_native'])
+
     def test_release_and_workflow_tooling_do_not_require_flutter(self):
         for path in [
             '.github/workflows/security.yml', '.github/actions/deployment-status/action.yml',
@@ -435,6 +444,11 @@ class WorkflowContractsTest(unittest.TestCase):
         self.assertNotIn('scripts/validate_store_screenshots.py', commands)
         self.assertIn('--require-screenshots', commands)
         self.assertIn('scripts/validate_store_demo_videos.py', commands)
+
+    def test_ios_notification_text_test_runs_in_build_ios(self):
+        steps = self.workflows['ci.yml']['jobs']['build-ios']['steps']
+        commands = '\n'.join(step.get('run', '') for step in steps)
+        self.assertIn('scripts/test_ios_push_notification_content.sh', commands)
 
     def test_windows_only_tests_are_gated_by_their_own_inputs(self):
         # build-windows is the only job that runs these tests, so each test file,

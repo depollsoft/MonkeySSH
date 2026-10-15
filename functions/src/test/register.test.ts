@@ -48,6 +48,22 @@ test("registration seals the token and a new device id under the current key", (
   assert.ok(!JSON.stringify(logs).includes(token));
 });
 
+test("a ticket says when the app posts its own notifications", () => {
+  const { deps: d } = deps();
+  const flagged = handleRegisterPushDevice(
+    { token, platform: "android", appNotifications: true },
+    d,
+  );
+  assert.equal(openTicket(keys, flagged.ticket)?.appNotifications, true);
+  for (const appNotifications of [undefined, false, "true", 1]) {
+    const result = handleRegisterPushDevice(
+      { token, platform: "android", appNotifications },
+      d,
+    );
+    assert.equal(openTicket(keys, result.ticket)?.appNotifications, undefined);
+  }
+});
+
 test("an existing device id is kept across re-registration", () => {
   const { deps: d } = deps();
   const result = handleRegisterPushDevice(
