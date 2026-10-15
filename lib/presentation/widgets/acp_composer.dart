@@ -1007,21 +1007,27 @@ class _ErrorBanner extends StatelessWidget {
           borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
           border: Border.all(color: scheme.error.withAlpha(90)),
         ),
-        padding: const EdgeInsets.fromLTRB(
-          FluttyTheme.spacingMd,
-          FluttyTheme.spacingSm,
-          FluttyTheme.spacingSm,
-          FluttyTheme.spacingSm,
+        // Same frame and dismiss target as the restored-draft note, so the
+        // composer's two notes read as one system.
+        padding: const EdgeInsetsDirectional.only(
+          start: FluttyTheme.spacingMd,
+          top: FluttyTheme.spacingXs,
+          bottom: FluttyTheme.spacingXs,
         ),
         child: Row(
           children: [
             Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
             const SizedBox(width: FluttyTheme.spacingSm),
             Expanded(
-              child: Text(
-                error.message,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onErrorContainer,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  vertical: FluttyTheme.spacingXs,
+                ),
+                child: Text(
+                  error.message,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onErrorContainer,
+                  ),
                 ),
               ),
             ),
@@ -1029,8 +1035,7 @@ class _ErrorBanner extends StatelessWidget {
               TextButton(onPressed: onUpload, child: const Text('Upload')),
             IconButton(
               tooltip: 'Dismiss error',
-              visualDensity: VisualDensity.compact,
-              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
               icon: Icon(Icons.close, size: 18, color: scheme.onErrorContainer),
               onPressed: onDismiss,
             ),
