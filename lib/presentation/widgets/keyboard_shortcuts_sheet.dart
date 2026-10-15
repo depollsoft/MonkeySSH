@@ -68,8 +68,10 @@ List<KeyboardShortcutListEntry> keyboardShortcutListEntries(
     entries.add(
       KeyboardShortcutListEntry(
         group: first.group,
+        // A word joiner after the dash keeps the range on one line.
         label:
-            'Go to window numbered ${first.windowNumber}–${last.windowNumber}',
+            'Go to window numbered '
+            '${first.windowNumber}–\u2060${last.windowNumber}',
         chord: '${describeAppShortcutChord(first, platform)}–${last.key.glyph}',
         semanticChord:
             '${describeAppShortcutChordForSemantics(first, platform)} '
@@ -341,7 +343,7 @@ class KeyboardShortcutKeycap extends StatelessWidget {
   }
 }
 
-/// The list shown while ⌘ is held on iPadOS.
+/// The list shown while ⌘ is held on iOS.
 class KeyboardShortcutsPeek extends StatelessWidget {
   /// Creates the peek panel.
   const KeyboardShortcutsPeek({super.key});
@@ -358,7 +360,7 @@ class KeyboardShortcutsPeek extends StatelessWidget {
       twoColumns ? _twoColumnWidth : 360.0,
       size.width - FluttyTheme.spacingMd * 2,
     );
-    var content = twoColumns
+    final content = twoColumns
         ? Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -383,7 +385,6 @@ class KeyboardShortcutsPeek extends StatelessWidget {
             ],
           )
         : KeyboardShortcutsList(platform: platform, dense: true);
-    content = SingleChildScrollView(child: content);
     return SafeArea(
       child: Center(
         child: ConstrainedBox(
@@ -404,21 +405,27 @@ class KeyboardShortcutsPeek extends StatelessWidget {
             child: Semantics(
               liveRegion: true,
               label: 'Keyboard shortcuts',
-              child: Padding(
+              // Large text can outgrow the panel; it scrolls (and clips,
+              // since the peek ignores touches) instead of overflowing.
+              child: SingleChildScrollView(
                 padding: const EdgeInsets.all(FluttyTheme.spacingMd),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Row(
+                    // The hint sits beside the title when both fit, and
+                    // drops under it when they do not.
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: FluttyTheme.spacingSm,
+                      runSpacing: FluttyTheme.spacingXs,
                       children: [
-                        Expanded(
-                          child: Text(
-                            'keyboard shortcuts',
-                            style: FluttyTheme.displayMono(
-                              fontSize: 16,
-                              color: theme.colorScheme.onSurface,
-                            ),
+                        Text(
+                          'keyboard shortcuts',
+                          style: FluttyTheme.displayMono(
+                            fontSize: 16,
+                            color: theme.colorScheme.onSurface,
                           ),
                         ),
                         Text(
@@ -429,7 +436,7 @@ class KeyboardShortcutsPeek extends StatelessWidget {
                         ),
                       ],
                     ),
-                    Flexible(child: content),
+                    content,
                   ],
                 ),
               ),
@@ -454,16 +461,17 @@ class KeyboardShortcutsSettingsTile extends StatelessWidget {
     if (scheme == null) {
       return const SizedBox.shrink();
     }
-    final showChord = scheme == AppShortcutModifierScheme.command
-        ? '⌘/'
-        : 'Ctrl+Shift+/';
+    final isCommand = scheme == AppShortcutModifierScheme.command;
+    final showChord = isCommand ? '⌘/' : 'Ctrl+Shift+/';
     return ListTile(
       key: const ValueKey('settings-keyboard-shortcuts'),
-      leading: const Icon(Icons.keyboard_command_key),
+      leading: Icon(
+        isCommand ? Icons.keyboard_command_key : Icons.keyboard_outlined,
+      ),
       title: const Text('Keyboard shortcuts'),
       subtitle: Text(
-        'Hardware keyboard shortcuts for windows, files and focus. '
-        'Press $showChord to see them anywhere.',
+        'Windows, files and focus from a hardware keyboard. '
+        '$showChord lists them anywhere.',
       ),
       onTap: () => unawaited(showKeyboardShortcutsSheet(context)),
     );
