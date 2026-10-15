@@ -10841,6 +10841,50 @@ void main() {
         await tester.pump(const Duration(seconds: 3));
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+      testWidgets('held Ctrl+Shift+] sends only the newest window to tmux', (
+        tester,
+      ) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        final firstSwitch = Completer<void>();
+        when(
+          () => tmuxService.selectWindow(
+            session,
+            'work',
+            1,
+            windowId: any(named: 'windowId'),
+            extraFlags: any(named: 'extraFlags'),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+          ),
+        ).thenAnswer((_) => firstSwitch.future);
+        stubSelect(tmuxService, 0);
+        shellWrites.clear();
+
+        // The press switches to window 1. While that is still on its way,
+        // three repeats step 0, 1, 0; only the last needs to be sent.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.bracketRight);
+        await tester.pump();
+        for (var i = 0; i < 3; i++) {
+          await tester.sendKeyRepeatEvent(LogicalKeyboardKey.bracketRight);
+          await tester.pump();
+        }
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.bracketRight);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+
+        firstSwitch.complete();
+        await tester.pump();
+        await tester.pump();
+
+        verifySelected(tmuxService, 1);
+        verifySelected(tmuxService, 0);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
       testWidgets('chords do nothing behind a touch-opened picker', (
         tester,
       ) async {

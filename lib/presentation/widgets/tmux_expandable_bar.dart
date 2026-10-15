@@ -265,6 +265,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   final _keyboardListKey = GlobalKey<KeyboardListNavigationState>();
   bool _showingNewWindowPicker = false;
 
+  /// Whether a keyboard window switch is on its way to the server, and the
+  /// newest server window the keyboard asked for since. Held next or
+  /// previous window repeats then send only the window they end on.
+  bool _keyboardSwitchInFlight = false;
+  TmuxWindow? _queuedKeyboardWindow;
+
   late final _windowLoader = TmuxWindowLoader(
     fetch: () => _mux.listWindows(
       widget.session,
@@ -1304,6 +1310,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         window.nativeAcpBridgeId == key.bridgeId) {
       return;
     }
+    _queuedKeyboardWindow = null;
     _clearPendingSelectedWindow(notify: false);
   }
 
@@ -1317,17 +1324,42 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     if (window == null) {
       // A pending server selection would otherwise still count as active,
       // and ⌘W would close that window instead of the session shown now.
+      _queuedKeyboardWindow = null;
       _clearPendingSelectedWindow(notify: true);
       await widget.onAction(TmuxOpenAcpSessionAction(target.session!.key));
       return;
     }
     setState(() => _pendingSelectedWindowIndex = window.index);
     _startPendingSelectionTimer(window.index);
-    await widget.onAction(
-      window.isNativeAcp
-          ? _openNativeWindowAction(window)
-          : TmuxSwitchWindowAction(window.index, windowId: window.id),
-    );
+    if (_keyboardSwitchInFlight) {
+      // The badge already moved; the server only needs the last window.
+      _queuedKeyboardWindow = window;
+      return;
+    }
+    _keyboardSwitchInFlight = true;
+    try {
+      TmuxWindow? next = window;
+      while (next != null) {
+        _queuedKeyboardWindow = null;
+        await widget.onAction(
+          next.isNativeAcp
+              ? _openNativeWindowAction(next)
+              : TmuxSwitchWindowAction(next.index, windowId: next.id),
+        );
+        if (!mounted) {
+          return;
+        }
+        next = _queuedKeyboardWindow;
+        // A touch on another row since then wins.
+        final pending = _pendingSelectedWindowIndex;
+        if (next != null && pending != null && pending != next.index) {
+          next = null;
+        }
+      }
+    } finally {
+      _keyboardSwitchInFlight = false;
+      _queuedKeyboardWindow = null;
+    }
   }
 
   /// Switches [delta] rows from the active window, wrapping at the ends.
