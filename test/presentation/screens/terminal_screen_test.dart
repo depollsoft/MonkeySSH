@@ -2483,6 +2483,29 @@ void main() {
       );
     }
 
+    testWidgets(
+      'a key snippet that only presses Enter on an empty prompt is not reviewed',
+      (tester) async {
+        await SnippetRepository(db).insert(
+          SnippetsCompanion.insert(name: 'Enter', command: '{key:enter}'),
+        );
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        session.debugHandlePrivateOsc('133', const ['A']);
+        await tester.pump();
+        shellWrites.clear();
+
+        await runSnippetFromSheet(tester, 'Enter');
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+
+        expect(shellOutput(), '\r');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     for (final (command, reviewed) in [
       ('rm -rf a && rm -rf b{key:enter}', true),
       ('/clear{key:enter}', false),

@@ -16223,14 +16223,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           insertedText: sequence.hasActions
               ? sequence.reviewText
               : sequence.plainText,
-          buildReview: (commandText) => reviewForSnippetMode(
-            assessSnippetCommandInsertion(
-              commandText,
-              hadVariableSubstitution: substitution.hadVariableSubstitution,
-            ),
-            reviewMode,
-            typesAfterSubmit: sequence.typesAfterSubmit,
-          ),
+          buildReview: (commandText) =>
+              sequence.hasActions && commandText.trim().isEmpty
+              // Only Enter on an empty line: there is no command to review.
+              ? TerminalCommandReview(command: commandText, reasons: const [])
+              : reviewForSnippetMode(
+                  assessSnippetCommandInsertion(
+                    commandText,
+                    hadVariableSubstitution:
+                        substitution.hadVariableSubstitution,
+                  ),
+                  reviewMode,
+                  typesAfterSubmit: sequence.typesAfterSubmit,
+                ),
           title: 'Review snippet command',
           messageBuilder: (_) =>
               'Confirm the rendered command before inserting it.',
