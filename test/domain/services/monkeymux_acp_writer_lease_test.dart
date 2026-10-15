@@ -194,6 +194,64 @@ void main() {
     expect(channels.last.frames.first['clientToken'], _token);
   });
 
+  test('a take over whose reply was lost is not asked again', () async {
+    var attaches = 0;
+    final (:transport, :channels) = _open(
+      takeOver: true,
+      answer: (channel, _) {
+        // The bridge acts on the first hello, but its reply never arrives.
+        if (++attaches == 1) {
+          unawaited(channel.remoteClose());
+          return;
+        }
+        channel.send(
+          _hello(canSend: false, writer: {'label': 'iPhone', 'idleSeconds': 0}),
+        );
+      },
+    );
+    final states = <MonkeyMuxAcpTransportState>[];
+    transport.states.listen(states.add);
+
+    await _waitUntil(
+      () => states.any(
+        (state) => state.status == MonkeyMuxAcpTransportStatus.heldElsewhere,
+      ),
+    );
+    expect(channels.first.frames.first['takeover'], isTrue);
+    // Another device may have taken the chat back since; only a new tap
+    // takes it again.
+    expect(channels.last.frames.first.containsKey('takeover'), isFalse);
+  });
+
+  test('each hello names the last connection whose hello arrived', () async {
+    const firstClient = '11111111111111111111111111111111';
+    const lostClient = '22222222222222222222222222222222';
+    var attaches = 0;
+    final (:transport, :channels) = _open(
+      reconnectBackoff: const [Duration.zero, Duration.zero],
+      answer: (channel, _) {
+        switch (++attaches) {
+          case 1:
+            channel.send(_hello(canSend: true)..['clientId'] = firstClient);
+          case 2:
+            // This connection reached the bridge, but its hello was lost.
+            unawaited(channel.remoteClose());
+          default:
+            channel.send(_hello(canSend: true)..['clientId'] = lostClient);
+        }
+      },
+    );
+    await _waitUntil(() => transport.isConnected);
+    await channels.single.remoteClose();
+    await _waitUntil(() => channels.length == 3 && transport.isConnected);
+
+    expect(channels[0].frames.first.containsKey('previousClientId'), isFalse);
+    // The bridge reports the count of the connection the app last heard
+    // from, never that of one whose hello it never read.
+    expect(channels[1].frames.first['previousClientId'], firstClient);
+    expect(channels[2].frames.first['previousClientId'], firstClient);
+  });
+
   test('a lease held elsewhere ends the attach without failing', () async {
     final (:transport, :channels) = _open(
       answer: (channel, _) => channel.send(
@@ -341,6 +399,40 @@ void main() {
       AcpInputDelivery.notSent,
     );
   });
+
+  test(
+    'a prompt sent after an answered turn is not sent when the lease moved',
+    () async {
+      final (:transport, :channels) = _open(
+        answer: (channel, _) => channel.send(_hello(canSend: true)),
+      );
+      await _waitUntil(() => transport.isConnected);
+      await transport.write(utf8.encode(prompt(1, 'session')));
+      // The first turn ends, and the lease moves before the follow-up the
+      // app queued behind it reached the transport.
+      channels.single
+        ..send({
+          'type': 'output',
+          'bridgeId': _bridgeId,
+          'sequence': 1,
+          'data': {
+            'jsonrpc': '2.0',
+            'id': 1,
+            'result': {'stopReason': 'end_turn'},
+          },
+        })
+        ..send({
+          'type': 'lease',
+          'bridgeId': _bridgeId,
+          'writer': {'label': 'iPhone', 'idleSeconds': 0},
+          'acceptedInputs': 1,
+        });
+      await _waitUntil(() => channels.single.closed);
+
+      // The follow-up must not inherit the answered turn's delivery.
+      expect(transport.promptDelivery('session'), AcpInputDelivery.notSent);
+    },
+  );
 
   test(
     'a prompt queued while reconnecting is not sent when the lease moved',

@@ -841,8 +841,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final String _clientToken;
   final Duration _heartbeatInterval;
   final DateTime Function() _clock;
-  // Only the first writer handshake takes the lease over. A later reconnect
-  // must not silently take back a lease another device deliberately took.
+  // Only the first handshake written takes the lease over, whether or not
+  // its reply arrives. A later reconnect must not silently take back a lease
+  // another device deliberately took meanwhile.
   bool _takeOverRequested;
   bool _heldWriterLease;
   Timer? _heartbeatTimer;
@@ -868,6 +869,10 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final _sentPrompts = <String, _SentPrompt>{};
   var _evictedSentPrompts = false;
   var _lastWriterGeneration = 0;
+  // The bridge's id for the last writer connection whose hello arrived. The
+  // next hello names it, so the count the bridge reports is that
+  // connection's even if a reconnect in between never got its hello back.
+  String? _lastWriterClientId;
   var _channelInputCount = 0;
   Map<String, AcpInputDelivery>? _promptDeliveries;
   final _pendingReplayFrames = Queue<AcpDecodedFrame>();
@@ -1025,7 +1030,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         'deviceLabel': _deviceLabel,
         'clientToken': _clientToken,
         if (_takeOverRequested) 'takeover': true,
+        'previousClientId': ?_lastWriterClientId,
       });
+      // The bridge may act on this hello even if its reply is lost, so a
+      // reconnect asks again only through a deliberate take over.
+      _takeOverRequested = false;
       _diagnostics.debug(
         'acp.transport',
         'attach_opened',
@@ -1319,9 +1328,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _handshakeTimer = null;
     _connected = true;
     _reconnectAttempt = 0;
-    _takeOverRequested = false;
     _heldWriterLease = true;
     _lastWriterGeneration = _generation;
+    final clientId = message['clientId'];
+    _lastWriterClientId =
+        clientId is String && isValidMonkeyMuxAcpBridgeId(clientId)
+        ? clientId
+        : null;
     if (leaseAware) _startHeartbeat();
     if (metadata.nextSequence < _lastDeliveredSequence) {
       _failTerminal(
@@ -1512,9 +1525,19 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       return;
     }
     _commitSequence(sequence);
+    _forgetAnsweredPrompt(data);
     _deliverOutput(output!);
     _sendAck(sequence);
     _finishDirectReplayIfComplete();
+  }
+
+  /// Drops the record of a prompt once its response arrives. A session's
+  /// next prompt then reads as not sent until it is written itself, so it
+  /// cannot inherit the delivery of the turn before it.
+  void _forgetAnsweredPrompt(Map<Object?, Object?> data) {
+    final id = data['id'];
+    if (id == null || data.containsKey('method')) return;
+    _sentPrompts.removeWhere((_, sent) => sent.requestId == id);
   }
 
   void _handlePending(Map<String, Object?> message, AcpDecodedFrame? output) {
@@ -1674,10 +1697,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     );
   }
 
-  /// Whether the newest prompt for [sessionId] reached the agent, once this
-  /// transport is [MonkeyMuxAcpTransportStatus.heldElsewhere].
+  /// Whether the unanswered prompt for [sessionId] reached the agent, once
+  /// this transport is [MonkeyMuxAcpTransportStatus.heldElsewhere].
   ///
-  /// A prompt the transport never received counts as not sent.
+  /// A prompt the transport never received counts as not sent, including one
+  /// sent after an earlier prompt of the session was answered.
   AcpInputDelivery promptDelivery(String sessionId) {
     final deliveries = _promptDeliveries;
     if (deliveries == null) return AcpInputDelivery.unknown;
@@ -1748,6 +1772,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       _sentPrompts[sessionId] = (
         generation: sent.generation,
         index: sent.index,
+        requestId: sent.requestId,
         settled: sent.index < acceptedInputs
             ? AcpInputDelivery.delivered
             : AcpInputDelivery.notSent,
@@ -1768,7 +1793,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
               : AcpInputDelivery.unknown);
     }
     for (final frame in _pendingInputFrames) {
-      if (frame.promptSessionId case final sessionId?) {
+      if (frame.prompt case (:final sessionId, requestId: _)?) {
         deliveries[sessionId] = AcpInputDelivery.notSent;
       }
     }
@@ -1948,12 +1973,13 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         _handleChannelLoss(_generation, error);
         return;
       }
-      if (frame.promptSessionId case final sessionId?) {
+      if (frame.prompt case (:final sessionId, :final requestId)?) {
         _sentPrompts
           ..remove(sessionId)
           ..[sessionId] = (
             generation: _generation,
             index: _channelInputCount,
+            requestId: requestId,
             settled: null,
           );
         if (_sentPrompts.length > _maxSentPromptSessions) {
@@ -2150,12 +2176,22 @@ String _buildHelperCommand(
   return buildWindowsPowerShellCommand(script);
 }
 
-/// One input frame for the bridge, with the session it prompts, if any.
-typedef _InputFrame = ({Uint8List bytes, String? promptSessionId});
+/// One input frame for the bridge, with the session and JSON-RPC request id
+/// of the prompt it carries, if any.
+typedef _InputFrame = ({
+  Uint8List bytes,
+  ({String sessionId, Object requestId})? prompt,
+});
 
-/// The newest prompt of a session, written as input frame [index] of channel
-/// [generation], and its fate once a later hello settled it.
-typedef _SentPrompt = ({int generation, int index, AcpInputDelivery? settled});
+/// The newest unanswered prompt of a session, request [requestId] written as
+/// input frame [index] of channel [generation], and its fate once a later
+/// hello settled it.
+typedef _SentPrompt = ({
+  int generation,
+  int index,
+  Object requestId,
+  AcpInputDelivery? settled,
+});
 
 // One entry per session on this bridge attachment (the chat and its forks).
 const _maxSentPromptSessions = 256;
@@ -2414,17 +2450,18 @@ _InputFrame _prepareAcpInputFrame(List<int> frame) {
   }
   final params = decoded['params'];
   final sessionId = params is Map ? params['sessionId'] : null;
+  final requestId = decoded['id'];
   return (
     bytes: _encodeWire({
       'version': monkeyMuxAcpBridgeProtocolVersion,
       'type': 'input',
       'data': decoded,
     }),
-    promptSessionId:
+    prompt:
         decoded['method'] == 'session/prompt' &&
-            decoded['id'] != null &&
+            requestId != null &&
             sessionId is String
-        ? sessionId
+        ? (sessionId: sessionId, requestId: requestId)
         : null,
   );
 }
