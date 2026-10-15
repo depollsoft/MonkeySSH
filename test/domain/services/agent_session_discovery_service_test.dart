@@ -3395,6 +3395,61 @@ branch refs/heads/main
       expect(promptReads, 2);
     });
 
+    test('Cursor prompt labels are re-read after invalidateSession', () async {
+      final client = _MockSshClient();
+      const chatDirectory =
+          '/Users/demo/.cursor/chats/workspace/'
+          '99999999-9999-4999-8999-999999999999';
+      const metaPath = '$chatDirectory/meta.json';
+      const promptPath = '$chatDirectory/prompt_history.json';
+      var prompt = 'Explain the build';
+      var promptReads = 0;
+      _stubDiscoveryExec(client, (command) async {
+        if (command.contains('find ~/.cursor/chats')) {
+          return _buildExecSession(
+            stdout: _listedFileLine(metaPath, mtime: 1787302132),
+          );
+        }
+        if (command.contains(promptPath)) {
+          promptReads += 1;
+          return _buildExecSession(
+            stdout:
+                '$promptPath\x1f${base64Encode(utf8.encode('[\n'))}'
+                '\x1f${base64Encode(utf8.encode('  "$prompt"\n]'))}\n',
+          );
+        }
+        if (command.contains(metaPath)) {
+          return _buildExecSession(
+            stdout: _remoteSnapshotLine(
+              metaPath,
+              '{"schemaVersion":1,"createdAtMs":1787302131000,'
+              '"hasConversation":true}',
+            ),
+          );
+        }
+        return _buildExecSession();
+      });
+      final discovery = AgentSessionDiscoveryService();
+      final session = _buildDiscoverySession(client);
+      Future<String?> pickerSummary() async =>
+          (await discovery
+                  .discoverSessionsStream(session, toolName: 'Cursor Agent')
+                  .last)
+              .sessions
+              .single
+              .summary;
+
+      expect(await pickerSummary(), 'Explain the build');
+      expect(promptReads, 1);
+
+      // A refresh drops the cached label with the rest of the host's state,
+      // even though meta.json kept its mtime.
+      prompt = 'Port the installer';
+      discovery.invalidateSession(session);
+      expect(await pickerSummary(), 'Port the installer');
+      expect(promptReads, 2);
+    });
+
     test('Cursor never names a chat with a label the picker drops', () async {
       final client = _MockSshClient();
       const workspace = '/Users/demo/.cursor/chats/workspace';
