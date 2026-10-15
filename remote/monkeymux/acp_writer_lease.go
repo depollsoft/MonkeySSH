@@ -49,6 +49,8 @@ type acpLeaseRequest struct {
 	label    string
 	token    string
 	takeover bool
+	// previousClientID is the client's last connection whose hello it read.
+	previousClientID string
 }
 
 func acpLeaseRequestFromHello(hello acpWireMessage) acpLeaseRequest {
@@ -61,6 +63,10 @@ func acpLeaseRequestFromHello(hello acpWireMessage) acpLeaseRequest {
 	}
 	if acpClientTokenPattern.MatchString(hello.ClientToken) {
 		request.token = hello.ClientToken
+	}
+	// Client ids are minted like bridge ids.
+	if validAcpBridgeID(hello.PreviousClientID) {
+		request.previousClientID = hello.PreviousClientID
 	}
 	// Only a client that can be told it lost the lease may take one over.
 	request.takeover = request.aware && hello.Takeover
@@ -256,40 +262,54 @@ func answerLeaseProbe(
 	}
 }
 
-// acpAcceptedInputsMemory bounds the per-token counts kept for reattaching
-// clients; one app process has one token, so few are ever live.
+// acpAcceptedInputsMemory bounds the per-connection counts kept for
+// reattaching clients. A client asks only about its own last connection, so
+// the newest few are enough.
 const acpAcceptedInputsMemory = 64
+
+// acpAcceptedInputs is the input count of a lease-aware connection that left,
+// with the token of the app process that made it.
+type acpAcceptedInputs struct {
+	token string
+	count uint64
+}
 
 // rememberAcceptedInputsLocked keeps the input count of a lease-aware
 // client's connection as it leaves, so that client's next hello can tell it
-// which prompts the bridge took before the connection dropped.
+// which prompts the bridge took before the connection dropped. Counts are
+// kept per connection: a later connection of the same process whose hello
+// never reached the app must not replace the count the app still needs.
 func (b *acpBridge) rememberAcceptedInputsLocked(client *acpBridgeClient) {
 	if !client.leaseAware || client.token == "" {
 		return
 	}
-	if b.acceptedByToken == nil {
-		b.acceptedByToken = map[string]uint64{}
+	if b.acceptedByClient == nil {
+		b.acceptedByClient = map[string]acpAcceptedInputs{}
 	}
-	if _, known := b.acceptedByToken[client.token]; !known {
-		for token := range b.acceptedByToken {
-			if len(b.acceptedByToken) < acpAcceptedInputsMemory {
-				break
-			}
-			delete(b.acceptedByToken, token)
+	if _, known := b.acceptedByClient[client.id]; !known {
+		for len(b.acceptedOrder) >= acpAcceptedInputsMemory {
+			delete(b.acceptedByClient, b.acceptedOrder[0])
+			b.acceptedOrder = b.acceptedOrder[1:]
 		}
+		b.acceptedOrder = append(b.acceptedOrder, client.id)
 	}
-	b.acceptedByToken[client.token] = client.acceptedInputs
+	b.acceptedByClient[client.id] = acpAcceptedInputs{
+		token: client.token,
+		count: client.acceptedInputs,
+	}
 }
 
-// previousAcceptedInputsLocked is the count remembered for request's token.
+// previousAcceptedInputsLocked is the count remembered for the connection
+// request names, when the same app process made it.
 func (b *acpBridge) previousAcceptedInputsLocked(request acpLeaseRequest) *uint64 {
-	if request.token == "" {
+	if request.token == "" || request.previousClientID == "" {
 		return nil
 	}
-	count, known := b.acceptedByToken[request.token]
-	if !known {
+	record, known := b.acceptedByClient[request.previousClientID]
+	if !known || record.token != request.token {
 		return nil
 	}
+	count := record.count
 	return &count
 }
 

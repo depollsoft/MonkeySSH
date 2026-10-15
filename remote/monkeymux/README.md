@@ -135,16 +135,23 @@ The displaced writer stops receiving output at once. A lease-aware one is sent
 queued output, where `acceptedInputs` counts the input frames the bridge took
 from that connection before the lease moved (later ones were dropped; zero is
 written out), and is disconnected 10 seconds later even if it never reads it.
-The bridge also remembers that count per `clientToken` when a connection ends,
-and reports it as `previousAcceptedInputs` in that token's next hello, so a
-client that reconnects knows which of its prompts the old connection
-delivered. Any other client is
+If the provider fails to take an input frame, that frame is not counted and
+the connection's later input is refused with the provider error, so the count
+is always the exact prefix the provider received. The bridge also remembers
+each lease-aware connection's count when it ends. A client names, as
+`previousClientId`, the `clientId` of its last connection whose hello it read,
+and the next hello reports that connection's count as
+`previousAcceptedInputs` (only for the same `clientToken`), so a client that
+reconnects knows which of its prompts the old connection delivered, even if a
+reconnect in between never got its hello back. Any other client is
 disconnected so it reattaches as a reader. Pending provider requests and
 in-flight turns belong to the bridge, so they carry over to the new writer,
 which receives them through the normal attach replay. Only one answer to a
 provider request reaches the provider; a second answer from another client is
 dropped without touching the request, so it can still be replayed if the
-first answer cannot be written. A resuming client without a token is always
+first answer cannot be written. If the provider cancels the request while
+that answer is being written and the write then fails, the bridge answers it
+as cancelled instead of replaying it. A resuming client without a token is always
 sent to a fresh attach, since the bridge cannot tell it wrote last.
 
 The replay buffer is memory-only. Bridge metadata exposed by `list` and

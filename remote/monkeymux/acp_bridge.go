@@ -104,10 +104,14 @@ type acpWireMessage struct {
 	ClientToken  string         `json:"clientToken,omitempty"`
 	Takeover     bool           `json:"takeover,omitempty"`
 	Writer       *acpWriterInfo `json:"writer,omitempty"`
+	// PreviousClientID names, in an attach hello, the client's last
+	// connection whose hello it read, so the bridge can report that
+	// connection's PreviousAcceptedInputs.
+	PreviousClientID string `json:"previousClientId,omitempty"`
 	// Input frames the bridge took from a displaced writer, in a lease frame.
 	AcceptedInputs *uint64 `json:"acceptedInputs,omitempty"`
-	// Input frames the bridge took on the previous connection with the same
-	// client token, in a hello.
+	// Input frames the bridge took on the connection the hello's
+	// PreviousClientID names, in a hello.
 	PreviousAcceptedInputs *uint64 `json:"previousAcceptedInputs,omitempty"`
 }
 
@@ -181,6 +185,10 @@ type acpBridgeClient struct {
 	leaseAware     bool
 	lastSeen       time.Time
 	acceptedInputs uint64
+	// inputRefused is set once the provider failed to take an input frame
+	// from this connection. Later frames are refused, so acceptedInputs
+	// stays the exact prefix of frames the provider took.
+	inputRefused bool
 	// displaced closes when the client loses the lease; leaseNotice is set
 	// before it closes and is what the writer goroutine sends next.
 	displaced   chan struct{}
@@ -222,13 +230,17 @@ type acpBridge struct {
 	clients              map[string]*acpBridgeClient
 	writerClientID       string
 	writerLastInput      time.Time
-	acceptedByToken      map[string]uint64
+	acceptedByClient     map[string]acpAcceptedInputs
+	acceptedOrder        []string
 	lastWriterLabel      string
 	lastWriterToken      string
 	leaseEverHeld        bool
 	now                  func() time.Time
 	leaseLinger          time.Duration
 	pendingRequests      map[string]struct{}
+	// claimedRequests holds provider requests whose answer is being written
+	// to the provider, and whether the provider cancelled one meanwhile.
+	claimedRequests      map[string]bool
 	cancelledRequests    map[string]struct{}
 	cancelledOrder       []string
 	inFlightTurns        map[string]struct{}
@@ -1117,18 +1129,12 @@ func (b *acpBridge) observeClientMessage(envelope acpEnvelope) {
 	if len(envelope.Method) == 0 {
 		id := acpRequestKey(envelope.ID)
 		delete(b.pendingRequests, id)
+		delete(b.claimedRequests, id)
 		b.releasePendingReplayLocked(id)
 	}
 	b.lastActivity = time.Now()
 }
 
-// claimClientResponse reports whether a client frame may reach the provider.
-// A response to a provider request the bridge already answered as cancelled
-// is dropped, so the provider never sees two answers. The marker stays until
-// the provider reuses the id or the bounded memory evicts it: each attachment
-// that resumes from before the cancel replays the request and answers it
-// again. Any other response claims its request before the write, so a racing
-// provider cancellation cannot also answer it.
 // acpResponseClaim is what may happen to a client frame on its way to the
 // provider.
 type acpResponseClaim int
@@ -1143,6 +1149,13 @@ const (
 	acpClaimDuplicate
 )
 
+// claimClientResponse reports whether a client frame may reach the provider.
+// A response to a provider request the bridge already answered as cancelled
+// is dropped, so the provider never sees two answers. The marker stays until
+// the provider reuses the id or the bounded memory evicts it: each attachment
+// that resumes from before the cancel replays the request and answers it
+// again. Any other response claims its request before the write, so a racing
+// provider cancellation cannot also answer it.
 func (b *acpBridge) claimClientResponse(envelope acpEnvelope) acpResponseClaim {
 	if len(envelope.ID) == 0 || len(envelope.Method) > 0 {
 		return acpClaimForward
@@ -1160,19 +1173,40 @@ func (b *acpBridge) claimClientResponse(envelope acpEnvelope) acpResponseClaim {
 		return acpClaimDuplicate
 	}
 	delete(b.pendingRequests, key)
+	if b.claimedRequests == nil {
+		b.claimedRequests = map[string]bool{}
+	}
+	b.claimedRequests[key] = false
 	return acpClaimForward
 }
 
 // unclaimClientResponse makes a claimed request pending again after its
-// answer could not be written to the provider, so a client can retry it.
+// answer could not be written to the provider, so a client can retry it. If
+// the provider cancelled the request while the answer was on its way, the
+// bridge answers it as cancelled instead, as it would have had the cancel
+// come first, so no client is shown a request the provider withdrew.
 func (b *acpBridge) unclaimClientResponse(envelope acpEnvelope) {
 	if len(envelope.ID) == 0 || len(envelope.Method) > 0 {
 		return
 	}
+	key := acpRequestKey(envelope.ID)
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.state == "running" {
-		b.pendingRequests[acpRequestKey(envelope.ID)] = struct{}{}
+	cancelled, claimed := b.claimedRequests[key]
+	delete(b.claimedRequests, key)
+	// Without a claim the provider reused the id for a new request, which
+	// is already pending.
+	if !claimed || b.state != "running" {
+		b.mu.Unlock()
+		return
+	}
+	b.pendingRequests[key] = struct{}{}
+	var cancelResponse json.RawMessage
+	if cancelled {
+		cancelResponse = b.cancelPendingRequestLocked(key)
+	}
+	b.mu.Unlock()
+	if cancelResponse != nil {
+		_ = b.queueProviderInput(cancelResponse, nil)
 	}
 }
 
@@ -1185,6 +1219,11 @@ func (b *acpBridge) unclaimClientResponse(envelope acpEnvelope) {
 // the request and then its cancellation, and drops the prompt.
 func (b *acpBridge) cancelPendingRequestLocked(key string) json.RawMessage {
 	if _, pending := b.pendingRequests[key]; !pending {
+		// An answer on its way to the provider is not pending; remember the
+		// cancel in case that write fails and the request is restored.
+		if _, claimed := b.claimedRequests[key]; claimed {
+			b.claimedRequests[key] = true
+		}
 		return nil
 	}
 	response, err := json.Marshal(map[string]any{
@@ -1288,6 +1327,9 @@ func (b *acpBridge) publish(
 	}
 	if pendingID != "" {
 		b.pendingRequests[pendingID] = struct{}{}
+		// A reused id is a new request; an answer still on its way was for
+		// the old one and must not touch this one if its write fails.
+		delete(b.claimedRequests, pendingID)
 		b.push.observeProviderRequestLocked(envelope.method, pendingID)
 		// A reused id names a new request; only an older one was cancelled.
 		b.forgetCancelledRequestLocked(pendingID)
@@ -1708,6 +1750,14 @@ func (b *acpBridge) handleAttach(
 		case "ack":
 			b.recordAck(clientID, message.Ack)
 		case "input":
+			if b.clientInputRefused(clientID) {
+				b.enqueue(client, acpWireMessage{
+					Version: acpBridgeProtocolVersion,
+					Type:    "error",
+					Error:   "ACP provider is unavailable",
+				})
+				continue
+			}
 			if !b.clientCanSend(clientID) {
 				b.enqueue(client, acpWireMessage{
 					Version: acpBridgeProtocolVersion,
@@ -1749,6 +1799,7 @@ func (b *acpBridge) handleAttach(
 					b.untrackClientRequest(requestID)
 				}
 				b.unclaimClientResponse(envelope)
+				b.refuseClientInput(client)
 				b.enqueue(client, acpWireMessage{
 					Version: acpBridgeProtocolVersion,
 					Type:    "error",
@@ -1943,6 +1994,29 @@ func (b *acpBridge) clientCanSend(clientID string) bool {
 	b.writerLastInput = b.clock()
 	b.clients[clientID].acceptedInputs++
 	return true
+}
+
+// clientInputRefused reports whether clientID's connection already failed to
+// pass an input frame to the provider.
+func (b *acpBridge) clientInputRefused(clientID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	client := b.clients[clientID]
+	return client != nil && client.inputRefused
+}
+
+// refuseClientInput takes back the count of the input frame the provider just
+// failed to take and refuses the connection's later frames. The client treats
+// the failure as fatal for this connection anyway; refusing what follows keeps
+// acceptedInputs an exact prefix, so a lease notice can never report a frame
+// that failed as delivered.
+func (b *acpBridge) refuseClientInput(client *acpBridgeClient) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if client.acceptedInputs > 0 {
+		client.acceptedInputs--
+	}
+	client.inputRefused = true
 }
 
 func (b *acpBridge) recordAck(clientID string, sequence uint64) {
