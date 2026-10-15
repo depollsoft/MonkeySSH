@@ -24,6 +24,9 @@ class FakeGitWorkingTreeService extends GitWorkingTreeService {
   final diffRequests = <String>[];
   Completer<void>? untrackedGate;
 
+  /// When set, [loadDiff] waits for it before answering.
+  Completer<void>? diffGate;
+
   @override
   Future<GitWorkingTreeSnapshot> loadStatus(String directory) async {
     statusDirectories.add(directory);
@@ -53,6 +56,7 @@ class FakeGitWorkingTreeService extends GitWorkingTreeService {
     GitChangedFile file,
   ) async {
     diffRequests.add('${file.group.name}:${file.path}');
+    await diffGate?.future;
     final diff = diffs[file.path];
     if (diff is GitFileDiff) {
       return diff;

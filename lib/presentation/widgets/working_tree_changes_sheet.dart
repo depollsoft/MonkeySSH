@@ -286,8 +286,13 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
     });
   }
 
-  void _askAboutHunk(GitChangedFile file, GitDiffHunk hunk) {
-    Navigator.of(context).pop(buildGitHunkPrompt(file: file, hunk: hunk));
+  void _askAboutHunk(
+    GitChangedFile file,
+    GitDiffHunk hunk, {
+    required bool cutOff,
+  }) {
+    Navigator.of(context)
+        .pop(buildGitHunkPrompt(file: file, hunk: hunk, cutOff: cutOff));
   }
 
   GitLineCounts? _countsFor(GitChangedFile file) =>
@@ -354,7 +359,7 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
       title = 'Working tree changes';
       subtitles = _listSubtitles(context, snapshot);
     } else {
-      title = _baseName(selected.path);
+      title = _displayName(selected.path);
       subtitles = [_fileSubtitle(selected)];
     }
     return Padding(
@@ -382,7 +387,7 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
                   header: true,
                   child: Text(
                     title,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: FluttyTheme.displayMono(
                       fontSize: 18,
@@ -395,7 +400,7 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
                 for (final subtitle in subtitles)
                   Text(
                     subtitle,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: subtitleStyle,
                   ),
@@ -552,9 +557,16 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
         return _scrollableState(
           BrandErrorState(
             title: 'git status failed',
-            message: exitCode == null
-                ? 'git stopped before reporting status.'
-                : 'git exited with status $exitCode.',
+            message: switch (exitCode) {
+              null => 'git stopped before reporting status.',
+              // git's usage error, which a git older than 2.11 gives for
+              // `--porcelain=v2`.
+              129 =>
+                'git exited with status 129, which usually means it is older '
+                    'than 2.11. Working tree changes need git 2.11 or newer '
+                    'on the host.',
+              _ => 'git exited with status $exitCode.',
+            },
             onRetry: _refresh,
           ),
         );
@@ -671,48 +683,79 @@ class _WorkingTreeChangesSheetState extends State<WorkingTreeChangesSheet> {
         ),
     ];
     final hunkCount = diff.hunks.length;
-    return ListView.builder(
-      key: ValueKey<String>('working-tree-diff-${file.id}'),
-      controller: widget.scrollController,
-      padding: const EdgeInsets.fromLTRB(
-        FluttyTheme.spacingSm,
-        FluttyTheme.spacingSm,
-        FluttyTheme.spacingSm,
-        FluttyTheme.spacingLg,
+    return LayoutBuilder(
+      builder: (context, constraints) => _buildHunkList(
+        file: file,
+        diff: diff,
+        items: items,
+        hunkCount: hunkCount,
+        // Below this width a labelled button would cut the hunk header's
+        // function name short.
+        compactActions: constraints.maxWidth < 420,
       ),
-      itemCount: items.length + hunkCount + (diff.truncated ? 1 : 0),
-      itemBuilder: (context, index) {
-        if (index < items.length) {
-          return items[index];
-        }
-        final hunkIndex = index - items.length;
-        if (hunkIndex >= hunkCount) {
-          return const _DiffTruncatedFooter();
-        }
-        final hunk = diff.hunks[hunkIndex];
-        final previous = hunkIndex == 0 ? null : diff.hunks[hunkIndex - 1];
-        final unchanged = gitUnchangedLinesBetween(previous, hunk);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (unchanged != null && unchanged > 0)
-              _UnchangedLines(count: unchanged)
-            else if (hunkIndex > 0)
-              const SizedBox(height: FluttyTheme.spacingSm),
-            AcpDiffView(
-              diff: AcpDiff(path: hunk.header, unifiedDiff: hunk.body),
-              semanticsLabel:
-                  'Hunk ${hunkIndex + 1} of $hunkCount, '
-                  '${hunk.lines.length} lines',
-              headerTrailing: widget.canAskAgent
-                  ? _AskAgentButton(onPressed: () => _askAboutHunk(file, hunk))
-                  : null,
-            ),
-          ],
-        );
-      },
     );
   }
+
+  Widget _buildHunkList({
+    required GitChangedFile file,
+    required GitFileDiff diff,
+    required List<Widget> items,
+    required int hunkCount,
+    required bool compactActions,
+  }) => ListView.builder(
+    key: ValueKey<String>('working-tree-diff-${file.id}'),
+    controller: widget.scrollController,
+    padding: const EdgeInsets.fromLTRB(
+      FluttyTheme.spacingSm,
+      FluttyTheme.spacingSm,
+      FluttyTheme.spacingSm,
+      FluttyTheme.spacingLg,
+    ),
+    itemCount: items.length + hunkCount + (diff.truncated ? 1 : 0),
+    itemBuilder: (context, index) {
+      if (index < items.length) {
+        return items[index];
+      }
+      final hunkIndex = index - items.length;
+      if (hunkIndex >= hunkCount) {
+        return const _DiffTruncatedFooter();
+      }
+      final hunk = diff.hunks[hunkIndex];
+      final previous = hunkIndex == 0 ? null : diff.hunks[hunkIndex - 1];
+      final unchanged = gitUnchangedLinesBetween(previous, hunk);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (unchanged != null && unchanged > 0)
+            _UnchangedLines(count: unchanged)
+          else if (hunkIndex > 0)
+            const SizedBox(height: FluttyTheme.spacingSm),
+          AcpDiffView(
+            diff: AcpDiff(path: hunk.header, unifiedDiff: hunk.body),
+            bodyOnly: true,
+            semanticsLabel:
+                'Hunk ${hunkIndex + 1} of $hunkCount, '
+                '${hunk.lines.length} lines',
+            headerTrailing: widget.canAskAgent
+                ? _AskAgentButton(
+                    compact: compactActions,
+                    // A refresh is rereading this diff; what is on screen
+                    // may already be stale.
+                    onPressed: _diffLoading
+                        ? null
+                        : () => _askAboutHunk(
+                            file,
+                            hunk,
+                            cutOff:
+                                diff.truncated && hunkIndex == hunkCount - 1,
+                          ),
+                  )
+                : null,
+          ),
+        ],
+      );
+    },
+  );
 
   Widget _scrollableState(Widget child) {
     final banner = _refreshFailedBanner(
@@ -773,8 +816,19 @@ String _baseName(String path) {
       ? path.substring(0, path.length - 1)
       : path;
   final slash = trimmed.lastIndexOf('/');
-  return slash < 0 ? trimmed : trimmed.substring(slash + 1);
+  if (slash < 0) {
+    return trimmed;
+  }
+  final name = trimmed.substring(slash + 1);
+  // A repository rooted at `/` is named `/`.
+  return name.isEmpty ? trimmed : name;
 }
+
+/// [path]'s last segment, keeping the trailing `/` that marks an untracked
+/// directory so it never reads as a file.
+String _displayName(String path) => path.endsWith('/') && path.length > 1
+    ? '${_baseName(path)}/'
+    : _baseName(path);
 
 String _directoryName(String path) {
   final trimmed = path.endsWith('/') && path.length > 1
@@ -908,18 +962,12 @@ class _TruncatedNotice extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
         FluttyTheme.spacingMd,
         FluttyTheme.spacingSm,
         FluttyTheme.spacingMd,
         0,
-      ),
-      padding: const EdgeInsets.all(FluttyTheme.spacingSm),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-        border: Border.all(color: scheme.outlineVariant),
       ),
       child: Row(
         children: [
@@ -1032,9 +1080,19 @@ class _ChangedFileTile extends StatelessWidget {
         ? ''
         : counts.binary
         ? ', binary'
-        : ', ${counts.added} added, ${counts.removed} removed';
+        : [
+            if (counts.added > 0) ', ${counts.added} added',
+            if (counts.removed > 0) ', ${counts.removed} removed',
+          ].join();
+    // A path changed both in the index and the work tree has two tiles; the
+    // group tells them apart when moving between controls.
+    final groupLabel = switch (file.group) {
+      GitChangeGroup.staged ||
+      GitChangeGroup.unstaged => ', ${gitChangeGroupLabel(file.group)}',
+      GitChangeGroup.conflicted || GitChangeGroup.untracked => '',
+    };
     final semanticsLabel =
-        '${file.path}, ${_kindLabel(file)}'
+        '${file.path}$groupLabel, ${_kindLabel(file)}'
         '${original == null ? '' : ' from $original'}'
         '${file.isSubmodule ? ', submodule' : ''}$countsLabel';
     return Semantics(
@@ -1076,7 +1134,7 @@ class _ChangedFileTile extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        _baseName(file.path),
+                        _displayName(file.path),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: FluttyTheme.monoStyle.copyWith(
@@ -1127,46 +1185,72 @@ class _LineCounts extends StatelessWidget {
     if (counts.binary) {
       return Text('bin', style: style.copyWith(color: scheme.onSurfaceVariant));
     }
-    return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(
-            text: '+${counts.added}',
-            style: style.copyWith(
-              color: _statusTextColor(theme, _additionColor(theme)),
-            ),
+    // A zero side says nothing, and a rename with no edits shows no counts.
+    final spans = <InlineSpan>[
+      if (counts.added > 0)
+        TextSpan(
+          text: '+${counts.added}',
+          style: style.copyWith(
+            color: _statusTextColor(theme, _additionColor(theme)),
           ),
-          const TextSpan(text: ' '),
-          TextSpan(
-            text: '\u2212${counts.removed}',
-            style: style.copyWith(color: _statusTextColor(theme, scheme.error)),
-          ),
-        ],
-      ),
-    );
+        ),
+      if (counts.added > 0 && counts.removed > 0) const TextSpan(text: ' '),
+      if (counts.removed > 0)
+        TextSpan(
+          text: '\u2212${counts.removed}',
+          style: style.copyWith(color: _statusTextColor(theme, scheme.error)),
+        ),
+    ];
+    if (spans.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Text.rich(TextSpan(children: spans));
   }
 }
 
 class _AskAgentButton extends StatelessWidget {
-  const _AskAgentButton({required this.onPressed});
+  const _AskAgentButton({required this.onPressed, required this.compact});
 
-  final VoidCallback onPressed;
+  /// Null while the diff reloads.
+  final VoidCallback? onPressed;
+
+  /// Icon only, so a narrow sheet keeps room for the hunk header.
+  final bool compact;
+
+  static const tooltip = 'Ask the agent about this hunk';
 
   @override
-  Widget build(BuildContext context) => Tooltip(
-    message: 'Ask the agent about this hunk',
-    child: TextButton.icon(
-      onPressed: onPressed,
-      // Neutral, not Signal Teal: every hunk carries one, so it must recede.
-      style: TextButton.styleFrom(
-        foregroundColor: Theme.of(context).colorScheme.onSurface,
-        minimumSize: const Size(44, 44),
-        padding: const EdgeInsets.symmetric(horizontal: FluttyTheme.spacingSm),
+  Widget build(BuildContext context) {
+    // Neutral, not Signal Teal: every hunk carries one, so it must recede.
+    final foreground = Theme.of(context).colorScheme.onSurface;
+    const icon = Icon(Icons.forum_outlined, size: 18);
+    if (compact) {
+      return IconButton(
+        tooltip: tooltip,
+        onPressed: onPressed,
+        style: IconButton.styleFrom(
+          foregroundColor: foreground,
+          minimumSize: const Size(44, 44),
+        ),
+        icon: icon,
+      );
+    }
+    return Tooltip(
+      message: tooltip,
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: foreground,
+          minimumSize: const Size(44, 44),
+          padding: const EdgeInsets.symmetric(
+            horizontal: FluttyTheme.spacingSm,
+          ),
+        ),
+        icon: icon,
+        label: const Text('Ask agent'),
       ),
-      icon: const Icon(Icons.forum_outlined, size: 18),
-      label: const Text('Ask agent'),
-    ),
-  );
+    );
+  }
 }
 
 class _UnchangedLines extends StatelessWidget {

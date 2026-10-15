@@ -1,6 +1,9 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
@@ -8,6 +11,8 @@ import 'package:monkeyssh/presentation/widgets/acp_diff.dart';
 import 'package:monkeyssh/presentation/widgets/working_tree_changes_sheet.dart';
 
 import '../support/fake_git_working_tree_service.dart';
+
+final askAgent = find.byTooltip('Ask the agent about this hunk');
 
 final refreshedAt = DateTime(2026, 10, 9, 14, 3, 7);
 
@@ -218,10 +223,18 @@ void main() {
     expect(find.text('from docs/old guide.md'), findsOneWidget);
     expect(find.text('bin'), findsOneWidget);
     expect(find.text('+12 −3'), findsOneWidget);
-    // Untracked counts arrive after the list.
-    expect(find.text('+7 −0'), findsOneWidget);
+    // Untracked counts arrive after the list, without a zero side.
+    expect(find.text('+7'), findsOneWidget);
+    // A rename with no edits shows no counts at all.
+    expect(find.textContaining('+0'), findsNothing);
     expect(
-      find.bySemanticsLabel('lib/main.dart, modified, 12 added, 3 removed'),
+      find.bySemanticsLabel(
+        'lib/main.dart, unstaged, modified, 12 added, 3 removed',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('notes.txt, untracked, 7 added'),
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('pubspec.lock, conflict UU'), findsOneWidget);
@@ -253,7 +266,10 @@ void main() {
     // The redundant diff/index/---/+++ lines are not repeated.
     expect(find.text('index 1..2 100644'), findsNothing);
 
-    await tester.tap(find.text('Ask agent').first);
+    // A phone-width sheet keeps the hunk header's room: the action is an
+    // icon with a tooltip.
+    expect(find.text('Ask agent'), findsNothing);
+    await tester.tap(askAgent.first);
     await tester.pumpAndSettle();
 
     expect(find.byType(WorkingTreeChangesSheet), findsNothing);
@@ -303,7 +319,115 @@ void main() {
     await tester.tap(find.text('main.dart'));
     await tester.pumpAndSettle();
     expect(find.byType(AcpDiffView), findsNWidgets(2));
-    expect(find.text('Ask agent'), findsNothing);
+    expect(askAgent, findsNothing);
+  });
+
+  testWidgets('a wide sheet labels Ask agent', (tester) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile]),
+      ],
+      diffs: {'lib/main.dart': twoHunkDiff()},
+    );
+    await _pumpSheet(tester, service: service, size: const Size(1024, 1366));
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ask agent'), findsNWidgets(2));
+  });
+
+  testWidgets('says the last hunk of a cut-off diff may be incomplete', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile]),
+      ],
+      diffs: {'lib/main.dart': twoHunkDiff(truncated: true)},
+    );
+    var host = await _pumpSheet(tester, service: service);
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+    await tester.tap(askAgent.last);
+    await tester.pumpAndSettle();
+    expect(host.prompt, contains('@@ -40,2 +41,3 @@'));
+    expect(host.prompt, contains('so this hunk may be incomplete'));
+
+    // Earlier hunks ended before the cap.
+    host = await _pumpSheet(tester, service: service);
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+    await tester.tap(askAgent.first);
+    await tester.pumpAndSettle();
+    expect(host.prompt, contains('@@ -1,3 +1,4 @@'));
+    expect(host.prompt, isNot(contains('may be incomplete')));
+  });
+
+  testWidgets('Ask agent waits while a refresh rereads the diff', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile]),
+      ],
+      diffs: {'lib/main.dart': twoHunkDiff()},
+    );
+    await _pumpSheet(tester, service: service);
+    await tester.tap(find.text('main.dart'));
+    await tester.pumpAndSettle();
+
+    bool enabled(Finder button) =>
+        tester
+            .widget<IconButton>(
+              find.ancestor(of: button, matching: find.byType(IconButton)),
+            )
+            .onPressed !=
+        null;
+    expect(enabled(askAgent.first), isTrue);
+
+    final gate = service.diffGate = Completer<void>();
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pump();
+    await tester.pump();
+    // The old diff stays readable but cannot be quoted as current.
+    expect(find.text('+B'), findsOneWidget);
+    expect(enabled(askAgent.first), isFalse);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(enabled(askAgent.first), isTrue);
+  });
+
+  testWidgets('names a repository rooted at /', (tester) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        GitWorkingTreeSnapshot(
+          state: GitWorkingTreeState.ready,
+          refreshedAt: refreshedAt,
+          files: const [modifiedFile],
+          repositoryRoot: '/',
+          branch: 'main',
+        ),
+      ],
+    );
+    await _pumpSheet(tester, service: service, directory: '/');
+    expect(find.text('/ · main'), findsOneWidget);
+  });
+
+  testWidgets('the title and subtitle wrap rather than truncate', (
+    tester,
+  ) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        readySnapshot(files: [modifiedFile]),
+      ],
+    );
+    // The test font's square glyphs are about as wide as JetBrains Mono at
+    // 1.7x text, so neither line fits on one row of a phone-width sheet.
+    await _pumpSheet(tester, service: service);
+    for (final text in ['Working tree changes', 'monkeyssh · feat/changes']) {
+      final paragraph = tester.renderObject<RenderParagraph>(find.text(text));
+      expect(paragraph.didExceedMaxLines, isFalse, reason: text);
+    }
   });
 
   testWidgets('binary and rename-only files explain the missing diff', (
@@ -367,6 +491,29 @@ void main() {
       expect(find.text(title), findsOneWidget);
     });
   }
+
+  testWidgets('names the git version a failed status may need', (tester) async {
+    final service = FakeGitWorkingTreeService(
+      snapshots: [
+        GitWorkingTreeSnapshot(
+          state: GitWorkingTreeState.failed,
+          refreshedAt: refreshedAt,
+          exitCode: 129,
+        ),
+        GitWorkingTreeSnapshot(
+          state: GitWorkingTreeState.failed,
+          refreshedAt: refreshedAt,
+          exitCode: 128,
+        ),
+      ],
+    );
+    await _pumpSheet(tester, service: service);
+    expect(find.textContaining('need git 2.11 or newer'), findsOneWidget);
+
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('git exited with status 128.'), findsOneWidget);
+  });
 
   testWidgets('a clean tree says so', (tester) async {
     final service = FakeGitWorkingTreeService(snapshots: [readySnapshot()]);
@@ -523,7 +670,8 @@ void main() {
       ],
     );
     await _pumpSheet(tester, service: service);
-    await tester.tap(find.text('plugin'));
+    // The slash marks it as a directory before it is opened.
+    await tester.tap(find.text('plugin/'));
     await tester.pumpAndSettle();
     expect(find.text('untracked directory'), findsOneWidget);
     expect(service.diffRequests, isEmpty);
@@ -592,14 +740,12 @@ void main() {
       await tester.tap(find.byType(InkWell).last);
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('Ask agent'), findsNWidgets(2));
+      expect(askAgent, findsNWidgets(2));
       final askSize = tester.getSize(
-        find.ancestor(
-          of: find.text('Ask agent').first,
-          matching: find.byType(TextButton),
-        ),
+        find.ancestor(of: askAgent.first, matching: find.byType(IconButton)),
       );
       expect(askSize.height, greaterThanOrEqualTo(44));
+      expect(askSize.width, greaterThanOrEqualTo(44));
       await tester.pumpWidget(const SizedBox.shrink());
     }
   });

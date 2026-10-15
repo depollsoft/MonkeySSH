@@ -1169,7 +1169,7 @@ void main() {
     expect(service.statusDirectories, ['/home/dev/project']);
     await tester.tap(find.text('a.dart'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Ask agent'));
+    await tester.tap(find.byTooltip('Ask the agent about this hunk'));
     await tester.pumpAndSettle();
 
     final field = tester.widget<TextField>(
