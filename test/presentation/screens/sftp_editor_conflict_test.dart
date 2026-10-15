@@ -154,7 +154,7 @@ void main() {
         expect(_text(server, _notes), 'line one\nfrom the agent\n');
 
         await _tapSave(tester);
-        await tester.tap(find.text('Overwrite host version'));
+        await tester.tap(find.text('Overwrite host file'));
         await tester.pumpAndSettle();
         expect(_text(server, _notes), 'line one\nfrom the phone\n');
         expect(find.byType(RemoteTextEditorScreen), findsNothing);
@@ -215,7 +215,7 @@ void main() {
       );
 
       await _tapSave(tester);
-      await tester.tap(find.text('Reload host version'));
+      await tester.tap(find.text('Reload from host'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Discard and reload'));
       await tester.pumpAndSettle();

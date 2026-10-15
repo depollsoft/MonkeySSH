@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/terminal_theme.dart' show contrastRatio;
 import '../../domain/services/remote_file_edit_session.dart';
 
 /// Lets the remote editor check the host's file before saving and resolve a
@@ -129,7 +130,8 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     final deleted = change == RemoteFileChange.deleted;
     // Only a changed file can be reloaded or overwritten; a folder or other
     // entry at the path can only be left alone.
@@ -141,24 +143,30 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
       RemoteFileChange.deleted => (
         Icons.delete_outline,
         'File deleted on the host',
-        ' was deleted or moved on the host after you opened it. Recreate it '
-            'with your edits, or keep them in a new file.',
+        'It was deleted or moved after you opened it. Recreate it with your '
+            'edits, or keep them in a new file.',
       ),
       RemoteFileChange.notAFile => (
         Icons.folder_outlined,
         'No longer a file',
-        ' is now a folder or another kind of entry on the host, so your '
-            'edits cannot be saved over it. Keep them in a new file.',
+        'The path is now a folder or another kind of entry, so your edits '
+            'cannot be saved over it. Keep them in a new file.',
       ),
       _ => (
         Icons.sync_problem,
         'File changed on the host',
-        ' changed on the host after you opened it, possibly by an agent or '
-            'another editor. Overwriting replaces those changes with yours.',
+        'It changed after you opened it, possibly by an agent or another '
+            'editor. Reloading discards your edits; overwriting discards the '
+            "host's changes.",
       ),
     };
+    final dialogBackground =
+        DialogTheme.of(context).backgroundColor ??
+        colorScheme.surfaceContainerHigh;
 
     return AlertDialog(
+      // Stacked full-width buttons would otherwise stretch across a tablet.
+      constraints: const BoxConstraints(minWidth: 280, maxWidth: 420),
       icon: Icon(icon),
       iconColor: colorScheme.onSurfaceVariant,
       title: Text(title),
@@ -167,20 +175,16 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text.rich(
-            TextSpan(
-              children: [
-                // File names are machine text, so they keep the mono voice.
-                TextSpan(
-                  text: fileName,
-                  style: TextStyle(
-                    fontFamily: FluttyTheme.monoStyle.fontFamily,
-                  ),
-                ),
-                TextSpan(text: explanation),
-              ],
-            ),
+          // The name is machine text, so it keeps the mono voice, on a line
+          // of its own so a long name never splits the sentence.
+          Text(
+            fileName,
+            style: FluttyTheme.monoStyle.copyWith(color: colorScheme.onSurface),
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
           ),
+          const SizedBox(height: 8),
+          Text(explanation),
           const SizedBox(height: 24),
           FilledButton.icon(
             style: FilledButton.styleFrom(minimumSize: buttonSize),
@@ -193,7 +197,7 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(minimumSize: buttonSize),
               icon: const Icon(Icons.refresh),
-              label: const Text('Reload host version'),
+              label: const Text('Reload from host'),
               onPressed: () => choose(RemoteEditorConflictChoice.reload),
             ),
             const SizedBox(height: 8),
@@ -202,10 +206,12 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
                 minimumSize: buttonSize,
-                foregroundColor: deleted ? null : colorScheme.error,
+                foregroundColor: deleted
+                    ? null
+                    : readableDestructiveColor(colorScheme, dialogBackground),
               ),
               icon: Icon(deleted ? Icons.save_outlined : Icons.warning_amber),
-              label: Text(deleted ? 'Recreate file' : 'Overwrite host version'),
+              label: Text(deleted ? 'Recreate file' : 'Overwrite host file'),
               onPressed: () => choose(RemoteEditorConflictChoice.overwrite),
             ),
             const SizedBox(height: 8),
@@ -223,4 +229,18 @@ class _RemoteEditorConflictDialog extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The error color, moved toward the text color just far enough to read at
+/// 4.5:1 on [background] (the light theme's red is too pale on white).
+@visibleForTesting
+Color readableDestructiveColor(ColorScheme colorScheme, Color background) {
+  final surface = Color.alphaBlend(background, colorScheme.surface);
+  final start = Color.alphaBlend(colorScheme.error, surface);
+  final ink = Color.alphaBlend(colorScheme.onSurface, surface);
+  for (var step = 0; step <= 20; step++) {
+    final candidate = Color.lerp(start, ink, step / 20)!;
+    if (contrastRatio(candidate, surface) >= 4.5) return candidate;
+  }
+  return ink;
 }

@@ -1,6 +1,9 @@
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/services/remote_file_edit_session.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/presentation/screens/remote_text_editor_conflict.dart';
@@ -14,7 +17,7 @@ class _FakeHost {
   final queuedChanges = <RemoteFileChange>[];
   String hostText = 'agent version';
   Object? checkError;
-  Exception? reloadError;
+  Object? reloadError;
   Exception? copyError;
 
   /// How many saves report a change between the check and the write.
@@ -54,6 +57,7 @@ class _FakeHost {
     },
     reload: () async {
       reloads++;
+      // ignore: only_throw_errors, dartssh2 models SFTP errors as interfaces.
       if (reloadError case final error?) throw error;
       change = RemoteFileChange.unchanged;
       return hostText;
@@ -147,11 +151,18 @@ void main() {
       await _save(tester);
 
       expect(find.text('File changed on the host'), findsOneWidget);
-      expect(find.textContaining('notes.txt changed on the host'), findsOne);
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('notes.txt'),
+        ),
+        findsOne,
+      );
+      expect(find.textContaining('Reloading discards your edits'), findsOne);
       for (final label in [
         'Save as a copy',
-        'Reload host version',
-        'Overwrite host version',
+        'Reload from host',
+        'Overwrite host file',
         'Cancel',
       ]) {
         final button = find.ancestor(
@@ -184,7 +195,7 @@ void main() {
       final harness = await _openEditor(tester, host);
 
       await _save(tester);
-      await tester.tap(find.text('Overwrite host version'));
+      await tester.tap(find.text('Overwrite host file'));
       await tester.pumpAndSettle();
 
       // The chosen overwrite skips the version comparison.
@@ -241,7 +252,7 @@ void main() {
       final harness = await _openEditor(tester, host);
 
       await _save(tester);
-      await tester.tap(find.text('Reload host version'));
+      await tester.tap(find.text('Reload from host'));
       await tester.pumpAndSettle();
       expect(find.text('Discard your edits?'), findsOneWidget);
       await tester.tap(find.text('Keep editing'));
@@ -252,7 +263,7 @@ void main() {
       expect(_editorIsEditable(tester), isTrue);
 
       await _save(tester);
-      await tester.tap(find.text('Reload host version'));
+      await tester.tap(find.text('Reload from host'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Discard and reload'));
       await tester.pumpAndSettle();
@@ -276,7 +287,7 @@ void main() {
       final harness = await _openEditor(tester, host, edit: null);
 
       await _save(tester);
-      await tester.tap(find.text('Reload host version'));
+      await tester.tap(find.text('Reload from host'));
       await tester.pumpAndSettle();
 
       expect(find.text('Discard your edits?'), findsNothing);
@@ -294,7 +305,7 @@ void main() {
       final harness = await _openEditor(tester, host);
 
       await _save(tester);
-      await tester.tap(find.text('Reload host version'));
+      await tester.tap(find.text('Reload from host'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Discard and reload'));
       await tester.pumpAndSettle();
@@ -311,7 +322,7 @@ void main() {
       await _save(tester);
 
       expect(find.text('File deleted on the host'), findsOneWidget);
-      expect(find.text('Reload host version'), findsNothing);
+      expect(find.text('Reload from host'), findsNothing);
       expect(find.text('Save as a copy'), findsOneWidget);
       await tester.tap(find.text('Recreate file'));
       await tester.pumpAndSettle();
@@ -368,8 +379,8 @@ void main() {
       expect(find.text('No longer a file'), findsOneWidget);
       expect(find.text('Save as a copy'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
-      expect(find.text('Reload host version'), findsNothing);
-      expect(find.text('Overwrite host version'), findsNothing);
+      expect(find.text('Reload from host'), findsNothing);
+      expect(find.text('Overwrite host file'), findsNothing);
       expect(find.text('Recreate file'), findsNothing);
     });
 
@@ -435,6 +446,102 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+  });
+
+  group('conflict dialog', () {
+    Future<void> showDialogIn(
+      WidgetTester tester,
+      ThemeData theme, {
+      Size size = const Size(390, 844),
+    }) async {
+      tester.view
+        ..physicalSize = size
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: FilledButton(
+                  onPressed: () => showRemoteEditorConflictDialog(
+                    context,
+                    fileName: 'settings.local.json',
+                    change: RemoteFileChange.modified,
+                  ),
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the overwrite label reads on a light dialog', (tester) async {
+      final theme = FluttyTheme.light;
+      await showDialogIn(tester, theme);
+
+      final label = tester.renderObject<RenderParagraph>(
+        find.text('Overwrite host file'),
+      );
+      expect(
+        contrastRatio(
+          label.text.style!.color!,
+          theme.dialogTheme.backgroundColor!,
+        ),
+        greaterThanOrEqualTo(4.5),
+      );
+    });
+
+    testWidgets('the dialog keeps a phone width on a tablet', (tester) async {
+      await showDialogIn(
+        tester,
+        FluttyTheme.dark,
+        size: const Size(1024, 1366),
+      );
+
+      final surface = find
+          .descendant(of: find.byType(Dialog), matching: find.byType(Material))
+          .first;
+      expect(tester.getSize(surface).width, lessThanOrEqualTo(420));
+    });
+
+    testWidgets('the file name sits on its own line', (tester) async {
+      await showDialogIn(tester, FluttyTheme.dark);
+
+      final name = tester.widget<Text>(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('settings.local.json'),
+        ),
+      );
+      expect(name.style?.fontFamily, FluttyTheme.monoStyle.fontFamily);
+    });
+  });
+
+  group('readableDestructiveColor', () {
+    test('darkens the light theme red until it reads on the dialog', () {
+      final scheme = FluttyTheme.light.colorScheme;
+      final background = FluttyTheme.light.dialogTheme.backgroundColor!;
+      // The theme red alone is too pale on a white dialog.
+      expect(contrastRatio(scheme.error, background), lessThan(4.5));
+
+      final color = readableDestructiveColor(scheme, background);
+
+      expect(contrastRatio(color, background), greaterThanOrEqualTo(4.5));
+      expect(color.r, greaterThan(color.g));
+    });
+
+    test('keeps a red that already reads', () {
+      final scheme = FluttyTheme.dark.colorScheme;
+      final background = FluttyTheme.dark.dialogTheme.backgroundColor!;
+
+      expect(readableDestructiveColor(scheme, background), scheme.error);
     });
   });
 }
