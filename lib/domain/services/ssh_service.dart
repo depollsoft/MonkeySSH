@@ -8756,6 +8756,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       try {
         await _showTerminalNotification(
           session,
+          queue,
           entry.request,
           tmuxSessionName: entry.tmuxSessionName,
           tmuxWindowIndex: entry.tmuxWindowIndex,
@@ -8785,6 +8786,7 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
 
   Future<void> _showTerminalNotification(
     SshSession session,
+    _TerminalNotificationQueue queue,
     TerminalNotificationRequest request, {
     required String? tmuxSessionName,
     required int? tmuxWindowIndex,
@@ -8798,7 +8800,16 @@ class ActiveSessionsNotifier extends Notifier<Map<int, SshConnectionState>> {
       final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
         session.hostId,
       );
-      if (!ref.mounted || !prefs.shellNotifications) return;
+      // A disconnect while the read was pending removed the queue, and with
+      // it the generations that would otherwise catch this.
+      if (!ref.mounted ||
+          !identical(
+            _terminalNotificationQueues[session.connectionId],
+            queue,
+          ) ||
+          !prefs.shellNotifications) {
+        return;
+      }
     }
     final notificationService = ref.read(localNotificationServiceProvider);
     final notificationId = buildTerminalNotificationId(

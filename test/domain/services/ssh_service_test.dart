@@ -4376,6 +4376,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     late _DelayedTerminalNotificationService notificationService;
     late List<MethodCall> methodCalls;
     var hostPrefs = const HostNotificationPrefs();
+    // Holds every preference read until completed, when set.
+    Completer<void>? prefsGate;
 
     setUp(() {
       fakeSshService = _FakeActiveSessionsSshService();
@@ -4404,15 +4406,17 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           terminalNotificationsNotifierProvider.overrideWith(
             _EnabledTerminalNotificationsNotifier.new,
           ),
-          hostNotificationPrefsReaderProvider.overrideWithValue(
-            (_) async => hostPrefs,
-          ),
+          hostNotificationPrefsReaderProvider.overrideWithValue((_) async {
+            await prefsGate?.future;
+            return hostPrefs;
+          }),
         ],
       );
     });
 
     tearDown(() async {
       hostPrefs = const HostNotificationPrefs();
+      prefsGate = null;
       BackgroundSshService.debugIsSupportedPlatformOverride = null;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_backgroundSshChannel, null);
@@ -4672,6 +4676,27 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         expect(notifier.debugTerminalNotificationQueueLength(connectionId), 0);
       },
     );
+
+    test('a notification whose preference read outlives its connection is '
+        'not shown', () async {
+      final gate = prefsGate = Completer<void>();
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final connectionId = result.connectionId!;
+      final session = notifier.getSession(connectionId)!;
+      notificationService.releaseShow.complete();
+
+      session.debugHandlePrivateOsc('99', const ['i=late', 'Late']);
+      await pumpEventQueue();
+      await notifier.disconnect(connectionId);
+      gate.complete();
+      await pumpEventQueue();
+
+      expect(
+        notificationService.calls.where((call) => call.startsWith('show')),
+        isEmpty,
+      );
+    });
 
     test('disconnect clears native timed notifications', () async {
       final notifier = container.read(activeSessionsProvider.notifier);

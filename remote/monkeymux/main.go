@@ -16790,6 +16790,7 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 					// not with the other modes, so it applies in byte order
 					// with the reports around it.
 					w.resetProgramStatusLocked()
+					w.noteProgramStatusStepLocked()
 				}
 			case 0x9d:
 				if index >= leadingUtf8Prefix &&

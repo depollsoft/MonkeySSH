@@ -131,8 +131,12 @@ func TestPushTerminalAgentStatusWithinOneRead(t *testing.T) {
 	read("state=working:app=claude-code", "state=done:app=claude-code")
 	read("state=working:app=claude-code", prompt)
 	read("state=working:app=claude-code", prompt)
-	if got := h.kinds(); got != "finished,permission,permission" {
-		t.Fatalf("pushes = %q, want the turn and both prompts", got)
+	// A terminal reset (RIS) clears the prompt, so one that follows it in the
+	// same read is new.
+	h.server.handleWindowOutput("@2", []byte("\x1bc"+programStatusOsc(prompt)))
+	h.deliverQueued()
+	if got := h.kinds(); got != "finished,permission,permission,permission" {
+		t.Fatalf("pushes = %q, want the turn and all three prompts", got)
 	}
 }
 
