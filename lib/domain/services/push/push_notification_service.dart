@@ -539,6 +539,12 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         unawaited(_installChannel());
       }
     }
+    if (!registered) {
+      // The notification context holds the device key. An opt-out the app
+      // was killed in, or a delete that failed, can leave it behind, so a
+      // device without a registration removes it at every start.
+      await _clearNotificationContext();
+    }
     if (_disposed) return;
     // A host turned off whose registration is still on the books was turned
     // off by a run that ended before it could unregister. It stays off, and
@@ -1404,6 +1410,15 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _contextDirty = true;
     try {
       await _contextStore.delete();
+    } on PlatformException catch (error) {
+      // An unsigned or simulator iOS build has no shared keychain group, so
+      // there is nothing to delete.
+      if (error.code == 'unavailable') return;
+      _log.warning(
+        _diagnosticsCategory,
+        'context_clear_failed',
+        fields: {'errorType': error.runtimeType},
+      );
     } on Object catch (error) {
       _log.warning(
         _diagnosticsCategory,

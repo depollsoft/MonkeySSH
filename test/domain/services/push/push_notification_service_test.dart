@@ -1607,6 +1607,7 @@ void main() {
         await h.start();
         await h.controller.enable();
         await h.controller.syncNow();
+        expect(h.context.stored, isNotNull);
         // What a kill right after the opt-out began leaves behind.
         await h.settings.setBool('push_notifications_enabled', value: false);
         await h.settings.setBool(
@@ -1619,6 +1620,8 @@ void main() {
 
         expect(h.state.enabled, isFalse);
         expect(h.secrets.values, isEmpty);
+        // The notification context's copy of the device key goes too.
+        expect(h.context.stored, isNull);
         expect(
           h.gateway.calls,
           containsAllInOrder(['autoInit:false', 'deleteToken']),
