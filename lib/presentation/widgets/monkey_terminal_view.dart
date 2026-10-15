@@ -661,6 +661,11 @@ class MonkeyTerminalView extends StatefulWidget {
   /// be scrolled above something that overlays the terminal, such as the
   /// find bar. It changes neither rows nor columns, so the PTY is not
   /// resized.
+  ///
+  /// The alternate screen gets none: a full-screen program would be lifted
+  /// by the clearance with no way to scroll its top rows back, since its
+  /// scrolling belongs to the program. What overlays it covers its bottom
+  /// rows instead.
   final double bottomScrollClearance;
 
   @override
@@ -965,10 +970,6 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
 
     _syncGraphicsAnimationTicker();
     _scheduleGraphicsAnimationSync();
-    if (transportChanged && widget.bottomScrollClearance > 0 && mounted) {
-      // Scroll physics depend on the screen while a clearance is set.
-      setState(() {});
-    }
     final currentViewWidth = widget.terminal.viewWidth;
     if (currentViewWidth == _lastTerminalViewWidth) {
       return;
@@ -1183,13 +1184,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     Widget child = Scrollable(
       key: _scrollableKey,
       controller: _scrollController,
-      // The bottom clearance gives the alternate screen a little scroll room
-      // for revealing rows. User scrolling must still reach the full-screen
-      // program, so the view itself does not scroll there.
-      physics:
-          widget.touchScrollToTerminal ||
-              (widget.bottomScrollClearance > 0 &&
-                  widget.terminal.isUsingAltBuffer)
+      physics: widget.touchScrollToTerminal
           ? const NeverScrollableScrollPhysics()
           : null,
       viewportBuilder: (context, offset) {
@@ -3256,6 +3251,10 @@ class MonkeyRenderTerminal extends RenderBox
   final Set<VoidCallback> _selectionListeners = <VoidCallback>{};
 
   int _lastKnownLineCount = -1;
+  // Whether the last layout measured the alternate screen. The clearance
+  // applies on the main screen only, so a switch changes the scroll extent
+  // even when the row count stays the same.
+  bool? _laidOutOnAltBuffer;
   int _forceLayoutOnTerminalChangeCount = 0;
   final _cursorCellData = CellData.empty();
 
@@ -3285,7 +3284,9 @@ class MonkeyRenderTerminal extends RenderBox
       _forceLayoutOnTerminalChangeCount -= 1;
       _lastKnownLineCount = lineCount;
       markNeedsLayout();
-    } else if (lineCount != _lastKnownLineCount) {
+    } else if (lineCount != _lastKnownLineCount ||
+        (_bottomScrollClearance > 0 &&
+            _terminal.isUsingAltBuffer != _laidOutOnAltBuffer)) {
       _lastKnownLineCount = lineCount;
       markNeedsLayout();
     } else {
@@ -3405,11 +3406,17 @@ class MonkeyRenderTerminal extends RenderBox
       _painter.cellSize.width,
       _painter.cellSize.height,
     );
-    _updateScrollOffset();
-
-    if (_liveOutputAutoScroll && _stickToBottom) {
+    _offset.applyViewportDimension(_viewportHeight);
+    // Follow the output before applying the new extent, so the position is
+    // never out of range: on iOS and macOS an out-of-range position starts a
+    // spring back, which a later correction does not stop. Entering the
+    // alternate screen shrinks the extent to nothing, and the screen would
+    // otherwise spring down from the old scrollback offset.
+    if (_liveOutputAutoScroll && _stickToBottom && _offset.hasPixels) {
       _offset.correctBy(_maxScrollExtent - _scrollOffset);
     }
+    _offset.applyContentDimensions(0, _maxScrollExtent);
+    _laidOutOnAltBuffer = _terminal.isUsingAltBuffer;
     _updateSelectionGeometry(deferNotification: true);
   }
 
@@ -4323,11 +4330,6 @@ class MonkeyRenderTerminal extends RenderBox
     _pendingTerminalResize = null;
   }
 
-  void _updateScrollOffset() {
-    _offset.applyViewportDimension(_viewportHeight);
-    _offset.applyContentDimensions(0, _maxScrollExtent);
-  }
-
   bool get _isComposingText =>
       _composingText != null && _composingText!.isNotEmpty;
 
@@ -4335,8 +4337,12 @@ class MonkeyRenderTerminal extends RenderBox
 
   double get _viewportHeight => size.height;
 
-  double get _maxScrollExtent =>
-      math.max(_terminalHeight - _viewportHeight + _bottomScrollClearance, 0.0);
+  double get _maxScrollExtent => math.max(
+    _terminalHeight -
+        _viewportHeight +
+        (_terminal.isUsingAltBuffer ? 0 : _bottomScrollClearance),
+    0.0,
+  );
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
 

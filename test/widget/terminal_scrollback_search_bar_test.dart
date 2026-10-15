@@ -417,6 +417,54 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    testWidgets(
+      'the alternate screen gets none, so a full-screen program keeps its top '
+      'rows in view',
+      (tester) async {
+        final terminal = Terminal();
+        final controller = ScrollController();
+        addTearDown(controller.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 400,
+                height: 300,
+                child: MonkeyTerminalView(
+                  terminal,
+                  scrollController: controller,
+                  hardwareKeyboardOnly: true,
+                  bottomScrollClearance: 60,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        // A fresh main screen has no scrollback, so it has as many rows as
+        // the alternate screen: the switch below keeps the row count.
+        final rows = terminal.buffer.lines.length;
+        expect(controller.position.maxScrollExtent, greaterThan(40));
+        expect(controller.offset, controller.position.maxScrollExtent);
+
+        terminal.write('\x1b[?1049h\x1b[Htop row of the program');
+        await tester.pump();
+        expect(terminal.buffer.lines.length, rows);
+        expect(controller.position.maxScrollExtent, 0);
+        // It stays there: iOS scroll physics must not spring back down from
+        // the main screen's offset.
+        for (var frame = 0; frame < 5; frame++) {
+          expect(controller.offset, 0);
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+
+        terminal.write('\x1b[?1049l');
+        await tester.pump();
+        expect(controller.position.maxScrollExtent, greaterThan(40));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
   });
 
   group('TerminalScrollbackSearchOverlay', () {
