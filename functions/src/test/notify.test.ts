@@ -25,6 +25,7 @@ const ticket = sealTicket(keys, {
   deviceId: "dev_test_device_00001",
   issuedAt: 1760000000,
   platform: "android",
+  appNotifications: true,
 });
 const payload = encodeBase64Url(Buffer.alloc(80, 3));
 const collapse = "0123456789abcdef0123456789abcdef";
@@ -74,39 +75,82 @@ function assertLogsClean(logs: NotifyLogEntry[]) {
   }
 }
 
+const iosTicket = sealTicket(keys, {
+  token,
+  deviceId: "dev_test_device_00001",
+  issuedAt: 1760000000,
+  platform: "ios",
+});
+
 test("a valid event is sent and answered with 202", async () => {
   const h = harness();
   const response = await handlePushNotify(post(valid), h.deps);
   assert.equal(response.status, 202);
   assert.deepEqual(response.body, { status: "sent" });
   assert.equal(h.sent.length, 1);
-  const message = h.sent[0];
-  assert.equal(message.token, token);
-  assert.deepEqual(message.data, { v: "1", p: payload });
-  assert.equal(message.notification?.title, "Approval needed");
-  assert.equal(message.android?.priority, "high");
-  assert.equal(message.android?.collapseKey, collapse);
-  assert.equal(message.android?.notification?.channelId, "agent-attention");
-  assert.equal(message.android?.notification?.tag, collapse);
-  assert.equal(message.apns?.headers?.["apns-priority"], "10");
-  assert.equal(message.apns?.headers?.["apns-collapse-id"], collapse);
-  assert.equal(message.apns?.payload?.aps.mutableContent, true);
+  assert.equal(h.sent[0].token, token);
   assert.deepEqual(h.logs, [
     { outcome: "sent", kind: "permission", platform: "android" },
   ]);
   assertLogsClean(h.logs);
 });
 
-test("normal-priority kinds stay quiet", async () => {
+test("Android gets data only, at high priority, for the app to show", async () => {
+  for (const kind of ["permission", "finished", "alert", "test"]) {
+    const h = harness();
+    await handlePushNotify(post({ ...valid, kind }), h.deps);
+    const message = h.sent[0];
+    assert.deepEqual(message.data, { v: "1", p: payload, k: kind, c: collapse });
+    assert.equal(message.notification, undefined);
+    assert.equal(message.apns, undefined);
+    assert.equal(message.android?.notification, undefined);
+    // The app must wake to post the notification, whatever the kind.
+    assert.equal(message.android?.priority, "high");
+    assert.equal(message.android?.collapseKey, collapse);
+  }
+});
+
+test("an Android build from before app notifications keeps the alert", async () => {
+  const older = sealTicket(keys, {
+    token,
+    deviceId: "dev_test_device_00001",
+    issuedAt: 1760000000,
+    platform: "android",
+  });
   const h = harness();
-  await handlePushNotify(post({ ...valid, kind: "finished" }), h.deps);
+  await handlePushNotify(post({ ...valid, ticket: older, kind: "finished" }), h.deps);
   const message = h.sent[0];
-  assert.equal(message.android?.priority, "normal");
-  // The channel decides sound on Android 8+, so routine kinds use a quiet one.
-  assert.equal(message.android?.notification?.channelId, "agent-updates");
+  assert.deepEqual(message.data, { v: "1", p: payload });
+  assert.equal(message.notification?.title, "Agent finished");
+  assert.equal(message.android?.notification?.channelId, "agent-updates-v2");
+});
+
+test("iOS gets an alert the notification service extension rewrites", async () => {
+  const h = harness();
+  await handlePushNotify(post({ ...valid, ticket: iosTicket }), h.deps);
+  const message = h.sent[0];
+  assert.deepEqual(message.data, { v: "1", p: payload });
+  assert.equal(message.notification?.title, "Approval needed");
+  assert.equal(message.apns?.headers?.["apns-priority"], "10");
+  assert.equal(message.apns?.headers?.["apns-collapse-id"], collapse);
+  assert.equal(message.apns?.payload?.aps.mutableContent, true);
+  assert.equal(message.apns?.payload?.aps.sound, "default");
+});
+
+test("normal-priority kinds stay quiet on iOS", async () => {
+  const h = harness();
+  await handlePushNotify(
+    post({ ...valid, ticket: iosTicket, kind: "finished" }),
+    h.deps,
+  );
+  const message = h.sent[0];
   assert.equal(message.apns?.headers?.["apns-priority"], "5");
   assert.equal(message.apns?.payload?.aps.sound, undefined);
   assert.equal(message.notification?.body, "An agent finished its turn.");
+  // A ticket without a platform still gets the Android channel for the kind.
+  // The channel decides sound on Android 8+: routine kinds sound without
+  // popping up.
+  assert.equal(message.android?.notification?.channelId, "agent-updates-v2");
 });
 
 test("only POST is accepted", async () => {

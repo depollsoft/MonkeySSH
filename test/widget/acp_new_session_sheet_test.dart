@@ -101,6 +101,11 @@ Host _host({
   remoteMuxBackend: remoteMuxBackend,
   autoForwardPorts: false,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 /// Pumps a launcher button that opens the new-session sheet, capturing the
