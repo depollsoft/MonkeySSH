@@ -8,6 +8,10 @@ part of '../terminal_screen.dart';
 /// which is keyboard navigable. Find in scrollback (#937) and Changes (#925)
 /// have no handler yet, so their chords stay with the terminal (they are not
 /// reserved until `available` is set in `app_shortcuts.dart`).
+/// Frames to wait for an agent chat's composer before giving up on focusing
+/// it after a keyboard flow.
+const _composerAttachFrames = 10;
+
 extension _TerminalScreenShortcuts on _TerminalScreenState {
   Map<AppShortcutAction, AppShortcutHandler?> _appShortcutHandlers(
     SshConnectionState connectionState,
@@ -34,16 +38,23 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
               bar()?.selectWindowNumberFromKeyboard(intent.windowNumber ?? 0),
             )
           : null,
+      // A new window, a close, or a pick in the navigator sheet can swap the
+      // viewport between the terminal and an agent chat, which drops the
+      // focused input with it.
       AppShortcutAction.newWindow: barShown
-          ? (_) => unawaited(bar()?.showNewWindowPickerFromKeyboard())
+          ? (_) => _afterKeyboardWindowSwitch(
+              bar()?.showNewWindowPickerFromKeyboard(),
+            )
           : null,
       AppShortcutAction.closeWindow: barShown
-          ? (_) => unawaited(bar()?.closeActiveWindowFromKeyboard())
+          ? (_) => _afterKeyboardWindowSwitch(
+              bar()?.closeActiveWindowFromKeyboard(),
+            )
           : null,
       AppShortcutAction.toggleWindowList: barShown
           ? (_) => bar()?.toggleFromKeyboard()
           : muxActive
-          ? (_) => unawaited(_openTmuxNavigator())
+          ? (_) => _afterKeyboardWindowSwitch(_openTmuxNavigator())
           : null,
       AppShortcutAction.focusComposer: (_) {
         _collapseTmuxBarIfExpanded();
@@ -55,8 +66,9 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
     };
   }
 
-  /// After a keyboard window switch lands, puts focus back on the input of
-  /// whatever the viewport now shows, unless something else took it.
+  /// After a keyboard window switch, new window, close, or navigator pick
+  /// lands, puts focus back on the input of whatever the viewport now shows,
+  /// unless something else took it.
   void _afterKeyboardWindowSwitch(Future<void>? switched) {
     if (switched == null) {
       return;
@@ -88,7 +100,9 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
     }
   }
 
-  void _restoreKeyboardInputFocusIfLost() {
+  void _restoreKeyboardInputFocusIfLost({
+    int framesLeft = _composerAttachFrames,
+  }) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -99,9 +113,19 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
           primary == null ||
           identical(primary, routeScope) ||
           _isFocusWithinTmuxBar();
-      if (lost) {
-        _focusKeyboardInput();
+      if (!lost) {
+        return;
       }
+      // An agent chat can build its composer a few frames after it fills
+      // the viewport. Wait for it instead of asking a composer that is not
+      // there yet.
+      if (_activeNativeAcpSessionKey != null &&
+          !_nativeComposerFocusController.isAttached &&
+          framesLeft > 0) {
+        _restoreKeyboardInputFocusIfLost(framesLeft: framesLeft - 1);
+        return;
+      }
+      _focusKeyboardInput();
     });
   }
 

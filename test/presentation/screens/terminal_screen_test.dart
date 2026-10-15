@@ -64,6 +64,7 @@ import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
+import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
@@ -10666,6 +10667,34 @@ void main() {
             .isNotEmpty;
       }
 
+      /// Whether keyboard focus is on the list row showing [text], not on a
+      /// container that merely holds that row.
+      bool focusIsOnRow(String text) {
+        final context = FocusManager.instance.primaryFocus?.context;
+        if (context == null) {
+          return false;
+        }
+        Element? row;
+        context.visitAncestorElements((element) {
+          if (element.widget is ListTile) {
+            row = element;
+            return false;
+          }
+          return true;
+        });
+        final tile = row;
+        return tile != null &&
+            find
+                .descendant(
+                  of: find.byElementPredicate(
+                    (element) => identical(element, tile),
+                  ),
+                  matching: find.text(text),
+                )
+                .evaluate()
+                .isNotEmpty;
+      }
+
       FocusNode terminalFocus(WidgetTester tester) => tester
           .widget<TerminalTextInputHandler>(
             find.byType(TerminalTextInputHandler),
@@ -10848,9 +10877,16 @@ void main() {
         expect(find.text('Close window?'), findsNothing);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-      testWidgets('⌘W closes the native session a number key opened', (
-        tester,
-      ) async {
+      /// MonkeyMux session "work" with windows build (0, active) and logs
+      /// (1), plus a native session with no server window, numbered 2.
+      Future<
+        ({
+          FakeAcpSessionManager acpManager,
+          _MockMonkeyMuxService monkeyMuxService,
+          AcpSessionKey orphanKey,
+        })
+      >
+      pumpMonkeyMuxWithOrphanSession(WidgetTester tester) async {
         final orphanKey = fakeAcpKey(
           hostId: host.id,
           bridgeId: 'native-session',
@@ -10870,6 +10906,8 @@ void main() {
         );
         when(() => tmuxService.prefetchInstalledAgentTools(session))
             .thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
         when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
             .thenAnswer((_) async => true);
         when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
@@ -10888,6 +10926,17 @@ void main() {
           appShortcuts: true,
         );
         await tester.pump(const Duration(milliseconds: 100));
+        return (
+          acpManager: acpManager,
+          monkeyMuxService: monkeyMuxService,
+          orphanKey: orphanKey,
+        );
+      }
+
+      testWidgets('⌘W closes the native session a number key opened', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
 
         // ⌘1 leaves a pending switch to "logs"; ⌘2 opens the native session.
         await pressChord(tester, [
@@ -10905,6 +10954,117 @@ void main() {
         expect(find.text('Close window?'), findsOneWidget);
         expect(find.textContaining('Orphan chat'), findsWidgets);
         expect(find.textContaining('“logs”'), findsNothing);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘N on a native session focuses its composer', (
+        tester,
+      ) async {
+        await pumpMonkeyMuxWithOrphanSession(tester);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        for (var i = 0; i < 6; i++) {
+          await tester.pump();
+        }
+
+        final composerField = find.descendant(
+          of: find.byType(AcpComposer),
+          matching: find.byType(TextField),
+        );
+        expect(composerField, findsOneWidget);
+        expect(
+          tester.widget<TextField>(composerField).focusNode!.hasFocus,
+          isTrue,
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘W on a native session hands the keyboard to the terminal', (
+        tester,
+      ) async {
+        final setup = await pumpMonkeyMuxWithOrphanSession(tester);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyW);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Close window?'), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(setup.acpManager.stopped, [setup.orphanKey.value]);
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        shellWrites.clear();
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+        await tester.pump();
+        expect(shellWrites.map(utf8.decode).join(), isNotEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('⌘T from a native session focuses the new terminal window', (
+        tester,
+      ) async {
+        final setup = await pumpMonkeyMuxWithOrphanSession(tester);
+        when(
+          () => setup.monkeyMuxService.createWindow(
+            session,
+            'work',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => setup.monkeyMuxService.currentPanePath(
+            session,
+            'work',
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => null);
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.digit2);
+        await tester.pump(const Duration(milliseconds: 100));
+        await pressChord(tester, [
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyT);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('Empty terminal'), findsOneWidget);
+        for (var i = 0; i < 16 && !focusIsOnRow('Empty terminal'); i++) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+        }
+        expect(focusIsOnRow('Empty terminal'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        verify(
+          () => setup.monkeyMuxService.createWindow(
+            session,
+            'work',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).called(1);
+        expect(find.text('Empty terminal'), findsNothing);
+        expect(terminalFocus(tester).hasFocus, isTrue);
         await tester.pump(const Duration(seconds: 3));
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
