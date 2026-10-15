@@ -17,11 +17,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -288,9 +291,11 @@ type pushServerView struct {
 	session  string
 	activeID string
 	attached map[string]bool
-	// agents names the agent each window runs (see pushAgentName), for the
+	// agents names the agent each window runs (see pushAgentName), and
+	// titles each window's title (see pushWindowTitleLocked), for the
 	// encrypted payload.
 	agents map[string]string
+	titles map[string]string
 }
 
 // pushJob is one event addressed to one device.
@@ -560,12 +565,17 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 		activeID: s.activeID,
 		attached: map[string]bool{},
 		agents:   map[string]string{},
+		titles:   map[string]string{},
 	}
 	for _, window := range s.windows {
 		// The resolved tool, as the window bar shows it: the live command, else
 		// what the window retains (its recorded tool, title or name).
-		if agent := pushAgentName(window.agentToolLocked()); agent != "" {
+		agent := pushAgentName(window.agentToolLocked())
+		if agent != "" {
 			view.agents[window.id] = agent
+		}
+		if title := pushWindowTitleLocked(window, agent); title != "" {
+			view.titles[window.id] = title
 		}
 	}
 	for _, clientID := range clientIDs {
@@ -795,6 +805,28 @@ func programStatusPushKind(before, after programStatusSummary) string {
 	return ""
 }
 
+// programStatusPushKinds is the push each status change within one PTY read
+// calls for, from before through the recorded steps to after, so the read
+// boundaries do not decide which turns and requests are pushed.
+func programStatusPushKinds(
+	before programStatusSummary,
+	steps []programStatusSummary,
+	after programStatusSummary,
+) []string {
+	var kinds []string
+	previous := before
+	for _, next := range steps {
+		if kind := programStatusPushKind(previous, next); kind != "" {
+			kinds = append(kinds, kind)
+		}
+		previous = next
+	}
+	if kind := programStatusPushKind(previous, after); kind != "" {
+		kinds = append(kinds, kind)
+	}
+	return kinds
+}
+
 // raisePushEvent sends a one-off event (a finished turn or a window alert) for
 // windowID to every device that is not already covering it. bridgeID names
 // the native agent bridge behind a finished turn. An alert raised here has no
@@ -864,7 +896,7 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], kind, entry.alerts, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, entry.alerts, now)
 		if err != nil {
 			continue
 		}
@@ -921,7 +953,7 @@ func (s *muxServer) raisePushAttention(
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], kind, 0, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, 0, now)
 		if err != nil {
 			continue
 		}
@@ -1000,7 +1032,7 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 		return refused
 	}
 	// A test opens the host, not a window, so the payload names neither.
-	job, err := buildPushJob(*device, salt, "", "", "", pushKindTest, 0, now)
+	job, err := buildPushJob(*device, salt, "", "", "", "", pushKindTest, 0, now)
 	if err != nil {
 		return pushResultFailed
 	}
@@ -1026,12 +1058,121 @@ func pushAgentName(tool string) string {
 	return tool
 }
 
+// pushTitleMaxRunes caps the window title a push carries.
+const pushTitleMaxRunes = 64
+
+// pushGenericTitles are window titles that say nothing about the window.
+var pushGenericTitles = map[string]bool{
+	"bash": true, "cmd": true, "fish": true, "login": true, "monkeymux": true,
+	"powershell": true, "pwsh": true, "sh": true, "shell": true,
+	"terminal": true, "tmux": true, "zsh": true,
+}
+
+// pushAgentTitleAliases are the names an agent's own window goes by beyond its
+// id, which a notification that already names the agent would repeat.
+var pushAgentTitleAliases = map[string][]string{
+	"antigravity":  {"agy"},
+	"claude":       {"claude code"},
+	"cursor-agent": {"cursor agent", "cursor"},
+	"muse":         {"muse code"},
+}
+
+var (
+	pushHostTitlePattern = regexp.MustCompile(
+		`^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$`,
+	)
+	pushStatusTitlePattern = regexp.MustCompile(
+		`^(idle|ready|running|thinking|waiting|working)( \(.*\))?$`,
+	)
+	// A shell's default title, `user@host` with an optional `: folder`.
+	pushUserHostTitlePattern = regexp.MustCompile(`^[^\s@]+@[^\s:]+(:.*)?$`)
+)
+
+// pushWindowTitleLocked is the window's title as a notification names it,
+// close to what the window bar shows: the agent's session title, else the
+// title the program set, else the window's name, else its folder. A title
+// that says nothing the notification does not already (a shell, the agent's
+// own name, a host name, a path, a shell's `user@host`, a bare status word)
+// is skipped. It travels only inside the encrypted payload.
+func pushWindowTitleLocked(window *muxWindow, agent string) string {
+	for _, candidate := range []string{
+		window.agentSessionTitle,
+		window.paneTitle,
+		window.name,
+	} {
+		if title := pushTitleCandidate(candidate, agent); title != "" {
+			return title
+		}
+	}
+	return pushFolderTitle(window.cwd, agent)
+}
+
+// pushTitleCandidate cleans a title for a notification, or returns "" when it
+// says nothing: control characters and runs of space collapse, and leading
+// decoration such as a spinner or status glyph goes. A path or a shell's
+// `user@host` title is left out.
+func pushTitleCandidate(value string, agent string) string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	})
+	joined := strings.Join(fields, " ")
+	if strings.HasPrefix(joined, "/") || strings.HasPrefix(joined, "~") ||
+		pushUserHostTitlePattern.MatchString(joined) {
+		return ""
+	}
+	title := strings.TrimLeftFunc(joined, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	lowered := strings.ToLower(title)
+	if lowered == "" ||
+		pushGenericTitles[lowered] ||
+		pushHostTitlePattern.MatchString(lowered) ||
+		pushStatusTitlePattern.MatchString(lowered) {
+		return ""
+	}
+	if agent != "" {
+		if lowered == agent || lowered == strings.ReplaceAll(agent, "-", " ") {
+			return ""
+		}
+		for _, alias := range pushAgentTitleAliases[agent] {
+			if lowered == alias {
+				return ""
+			}
+		}
+	}
+	if runes := []rune(title); len(runes) > pushTitleMaxRunes {
+		title = strings.TrimRightFunc(
+			string(runes[:pushTitleMaxRunes-1]), unicode.IsSpace,
+		) + "…"
+	}
+	return title
+}
+
+// pushFolderTitle names a window by its working folder, unless that is the
+// home folder or the root, which say nothing.
+func pushFolderTitle(cwd string, agent string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	clean := filepath.Clean(cwd)
+	if home, err := os.UserHomeDir(); err == nil && clean == filepath.Clean(home) {
+		return ""
+	}
+	base := filepath.Base(clean)
+	if base == "." || base == string(filepath.Separator) || base == "~" {
+		return ""
+	}
+	return pushTitleCandidate(base, agent)
+}
+
 func buildPushJob(
 	device pushDeviceRecord,
 	salt []byte,
 	session string,
 	windowID string,
 	agent string,
+	title string,
 	kind string,
 	alerts pushAlertCategories,
 	now time.Time,
@@ -1056,9 +1197,10 @@ func buildPushJob(
 		SessionID string   `json:"sessionId"`
 		Kind      string   `json:"kind"`
 		Agent     string   `json:"agent,omitempty"`
+		Title     string   `json:"title,omitempty"`
 		Alert     []string `json:"alert,omitempty"`
 		TS        int64    `json:"ts"`
-	}{1, device.HostRef, windowID, session, kind, agent, alertNames, now.Unix()})
+	}{1, device.HostRef, windowID, session, kind, agent, title, alertNames, now.Unix()})
 	if err != nil {
 		return pushJob{}, err
 	}
@@ -1372,6 +1514,7 @@ func (s *muxServer) flushPushDeferred() {
 			view.session,
 			entry.event.windowID,
 			view.agents[entry.event.windowID],
+			view.titles[entry.event.windowID],
 			entry.event.kind,
 			entry.event.alerts,
 			entry.event.at,

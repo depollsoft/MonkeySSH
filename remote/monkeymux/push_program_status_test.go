@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +109,33 @@ func TestPushTerminalAgentTurnsAndPrompts(t *testing.T) {
 	}
 }
 
+// A read carrying several reports pushes each change, so a quick turn whose
+// working and done arrive together still pushes, and so does a prompt that
+// replaces an answered one within the same read.
+func TestPushTerminalAgentStatusWithinOneRead(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, nil)
+	h.addPushStatusWindow("@2", "")
+	prompt := "state=blocked:app=claude-code:kind=permission"
+	h.reportStatus("@2", "state=idle:app=claude-code")
+	read := func(reports ...string) {
+		var chunk strings.Builder
+		for _, report := range reports {
+			chunk.WriteString(programStatusOsc(report))
+		}
+		h.server.handleWindowOutput("@2", []byte(chunk.String()))
+		h.deliverQueued()
+		h.clock.now = h.clock.now.Add(pushCoalesceWindow)
+	}
+	read("state=working:app=claude-code", "state=done:app=claude-code")
+	read("state=working:app=claude-code", prompt)
+	read("state=working:app=claude-code", prompt)
+	if got := h.kinds(); got != "finished,permission,permission" {
+		t.Fatalf("pushes = %q, want the turn and both prompts", got)
+	}
+}
+
 func TestPushTerminalAgentFollowsTheHostsEvents(t *testing.T) {
 	h := newPushTestHarness(t)
 	h.registerEvents(t, newPushTestDevice(t, 1), pushTestEvents(pushEventAttention))
@@ -186,5 +215,74 @@ func TestPushPayloadNamesTheWindowsAgent(t *testing.T) {
 				t.Fatalf("agent = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A push names the window as the window bar does, skipping titles that say
+// nothing the notification does not already.
+func TestPushWindowTitle(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(home, "src", "monkeyssh")
+	type titles struct{ session, pane, name, cwd string }
+	cases := []struct {
+		name   string
+		window titles
+		agent  string
+		want   string
+	}{
+		{"agent session title first", titles{session: "Fix login bug", pane: "✳ Other", name: "claude"}, "claude", "Fix login bug"},
+		{"program title without its spinner", titles{pane: "⠂ Fix login bug", name: "claude"}, "claude", "Fix login bug"},
+		{"window name", titles{pane: "zsh", name: "build"}, "", "build"},
+		{"agent's own name skipped for the folder", titles{pane: "Claude Code", name: "claude", cwd: project}, "claude", "monkeyssh"},
+		{"host name and status words skipped", titles{pane: "build-box.local", name: "working", cwd: project}, "", "monkeyssh"},
+		{"home folder says nothing", titles{name: "bash", cwd: home}, "", ""},
+		{"shell titles and paths skipped", titles{pane: "dev@build-box: ~/src", name: "~/src/monkeyssh", cwd: project}, "", "monkeyssh"},
+		{"a path inside a title is kept", titles{pane: "✳ Fix src/auth.ts"}, "claude", "Fix src/auth.ts"},
+		{"control characters collapse", titles{name: "deploy\x1b[31m\n  prod"}, "", "deploy [31m prod"},
+		{"long titles are cut", titles{name: strings.Repeat("a", 80)}, "", strings.Repeat("a", 63) + "…"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			window := &muxWindow{
+				agentSessionTitle: tc.window.session,
+				paneTitle:         tc.window.pane,
+				name:              tc.window.name,
+				cwd:               tc.window.cwd,
+			}
+			if got := pushWindowTitleLocked(window, tc.agent); got != tc.want {
+				t.Fatalf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The title travels in the encrypted payload.
+func TestPushPayloadNamesTheWindowsTitle(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, nil)
+	h.addPushStatusWindow("@2", "")
+	h.server.mu.Lock()
+	h.server.windows[len(h.server.windows)-1].paneTitle = "✳ Fix login bug"
+	h.server.mu.Unlock()
+	h.reportStatus("@2", "state=working", "state=done")
+	requests := h.endpoint.received()
+	if len(requests) != 1 {
+		t.Fatalf("pushes = %d, want 1", len(requests))
+	}
+	var event struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(openPushPayloadForTest(t, device.private, requests[0].Payload), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Title != "Fix login bug" {
+		t.Fatalf("title = %q, want the window's title", event.Title)
+	}
+	if strings.Contains(requests[0].Payload, "login") {
+		t.Fatal("the title is readable outside the encrypted payload")
 	}
 }

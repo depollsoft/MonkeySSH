@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.236"
+	monkeyMuxVersion                  = "0.1.237"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -864,6 +864,12 @@ type muxWindow struct {
 	programStatusClock    uint64
 	programStatusQueries  int
 	programStatusReporter *programStatusReporter
+	// programStatusSteps collects, while handleWindowOutput applies a PTY
+	// read (programStatusStepping), the summary after each OSC 7501 report
+	// or prompt mark that changes its state or kind, so a read carrying
+	// several reports raises the push each change calls for.
+	programStatusSteps    []programStatusSummary
+	programStatusStepping bool
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -6935,6 +6941,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		return
 	}
 	before := window.broadcastIdentityLocked()
+	window.programStatusSteps = window.programStatusSteps[:0]
+	window.programStatusStepping = true
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
@@ -6951,6 +6959,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
+	window.programStatusStepping = false
 	pushAlert := pushAlertOutputCategories(terminalBell, completedOscs)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
@@ -7023,9 +7032,13 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	after := window.broadcastIdentityLocked()
 	// A native agent window's turns and requests are pushed from its bridge.
-	var statusPush string
+	var statusPushes []string
 	if !validAcpBridgeID(window.nativeAcpBridgeID) {
-		statusPush = programStatusPushKind(before.programStatus, after.programStatus)
+		statusPushes = programStatusPushKinds(
+			before.programStatus,
+			window.programStatusSteps,
+			after.programStatus,
+		)
 	}
 	if before != after ||
 		(!wasAlert && window.alert) ||
@@ -7118,8 +7131,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	if pushAlert != 0 {
 		s.notePushAlert(windowID, pushAlert)
 	}
-	if statusPush != "" {
-		s.notePushProgramStatus(windowID, statusPush)
+	for _, kind := range statusPushes {
+		s.notePushProgramStatus(windowID, kind)
 	}
 
 	if shouldWrite {
@@ -16966,9 +16979,11 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 		// of the OSC 133 shell integration marks.
 		if value == "A" || strings.HasPrefix(value, "A;") {
 			w.dropRunningProgramStatusLocked(nil)
+			w.noteProgramStatusStepLocked()
 		}
 	case programStatusOscCode:
 		w.applyProgramStatusPayloadLocked(value)
+		w.noteProgramStatusStepLocked()
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
 		w.applyAgentIdentityPayloadLocked(value)
