@@ -470,17 +470,17 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(error, style: theme.textTheme.bodyMedium),
-                  // What the server or SSH library said, kept apart so the
-                  // sentence above reads on its own.
+                  Text(
+                    error,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onSurface,
+                    ),
+                  ),
+                  // What the server or SSH library said, kept apart and
+                  // quieter so the sentence above reads on its own.
                   if (detail != null && detail.trim().isNotEmpty) ...[
                     const SizedBox(height: FluttyTheme.spacingXs),
-                    Text(
-                      detail.trim(),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
+                    Text(detail.trim(), style: theme.textTheme.bodySmall),
                   ],
                 ],
               ),
