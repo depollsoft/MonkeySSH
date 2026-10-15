@@ -254,6 +254,11 @@ class _Fixture {
       autoConnectRequiresConfirmation: false,
       autoForwardPorts: false,
       sortOrder: 0,
+      notifyAgentAttention: true,
+      notifyAgentFinished: true,
+      notifyWindowAlerts: true,
+      notifyShellNotifications: true,
+      pushWhenClosed: true,
     );
     when(() => hostRepository.getById(id)).thenAnswer((_) async => host);
     return host;
