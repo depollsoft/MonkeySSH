@@ -96,6 +96,7 @@ dependencies:
   firebase_messaging: ^16.7.0
   firebase_app_check: ^0.4.8
   mime: ^2.1.0
+  qr: ^3.0.2
 
 dependency_overrides:
   # A process on a host with SSH agent forwarding could stall the app and

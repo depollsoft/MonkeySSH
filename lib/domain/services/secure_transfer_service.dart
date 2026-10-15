@@ -233,6 +233,7 @@ class SecureTransferService {
     SettingKeys.agentLaunchPresets,
     SettingKeys.agentWorktrees,
     SettingKeys.hostCliLaunchPreferences,
+    SettingKeys.hostSetupChecklist,
     SettingKeys.sftpBrowserViews,
     SettingKeys.sftpBrowserFilters,
   };

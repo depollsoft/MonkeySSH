@@ -123,6 +123,7 @@ class TelemetryService {
     'generated',
     'import',
     'manual',
+    'ssh_config',
   };
   static const _allowedAuthMethods = <String>{
     'key',
