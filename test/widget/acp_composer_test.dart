@@ -538,6 +538,27 @@ void main() {
     expect(controller.attachments, isEmpty);
   });
 
+  testWidgets('a failing picker shows an attachment error', (tester) async {
+    final controller = _makeController(_RecordingManager());
+    addTearDown(controller.dispose);
+    final actions = AcpComposerAttachmentActions(
+      pickFiles: (_) async => throw PlatformException(code: 'already_active'),
+    );
+    await _pump(tester, controller, actions: actions);
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Choose file'));
+    await tester.pumpAndSettle();
+
+    expect(controller.attachments, isEmpty);
+    expect(controller.error?.kind, AcpComposerErrorKind.attachment);
+    expect(
+      find.text('Could not add the attachment. Try again.'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('offers audio files only to audio-capable agents', (
     tester,
   ) async {

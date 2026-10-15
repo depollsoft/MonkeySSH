@@ -7,9 +7,11 @@ import '../../data/repositories/host_repository.dart';
 import '../models/acp_provider.dart';
 import '../models/acp_session_keys.dart';
 import '../models/acp_session_state.dart';
+import '../models/host_notifications.dart';
 import 'acp_session_manager.dart';
 import 'auth_service.dart';
 import 'diagnostics_log_service.dart';
+import 'host_notification_prefs_reader.dart';
 import 'local_notification_service.dart';
 import 'ssh_service.dart';
 
@@ -47,11 +49,14 @@ class AcpLifecycleService {
     required bool Function(int hostId) hasActiveSshSession,
     required LocalNotificationService notificationService,
     Future<String?> Function(int hostId)? resolveHostLabel,
+    Future<HostNotificationPrefs> Function(int hostId)?
+    resolveNotificationPrefs,
     DiagnosticsLogger? diagnostics,
   }) : _sessionManager = sessionManager,
        _hasActiveSshSession = hasActiveSshSession,
        _notificationService = notificationService,
        _resolveHostLabel = resolveHostLabel,
+       _resolveNotificationPrefs = resolveNotificationPrefs,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final AcpSessionManager _sessionManager;
@@ -59,6 +64,10 @@ class AcpLifecycleService {
 
   /// Looks up the user-facing label of a host for notification subtitles.
   final Future<String?> Function(int hostId)? _resolveHostLabel;
+
+  /// Looks up which notifications the host allows; null allows everything.
+  final Future<HostNotificationPrefs> Function(int hostId)?
+  _resolveNotificationPrefs;
   final LocalNotificationService _notificationService;
 
   final DiagnosticsLogger _diagnostics;
@@ -274,6 +283,7 @@ class AcpLifecycleService {
     required String body,
   }) async {
     final hostLabel = await _hostLabelFor(session.key.hostId);
+    if (!await _hostAllows(session.key.hostId, kind)) return;
     if (_disposed || !_canNotify(session.key.hostId)) return;
     final payload = _payload(session, kind);
     await _notificationService.showAcpNotification(
@@ -286,6 +296,25 @@ class AcpLifecycleService {
       body: body,
       payload: payload,
     );
+  }
+
+  /// Whether the host's notification preferences allow [kind]: completion
+  /// is "agent finished", everything else is "agent needs you".
+  Future<bool> _hostAllows(int hostId, AcpNotificationKind kind) async {
+    final resolve = _resolveNotificationPrefs;
+    if (resolve == null) return true;
+    final HostNotificationPrefs prefs;
+    try {
+      prefs = await resolve(hostId);
+    } on Object {
+      return true;
+    }
+    return prefs.allows(switch (kind) {
+      AcpNotificationKind.completion => HostNotificationKind.agentFinished,
+      AcpNotificationKind.permission ||
+      AcpNotificationKind.writeApproval ||
+      AcpNotificationKind.input => HostNotificationKind.agentAttention,
+    });
   }
 
   Future<String?> _hostLabelFor(int hostId) async {
@@ -353,6 +382,7 @@ final acpLifecycleServiceProvider = Provider<AcpLifecycleService>((ref) {
     notificationService: ref.watch(localNotificationServiceProvider),
     resolveHostLabel: (hostId) async =>
         (await hostRepository.getById(hostId))?.label,
+    resolveNotificationPrefs: ref.watch(hostNotificationPrefsReaderProvider),
   )..start();
   ref.onDispose(() => unawaited(service.dispose()));
   return service;
