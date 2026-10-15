@@ -48,6 +48,9 @@ import UserNotifications
     } else {
       NSLog("Failed to configure AppDelegate method channels.")
     }
+    if let hardwareKeyRegistrar = self.registrar(forPlugin: "HardwareKeyPlugin") {
+      HardwareKeyPlugin.register(with: hardwareKeyRegistrar)
+    }
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(keyboardWillShow),

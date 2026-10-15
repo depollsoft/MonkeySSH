@@ -7,6 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/database.dart';
 import '../../data/repositories/key_repository.dart';
+import '../models/hardware_key.dart';
+import 'diagnostics_log_service.dart';
+import 'hardware_key_service.dart';
 import 'openssh_key_generator.dart';
 
 /// Key type for SSH key generation.
@@ -24,9 +27,11 @@ enum SshKeyType {
 /// Service for SSH key management.
 class KeyService {
   /// Creates a new [KeyService].
-  KeyService(this._keyRepository);
+  KeyService(this._keyRepository, {HardwareKeyService? hardwareKeyService})
+    : _hardwareKeyService = hardwareKeyService ?? HardwareKeyService();
 
   final KeyRepository _keyRepository;
+  final HardwareKeyService _hardwareKeyService;
 
   /// Import a key from PEM content.
   Future<SshKey?> importKey({
@@ -85,6 +90,63 @@ class KeyService {
     );
   }
 
+  /// Generate a non-exportable ECDSA P-256 key in secure hardware.
+  ///
+  /// Only the keystore alias and the public key are stored. When
+  /// [requireUserPresence] is set, every signature needs biometric or
+  /// passcode confirmation, so the key cannot sign in the background.
+  Future<SshKey?> generateHardwareKey({
+    required String name,
+    required bool requireUserPresence,
+  }) async {
+    final generated = await _hardwareKeyService.generate(
+      requireUserPresence: requireUserPresence,
+    );
+    try {
+      return await _insertKey(
+        name: name,
+        privateKeyPem: generated.reference.encode(),
+        publicKeyBlob: generated.publicKeyBlob,
+      );
+    } on Object {
+      await _deleteHardwareKey(generated.reference.alias);
+      rethrow;
+    }
+  }
+
+  /// Delete [key], removing a hardware-backed private key from the device.
+  ///
+  /// The hardware key goes first, and the row only once it is gone, so a
+  /// failure keeps the alias for a retry; deleting a missing key succeeds.
+  /// Returns false, keeping the row, when secure hardware refused.
+  Future<bool> deleteKey(SshKey key) async {
+    // Only the alias matters for cleanup, so a reference damaged anywhere
+    // else still removes its key. An alias the app could not have created
+    // is never sent to the keystore, and its row is simply dropped.
+    final alias = HardwareKeyReference.tryParseAlias(key.privateKey);
+    if (alias != null &&
+        alias.startsWith(hardwareKeyAliasPrefix) &&
+        !await _deleteHardwareKey(alias)) {
+      return false;
+    }
+    await _keyRepository.delete(key.id);
+    return true;
+  }
+
+  Future<bool> _deleteHardwareKey(String alias) async {
+    try {
+      await _hardwareKeyService.deleteAlias(alias);
+      return true;
+    } on HardwareKeyException catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'hardware_key',
+        'delete_failed',
+        fields: {'code': error.code.wireName},
+      );
+      return false;
+    }
+  }
+
   Future<SshKey?> _insertKey({
     required String name,
     required String privateKeyPem,
@@ -134,5 +196,8 @@ String computeOpenSshPublicKeyFingerprint(String publicKey) {
 
 /// Provider for [KeyService].
 final keyServiceProvider = Provider<KeyService>(
-  (ref) => KeyService(ref.watch(keyRepositoryProvider)),
+  (ref) => KeyService(
+    ref.watch(keyRepositoryProvider),
+    hardwareKeyService: ref.watch(hardwareKeyServiceProvider),
+  ),
 );
