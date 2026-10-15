@@ -28,6 +28,7 @@ import 'acp_client_capability_service.dart';
 import 'acp_concurrency_policy.dart';
 import 'acp_json_rpc_connection.dart';
 import 'acp_mcp_server_service.dart';
+import 'acp_provider_service.dart';
 import 'acp_recent_sessions_service.dart';
 import 'acp_telemetry.dart';
 import 'acp_telemetry_adapter.dart';
@@ -161,6 +162,7 @@ class AcpSessionManager {
     required AcpRecentSessionsService recentSessions,
     required bool Function() isProUnlocked,
     AcpMcpServerService? mcpServerService,
+    AcpCustomProviderLookup? customProviders,
     AcpConcurrencyPolicy concurrencyPolicy = const AcpConcurrencyPolicy(),
     DiagnosticsLogger? diagnostics,
     AcpTelemetrySink telemetry = const NoopAcpTelemetrySink(),
@@ -170,6 +172,7 @@ class AcpSessionManager {
        _recentSessions = recentSessions,
        _isProUnlocked = isProUnlocked,
        _mcpServerService = mcpServerService,
+       _customProviders = customProviders,
        _policy = concurrencyPolicy,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
        _telemetry = telemetry,
@@ -180,6 +183,7 @@ class AcpSessionManager {
   final AcpRecentSessionsService _recentSessions;
   final bool Function() _isProUnlocked;
   final AcpMcpServerService? _mcpServerService;
+  final AcpCustomProviderLookup? _customProviders;
   final AcpConcurrencyPolicy _policy;
   final DiagnosticsLogger _diagnostics;
   final AcpTelemetrySink _telemetry;
@@ -309,7 +313,12 @@ class AcpSessionManager {
       launch as _ResolvedLaunch,
       providerLabelOverride,
     );
-    final workingDirectory = await _resolveWorkingDirectory(hostId, cwd);
+    // A home-folder agent starts new sessions in ~; a resumed session keeps
+    // the folder it was created in.
+    final workingDirectory = await _resolveWorkingDirectory(
+      hostId,
+      resolved.startsInHomeDirectory && existingSessionId == null ? '~' : cwd,
+    );
     if (workingDirectory.error case final error?) {
       return AcpSessionLaunchFailed(null, error);
     }
@@ -392,13 +401,27 @@ class AcpSessionManager {
       providerId,
       launchCommandOverride: launchCommandOverride,
     );
-    if (launch is _LaunchError) {
+    // Attaching to a custom agent's running bridge starts no process, so it
+    // needs no approval: an edited or deleted definition must not strand its
+    // live sessions. The launch error applies only if a process must start.
+    final isBuiltin = acpBuiltinProviders.any(
+      (provider) => provider.id == providerId,
+    );
+    if (launch is _LaunchError &&
+        (isBuiltin || launchCommandOverride != null)) {
       return AcpSessionLaunchFailed(key, launch.error);
     }
-    final resolved = _withProviderLabel(
-      launch as _ResolvedLaunch,
-      providerLabelOverride,
-    );
+    final deferredLaunchError = launch is _LaunchError ? launch.error : null;
+    var resolved = launch is _ResolvedLaunch
+        ? _withProviderLabel(launch, providerLabelOverride)
+        : _ResolvedLaunch(
+            providerId: providerId,
+            label:
+                providerLabelOverride ??
+                existing?._providerLabel ??
+                'Coding agent',
+            argv: const <String>[],
+          );
     final workingDirectory = await _resolveWorkingDirectory(
       hostId,
       cwd,
@@ -422,21 +445,14 @@ class AcpSessionManager {
     }
     final reconnectWorkspace = resolvedWorkspace.value!;
 
-    try {
-      await _stopAll(replace);
-    } on Object catch (error) {
-      return AcpSessionLaunchFailed(key, _mapBridgeError(error));
-    }
-
-    final decision = _evaluate(key.value);
-    if (decision is AcpConcurrencyRequiresChoice) {
-      return AcpSessionLaunchBlocked(decision);
-    }
-
     MonkeyMuxAcpBridgeMetadata? remoteBridge;
-    if (knownRemoteBridge?.id == bridgeId) {
-      remoteBridge = knownRemoteBridge;
-    } else {
+    var bridgeLookedUp = false;
+    Future<AcpSessionLaunchFailed?> lookUpBridge() async {
+      bridgeLookedUp = true;
+      if (knownRemoteBridge?.id == bridgeId) {
+        remoteBridge = knownRemoteBridge;
+        return null;
+      }
       final List<MonkeyMuxAcpBridgeMetadata> remoteBridges;
       try {
         remoteBridges = await _connector.listBridges(
@@ -449,21 +465,54 @@ class AcpSessionManager {
       remoteBridge = remoteBridges.firstWhereOrNull(
         (bridge) => bridge.id == bridgeId,
       );
+      return null;
     }
-    final bridgeCanResume =
-        remoteBridge != null &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.exited &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.stopped &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.protocolError;
-    if (!bridgeCanResume) {
-      if (!selectOnSuccess) {
+
+    bool bridgeCanResume() {
+      final bridge = remoteBridge;
+      return bridge != null &&
+          bridge.state != MonkeyMuxAcpProviderState.exited &&
+          bridge.state != MonkeyMuxAcpProviderState.stopped &&
+          bridge.state != MonkeyMuxAcpProviderState.protocolError;
+    }
+
+    const bridgeExpired = AcpSessionError(
+      kind: AcpSessionErrorKind.bridgeExpired,
+      message: 'The remote native agent window is no longer available.',
+    );
+
+    if (deferredLaunchError != null) {
+      // This custom agent cannot start a new process, so its bridge must
+      // still be running. Find out before ending the sessions in [replace].
+      if (await lookUpBridge() case final failure?) return failure;
+      if (!bridgeCanResume()) {
         return AcpSessionLaunchFailed(
           key,
-          const AcpSessionError(
-            kind: AcpSessionErrorKind.bridgeExpired,
-            message: 'The remote native agent window is no longer available.',
-          ),
+          selectOnSuccess ? deferredLaunchError : bridgeExpired,
         );
+      }
+    }
+
+    try {
+      await _stopAll(replace);
+    } on Object catch (error) {
+      return AcpSessionLaunchFailed(key, _mapBridgeError(error));
+    }
+
+    final decision = _evaluate(key.value);
+    if (decision is AcpConcurrencyRequiresChoice) {
+      return AcpSessionLaunchBlocked(decision);
+    }
+
+    if (!bridgeLookedUp) {
+      if (await lookUpBridge() case final failure?) return failure;
+    }
+    if (!bridgeCanResume()) {
+      if (!selectOnSuccess) {
+        return AcpSessionLaunchFailed(key, bridgeExpired);
+      }
+      if (deferredLaunchError != null) {
+        return AcpSessionLaunchFailed(key, deferredLaunchError);
       }
       if (existing != null) {
         _controllers.remove(key.value);
@@ -491,6 +540,19 @@ class AcpSessionManager {
       return restarted;
     }
 
+    final liveBridge = remoteBridge!;
+    if (deferredLaunchError != null && existing == null) {
+      // Show the label the running agent was started with.
+      final bridgeLabel = liveBridge.provider.trim();
+      if (providerLabelOverride == null && bridgeLabel.isNotEmpty) {
+        resolved = _ResolvedLaunch(
+          providerId: providerId,
+          label: bridgeLabel,
+          argv: const <String>[],
+        );
+      }
+    }
+
     // Re-attach an existing (detached) controller in place when possible.
     if (existing != null) {
       // Re-send this workspace on the reattached session's load/resume.
@@ -499,7 +561,7 @@ class AcpSessionManager {
         .._workspace = reconnectWorkspace;
       try {
         await existing.reconnect(
-          remoteBridge: remoteBridge,
+          remoteBridge: liveBridge,
           chooseAuthentication: chooseAuthentication,
         );
       } on _LaunchException catch (error) {
@@ -529,7 +591,7 @@ class AcpSessionManager {
       chooseAuthentication: chooseAuthentication,
       autoApprovePermissions: autoApprovePermissions,
       workspace: reconnectWorkspace,
-      liveBridge: remoteBridge,
+      liveBridge: liveBridge,
       selectOnSuccess: selectOnSuccess,
     );
   });
@@ -752,15 +814,22 @@ class AcpSessionManager {
           (other) =>
               !identical(other, controller) && other.bridgeKey == key.bridge,
         );
-        if (shared || controller._launchArgv.isEmpty) {
-          controller.clearAuthenticationRequired();
-          return AcpSessionLaunchStarted(key);
-        }
-        final launch = _ResolvedLaunch(
+        _ResolvedLaunch? launch = _ResolvedLaunch(
           providerId: key.providerId,
           label: controller._providerLabel,
           argv: controller._launchArgv,
         );
+        if (!acpBuiltinProviders.any((p) => p.id == key.providerId)) {
+          // A custom agent restarts only with the name and command approved
+          // now; if its definition changed or went away, it is just marked
+          // signed in.
+          final current = await _resolveLaunch(key.providerId);
+          launch = current is _ResolvedLaunch ? current : null;
+        }
+        if (shared || launch == null || launch.argv.isEmpty) {
+          controller.clearAuthenticationRequired();
+          return AcpSessionLaunchStarted(key);
+        }
         final cwd = controller._cwd;
         final workspace = controller._workspace;
         final autoApprove = controller._autoApprovePermissions;
@@ -1316,6 +1385,7 @@ class AcpSessionManager {
       providerId: launch.providerId,
       label: label,
       argv: launch.argv,
+      startsInHomeDirectory: launch.startsInHomeDirectory,
     );
   }
 
@@ -1485,11 +1555,33 @@ class AcpSessionManager {
         argv: (launchCommandOverride ?? builtin.launchCommand).argv,
       );
     }
-    return const _LaunchError(
-      AcpSessionError(
-        kind: AcpSessionErrorKind.unknown,
-        message: 'Unknown ACP provider.',
-      ),
+    final custom = await _customProviders?.getCustomProvider(providerId);
+    if (custom == null) {
+      return const _LaunchError(
+        AcpSessionError(
+          kind: AcpSessionErrorKind.unknown,
+          message: 'Unknown ACP provider.',
+        ),
+      );
+    }
+    // A custom agent runs only the exact launch the user approved: never an
+    // override, and never after its definition changed without review.
+    if (launchCommandOverride != null || !custom.isCommandApproved) {
+      return const _LaunchError(
+        AcpSessionError(
+          kind: AcpSessionErrorKind.commandNotApproved,
+          message:
+              'Review and approve this agent’s command in Settings › Custom '
+              'agents before starting it.',
+        ),
+      );
+    }
+    return _ResolvedLaunch(
+      providerId: custom.id,
+      label: custom.label,
+      argv: custom.launchCommand.argv,
+      startsInHomeDirectory:
+          custom.cwdPolicy == AcpCustomProviderCwdPolicy.homeDirectory,
     );
   }
 
@@ -3805,11 +3897,16 @@ final class _ResolvedLaunch extends _LaunchOutcome {
     required this.providerId,
     required this.label,
     required this.argv,
+    this.startsInHomeDirectory = false,
   });
 
   final String providerId;
   final String label;
   final List<String> argv;
+
+  /// Whether new sessions start in the host home folder whatever directory
+  /// was requested (a custom agent's working-directory policy).
+  final bool startsInHomeDirectory;
 }
 
 final class _LaunchError extends _LaunchOutcome {
@@ -3866,6 +3963,7 @@ final acpSessionManagerProvider = Provider<AcpSessionManager>((ref) {
     connector: ref.watch(acpBridgeConnectorProvider),
     recentSessions: ref.watch(acpRecentSessionsServiceProvider),
     mcpServerService: ref.watch(acpMcpServerServiceProvider),
+    customProviders: ref.watch(acpCustomProviderServiceProvider),
     isProUnlocked: () =>
         ref.read(monetizationServiceProvider).currentState.isProUnlocked,
     telemetry: AcpTelemetryAdapter(ref.watch(telemetryServiceProvider)),

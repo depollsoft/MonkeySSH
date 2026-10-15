@@ -12,6 +12,7 @@ import 'package:pointycastle/export.dart'
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
+import '../models/acp_provider.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
 import 'diagnostics_log_service.dart';
@@ -20,6 +21,7 @@ import 'host_key_verification.dart';
 import 'key_service.dart';
 import 'monkeymux_offer_service.dart';
 import 'port_forward_browser_service.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
 import 'ssh_wire.dart';
@@ -234,6 +236,13 @@ class SecureTransferService {
   /// their host ids would point at other hosts on another device.
   static const _deviceLocalSettingsKeys = {monkeyMuxOfferPendingSettingKey};
 
+  /// Whether [key] is a setting that stays on this device: onboarding state
+  /// in [_deviceLocalSettingsKeys], and unsent chat drafts, which are user
+  /// content tied to this device's sessions and files.
+  static bool _isDeviceLocalSetting(String key) =>
+      _deviceLocalSettingsKeys.contains(key) ||
+      SettingKeys.isAcpComposerDraft(key);
+
   /// Where payloads from before per-host notification settings kept the
   /// hosts whose push was off, by host id. It now lives on each host row.
   static const _legacyPushDisabledHostsKey =
@@ -369,8 +378,7 @@ class SecureTransferService {
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
       for (final setting in settings)
-        if (!_deviceLocalSettingsKeys.contains(setting.key))
-          setting.key: setting.value,
+        if (!_isDeviceLocalSetting(setting.key)) setting.key: setting.value,
     };
 
     return {
@@ -1123,12 +1131,22 @@ class SecureTransferService {
       _sortedStringMap(settings),
       hostMapping: hostMapping,
     );
+    // Read before a replace clears it: only this device's own approvals may
+    // carry over to imported custom agents.
+    final localCustomProviders = await _settingsService.getString(
+      SettingKeys.acpCustomProviders,
+    );
     if (clearExisting) {
       await _db.customStatement('DELETE FROM settings');
     }
     for (final entry in preparedSettings.entries) {
-      final value =
-          !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
+      final value = entry.key == SettingKeys.acpCustomProviders
+          ? _mergeImportedCustomProviders(
+              localCustomProviders,
+              entry.value,
+              keepUnmatchedLocal: !clearExisting,
+            )
+          : !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
           ? await _mergeHostScopedSettingValue(entry.key, entry.value)
           : entry.value;
       await _db
@@ -1137,6 +1155,47 @@ class SecureTransferService {
             SettingsCompanion.insert(key: entry.key, value: value),
           );
     }
+  }
+
+  /// Imported custom agents run commands on remote hosts, so an approval
+  /// recorded elsewhere is never trusted: each arrives unapproved unless
+  /// this device already approved its exact fingerprint.
+  String _mergeImportedCustomProviders(
+    String? localValue,
+    String importedValue, {
+    required bool keepUnmatchedLocal,
+  }) {
+    final importedRaw = decodeJsonList(importedValue);
+    // Decode every agent on both sides, so an oversized result is rejected
+    // below rather than cut to the limit.
+    final decoded = decodeMigratedAcpCustomProviders(
+      local: decodeJsonList(localValue),
+      imported: importedRaw,
+    );
+    // Like port forwards, an agent this version cannot read (one written by
+    // a newer app, say) is skipped rather than failing the whole migration.
+    final skippedCount = importedRaw.length - decoded.imported.length;
+    if (skippedCount > 0) {
+      _diagnosticsLogger.warning(
+        'secure_transfer',
+        'migration_import_custom_agents_skipped',
+        fields: {'skippedCount': skippedCount},
+      );
+    }
+    final merged = mergeImportedAcpCustomProviders(
+      local: decoded.local,
+      imported: decoded.imported,
+      keepUnmatchedLocal: keepUnmatchedLocal,
+    );
+    if (merged.length > acpCustomProviderMaxCount) {
+      // Failing the transaction keeps every agent instead of dropping some.
+      throw const FormatException(
+        'This import would leave more than $acpCustomProviderMaxCount custom '
+        'agents. Delete some first, or replace existing data instead of '
+        'merging.',
+      );
+    }
+    return jsonEncode([for (final definition in merged) definition.toJson()]);
   }
 
   List<Map<String, dynamic>> _listFromData(
@@ -1202,7 +1261,7 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
-      if (_deviceLocalSettingsKeys.contains(entry.key) ||
+      if (_isDeviceLocalSetting(entry.key) ||
           entry.key == _legacyPushDisabledHostsKey) {
         continue;
       }

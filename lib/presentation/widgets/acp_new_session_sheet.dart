@@ -1,11 +1,11 @@
 /// Staged new-session flow for launching an ACP coding-agent session.
 ///
 /// Walks the user through: choose a saved host → connect/reuse SSH → choose a
-/// built-in provider → choose a working directory → start a new session or
-/// reconnect a recent one. It handles helper-install confirmation,
-/// missing/auth-required providers (the agent's advertised sign-in methods,
-/// with a safe Open Terminal escape hatch), and the free-tier concurrency
-/// choice.
+/// built-in provider or an approved custom agent → choose a working directory
+/// → start a new session or reconnect a recent one. It handles helper-install
+/// confirmation, missing/auth-required providers (the agent's advertised
+/// sign-in methods, with a safe Open Terminal escape hatch), and the free-tier
+/// concurrency choice.
 ///
 /// No prompts, transcripts, or command text are ever logged.
 library;
@@ -21,24 +21,29 @@ import '../../app/notification_navigation.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/models/acp_authentication.dart';
+import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_session_workspace.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/services/acp_custom_provider_host_service.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/monkeymux_acp_bridge_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
 import 'acp_auth_method_sheet.dart';
 import 'acp_concurrency_choice.dart';
 import 'acp_connection_support.dart';
+import 'acp_custom_agent_launch.dart';
 import 'acp_session_presentation.dart';
 import 'acp_session_workspace_section.dart';
 
@@ -211,11 +216,15 @@ class _NewSessionSheet extends ConsumerStatefulWidget {
 }
 
 class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
+  /// The "Start a new session" row among the recent sessions.
+  static const Object _newSessionChoice = Object();
+
   int? _hostId;
   String? _providerId;
   final TextEditingController _cwd = TextEditingController();
   bool _cwdEdited = false;
   AcpRecentSessionRef? _selectedRecent;
+  AcpSessionInfo? _selectedAgentSession;
   var _busy = false;
   var _loadingDefaults = true;
   var _defaultsScheduled = false;
@@ -338,6 +347,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       _hostId = hostId;
       _cwdEdited = false;
       _selectedRecent = null;
+      _selectedAgentSession = null;
       _loadingDefaults = hostId != null;
     });
     _workspace.clearRecent();
@@ -494,12 +504,63 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       }
       launchCommandOverride = launch.override;
     }
+    final customProvider = _customProvider(providerId);
+    // Reattaching to a recent session usually finds its agent still running,
+    // which needs nothing from the host environment; the session switcher
+    // and notifications reattach without the check too.
+    final reattaching =
+        _selectedRecent != null && _selectedAgentSession == null;
+    if (customProvider != null && sshSession != null) {
+      final problem = reattaching
+          ? null
+          : await checkAcpCustomAgentEnvironment(
+              ref,
+              sshSession,
+              customProvider,
+            );
+      if (!mounted) return null;
+      final windowsProblem = sshSession.remoteIsWindows
+          ? acpWindowsCustomLaunchProblem(
+              label: customProvider.label,
+              argv: customProvider.launchCommand.argv,
+              providerId: customProvider.id,
+            )
+          : null;
+      if (problem != null || windowsProblem != null) {
+        setState(() => _error = problem ?? windowsProblem);
+        return null;
+      }
+    }
     _lastResolvedLaunch = (
       hostId: hostId,
       providerId: providerId,
       override: launchCommandOverride,
       profile: selectedProfile,
     );
+
+    // The folder field is hidden for a home-folder agent, so never fall back
+    // to what it held.
+    final fallbackCwd =
+        customProvider?.cwdPolicy == AcpCustomProviderCwdPolicy.homeDirectory
+        ? '~'
+        : cwd;
+    final agentSession = _selectedAgentSession;
+    if (customProvider != null && agentSession != null) {
+      final sessionCwd = agentSession.cwd.trim();
+      return manager.resumeProviderSession(
+        hostId: hostId,
+        providerId: providerId,
+        acpSessionId: agentSession.sessionId,
+        cwd: sessionCwd.isEmpty ? fallbackCwd : sessionCwd,
+        confirmInstall: _confirmInstall,
+        chooseAuthentication: _chooseAuthentication,
+        autoApprovePermissions: launchPreferences.startInYoloMode,
+        replace: replace,
+        // Re-send the roots the agent reported for this session alongside
+        // the ones chosen here.
+        workspace: _withListedDirectories(_workspace.options, agentSession),
+      );
+    }
 
     final recent = _selectedRecent;
     if (recent != null) {
@@ -508,7 +569,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         providerId: recent.providerId,
         bridgeId: recent.bridgeId,
         acpSessionId: recent.acpSessionId,
-        cwd: recent.cwd ?? cwd,
+        cwd: recent.cwd ?? fallbackCwd,
         confirmInstall: _confirmInstall,
         chooseAuthentication: _chooseAuthentication,
         launchCommandOverride: launchCommandOverride,
@@ -534,6 +595,62 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       replace: replace,
       workspace: _workspace.options,
     );
+  }
+
+  static AcpSessionWorkspaceOptions _withListedDirectories(
+    AcpSessionWorkspaceOptions options,
+    AcpSessionInfo session,
+  ) => AcpSessionWorkspaceOptions(
+    mcpServerIds: options.mcpServerIds,
+    additionalDirectories: <String>{
+      ...options.additionalDirectories,
+      ...session.additionalDirectories,
+    }.toList(growable: false),
+  );
+
+  /// The approved custom agent with [providerId], when one is selected.
+  AcpCustomProviderDefinition? _customProvider(String? providerId) => ref
+      .read(acpProvidersProvider)
+      .asData
+      ?.value
+      .whereType<AcpCustomProviderDefinition>()
+      .firstWhereOrNull((provider) => provider.id == providerId);
+
+  Future<AcpCustomAgentSessionListing?> _listAgentSessions(
+    String definitionId,
+  ) async {
+    final hostId = _hostId;
+    if (hostId == null) return null;
+    // Listing starts the agent, so act on the stored definition, not the
+    // copy this sheet was built with.
+    final definition = await ref
+        .read(acpCustomProviderLookupProvider)
+        .getCustomProvider(definitionId);
+    if (!mounted) return null;
+    if (definition == null || !definition.isCommandApproved) {
+      return const AcpCustomAgentSessionListing(
+        AcpCustomAgentSessionListStatus.notApproved,
+      );
+    }
+    final knownHost = ref
+        .read(allHostsProvider)
+        .asData
+        ?.value
+        .where((host) => host.id == hostId)
+        .firstOrNull;
+    final connection = await ensureAcpHostConnection(
+      context,
+      ref,
+      hostId,
+      knownHost: knownHost,
+    );
+    final connectionId = connection.connectionId;
+    if (!mounted || !connection.success || connectionId == null) return null;
+    final session = ref.read(sshServiceProvider).getSession(connectionId);
+    if (session == null) return null;
+    return ref
+        .read(acpCustomProviderHostServiceProvider)
+        .listSessions(session, definition);
   }
 
   Future<void> _start({bool afterSignIn = false}) async {
@@ -703,6 +820,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             ));
     final lockedContextUnavailable =
         lockedHostUnavailable || lockedProviderUnavailable;
+    final selectedCustom = providers
+        ?.whereType<AcpCustomProviderDefinition>()
+        .firstWhereOrNull((provider) => provider.id == _providerId);
 
     return PopScope(
       // Block dismissal (back gesture / predictive pop) while a launch is in
@@ -805,20 +925,40 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               ),
               const SizedBox(height: FluttyTheme.spacingMd),
               _sectionLabel(context, 'Working directory'),
-              TextField(
-                controller: _cwd,
-                enabled: !controlsDisabled,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: FluttyTheme.monoStyle,
-                onChanged: (_) => _cwdEdited = true,
-                decoration: const InputDecoration(hintText: '~'),
-              ),
+              if (selectedCustom?.cwdPolicy ==
+                  AcpCustomProviderCwdPolicy.homeDirectory)
+                _buildHomeFolderRow()
+              else
+                TextField(
+                  controller: _cwd,
+                  enabled: !controlsDisabled,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  style: FluttyTheme.monoStyle,
+                  onChanged: (_) => _cwdEdited = true,
+                  decoration: const InputDecoration(hintText: '~'),
+                ),
               AcpSessionWorkspaceSection(
                 controller: _workspace,
                 enabled: !controlsDisabled,
               ),
               _buildRecentSessions(),
+              if (selectedCustom != null && _hostId != null)
+                AcpCustomAgentSessions(
+                  key: ValueKey('custom-agent-sessions-${selectedCustom.id}'),
+                  definition: selectedCustom,
+                  hostId: _hostId!,
+                  enabled: !controlsDisabled,
+                  selected: _selectedAgentSession,
+                  onSelected: (session) {
+                    setState(() {
+                      _selectedAgentSession = session;
+                      if (session != null) _selectedRecent = null;
+                    });
+                    if (session != null) _workspace.clearRecent();
+                  },
+                  loadSessions: () => _listAgentSessions(selectedCustom.id),
+                ),
               if (_error != null) ...[
                 const SizedBox(height: FluttyTheme.spacingMd),
                 Row(
@@ -856,7 +996,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                       )
                     : const Icon(Icons.play_arrow_rounded),
                 label: Text(
-                  _selectedRecent != null ? 'Resume session' : 'Start session',
+                  _selectedRecent != null || _selectedAgentSession != null
+                      ? 'Resume session'
+                      : 'Start session',
                 ),
               ),
             ],
@@ -896,12 +1038,36 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                   setState(() {
                     _providerId = provider.id;
                     _selectedRecent = null;
+                    _selectedAgentSession = null;
                   });
                   _workspace.clearRecent();
                 },
         ),
     ],
   );
+
+  /// The folder a home-folder agent will use: home for a new session, the
+  /// session's own folder for a resume, as [_launch] passes them.
+  Widget _buildHomeFolderRow() {
+    final agentSession = _selectedAgentSession;
+    final recent = _selectedRecent;
+    final resumeFolder = agentSession != null
+        ? agentSession.cwd.trim()
+        : recent?.cwd?.trim();
+    final resuming = agentSession != null || recent != null;
+    return InputDecorator(
+      key: const ValueKey('custom-agent-home-folder'),
+      decoration: InputDecoration(
+        helperText: resuming
+            ? 'Resumes in the session’s own folder.'
+            : 'New sessions start in your home folder.',
+      ),
+      child: Text(
+        resumeFolder == null || resumeFolder.isEmpty ? '~' : resumeFolder,
+        style: FluttyTheme.monoStyle,
+      ),
+    );
+  }
 
   Widget _buildRecentSessions() {
     final hostId = _hostId;
@@ -923,30 +1089,39 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           children: [
             const SizedBox(height: FluttyTheme.spacingMd),
             _sectionLabel(context, 'Resume a recent session'),
-            RadioGroup<AcpRecentSessionRef?>(
-              groupValue: _selectedRecent,
+            // While one of a custom agent's listed sessions is chosen, no row
+            // here is selected: "Start a new session" would contradict it.
+            RadioGroup<Object?>(
+              groupValue:
+                  _selectedRecent ??
+                  (_selectedAgentSession == null ? _newSessionChoice : null),
               onChanged: (value) {
                 if (_busy) {
                   return;
                 }
-                setState(() => _selectedRecent = value);
+                final recent = value is AcpRecentSessionRef ? value : null;
+                setState(() {
+                  _selectedRecent = recent;
+                  _selectedAgentSession = null;
+                });
                 // A resumed session re-sends its own MCP servers and
                 // directories; starting fresh restores the defaults.
-                if (value == null) {
+                if (recent == null) {
                   _workspace.clearRecent();
                 } else {
-                  _workspace.applyRecent(value.workspace);
+                  _workspace.applyRecent(recent.workspace);
                 }
               },
               child: Column(
                 children: [
-                  const RadioListTile<AcpRecentSessionRef?>(
-                    value: null,
+                  const RadioListTile<Object?>(
+                    key: ValueKey('recent-session-new'),
+                    value: _newSessionChoice,
                     title: Text('Start a new session'),
                     contentPadding: EdgeInsets.zero,
                   ),
                   for (final recent in recents)
-                    RadioListTile<AcpRecentSessionRef?>(
+                    RadioListTile<Object?>(
                       value: recent,
                       contentPadding: EdgeInsets.zero,
                       title: Text(
@@ -992,6 +1167,9 @@ class _ProviderChip extends StatelessWidget {
     label: Text(provider.label),
     selected: selected,
     onSelected: onSelected == null ? null : (_) => onSelected!(),
-    avatar: const Icon(Icons.smart_toy_outlined, size: 18),
+    avatar: Icon(
+      provider.isCustom ? Icons.terminal : Icons.smart_toy_outlined,
+      size: 18,
+    ),
   );
 }

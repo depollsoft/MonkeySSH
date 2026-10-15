@@ -62,6 +62,31 @@ final class AcpThreadSearchFocus {
   final int serial;
 }
 
+/// Room left above the unread divider after a jump, for the pinned prompt
+/// summary that can cover the top of the viewport.
+const double _unreadDividerTopInset = 44;
+
+/// Transcript width from which the unread divider's label is set larger,
+/// matching the chat's wide layout breakpoint.
+const double _unreadDividerWideWidth = 840;
+
+/// Where the "unread since you left" divider sits in a thread.
+@immutable
+final class AcpThreadUnreadDivider {
+  /// Creates a divider above the top-level entry at [entryIndex].
+  const AcpThreadUnreadDivider({
+    required this.entryIndex,
+    required this.earlierHistoryUnavailable,
+  });
+
+  /// Index of the top-level entry the divider sits above.
+  final int entryIndex;
+
+  /// Whether the divider marks the start of loaded history because where the
+  /// user left off is no longer loaded.
+  final bool earlierHistoryUnavailable;
+}
+
 /// Renders an ordered list of [AcpTimelineEntry]s as a conversation thread.
 ///
 /// The renderer is suitable for both live streaming and replay. It stays lazy,
@@ -91,6 +116,9 @@ class AcpMessageThread extends StatefulWidget {
     this.onOpenLocation,
     this.followTail = false,
     this.searchFocus,
+    this.unreadDivider,
+    this.unreadJumpSerial = 0,
+    this.onLastVisibleEntryChanged,
   });
 
   /// The ordered timeline entries to render.
@@ -145,6 +173,20 @@ class AcpMessageThread extends StatefulWidget {
   /// The active transcript search match, revealed and highlighted.
   final AcpThreadSearchFocus? searchFocus;
 
+  /// The "unread since you left" divider, when there is unread history.
+  final AcpThreadUnreadDivider? unreadDivider;
+
+  /// Grows each time the user asks to jump to [unreadDivider]. It is passed
+  /// apart from the divider so a thread built without one still knows which
+  /// requests were already handled.
+  final int unreadJumpSerial;
+
+  /// Reports the last row at least partly on screen, as the user scrolls:
+  /// the index of its top-level entry, and the id of the entry the row
+  /// shows, which is a nested entry or header inside a subagent block.
+  final void Function(int entryIndex, String rowEntryId)?
+  onLastVisibleEntryChanged;
+
   @override
   State<AcpMessageThread> createState() => _AcpMessageThreadState();
 }
@@ -177,6 +219,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
 
   /// Whether the last layout had room for the sticky prompt summary.
   bool _stickyPromptFits = true;
+  int _handledUnreadJumpSerial = 0;
+  (int, String)? _reportedLastVisibleRow;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -190,6 +234,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _scheduleTailAnchor(reset: true);
     final focus = widget.searchFocus;
     if (focus != null) _revealSearchFocus(focus);
+    // A thread mounted after a Jump does not replay it.
+    _handledUnreadJumpSerial = widget.unreadJumpSerial;
   }
 
   @override
@@ -215,6 +261,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     } else if (focus.serial != oldWidget.searchFocus?.serial) {
       _revealSearchFocus(focus);
     }
+    _jumpToUnreadDividerIfAsked();
   }
 
   /// Scrolls to a search match. Search navigation is the user moving through
@@ -259,6 +306,47 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           _controller.hasClients) {
         _controller.jumpTo(_controller.offset);
       }
+    });
+  }
+
+  /// Jumps for a Jump request not handled yet. Requests are remembered here,
+  /// not compared with the previous widget, so a divider that disappears and
+  /// comes back never replays one.
+  void _jumpToUnreadDividerIfAsked() {
+    final divider = widget.unreadDivider;
+    final serial = widget.unreadJumpSerial;
+    if (serial == _handledUnreadJumpSerial) return;
+    _handledUnreadJumpSerial = serial;
+    if (divider == null) return;
+    // Jumping is the user moving through the transcript, so it suspends
+    // live-follow like a drag does.
+    _userOwnsScrollPosition = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted ||
+          divider.entryIndex < 0 ||
+          divider.entryIndex >= widget.entries.length) {
+        return;
+      }
+      widget.onStickyPromptTap?.call();
+      await _scrollEntryIntoView(divider.entryIndex);
+      // Leave room for the pinned prompt summary above the divider.
+      if (!mounted || !_controller.hasClients) return;
+      final position = _controller.position;
+      final target = (position.pixels - _unreadDividerTopInset).clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+      if ((target - position.pixels).abs() >= 1) _controller.jumpTo(target);
+      if (!mounted || !MediaQuery.supportsAnnounceOf(context)) return;
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          View.of(context),
+          divider.earlierHistoryUnavailable
+              ? 'Showing the oldest loaded message'
+              : 'Showing the first unread message',
+          Directionality.of(context),
+        ),
+      );
     });
   }
 
@@ -422,6 +510,37 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
           _controller.position.pixels >
           _controller.position.minScrollExtent + 1,
     );
+    _reportLastVisibleEntry(renderObject);
+  }
+
+  /// Tells the owner which row is the last one on screen.
+  void _reportLastVisibleEntry(RenderSliverMultiBoxAdaptor sliver) {
+    final report = widget.onLastVisibleEntryChanged;
+    if (report == null) return;
+    final viewportBottom =
+        sliver.constraints.scrollOffset +
+        sliver.constraints.remainingPaintExtent;
+    (int, String)? lastVisible;
+    for (
+      var child = sliver.firstChild;
+      child != null;
+      child = sliver.childAfter(child)
+    ) {
+      final top = sliver.childScrollOffset(child) ?? 0;
+      if (top >= viewportBottom) break;
+      final index = sliver.indexOf(child);
+      final absolute =
+          index - _leadingWindowChildCount + _renderStartChildIndex;
+      if (absolute >= 0 && absolute < _threadChildren.length) {
+        final row = _threadChildren[absolute];
+        lastVisible = (row.entryIndex, row.entry.id);
+      }
+    }
+    if (lastVisible == null || lastVisible == _reportedLastVisibleRow) {
+      return;
+    }
+    _reportedLastVisibleRow = lastVisible;
+    report(lastVisible.$1, lastVisible.$2);
   }
 
   void _setViewportContext({
@@ -929,7 +1048,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       return Padding(
         key: ValueKey(threadChild.keyValue),
         padding: EdgeInsets.only(top: gap),
-        child: content,
+        child: _withUnreadDivider(absoluteIndex, content),
       );
     }
     final header = entry is AcpSubagentTranscriptEntry;
@@ -945,17 +1064,41 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     }
     return KeyedSubtree(
       key: ValueKey(threadChild.keyValue),
-      child: _SubagentRails(
-        depth: threadChild.depth,
-        // A header starts its own rail below the gap; other rows keep the gap
-        // inside their innermost rail so the rail stays continuous.
-        gapDepth: header ? threadChild.depth - 1 : threadChild.depth,
-        gap: gap,
-        headerKey: entry is AcpSubagentTranscriptEntry
-            ? ValueKey('acp-subagent-transcript-${entry.launchToolCallId}')
-            : null,
-        child: content,
+      child: _withUnreadDivider(
+        absoluteIndex,
+        _SubagentRails(
+          depth: threadChild.depth,
+          // A header starts its own rail below the gap; other rows keep the gap
+          // inside their innermost rail so the rail stays continuous.
+          gapDepth: header ? threadChild.depth - 1 : threadChild.depth,
+          gap: gap,
+          headerKey: entry is AcpSubagentTranscriptEntry
+              ? ValueKey('acp-subagent-transcript-${entry.launchToolCallId}')
+              : null,
+          child: content,
+        ),
       ),
+    );
+  }
+
+  /// Puts the unread divider above the first row of its entry. Every row
+  /// keeps the same wrapper, so the divider coming or going never resets a
+  /// row's state, such as an expanded tool call.
+  Widget _withUnreadDivider(int absoluteIndex, Widget child) {
+    final divider = widget.unreadDivider;
+    final here =
+        divider != null &&
+        _firstChildIndexByEntry[divider.entryIndex] == absoluteIndex;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (here)
+          _UnreadDivider(
+            earlierHistoryUnavailable: divider.earlierHistoryUnavailable,
+          ),
+        child,
+      ],
     );
   }
 
@@ -1310,6 +1453,78 @@ class _SearchMatchHighlight extends StatelessWidget {
         ),
         child,
       ],
+    );
+  }
+}
+
+/// A labelled rule marking where unread history starts.
+class _UnreadDivider extends StatelessWidget {
+  const _UnreadDivider({required this.earlierHistoryUnavailable});
+
+  final bool earlierHistoryUnavailable;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final color = earlierHistoryUnavailable
+        ? scheme.onSurfaceVariant
+        : scheme.primary;
+    final label = earlierHistoryUnavailable
+        ? 'earlier history not available'
+        : 'unread since you left';
+    final rule = Expanded(
+      child: Divider(height: 1, color: color.withValues(alpha: 0.5)),
+    );
+    return Semantics(
+      key: const ValueKey('acp-unread-divider'),
+      container: true,
+      label: earlierHistoryUnavailable
+          ? 'Earlier history not available'
+          : 'Unread since you left',
+      child: ExcludeSemantics(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: FluttyTheme.spacingSm),
+          // The label may take most of the row and wraps beyond that, so a
+          // large text size does not overflow; the rules take what is left.
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: [
+                rule,
+                const SizedBox(width: FluttyTheme.spacingSm),
+                Icon(
+                  earlierHistoryUnavailable
+                      ? Icons.history_toggle_off
+                      : Icons.mark_chat_unread_outlined,
+                  size: 14,
+                  color: color,
+                ),
+                const SizedBox(width: FluttyTheme.spacingXs),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth * 0.7,
+                  ),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: FluttyTheme.monoStyle.copyWith(
+                      // A wide transcript gets a slightly larger label, so
+                      // it does not shrink to a caption on a long rule.
+                      fontSize: constraints.maxWidth >= _unreadDividerWideWidth
+                          ? 12
+                          : 11,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: FluttyTheme.spacingSm),
+                rule,
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

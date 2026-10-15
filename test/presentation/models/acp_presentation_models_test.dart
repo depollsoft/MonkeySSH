@@ -6,6 +6,7 @@ import 'acp_timeline_cases.dart';
 import 'acp_timeline_mapper_cases.dart';
 import 'acp_transcript_markdown_cases.dart';
 import 'acp_transcript_search_cases.dart';
+import 'acp_unread_cases.dart';
 
 void main() {
   registerAcpAttachmentPickerAdaptersTests();
@@ -14,4 +15,5 @@ void main() {
   registerAcpTimelineMapperTests();
   registerAcpTranscriptMarkdownTests();
   registerAcpTranscriptSearchTests();
+  registerAcpUnreadTests();
 }
