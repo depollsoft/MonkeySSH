@@ -18,6 +18,7 @@ import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_composer_draft_store.dart';
@@ -2730,7 +2731,9 @@ class _SnippetRow extends ConsumerWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      snippet.command.replaceAll('\n', ' '),
+                      // What the snippet types: an escaped `\{key:1}` from
+                      // the key-token upgrade shows as the text it sends.
+                      snippetLiteralText(snippet.command).replaceAll('\n', ' '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: FluttyTheme.monoStyle.copyWith(
@@ -2851,7 +2854,7 @@ class _SnippetRow extends ConsumerWidget {
   }
 
   void _copySnippet(BuildContext context, WidgetRef ref) {
-    Clipboard.setData(ClipboardData(text: snippet.command));
+    Clipboard.setData(ClipboardData(text: snippetLiteralText(snippet.command)));
     unawaited(ref.read(snippetRepositoryProvider).incrementUsage(snippet.id));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Copied "${snippet.name}" to clipboard')),
