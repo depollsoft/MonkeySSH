@@ -12,6 +12,7 @@ import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
 import 'package:monkeyssh/domain/services/acp_composer_draft_store.dart';
+import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_controller.dart';
 import 'package:monkeyssh/presentation/controllers/acp_composer_draft_persistence.dart';
@@ -281,7 +282,11 @@ void main() {
       final harness = _Harness(settings)..start();
       addTearDown(harness.dispose);
       await tester.pump();
-      harness.manager.throwOnPrompt = StateError('rejected');
+      // An agent error: the prompt never ran, so it comes back to the draft.
+      harness.manager.throwOnPrompt = const AcpRemoteException(
+        code: -32603,
+        message: 'Internal error',
+      );
       harness.controller.setText('try again');
 
       expect(await harness.controller.send(), isTrue);
