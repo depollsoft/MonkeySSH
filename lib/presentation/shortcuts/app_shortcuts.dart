@@ -3,7 +3,9 @@
 ///
 /// ## Precedence rule
 ///
-/// Only iPadOS and Android reserve chords. Desktop builds reserve none.
+/// Only iOS and Android reserve chords. On iOS that is iPad and also iPhone
+/// with a hardware keyboard, which gets the same chords. Desktop builds
+/// reserve none.
 ///
 /// 1. A chord is an app shortcut when its key and modifiers exactly match an
 ///    entry in [appShortcutsFor]. On iPadOS the modifiers are ⌘ plus the
