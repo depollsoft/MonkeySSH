@@ -113,6 +113,69 @@ void main() {
     expect(stored.map((definition) => definition.id), [local.id]);
   });
 
+  test('a merge never moves an imported agent onto an unrelated local '
+      'one', () async {
+    // Made here by hand, before a built-in agent took `opencode`.
+    final local = AcpCustomProviderDefinition.create(
+      id: 'custom-opencode',
+      label: 'My fork',
+      launchCommand: AcpLaunchCommand(executable: 'my-opencode-fork'),
+    );
+    await SettingsService(
+      db,
+    ).setString(SettingKeys.acpCustomProviders, jsonEncode([local.toJson()]));
+    // An older device still stores its agent under the reserved ID.
+    final imported = {...goose().toJson(), 'id': 'opencode'};
+
+    await transfer.importMigrationData(
+      data: {
+        'settings': {
+          SettingKeys.acpCustomProviders: jsonEncode([imported]),
+        },
+      },
+      mode: MigrationImportMode.merge,
+    );
+
+    final stored = await customProviders.listCustomProviders();
+    expect(stored.map((definition) => (definition.id, definition.label)), [
+      ('custom-opencode', 'My fork'),
+      ('custom-opencode-2', 'Goose'),
+    ]);
+  });
+
+  test('a merge reads every stored agent before checking the limit', () async {
+    // More than the limit, as a different app version could have stored.
+    final stored = [
+      for (var i = 0; i <= acpCustomProviderMaxCount; i++)
+        AcpCustomProviderDefinition.create(
+          id: 'local-$i',
+          label: 'Local $i',
+          launchCommand: AcpLaunchCommand(executable: 'agent'),
+        ).toJson(),
+    ];
+    final settings = SettingsService(db);
+    final raw = jsonEncode(stored);
+    await settings.setString(SettingKeys.acpCustomProviders, raw);
+
+    // Replacing one stored agent adds none, yet reading only the first 32
+    // would write back a list without the last one.
+    final replacement = AcpCustomProviderDefinition.create(
+      id: 'local-0',
+      label: 'Local 0 (newer)',
+      launchCommand: AcpLaunchCommand(executable: 'agent'),
+    );
+
+    await expectLater(
+      transfer.importMigrationData(
+        data: migrationWith([replacement]),
+        mode: MigrationImportMode.merge,
+      ),
+      throwsFormatException,
+    );
+
+    expect(await settings.getString(SettingKeys.acpCustomProviders), raw);
+  });
+
   for (final mode in MigrationImportMode.values) {
     test(
       'a migration import never carries approvals in (${mode.name})',

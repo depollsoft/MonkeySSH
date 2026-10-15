@@ -52,9 +52,9 @@ final _unsafeTextPattern = RegExp(
 
 // Characters that render as nothing (Unicode default-ignorable code points,
 // such as Hangul fillers, variation selectors and the combining grapheme
-// joiner) plus the blank braille pattern. A label made of them looks empty
-// or like another label.
-final _invisibleLabelPattern = RegExp(
+// joiner) plus the blank braille pattern. A label or command made of them
+// looks empty or like another one in the review sheet.
+final _invisibleTextPattern = RegExp(
   r'\p{Default_Ignorable_Code_Point}|\u2800',
   unicode: true,
 );
@@ -122,7 +122,7 @@ String validateAcpProviderLabel(String label) {
     throw const FormatException('Name is too long.');
   }
   if (_unsafeTextPattern.hasMatch(trimmed) ||
-      _invisibleLabelPattern.hasMatch(trimmed)) {
+      _invisibleTextPattern.hasMatch(trimmed)) {
     throw const FormatException(
       'Name must not contain control or invisible characters.',
     );
@@ -134,8 +134,8 @@ String validateAcpProviderLabel(String label) {
 ///
 /// Throws a [FormatException] when the executable is blank or has
 /// surrounding whitespace, the executable or an argument contains control
-/// characters (including NUL), or the command exceeds the length and count
-/// limits.
+/// characters (including NUL) or characters that render as nothing, or the
+/// command exceeds the length and count limits.
 void validateAcpLaunchCommand(AcpLaunchCommand command) {
   final executable = command.executable;
   if (executable.trim().isEmpty) {
@@ -152,9 +152,10 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
       'fewer.',
     );
   }
-  if (_unsafeTextPattern.hasMatch(executable)) {
+  if (_unsafeTextPattern.hasMatch(executable) ||
+      _invisibleTextPattern.hasMatch(executable)) {
     throw const FormatException(
-      'Command must not contain control or invisible formatting characters.',
+      'Command must not contain control or invisible characters.',
     );
   }
   if (command.arguments.length > acpLaunchCommandMaxArgumentCount) {
@@ -169,10 +170,10 @@ void validateAcpLaunchCommand(AcpLaunchCommand command) {
         'or fewer.',
       );
     }
-    if (_unsafeTextPattern.hasMatch(argument)) {
+    if (_unsafeTextPattern.hasMatch(argument) ||
+        _invisibleTextPattern.hasMatch(argument)) {
       throw const FormatException(
-        'Arguments must not contain control or invisible formatting '
-        'characters.',
+        'Arguments must not contain control or invisible characters.',
       );
     }
   }
@@ -831,6 +832,41 @@ List<AcpCustomProviderDefinition> decodeAcpCustomProviderImport(
 List<AcpCustomProviderDefinition> decodeStoredAcpCustomProviders(
   Object? raw, {
   int? limit = acpCustomProviderMaxCount,
+}) => _decodeStored(raw, limit: limit);
+
+/// Decodes both sides of a settings migration: the [local] stored list and
+/// the [imported] one, each in full.
+///
+/// A definition whose ID became reserved moves to an ID that neither list
+/// uses, so merging by ID never replaces an unrelated definition from the
+/// other list. When the other list already holds the moved copy of the same
+/// definition (moved from the same reserved ID), it takes that ID, so the
+/// two still match.
+({
+  List<AcpCustomProviderDefinition> local,
+  List<AcpCustomProviderDefinition> imported,
+})
+decodeMigratedAcpCustomProviders({
+  required Object? local,
+  required Object? imported,
+}) {
+  final localDecoded = _decodeStored(
+    local,
+    limit: null,
+    alongside: _decodeStored(imported, limit: null, moveReserved: false),
+  );
+  return (
+    local: localDecoded,
+    imported: _decodeStored(imported, limit: null, alongside: localDecoded),
+  );
+}
+
+List<AcpCustomProviderDefinition> _decodeStored(
+  Object? raw, {
+  required int? limit,
+  bool moveReserved = true,
+  List<AcpCustomProviderDefinition> alongside =
+      const <AcpCustomProviderDefinition>[],
 }) {
   if (raw is! List) return const <AcpCustomProviderDefinition>[];
   final decoded = <AcpCustomProviderDefinition>[];
@@ -841,10 +877,29 @@ List<AcpCustomProviderDefinition> decodeStoredAcpCustomProviders(
     decoded.add(definition);
     if (limit != null && decoded.length >= limit) break;
   }
+  if (!moveReserved) {
+    return List<AcpCustomProviderDefinition>.unmodifiable(decoded);
+  }
+  final ownIds = {...ids};
+  final taken = {...ids, for (final other in alongside) other.id};
+  final movedElsewhere = {
+    for (final other in alongside) ?other.renamedFromId: other.id,
+  };
+  String movedId(String reservedId) {
+    final match = movedElsewhere[reservedId];
+    if (match != null && !ownIds.contains(match)) {
+      ownIds.add(match);
+      return match;
+    }
+    final candidate = _unreservedId(reservedId, taken);
+    ownIds.add(candidate);
+    return candidate;
+  }
+
   final definitions = [
     for (final definition in decoded)
       if (acpReservedCustomProviderIds.contains(definition.id))
-        definition._renamedTo(_unreservedId(definition.id, ids))
+        definition._renamedTo(movedId(definition.id))
       else
         definition,
   ];

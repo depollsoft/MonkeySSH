@@ -1159,14 +1159,26 @@ class SecureTransferService {
     String importedValue, {
     required bool keepUnmatchedLocal,
   }) {
+    final importedRaw = decodeJsonList(importedValue);
+    // Decode every agent on both sides, so an oversized result is rejected
+    // below rather than cut to the limit.
+    final decoded = decodeMigratedAcpCustomProviders(
+      local: decodeJsonList(localValue),
+      imported: importedRaw,
+    );
+    // Like port forwards, an agent this version cannot read (one written by
+    // a newer app, say) is skipped rather than failing the whole migration.
+    final skippedCount = importedRaw.length - decoded.imported.length;
+    if (skippedCount > 0) {
+      _diagnosticsLogger.warning(
+        'secure_transfer',
+        'migration_import_custom_agents_skipped',
+        fields: {'skippedCount': skippedCount},
+      );
+    }
     final merged = mergeImportedAcpCustomProviders(
-      local: decodeStoredAcpCustomProviders(decodeJsonList(localValue)),
-      // Decode every imported agent, so an oversized list is rejected below
-      // rather than cut to the limit.
-      imported: decodeStoredAcpCustomProviders(
-        decodeJsonList(importedValue),
-        limit: null,
-      ),
+      local: decoded.local,
+      imported: decoded.imported,
       keepUnmatchedLocal: keepUnmatchedLocal,
     );
     if (merged.length > acpCustomProviderMaxCount) {

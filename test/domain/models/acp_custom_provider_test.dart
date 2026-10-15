@@ -92,7 +92,7 @@ void main() {
       expect(validateAcpProviderLabel(r"Goose's \agent! 日本"), isNotEmpty);
     });
 
-    test('labels reject characters that render as nothing', () {
+    test('labels and argv reject characters that render as nothing', () {
       for (final blank in [
         '\u3164', // Hangul filler
         '\u115F', // Hangul choseong filler
@@ -100,10 +100,29 @@ void main() {
         '\u034F', // combining grapheme joiner
         '\uFE0F', // variation selector 16
       ]) {
+        final reason = blank.codeUnitAt(0).toRadixString(16);
         expect(
           () => validateAcpProviderLabel('Goose$blank'),
           throwsFormatException,
-          reason: blank.codeUnitAt(0).toRadixString(16),
+          reason: reason,
+        );
+        // The review sheet would show the command without them.
+        expect(
+          () => validateAcpLaunchCommand(
+            AcpLaunchCommand(executable: 'goose$blank'),
+          ),
+          throwsFormatException,
+          reason: reason,
+        );
+        expect(
+          () => validateAcpLaunchCommand(_command(['acp$blank'])),
+          throwsFormatException,
+          reason: reason,
+        );
+        expect(
+          () => validateAcpLaunchCommand(_command([blank])),
+          throwsFormatException,
+          reason: reason,
         );
       }
     });
@@ -327,6 +346,80 @@ void main() {
         ),
         throwsFormatException,
       );
+    });
+
+    group('decodeMigratedAcpCustomProviders', () {
+      final goose = _goose();
+      Map<String, Object?> stored(String id, String label) => {
+        ...goose.toJson(),
+        'id': id,
+        'label': label,
+      };
+
+      test('moves an imported reserved ID past the local IDs', () {
+        final decoded = decodeMigratedAcpCustomProviders(
+          local: [stored('custom-opencode', 'Mine')],
+          imported: [stored('opencode', 'OpenCode')],
+        );
+        expect(decoded.imported.single.id, 'custom-opencode-2');
+        final merged = mergeImportedAcpCustomProviders(
+          local: decoded.local,
+          imported: decoded.imported,
+          keepUnmatchedLocal: true,
+        );
+        expect(merged.map((definition) => definition.label), [
+          'Mine',
+          'OpenCode',
+        ]);
+      });
+
+      test('moves a local reserved ID past the imported IDs', () {
+        final decoded = decodeMigratedAcpCustomProviders(
+          local: [stored('opencode', 'OpenCode')],
+          imported: [stored('custom-opencode', 'Theirs')],
+        );
+        expect(decoded.local.single.id, 'custom-opencode-2');
+        final merged = mergeImportedAcpCustomProviders(
+          local: decoded.local,
+          imported: decoded.imported,
+          keepUnmatchedLocal: true,
+        );
+        expect(merged.map((definition) => definition.label), [
+          'OpenCode',
+          'Theirs',
+        ]);
+      });
+
+      test('matches the moved copy of the same agent', () {
+        final local = decodeStoredAcpCustomProviders([
+          stored('opencode', 'OpenCode'),
+        ]);
+        expect(local.single.id, 'custom-opencode');
+        final decoded = decodeMigratedAcpCustomProviders(
+          local: [for (final definition in local) definition.toJson()],
+          imported: [stored('opencode', 'OpenCode (newer)')],
+        );
+        expect(decoded.imported.single.id, 'custom-opencode');
+        final merged = mergeImportedAcpCustomProviders(
+          local: decoded.local,
+          imported: decoded.imported,
+          keepUnmatchedLocal: true,
+        );
+        expect(merged.single.label, 'OpenCode (newer)');
+      });
+
+      test('keeps every entry on both sides', () {
+        final many = [
+          for (var i = 0; i <= acpCustomProviderMaxCount; i++)
+            stored('agent-$i', 'Agent $i'),
+        ];
+        final decoded = decodeMigratedAcpCustomProviders(
+          local: many,
+          imported: many,
+        );
+        expect(decoded.local, hasLength(acpCustomProviderMaxCount + 1));
+        expect(decoded.imported, hasLength(acpCustomProviderMaxCount + 1));
+      });
     });
 
     test('decodeStoredAcpCustomProviders can keep every entry', () {
