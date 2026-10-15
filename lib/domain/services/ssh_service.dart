@@ -1813,13 +1813,8 @@ class SshService {
     if (jumpHostId == null) {
       return null;
     }
-    if (visited.contains(jumpHostId)) {
-      if (followChain) throw const _JumpHostLoop();
-      return null;
-    }
-    if (visited.length > _maxJumpHostChainLength) {
-      throw const JumpHostChainTooLongException(_maxJumpHostChainLength);
-    }
+    // The hop's own Wi-Fi bypass comes first: a jump it skips on this network
+    // is never dialled, so it can't close a loop or lengthen the chain.
     if (skipJumpHostOnSsids != null && skipJumpHostOnSsids.isNotEmpty) {
       context.onProgress?.call(
         const ConnectionProgressUpdate(
@@ -1865,6 +1860,13 @@ class SshService {
       if (skipJumpHost) {
         return null;
       }
+    }
+    if (visited.contains(jumpHostId)) {
+      if (followChain) throw const _JumpHostLoop();
+      return null;
+    }
+    if (visited.length > _maxJumpHostChainLength) {
+      throw const JumpHostChainTooLongException(_maxJumpHostChainLength);
     }
     context.setPhase('load_jump_host');
     final jumpHost = await hostRepository!.getById(jumpHostId);

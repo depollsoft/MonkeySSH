@@ -9015,6 +9015,72 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(jump.jumpHost, isNull);
       expect(wifi.requestPermissionCallCount, 1);
     });
+
+    test(
+      'a hop that skips its jump on this Wi-Fi never closes a loop',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db, wifi: _StubWifiNetworkService('home'));
+        // T → J → K → J, but K dials directly on "home", so the route is
+        // device → K → J → T and the loop is never reached.
+        final j = await insertHost(db, 'j');
+        final k = await insertHost(
+          db,
+          'k',
+          jumpHostId: j,
+          skipJumpHostOnSsids: 'home',
+        );
+        await (db.update(db.hosts)..where((h) => h.id.equals(j))).write(
+          HostsCompanion(jumpHostId: Value(k)),
+        );
+        final target = await insertHost(db, 'target', jumpHostId: j);
+
+        await service.connectToHost(target);
+
+        final jump = service.capturedConfig!.jumpHost!;
+        expect(jump.hostname, 'j.example.com');
+        expect(jump.jumpHost!.hostname, 'k.example.com');
+        expect(jump.jumpHost!.jumpHost, isNull);
+      },
+    );
+
+    test(
+      'a bypass that trims a ninth hop leaves a chain that connects',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db, wifi: _StubWifiNetworkService('home'));
+        int? previous;
+        for (var i = 9; i >= 1; i--) {
+          previous = await insertHost(
+            db,
+            'h$i',
+            jumpHostId: previous,
+            // h8 skips its jump (h9) on this network.
+            skipJumpHostOnSsids: i == 8 ? 'home' : null,
+          );
+        }
+        final target = await insertHost(db, 'target', jumpHostId: previous);
+
+        await service.connectToHost(target);
+
+        // Dialled, rather than refused as a chain over eight hops.
+        expect(service.capturedConfig, isNotNull);
+        var hops = 0;
+        SshConnectionConfig? last;
+        for (
+          var c = service.capturedConfig!.jumpHost;
+          c != null;
+          c = c.jumpHost
+        ) {
+          hops++;
+          last = c;
+        }
+        expect(hops, 8);
+        expect(last!.hostname, 'h8.example.com');
+      },
+    );
   });
 
   group('connection cancellation', () {
