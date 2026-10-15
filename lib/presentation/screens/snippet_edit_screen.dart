@@ -10,6 +10,7 @@ import '../../data/database/database.dart';
 import '../../data/repositories/snippet_repository.dart';
 import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/snippet_variables.dart';
+import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/snippet_key_sender.dart';
@@ -80,10 +81,12 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   int _folderDropdownRevision = 0;
   List<SnippetFolder> _folders = [];
   _SnippetEditDraft? _initialDraft;
+  late final Future<bool> _keyTokensReady;
 
   @override
   void initState() {
     super.initState();
+    _keyTokensReady = _upgradeStoredSnippetsForKeyTokens();
     unawaited(_loadFolders());
     if (widget.snippetId != null) {
       unawaited(_loadSnippet());
@@ -110,8 +113,35 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     }
   }
 
+  /// Startup escapes `{key:...}` in snippets saved before key tokens
+  /// existed, once. If that failed, it is finished here before this editor
+  /// reads or writes a snippet: the retry on the next launch escapes every
+  /// stored snippet, and would turn one saved now into plain text. Returns
+  /// whether stored snippets are ready.
+  Future<bool> _upgradeStoredSnippetsForKeyTokens() async {
+    final repository = ref.read(snippetRepositoryProvider);
+    try {
+      if (await repository.keyTokensReady()) {
+        return true;
+      }
+      await repository.escapeLegacyKeyTokens();
+      return true;
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'snippets',
+        'key_token_escape_failed',
+        fields: {'errorType': error.runtimeType, 'inEditor': true},
+      );
+      return false;
+    }
+  }
+
   Future<void> _loadSnippet() async {
     setState(() => _isLoading = true);
+    // An old snippet must load as the upgrade rewrote it, or saving it would
+    // turn its text into key presses.
+    await _keyTokensReady;
+    if (!mounted) return;
     try {
       final snippet = await ref
           .read(snippetRepositoryProvider)
@@ -426,6 +456,19 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     var didScheduleClose = false;
 
     try {
+      if (!await _keyTokensReady) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not save: stored snippets could not be updated for '
+                'key tokens. Restart MonkeySSH and try again.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
       final repo = ref.read(snippetRepositoryProvider);
       final description = _descriptionController.text.isEmpty
           ? null

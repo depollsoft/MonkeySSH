@@ -2,6 +2,7 @@
 
 import 'dart:async';
 
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -444,6 +445,141 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    group('before stored snippets are upgraded for key tokens', () {
+      late AppDatabase db;
+      late SnippetRepository repository;
+
+      setUp(() {
+        db = AppDatabase.forTesting(NativeDatabase.memory());
+        repository = SnippetRepository(db);
+      });
+
+      tearDown(() => db.close());
+
+      Future<void> pumpEditor(WidgetTester tester, {int? snippetId}) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              snippetRepositoryProvider.overrideWithValue(repository),
+            ],
+            child: MaterialApp.router(
+              routerConfig: GoRouter(
+                initialLocation: '/edit',
+                routes: [
+                  GoRoute(
+                    path: '/',
+                    builder: (context, state) => const Text('Snippets'),
+                    routes: [
+                      GoRoute(
+                        path: 'edit',
+                        builder: (context, state) =>
+                            SnippetEditScreen(snippetId: snippetId),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('saving upgrades first, so the next launch keeps the keys', (
+        tester,
+      ) async {
+        // Startup failed to upgrade this old snippet.
+        final oldId = await repository.insert(
+          SnippetsCompanion.insert(name: 'Index', command: 'f({key:1})'),
+        );
+        await pumpEditor(tester);
+
+        await tester.enterText(
+          find.widgetWithText(TextFormField, 'Name'),
+          'Rewind',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextFormField, 'Command'),
+          '{key:esc}{key:esc}',
+        );
+        await tester.ensureVisible(find.byIcon(Icons.save));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.save));
+        await tester.pumpAndSettle();
+        expect(find.text('Snippets'), findsOneWidget);
+
+        // The next launch retries the upgrade.
+        expect(await repository.escapeLegacyKeyTokens(), 0);
+        final snippets = {
+          for (final snippet in await repository.getAll())
+            snippet.name: snippet.command,
+        };
+        expect(snippets, {
+          'Index': r'f(\{key:1})',
+          'Rewind': '{key:esc}{key:esc}',
+        });
+        expect((await repository.getById(oldId))!.command, r'f(\{key:1})');
+      });
+
+      testWidgets('an old snippet opens as the upgrade rewrote it', (
+        tester,
+      ) async {
+        final id = await repository.insert(
+          SnippetsCompanion.insert(name: 'Index', command: 'f({key:1})'),
+        );
+        await pumpEditor(tester, snippetId: id);
+
+        expect(find.text(r'f(\{key:1})'), findsOneWidget);
+        await tester.ensureVisible(find.byIcon(Icons.save));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.save));
+        await tester.pumpAndSettle();
+        expect(find.text('Snippets'), findsOneWidget);
+        expect((await repository.getById(id))!.command, r'f(\{key:1})');
+      });
+    });
+
+    testWidgets('full editor refuses to save while the upgrade fails', (
+      tester,
+    ) async {
+      registerFallbackValue(
+        SnippetsCompanion.insert(name: 'fallback', command: 'fallback'),
+      );
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
+      when(snippetRepository.keyTokensReady).thenAnswer((_) async => false);
+      when(snippetRepository.escapeLegacyKeyTokens)
+          .thenThrow(StateError('disk full'));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          ],
+          child: const MaterialApp(home: SnippetEditScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Name'),
+        'Rewind',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        '{key:esc}{key:esc}',
+      );
+      await tester.ensureVisible(find.byIcon(Icons.save));
+      await tester.tap(find.byIcon(Icons.save));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Restart MonkeySSH'), findsOneWidget);
+      verifyNever(() => snippetRepository.insert(any()));
+      // The form stays, so the draft is not lost.
+      expect(find.text('{key:esc}{key:esc}'), findsOneWidget);
     });
 
     testWidgets('full editor uses snippet prefill values', (tester) async {

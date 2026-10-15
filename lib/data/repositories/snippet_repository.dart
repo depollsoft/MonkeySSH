@@ -71,9 +71,9 @@ class SnippetRepository {
   /// Whether stored snippets are safe to read with key tokens: the upgrade
   /// in [escapeLegacyKeyTokens] has run. Startup runs it. If it failed there,
   /// this stays false and callers treat every snippet as plain text, so an
-  /// old `{key:esc}` is never pressed. This does not retry the upgrade:
-  /// snippets saved since then were written for key tokens, and escaping
-  /// them would break them. The next launch retries.
+  /// old `{key:esc}` is never pressed. The snippet editor retries the upgrade
+  /// before it reads or saves a snippet, and refuses to save while it fails,
+  /// so no snippet is written for key tokens before the upgrade has run.
   Future<bool> keyTokensReady() async {
     try {
       final done =
