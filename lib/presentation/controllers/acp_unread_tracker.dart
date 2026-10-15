@@ -61,30 +61,51 @@ Set<String> acpPendingRequestIds(AcpSessionState session) => {
 /// What the user has seen of [session], mapped as [entries].
 ///
 /// When the chat was following the newest output, that is everything.
-/// Otherwise it is what was rendered down to [lastVisibleEntryIndex], the
-/// last top-level entry on screen. Subagent output is nested next to its
-/// launching tool, so rendered order is not timeline order: the boundary is
-/// the newest order below which every entry was rendered, which never marks
+/// Otherwise it is what was rendered down to the last row on screen: the
+/// row of [lastVisibleRowId] in the top-level entry at
+/// [lastVisibleEntryIndex], so a subagent block only partly on screen counts
+/// only the rows reached. Subagent output is nested next to its launching
+/// tool, so rendered order is not timeline order: the boundary is the newest
+/// order below which every entry with a row was rendered, which never marks
 /// an entry the user did not reach as seen.
 AcpSeenSnapshot? acpSeenSnapshot(
   AcpSessionState? session,
   List<AcpTimelineEntry>? entries, {
   required bool followingTail,
   int? lastVisibleEntryIndex,
+  String? lastVisibleRowId,
 }) {
   if (session == null) return null;
   int? upToOrder;
   if (!followingTail &&
       entries != null &&
       lastVisibleEntryIndex != null &&
-      lastVisibleEntryIndex < entries.length - 1) {
+      lastVisibleEntryIndex >= 0 &&
+      lastVisibleEntryIndex < entries.length) {
     final rendered = <String>{};
-    for (var index = 0; index <= lastVisibleEntryIndex; index++) {
+    for (var index = 0; index < lastVisibleEntryIndex; index++) {
       _collectIds(entries[index], rendered);
+    }
+    final last = entries[lastVisibleEntryIndex];
+    if (lastVisibleRowId == null) {
+      _collectIds(last, rendered);
+    } else {
+      final reached = <String>{};
+      if (_collectIdsUpTo(last, reached, lastVisibleRowId)) {
+        rendered.addAll(reached);
+      }
+    }
+    final mapped = <String>{};
+    for (final entry in entries) {
+      _collectIds(entry, mapped);
     }
     upToOrder = -1;
     for (final entry in session.timeline.entries) {
-      if (!rendered.contains(acpPresentationEntryId(entry))) break;
+      final id = acpPresentationEntryId(entry);
+      // An entry with no row, such as a prompt with nothing addressed to
+      // the user, has nothing to see.
+      if (!mapped.contains(id)) continue;
+      if (!rendered.contains(id)) break;
       upToOrder = entry.order;
     }
   }
@@ -104,6 +125,25 @@ void _collectIds(AcpTimelineEntry entry, Set<String> ids) {
     return;
   }
   ids.add(entry.id);
+}
+
+/// Adds the ids of [entry]'s rows, in the order the thread shows them, up to
+/// and including the row of [lastRowId]. Returns whether that row was
+/// reached; a subagent block's header row adds nothing of its own.
+bool _collectIdsUpTo(
+  AcpTimelineEntry entry,
+  Set<String> ids,
+  String lastRowId,
+) {
+  if (entry case AcpSubagentTranscriptEntry(:final entries)) {
+    if (entry.id == lastRowId) return true;
+    for (final child in entries) {
+      if (_collectIdsUpTo(child, ids, lastRowId)) return true;
+    }
+    return false;
+  }
+  ids.add(entry.id);
+  return entry.id == lastRowId;
 }
 
 /// Where the user left each native chat during this app run.

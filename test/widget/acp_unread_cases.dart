@@ -493,12 +493,16 @@ void registerAcpUnreadWidgetTests() {
       final controller = ScrollController();
       addTearDown(controller.dispose);
       int? lastVisible;
+      String? lastRowId;
       await tester.pumpWidget(
         _app(
           AcpMessageThread(
             entries: entries,
             controller: controller,
-            onLastVisibleEntryChanged: (index) => lastVisible = index,
+            onLastVisibleEntryChanged: (index, rowId) {
+              lastVisible = index;
+              lastRowId = rowId;
+            },
           ),
         ),
       );
@@ -510,6 +514,52 @@ void registerAcpUnreadWidgetTests() {
       controller.jumpTo(controller.position.maxScrollExtent);
       await tester.pumpAndSettle();
       expect(lastVisible, 39);
+      expect(lastRowId, 'agent-39');
+    });
+
+    testWidgets('the thread reports the last row inside a subagent block', (
+      tester,
+    ) async {
+      final entries = <AcpTimelineEntry>[
+        AcpUserPromptEntry(id: 'prompt', parts: const [AcpTextPart('Go')]),
+        AcpSubagentTranscriptEntry(
+          id: 'subagent-helper',
+          launchToolCallId: 'helper',
+          entries: [
+            for (var i = 0; i < 40; i++)
+              AcpAssistantMessageEntry(
+                id: 'nested-$i',
+                markdown: 'Nested $i\n\nfiller paragraph',
+                parentToolCallId: 'helper',
+              ),
+          ],
+        ),
+        const AcpAssistantMessageEntry(id: 'after', markdown: 'After'),
+      ];
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      int? lastVisible;
+      String? lastRowId;
+      await tester.pumpWidget(
+        _app(
+          AcpMessageThread(
+            entries: entries,
+            controller: controller,
+            onLastVisibleEntryChanged: (index, rowId) {
+              lastVisible = index;
+              lastRowId = rowId;
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      controller.jumpTo(0);
+      await tester.pumpAndSettle();
+      // The block runs past the bottom of the screen: the last row on
+      // screen is one of its early nested replies, not the whole block.
+      expect(lastVisible, 1);
+      expect(lastRowId, startsWith('nested-'));
+      expect(lastRowId, isNot('nested-39'));
     });
 
     group('presence', () {

@@ -135,9 +135,11 @@ class AcpMessageThread extends StatefulWidget {
   /// requests were already handled.
   final int unreadJumpSerial;
 
-  /// Reports the index of the last top-level entry at least partly on
-  /// screen, as the user scrolls.
-  final ValueChanged<int>? onLastVisibleEntryChanged;
+  /// Reports the last row at least partly on screen, as the user scrolls:
+  /// the index of its top-level entry, and the id of the entry the row
+  /// shows, which is a nested entry or header inside a subagent block.
+  final void Function(int entryIndex, String rowEntryId)?
+  onLastVisibleEntryChanged;
 
   @override
   State<AcpMessageThread> createState() => _AcpMessageThreadState();
@@ -167,7 +169,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
   int _tailAnchorStableFrames = 0;
   double? _lastTailMaxExtent;
   int _handledUnreadJumpSerial = 0;
-  int? _reportedLastVisibleEntry;
+  (int, String)? _reportedLastVisibleRow;
 
   ScrollController get _controller =>
       widget.controller ?? (_ownedController ??= ScrollController());
@@ -405,14 +407,14 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
     _reportLastVisibleEntry(renderObject);
   }
 
-  /// Tells the owner which top-level entry is the last one on screen.
+  /// Tells the owner which row is the last one on screen.
   void _reportLastVisibleEntry(RenderSliverMultiBoxAdaptor sliver) {
     final report = widget.onLastVisibleEntryChanged;
     if (report == null) return;
     final viewportBottom =
         sliver.constraints.scrollOffset +
         sliver.constraints.remainingPaintExtent;
-    int? lastVisible;
+    (int, String)? lastVisible;
     for (
       var child = sliver.firstChild;
       child != null;
@@ -424,14 +426,15 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       final absolute =
           index - _leadingWindowChildCount + _renderStartChildIndex;
       if (absolute >= 0 && absolute < _threadChildren.length) {
-        lastVisible = _threadChildren[absolute].entryIndex;
+        final row = _threadChildren[absolute];
+        lastVisible = (row.entryIndex, row.entry.id);
       }
     }
-    if (lastVisible == null || lastVisible == _reportedLastVisibleEntry) {
+    if (lastVisible == null || lastVisible == _reportedLastVisibleRow) {
       return;
     }
-    _reportedLastVisibleEntry = lastVisible;
-    report(lastVisible);
+    _reportedLastVisibleRow = lastVisible;
+    report(lastVisible.$1, lastVisible.$2);
   }
 
   void _setViewportContext({

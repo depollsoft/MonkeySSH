@@ -845,6 +845,63 @@ void registerAcpUnreadTests() {
     });
   });
 
+  group('acpSeenSnapshot', () {
+    test('a subagent block only partly on screen counts the rows reached', () {
+      final session = fakeAcpSession(
+        timeline: _timeline([
+          _user(0, 'Go'),
+          _tool(1, 'helper', kind: d.AcpToolKind.other, subagent: true),
+          _agent(2, 'Nested reply', parent: 'helper'),
+          _tool(3, 'nested-run', kind: d.AcpToolKind.execute, parent: 'helper'),
+          _agent(4, 'Parent reply'),
+          _agent(5, 'Another reply'),
+        ], source: Object()),
+      );
+      final entries = mapAcpSessionTimeline(session);
+      final blockIndex = entries.indexWhere(
+        (entry) => entry is AcpSubagentTranscriptEntry,
+      );
+      final block = entries[blockIndex] as AcpSubagentTranscriptEntry;
+      int? seenUpTo(String rowId) => acpSeenSnapshot(
+        session,
+        entries,
+        followingTail: false,
+        lastVisibleEntryIndex: blockIndex,
+        lastVisibleRowId: rowId,
+      )!.upToOrder;
+
+      // Only the block's header is on screen: nothing nested was reached.
+      expect(seenUpTo(block.id), 1);
+      // The nested reply is on screen, the nested run below it is not.
+      expect(seenUpTo(block.entries.first.id), 2);
+      expect(seenUpTo(block.entries.last.id), 3);
+    });
+
+    test('an entry with no row does not stop the read boundary', () {
+      final session = fakeAcpSession(
+        timeline: _timeline([
+          _user(0, 'Go'),
+          _agent(1, 'One'),
+          _user(2, ''),
+          _agent(3, 'Three'),
+          _agent(4, 'Four'),
+          _agent(5, 'Five'),
+        ], source: Object()),
+      );
+      final entries = mapAcpSessionTimeline(session);
+      expect(entries.map((entry) => entry.id), isNot(contains('msg-2')));
+      final four = entries.indexWhere((entry) => entry.id == 'msg-4');
+      final seen = acpSeenSnapshot(
+        session,
+        entries,
+        followingTail: false,
+        lastVisibleEntryIndex: four,
+        lastVisibleRowId: 'msg-4',
+      )!;
+      expect(seen.upToOrder, 4);
+    });
+  });
+
   group('returning from the background', () {
     var now = DateTime(2026, 10, 15, 12);
     setUp(() {

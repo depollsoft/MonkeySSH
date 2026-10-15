@@ -228,6 +228,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   AcpSessionState? _lastSession;
   List<ui.AcpTimelineEntry>? _lastEntries;
   int? _lastVisibleEntryIndex;
+  String? _lastVisibleRowId;
 
   @override
   void initState() {
@@ -267,6 +268,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     _lastEntries,
     followingTail: _autoScroll,
     lastVisibleEntryIndex: _lastVisibleEntryIndex,
+    lastVisibleRowId: _lastVisibleRowId,
   );
 
   /// What the user has seen counts as seen; the next visit compares with it.
@@ -1393,8 +1395,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               onCopyCode: (code) => _copyToClipboard(code, 'Code'),
               onOpenLocation: (location) =>
                   unawaited(_openRemotePath(location.path)),
-              onLastVisibleEntryChanged: (index) =>
-                  _lastVisibleEntryIndex = index,
+              onLastVisibleEntryChanged: (index, rowId) {
+                _lastVisibleEntryIndex = index;
+                _lastVisibleRowId = rowId;
+              },
               unreadDivider: unread?.dividerEntryIndex == null
                   ? null
                   : AcpThreadUnreadDivider(
