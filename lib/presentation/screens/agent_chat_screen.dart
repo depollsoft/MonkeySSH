@@ -35,18 +35,23 @@ import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/acp_terminal_display.dart';
 import '../../domain/models/acp_timeline.dart' as domain;
 import '../../domain/services/acp_attachment_service.dart';
+import '../../domain/services/acp_composer_draft_store.dart';
 import '../../domain/services/acp_session_manager.dart';
+import '../../domain/services/git_working_tree_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/pi_model_scope_metadata_service.dart';
 import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../controllers/acp_composer_controller.dart';
+import '../controllers/acp_composer_draft_persistence.dart';
 import '../controllers/acp_sftp_client_cache.dart';
+import '../controllers/acp_unread_tracker.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
+import '../models/acp_unread.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
 import '../widgets/acp_composer.dart';
@@ -62,11 +67,13 @@ import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/acp_terminal_output.dart';
+import '../widgets/acp_unread_digest_bar.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_text_style.dart';
+import '../widgets/working_tree_changes_sheet.dart';
 import 'acp_quick_selectors.dart';
 import 'sftp_screen.dart';
 
@@ -199,6 +206,7 @@ class AgentChatScreen extends ConsumerStatefulWidget {
 class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   late AcpSessionKey _key;
   late final AcpComposerController _composer;
+  late final AcpComposerDraftPersistence _draftPersistence;
   late final ScrollController _scroll;
 
   late bool _autoScroll;
@@ -221,6 +229,11 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   String? _piModelScopeIdentity;
   List<String>? _piEnabledModelPatterns;
   var _piModelScopeLoading = false;
+  late final AcpUnreadVisit _unread;
+  AcpSessionState? _lastSession;
+  List<ui.AcpTimelineEntry>? _lastEntries;
+  int? _lastVisibleEntryIndex;
+  String? _lastVisibleRowId;
 
   @override
   void initState() {
@@ -245,20 +258,41 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       uploaderBuilder: _buildUploader,
       initialSession: manager.state.byKeyValue(_key.value),
     );
+    _draftPersistence = AcpComposerDraftPersistence(
+      controller: _composer,
+      store: ref.read(acpComposerDraftStoreProvider),
+    )..start();
     _scroll.addListener(_onScroll);
+    _unread = AcpUnreadVisit(ref.read(acpLastSeenRegistryProvider))
+      ..begin(_key);
     if (widget.connectOnMount) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _ensureConnected());
     }
   }
 
+  /// What the user has seen: everything when following the newest output,
+  /// otherwise up to the last entry on screen.
+  AcpSeenSnapshot? _seenSnapshot() => acpSeenSnapshot(
+    _lastSession,
+    _lastEntries,
+    followingTail: _autoScroll,
+    lastVisibleEntryIndex: _lastVisibleEntryIndex,
+    lastVisibleRowId: _lastVisibleRowId,
+  );
+
+  /// What the user has seen counts as seen; the next visit compares with it.
+  void _markChatSeen() => _unread.end(_key, _seenSnapshot());
+
   @override
   void dispose() {
+    _markChatSeen();
     _previewPublishTimer?.cancel();
     _initialScrollSettleTimer?.cancel();
     _publishScrollState();
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
+    _draftPersistence.dispose();
     _composer.dispose();
     super.dispose();
   }
@@ -1027,7 +1061,24 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontSize: fontSize,
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
-      child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
+      child: AcpChatPresence(
+        onAway: () => _unread.depart(_seenSnapshot()),
+        // No frames run while the app is hidden, so read the live session
+        // rather than the last one built.
+        onBack: ({required left, required hidden}) => setState(
+          () => _unread.arrive(
+            _key,
+            left: left,
+            hidden: hidden,
+            current: acpSeenSnapshot(
+              ref.read(acpSessionManagerProvider).state.byKeyValue(_key.value),
+              null,
+              followingTail: true,
+            ),
+          ),
+        ),
+        child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
+      ),
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
@@ -1174,7 +1225,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
 
     _ensurePiModelScope(session);
-    final entries = _timelineMapperCache.map(session);
+    _lastSession = session;
+    final entries = _lastEntries = _timelineMapperCache.map(session);
+    final unread = _unread.evaluate(session, entries);
     final activity = acpSessionActivityDisplay(session);
     _queuePreviewPublish(session, entries, activity);
     final toolTitles = _toolTitles(session);
@@ -1195,7 +1248,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 child: Column(
                   children: [
                     ?_buildBanner(session, activity),
-                    Expanded(child: _buildTranscript(session, entries)),
+                    Expanded(child: _buildTranscript(session, entries, unread)),
+                    if (unread != null && !_unread.digestDismissed)
+                      AcpUnreadDigestBar(
+                        state: unread,
+                        onJump: () => setState(_unread.jumpToDivider),
+                        onDismiss: () => setState(_unread.dismissDigest),
+                      ),
                     if (prompts.isNotEmpty ||
                         session.pendingElicitations.isNotEmpty ||
                         session.awaitingElicitations.isNotEmpty)
@@ -1307,6 +1366,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Widget _buildTranscript(
     AcpSessionState session,
     List<ui.AcpTimelineEntry> entries,
+    AcpUnreadState? unread,
   ) => Stack(
     children: [
       if (entries.isEmpty)
@@ -1345,6 +1405,18 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               onCopyCode: (code) => _copyToClipboard(code, 'Code'),
               onOpenLocation: (location) =>
                   unawaited(_openRemotePath(location.path)),
+              onLastVisibleEntryChanged: (index, rowId) {
+                _lastVisibleEntryIndex = index;
+                _lastVisibleRowId = rowId;
+              },
+              unreadDivider: unread?.dividerEntryIndex == null
+                  ? null
+                  : AcpThreadUnreadDivider(
+                      entryIndex: unread!.dividerEntryIndex!,
+                      earlierHistoryUnavailable:
+                          unread.earlierHistoryUnavailable,
+                    ),
+              unreadJumpSerial: _unread.jumpSerial,
             ),
           ),
         ),
@@ -1655,6 +1727,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             ),
           ),
         const PopupMenuItem(
+          value: _ChatAction.workingTreeChanges,
+          child: ListTile(
+            leading: Icon(Icons.difference_outlined),
+            title: Text('Working tree changes'),
+          ),
+        ),
+        const PopupMenuItem(
           value: _ChatAction.detach,
           child: ListTile(
             leading: Icon(Icons.pause_circle_outline),
@@ -1699,6 +1778,29 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         ],
       ],
     );
+  }
+
+  /// Opens the read-only git changes sheet for the session's directory and
+  /// appends an "Ask agent" prompt to the draft.
+  Future<void> _openWorkingTreeChanges(AcpSessionState session) async {
+    final sshSession = ref
+        .read(sshServiceProvider)
+        .getSessionsForHost(widget.hostId)
+        .firstOrNull;
+    final prompt = await showWorkingTreeChangesSheet(
+      context: context,
+      service: sshSession == null
+          ? null
+          : ref.read(gitWorkingTreeServiceFactoryProvider)(sshSession),
+      directory: session.cwd,
+      unavailableMessage: workingTreeChangesUnavailableReason(sshSession),
+      canAskAgent: true,
+    );
+    if (!mounted || prompt == null) return;
+    final draft = _composer.text;
+    final separator = draft.isEmpty || draft.endsWith('\n') ? '' : '\n\n';
+    _composer.setText('$draft$separator$prompt');
+    widget.composerFocusController?.requestFocus();
   }
 
   Future<bool> _confirmDeleteSession() async {
@@ -1752,9 +1854,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         case _ChatAction.delete:
           if (!await _confirmDeleteSession() || !mounted) return;
           await manager.deleteSession(_key);
+          _draftPersistence.discard();
           if (mounted) _leaveChat();
         case _ChatAction.signOut:
           await _signOut(session);
+        case _ChatAction.workingTreeChanges:
+          await _openWorkingTreeChanges(session);
       }
     } on Object {
       if (!mounted) return;
@@ -2304,4 +2409,13 @@ class _AgentChatZoomSurfaceState extends State<_AgentChatZoomSurface> {
   }
 }
 
-enum _ChatAction { settings, reconnect, detach, stop, fork, delete, signOut }
+enum _ChatAction {
+  settings,
+  reconnect,
+  detach,
+  stop,
+  fork,
+  delete,
+  signOut,
+  workingTreeChanges,
+}

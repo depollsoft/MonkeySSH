@@ -29,6 +29,7 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -45,6 +46,7 @@ import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
+import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
@@ -80,6 +82,7 @@ import 'package:xterm/xterm.dart';
 import '../../helpers/fake_wakelock_plus_platform.dart';
 import '../../helpers/terminal_screen_mux_fixture.dart';
 import '../../support/fake_acp_session_manager.dart';
+import '../../support/fake_git_working_tree_service.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 String _trueColorLoginShellCommand(
@@ -1804,6 +1807,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
         buildScreen(
@@ -1811,6 +1815,7 @@ void main() {
           monetizationState: monetizationState,
           loadSharedClipboard: () async => sharedClipboard,
           overrides: [
+            ...overrides,
             if (remoteFileService != null)
               remoteFileServiceProvider.overrideWithValue(remoteFileService),
             themeModeNotifierProvider.overrideWith(
@@ -3300,6 +3305,265 @@ void main() {
 
       expect(firstOffset, scrollController.position.maxScrollExtent);
       expect(secondOffset, lessThan(firstOffset));
+    });
+
+    testWidgets(
+      'find takes focus from the terminal so the query never reaches the shell',
+      (tester) async {
+        session.terminal!.write('needle near the top\r\n');
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final terminalFocus =
+            tester
+                  .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+                  .focusNode!
+              ..requestFocus();
+        await tester.pump();
+        expect(terminalFocus.hasFocus, isTrue);
+        shellWrites.clear();
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+        // Typed through the platform text input, as a keyboard would.
+        tester.testTextInput.enterText('needle');
+        await tester.pump();
+        expect(tester.widget<TextField>(field).controller!.text, 'needle');
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          isNot(contains('needle')),
+        );
+
+        // Choosing Find again while the bar is open focuses the field again.
+        terminalFocus.requestFocus();
+        await tester.pump();
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Close find'));
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'with the find field focused the toolbar keys act on the search, not '
+      'the shell',
+      (tester) async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'nee\ndle'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final terminal = session.terminal!;
+        for (var row = 0; row < 80; row += 1) {
+          terminal.write(row == 5 ? 'cat a/needle\r\n' : 'output $row\r\n');
+        }
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final scrollController = tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .scrollController!;
+        String shellText() =>
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+        Future<void> tapKey(String tooltip) async {
+          await tester.ensureVisible(find.byTooltip(tooltip));
+          await tester.tap(find.byTooltip(tooltip));
+          await tester.pump();
+        }
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        TextField textField() => tester.widget<TextField>(field);
+        shellWrites.clear();
+
+        tester.testTextInput.enterText('a');
+        await tester.pump();
+        await tapKey('Slash');
+        expect(textField().controller!.text, 'a/');
+        expect(textField().focusNode!.hasFocus, isTrue);
+
+        // Paste goes into the field, without the line break.
+        await tapKey('Paste');
+        await tester.pumpAndSettle();
+        expect(textField().controller!.text, 'a/needle');
+        await tester.pump(const Duration(milliseconds: 200));
+        for (var turn = 0; turn < 10; turn++) {
+          await tester.pump(Duration.zero);
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('1/1'), findsOneWidget);
+        final revealed = scrollController.offset;
+        expect(revealed, lessThan(scrollController.position.maxScrollExtent));
+
+        // Enter and the arrows step through the matches and move the caret;
+        // none of them reaches the shell or scrolls the terminal back down.
+        for (final key in ['Enter', 'Up', 'Down', 'Left', 'Right']) {
+          await tapKey(key);
+        }
+        await tester.pumpAndSettle();
+        expect(scrollController.offset, revealed);
+        expect(textField().focusNode!.hasFocus, isTrue);
+        expect(textField().controller!.text, 'a/needle');
+        expect(shellText(), isEmpty);
+
+        // With the terminal focused, the toolbar types into the shell again.
+        tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .focusNode!
+            .requestFocus();
+        // The focus change lands after one frame, the toolbar switches in
+        // the next.
+        await tester.pump();
+        await tester.pump();
+        await tapKey('Pipe');
+        await tester.pumpAndSettle();
+        expect(shellText(), '|');
+        expect(textField().controller!.text, 'a/needle');
+
+        // From the field, Escape closes Find.
+        textField().focusNode!.requestFocus();
+        await tester.pump();
+        await tester.pump();
+        shellWrites.clear();
+        await tapKey('Escape');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey<String>('terminal-search-bar')),
+          findsNothing,
+        );
+        expect(shellText(), isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('find searches the scrollback and closes cleanly', (
+      tester,
+    ) async {
+      final terminal = session.terminal!;
+      for (var row = 0; row < 80; row += 1) {
+        terminal.write(
+          row == 5 ? 'needle near the top\r\n' : 'output $row\r\n',
+        );
+      }
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final scrollController = terminalView().scrollController!;
+      scrollController.jumpTo(scrollController.position.maxScrollExtent);
+      await tester.pump();
+      final bottom = scrollController.offset;
+
+      await openTerminalOverflowMenu(tester);
+      expect(terminalMenuItemButton('Export Scrollback'), findsOneWidget);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      expect(terminalView().searchHits, isNotNull);
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'NEEDLE',
+      );
+      // Past the typing debounce, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(scrollController.offset, lessThan(bottom));
+
+      await tester.tap(find.byTooltip('Close find'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('terminal-search-bar')),
+        findsNothing,
+      );
+      expect(terminalView().searchHits, isNull);
+    });
+
+    testWidgets('find results follow a local terminal resize', (tester) async {
+      tester.view
+        ..physicalSize = const Size(2400, 1800)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      // A long line whose needle sits at its end, so a narrower viewport
+      // wraps the needle onto a new row.
+      final terminal = session.terminal!..write('${'x' * 50}needle\r\n');
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final wideColumns = terminal.viewWidth;
+      expect(wideColumns, greaterThan(56));
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'needle',
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('1/1'), findsOneWidget);
+
+      List<int> rowsWithHits() {
+        final hits = terminalView().searchHits!;
+        final rows = terminal.buffer.lines;
+        return [
+          for (var row = 0; row < rows.length; row++)
+            if (hits.hitsForRow(rows[row]).isNotEmpty) row,
+        ];
+      }
+
+      expect(rowsWithHits(), [0]);
+
+      // Narrow the window: the terminal reflows the line over two rows.
+      tester.view.physicalSize = const Size(1200, 1800);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(terminal.viewWidth, lessThan(wideColumns));
+      expect(terminal.viewWidth, lessThan(56));
+
+      // Past the refresh delay, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 600));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(rowsWithHits(), isNotEmpty);
+      expect(rowsWithHits(), isNot([0]));
     });
 
     for (final (updateAgents, adapters) in [
@@ -7930,6 +8194,255 @@ void main() {
       );
     }
 
+    FakeGitWorkingTreeService workingTreeService(String root) =>
+        FakeGitWorkingTreeService(
+          snapshots: [
+            GitWorkingTreeSnapshot(
+              state: GitWorkingTreeState.ready,
+              refreshedAt: DateTime(2026, 10, 9, 9),
+              repositoryRoot: root,
+              files: const [
+                GitChangedFile(
+                  path: 'lib/a.dart',
+                  group: GitChangeGroup.unstaged,
+                  kind: GitChangeKind.modified,
+                ),
+              ],
+            ),
+          ],
+          diffs: {
+            'lib/a.dart': GitFileDiff(
+              headerLines: const [],
+              hunks: [
+                GitDiffHunk(
+                  header: '@@ -1 +1 @@',
+                  lines: const ['-old', '+new'],
+                ),
+              ],
+              binary: false,
+              truncated: false,
+            ),
+          },
+        );
+
+    final askAgent = find.byTooltip('Ask the agent about this hunk');
+
+    String pastedText() =>
+        utf8.decode(shellWrites.expand((write) => write).toList());
+
+    testWidgets(
+      'the overflow menu opens working tree changes and pastes a hunk',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // A feature view, next to Port Forwards rather than in Options.
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        // A multi-line prompt at a shell goes through the paste review.
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Paste anyway'));
+        await tester.pumpAndSettle();
+
+        expect(pastedText(), contains('About this hunk in lib/a.dart'));
+        expect(pastedText(), contains('-old'));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'a hunk for a running program that is not an agent is reviewed',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        // psql, a REPL or a nested shell: no shell prompt and no agent, and
+        // a line break without bracketed paste runs a line.
+        session.terminal!.write('\u001b]133;C\u0007');
+        await tester.pump();
+        expect(session.shellStatus, TerminalShellStatus.runningCommand);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(pastedText(), isNot(contains('About this hunk')));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    group('working tree changes in a MonkeyMux window', () {
+      const sessionName = 'work';
+      const shellActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: false, id: '@1'),
+      ];
+      const buildActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: false, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: true, id: '@1'),
+      ];
+
+      Future<TerminalScreenMuxFixture> pumpMux(
+        WidgetTester tester, {
+        required FakeGitWorkingTreeService service,
+        required Future<TmuxPaneContext?> Function() paneContext,
+      }) async {
+        final monkeyMuxService = _MockMonkeyMuxService();
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(_MockTmuxService(), monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => shellActive)
+              ..stubWindowEvents()
+              ..stubThemeRefresh();
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            sessionName,
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => paneContext());
+        await muxFixture.pump(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+        return muxFixture;
+      }
+
+      Future<void> settle(WidgetTester tester) async {
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+      }
+
+      testWidgets('drops the hunk when the active window changed meanwhile', (
+        tester,
+      ) async {
+        final service = workingTreeService('/srv/project');
+        final muxFixture = await pumpMux(
+          tester,
+          service: service,
+          paneContext: () async =>
+              const TmuxPaneContext(currentPath: '/srv/project'),
+        );
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await settle(tester);
+        expect(service.statusDirectories, ['/srv/project']);
+        await tester.tap(find.text('a.dart'));
+        await settle(tester);
+
+        // Another client switches windows while the sheet is open.
+        muxFixture.windowEvents.add(const TmuxWindowListEvent(buildActive));
+        await settle(tester);
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await settle(tester);
+
+        expect(
+          find.text(
+            'The window changed while the sheet was open, so the prompt '
+            'was not sent.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Review prompt paste'), findsNothing);
+        expect(pastedText(), isNot(contains('About this hunk')));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets(
+        'opens on the last known directory when the pane lookup fails',
+        (tester) async {
+          final service = workingTreeService('/srv/fallback');
+          await pumpMux(
+            tester,
+            service: service,
+            paneContext: () async =>
+                throw Exception('MonkeyMux control command timed out'),
+          );
+          session.terminal!.write(
+            '\u001b]7;file://remote.example.com/srv/fallback\u0007',
+          );
+          await tester.pump();
+
+          await openTerminalOverflowMenu(tester);
+          await tester.tap(terminalMenuItemButton('Working tree changes'));
+          await settle(tester);
+
+          expect(tester.takeException(), isNull);
+          expect(find.text('Working tree changes'), findsOneWidget);
+          expect(service.statusDirectories, ['/srv/fallback']);
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    });
+
     testWidgets('overflow menu toggles shell completion popups', (
       tester,
     ) async {
@@ -11153,6 +11666,42 @@ void main() {
         await tester.binding.handlePopRoute();
         await tester.pump();
 
+        expect(dismissRegion, findsNothing);
+        expect(find.byType(TerminalScreen), findsOneWidget);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'Android back closes find, then the expanded tmux bar, one per press',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService);
+
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        final dismissRegion = find.byKey(
+          const ValueKey('tmux-terminal-dismiss-region'),
+        );
+        expect(dismissRegion, findsOneWidget);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final findBar = find.byKey(
+          const ValueKey<String>('terminal-search-bar'),
+        );
+        expect(findBar, findsOneWidget);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(findBar, findsNothing);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
         expect(dismissRegion, findsNothing);
         expect(find.byType(TerminalScreen), findsOneWidget);
       },

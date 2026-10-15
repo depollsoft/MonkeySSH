@@ -14,6 +14,23 @@ void main() {
       expect(log.snapshot(), isEmpty);
     });
 
+    test('a quiet scope drops debug entries across async work only', () async {
+      final log = DiagnosticsLogService(enabled: true);
+      await DiagnosticsLogService.runWithoutDebugEntries(() async {
+        log.debug('ssh.exec', 'open_start');
+        await Future<void>.delayed(Duration.zero);
+        log
+          ..debug('acp.bridge', 'list_success')
+          ..info('connections.attention', 'bridge_poll_failed');
+      });
+      log.debug('ssh.exec', 'open_start');
+
+      expect(log.snapshot().map((entry) => entry.message), [
+        'bridge_poll_failed',
+        'open_start',
+      ]);
+    });
+
     test('redacts sensitive fields and unsafe string values', () {
       final log =
           DiagnosticsLogService(

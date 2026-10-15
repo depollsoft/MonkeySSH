@@ -48,6 +48,19 @@ const _windowsEncodedCommandPrefix =
 String buildWindowsPowerShellCommand(String script) =>
     '$_windowsEncodedCommandPrefix${encodePowerShellCommand(script)}';
 
+/// The longest command to send to a Windows host. Windows OpenSSH runs exec
+/// commands through `cmd.exe /c`, whose command line stops at 8191 characters;
+/// the rest is margin for that wrapper.
+const windowsCommandMaxLength = 7500;
+
+/// The length of [buildWindowsPowerShellCommand] for [script], without
+/// encoding it.
+///
+/// Dart string length counts UTF-16 code units: two bytes each, with base64
+/// rounded up to groups of three bytes.
+int windowsPowerShellCommandLength(String script) =>
+    _windowsEncodedCommandPrefix.length + ((script.length * 2 + 2) ~/ 3) * 4;
+
 /// Compresses large management scripts to fit Windows OpenSSH command lines.
 ///
 /// Unlike UTF-16 EncodedCommand (which expands scripts by roughly 8/3), the
@@ -62,12 +75,10 @@ String buildCompactWindowsPowerShellCommand(
   String script, {
   bool plainTextOutput = false,
 }) {
-  // Dart string length counts UTF-16 code units: two bytes each, with base64
-  // rounded up to groups of three bytes. Avoid encoding an oversized command
-  // just to discard it (and skip the calculation for text-only installers).
+  // Avoid encoding an oversized command just to discard it (and skip the
+  // calculation for text-only installers).
   if (!plainTextOutput &&
-      _windowsEncodedCommandPrefix.length + ((script.length * 2 + 2) ~/ 3) * 4 <
-          7500) {
+      windowsPowerShellCommandLength(script) < windowsCommandMaxLength) {
     return buildWindowsPowerShellCommand(script);
   }
   final payload = base64.encode(

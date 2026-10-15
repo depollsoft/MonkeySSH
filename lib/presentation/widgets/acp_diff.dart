@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
+import '../../domain/models/terminal_theme.dart' show contrastRatio;
 import '../models/acp_timeline.dart';
 import 'acp_chat_typography.dart';
 
@@ -19,16 +20,29 @@ const int kAcpDiffMaxSourceChars = 256 * 1024; // 256K characters
 
 enum _DiffLineKind { addition, deletion, hunk, meta, context }
 
-_DiffLineKind _classifyDiffLine(String line) {
-  if (line.startsWith('@@')) {
-    return _DiffLineKind.hunk;
+/// Returns [color] moved toward [ink] just far enough to reach a 4.5:1 WCAG
+/// contrast against [background], so red and green diff text stays legible
+/// on light themes where the raw status hue is too pale.
+Color legibleDiffColor(
+  Color color, {
+  required Color background,
+  required Color ink,
+}) {
+  const minimumContrast = 4.5;
+  if (contrastRatio(color, background) >= minimumContrast) {
+    return color;
   }
-  if (line.startsWith('+++') ||
-      line.startsWith('---') ||
-      line.startsWith('diff ') ||
-      line.startsWith('index ')) {
-    return _DiffLineKind.meta;
+  for (var step = 1; step < 10; step++) {
+    final candidate = Color.lerp(color, ink, step / 10)!;
+    if (contrastRatio(candidate, background) >= minimumContrast) {
+      return candidate;
+    }
   }
+  return ink;
+}
+
+/// The kind of a line inside a hunk, where its first character decides.
+_DiffLineKind _classifyHunkLine(String line) {
   if (line.startsWith('+')) {
     return _DiffLineKind.addition;
   }
@@ -36,6 +50,69 @@ _DiffLineKind _classifyDiffLine(String line) {
     return _DiffLineKind.deletion;
   }
   return _DiffLineKind.context;
+}
+
+final _hunkRange = RegExp(r'^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@');
+
+/// Classifies each of [lines]. File headers (`diff`, `index`, `---`, `+++`)
+/// are only recognised outside a hunk. Inside one, for as many lines as its
+/// `@@` header counts, a deleted `-- comment` or an added `++i` is content.
+/// A hunk whose header has no counts (a combined diff) runs until the next
+/// `@@` or `diff` line. When [bodyOnly] is true, [lines] hold one hunk's lines
+/// with no headers at all.
+List<_DiffLineKind> _classifyDiffLines(
+  List<String> lines, {
+  required bool bodyOnly,
+}) {
+  if (bodyOnly) {
+    return [for (final line in lines) _classifyHunkLine(line)];
+  }
+  final kinds = <_DiffLineKind>[];
+  var inHunk = false;
+  int? oldLeft;
+  int? newLeft;
+  for (final line in lines) {
+    if (line.startsWith('@@')) {
+      final match = _hunkRange.firstMatch(line);
+      inHunk = true;
+      oldLeft = match == null ? null : int.parse(match.group(1) ?? '1');
+      newLeft = match == null ? null : int.parse(match.group(2) ?? '1');
+      kinds.add(_DiffLineKind.hunk);
+      continue;
+    }
+    final counted = oldLeft != null && newLeft != null;
+    if (inHunk && counted && oldLeft <= 0 && newLeft <= 0) {
+      inHunk = false;
+    }
+    if (inHunk && (counted || !line.startsWith('diff '))) {
+      final kind = _classifyHunkLine(line);
+      if (counted && !line.startsWith(r'\')) {
+        switch (kind) {
+          case _DiffLineKind.addition:
+            newLeft = newLeft - 1;
+          case _DiffLineKind.deletion:
+            oldLeft = oldLeft - 1;
+          case _DiffLineKind.context ||
+              _DiffLineKind.hunk ||
+              _DiffLineKind.meta:
+            oldLeft = oldLeft - 1;
+            newLeft = newLeft - 1;
+        }
+      }
+      kinds.add(kind);
+      continue;
+    }
+    inHunk = false;
+    kinds.add(
+      line.startsWith('+++') ||
+              line.startsWith('---') ||
+              line.startsWith('diff ') ||
+              line.startsWith('index ')
+          ? _DiffLineKind.meta
+          : _classifyHunkLine(line),
+    );
+  }
+  return kinds;
 }
 
 /// Renders a unified diff as coloured, monospace lines.
@@ -54,6 +131,9 @@ class AcpDiffView extends StatefulWidget {
     super.key,
     this.initialLineCap = kAcpDiffInitialLineCap,
     this.maxSourceChars = kAcpDiffMaxSourceChars,
+    this.headerTrailing,
+    this.semanticsLabel,
+    this.bodyOnly = false,
   });
 
   /// The diff to render.
@@ -66,12 +146,25 @@ class AcpDiffView extends StatefulWidget {
   /// truncated to this bounded prefix with a visible truncation notice.
   final int maxSourceChars;
 
+  /// Optional action shown at the end of the header row, such as a per-hunk
+  /// button. The header keeps its compact padding when this is null.
+  final Widget? headerTrailing;
+
+  /// Overrides the default `Diff for <path>, N lines` screen-reader label.
+  final String? semanticsLabel;
+
+  /// Whether [diff] holds the lines of a single hunk with no file or `@@`
+  /// headers, so every line is content: a deleted `-- comment` reads as a
+  /// deletion rather than a `---` file header.
+  final bool bodyOnly;
+
   @override
   State<AcpDiffView> createState() => _AcpDiffViewState();
 }
 
 class _AcpDiffViewState extends State<AcpDiffView> {
   late List<String> _lines;
+  late List<_DiffLineKind> _kinds;
   late int _visibleCount;
   late bool _sourceTruncated;
 
@@ -86,7 +179,8 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.diff != widget.diff ||
         oldWidget.initialLineCap != widget.initialLineCap ||
-        oldWidget.maxSourceChars != widget.maxSourceChars) {
+        oldWidget.maxSourceChars != widget.maxSourceChars ||
+        oldWidget.bodyOnly != widget.bodyOnly) {
       _prepareSource();
     }
   }
@@ -99,6 +193,7 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     // for a multi-megabyte source or a single enormous line.
     final bounded = _sourceTruncated ? source.substring(0, maxChars) : source;
     _lines = bounded.split('\n');
+    _kinds = _classifyDiffLines(_lines, bodyOnly: widget.bodyOnly);
     _visibleCount = _initialCount;
   }
 
@@ -123,6 +218,18 @@ class _AcpDiffViewState extends State<AcpDiffView> {
         ? const Color(0xFF3FB950)
         : const Color(0xFF1A7F37);
     final deletionColor = scheme.error;
+    final additionTint = additionColor.withValues(alpha: 0.14);
+    final deletionTint = deletionColor.withValues(alpha: 0.14);
+    final additionText = legibleDiffColor(
+      additionColor,
+      background: Color.alphaBlend(additionTint, scheme.surface),
+      ink: scheme.onSurface,
+    );
+    final deletionText = legibleDiffColor(
+      deletionColor,
+      background: Color.alphaBlend(deletionTint, scheme.surface),
+      ink: scheme.onSurface,
+    );
     final monoBase = AcpChatTypography.monoStyleOf(context)
         .copyWith(fontSize: 12, height: 1.4);
 
@@ -130,16 +237,16 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     final visible = math.min(_visibleCount, _lines.length);
     for (var i = 0; i < visible; i++) {
       final line = _lines[i];
-      final kind = _classifyDiffLine(line);
+      final kind = _kinds[i];
       final Color? background;
       final Color color;
       switch (kind) {
         case _DiffLineKind.addition:
-          background = additionColor.withValues(alpha: 0.14);
-          color = additionColor;
+          background = additionTint;
+          color = additionText;
         case _DiffLineKind.deletion:
-          background = deletionColor.withValues(alpha: 0.14);
-          color = deletionColor;
+          background = deletionTint;
+          color = deletionText;
         case _DiffLineKind.hunk:
           background = null;
           color = scheme.primary;
@@ -168,10 +275,25 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     final remaining = _lines.length - visible;
     final truncated = _lines.length > _cap;
 
-    final semanticsLabel = _sourceTruncated
-        ? 'Diff for ${widget.diff.path}, truncated, '
-              'first ${_lines.length} lines'
-        : 'Diff for ${widget.diff.path}, ${_lines.length} lines';
+    final semanticsLabel =
+        widget.semanticsLabel ??
+        (_sourceTruncated
+            ? 'Diff for ${widget.diff.path}, truncated, '
+                  'first ${_lines.length} lines'
+            : 'Diff for ${widget.diff.path}, ${_lines.length} lines');
+    final headerTrailing = widget.headerTrailing;
+    // A header that shares its row with an action, such as a hunk header
+    // with its function name, may wrap rather than lose that context.
+    final headerText = Text(
+      widget.diff.path,
+      maxLines: headerTrailing == null ? 1 : 2,
+      overflow: TextOverflow.ellipsis,
+      style: AcpChatTypography.monoStyleOf(context).copyWith(
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+      ),
+    );
 
     return Semantics(
       label: semanticsLabel,
@@ -190,28 +312,37 @@ class _AcpDiffViewState extends State<AcpDiffView> {
               Container(
                 width: double.infinity,
                 color: scheme.surfaceContainerHighest,
-                padding: const EdgeInsets.symmetric(
+                padding: EdgeInsets.symmetric(
                   horizontal: FluttyTheme.spacingSm,
-                  vertical: 6,
+                  vertical: headerTrailing == null ? 6 : 0,
                 ),
-                child: Text(
-                  widget.diff.path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AcpChatTypography.monoStyleOf(context).copyWith(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: scheme.onSurface,
-                  ),
-                ),
+                child: headerTrailing == null
+                    ? headerText
+                    : Row(
+                        children: [
+                          Expanded(child: headerText),
+                          headerTrailing,
+                        ],
+                      ),
               ),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: IntrinsicWidth(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: rows,
+              // Rows span at least the visible width so each line's tint
+              // reads as a full bar, and scroll sideways when a line is wider.
+              LayoutBuilder(
+                builder: (context, constraints) => SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: constraints.hasBoundedWidth
+                          ? constraints.maxWidth
+                          : 0,
+                    ),
+                    child: IntrinsicWidth(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisSize: MainAxisSize.min,
+                        children: rows,
+                      ),
+                    ),
                   ),
                 ),
               ),
