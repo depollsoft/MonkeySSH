@@ -47,9 +47,9 @@ class AgentSignatureDialog extends StatefulWidget {
 class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
   static const _maxUsernameLength = 64;
 
-  // Taps this soon after the prompt appears are ignored, so a tap meant for
-  // the terminal (the host sees every keystroke and can time a request to
-  // land under one) cannot answer it.
+  // The answers stay disabled this long after the prompt appears, so a tap
+  // meant for the terminal (the host sees every keystroke and can time a
+  // request to land under one) cannot answer it.
   static const _armDelay = Duration(milliseconds: 500);
 
   Timer? _timeoutTimer;
@@ -61,7 +61,11 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
   @override
   void initState() {
     super.initState();
-    _armTimer = Timer(_armDelay, () => _armed = true);
+    _armTimer = Timer(_armDelay, () {
+      if (mounted) {
+        setState(() => _armed = true);
+      }
+    });
     _timeoutTimer = Timer(
       widget.timeout,
       () => _close(SshAgentSignatureDecision.declined),
@@ -101,11 +105,10 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
     super.dispose();
   }
 
-  void _answer(SshAgentSignatureDecision decision) {
-    if (_armed) {
-      _close(decision);
-    }
-  }
+  /// The button callback for [decision]: null, so the button shows as
+  /// disabled, until the prompt is armed.
+  VoidCallback? _answer(SshAgentSignatureDecision decision) =>
+      _armed ? () => _close(decision) : null;
 
   void _close(SshAgentSignatureDecision decision) {
     if (_closed || !mounted) {
@@ -159,7 +162,9 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
                     const TextSpan(text: ' with your key:'),
                   ],
                 ),
-                style: theme.textTheme.bodyMedium,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: colorScheme.onSurface,
+                ),
               ),
               const SizedBox(height: 12),
               Container(
@@ -195,9 +200,22 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
               Text(
                 'Allow only if you started this, for example a git push. '
                 'MonkeySSH refuses on its own after $seconds seconds.',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              // A third way out, kept apart from the Deny/Allow pair so the
+              // two everyday answers stay side by side.
+              TextButton.icon(
+                key: const Key('agent-signature-stop'),
+                style: TextButton.styleFrom(
+                  foregroundColor: colorScheme.onSurface,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  alignment: AlignmentDirectional.centerStart,
+                  minimumSize: const Size.fromHeight(44),
                 ),
+                onPressed: _answer(SshAgentSignatureDecision.stopForwarding),
+                icon: const Icon(Icons.key_off_outlined, size: 18),
+                label: const Text('Deny and turn off forwarding'),
               ),
             ],
           ),
@@ -205,19 +223,13 @@ class _AgentSignatureDialogState extends State<AgentSignatureDialog> {
       ),
       actions: [
         TextButton(
-          key: const Key('agent-signature-stop'),
-          style: TextButton.styleFrom(foregroundColor: colorScheme.error),
-          onPressed: () => _answer(SshAgentSignatureDecision.stopForwarding),
-          child: const Text('Deny and turn off forwarding'),
-        ),
-        TextButton(
           key: const Key('agent-signature-deny'),
-          onPressed: () => _answer(SshAgentSignatureDecision.declined),
+          onPressed: _answer(SshAgentSignatureDecision.declined),
           child: const Text('Deny'),
         ),
         FilledButton(
           key: const Key('agent-signature-allow'),
-          onPressed: () => _answer(SshAgentSignatureDecision.approved),
+          onPressed: _answer(SshAgentSignatureDecision.approved),
           child: const Text('Allow'),
         ),
       ],

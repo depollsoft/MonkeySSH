@@ -12,8 +12,9 @@ import '../../domain/services/ssh_agent_forwarding.dart';
 /// alone, and disappears once forwarding stops on the connection. The title
 /// gives way first in a narrow title bar, then the label, leaving the key
 /// icon at a 44-point tap target; with less room than that the badge hides
-/// rather than shrink or overflow. Tapping it explains what the host can do
-/// and how many signatures it has made.
+/// rather than shrink or overflow. The room kept for the title and the label
+/// grows with the text size. Tapping it explains what the host can do, how
+/// many signatures it has made, and offers to turn forwarding off.
 class AgentForwardingTitleSlot extends StatelessWidget {
   /// Creates an [AgentForwardingTitleSlot].
   const AgentForwardingTitleSlot({
@@ -28,9 +29,13 @@ class AgentForwardingTitleSlot extends StatelessWidget {
   /// The forwarding serving this connection, or null when there is none.
   final SshAgentForwarding? forwarding;
 
-  // The label shows once the title keeps at least this much room beside it.
+  // The label shows once the title keeps at least this much room beside it,
+  // at the title's 16-point size; both widths grow with the text size.
   static const _titleRoomForLabel = 80.0;
+  static const _titleFontSize = 16.0;
+  // At the label's 11-point size.
   static const _labelBadgeWidth = 88.0;
+  static const _labelFontSize = 11.0;
   // The smallest tap target the badge is shown with; narrower, it hides.
   static const _iconBadgeWidth = 44.0;
 
@@ -46,13 +51,21 @@ class AgentForwardingTitleSlot extends StatelessWidget {
         if (!status.serving) {
           return title;
         }
+        final textScaler = MediaQuery.textScalerOf(context);
+        final labelRoom =
+            _labelBadgeWidth *
+                textScaler.scale(_labelFontSize) /
+                _labelFontSize +
+            _titleRoomForLabel *
+                textScaler.scale(_titleFontSize) /
+                _titleFontSize;
         return LayoutBuilder(
           builder: (context, constraints) {
             final width = constraints.maxWidth;
             if (width < _iconBadgeWidth) {
               return title;
             }
-            final showLabel = width >= _labelBadgeWidth + _titleRoomForLabel;
+            final showLabel = width >= labelRoom;
             final badgeWidth = showLabel ? null : _iconBadgeWidth;
             return Row(
               children: [
@@ -194,7 +207,9 @@ class _AgentForwardingDetails extends StatelessWidget {
                             'is in the background. Forwarding ends when the '
                             'connection closes.'
                       : 'Forwarding has stopped on this connection.',
-                  style: theme.textTheme.bodyMedium,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.onSurface,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 _DetailRow(
@@ -215,12 +230,31 @@ class _AgentForwardingDetails extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Turn it off, choose keys or change confirmation in the '
-                  'host settings. Changes apply to this connection too.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                  'Choose keys or change confirmation in the host settings. '
+                  'Changes apply to this connection too.',
+                  style: theme.textTheme.bodySmall,
                 ),
+                if (status.serving) ...[
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      key: const Key('agent-forwarding-turn-off'),
+                      onPressed: () {
+                        forwarding.stop();
+                        Navigator.of(context).pop();
+                      },
+                      icon: const Icon(Icons.key_off_outlined, size: 18),
+                      label: const Text('Turn off forwarding'),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Stops it on this connection and turns it off for this '
+                    'host until you turn it on again.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
               ],
             ),
           ),
@@ -262,7 +296,9 @@ class _DetailRow extends StatelessWidget {
                 TextSpan(text: text),
               ],
             ),
-            style: theme.textTheme.bodyMedium,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurface,
+            ),
           ),
         ),
       ],

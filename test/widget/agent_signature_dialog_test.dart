@@ -117,6 +117,30 @@ void main() {
       expect(await result, SshAgentSignatureDecision.declined);
     });
 
+    testWidgets('shows the answers disabled until it arms', (tester) async {
+      final result = await showPrompt(tester, _request(), armed: false);
+      const answers = [
+        Key('agent-signature-allow'),
+        Key('agent-signature-deny'),
+        Key('agent-signature-stop'),
+      ];
+      bool enabled(Key key) =>
+          tester.widget<ButtonStyleButton>(find.byKey(key)).onPressed != null;
+
+      for (final key in answers) {
+        expect(enabled(key), isFalse, reason: '$key');
+      }
+
+      await tester.pump(const Duration(milliseconds: 300));
+      for (final key in answers) {
+        expect(enabled(key), isTrue, reason: '$key');
+      }
+
+      await tester.tap(find.byKey(const Key('agent-signature-deny')));
+      await tester.pumpAndSettle();
+      expect(await result, SshAgentSignatureDecision.declined);
+    });
+
     testWidgets('refuses on its own when time runs out', (tester) async {
       final result = await showPrompt(
         tester,
@@ -244,9 +268,15 @@ void main() {
       WidgetTester tester,
       SshAgentForwarding? forwarding, {
       double width = 400,
+      double textScale = 1,
     }) async {
       await tester.pumpWidget(
         MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(textScale)),
+            child: child!,
+          ),
           home: Scaffold(
             body: Center(
               child: SizedBox(
@@ -320,6 +350,43 @@ void main() {
       await pumpTitle(tester, forwarding, width: 90);
       expect(find.text('ssh-agent'), findsNothing);
       expect(find.byIcon(Icons.key_rounded), findsOneWidget);
+    });
+
+    testWidgets('keeps the title room as the text grows', (tester) async {
+      final forwarding = _forwarding();
+
+      await pumpTitle(tester, forwarding, width: 180);
+      expect(find.text('ssh-agent'), findsOneWidget);
+
+      // Larger text needs more room for both the title and the label, so
+      // the badge falls back to the key alone.
+      await pumpTitle(tester, forwarding, width: 180, textScale: 1.3);
+      expect(tester.takeException(), isNull);
+      expect(find.text('ssh-agent'), findsNothing);
+      expect(find.byIcon(Icons.key_rounded), findsOneWidget);
+    });
+
+    testWidgets('turns forwarding off from the details sheet', (tester) async {
+      var stops = 0;
+      final forwarding = SshAgentForwarding(
+        hostId: 1,
+        hostLabel: 'build box',
+        loadPolicy: () async => const SshAgentForwardingPolicy(enabled: true),
+        onStop: () => stops++,
+        diagnostics: RecordingDiagnosticsLogger(),
+      );
+      await pumpTitle(tester, forwarding);
+
+      await tester.tap(find.byKey(const Key('agent-forwarding-indicator')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('agent-forwarding-turn-off')));
+      await tester.pumpAndSettle();
+
+      expect(stops, 1);
+      expect(forwarding.status.value.serving, isFalse);
+      expect(forwarding.status.value.stoppedByUser, isTrue);
+      expect(find.text('agent forwarding'), findsNothing);
+      expect(find.byIcon(Icons.key_rounded), findsNothing);
     });
 
     testWidgets('the details sheet scrolls with large text in landscape', (
