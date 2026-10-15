@@ -105,13 +105,22 @@ func pushSessionKey(salt []byte, session string) string {
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 
-// pushCollapseKey derives the opaque per-device, per-window collapse key.
-func pushCollapseKey(salt []byte, deviceID string, session string, windowID string) string {
+// pushCollapseKey derives the opaque collapse key for a device, window and
+// kind group: approvals and questions are one group and everything else the
+// other, so a newer push replaces an older one of its group but a routine
+// one never replaces a request still waiting on the user.
+func pushCollapseKey(salt []byte, deviceID string, session string, windowID string, kind string) string {
+	group := "update"
+	if kind == pushKindPermission || kind == pushKindInput {
+		group = "attention"
+	}
 	mac := hmac.New(sha256.New, salt)
 	mac.Write([]byte(deviceID))
 	mac.Write([]byte{'\n'})
 	mac.Write([]byte(session))
 	mac.Write([]byte{'\n'})
 	mac.Write([]byte(windowID))
+	mac.Write([]byte{'\n'})
+	mac.Write([]byte(group))
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }

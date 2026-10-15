@@ -667,6 +667,53 @@ void main() {
       expect(doneOverStaleProgress.activityProgress, isNull);
     });
 
+    test('a program status reporter is never guessed from timing', () {
+      // Entering a window makes its program redraw, which the timing guess
+      // reads as work; a reporter that reports nothing stays neutral.
+      final activityEpoch = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final entered = TmuxWindow(
+        index: 2,
+        name: 'claude',
+        isActive: true,
+        currentCommand: 'claude',
+        lastActivityEpochSeconds: activityEpoch,
+        terminalProgress: const TerminalProgress(
+          state: TerminalProgressState.indeterminate,
+        ),
+        programStatusReporter: true,
+      );
+      const quiet = TmuxWindow(
+        index: 3,
+        name: 'claude',
+        isActive: false,
+        idleSeconds: 120,
+        programStatusReporter: true,
+      );
+      const ringing = TmuxWindow(
+        index: 4,
+        name: 'claude',
+        isActive: false,
+        flags: '#',
+        programStatusReporter: true,
+      );
+      const reporting = TmuxWindow(
+        index: 5,
+        name: 'claude',
+        isActive: false,
+        programStatusReporter: true,
+        programStatus: TerminalProgramStatus(state: TerminalProgramState.done),
+      );
+
+      expect(entered.statusLabel, 'no status');
+      expect(entered.needsLocalIdleRefresh, isFalse);
+      expect(entered.activityProgress, isNull);
+      expect(quiet.statusLabel, 'no status');
+      expect(ringing.statusLabel, 'alert');
+      expect(reporting.statusLabel, 'done');
+      expect(entered.copyWith(isActive: false).programStatusReporter, isTrue);
+      expect(entered == entered.copyWith(), isTrue);
+    });
+
     test(
       'foregroundAgentTool prefers the current command then window name',
       () {
