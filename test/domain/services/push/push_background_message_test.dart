@@ -129,14 +129,19 @@ void main() {
   });
 
   group('notification text', () {
-    PushEvent event(PushEventKind kind, {String? agent, String? session}) =>
-        PushEvent(
-          hostRef: 'ref',
-          kind: kind,
-          timestamp: DateTime.utc(2026),
-          sessionName: session,
-          agent: agent,
-        );
+    PushEvent event(
+      PushEventKind kind, {
+      String? agent,
+      String? session,
+      String? window,
+    }) => PushEvent(
+      hostRef: 'ref',
+      kind: kind,
+      timestamp: DateTime.utc(2026),
+      sessionName: session,
+      agent: agent,
+      windowTitle: window,
+    );
 
     test('names the agent in the title', () {
       String title(PushEventKind kind) =>
@@ -197,6 +202,45 @@ void main() {
         );
       },
     );
+
+    test('the body leads with the window title', () {
+      String body(String? window, {String? session, String? label}) =>
+          pushNotificationText(
+            event(PushEventKind.finished, session: session, window: window),
+            hostLabel: label,
+          ).body;
+      expect(
+        body('Fix login bug', session: 'main', label: 'build-box'),
+        'Fix login bug · build-box · main',
+      );
+      expect(
+        body('Fix login bug', session: 'build-box', label: 'build-box'),
+        'Fix login bug · build-box',
+      );
+      // A host the phone does not know still shows the title.
+      expect(body('Fix login bug', session: 'main'), 'Fix login bug');
+      expect(body('build-box', label: 'build-box'), 'build-box');
+    });
+  });
+
+  test('a payload title is cleaned and bounded', () {
+    PushEvent? parse(Object? title) => PushEvent.tryParse(
+      utf8.encode(
+        jsonEncode({
+          'v': 1,
+          'hostRef': 'ref',
+          'kind': 'finished',
+          'ts': 1,
+          'title': ?title,
+        }),
+      ),
+    );
+    expect(parse('Fix login bug')!.windowTitle, 'Fix login bug');
+    expect(parse(' deploy\n\u001b prod ')!.windowTitle, 'deploy prod');
+    expect(parse(null)!.windowTitle, isNull);
+    expect(parse('  ')!.windowTitle, isNull);
+    expect(parse(7)!.windowTitle, isNull);
+    expect(parse('a' * 65)!.windowTitle, isNull);
   });
 
   test('a payload names its agent only with a short lowercase id', () {

@@ -48,8 +48,8 @@ PushNotificationText genericPushNotificationText(PushEventKind kind) =>
     };
 
 /// The text for a decrypted [event]: the agent in the title when the payload
-/// names one, and [hostLabel] with the session in the body when the phone
-/// knows the host.
+/// names one, and in the body the window's title, [hostLabel] when the phone
+/// knows the host, and the session, each once, joined by ` · `.
 PushNotificationText pushNotificationText(
   PushEvent event, {
   String? hostLabel,
@@ -63,14 +63,15 @@ PushNotificationText pushNotificationText(
     _ => generic.title,
   };
   if (event.kind == PushEventKind.test) return generic;
-  final label = hostLabel?.trim();
-  if (label == null || label.isEmpty) return (title: title, body: generic.body);
-  // A session named after its host (the default) would repeat the label.
-  final session = event.sessionName?.trim();
-  return (
-    title: title,
-    body: session == null || session.isEmpty || session == label
-        ? label
-        : '$label · $session',
-  );
+  final label = hostLabel?.trim() ?? '';
+  final parts = <String>[];
+  // A session is named after its host by default, so each part shows once.
+  for (final part in [
+    event.windowTitle?.trim() ?? '',
+    label,
+    if (label.isNotEmpty) event.sessionName?.trim() ?? '',
+  ]) {
+    if (part.isNotEmpty && !parts.contains(part)) parts.add(part);
+  }
+  return (title: title, body: parts.isEmpty ? generic.body : parts.join(' · '));
 }

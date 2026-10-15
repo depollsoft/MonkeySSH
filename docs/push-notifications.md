@@ -1,8 +1,8 @@
 # Push notifications for agent events
 
 This is the wire specification for issue #948. When an agent needs the user and
-the app is suspended or closed, the host sends an encrypted, content-free event
-to a Firebase Function, which delivers it through Firebase Cloud Messaging
+the app is suspended or closed, the host sends an encrypted event to a
+Firebase Function, which delivers it through Firebase Cloud Messaging
 (FCM). FCM uses APNs on iOS.
 
 Three components implement it:
@@ -27,11 +27,16 @@ file, and intermediate secrets are checked by their SHA-256 digests.
 | Function, Google, Apple | Sealed ticket and the FCM token inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
 | App (device key holder) | Everything in the payload |
 
-The payload never contains prompts, terminal output, file paths, commands,
-window names or hostnames; besides opaque ids it names only the session and,
-when known, the agent's short command name. The coarse kind is sent in clear
-text so a phone that cannot open the payload can still say something useful.
-The phone adds the host's label itself, from its own saved hosts.
+Besides opaque ids, the payload names the session and, when known, the
+agent's short command name and the window's title as the window bar shows it.
+The title is whatever the agent, the program or the user named the window (an
+agent's summary of its task, a window name, a folder's name), so it can say
+what the window is working on; MonkeyMux leaves out titles that are only a
+path, a host name or a shell's `user@host`. The payload never contains
+prompts, the agent's messages, terminal output or full paths, and only the
+device can read it. The coarse kind is sent in clear text so a phone that
+cannot open the payload can still say something useful. The phone adds the
+host's label itself, from its own saved hosts.
 
 ## Encodings
 
@@ -73,12 +78,14 @@ keyId     = 1*32( ALPHA / DIGIT / "_" / "-" )
 nonce     = 12 random bytes
 aad       = "v1." keyId            ; ASCII
 key       = 32 bytes from the PUSH_TICKET_KEYS secret, selected by keyId
-plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android"}
+plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
 ```
 
 AES-256-GCM with a 16-byte tag. Binding the key id into the AAD means a ticket
 cannot be replayed under a different key id. `p` is optional and only used for
-platform-specific message fields and the `platform` log field.
+platform-specific message fields and the `platform` log field. `a` is present
+when the app registered with `appNotifications`: it posts its own
+notifications from data-only messages (see "FCM message").
 
 A ticket stops opening 90 days after `i`, or when `i` is more than a day in the
 future. The app renews its ticket at least weekly, and hosts receive the new one
@@ -131,6 +138,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `sessionId` | MonkeyMux session name that owns the window, empty for a test |
 | `kind` | One of the kinds below |
 | `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
+| `title` | Since 0.1.237, when the window has one worth showing: its title, the first of the agent's session title, the title the program set (without a leading spinner or status glyph), the window name and the working folder's name that is not generic (a shell's name, the agent's own name, a host name, a path, `user@host`, a bare status word such as `working`, or the home folder). Control characters and runs of space become one space; at most 64 characters, cut with `…` |
 | `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
 | `ts` | Event time, Unix seconds |
 
@@ -164,8 +172,13 @@ Firebase Auth user is required.
 Request data:
 
 ```json
-{"token": "<FCM registration token>", "platform": "ios", "deviceId": "<optional existing id>"}
+{"token": "<FCM registration token>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
 ```
+
+The Android app sends `appNotifications: true`: it posts its own notifications
+from data-only messages, which Android builds before that could not show. Any
+other value is ignored. A ticket the app holds from before it sent the field
+is renewed at the next start, so its pushes get the new form.
 
 Response data:
 
@@ -250,8 +263,8 @@ header before reading the body, would close it.
 
 ### FCM message
 
-An Android ticket gets a data-only message. The app decrypts `p` and posts the
-notification itself (see "Notification text" under App); `k` and `c` let it
+An Android ticket with `a` (see "Ticket") gets a data-only message. The app
+decrypts `p` and posts the notification itself (see "Notification text" under App); `k` and `c` let it
 post the generic text for the kind, tagged with the collapse key, when the
 payload does not open. Every such push ends in a visible notification, so all
 kinds go at high priority to wake the app:
@@ -264,7 +277,8 @@ kinds go at high priority to wake the app:
 }
 ```
 
-An iOS ticket (and a ticket without a platform) gets an alert, which the
+An iOS ticket, an Android ticket without `a` (a build that cannot show
+data-only messages) and a ticket without a platform get an alert, which the iOS
 notification service extension rewrites on the phone:
 
 ```json
@@ -630,15 +644,16 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   rather than showing another session's terminal on a connection to the same
   host. A native agent window opens its chat. A payload
   that does not decrypt opens the app on Connections.
-- **Notification text:** the phone names the agent, the saved host and the
-  MonkeyMux session, from the decrypted payload and its own host labels:
-  "Claude Code finished" / "build-box · MonkeySSH". Titles are "<Agent> needs
-  approval", "<Agent> has a question" and "<Agent> finished" when the payload
-  names a known agent (otherwise the generic titles in the Kinds table), and
-  "Terminal alert" or "MonkeySSH" for the other kinds. The body is "<host
-  label> · <session>" when the phone knows the host (just the label when the
-  session is named after the host, as it is by default), else the generic
-  body.
+- **Notification text:** the phone names the agent, the window, the saved
+  host and the MonkeyMux session, from the decrypted payload and its own host
+  labels: "Claude Code finished" / "Fix login bug · build-box · MonkeySSH".
+  Titles are "<Agent> needs approval", "<Agent> has a question" and "<Agent>
+  finished" when the payload names a known agent (otherwise the generic titles
+  in the Kinds table), and "Terminal alert" or "MonkeySSH" for the other
+  kinds. The body joins the window's title, the host label when the phone
+  knows the host, and then the session with ` · `, each once (the session is
+  named after the host by default, so it usually shows once); with none of
+  them it is the generic body.
   `lib/domain/services/push/push_notification_text.dart` and the iOS
   extension build the same strings.
 - **Notification context:** to show that text while MonkeySSH is not running,

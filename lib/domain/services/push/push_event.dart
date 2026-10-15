@@ -42,6 +42,7 @@ class PushEvent {
     this.sessionName,
     this.alertCategories,
     this.agent,
+    this.windowTitle,
   });
 
   /// The host reference this device registered on the host.
@@ -66,6 +67,10 @@ class PushEvent {
   /// The agent the window runs, as MonkeyMux names it (such as `claude`),
   /// from 0.1.236 on when it knows.
   final String? agent;
+
+  /// The window's title as the window bar shows it, from 0.1.237 on when it
+  /// has one worth showing.
+  final String? windowTitle;
 
   /// Parses decrypted payload bytes, returning null for anything malformed.
   static PushEvent? tryParse(List<int> plaintext) {
@@ -100,6 +105,7 @@ class PushEvent {
         : null;
     final alert = decoded['alert'];
     final agent = decoded['agent'];
+    final title = decoded['title'];
     return PushEvent(
       hostRef: hostRef,
       kind: kind,
@@ -113,11 +119,23 @@ class PushEvent {
             }
           : null,
       agent: agent is String && _agentPattern.hasMatch(agent) ? agent : null,
+      windowTitle: title is String ? _cleanWindowTitle(title) : null,
     );
   }
 }
 
 final _agentPattern = RegExp(r'^[a-z0-9-]{1,32}$');
+
+/// Runs of whitespace and control characters, which a notification shows as
+/// one space.
+final _titleSpacePattern = RegExp(r'[\s\x00-\x1f\x7f-\x9f]+');
+
+/// MonkeyMux cuts titles to 64 characters; anything longer is not from it.
+String? _cleanWindowTitle(String title) {
+  final cleaned = title.replaceAll(_titleSpacePattern, ' ').trim();
+  if (cleaned.isEmpty || cleaned.runes.length > 64) return null;
+  return cleaned;
+}
 
 /// Where a push notification tap should land.
 @immutable

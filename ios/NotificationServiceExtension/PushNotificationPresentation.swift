@@ -34,6 +34,7 @@ struct PushNotificationPresentation: Equatable {
         kind: event.kind,
         hostLabel: context.hosts[event.hostRef],
         sessionId: event.sessionId,
+        windowTitle: event.windowTitle,
         originalBody: originalBody
       ),
       threadIdentifier: event.hostRef
@@ -92,6 +93,9 @@ struct PushPayloadEvent {
   /// The MonkeyMux session, nil when absent or blank.
   let sessionId: String?
   let agent: String?
+  /// The window's title (MonkeyMux 0.1.237 on), nil when absent, blank or
+  /// longer than MonkeyMux sends.
+  let windowTitle: String?
 
   init?(plaintext: Data) {
     guard
@@ -118,6 +122,32 @@ struct PushPayloadEvent {
       sessionId = nil
     }
     agent = root["agent"] as? String
+    windowTitle = (root["title"] as? String).flatMap(PushPayloadEvent.cleanTitle)
+  }
+
+  /// Runs of whitespace and control characters become one space, as Dart's
+  /// `PushEvent.tryParse` does; MonkeyMux cuts titles to 64 characters.
+  static func cleanTitle(_ title: String) -> String? {
+    var cleaned = String.UnicodeScalarView()
+    var pendingSpace = false
+    for scalar in title.unicodeScalars {
+      let value = scalar.value
+      if scalar.properties.isWhitespace || value <= 0x1f || (0x7f...0x9f).contains(value)
+        || value == 0xfeff
+      {
+        pendingSpace = !cleaned.isEmpty
+        continue
+      }
+      if pendingSpace {
+        cleaned.append(" ")
+        pendingSpace = false
+      }
+      cleaned.append(scalar)
+    }
+    guard !cleaned.isEmpty, cleaned.count <= 64 else {
+      return nil
+    }
+    return String(cleaned)
   }
 }
 
@@ -159,27 +189,30 @@ enum PushNotificationText {
     }
   }
 
-  /// "<host> · <session>" when the app shared a label for the host, the
-  /// original generic body otherwise. A session named after its host (the
-  /// default) is not repeated. Dart's `pushNotificationText` matches this.
+  /// "<window> · <host> · <session>", each part once: the window's title,
+  /// the label the app shared for the host and, with a label, the session
+  /// (named after its host by default). With none of them, the original
+  /// generic body. Dart's `pushNotificationText` matches this.
   static func body(
     kind: PushEventKind,
     hostLabel: String?,
     sessionId: String?,
+    windowTitle: String? = nil,
     originalBody: String
   ) -> String {
     if kind == .test {
       return testBody
     }
-    let label = hostLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !label.isEmpty else {
-      return originalBody
+    func trimmed(_ value: String?) -> String {
+      value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
-    let session = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !session.isEmpty, session != label else {
-      return label
+    let label = trimmed(hostLabel)
+    var parts: [String] = []
+    for part in [trimmed(windowTitle), label, label.isEmpty ? "" : trimmed(sessionId)]
+    where !part.isEmpty && !parts.contains(part) {
+      parts.append(part)
     }
-    return "\(label) \u{00B7} \(session)"
+    return parts.isEmpty ? originalBody : parts.joined(separator: " \u{00B7} ")
   }
 }
 

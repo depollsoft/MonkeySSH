@@ -175,6 +175,40 @@ equal(
   "blank label"
 )
 
+// The window's title leads, as in Dart's pushNotificationText.
+equal(
+  PushNotificationText.body(
+    kind: .finished, hostLabel: "build-box", sessionId: "main", windowTitle: "Fix login bug",
+    originalBody: "generic"),
+  "Fix login bug \u{00B7} build-box \u{00B7} main",
+  "window title, host and session"
+)
+equal(
+  PushNotificationText.body(
+    kind: .finished, hostLabel: "build-box", sessionId: "build-box",
+    windowTitle: "Fix login bug", originalBody: "generic"),
+  "Fix login bug \u{00B7} build-box",
+  "window title with the default session"
+)
+equal(
+  PushNotificationText.body(
+    kind: .finished, hostLabel: nil, sessionId: "main", windowTitle: "Fix login bug",
+    originalBody: "generic"),
+  "Fix login bug",
+  "window title on an unknown host"
+)
+equal(
+  PushNotificationText.body(
+    kind: .finished, hostLabel: "build-box", sessionId: nil, windowTitle: "build-box",
+    originalBody: "generic"),
+  "build-box",
+  "window title equal to the label"
+)
+equal(PushPayloadEvent.cleanTitle(" deploy\n\u{1B} prod "), "deploy prod", "title cleaned")
+check(PushPayloadEvent.cleanTitle("  ") == nil, "blank title kept")
+check(PushPayloadEvent.cleanTitle(String(repeating: "a", count: 65)) == nil, "long title kept")
+equal(PushPayloadEvent.cleanTitle(String(repeating: "a", count: 64)), String(repeating: "a", count: 64), "64-character title")
+
 // The pinned vector, end to end.
 equal(
   PushNotificationPresentation.make(payload: payload, context: context, originalBody: "generic"),
