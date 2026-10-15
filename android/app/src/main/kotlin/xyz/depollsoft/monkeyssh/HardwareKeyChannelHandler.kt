@@ -14,7 +14,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -30,6 +29,7 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.ProviderException
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
@@ -388,7 +388,16 @@ object HardwareKeyChannelHandler {
             try {
                 generator.initialize(keySpec(alias, requireUserPresence, strongBox = true))
                 generator.generateKeyPair().also { usedStrongBox = true }
-            } catch (error: StrongBoxUnavailableException) {
+            } catch (error: ProviderException) {
+                // StrongBoxUnavailableException, or any other StrongBox
+                // failure: the TEE still holds the key in hardware, and
+                // securityBacking reports where it went.
+                Log.w(TAG, "StrongBox generation failed: ${error.javaClass.simpleName}")
+                try {
+                    keyStore.deleteEntry(alias)
+                } catch (cleanup: Exception) {
+                    Log.w(TAG, "StrongBox key cleanup failed: ${cleanup.javaClass.simpleName}")
+                }
                 generator.initialize(keySpec(alias, requireUserPresence, strongBox = false))
                 generator.generateKeyPair()
             }
