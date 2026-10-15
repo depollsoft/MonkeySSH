@@ -72,6 +72,28 @@ void main() {
     );
   });
 
+  test('recognizes late channel writes to an already closed socket', () {
+    const uploadFrames =
+        '#1 SSHTransport._sendAeadPacket\n'
+        '#2 SSHTransport.sendPacket\n'
+        '#3 SSHChannelController._uploadLoop.<anonymous closure>\n';
+    expect(
+      isExpectedSshChannelTeardownError(
+        StateError('StreamSink is closed'),
+        StackTrace.fromString('#0 _Socket.add (dart:io)\n$uploadFrames'),
+      ),
+      isTrue,
+    );
+    // Other state errors in the same loop are programming errors.
+    expect(
+      isExpectedSshChannelTeardownError(
+        StateError('bug'),
+        StackTrace.fromString('#0 SSHChannelController.addData\n$uploadFrames'),
+      ),
+      isFalse,
+    );
+  });
+
   test('does not hide SSH state errors from other operations', () {
     expect(
       isExpectedSshChannelTeardownError(

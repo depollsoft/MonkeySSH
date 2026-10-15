@@ -105,6 +105,7 @@ class TmuxWindow {
     this.terminalBracketedPasteMode,
     this.terminalProgress,
     this.programStatus,
+    this.programStatusReporter = false,
     int? idleSeconds,
     this.lastActivityEpochSeconds,
     this.pendingNotifications = const [],
@@ -242,15 +243,24 @@ class TmuxWindow {
   /// Plain tmux snapshots leave this unset.
   final TerminalProgramStatus? programStatus;
 
+  /// Whether the program in this MonkeyMux window speaks OSC 7501: it asked
+  /// for support or reported a status, and is still running.
+  ///
+  /// Its window shows only what it reports, never a guess from output timing,
+  /// because a redraw (such as the one entering the window causes) would read
+  /// as work. Plain tmux snapshots leave this false.
+  final bool programStatusReporter;
+
   /// Progress to draw for this window: work a program reported through OSC
   /// 7501, otherwise its OSC 9;4 progress.
   ///
   /// Any OSC 7501 status replaces OSC 9;4, as the spec asks, so a reported
   /// state without a bar (done, or blocked without a percentage) hides a
-  /// stale one rather than drawing it.
+  /// stale one rather than drawing it. So does a reporter with no status.
   TerminalProgress? get activityProgress {
     final status = programStatus;
-    return status == null ? terminalProgress : status.terminalProgress;
+    if (status != null) return status.terminalProgress;
+    return programStatusReporter ? null : terminalProgress;
   }
 
   /// tmux's `window_activity` epoch seconds, if available.
@@ -293,6 +303,7 @@ class TmuxWindow {
   /// without tmux emitting a new control-mode notification.
   bool get needsLocalIdleRefresh =>
       programStatus == null &&
+      !programStatusReporter &&
       !hasAlert &&
       idleSeconds != null &&
       idleSeconds! <= _idleThreshold;
@@ -338,6 +349,7 @@ class TmuxWindow {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: terminalProgress,
     programStatus: programStatus,
+    programStatusReporter: programStatusReporter,
     idleSeconds: _snapshotIdleSeconds,
     lastActivityEpochSeconds: clearLastActivityEpochSeconds
         ? null
@@ -574,9 +586,12 @@ class TmuxWindow {
   ///
   /// A program's own OSC 7501 report replaces the guess from output timing. A
   /// blocked program outranks a pending alert; any other report yields to it.
+  /// A [programStatusReporter] that currently reports nothing gets a neutral
+  /// label rather than a guess.
   String get statusLabel {
     if (reportedStatus case final status?) return status.label;
     if (hasAlert) return 'alert';
+    if (programStatusReporter) return 'no status';
     if (isIdle) return 'waiting';
     return 'running';
   }
@@ -644,6 +659,7 @@ class TmuxWindow {
           terminalBracketedPasteMode == other.terminalBracketedPasteMode &&
           terminalProgress == other.terminalProgress &&
           programStatus == other.programStatus &&
+          programStatusReporter == other.programStatusReporter &&
           lastActivityEpochSeconds == other.lastActivityEpochSeconds &&
           _snapshotIdleSeconds == other._snapshotIdleSeconds &&
           listEquals(pendingNotifications, other.pendingNotifications);
@@ -673,6 +689,7 @@ class TmuxWindow {
     terminalBracketedPasteMode,
     terminalProgress,
     programStatus,
+    programStatusReporter,
     lastActivityEpochSeconds,
     _snapshotIdleSeconds,
     Object.hashAll(pendingNotifications),
