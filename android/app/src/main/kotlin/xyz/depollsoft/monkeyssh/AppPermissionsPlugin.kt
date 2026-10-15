@@ -51,11 +51,32 @@ internal fun resolveDenial(
     }
 
 /**
+ * Removes and returns the queued requests that one dialog's answer also
+ * settles: those for the same permission, once the user actually answered.
+ * Asking them again straight away would show the same dialog twice, and two
+ * quick denials would turn into a permanent one. An interrupted dialog has no
+ * answer to share, so the next request still gets to ask.
+ */
+internal fun <T> takeSettledBy(
+    queue: ArrayDeque<T>,
+    answered: Boolean,
+    samePermission: (T) -> Boolean,
+): List<T> {
+    if (!answered) {
+        return emptyList()
+    }
+    val settled = queue.filter(samePermission)
+    queue.removeAll(samePermission)
+    return settled
+}
+
+/**
  * Camera, microphone and foreground-location permissions for the
  * `xyz.depollsoft.monkeyssh/permissions` channel (`AppPermissionService` in Dart).
  *
  * Requests run one at a time, because Android answers a `requestPermissions`
- * call made while another dialog is showing with an empty result.
+ * call made while another dialog is showing with an empty result. Requests for
+ * the same permission that queued behind a dialog share its answer.
  */
 class AppPermissionsPlugin :
     FlutterPlugin,
@@ -233,13 +254,16 @@ class AppPermissionsPlugin :
         activeRequest = null
         // An interrupted request reports empty arrays. The user made no choice,
         // so it must not count towards a permanent denial.
+        val answered = permissions.isNotEmpty()
         val status =
-            if (permissions.isEmpty()) {
-                currentStatus(request.permission)
-            } else {
+            if (answered) {
                 resolveRequestResult(request)
+            } else {
+                currentStatus(request.permission)
             }
         request.result.success(status)
+        takeSettledBy(queuedRequests, answered) { it.permission == request.permission }
+            .forEach { it.result.success(status) }
         startNextRequest()
         return true
     }
