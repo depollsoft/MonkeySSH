@@ -200,12 +200,19 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
-      expect(find.text('non-exportable · Secure Enclave'), findsOneWidget);
-      expect(find.text('non-exportable · TEE'), findsOneWidget);
+      // Rows keep the backing, which tells the keys apart, and let the lock
+      // stand for "non-exportable"; screen readers hear the full phrase.
+      expect(find.text('Secure Enclave'), findsOneWidget);
+      expect(find.text('TEE'), findsOneWidget);
+      expect(find.textContaining('non-exportable'), findsNothing);
       expect(
         find.bySemanticsLabel(RegExp('Non-exportable key in Secure Enclave')),
         findsOneWidget,
       );
+
+      await tester.tap(find.text('Pixel key'));
+      await tester.pumpAndSettle();
+      expect(find.text('non-exportable · TEE'), findsOneWidget);
       semantics.dispose();
     });
 
@@ -233,10 +240,11 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
-      expect(find.text('non-exportable · TEE (emulator)'), findsOneWidget);
+      expect(find.text('TEE (emulator)'), findsOneWidget);
       await tester.tap(find.text('Phone key'));
       await tester.pumpAndSettle();
 
+      expect(find.text('non-exportable · TEE (emulator)'), findsOneWidget);
       expect(find.textContaining('simulated in software'), findsOneWidget);
       expect(find.textContaining('inside this device’s secure'), findsNothing);
     });

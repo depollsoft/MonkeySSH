@@ -26,13 +26,24 @@ String sshKeyDeleteConfirmationMessage(
           'that trust only this key will stop accepting this device.'
     : softwareKeyMessage;
 
-/// Compact status badge marking a key as non-exportable, naming its backing.
+/// Status badge marking a key as non-exportable, naming its backing.
+///
+/// The [compact] form for list rows shows the lock and the backing only,
+/// which is what tells two hardware keys apart in a narrow row; screen
+/// readers always hear the full phrase.
 class HardwareKeyBadge extends StatelessWidget {
   /// Creates a [HardwareKeyBadge] for [sshKey].
-  const HardwareKeyBadge({required this.sshKey, super.key});
+  const HardwareKeyBadge({
+    required this.sshKey,
+    this.compact = false,
+    super.key,
+  });
 
   /// The hardware-backed key.
   final SshKey sshKey;
+
+  /// Whether to leave out the words "non-exportable".
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -60,7 +71,7 @@ class HardwareKeyBadge extends StatelessWidget {
                 const SizedBox(width: 4),
                 Flexible(
                   child: Text(
-                    'non-exportable · $backing',
+                    compact ? backing : 'non-exportable · $backing',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: FluttyTheme.monoStyle.copyWith(
@@ -86,6 +97,7 @@ class SshKeyTypeLine extends StatelessWidget {
     required this.sshKey,
     required this.typeLabel,
     required this.style,
+    this.detailed = false,
     super.key,
   });
 
@@ -98,6 +110,11 @@ class SshKeyTypeLine extends StatelessWidget {
   /// Style of [typeLabel].
   final TextStyle? style;
 
+  /// For a details sheet header: the full badge on its own line under the
+  /// type, so every hardware key's header has the same shape. List rows
+  /// use the compact badge.
+  final bool detailed;
+
   @override
   Widget build(BuildContext context) {
     final type = Text(
@@ -109,13 +126,23 @@ class SshKeyTypeLine extends StatelessWidget {
     if (!sshKey.isHardwareBacked) {
       return type;
     }
+    if (detailed) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          type,
+          const SizedBox(height: 6),
+          HardwareKeyBadge(sshKey: sshKey),
+        ],
+      );
+    }
     return Wrap(
       spacing: 6,
       runSpacing: 2,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         type,
-        HardwareKeyBadge(sshKey: sshKey),
+        HardwareKeyBadge(sshKey: sshKey, compact: true),
       ],
     );
   }

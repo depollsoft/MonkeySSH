@@ -254,6 +254,7 @@ class _KeyDetailsSheet extends StatelessWidget {
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.primary,
             ),
+            detailed: true,
           ),
           const SizedBox(height: 24),
 

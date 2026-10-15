@@ -648,7 +648,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.text('non-exportable · StrongBox'), findsOneWidget);
+    expect(find.text('StrongBox'), findsOneWidget);
     expect(find.byTooltip('Export encrypted'), findsNothing);
     expect(find.byTooltip('Share encrypted'), findsNothing);
     expect(find.byTooltip('Copy public key'), findsOneWidget);
@@ -661,6 +661,7 @@ void main() {
       scrollable: find.byType(Scrollable).last,
     );
     expect(find.text('held in StrongBox'), findsOneWidget);
+    expect(find.text('non-exportable · StrongBox'), findsOneWidget);
     expect(find.textContaining(HardwareKeyReference.prefix), findsNothing);
 
     await tester.pumpWidget(const SizedBox.shrink());

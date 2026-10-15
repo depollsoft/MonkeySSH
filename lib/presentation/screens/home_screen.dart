@@ -2214,6 +2214,7 @@ class _KeyRow extends ConsumerWidget {
                   fontWeight: FontWeight.w600,
                   fontSize: 12,
                 ),
+                detailed: true,
               ),
               const SizedBox(height: 20),
               Text('Public Key', style: theme.textTheme.titleSmall),
