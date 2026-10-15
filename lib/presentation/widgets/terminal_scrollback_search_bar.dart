@@ -65,16 +65,39 @@ String? describeTerminalSearchStatusForSemantics(
 }
 
 /// Height the find bar covers of the terminal view at the bottom of a
-/// terminal area whose media query is [data]: the bar plus the bottom
-/// safe-area padding it adds, less [reservedBottom], space at the bottom of
-/// the area the terminal view already leaves free (the tmux bar's handle).
+/// terminal area whose media query is [data]: the bar at [data]'s text
+/// scale plus the bottom safe-area padding it adds, less [reservedBottom],
+/// space at the bottom of the area the terminal view already leaves free
+/// (the tmux bar's handle).
 double terminalSearchBarObscuredHeight(
   MediaQueryData data, {
   double reservedBottom = 0,
 }) => math.max(
   0,
-  TerminalScrollbackSearchBar.height + data.padding.bottom - reservedBottom,
+  TerminalScrollbackSearchBar.heightFor(data.textScaler) +
+      data.padding.bottom -
+      reservedBottom,
 );
+
+// The query's font size and line height. Both are fixed here so the bar's
+// height can be worked out before it is laid out.
+const _queryFontSize = 14.0;
+const _queryLineHeight = 1.5;
+// The query field is at least a 48 px tap target, with at least this much
+// room above and below the text.
+const _fieldMinHeight = 48.0;
+const _fieldMinTextPadding = 4.0;
+const _barVerticalPadding = 6.0;
+
+TextScaler _barTextScaler(TextScaler system) =>
+    system.clamp(maxScaleFactor: TerminalScrollbackSearchBar.maxTextScale);
+
+// Rounded up: text layout rounds the line's height to whole pixels.
+double _queryLineExtent(TextScaler barTextScaler) =>
+    (barTextScaler.scale(_queryFontSize) * _queryLineHeight).ceilToDouble();
+
+double _fieldTextPadding(double lineExtent) =>
+    math.max(_fieldMinTextPadding, (_fieldMinHeight - lineExtent) / 2);
 
 /// Lays the find bar for [search] over the bottom edge of [child], the
 /// terminal area, and scrolls the terminal to each match it reveals. Shows
@@ -186,8 +209,21 @@ class TerminalScrollbackSearchBar extends StatefulWidget {
     super.key,
   });
 
-  /// Height of the bar, excluding any bottom safe-area padding.
+  /// Height of the bar at the default text size, excluding any bottom
+  /// safe-area padding. Large text makes it taller; see [heightFor].
   static const height = 60.0;
+
+  /// Largest text scale the bar follows. Past it the bar's text stops
+  /// growing, so the bar never takes over a phone's terminal.
+  static const maxTextScale = 2.0;
+
+  /// Height of the bar when the system text scale is [textScaler], excluding
+  /// any bottom safe-area padding. It is [height] up to about 1.9x, where
+  /// the query line no longer fits the 48 px field.
+  static double heightFor(TextScaler textScaler) {
+    final line = _queryLineExtent(_barTextScaler(textScaler));
+    return line + 2 * _fieldTextPadding(line) + 2 * _barVerticalPadding;
+  }
 
   /// The search this bar drives.
   final TerminalScrollbackSearchController controller;
@@ -387,6 +423,8 @@ class _TerminalScrollbackSearchBarState
     final hint = search.searchesAlternateScreen
         ? 'Find on screen'
         : 'Find in scrollback';
+    final systemTextScaler = MediaQuery.textScalerOf(context);
+    final queryLine = _queryLineExtent(_barTextScaler(systemTextScaler));
 
     final field = CallbackShortcuts(
       bindings: <ShortcutActivator, VoidCallback>{
@@ -410,7 +448,8 @@ class _TerminalScrollbackSearchBarState
         smartQuotesType: SmartQuotesType.disabled,
         textInputAction: TextInputAction.search,
         style: FluttyTheme.monoStyle.copyWith(
-          fontSize: 14,
+          fontSize: _queryFontSize,
+          height: _queryLineHeight,
           color: colorScheme.onSurface,
         ),
         onChanged: search.setQuery,
@@ -427,10 +466,16 @@ class _TerminalScrollbackSearchBarState
           isDense: true,
           hintText: hint,
           hintStyle: theme.textTheme.bodyMedium?.copyWith(
+            fontSize: _queryFontSize,
+            height: _queryLineHeight,
             color: colorScheme.onSurfaceVariant,
           ),
-          constraints: const BoxConstraints(minHeight: 48),
-          contentPadding: const EdgeInsets.symmetric(vertical: 14),
+          constraints: const BoxConstraints(minHeight: _fieldMinHeight),
+          // Large text eats into the padding before the field grows, so the
+          // bar keeps its height up to about 1.9x.
+          contentPadding: EdgeInsets.symmetric(
+            vertical: _fieldTextPadding(queryLine),
+          ),
           prefixIcon: _SearchOptionsButton(
             search: search,
             onClose: _fieldFocusNode.requestFocus,
@@ -452,34 +497,40 @@ class _TerminalScrollbackSearchBarState
       child: SafeArea(
         top: false,
         child: SizedBox(
-          height: TerminalScrollbackSearchBar.height,
+          height: TerminalScrollbackSearchBar.heightFor(systemTextScaler),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: Row(
-              children: [
-                Expanded(child: field),
-                const SizedBox(width: 4),
-                IconButton(
-                  key: const ValueKey<String>('terminal-search-previous'),
-                  tooltip: 'Previous match',
-                  icon: const Icon(Icons.keyboard_arrow_up_rounded),
-                  onPressed: _canStep ? search.showPrevious : null,
-                ),
-                IconButton(
-                  key: const ValueKey<String>('terminal-search-next'),
-                  tooltip: 'Next match',
-                  icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                  onPressed: _canStep ? search.showNext : null,
-                ),
-                // Keep Close clear of the step buttons a thumb is tapping.
-                const SizedBox(width: 8),
-                IconButton(
-                  key: const ValueKey<String>('terminal-search-close'),
-                  tooltip: 'Close find',
-                  icon: const Icon(Icons.close_rounded),
-                  onPressed: widget.onClose,
-                ),
-              ],
+            padding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: _barVerticalPadding,
+            ),
+            child: MediaQuery.withClampedTextScaling(
+              maxScaleFactor: TerminalScrollbackSearchBar.maxTextScale,
+              child: Row(
+                children: [
+                  Expanded(child: field),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    key: const ValueKey<String>('terminal-search-previous'),
+                    tooltip: 'Previous match',
+                    icon: const Icon(Icons.keyboard_arrow_up_rounded),
+                    onPressed: _canStep ? search.showPrevious : null,
+                  ),
+                  IconButton(
+                    key: const ValueKey<String>('terminal-search-next'),
+                    tooltip: 'Next match',
+                    icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                    onPressed: _canStep ? search.showNext : null,
+                  ),
+                  // Keep Close clear of the step buttons a thumb is tapping.
+                  const SizedBox(width: 8),
+                  IconButton(
+                    key: const ValueKey<String>('terminal-search-close'),
+                    tooltip: 'Close find',
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: widget.onClose,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -537,23 +588,27 @@ class _SearchOptionsButton extends StatelessWidget {
         // the control that changes it, and the query keeps its width.
         icon: active.isEmpty
             ? const Icon(Icons.tune_rounded, size: 20)
-            : DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border.all(color: colorScheme.outline),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 3,
-                    vertical: 1,
+            // Shrinks to fit large text, so both labels stay readable.
+            : FittedBox(
+                fit: BoxFit.scaleDown,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: colorScheme.outline),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                  child: Text(
-                    active.join(),
-                    maxLines: 1,
-                    softWrap: false,
-                    style: FluttyTheme.monoStyle.copyWith(
-                      fontSize: 11,
-                      color: colorScheme.onSurface,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 3,
+                      vertical: 1,
+                    ),
+                    child: Text(
+                      active.join(),
+                      maxLines: 1,
+                      softWrap: false,
+                      style: FluttyTheme.monoStyle.copyWith(
+                        fontSize: 11,
+                        color: colorScheme.onSurface,
+                      ),
                     ),
                   ),
                 ),
@@ -579,6 +634,10 @@ class _SearchStatus extends StatelessWidget {
       fontSize: 12,
       color: isError ? colorScheme.error : colorScheme.onSurfaceVariant,
     );
+    // The count grows less than the query, which keeps the room it needs
+    // at large text sizes. Screen readers get the full status.
+    final textScaler = MediaQuery.textScalerOf(context)
+        .clamp(maxScaleFactor: 1.5);
     final children = <Widget>[
       if (isError)
         Padding(
@@ -596,6 +655,7 @@ class _SearchStatus extends StatelessWidget {
             status,
             key: const ValueKey<String>('terminal-search-status'),
             style: mono,
+            textScaler: textScaler,
           ),
         ),
     ];

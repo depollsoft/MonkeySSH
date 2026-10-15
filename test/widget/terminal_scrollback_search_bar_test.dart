@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
@@ -179,6 +180,63 @@ void main() {
       input.insertText('ignored');
       expect(search.query, 'alpha');
     });
+
+    for (final scale in [1.0, 1.5, 2.0, 3.1]) {
+      testWidgets('fits its text at ${scale}x text size', (tester) async {
+        search
+          ..setCaseSensitive(value: true)
+          ..setRegex(value: true);
+        final media = MediaQueryData(
+          size: const Size(390, 600),
+          textScaler: TextScaler.linear(scale),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: FluttyTheme.dark,
+            home: MediaQuery(
+              data: media,
+              child: Scaffold(
+                body: Column(
+                  children: [
+                    const Expanded(child: SizedBox.expand()),
+                    TerminalScrollbackSearchBar(
+                      controller: search,
+                      onClose: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        // The query line fits its field, and the bar is as tall as the
+        // terminal is told it is.
+        final editable = tester.allRenderObjects
+            .whereType<RenderEditable>()
+            .single;
+        expect(
+          editable.size.height,
+          greaterThanOrEqualTo(editable.preferredLineHeight),
+        );
+        final barHeight = tester
+            .getSize(find.byKey(const ValueKey<String>('terminal-search-bar')))
+            .height;
+        expect(barHeight, terminalSearchBarObscuredHeight(media));
+        if (scale == 1.0) {
+          expect(barHeight, TerminalScrollbackSearchBar.height);
+        }
+        // The options badge shows both labels in full.
+        final badge = tester.renderObject<RenderParagraph>(find.text('Aa.*'));
+        expect(
+          badge.size.width,
+          greaterThanOrEqualTo(badge.getMaxIntrinsicWidth(double.infinity)),
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
 
     testWidgets('disables stepping without matches and says so', (
       tester,
