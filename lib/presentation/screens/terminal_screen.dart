@@ -14930,6 +14930,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         connectionId: connectionId,
         session: session,
         onOpenInBrowser: _openPortForwardBrowserTunnel,
+        // The user chose here, so a reconnect must not place the hold again.
+        onLinkHoldEnded: () => _linkPortForwardsReleased = true,
       );
     } finally {
       _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);

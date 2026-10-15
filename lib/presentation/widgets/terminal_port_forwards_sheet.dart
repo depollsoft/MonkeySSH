@@ -16,12 +16,16 @@ import 'host_port_forward_editor_sheet.dart';
 import 'terminal_overlay_focus.dart';
 
 /// Opens live port-forward controls for the current terminal connection.
+///
+/// [onLinkHoldEnded] runs when the user ends the forwarding hold a link
+/// placed on the host, by starting detection or switching it here.
 Future<void> showTerminalPortForwardsSheet({
   required BuildContext context,
   required int hostId,
   required int connectionId,
   required SshSession session,
   required Future<void> Function(ActiveTunnelInfo tunnel) onOpenInBrowser,
+  VoidCallback? onLinkHoldEnded,
 }) => showModalBottomSheet<void>(
   context: context,
   isScrollControlled: true,
@@ -38,6 +42,7 @@ Future<void> showTerminalPortForwardsSheet({
       connectionId: connectionId,
       session: session,
       onOpenInBrowser: onOpenInBrowser,
+      onLinkHoldEnded: onLinkHoldEnded,
       scrollController: scrollController,
     ),
   ),
@@ -50,12 +55,14 @@ class _TerminalPortForwardsSheet extends ConsumerStatefulWidget {
     required this.session,
     required this.onOpenInBrowser,
     required this.scrollController,
+    this.onLinkHoldEnded,
   });
 
   final int hostId;
   final int connectionId;
   final SshSession session;
   final Future<void> Function(ActiveTunnelInfo tunnel) onOpenInBrowser;
+  final VoidCallback? onLinkHoldEnded;
   final ScrollController scrollController;
 
   @override
@@ -295,9 +302,11 @@ class _TerminalPortForwardsSheetState
   /// Ends a link-opened connection's hold so detection runs as configured.
   Future<void> _resumeAutoForwardPorts() async {
     final sessions = ref.read(activeSessionsProvider.notifier);
+    final onLinkHoldEnded = widget.onLinkHoldEnded;
     setState(() => _isUpdatingAutoForwardPorts = true);
     try {
       await sessions.releaseAutomaticForwardingHold(widget.hostId);
+      onLinkHoldEnded?.call();
       if (mounted) {
         _showMessage('Detecting open ports on this host.');
       }
@@ -330,6 +339,7 @@ class _TerminalPortForwardsSheetState
     // applies the change to live sessions.
     final hostRepository = ref.read(hostRepositoryProvider);
     final sessions = ref.read(activeSessionsProvider.notifier);
+    final onLinkHoldEnded = widget.onLinkHoldEnded;
     setState(() => _isUpdatingAutoForwardPorts = true);
     try {
       final updated = await hostRepository.setAutoForwardPorts(
@@ -345,6 +355,7 @@ class _TerminalPortForwardsSheetState
       // Toggling here is an explicit choice, so it also ends any hold a
       // link-opened connection placed on automatic forwarding.
       await sessions.releaseAutomaticForwardingHold(widget.hostId);
+      onLinkHoldEnded?.call();
       if (mounted) {
         _showMessage(
           enabled

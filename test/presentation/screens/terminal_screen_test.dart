@@ -11913,6 +11913,58 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
+    testWidgets(
+      'detection started from the port forwards sheet stays on after a '
+      'reconnect',
+      (tester) async {
+        host = _buildHost(id: host.id, autoForwardPorts: true);
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        when(() => hostRepository.watchById(host.id))
+            .thenAnswer((_) => Stream.value(host));
+        final activeSessions = _TestActiveSessionsNotifier(session);
+
+        await pumpScreen(
+          tester,
+          activeSessions: activeSessions,
+          resolveConnection: true,
+          openedFromLink: true,
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(activeSessions.automaticForwardHolds, [host.id]);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Port Forwards'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const Key('terminal-auto-forward-ports-resume')),
+        );
+        await tester.pumpAndSettle();
+        expect(activeSessions.automaticForwardReleases, [host.id]);
+        Navigator.of(tester.element(find.text('Detect open ports'))).pop();
+        await tester.pumpAndSettle();
+
+        await activeSessions.disconnect(session.connectionId);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.tap(find.text('Reconnect'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // The user started detection on this screen, so the reconnect does
+        // not pause it again.
+        expect(activeSessions.connectForceNewValues, hasLength(2));
+        expect(activeSessions.automaticForwardHolds, [host.id]);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
     for (final disposeWhileSaving in [false, true]) {
       testWidgets(
         'trust persistence completes before running, disposed: $disposeWhileSaving',
