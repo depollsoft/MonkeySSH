@@ -413,6 +413,40 @@ void registerAcpTranscriptToolsTests() {
       await tester.pump();
     }
 
+    testWidgets('the dialog on a wide screen has a close button', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(1024, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: FluttyTheme.dark,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => showAcpTranscriptExportSheet(
+                  context,
+                  source: _exportSource(),
+                  share: (_, _, _) async {},
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsOneWidget);
+      final close = find.byKey(const ValueKey('acp-export-close'));
+      expect(tester.getSize(close).width, greaterThanOrEqualTo(44));
+      await tester.tap(close);
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsNothing);
+    });
+
     testWidgets('previews the export and shares it as a Markdown file', (
       tester,
     ) async {
@@ -425,7 +459,7 @@ void registerAcpTranscriptToolsTests() {
           sharedName = fileName;
         },
       );
-      expect(find.text('Export transcript'), findsOneWidget);
+      expect(find.text('Export chat'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('acp-export-history-notice')),
         findsOneWidget,

@@ -1762,7 +1762,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           value: _ChatAction.export,
           child: ListTile(
             leading: Icon(Icons.adaptive.share),
-            title: const Text('Export transcript'),
+            title: const Text('Export chat'),
           ),
         ),
         if (sessionCaps.fork)

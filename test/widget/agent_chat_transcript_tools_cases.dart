@@ -246,10 +246,10 @@ void registerAgentChatTranscriptToolsTests() {
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.more_vert));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Export transcript'));
+      await tester.tap(find.text('Export chat'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Export transcript'), findsOneWidget);
+      expect(find.text('Export chat'), findsOneWidget);
       expect(find.textContaining('# Flaky test hunt'), findsOneWidget);
       expect(find.textContaining('**Run tests** · completed'), findsOneWidget);
       expect(find.textContaining('haystack-needle'), findsNothing);

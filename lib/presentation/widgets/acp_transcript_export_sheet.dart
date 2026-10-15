@@ -59,7 +59,11 @@ Future<void> showAcpTranscriptExportSheet(
       builder: (context) => Dialog(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 640, maxHeight: 720),
-          child: AcpTranscriptExportSheet(source: source, share: share),
+          child: AcpTranscriptExportSheet(
+            source: source,
+            share: share,
+            showClose: true,
+          ),
         ),
       ),
     );
@@ -145,6 +149,7 @@ class AcpTranscriptExportSheet extends StatefulWidget {
     required this.source,
     this.share = shareAcpTranscriptMarkdown,
     this.now,
+    this.showClose = false,
     super.key,
   });
 
@@ -156,6 +161,10 @@ class AcpTranscriptExportSheet extends StatefulWidget {
 
   /// Clock for the export timestamp and file name; defaults to now.
   final DateTime Function()? now;
+
+  /// Whether the title row has a close button. A dialog needs one; a bottom
+  /// sheet has its drag handle.
+  final bool showClose;
 
   @override
   State<AcpTranscriptExportSheet> createState() =>
@@ -268,9 +277,10 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
+        // A dialog has no drag handle above the title to space it.
+        padding: EdgeInsets.fromLTRB(
           FluttyTheme.spacingMd,
-          0,
+          widget.showClose ? FluttyTheme.spacingSm : 0,
           FluttyTheme.spacingMd,
           FluttyTheme.spacingMd,
         ),
@@ -286,12 +296,30 @@ class _AcpTranscriptExportSheetState extends State<AcpTranscriptExportSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text(
-                        'Export transcript',
-                        style: FluttyTheme.displayMono(
-                          fontSize: 18,
-                          color: scheme.onSurface,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Export chat',
+                              style: FluttyTheme.displayMono(
+                                fontSize: 18,
+                                color: scheme.onSurface,
+                              ),
+                            ),
+                          ),
+                          if (widget.showClose)
+                            IconButton(
+                              key: const ValueKey('acp-export-close'),
+                              tooltip: 'Close',
+                              constraints: const BoxConstraints.tightFor(
+                                width: 44,
+                                height: 44,
+                              ),
+                              padding: EdgeInsets.zero,
+                              icon: const Icon(Icons.close, size: 20),
+                              onPressed: () => Navigator.of(context).maybePop(),
+                            ),
+                        ],
                       ),
                       const SizedBox(height: FluttyTheme.spacingXs),
                       Text(
