@@ -36,6 +36,21 @@ bool terminalScrollbackExportUsesShareSheet(
     !isWeb &&
     (platform == TargetPlatform.iOS || platform == TargetPlatform.android);
 
+/// Icon for the export action on [platform]: the platform's share glyph
+/// where the export opens the share sheet, a save glyph where it opens a
+/// save dialog.
+IconData terminalScrollbackExportIcon(
+  TargetPlatform platform, {
+  bool isWeb = kIsWeb,
+}) {
+  if (!terminalScrollbackExportUsesShareSheet(platform, isWeb: isWeb)) {
+    return Icons.save_alt_rounded;
+  }
+  return platform == TargetPlatform.iOS
+      ? Icons.ios_share_rounded
+      : Icons.share_rounded;
+}
+
 /// How long a leftover export may stay in temporary storage before
 /// [cleanUpTerminalScrollbackExports] removes it.
 const kTerminalScrollbackExportMaxAge = Duration(minutes: 10);

@@ -15,6 +15,28 @@ void main() {
     );
   });
 
+  test('the menu icon says whether the export shares or saves', () {
+    expect(
+      terminalScrollbackExportIcon(TargetPlatform.iOS, isWeb: false),
+      Icons.ios_share_rounded,
+    );
+    expect(
+      terminalScrollbackExportIcon(TargetPlatform.android, isWeb: false),
+      Icons.share_rounded,
+    );
+    for (final platform in [
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+      TargetPlatform.linux,
+    ]) {
+      expect(
+        terminalScrollbackExportIcon(platform, isWeb: false),
+        Icons.save_alt_rounded,
+        reason: '$platform',
+      );
+    }
+  });
+
   test('only iOS and Android use the share sheet', () {
     // macOS and Windows return from share_plus while the target may still
     // read the file, which the export then deletes.

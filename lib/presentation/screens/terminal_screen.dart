@@ -11878,7 +11878,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 if (showsTerminalViewportMenuActions)
                   _terminalOverflowMenuItem(
                     context: context,
-                    icon: Icons.ios_share_rounded,
+                    icon: terminalScrollbackExportIcon(defaultTargetPlatform),
                     label: 'Export Scrollback',
                     action: 'export_scrollback',
                   ),
