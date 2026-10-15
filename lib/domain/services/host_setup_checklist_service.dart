@@ -300,6 +300,10 @@ class HostSetupChecklistStore {
   Future<void> dismiss(int hostId) =>
       _update(hostId, (current) => {...current, 'dismissed': true});
 
+  /// Shows the checklist for [hostId] again.
+  Future<void> restore(int hostId) =>
+      _update(hostId, (current) => {...current}..remove('dismissed'));
+
   Future<void> _update(
     int hostId,
     Map<String, dynamic> Function(Map<String, dynamic> current) change,

@@ -17,6 +17,7 @@ import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_setup_checklist_service.dart';
 import '../../domain/services/local_notification_service.dart'
     show buildAgentChatLocation;
+import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_exec_queue.dart';
 import '../../domain/services/ssh_service.dart';
@@ -60,13 +61,41 @@ String hostSetupStepHint(HostSetupStep step) => switch (step) {
     'Start a native agent chat. It walks you through the agent’s sign-in.',
 };
 
-/// Label of the button that runs a step.
-String hostSetupStepActionLabel(HostSetupStep step) => switch (step) {
+/// Label of the button that runs a step. Agent Management says "(Pro)" only
+/// to users who don't have it, like other Pro actions.
+String hostSetupStepActionLabel(
+  HostSetupStep step, {
+  bool hasAgentManagement = false,
+}) => switch (step) {
   HostSetupStep.keyLogin => 'Set Up Key Login',
   HostSetupStep.monkeyMux => 'Install MonkeyMux',
-  HostSetupStep.agents => 'Open Agent Management (Pro)',
+  HostSetupStep.agents =>
+    hasAgentManagement
+        ? 'Open Agent Management'
+        : 'Open Agent Management (Pro)',
   HostSetupStep.agentSignIn => 'Start Agent Chat',
 };
+
+/// Hides [host]'s checklist and offers Undo, since a hidden checklist has no
+/// other way back.
+void _hideChecklist(
+  ScaffoldMessengerState? messenger,
+  HostSetupPersistedStateNotifier notifier,
+  Host host,
+) {
+  final hiding = notifier.dismiss(host.id);
+  unawaited(hiding);
+  messenger?.showSnackBar(
+    SnackBar(
+      content: Text('Setup checklist hidden for ${host.label}.'),
+      action: SnackBarAction(
+        label: 'Undo',
+        onPressed: () =>
+            unawaited(hiding.then((_) => notifier.restore(host.id))),
+      ),
+    ),
+  );
+}
 
 /// The checklist hint inside a host row. Renders nothing when the host has no
 /// known next step, and probes the host while it is connected.
@@ -102,6 +131,9 @@ class HostSetupChecklistLine extends ConsumerWidget {
               label:
                   'Setup ${checklist.doneCount} of $total done. Next: '
                   '${hostSetupStepShortLabel(next)}',
+              // excludeSemantics drops the InkWell's own tap action, so the
+              // node needs one of its own for TalkBack and VoiceOver.
+              onTap: () => showHostSetupChecklistSheet(context, host.id),
               excludeSemantics: true,
               child: InkWell(
                 borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
@@ -147,10 +179,10 @@ class HostSetupChecklistLine extends ConsumerWidget {
             constraints: const BoxConstraints.tightFor(width: 44, height: 44),
             iconSize: 18,
             color: colorScheme.onSurfaceVariant,
-            onPressed: () => unawaited(
-              ref
-                  .read(hostSetupPersistedStateProvider.notifier)
-                  .dismiss(host.id),
+            onPressed: () => _hideChecklist(
+              ScaffoldMessenger.maybeOf(context),
+              ref.read(hostSetupPersistedStateProvider.notifier),
+              host,
             ),
             icon: const Icon(Icons.close),
           ),
@@ -321,6 +353,15 @@ class _HostSetupChecklistSheetState
     final next = checklist.nextStep;
     final connected =
         ref.watch(hostConnectedConnectionIdProvider(widget.hostId)) != null;
+    final hasAgentManagement = ref.watch(
+      monetizationStateProvider.select(
+        (state) =>
+            state.asData?.value.allowsFeature(
+              MonetizationFeature.agentManagement,
+            ) ??
+            false,
+      ),
+    );
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
@@ -356,7 +397,12 @@ class _HostSetupChecklistSheetState
           if (next != null)
             FilledButton(
               onPressed: _running ? null : () => _run(host, next),
-              child: Text(hostSetupStepActionLabel(next)),
+              child: Text(
+                hostSetupStepActionLabel(
+                  next,
+                  hasAgentManagement: hasAgentManagement,
+                ),
+              ),
             )
           else if (checklist.isComplete)
             Text(
@@ -379,10 +425,10 @@ class _HostSetupChecklistSheetState
                 foregroundColor: colorScheme.onSurfaceVariant,
               ),
               onPressed: () {
-                unawaited(
-                  ref
-                      .read(hostSetupPersistedStateProvider.notifier)
-                      .dismiss(widget.hostId),
+                _hideChecklist(
+                  ScaffoldMessenger.maybeOf(context),
+                  ref.read(hostSetupPersistedStateProvider.notifier),
+                  host,
                 );
                 Navigator.of(context).pop();
               },
@@ -396,6 +442,7 @@ class _HostSetupChecklistSheetState
 
   Future<void> _run(Host host, HostSetupStep step) async {
     setState(() => _running = true);
+    final messenger = ScaffoldMessenger.maybeOf(context);
     DiagnosticsLogService.instance.info(
       'onboarding.checklist',
       'step_started',
@@ -403,6 +450,26 @@ class _HostSetupChecklistSheetState
     );
     try {
       await runHostSetupStep(context, ref, host, step);
+      // Each step reports its own expected failures; anything else (an SSH
+      // error, a timeout) still ends in a message rather than nothing.
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'onboarding.checklist',
+        'step_failed',
+        fields: {
+          'hostId': host.id,
+          'step': step.storageValue,
+          'errorType': error.runtimeType,
+        },
+      );
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'That step didn’t finish. Check the connection and '
+            'try again.',
+          ),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _running = false);
     }
@@ -583,6 +650,20 @@ Future<void> _installMonkeyMux(
     // The user chose "Not now".
   } on MonkeyMuxInstallException catch (error) {
     messenger.showSnackBar(SnackBar(content: Text(error.message)));
+    // SSH, SFTP and timeout errors from the platform probe or the upload.
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.warning(
+      'onboarding.checklist',
+      'monkeymux_install_failed',
+      fields: {'hostId': host.id, 'errorType': error.runtimeType},
+    );
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Couldn’t install MonkeyMux. Check the connection and try again.',
+        ),
+      ),
+    );
   } finally {
     if (progressOpen) progressNavigator?.pop();
   }

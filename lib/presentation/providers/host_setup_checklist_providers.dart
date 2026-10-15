@@ -5,6 +5,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models/acp_recent_session.dart';
+import '../../domain/services/acp_recent_sessions_service.dart';
 import '../../domain/services/app_review_demo_service.dart';
 import '../../domain/services/host_setup_checklist_service.dart';
 import '../../domain/services/settings_service.dart';
@@ -41,14 +42,26 @@ class HostSetupPersistedStateNotifier
     await store.dismiss(hostId);
     if (ref.mounted) state = AsyncData(await store.load());
   }
+
+  /// Shows the checklist for [hostId] again after [dismiss].
+  Future<void> restore(int hostId) async {
+    final store = ref.read(hostSetupChecklistStoreProvider);
+    await store.restore(hostId);
+    if (ref.mounted) state = AsyncData(await store.load());
+  }
 }
 
 /// Hosts where a native agent session has started, which proves an agent
 /// there is signed in. The ACP manager records a recent entry as soon as a
-/// session starts. Read once and refreshed when a host is probed or its
-/// checklist sheet opens.
+/// session starts, and every recorded change reads the list again.
 final hostIdsWithAgentSessionsProvider = FutureProvider<Set<int>>((ref) async {
   ref.watch(settingsGenerationProvider);
+  // A one-shot read refreshed on each write, rather than a watched query,
+  // so widget tests don't leave a stream-query timer behind.
+  final revision = ref.watch(acpRecentSessionsServiceProvider).revision;
+  void refresh() => ref.invalidateSelf();
+  revision.addListener(refresh);
+  ref.onDispose(() => revision.removeListener(refresh));
   return _decodeRecentHostIds(
     await ref
         .watch(settingsServiceProvider)
