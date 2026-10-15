@@ -6,9 +6,15 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:drift/drift.dart' hide isNotNull, isNull;
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/git_working_tree.dart';
+import 'package:monkeyssh/domain/services/app_review_demo_service.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart'
     show shellEscapePosix;
@@ -652,6 +658,71 @@ void main() {
         SshExecPriority.low,
       ]);
       expect(counts, {'-': const GitLineCounts(added: 2, removed: 0)});
+    });
+  });
+
+  group('GitWorkingTreeService on the App Review demo host', () {
+    late AppDatabase database;
+    late SshService sshService;
+
+    setUp(() {
+      database = AppDatabase.forTesting(NativeDatabase.memory());
+      sshService = SshService(
+        hostRepository: HostRepository(
+          database,
+          SecretEncryptionService.forTesting(),
+        ),
+      );
+    });
+
+    tearDown(() async {
+      await sshService.disconnectAll();
+      await database.close();
+    });
+
+    test('shows a canned work tree instead of failing', () async {
+      final hostId = await database
+          .into(database.hosts)
+          .insert(
+            HostsCompanion.insert(
+              label: '${AppReviewDemoService.demoHostLabelPrefix} Git',
+              hostname: '127.0.0.1',
+              port: const Value(2201),
+              username: 'reviewer',
+              tags: const Value('app-review,demo,monkeymux'),
+            ),
+          );
+      final result = await sshService.connectToHost(hostId);
+      expect(result.success, isTrue);
+      final session = sshService.getSession(result.connectionId!)!;
+      final service = GitWorkingTreeService.ssh(session);
+
+      final snapshot = await service.loadStatus(
+        '/home/reviewer/work/monkeyssh-demo',
+      );
+      expect(snapshot.state, GitWorkingTreeState.ready);
+      expect(snapshot.branch, 'main');
+      expect(snapshot.files, isNotEmpty);
+      for (final file in snapshot.files) {
+        final diff = await service.loadDiff(snapshot.repositoryRoot!, file);
+        expect(diff.failed, isFalse, reason: file.path);
+        expect(diff.hunks, isNotEmpty, reason: file.path);
+      }
+      final untracked = snapshot.filesIn(GitChangeGroup.untracked);
+      final counts = await service.loadUntrackedCounts(
+        snapshot.repositoryRoot!,
+        [for (final file in untracked) file.path],
+      );
+      expect(counts.keys, [for (final file in untracked) file.path]);
+
+      expect(
+        (await service.loadStatus('~/work/monkeyssh-demo/src')).state,
+        GitWorkingTreeState.ready,
+      );
+      expect(
+        (await service.loadStatus('/home/reviewer')).state,
+        GitWorkingTreeState.notRepository,
+      );
     });
   });
 

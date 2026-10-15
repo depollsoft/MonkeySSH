@@ -125,12 +125,17 @@ class GitWorkingTreeService {
   ///
   /// Opening the channel and reading its output share one [kGitCommandTimeout]
   /// budget. Untracked line counts run at low priority, so they never hold
-  /// both of the connection's exec slots alongside a diff.
-  factory GitWorkingTreeService.ssh(SshSession session) =>
-      GitWorkingTreeService(
-        _sshRunner(session, SshExecPriority.normal),
-        backgroundRun: _sshRunner(session, SshExecPriority.low),
-      );
+  /// both of the connection's exec slots alongside a diff. The in-app App
+  /// Review demo host cannot run scripts, so it gets a canned work tree.
+  factory GitWorkingTreeService.ssh(SshSession session) {
+    if (isAppReviewDemoSession(session)) {
+      return _AppReviewDemoGitWorkingTreeService();
+    }
+    return GitWorkingTreeService(
+      _sshRunner(session, SshExecPriority.normal),
+      backgroundRun: _sshRunner(session, SshExecPriority.low),
+    );
+  }
 
   final GitCommandRunner _run;
   final GitCommandRunner _backgroundRun;
@@ -1084,4 +1089,118 @@ String buildGitHunkPrompt({
   }
   buffer.writeln();
   return buffer.toString();
+}
+
+/// Repository root of the in-app App Review demo workspace.
+const _appReviewDemoRepositoryRoot = '/home/reviewer/work/monkeyssh-demo';
+
+/// A canned work tree for the in-app App Review demo host, whose transport
+/// answers commands by name and cannot run the status script.
+class _AppReviewDemoGitWorkingTreeService extends GitWorkingTreeService {
+  _AppReviewDemoGitWorkingTreeService() : super(_unsupported);
+
+  static Future<GitCommandOutput> _unsupported(
+    String script, {
+    required int maxBytes,
+    required Duration timeout,
+  }) => throw UnsupportedError('The demo host runs no git scripts.');
+
+  static const _diffs = <String, String>{
+    'README.md':
+        'diff --git a/README.md b/README.md\n'
+        '--- a/README.md\n'
+        '+++ b/README.md\n'
+        '@@ -1,3 +1,4 @@\n'
+        ' # MonkeySSH App Review Demo\n'
+        ' \n'
+        '-This is a local demo workspace.\n'
+        '+This is an in-app local demo workspace. It does not require a '
+        'private SSH\n'
+        '+server, but it behaves like a connected terminal for review.\n',
+    'src/main.dart':
+        'diff --git a/src/main.dart b/src/main.dart\n'
+        '--- a/src/main.dart\n'
+        '+++ b/src/main.dart\n'
+        '@@ -1,3 +1,3 @@\n'
+        ' void main() {\n'
+        "-  print('Hello, world');\n"
+        "+  print('MonkeySSH App Review Demo');\n"
+        ' }\n',
+    'deploy-demo.sh':
+        'diff --git a/deploy-demo.sh b/deploy-demo.sh\n'
+        'new file mode 100755\n'
+        '--- /dev/null\n'
+        '+++ b/deploy-demo.sh\n'
+        '@@ -0,0 +1,2 @@\n'
+        '+#!/bin/sh\n'
+        '+echo "dry-run deploy complete"\n',
+  };
+
+  @override
+  Future<GitWorkingTreeSnapshot> loadStatus(String directory) async {
+    final path = directory.startsWith('~')
+        ? '/home/reviewer${directory.substring(1)}'
+        : directory;
+    final inWorkspace =
+        path == _appReviewDemoRepositoryRoot ||
+        path.startsWith('$_appReviewDemoRepositoryRoot/');
+    if (!inWorkspace) {
+      return GitWorkingTreeSnapshot(
+        state: GitWorkingTreeState.notRepository,
+        refreshedAt: _clock(),
+      );
+    }
+    return GitWorkingTreeSnapshot(
+      state: GitWorkingTreeState.ready,
+      refreshedAt: _clock(),
+      repositoryRoot: _appReviewDemoRepositoryRoot,
+      branch: 'main',
+      files: const [
+        GitChangedFile(
+          path: 'README.md',
+          group: GitChangeGroup.staged,
+          kind: GitChangeKind.modified,
+          counts: GitLineCounts(added: 2, removed: 1),
+        ),
+        GitChangedFile(
+          path: 'src/main.dart',
+          group: GitChangeGroup.unstaged,
+          kind: GitChangeKind.modified,
+          counts: GitLineCounts(added: 1, removed: 1),
+        ),
+        GitChangedFile(
+          path: 'deploy-demo.sh',
+          group: GitChangeGroup.untracked,
+          kind: GitChangeKind.untracked,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<Map<String, GitLineCounts>> loadUntrackedCounts(
+    String repositoryRoot,
+    List<String> paths,
+  ) async => {
+    if (paths.contains('deploy-demo.sh'))
+      'deploy-demo.sh': const GitLineCounts(added: 2, removed: 0),
+  };
+
+  @override
+  Future<GitFileDiff> loadDiff(
+    String repositoryRoot,
+    GitChangedFile file,
+  ) async {
+    final diff = _diffs[file.path];
+    if (diff == null) {
+      return GitFileDiff(
+        headerLines: const <String>[],
+        hunks: const <GitDiffHunk>[],
+        binary: false,
+        truncated: false,
+        failed: true,
+      );
+    }
+    return parseGitUnifiedDiff(diff, truncated: false);
+  }
 }
