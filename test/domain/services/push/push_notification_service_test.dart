@@ -272,6 +272,9 @@ class _Harness {
 
   /// Notification preferences per saved host; absent means all on.
   final hostPrefs = <int, HostNotificationPrefs>{};
+
+  /// Makes reading the hosts' settings fail while set.
+  bool hostSettingsFail = false;
   final hostChanges = StreamController<void>.broadcast();
   bool terminalNotifications = true;
   final context = _MemoryContextStore();
@@ -304,6 +307,7 @@ class _Harness {
       pushHostIdsProvider.overrideWithValue(() async => hostIds()),
       pushHostSettingsProvider.overrideWithValue(
         () async => {
+          if (hostSettingsFail) ...throw StateError('hosts unreadable'),
           for (final id in hostIds())
             id: (
               sessionName: hostSessions[id],
@@ -534,6 +538,16 @@ void main() {
     await h.editHost(2, const HostNotificationPrefs(agentFinished: false));
     await h.controller.syncNow();
     expect(allowed(), {'attention', 'bell'});
+
+    // A change whose read fails is written once a read succeeds again.
+    h.hostSettingsFail = true;
+    await h.editHost(2, const HostNotificationPrefs());
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'bell'});
+    h.hostSettingsFail = false;
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'finished', 'bell'});
+
     await h.editHost(
       2,
       const HostNotificationPrefs().withPushWhenClosed(enabled: false),

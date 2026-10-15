@@ -1382,8 +1382,12 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       Map<int, PushHostSettings>? settings;
       try {
         settings = await _hostSettings();
+        _lastHostSettings = settings;
       } on Object {
+        // The last good read can predate a change; a later sync writes the
+        // context again from a fresh one.
         settings = _lastHostSettings;
+        _contextDirty = true;
       }
       final hosts = <String, String>{};
       final allowed = <String, Set<String>>{};
