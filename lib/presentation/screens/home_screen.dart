@@ -42,6 +42,7 @@ import '../view_models/mux_badge_controller.dart';
 import '../widgets/acp_mux_window_status_badge.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
+import '../widgets/adaptive_button_row.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/ai_session_picker.dart';
 import '../widgets/brand_empty_state.dart';
@@ -2248,22 +2249,17 @@ class _KeyRow extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              Row(
+              AdaptiveButtonRow(
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _copyPublicKey(context),
-                      icon: const Icon(Icons.copy, size: 16),
-                      label: const Text('Copy Public Key'),
-                    ),
+                  OutlinedButton.icon(
+                    onPressed: () => _copyPublicKey(context),
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('Copy Public Key'),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => showPublicKeyShareSheet(context, sshKey),
-                      icon: const Icon(Icons.qr_code_2, size: 16),
-                      label: const Text('QR & Share'),
-                    ),
+                  OutlinedButton.icon(
+                    onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                    icon: const Icon(Icons.qr_code_2, size: 16),
+                    label: const Text('QR & Share'),
                   ),
                 ],
               ),

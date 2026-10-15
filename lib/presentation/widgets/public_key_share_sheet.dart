@@ -6,6 +6,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/services/authorized_key_install_service.dart';
+import 'adaptive_button_row.dart';
 
 /// Renders [data] as a QR code: dark modules on white with a quiet zone, in
 /// every theme, so cameras can read it.
@@ -190,39 +191,26 @@ class PublicKeyShareSheet extends StatelessWidget {
               ),
             ),
           const SizedBox(height: FluttyTheme.spacingSm),
-          Row(
+          AdaptiveButtonRow(
             children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  style: _compactButton,
-                  onPressed: () =>
-                      _copy(context, publicKey, 'Public key copied'),
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Copy Key'),
-                ),
+              OutlinedButton.icon(
+                onPressed: () => _copy(context, publicKey, 'Public key copied'),
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy Key'),
               ),
-              if (command != null) ...[
-                const SizedBox(width: FluttyTheme.spacingSm),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    style: _compactButton,
-                    onPressed: () =>
-                        _copy(context, command, 'Install command copied'),
-                    icon: const Icon(Icons.terminal),
-                    label: const Text('Copy Command'),
-                  ),
+              if (command != null)
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      _copy(context, command, 'Install command copied'),
+                  icon: const Icon(Icons.terminal),
+                  label: const Text('Copy Command'),
                 ),
-              ],
             ],
           ),
         ],
       ),
     );
   }
-
-  static final _compactButton = OutlinedButton.styleFrom(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-  );
 
   // iPad anchors the share popover to the button that opened it.
   static Rect? _originOf(BuildContext context) {

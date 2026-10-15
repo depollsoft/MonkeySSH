@@ -7,6 +7,7 @@ import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/key_repository.dart';
 import '../providers/entity_list_providers.dart';
+import '../widgets/adaptive_button_row.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
@@ -259,22 +260,17 @@ class _KeyDetailsSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          Row(
+          AdaptiveButtonRow(
             children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _copyToClipboard(context, sshKey.publicKey),
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Copy Public Key'),
-                ),
+              OutlinedButton.icon(
+                onPressed: () => _copyToClipboard(context, sshKey.publicKey),
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy Public Key'),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => showPublicKeyShareSheet(context, sshKey),
-                  icon: const Icon(Icons.qr_code_2),
-                  label: const Text('QR & Share'),
-                ),
+              OutlinedButton.icon(
+                onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                icon: const Icon(Icons.qr_code_2),
+                label: const Text('QR & Share'),
               ),
             ],
           ),
