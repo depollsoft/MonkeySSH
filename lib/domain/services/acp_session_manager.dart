@@ -445,21 +445,14 @@ class AcpSessionManager {
     }
     final reconnectWorkspace = resolvedWorkspace.value!;
 
-    try {
-      await _stopAll(replace);
-    } on Object catch (error) {
-      return AcpSessionLaunchFailed(key, _mapBridgeError(error));
-    }
-
-    final decision = _evaluate(key.value);
-    if (decision is AcpConcurrencyRequiresChoice) {
-      return AcpSessionLaunchBlocked(decision);
-    }
-
     MonkeyMuxAcpBridgeMetadata? remoteBridge;
-    if (knownRemoteBridge?.id == bridgeId) {
-      remoteBridge = knownRemoteBridge;
-    } else {
+    var bridgeLookedUp = false;
+    Future<AcpSessionLaunchFailed?> lookUpBridge() async {
+      bridgeLookedUp = true;
+      if (knownRemoteBridge?.id == bridgeId) {
+        remoteBridge = knownRemoteBridge;
+        return null;
+      }
       final List<MonkeyMuxAcpBridgeMetadata> remoteBridges;
       try {
         remoteBridges = await _connector.listBridges(
@@ -472,21 +465,51 @@ class AcpSessionManager {
       remoteBridge = remoteBridges.firstWhereOrNull(
         (bridge) => bridge.id == bridgeId,
       );
+      return null;
     }
-    final bridgeCanResume =
-        remoteBridge != null &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.exited &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.stopped &&
-        remoteBridge.state != MonkeyMuxAcpProviderState.protocolError;
-    if (!bridgeCanResume) {
-      if (!selectOnSuccess) {
+
+    bool bridgeCanResume() {
+      final bridge = remoteBridge;
+      return bridge != null &&
+          bridge.state != MonkeyMuxAcpProviderState.exited &&
+          bridge.state != MonkeyMuxAcpProviderState.stopped &&
+          bridge.state != MonkeyMuxAcpProviderState.protocolError;
+    }
+
+    const bridgeExpired = AcpSessionError(
+      kind: AcpSessionErrorKind.bridgeExpired,
+      message: 'The remote native agent window is no longer available.',
+    );
+
+    if (deferredLaunchError != null) {
+      // This custom agent cannot start a new process, so its bridge must
+      // still be running. Find out before ending the sessions in [replace].
+      if (await lookUpBridge() case final failure?) return failure;
+      if (!bridgeCanResume()) {
         return AcpSessionLaunchFailed(
           key,
-          const AcpSessionError(
-            kind: AcpSessionErrorKind.bridgeExpired,
-            message: 'The remote native agent window is no longer available.',
-          ),
+          selectOnSuccess ? deferredLaunchError : bridgeExpired,
         );
+      }
+    }
+
+    try {
+      await _stopAll(replace);
+    } on Object catch (error) {
+      return AcpSessionLaunchFailed(key, _mapBridgeError(error));
+    }
+
+    final decision = _evaluate(key.value);
+    if (decision is AcpConcurrencyRequiresChoice) {
+      return AcpSessionLaunchBlocked(decision);
+    }
+
+    if (!bridgeLookedUp) {
+      if (await lookUpBridge() case final failure?) return failure;
+    }
+    if (!bridgeCanResume()) {
+      if (!selectOnSuccess) {
+        return AcpSessionLaunchFailed(key, bridgeExpired);
       }
       if (deferredLaunchError != null) {
         return AcpSessionLaunchFailed(key, deferredLaunchError);
@@ -517,9 +540,10 @@ class AcpSessionManager {
       return restarted;
     }
 
+    final liveBridge = remoteBridge!;
     if (deferredLaunchError != null && existing == null) {
       // Show the label the running agent was started with.
-      final bridgeLabel = remoteBridge.provider.trim();
+      final bridgeLabel = liveBridge.provider.trim();
       if (providerLabelOverride == null && bridgeLabel.isNotEmpty) {
         resolved = _ResolvedLaunch(
           providerId: providerId,
@@ -537,7 +561,7 @@ class AcpSessionManager {
         .._workspace = reconnectWorkspace;
       try {
         await existing.reconnect(
-          remoteBridge: remoteBridge,
+          remoteBridge: liveBridge,
           chooseAuthentication: chooseAuthentication,
         );
       } on _LaunchException catch (error) {
@@ -567,7 +591,7 @@ class AcpSessionManager {
       chooseAuthentication: chooseAuthentication,
       autoApprovePermissions: autoApprovePermissions,
       workspace: reconnectWorkspace,
-      liveBridge: remoteBridge,
+      liveBridge: liveBridge,
       selectOnSuccess: selectOnSuccess,
     );
   });
@@ -790,22 +814,22 @@ class AcpSessionManager {
           (other) =>
               !identical(other, controller) && other.bridgeKey == key.bridge,
         );
-        var argv = controller._launchArgv;
+        _ResolvedLaunch? launch = _ResolvedLaunch(
+          providerId: key.providerId,
+          label: controller._providerLabel,
+          argv: controller._launchArgv,
+        );
         if (!acpBuiltinProviders.any((p) => p.id == key.providerId)) {
-          // A custom agent restarts only with the command approved now; if
-          // its definition changed or went away, it is just marked signed in.
+          // A custom agent restarts only with the name and command approved
+          // now; if its definition changed or went away, it is just marked
+          // signed in.
           final current = await _resolveLaunch(key.providerId);
-          argv = current is _ResolvedLaunch ? current.argv : const <String>[];
+          launch = current is _ResolvedLaunch ? current : null;
         }
-        if (shared || argv.isEmpty) {
+        if (shared || launch == null || launch.argv.isEmpty) {
           controller.clearAuthenticationRequired();
           return AcpSessionLaunchStarted(key);
         }
-        final launch = _ResolvedLaunch(
-          providerId: key.providerId,
-          label: controller._providerLabel,
-          argv: argv,
-        );
         final cwd = controller._cwd;
         final workspace = controller._workspace;
         final autoApprove = controller._autoApprovePermissions;

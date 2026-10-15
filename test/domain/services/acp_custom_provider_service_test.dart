@@ -297,6 +297,64 @@ void main() {
       expect(launch!.argv, ['goose', 'acp', 'login']);
     });
 
+    test('uses the name approved now', () async {
+      final created = await addGoose();
+      final renamed = await service.update(
+        created.id,
+        label: 'Goose (work)',
+        launchCommand: created.launchCommand,
+        environmentVariableNames: created.environmentVariableNames,
+        cwdPolicy: created.cwdPolicy,
+      );
+      await service.approve(
+        created.id,
+        reviewedFingerprint: renamed.fingerprint,
+      );
+
+      final launch = await currentAcpTerminalSignInLaunch(
+        service,
+        launchFor(created.id),
+      );
+
+      expect(launch!.providerLabel, 'Goose (work)');
+    });
+
+    test('refuses on Windows an approved edit Windows would not pass '
+        'exactly', () async {
+      final created = await service.create(
+        label: 'Goose',
+        launchCommand: AcpLaunchCommand(
+          executable: 'goose',
+          arguments: const ['acp', ''],
+        ),
+      );
+      await service.approve(
+        created.id,
+        reviewedFingerprint: created.fingerprint,
+      );
+
+      await expectLater(
+        currentAcpTerminalSignInLaunch(
+          service,
+          launchFor(created.id),
+          isWindows: true,
+        ),
+        throwsA(
+          isA<AcpCustomProviderException>().having(
+            (error) => error.message,
+            'message',
+            contains('On Windows hosts'),
+          ),
+        ),
+      );
+      // POSIX hosts pass the empty argument exactly.
+      final posix = await currentAcpTerminalSignInLaunch(
+        service,
+        launchFor(created.id),
+      );
+      expect(posix!.argv, ['goose', 'acp', '', 'login']);
+    });
+
     test('refuses a deleted or unapproved agent', () async {
       final created = await addGoose();
       expect(

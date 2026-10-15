@@ -106,13 +106,26 @@ Future<bool> runAcpTerminalSignIn(
 ) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   var launch = requested;
+  final session = ref
+      .read(sshServiceProvider)
+      .getSessionsForHost(launch.hostId)
+      .firstOrNull;
   if (!launch.providerId.startsWith(acpBuiltinProviderIdPrefix)) {
     // A custom agent signs in with the command approved now, never the one
     // captured when its session started.
-    final current = await currentAcpTerminalSignInLaunch(
-      ref.read(acpCustomProviderLookupProvider),
-      launch,
-    );
+    final AcpTerminalAuthLaunch? current;
+    try {
+      current = await currentAcpTerminalSignInLaunch(
+        ref.read(acpCustomProviderLookupProvider),
+        launch,
+        isWindows: session?.remoteIsWindows ?? false,
+      );
+    } on AcpCustomProviderException catch (error) {
+      if (context.mounted) {
+        messenger?.showSnackBar(SnackBar(content: Text(error.message)));
+      }
+      return false;
+    }
     if (!context.mounted) return false;
     if (current == null) {
       messenger?.showSnackBar(
@@ -127,10 +140,6 @@ Future<bool> runAcpTerminalSignIn(
     }
     launch = current;
   }
-  final session = ref
-      .read(sshServiceProvider)
-      .getSessionsForHost(launch.hostId)
-      .firstOrNull;
   if (session == null) {
     messenger?.showSnackBar(
       const SnackBar(content: Text('Reconnect to this host to sign in.')),

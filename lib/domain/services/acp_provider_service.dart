@@ -124,9 +124,9 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
 
   /// Saves edits to the definition [id].
   ///
-  /// Changing what runs (the command, environment variable names or working
-  /// directory policy) leaves the definition unapproved until it is reviewed
-  /// again; renaming keeps its approval.
+  /// Any change to the fingerprint (the name, command, environment variable
+  /// names or working directory policy) leaves the definition unapproved
+  /// until it is reviewed again.
   Future<AcpCustomProviderDefinition> update(
     String id, {
     required String label,
@@ -302,23 +302,38 @@ class AcpCustomProviderService implements AcpCustomProviderLookup {
 /// The terminal sign-in [launch] to run now.
 ///
 /// A sign-in reruns the agent's own command. For a custom agent that is the
-/// command approved now, not the one captured when its session started:
-/// returns `null` when the agent was deleted or awaits approval.
+/// command approved now, with its current name, not the one captured when its
+/// session started: returns `null` when the agent was deleted or awaits
+/// approval. On a Windows host ([isWindows]) it throws an
+/// [AcpCustomProviderException] when Windows would not pass the arguments
+/// exactly, the same rule a launch applies.
 Future<AcpTerminalAuthLaunch?> currentAcpTerminalSignInLaunch(
   AcpCustomProviderLookup lookup,
-  AcpTerminalAuthLaunch launch,
-) async {
+  AcpTerminalAuthLaunch launch, {
+  bool isWindows = false,
+}) async {
   if (launch.providerId.startsWith(acpBuiltinProviderIdPrefix)) return launch;
   final definition = await lookup.getCustomProvider(launch.providerId);
   if (definition == null || !definition.isCommandApproved) return null;
-  return AcpTerminalAuthLaunch.forMethod(
+  final current = AcpTerminalAuthLaunch.forMethod(
     hostId: launch.hostId,
     providerId: launch.providerId,
-    providerLabel: launch.providerLabel,
+    providerLabel: definition.label,
     method: launch.method,
     launchArgv: definition.launchCommand.argv,
     workingDirectory: launch.workingDirectory,
   );
+  if (isWindows) {
+    // The sign-in passes the method's arguments too, so check all of them.
+    final problem = acpWindowsLaunchArgumentProblem(
+      AcpLaunchCommand(
+        executable: current.argv.first,
+        arguments: current.argv.sublist(1),
+      ),
+    );
+    if (problem != null) throw AcpCustomProviderException(problem);
+  }
+  return current;
 }
 
 /// Derives a unique custom provider ID slug from [label].

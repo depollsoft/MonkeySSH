@@ -459,6 +459,46 @@ void main() {
       );
       expect(connector.started, hasLength(1));
     });
+
+    test('ends no other session when the bridge is gone and the agent '
+        'cannot start', () async {
+      final kimi = AcpCustomProviderDefinition.create(
+        id: 'kimi',
+        label: 'Kimi',
+        launchCommand: AcpLaunchCommand(
+          executable: 'kimi',
+          arguments: const ['acp'],
+        ),
+      ).approve();
+      lookup.definitions[kimi.id] = kimi;
+      final other = await manager.startNewSession(
+        hostId: 1,
+        providerId: kimi.id,
+        cwd: '/repo',
+      );
+      final otherKey = (other as AcpSessionLaunchStarted).key;
+      lookup.definitions['goose'] = lookup.definitions['goose']!.edit(
+        label: 'Goose (edited)',
+      );
+      connector.runningLabels.remove(key.bridgeId);
+
+      // As when a free-tier user picks "end the other session" to make room.
+      final result = await manager.reconnectSession(
+        hostId: key.hostId,
+        providerId: key.providerId,
+        bridgeId: key.bridgeId,
+        acpSessionId: key.acpSessionId,
+        cwd: '/repo',
+        replace: [otherKey],
+      );
+
+      expect(
+        (result as AcpSessionLaunchFailed).error.kind,
+        AcpSessionErrorKind.commandNotApproved,
+      );
+      expect(connector.stopped, isEmpty);
+      expect(connector.runningLabels, contains(otherKey.bridgeId));
+    });
   });
 
   group('restart after sign-in', () {
@@ -484,6 +524,16 @@ void main() {
         connector.started.last.launchArgv,
         connector.started.first.launchArgv,
       );
+    });
+
+    test('starts the bridge under the name approved now', () async {
+      final renamed = lookup.definitions['goose']!.edit(label: 'Goose (work)');
+      lookup.definitions['goose'] = renamed.approve();
+
+      final result = await manager.restartAfterSignIn(key);
+
+      expect(result, isA<AcpSessionLaunchStarted>());
+      expect(connector.started.last.providerLabel, 'Goose (work)');
     });
 
     test('starts nothing once the definition is no longer approved', () async {
