@@ -275,6 +275,33 @@ void main() {
     });
   });
 
+  group('round 3', () {
+    test('review text shows keys the way the snippet wrote them', () {
+      expect(
+        parseSnippetKeySequence(
+          '{key:?}{key:+}{key:ctrl+shift+C}{key:Escape}x{key:ctrl+m}',
+        ).reviewText,
+        '{key:?}{key:+}{key:ctrl+shift+C}{key:Escape}x\n',
+      );
+    });
+
+    test('notes that an escaped token is text', () {
+      expect(
+        parseSnippetKeySequence(r'f(\{key:1}, \{key:1})').warnings.single,
+        r'\{key:1} types the text {key:1}. Without the backslash it presses '
+        'the key.',
+      );
+      expect(
+        parseSnippetKeySequence(r'\{delay:10}').warnings.single,
+        r'\{delay:10} types the text {delay:10}. Without the backslash it '
+        'pauses.',
+      );
+      // Not a token without the backslash either, or not escaped at all.
+      expect(parseSnippetKeySequence(r'\{key:nope}').warnings, isEmpty);
+      expect(parseSnippetKeySequence(r'\\{key:esc}').warnings, isEmpty);
+    });
+  });
+
   test('snippets with any key token need a terminal', () {
     expect(parseSnippetKeySequence('echo hi').needsTerminal, isFalse);
     expect(parseSnippetKeySequence(r'echo \{key:esc}').needsTerminal, isFalse);

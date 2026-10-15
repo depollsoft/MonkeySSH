@@ -403,6 +403,49 @@ void main() {
       expect(find.textContaining(r'write {key:$}{key:enter}'), findsOneWidget);
     });
 
+    testWidgets('full editor notes dropped modifiers and escaped tokens', (
+      tester,
+    ) async {
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.getAllFolders)
+          .thenAnswer((_) async => const <SnippetFolder>[]);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          ],
+          child: const MaterialApp(home: SnippetEditScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Command'),
+        r'{key:ctrl+esc}db.c.createIndex(\{key:1})',
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('snippet-key-token-warning')),
+        findsNWidgets(2),
+      );
+      expect(
+        find.text(
+          '{key:ctrl+esc} is sent as {key:esc}, except to programs that turn '
+          'on the kitty keyboard protocol.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          r'\{key:1} types the text {key:1}. Without the backslash it presses '
+          'the key.',
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('full editor uses snippet prefill values', (tester) async {
       final snippetRepository = _MockSnippetRepository();
       when(snippetRepository.getAllFolders)

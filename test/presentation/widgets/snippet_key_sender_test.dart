@@ -30,6 +30,12 @@ String _send(String token, {String setup = ''}) {
   return target.writes.join();
 }
 
+String _sendChord(SnippetKeyChord chord) {
+  final target = _terminal();
+  expect(sendSnippetKey(target.terminal, chord), isTrue, reason: chord.token);
+  return target.writes.join();
+}
+
 String _hardwareKey(TerminalKey key, {bool alt = false}) {
   final target = _terminal();
   target.terminal.keyInput(key, alt: alt);
@@ -126,6 +132,108 @@ void main() {
         sendSnippetKey(target.terminal, parseSnippetKeyChord(token)!);
         expect(target.enterFlags, [true], reason: token);
       }
+    });
+
+    test('names the chord legacy mode sends for dropped modifiers', () {
+      String legacy(String token) =>
+          legacySnippetKeyChord(parseSnippetKeyChord(token)!).token;
+      expect(legacy('ctrl+esc'), '{key:esc}');
+      expect(legacy('ctrl+shift+esc'), '{key:esc}');
+      expect(legacy('alt+ctrl+esc'), '{key:alt+esc}');
+      expect(legacy('ctrl+tab'), '{key:tab}');
+      expect(legacy('ctrl+shift+tab'), '{key:shift+tab}');
+      expect(legacy('ctrl+enter'), '{key:enter}');
+      expect(legacy('ctrl+alt+enter'), '{key:enter}');
+      expect(legacy('shift+backspace'), '{key:backspace}');
+      expect(legacy('ctrl+alt+backspace'), '{key:alt+backspace}');
+      expect(legacy('shift+space'), '{key:space}');
+      expect(legacy('ctrl+shift+c'), '{key:ctrl+c}');
+      // Modifiers that change the bytes stay.
+      for (final token in [
+        'shift+tab',
+        'shift+enter',
+        'alt+enter',
+        'ctrl+backspace',
+        'alt+esc',
+        'ctrl+c',
+        'ctrl+?',
+        'shift+delete',
+        'ctrl+alt+left',
+        'alt+shift+b',
+      ]) {
+        expect(
+          legacy(token),
+          parseSnippetKeyChord(token)!.token,
+          reason: token,
+        );
+      }
+    });
+
+    test('the named chord sends the same bytes, and nothing less does', () {
+      const keys = ['esc', 'tab', 'enter', 'backspace', 'space', 'f5', 'c'];
+      const modifierSets = ['ctrl+', 'shift+', 'alt+', 'ctrl+shift+'];
+      for (final key in keys) {
+        for (final modifiers in modifierSets) {
+          final chord = parseSnippetKeyChord('$modifiers$key')!;
+          final legacy = legacySnippetKeyChord(chord);
+          final bytes = _sendChord(chord);
+          expect(_sendChord(legacy), bytes, reason: chord.token);
+          for (final fewer in [
+            if (legacy.ctrl)
+              SnippetKeyChord(
+                legacy.key,
+                alt: legacy.alt,
+                shift: legacy.shift,
+                character: legacy.character,
+              ),
+            if (legacy.shift)
+              SnippetKeyChord(
+                legacy.key,
+                ctrl: legacy.ctrl,
+                alt: legacy.alt,
+                character: legacy.character,
+              ),
+          ]) {
+            expect(_sendChord(fewer), isNot(bytes), reason: chord.token);
+          }
+        }
+      }
+    });
+  });
+
+  group('snippetEditorWarnings', () {
+    List<String> warnings(String command) =>
+        snippetEditorWarnings(parseSnippetKeySequence(command));
+
+    test('warns about modifiers legacy mode drops, as written', () {
+      expect(
+        warnings('{key:Control+Escape}').single,
+        '{key:Control+Escape} is sent as {key:esc}, except to programs that '
+        'turn on the kitty keyboard protocol.',
+      );
+      expect(warnings('{key:ctrl+shift+c}'), [
+        contains('is sent as {key:ctrl+c},'),
+      ]);
+      expect(warnings('{key:ctrl+tab}{key:ctrl+tab}'), hasLength(1));
+    });
+
+    test('keeps the parser warnings and skips the Shift a symbol implies', () {
+      expect(
+        warnings(r'\{key:1}').single,
+        r'\{key:1} types the text {key:1}. Without the backslash it presses '
+        'the key.',
+      );
+      for (final command in [
+        '{key:ctrl+@}',
+        '{key:ctrl+_}',
+        '{key:ctrl+^}',
+        '{key:shift+tab}',
+        '{key:esc}:wq{key:enter}',
+        '{key:ctrl+c}',
+      ]) {
+        expect(warnings(command), isEmpty, reason: command);
+      }
+      expect(warnings('{key:ctrl+shift+2}'), [contains('{key:ctrl+2}')]);
     });
   });
 

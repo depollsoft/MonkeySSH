@@ -276,6 +276,79 @@ bool sendSnippetKey(Terminal terminal, SnippetKeyChord chord) {
   return true;
 }
 
+/// What the snippet editor notes under a command: the parser's
+/// [SnippetKeySequence.warnings], then one for each key with a modifier that
+/// a program without the kitty keyboard protocol never sees, such as
+/// `{key:ctrl+esc}`, which reaches it as Esc. The Shift a symbol implies is
+/// left out: `{key:ctrl+@}` sends NUL, as Ctrl+@ always has.
+List<String> snippetEditorWarnings(SnippetKeySequence sequence) => {
+  ...sequence.warnings,
+  for (final step in sequence.steps)
+    if (step is SnippetKeyStep) ?_droppedModifierWarning(step),
+}.toList();
+
+String? _droppedModifierWarning(SnippetKeyStep step) {
+  final chord = step.chord;
+  final legacy = legacySnippetKeyChord(chord);
+  final dropsWrittenModifier =
+      (chord.ctrl && !legacy.ctrl) ||
+      (chord.alt && !legacy.alt) ||
+      (chord.shift &&
+          !legacy.shift &&
+          step.token.toLowerCase().contains('shift+'));
+  if (!dropsWrittenModifier) {
+    return null;
+  }
+  return '${step.token} is sent as ${legacy.token}, except to programs '
+      'that turn on the kitty keyboard protocol.';
+}
+
+/// The chord with the fewest modifiers that [sendSnippetKey] sends as the
+/// same bytes as [chord] when the program has not turned on the kitty
+/// keyboard protocol. Legacy encodings have no code for some modifiers on
+/// some keys and drop them, for a hardware keyboard and the toolbar too:
+/// Ctrl+Esc is Esc, Ctrl+Tab is Tab and Ctrl+Shift+C is Ctrl+C.
+SnippetKeyChord legacySnippetKeyChord(SnippetKeyChord chord) {
+  final bytes = _legacyBytes(chord);
+  var result = chord;
+  var changed = true;
+  while (changed) {
+    changed = false;
+    for (final candidate in [
+      if (result.ctrl) _withModifiers(result, ctrl: false),
+      if (result.alt) _withModifiers(result, alt: false),
+      if (result.shift) _withModifiers(result, shift: false),
+    ]) {
+      if (_legacyBytes(candidate) == bytes) {
+        result = candidate;
+        changed = true;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+SnippetKeyChord _withModifiers(
+  SnippetKeyChord chord, {
+  bool? ctrl,
+  bool? alt,
+  bool? shift,
+}) => SnippetKeyChord(
+  chord.key,
+  ctrl: ctrl ?? chord.ctrl,
+  alt: alt ?? chord.alt,
+  shift: shift ?? chord.shift,
+  character: chord.character,
+);
+
+// A terminal no program has configured, so keys use legacy encodings. Only
+// key input goes through it, which never changes its state.
+final _legacyEncoder = Terminal();
+
+String? _legacyBytes(SnippetKeyChord chord) =>
+    _captureOutput(_legacyEncoder, () => sendSnippetKey(_legacyEncoder, chord));
+
 const _cursorKeyFinals = <TerminalKey, String>{
   TerminalKey.arrowUp: 'A',
   TerminalKey.arrowDown: 'B',

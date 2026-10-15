@@ -12,6 +12,7 @@ import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/snippet_variables.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
+import '../widgets/snippet_key_sender.dart';
 import '../widgets/unsaved_changes_guard.dart';
 
 typedef _SnippetEditDraft = ({
@@ -257,9 +258,9 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                         color: Theme.of(context).colorScheme.outline,
                       ),
                     ),
-                    for (final warning in parseSnippetKeySequence(
-                      _contentController.text,
-                    ).warnings) ...[
+                    for (final warning in snippetEditorWarnings(
+                      parseSnippetKeySequence(_contentController.text),
+                    )) ...[
                       const SizedBox(height: 8),
                       Row(
                         key: const ValueKey('snippet-key-token-warning'),

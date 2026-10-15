@@ -101,12 +101,21 @@ final class SnippetTextStep extends SnippetStep {
 
 /// A key press from a `{key:...}` token.
 final class SnippetKeyStep extends SnippetStep {
-  /// Creates a key step.
-  const SnippetKeyStep(this.chord);
+  /// Creates a key step. [source] is the token as it was written, if it
+  /// came from one.
+  const SnippetKeyStep(this.chord, {String? source}) : _source = source;
 
   /// The key and its modifiers.
   final SnippetKeyChord chord;
 
+  final String? _source;
+
+  /// The token as the snippet wrote it, such as `{key:?}`, or the canonical
+  /// token ([SnippetKeyChord.token]) for a step that was not parsed.
+  String get token => _source ?? chord.token;
+
+  /// Two steps that press the same chord are equal, however they were
+  /// written.
   @override
   bool operator ==(Object other) =>
       other is SnippetKeyStep && other.chord == chord;
@@ -159,8 +168,10 @@ class SnippetKeySequence {
   /// errors must not be sent.
   final List<String> errors;
 
-  /// Things that are allowed but probably not what was meant, such as a key
-  /// token after `$`, which stays text. They do not stop the snippet.
+  /// Things that are allowed but easy to misread, one message each, such as
+  /// a key token after `$` or a backslash, which stays text. They do not stop
+  /// the snippet. The editor adds notes that depend on the encoding, from
+  /// `snippetEditorWarnings`.
   final List<String> warnings;
 
   /// Whether the snippet has key presses or pauses, so it cannot be pasted
@@ -207,12 +218,14 @@ class SnippetKeySequence {
 
   /// The snippet as a command line would see it, for review before sending:
   /// keys that submit a line (Enter, Ctrl+M, Ctrl+J) become a line break,
-  /// other keys show as their tokens and pauses are left out.
+  /// other keys show as the tokens the snippet wrote and pauses are left
+  /// out.
   String get reviewText => [
     for (final step in steps)
       switch (step) {
         SnippetTextStep(:final text) => text,
-        SnippetKeyStep(:final chord) => chord.submitsLine ? '\n' : chord.token,
+        SnippetKeyStep(:final chord, :final token) =>
+          chord.submitsLine ? '\n' : token,
         SnippetDelayStep() => '',
       },
   ].join();
@@ -301,6 +314,13 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
     cursor = match.end;
     if (backslashes.isOdd) {
       text.write(match.group(0));
+      if (_isValidToken(match)) {
+        final token = match.group(0)!;
+        warnings.add(
+          '\\$token types the text $token. Without the backslash it '
+          '${match.group(1) == 'delay' ? 'pauses' : 'presses the key'}.',
+        );
+      }
       continue;
     }
 
@@ -332,7 +352,7 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
         continue;
       }
       flushText();
-      steps.add(SnippetKeyStep(chord));
+      steps.add(SnippetKeyStep(chord, source: match.group(0)));
     }
   }
   text.write(command.substring(cursor));
@@ -340,7 +360,7 @@ SnippetKeySequence parseSnippetKeySequence(String command) {
   return SnippetKeySequence(
     List.unmodifiable(steps),
     errors: List.unmodifiable(errors),
-    warnings: List.unmodifiable(warnings),
+    warnings: List.unmodifiable(warnings.toSet()),
   );
 }
 
