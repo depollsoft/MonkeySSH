@@ -1532,6 +1532,28 @@ void main() {
         ],
       );
 
+      // The session reads as required, above the worktree switch that
+      // needs it, before any save attempt.
+      expect(find.text('MonkeyMux session'), findsOneWidget);
+      expect(find.text('MonkeyMux session (optional)'), findsNothing);
+      expect(
+        find.text(
+          'Required for worktree launches, so reconnecting returns to the '
+          'same worktree.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getTopLeft(find.byKey(const Key('host-agent-tmux-session-field')))
+            .dy,
+        lessThan(
+          tester
+              .getTopLeft(find.byKey(const Key('host-agent-worktree-switch')))
+              .dy,
+        ),
+      );
+
       await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
 
       verifyNever(() => presetService.setPresetForHost(1, any()));

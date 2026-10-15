@@ -1289,16 +1289,6 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               ? (_) => _handleAgentPresetFieldChanged()
               : null,
         ),
-        AgentPresetWorkspaceFields(
-          state: _agentWorkspaceForm,
-          enabled: hasAgentPresetAccess,
-          tool: _selectedAgentLaunchTool,
-          workingDirectory: _agentWorkingDirectoryController,
-          onChanged: () {
-            setState(() {});
-            _updateDirtyState();
-          },
-        ),
         const SizedBox(height: 12),
         KeyedSubtree(
           key: _agentSessionFieldLocationKey,
@@ -1314,15 +1304,22 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                       'the same worktree.'
                 : null,
             decoration: InputDecoration(
-              labelText: isAgentTmuxBackend
-                  ? 'tmux session (optional)'
-                  : 'MonkeyMux session (optional)',
+              // A worktree launch needs the session, so it stops being
+              // optional when worktrees are on.
+              labelText: [
+                if (isAgentTmuxBackend) 'tmux session' else 'MonkeyMux session',
+                if (!_agentWorkspaceForm.worktreeEnabled) '(optional)',
+              ].join(' '),
               hintText: 'app-agent',
               prefixIcon: const Icon(Icons.view_carousel_outlined),
-              helperText: isAgentTmuxBackend
+              helperText: _agentWorkspaceForm.worktreeEnabled
+                  ? 'Required for worktree launches, so reconnecting returns '
+                        'to the same worktree.'
+                  : isAgentTmuxBackend
                   ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
                   : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
               helperMaxLines: _hostFieldHelperMaxLines,
+              errorMaxLines: _hostFieldHelperMaxLines,
             ),
             autocorrect: false,
             onChanged: hasAgentPresetAccess
@@ -1404,6 +1401,17 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             ),
           ),
         ],
+        // After the session it depends on, so the dependency reads top-down.
+        AgentPresetWorkspaceFields(
+          state: _agentWorkspaceForm,
+          enabled: hasAgentPresetAccess,
+          tool: _selectedAgentLaunchTool,
+          workingDirectory: _agentWorkingDirectoryController,
+          onChanged: () {
+            setState(() {});
+            _updateDirtyState();
+          },
+        ),
         const SizedBox(height: 12),
         Text(
           currentPreset.usesMonkeyMuxSession

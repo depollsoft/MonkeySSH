@@ -122,7 +122,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 4),
+        const SizedBox(height: 8),
         KeyedSubtree(
           key: const Key('host-agent-worktree-switch-location'),
           child: SwitchListTile(
@@ -132,8 +132,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
             secondary: const Icon(Icons.account_tree_outlined),
             title: const Text('Start in a new git worktree'),
             subtitle: const Text(
-              'Each launch adds a branch and folder, so parallel agents '
-              'don’t share a checkout.',
+              'Each new session starts on its own branch, in its own folder.',
             ),
             onChanged: enabled
                 ? (value) {
@@ -217,13 +216,15 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            'Needs a MonkeyMux or tmux session, set below, so reconnecting '
-            'returns to the same worktree. Closing the agent’s window offers '
-            'to remove a clean worktree.',
+            'Uses the session above, so reconnecting returns to the same '
+            'worktree. Closing the agent’s window offers to remove a clean '
+            'worktree.',
             style: helperStyle,
           ),
         ],
-        const SizedBox(height: 12),
+        // The prompt is a native-chat setting, not part of the worktree
+        // block, so it gets a section's separation.
+        const SizedBox(height: FluttyTheme.spacingMd),
         TextFormField(
           key: const Key('host-agent-initial-prompt-field'),
           controller: state.initialPrompt,
@@ -273,6 +274,7 @@ class AgentPresetWorkspaceFields extends StatelessWidget {
         prefixIcon: Icon(icon),
         helperText: helper,
         helperMaxLines: 3,
+        errorMaxLines: 3,
       ),
     ),
   );

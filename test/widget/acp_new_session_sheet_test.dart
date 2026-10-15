@@ -461,15 +461,21 @@ void main() {
       final promptSwitch = find.byKey(
         const Key('acp-new-session-initial-prompt-switch'),
       );
-      expect(find.text('origin/main · ~/src/app'), findsOneWidget);
       expect(
-        tester
-            .widget<TextField>(
-              find.byKey(const Key('acp-new-session-cwd-field')),
-            )
-            .enabled,
-        isFalse,
+        find.text('A new branch from origin/main, in its own folder.'),
+        findsOneWidget,
       );
+      // While the worktree is on, the field shows the repository it is made
+      // from instead of a working directory that would not be used.
+      expect(find.text('Repository'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('acp-new-session-worktree-repository')),
+          matching: find.text('~/src/app'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('acp-new-session-cwd-field')), findsNothing);
       await tester.ensureVisible(worktreeSwitch);
       await tester.tap(worktreeSwitch);
       await tester.ensureVisible(promptSwitch);
@@ -484,6 +490,43 @@ void main() {
       expect(worktrees.created, isEmpty);
       expect(manager.starts.single.cwd, '~/src/app');
       expect(manager.prompts, isEmpty);
+    });
+
+    testWidgets('starts with the worktree off on a known Windows host', (
+      tester,
+    ) async {
+      final manager = _PromptRecordingManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(cursorKey);
+      final session = _cursorSession();
+      when(() => session.client.remoteVersion)
+          .thenReturn('SSH-2.0-OpenSSH_for_Windows_9.5');
+
+      final result = await _pumpAndLaunch(
+        tester,
+        manager,
+        preset: preset,
+        initialProviderId: AcpBuiltinProviderIds.cursorAgent,
+        activeSession: session,
+        worktreeLauncher: launcher,
+        startSession: false,
+      );
+      final worktreeSwitch = tester.widget<SwitchListTile>(
+        find.byKey(const Key('acp-new-session-worktree-switch')),
+      );
+      expect(worktreeSwitch.value, isFalse);
+      expect(worktreeSwitch.onChanged, isNull);
+      expect(
+        find.text('Worktree launches need a macOS or Linux host.'),
+        findsOneWidget,
+      );
+      final startButton = find.widgetWithText(FilledButton, 'Start session');
+      await tester.ensureVisible(startButton);
+      await tester.tap(startButton);
+      await tester.pumpAndSettle();
+
+      expect(result(), cursorKey);
+      expect(worktrees.created, isEmpty);
+      expect(manager.starts.single.cwd, '~/src/app');
     });
   });
 

@@ -280,7 +280,20 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   bool get _startsInWorktree =>
       _useWorktree &&
       _selectedRecent == null &&
+      !_hostKnownWindows &&
       (_selectedPreset?.launchesInNewWorktree ?? false);
+
+  /// Whether a live connection has shown the selected host runs Windows,
+  /// where worktree launches are not supported, so the switch starts off
+  /// instead of failing the first start.
+  bool get _hostKnownWindows {
+    final hostId = _hostId;
+    return hostId != null &&
+        ref
+            .read(sshServiceProvider)
+            .getSessionsForHost(hostId)
+            .any((session) => session.remoteIsWindows);
+  }
 
   /// The preset prompt a new session sends once, if any.
   String? get _initialPrompt {
@@ -955,24 +968,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                 error: (_, _) => const Text('Could not load providers.'),
               ),
               const SizedBox(height: FluttyTheme.spacingMd),
-              _sectionLabel(context, 'Working directory'),
-              TextField(
-                key: const Key('acp-new-session-cwd-field'),
-                controller: _cwd,
-                enabled: !controlsDisabled && !_startsInWorktree,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: FluttyTheme.monoStyle,
-                onChanged: (_) => _cwdEdited = true,
-                decoration: InputDecoration(
-                  hintText: '~',
-                  helperText: _startsInWorktree
-                      ? 'The agent starts in a new worktree of the preset’s '
-                            'repository.'
-                      : null,
-                  helperMaxLines: 2,
-                ),
-              ),
+              ..._buildWorkingDirectory(context, disabled: controlsDisabled),
               _buildPresetOptions(context, disabled: controlsDisabled),
               AcpSessionWorkspaceSection(
                 controller: _workspace,
@@ -1026,6 +1022,53 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     );
   }
 
+  /// The working directory field, or, while the start creates a worktree,
+  /// the repository the worktree is made from: the agent's folder is not
+  /// known until then.
+  List<Widget> _buildWorkingDirectory(
+    BuildContext context, {
+    required bool disabled,
+  }) {
+    final preset = _selectedPreset;
+    final repository = _startsInWorktree
+        ? preset?.worktree?.resolveRepositoryPath(preset.workingDirectory)
+        : null;
+    if (repository == null) {
+      return [
+        _sectionLabel(context, 'Working directory'),
+        TextField(
+          key: const Key('acp-new-session-cwd-field'),
+          controller: _cwd,
+          enabled: !disabled,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: FluttyTheme.monoStyle,
+          onChanged: (_) => _cwdEdited = true,
+          decoration: const InputDecoration(hintText: '~'),
+        ),
+      ];
+    }
+    return [
+      _sectionLabel(context, 'Repository'),
+      // Read-only: the preset sets it. The resting field look keeps it in
+      // the system, and the lock says it cannot be typed into.
+      InputDecorator(
+        key: const Key('acp-new-session-worktree-repository'),
+        decoration: const InputDecoration(
+          suffixIcon: Icon(Icons.lock_outline, size: 18),
+        ),
+        child: Text(
+          repository,
+          style: FluttyTheme.monoStyle.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    ];
+  }
+
   /// Worktree and initial-prompt switches from the host's agent preset,
   /// shown only when starting a new session.
   Widget _buildPresetOptions(BuildContext context, {required bool disabled}) {
@@ -1038,10 +1081,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     if (worktree == null && prompt.isEmpty) {
       return const SizedBox.shrink();
     }
-    final colorScheme = Theme.of(context).colorScheme;
-    final mono = FluttyTheme.monoStyle.copyWith(
-      color: colorScheme.onSurfaceVariant,
-    );
+    final windowsHost = worktree != null && _hostKnownWindows;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1053,15 +1093,17 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             contentPadding: EdgeInsets.zero,
             secondary: const Icon(Icons.account_tree_outlined),
             title: const Text('Start in a new git worktree'),
+            // The repository shows in the field above while this is on.
             subtitle: Text(
-              '${worktree.effectiveBaseRef} · '
-              '${worktree.resolveRepositoryPath(preset.workingDirectory) ?? ''}',
-              style: mono,
+              windowsHost
+                  ? 'Worktree launches need a macOS or Linux host.'
+                  : 'A new branch from ${worktree.effectiveBaseRef}, in its '
+                        'own folder.',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
-            value: _useWorktree,
-            onChanged: disabled
+            value: _useWorktree && !windowsHost,
+            onChanged: disabled || windowsHost
                 ? null
                 : (value) => setState(() => _useWorktree = value),
           ),

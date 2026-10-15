@@ -114,6 +114,14 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('{prompt}'), findsWidgets);
+    // The field's own error wraps instead of cutting off at one line.
+    final decorator = tester.widget<InputDecorator>(
+      find.descendant(
+        of: find.byKey(const Key('host-agent-worktree-branch-field')),
+        matching: find.byType(InputDecorator),
+      ),
+    );
+    expect(decorator.decoration.errorMaxLines, 3);
   });
 
   testWidgets('needs a repository or a working directory', (tester) async {
