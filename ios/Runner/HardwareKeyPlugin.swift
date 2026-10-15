@@ -15,16 +15,25 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
   private static let aliasPrefix = "xyz.depollsoft.monkeyssh.sshkey."
 
   /// A sign request from the moment the channel receives it, so a cancel
-  /// that arrives while it waits in [queue] is not lost.
+  /// that arrives before it reaches its prompt is not lost.
   private final class PendingSign {
     let context = LAContext()
     var cancelled = false
   }
 
-  /// Serial: one Secure Enclave operation, and so one prompt, at a time.
+  /// Serial queue for generating and deleting keys.
   private let queue = DispatchQueue(
     label: "xyz.depollsoft.monkeyssh.hardware-keys",
     qos: .userInitiated
+  )
+  /// Signs run side by side: SecKeyCreateSignature blocks its thread while a
+  /// per-use prompt is up, and a sign that needs no prompt must not wait
+  /// behind it. Dart's BiometricPromptCoordinator already shows per-use
+  /// prompts one at a time.
+  private let signQueue = DispatchQueue(
+    label: "xyz.depollsoft.monkeyssh.hardware-keys.sign",
+    qos: .userInitiated,
+    attributes: .concurrent
   )
   private let lock = NSLock()
   private var pendingSigns: [String: PendingSign] = [:]
@@ -65,7 +74,7 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
       lock.lock()
       pendingSigns[requestId] = pending
       lock.unlock()
-      run(result) {
+      run(result, on: signQueue) {
         defer {
           self.lock.lock()
           self.pendingSigns.removeValue(forKey: requestId)
@@ -81,8 +90,9 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
         let pending = pendingSigns[requestId]
         pending?.cancelled = true
         lock.unlock()
-        // Dismisses a prompt that is showing; a queued request sees
-        // `cancelled` before it can show one.
+        // Dismisses a prompt that is showing; a request that has not
+        // reached its prompt sees `cancelled`, or the invalidated context,
+        // before it can show one.
         pending?.context.invalidate()
       }
       result(nil)
@@ -242,8 +252,12 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
 
   // MARK: - Helpers
 
-  private func run(_ result: @escaping FlutterResult, _ operation: @escaping () throws -> Any?) {
-    queue.async {
+  private func run(
+    _ result: @escaping FlutterResult,
+    on operationQueue: DispatchQueue? = nil,
+    _ operation: @escaping () throws -> Any?
+  ) {
+    (operationQueue ?? queue).async {
       let reply: Any?
       do {
         reply = try operation()
