@@ -178,7 +178,10 @@ class SSHKeyPairAgent implements SSHAgentHandler {
 ///   are waiting, which a client that waits for each reply never reaches;
 /// * closes the channel when more than [maxPendingReplyBytes] of replies are
 ///   waiting for the peer to read them;
-/// * serves at most [maxChannelsPerHandler] channels per handler at once.
+/// * serves at most [maxChannelsPerHandler] channels per handler at once. A
+///   channel keeps its slot until the client drops it, which after an abort
+///   waits for the peer's CHANNEL_CLOSE, so a peer that ignores the close
+///   cannot make the client hold more channels than that.
 ///
 /// When the peer sends EOF, requests it already sent are still answered, as
 /// upstream does; only the limits above drop work.
@@ -210,6 +213,7 @@ class SSHAgentChannel {
     final open = (_openChannels[_handler] ?? 0) + 1;
     _openChannels[_handler] = open;
     _channel.done.whenComplete(_handleClosed);
+    _channel.released.whenComplete(_releaseSlot);
     _subscription = _channel.stream.listen(
       _handleData,
       onDone: _handleInputDone,
@@ -230,6 +234,7 @@ class SSHAgentChannel {
   int _end = 0;
   bool _processing = false;
   bool _closed = false;
+  bool _slotReleased = false;
 
   int get _bufferedBytes => _end - _start;
 
@@ -238,10 +243,16 @@ class SSHAgentChannel {
     _subscription?.cancel();
   }
 
+  /// The client dropped the channel, so another may take its place.
+  void _releaseSlot() {
+    if (_slotReleased) return;
+    _slotReleased = true;
+    _openChannels[_handler] = (_openChannels[_handler] ?? 1) - 1;
+  }
+
   void _handleClosed() {
     if (_closed) return;
     _closed = true;
-    _openChannels[_handler] = (_openChannels[_handler] ?? 1) - 1;
     _subscription?.cancel();
     _buffer = Uint8List(0);
     _start = 0;

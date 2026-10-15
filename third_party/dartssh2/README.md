@@ -34,7 +34,10 @@ upstream; replace this directory with the released package once it does.
   `SSH_OPEN_RESOURCE_SHORTAGE` before allocating anything for them (patched
   in `lib/src/ssh_client.dart`). Each `ssh` run on the server holds one
   while it authenticates, so this caps simultaneous onward sign-ins, not
-  onward connections.
+  onward connections. A channel keeps its slot until `SSHClient` drops it.
+  After an abort that means until the server answers the CHANNEL_CLOSE, so a
+  server that never answers cannot make the client hold more agent channels
+  than the cap.
 - When the peer sends EOF, the requests it already sent are still answered,
   as upstream does; the slot is released when the channel closes.
 
@@ -49,6 +52,10 @@ patch; that would need backpressure on the transport's socket writes.
 - `SSHChannel.pendingOutputBytes` counts bytes passed to `addData` that the
   upload loop has not sent yet, so the agent channel can tell when the peer
   stops reading.
+- `SSHChannel.released` completes once the client drops the channel, which
+  `SSHClient` reports through `SSHChannelController.markReleased` when the
+  peer's CHANNEL_CLOSE arrives and when the connection ends. `done` completes
+  earlier when this side closes first.
 - `sendAgentForwardingRequest` sends `auth-agent-req@openssh.com` with
   `want_reply` false and does not wait, as `ssh(1)` does. OpenSSH's sshd sets
   forwarding up for the first request on a connection and refuses the rest,

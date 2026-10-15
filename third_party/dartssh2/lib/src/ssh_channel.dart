@@ -132,6 +132,19 @@ class SSHChannelController {
 
   final _done = Completer<void>();
 
+  // MonkeySSH patch: completes once the client has dropped this channel.
+  final _released = Completer<void>();
+
+  /// MonkeySSH patch: called by the client when it drops this channel, after
+  /// the peer's CHANNEL_CLOSE or when the connection ends. Until then the
+  /// client still holds the channel, even after [done] completes because this
+  /// side closed or destroyed it first.
+  void markReleased() {
+    if (!_released.isCompleted) {
+      _released.complete();
+    }
+  }
+
   Future<bool> sendExec(String command) {
     return _sendRequest(
       SSH_Message_Channel_Request.exec(
@@ -571,6 +584,11 @@ class SSHChannel {
   StreamSink<SSHChannelData> get sink => _controller._localStream.sink;
 
   Future<void> get done => _controller._done.future;
+
+  /// MonkeySSH patch: completes once the client no longer holds this channel.
+  /// After this side closes or destroys the channel, that waits for the
+  /// peer's CHANNEL_CLOSE, which a peer can withhold.
+  Future<void> get released => _controller._released.future;
 
   SSHChannel(this._controller);
 

@@ -61,6 +61,14 @@ class _AgentChannelHarness {
     SSH_Message_Channel_Data(recipientChannel: 1, data: data),
   );
 
+  /// What SSHClient does when the peer's CHANNEL_CLOSE arrives: hands the
+  /// message to the channel, then drops it.
+  void peerClose() {
+    controller
+      ..handleMessage(SSH_Message_Channel_Close(recipientChannel: 1))
+      ..markReleased();
+  }
+
   Iterable<Uint8List> get replies =>
       sent.whereType<SSH_Message_Channel_Data>().map((message) => message.data);
 }
@@ -317,10 +325,40 @@ void main() {
     expect(extra.closed, isTrue);
     expect(harnesses.where((harness) => harness.closed), isEmpty);
 
-    // A slot frees once a channel closes.
-    harnesses.first.controller.handleMessage(
-      SSH_Message_Channel_Close(recipientChannel: 1),
+    // The refused channel holds its slot until the client drops it, and a
+    // slot frees once a channel closes.
+    extra.peerClose();
+    harnesses.first.peerClose();
+    await pumpEventQueue();
+    expect(SSHAgentChannel.hasRoomFor(shared), isTrue);
+  });
+
+  test('an aborted channel keeps its slot until the client drops it', () async {
+    // A host that breaks the protocol on every channel and never answers the
+    // CHANNEL_CLOSE that follows: the client keeps each channel until that
+    // answer, so the slots must stay taken too.
+    final shared = handler();
+    final harnesses = [
+      for (
+        var index = 0;
+        index < SSHAgentChannel.maxChannelsPerHandler;
+        index++
+      )
+        _AgentChannelHarness(shared, remoteWindow: _window),
+    ];
+    for (final harness in harnesses) {
+      harness.send(_uint32(0));
+    }
+    await pumpEventQueue();
+
+    expect(harnesses.where((harness) => !harness.closed), isEmpty);
+    expect(
+      harnesses.first.sent.whereType<SSH_Message_Channel_Close>(),
+      hasLength(1),
     );
+    expect(SSHAgentChannel.hasRoomFor(shared), isFalse);
+
+    harnesses.first.peerClose();
     await pumpEventQueue();
     expect(SSHAgentChannel.hasRoomFor(shared), isTrue);
   });

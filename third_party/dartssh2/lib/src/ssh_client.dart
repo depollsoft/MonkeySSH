@@ -933,6 +933,8 @@ class SSHClient {
     for (final channel in _channels.values) {
       channel.destroy(error, stackTrace);
       _channelIdAllocator.release(channel.localId);
+      // MonkeySSH patch: see SSHChannelController.markReleased.
+      channel.markReleased();
     }
 
     _channels.clear();
@@ -1537,6 +1539,8 @@ class SSHClient {
       channel.handleMessage(message);
       _channels.remove(message.recipientChannel);
       _channelIdAllocator.release(message.recipientChannel);
+      // MonkeySSH patch: see SSHChannelController.markReleased.
+      channel.markReleased();
     }
   }
 
