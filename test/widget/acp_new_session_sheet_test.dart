@@ -28,6 +28,7 @@ import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_acp_bridge_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
@@ -1064,9 +1065,9 @@ void main() {
         manager.startLaunchOverrides.map((command) => command?.executable),
         ['/usr/bin/copilot', '/usr/bin/copilot'],
       );
-      final signIn = commands.last;
-      expect(signIn, contains(r"'\''/usr/bin/copilot'\'' '\''--acp'\'' "));
-      expect(signIn, contains(r"'\''--login'\''"));
+      final signIn = decodeMonkeyMuxLoginShellSafeCommand(commands.last)[4];
+      expect(signIn, contains("'/usr/bin/copilot' '--acp' "));
+      expect(signIn, contains("'--login'"));
       expect(ptys.last, isNotNull);
     });
 
