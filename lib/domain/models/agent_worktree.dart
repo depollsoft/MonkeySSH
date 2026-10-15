@@ -38,6 +38,12 @@ final _refForbiddenPattern = RegExp(r'[\x00-\x20\x7f]');
 final _pathControlPattern = RegExp(r'[\x00-\x1f\x7f]');
 
 const _branchPlaceholders = {'tool', 'date', 'time', 'id'};
+const _jsonKeys = [
+  'repositoryPath',
+  'baseRef',
+  'branchTemplate',
+  'pathTemplate',
+];
 const _pathPlaceholders = {'tool', 'date', 'time', 'id', 'name', 'branch'};
 
 /// Git worktree settings saved on an agent launch preset.
@@ -55,10 +61,21 @@ final class AgentWorktreeLaunchOptions {
     this.pathTemplate,
   });
 
-  /// Decodes options from JSON, or returns null when [json] is not a map.
+  /// Decodes options from JSON, or returns null when [json] is not a map or
+  /// one of its settings is present but not text.
+  ///
+  /// A setting that cannot be read must not fall back to its default: a
+  /// repository path read as unset would branch the working directory's
+  /// repository instead of the one the user chose.
   static AgentWorktreeLaunchOptions? tryFromJson(Object? json) {
     if (json is! Map<String, dynamic>) {
       return null;
+    }
+    for (final key in _jsonKeys) {
+      final value = json[key];
+      if (value != null && value is! String) {
+        return null;
+      }
     }
     return AgentWorktreeLaunchOptions(
       repositoryPath: _readTrimmed(json['repositoryPath']),

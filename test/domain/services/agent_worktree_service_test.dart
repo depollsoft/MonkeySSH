@@ -63,6 +63,7 @@ class _LocalShell implements AgentWorktreeShell {
         'SHELL': loginShell,
         'LANG': 'C',
         'TMPDIR': home,
+        'GIT_CEILING_DIRECTORIES': _gitCeiling(home),
       },
       includeParentEnvironment: false,
     );
@@ -114,12 +115,32 @@ Future<String> _git(String home, String directory, List<String> args) async {
       directory,
       ...args,
     ],
-    environment: {'HOME': home, 'PATH': _systemPath, 'LANG': 'C'},
+    environment: {
+      'HOME': home,
+      'PATH': _systemPath,
+      'LANG': 'C',
+      'GIT_CEILING_DIRECTORIES': _gitCeiling(home),
+    },
     includeParentEnvironment: false,
   );
   if (result.exitCode != 0) {
     throw StateError('git ${args.join(' ')} failed: ${result.stderr}');
   }
+  return (result.stdout as String).trim();
+}
+
+/// Keeps git from finding a repository above the test's scratch [home], so
+/// a scratch root inside a checkout never gets worktrees or branches.
+String _gitCeiling(String home) => Directory(home).parent.path;
+
+/// The git the test's system PATH finds.
+Future<String> _systemGit() async {
+  final result = await Process.run(
+    '/bin/sh',
+    ['-c', 'command -v git'],
+    environment: {'PATH': _systemPath},
+    includeParentEnvironment: false,
+  );
   return (result.stdout as String).trim();
 }
 
@@ -770,6 +791,115 @@ void main() {
             isNot(contains('worktree ${record.path}')),
           );
         });
+
+        test(
+          'leaves other missing worktrees registered when one is gone',
+          () async {
+            final record = await create();
+            // The user's own worktree, on a volume that is unmounted now.
+            final mine = '$home/mine';
+            await git(repository, [
+              'worktree',
+              'add',
+              '-q',
+              '-b',
+              'mine',
+              mine,
+            ]);
+            await Directory(mine).rename('$home/mine-unmounted');
+            await Directory(record.path).delete(recursive: true);
+
+            final removal = await service.remove(shell, record);
+
+            expect(removal.branchDeleted, isTrue);
+            final worktrees = await git(repository, [
+              'worktree',
+              'list',
+              '--porcelain',
+            ]);
+            expect(worktrees, isNot(contains('worktree ${record.path}')));
+            expect(worktrees, contains('worktree $mine'));
+          },
+        );
+
+        test(
+          'keeps a branch it cannot show it made when the folder never existed',
+          () async {
+            // A pending record whose create never ran, and a branch of the
+            // same name the user made at the same commit.
+            final plan = await service.plan(
+              shell,
+              repository: repository,
+              baseRef: 'HEAD',
+              target: renderAgentWorktreeTarget(
+                const AgentWorktreeLaunchOptions(),
+                _values,
+              ),
+            );
+            final pending = plan.pendingRecord(
+              hostId: 7,
+              createdAt: DateTime.utc(2026, 10, 9),
+              launchId: 'launch-pending',
+            );
+            await git(repository, ['branch', plan.branch]);
+
+            final removal = await service.remove(shell, pending);
+
+            expect(removal.branchDeleted, isFalse);
+            expect(
+              await git(repository, ['branch', '--list', plan.branch]),
+              contains(plan.branch),
+            );
+          },
+        );
+
+        test(
+          'undoes a worktree whose launch marker cannot be written',
+          () async {
+            // A git that cannot name the new worktree's admin folder, so the
+            // marker that later proves the worktree is MonkeySSH's is missing.
+            final realGit = await _systemGit();
+            final bin = Directory('$home/bin')..createSync();
+            File('${bin.path}/git').writeAsStringSync(
+              '#!/bin/sh\n'
+              'for a in "\$@"; do\n'
+              '  [ "\$a" != --absolute-git-dir ] || exit 1\n'
+              'done\n'
+              'exec ${quoteAgentWorktreeShellWord(realGit)} "\$@"\n',
+            );
+            await Process.run('chmod', ['+x', '${bin.path}/git']);
+            final wrapped = _LocalShell(
+              shellPath,
+              home: home,
+              loginShell: _noLoginShell,
+            );
+
+            await expectLater(
+              service.create(
+                wrapped,
+                hostId: 7,
+                repository: repository,
+                baseRef: 'HEAD',
+                target: renderAgentWorktreeTarget(
+                  const AgentWorktreeLaunchOptions(),
+                  _values,
+                ),
+                launchId: 'launch-unmarked',
+              ),
+              _throwsKind(AgentWorktreeErrorKind.addFailed),
+            );
+
+            expect(Directory('$repository.worktrees').listSync(), isEmpty);
+            expect(
+              await git(repository, ['branch', '--list', 'agent/*']),
+              isEmpty,
+            );
+            expect(
+              await git(repository, ['worktree', 'list', '--porcelain']),
+              isNot(contains('.worktrees')),
+            );
+          },
+        );
 
         group('launcher', () {
           late MemoryAgentWorktreeRegistry registry;

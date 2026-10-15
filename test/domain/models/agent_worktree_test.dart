@@ -249,6 +249,35 @@ void main() {
       }
     });
 
+    test(
+      'a worktree setting that is not text makes the preset unsupported',
+      () {
+        for (final key in [
+          'repositoryPath',
+          'baseRef',
+          'branchTemplate',
+          'pathTemplate',
+        ]) {
+          expect(
+            AgentLaunchPreset.tryFromJson({
+              'tool': 'codex',
+              'workingDirectory': '~/src/app',
+              'worktree': {key: 42},
+            }),
+            isNull,
+            reason: key,
+          );
+        }
+        expect(
+          AgentWorktreeLaunchOptions.tryFromJson({
+            'repositoryPath': null,
+            'unknown': 3,
+          }),
+          isNotNull,
+        );
+      },
+    );
+
     test('presets saved before worktrees still decode without them', () {
       final decoded = AgentLaunchPreset.tryFromJson({
         'tool': 'codex',

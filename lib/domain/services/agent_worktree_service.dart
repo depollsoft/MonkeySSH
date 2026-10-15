@@ -384,6 +384,8 @@ command -v git >/dev/null 2>&1 || mssh_fail no_git ''
 /// (detached commits no branch, tag, remote-tracking ref or stash contains;
 /// per-worktree refs go with the worktree, so they do not count) and
 /// `operation` (a rebase, merge, cherry-pick, revert or bisect in progress).
+/// `mssh_registered_here` reads `git worktree list --porcelain` on stdin and
+/// succeeds when it lists `$wt` with `$branch` checked out.
 /// `mssh_delete_branch` deletes the branch only while it points at `$base`
 /// and no worktree has it checked out.
 const _recordHelpers = r'''
@@ -424,6 +426,13 @@ mssh_safety() {
     case "$mssh_g" in /*) ;; *) mssh_g="$wt/$mssh_g" ;; esac
     if [ -e "$mssh_g" ]; then operation=$mssh_p; break; fi
   done
+}
+mssh_registered_here() {
+  MSSH_WT_LINE="worktree $wt" MSSH_BRANCH_LINE="branch refs/heads/$branch" awk '
+    $0 == "" { if (p && b) f = 1; p = 0; b = 0; next }
+    $0 == ENVIRON["MSSH_WT_LINE"] { p = 1 }
+    $0 == ENVIRON["MSSH_BRANCH_LINE"] { b = 1 }
+    END { if (p && b) f = 1; exit f ? 0 : 1 }'
 }
 mssh_delete_branch() {
   deleted=no
@@ -543,8 +552,14 @@ logical=$(cd -- "$cand_wt" >/dev/null 2>&1 && pwd) || logical=$cand_wt
 start=$phys
 if [ -n "$prefix" ] && [ -d "$phys/${prefix%/}" ]; then start=$phys/${prefix%/}; fi
 if [ -n "$launch" ]; then
-  mssh_admin=$(git -C "$cand_wt" rev-parse --absolute-git-dir 2>/dev/null) &&
-    printf '%s\n' "$launch" > "$mssh_admin/monkeyssh-launch" 2>/dev/null
+  mssh_admin=$(git -C "$cand_wt" rev-parse --absolute-git-dir 2>/dev/null)
+  if [ -z "$mssh_admin" ] || ! printf '%s\n' "$launch" > "$mssh_admin/monkeyssh-launch" 2>/dev/null; then
+    # Without the marker nothing could later prove this worktree is ours, so
+    # removal would never be offered: undo the fresh, unchanged checkout.
+    git -C "$top" worktree remove -- "$cand_wt" >/dev/null 2>&1 &&
+      git -C "$top" update-ref -d "refs/heads/$cand_branch" "$commit" >/dev/null 2>&1
+    mssh_fail add_failed 'MonkeySSH could not write its launch marker in it.'
+  fi
 fi
 mssh_emit ok "$phys" "$logical" "$start"
 ''';
@@ -586,8 +601,15 @@ String buildAgentWorktreeRemoveScript(AgentWorktreeRecord record) =>
     '$_gitPrelude$_recordHelpers${_recordAssignments(record)}'
     r'''
 if [ ! -e "$wt" ] && [ ! -L "$wt" ]; then
-  git -C "$repo" worktree prune >/dev/null 2>&1
-  mssh_delete_branch
+  # Only git's entry for this missing folder, still on the recorded branch,
+  # is dropped; other worktrees whose folders are missing (an unmounted
+  # volume) stay registered. Without that entry the branch was never shown
+  # to be ours, so it is kept.
+  deleted=no
+  if git -C "$repo" worktree list --porcelain 2>/dev/null | mssh_registered_here &&
+    git -C "$repo" worktree remove -- "$wt" >/dev/null 2>&1; then
+    mssh_delete_branch
+  fi
   mssh_emit removed "$deleted"
   exit 0
 fi
