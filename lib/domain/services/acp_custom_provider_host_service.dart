@@ -53,13 +53,14 @@ String buildAcpEnvironmentProbeCommand(
       powerShellUtf8OutputScript('$powerShellProfilePathPreamble$checks'),
     );
   }
-  final checks = names
-      .map(
-        (name) =>
-            '[ -n "\${$name-}" ] || '
-            "printf '%s\\n' '$_environmentProbeMarker$name';",
-      )
-      .join(' ');
+  // Each name appears once, so the most names of the longest length the
+  // editor allows still fit the bridge's command limit. The names are plain
+  // identifiers, so `eval` sees only a parameter expansion.
+  final checks =
+      'for __flName in ${names.join(' ')}; do '
+      r'eval "[ -n \"\${$__flName-}\" ]" || '
+      "printf '$_environmentProbeMarker%s\\n' \"\$__flName\"; "
+      'done';
   return buildMonkeyMuxAcpPosixShellCommand(
     buildMonkeyMuxAcpProviderCommand([
       '/bin/sh',

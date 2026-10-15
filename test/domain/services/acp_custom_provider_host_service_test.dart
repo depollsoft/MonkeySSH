@@ -136,6 +136,47 @@ void main() {
       expect(script, isNot(contains(r'echo "$OPENAI_API_KEY"')));
     });
 
+    test(
+      'POSIX probe fits the most and longest names a definition allows',
+      () async {
+        final names = [
+          for (var i = 0; i < acpCustomProviderMaxEnvironmentVariables; i++)
+            'V${'$i'.padLeft(2, '0')}'.padRight(
+              acpEnvironmentVariableNameMaxLength,
+              'X',
+            ),
+        ];
+        expect(
+          validateAcpEnvironmentVariableNames(names),
+          hasLength(names.length),
+        );
+
+        final command = buildAcpEnvironmentProbeCommand(
+          names,
+          isWindows: false,
+        );
+
+        final home = await Directory.systemTemp.createTemp('acp-env-home');
+        addTearDown(() => home.delete(recursive: true));
+        final result = await Process.run(
+          '/bin/sh',
+          ['-c', command],
+          environment: {
+            'HOME': home.path,
+            'SHELL': '/bin/bash',
+            'PATH': '/usr/bin:/bin',
+            names.first: 'set',
+          },
+          includeParentEnvironment: false,
+        );
+        expect(
+          parseAcpEnvironmentProbeOutput(result.stdout as String, names),
+          names.skip(1),
+        );
+      },
+      testOn: 'mac-os || linux',
+    );
+
     test('Windows probe checks each variable with PowerShell', () {
       final script = _decodeEncodedPowerShell(
         buildAcpEnvironmentProbeCommand(const ['API_KEY'], isWindows: true),
