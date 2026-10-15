@@ -304,12 +304,15 @@ final class AcpClient {
     );
   }
 
-  /// Sends a prompt turn.
+  /// Sends a prompt turn. [onSent] runs once the transport has taken the
+  /// request, or failed partway through writing it; a failure before it
+  /// means the agent never saw the prompt.
   Future<AcpPromptResult> prompt({
     required String sessionId,
     required List<AcpContentBlock> content,
     AcpJsonMap meta = const <String, Object?>{},
     Duration? timeout,
+    void Function()? onSent,
   }) async {
     final result = await connection.request(
       'session/prompt',
@@ -323,6 +326,7 @@ final class AcpClient {
       // Provider/transport shutdown and explicit cancel already terminate it,
       // so the generic short control-request deadline is a false timeout here.
       noTimeout: timeout == null,
+      onWriteStarted: onSent,
     );
     return AcpPromptResult.fromJson(_requireObject(result));
   }

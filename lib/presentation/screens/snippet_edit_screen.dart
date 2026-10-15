@@ -8,9 +8,12 @@ import 'package:go_router/go_router.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/snippet_repository.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/snippet_variables.dart';
+import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
+import '../widgets/snippet_key_sender.dart';
 import '../widgets/unsaved_changes_guard.dart';
 
 typedef _SnippetEditDraft = ({
@@ -78,10 +81,12 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   int _folderDropdownRevision = 0;
   List<SnippetFolder> _folders = [];
   _SnippetEditDraft? _initialDraft;
+  late final Future<bool> _keyTokensReady;
 
   @override
   void initState() {
     super.initState();
+    _keyTokensReady = _upgradeStoredSnippetsForKeyTokens();
     unawaited(_loadFolders());
     if (widget.snippetId != null) {
       unawaited(_loadSnippet());
@@ -108,8 +113,35 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     }
   }
 
+  /// Startup escapes `{key:...}` in snippets saved before key tokens
+  /// existed, once. If that failed, it is finished here before this editor
+  /// reads or writes a snippet: the retry on the next launch escapes every
+  /// stored snippet, and would turn one saved now into plain text. Returns
+  /// whether stored snippets are ready.
+  Future<bool> _upgradeStoredSnippetsForKeyTokens() async {
+    final repository = ref.read(snippetRepositoryProvider);
+    try {
+      if (await repository.keyTokensReady()) {
+        return true;
+      }
+      await repository.escapeLegacyKeyTokens();
+      return true;
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'snippets',
+        'key_token_escape_failed',
+        fields: {'errorType': error.runtimeType, 'inEditor': true},
+      );
+      return false;
+    }
+  }
+
   Future<void> _loadSnippet() async {
     setState(() => _isLoading = true);
+    // An old snippet must load as the upgrade rewrote it, or saving it would
+    // turn its text into key presses.
+    await _keyTokensReady;
+    if (!mounted) return;
     try {
       final snippet = await ref
           .read(snippetRepositoryProvider)
@@ -153,7 +185,7 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
             IconButton(
               icon: const Icon(Icons.help_outline),
               onPressed: _showVariablesHelp,
-              tooltip: 'Variable syntax',
+              tooltip: 'Snippet syntax',
             ),
           ],
         ),
@@ -239,21 +271,59 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
                       ),
                       maxLines: 6,
                       style: FluttyTheme.monoStyle.copyWith(fontSize: 14),
+                      // Token errors show as the command is typed, like the
+                      // notes under it, not only on Save.
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a command';
                         }
-                        return null;
+                        final errors = parseSnippetKeySequence(value).errors;
+                        return errors.isEmpty ? null : errors.first;
                       },
                     ),
                     const SizedBox(height: 8),
-                    Text(
-                      'Use {{variable}} placeholders. Examples: '
-                      '{{container}}, {{branch}}, {{log_file}}.',
+                    Text.rich(
+                      _withCode(
+                        'Use `{{variable}}` placeholders, such as '
+                        '`{{container}}`. Press keys with `{key:esc}`, '
+                        '`{key:ctrl+c}` or `{key:shift+tab}`, and pause with '
+                        '`{delay:100}`.',
+                      ),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.outline,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
+                    for (final warning in snippetEditorWarnings(
+                      parseSnippetKeySequence(_contentController.text),
+                    )) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        key: const ValueKey('snippet-key-token-warning'),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.info_outline_rounded,
+                            size: 16,
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text.rich(
+                              _withTokensInMono(warning),
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 24),
 
                     // Variable preview
@@ -392,6 +462,19 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     var didScheduleClose = false;
 
     try {
+      if (!await _keyTokensReady) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not save: stored snippets could not be updated for '
+                'key tokens. Restart MonkeySSH and try again.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
       final repo = ref.read(snippetRepositoryProvider);
       final description = _descriptionController.text.isEmpty
           ? null
@@ -459,33 +542,148 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
   void _showVariablesHelp() {
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Variable Substitution'),
-        content: const SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Use {{variable}} syntax to create placeholders.'),
-              SizedBox(height: 16),
-              Text('Examples:', style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 8),
-              Text('• ssh {{user}}@{{host}}'),
-              Text('• tail -f {{log_file}}'),
-              Text('• docker restart {{container}}'),
-              Text('• git pull && {{restart_command}}'),
-              SizedBox(height: 16),
-              Text('When executing, you\'ll be prompted to fill in values.'),
-            ],
+      builder: (context) {
+        final theme = Theme.of(context);
+        // In-screen section headers are lowercase display mono.
+        final heading = FluttyTheme.displayMono(
+          fontSize: 13,
+          color: theme.colorScheme.onSurface,
+          letterSpacing: 0,
+        );
+        Widget code(String text) => Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(text, style: FluttyTheme.monoStyle),
+        );
+        return AlertDialog(
+          title: const Text('Snippet Syntax'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('variables', style: heading),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'Use `{{variable}}` to create a placeholder. You fill in '
+                    'its value when you run the snippet.',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                code('ssh {{user}}@{{host}}'),
+                code('tail -f {{log_file}}'),
+                code('docker restart {{container}}'),
+                code('git pull && {{restart_command}}'),
+                const SizedBox(height: 24),
+                Text('keys and pauses', style: heading),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'In the terminal, `{key:name}` presses a key and '
+                    '`{delay:N}` waits N milliseconds (up to 5000).',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                code('{key:esc}{key:esc}'),
+                code('{key:ctrl+c}'),
+                code('{key:shift+tab}'),
+                code('{key:esc}:wq{key:enter}'),
+                const SizedBox(height: 16),
+                const Text('Key names:'),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 4,
+                  children: [
+                    for (final key in _helpKeyNames)
+                      Text(key, style: FluttyTheme.monoStyle),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text.rich(
+                  _withCode(
+                    'Or one character, such as `a`, `/` or `?`. Put `ctrl+`, '
+                    '`alt+` or `shift+` in front. A shifted symbol such as '
+                    '`?` or `+` adds Shift itself, and so does a capital '
+                    'letter on its own.',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text.rich(
+                  _withCode(
+                    // A word joiner keeps `$` and `{key:1}` on one line.
+                    r'Write `\{key:esc}` to type a token as text. A token '
+                    'right after `\$`, as in `\$\u2060{key:1}`, is always '
+                    'text.',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'A sequence stops if the connection drops or you switch '
+                  'windows. Snippets with keys do not work in native chat.',
+                ),
+              ],
+            ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Got it'),
+            ),
+          ],
+        );
+      },
     );
   }
+}
+
+const _helpKeyNames = [
+  'esc',
+  'tab',
+  'enter',
+  'backspace',
+  'delete',
+  'insert',
+  'space',
+  'up',
+  'down',
+  'left',
+  'right',
+  'home',
+  'end',
+  'pageup',
+  'pagedown',
+  'f1-f12',
+];
+
+final _codeStyle = TextStyle(fontFamily: FluttyTheme.monoStyle.fontFamily);
+
+/// [text] as spans, with the runs between backticks set in mono at the
+/// surrounding size: literal syntax such as `{key:esc}` reads as machine
+/// text.
+TextSpan _withCode(String text) => TextSpan(
+  children: [
+    for (final (index, part) in text.split('`').indexed)
+      if (part.isNotEmpty)
+        TextSpan(text: part, style: index.isOdd ? _codeStyle : null),
+  ],
+);
+
+final _quotedToken = RegExp(r'\\?\$?\{(?:key|delay):[^{}\s]+\}');
+
+/// [text], an editor note that quotes tokens, with the tokens in mono.
+TextSpan _withTokensInMono(String text) {
+  final spans = <TextSpan>[];
+  var cursor = 0;
+  for (final match in _quotedToken.allMatches(text)) {
+    if (match.start > cursor) {
+      spans.add(TextSpan(text: text.substring(cursor, match.start)));
+    }
+    spans.add(TextSpan(text: match.group(0), style: _codeStyle));
+    cursor = match.end;
+  }
+  if (cursor < text.length) {
+    spans.add(TextSpan(text: text.substring(cursor)));
+  }
+  return TextSpan(children: spans);
 }

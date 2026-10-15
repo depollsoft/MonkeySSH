@@ -35,6 +35,7 @@ import 'app_review_prompt_service.dart';
 import 'background_ssh_service.dart';
 import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
+import 'host_agent_forwarding_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'host_notification_prefs_reader.dart';
@@ -44,6 +45,7 @@ import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
 import 'serial_task_queue.dart';
 import 'settings_service.dart';
+import 'ssh_agent_forwarding.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_wire.dart';
@@ -1050,6 +1052,7 @@ class SshConnectionConfig {
     this.passphrase,
     this.identityKeys,
     this.jumpHost,
+    this.agentForwarding,
     this.keepAliveInterval = const Duration(seconds: 30),
     this.connectionTimeout = const Duration(seconds: 30),
   });
@@ -1060,6 +1063,7 @@ class SshConnectionConfig {
     SshKey? key,
     List<SshKey>? identityKeys,
     SshConnectionConfig? jumpHostConfig,
+    SshAgentForwarding? agentForwarding,
   }) => SshConnectionConfig(
     hostname: host.hostname,
     port: host.port,
@@ -1069,6 +1073,7 @@ class SshConnectionConfig {
     passphrase: key?.passphrase,
     identityKeys: identityKeys,
     jumpHost: jumpHostConfig,
+    agentForwarding: agentForwarding,
   );
 
   /// Hostname or IP address.
@@ -1094,6 +1099,10 @@ class SshConnectionConfig {
 
   /// Jump host configuration for proxy connections.
   final SshConnectionConfig? jumpHost;
+
+  /// Serves the app's keys to this endpoint over SSH agent forwarding; null
+  /// when forwarding is off. Never set on a jump host.
+  final SshAgentForwarding? agentForwarding;
 
   /// Keep-alive interval.
   final Duration keepAliveInterval;
@@ -1442,9 +1451,14 @@ class SshService {
     WifiNetworkService? wifiNetworkService,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
+    SshAgentForwardingResolver? agentForwardingResolver,
+    SshAgentForwardingClientFactory? agentForwardingClientFactory,
   }) : wifiNetworkService = wifiNetworkService ?? WifiNetworkService(),
        _socketConnector = socketConnector ?? _connectWithKeepAlive,
-       _clientFactory = clientFactory ?? _defaultClientFactory;
+       _clientFactory = clientFactory ?? _defaultClientFactory,
+       _agentForwardingResolver = agentForwardingResolver,
+       _agentForwardingClientFactory =
+           agentForwardingClientFactory ?? createAgentForwardingSshClient;
 
   /// Number of key identities to try per SSH authentication attempt.
   ///
@@ -1478,6 +1492,8 @@ class SshService {
 
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
+  final SshAgentForwardingResolver? _agentForwardingResolver;
+  final SshAgentForwardingClientFactory _agentForwardingClientFactory;
 
   final Map<int, SshSession> _sessions = {};
   int _nextConnectionId = 1;
@@ -1592,12 +1608,20 @@ class SshService {
         ),
       );
 
+      preflightPhase = 'agent_forwarding';
+      final resolvingForwarding = _agentForwardingResolver?.call(host);
+      final agentForwarding = resolvingForwarding == null
+          ? null
+          : await (cancellationToken?.guard(resolvingForwarding) ??
+                resolvingForwarding);
+
       preflightPhase = 'build_config';
       final config = SshConnectionConfig.fromHost(
         host,
         key: key,
         identityKeys: identityKeys,
         jumpHostConfig: jumpHostConfig,
+        agentForwarding: agentForwarding,
       );
 
       preflightPhase = 'connect';
@@ -1645,6 +1669,7 @@ class SshService {
             'usesJumpHost': config.jumpHost != null,
             'usesPassword': config.password != null,
             'identityCount': config.identityKeys?.length ?? 0,
+            'agentForwarding': agentForwarding != null,
           },
         );
         return SshConnectionResult(
@@ -2056,15 +2081,28 @@ class SshService {
           SshConnectionState.authenticating,
           isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
         );
-        final createdClient = _clientFactory(
-          socket,
-          username: config.username,
-          onVerifyHostKey: verify,
-          onPasswordRequest: authHandlers.onPasswordRequest,
-          onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: identities,
-          keepAliveInterval: config.keepAliveInterval,
-        );
+        final agentForwarding = config.agentForwarding;
+        final createdClient = agentForwarding == null
+            ? _clientFactory(
+                socket,
+                username: config.username,
+                onVerifyHostKey: verify,
+                onPasswordRequest: authHandlers.onPasswordRequest,
+                onUserInfoRequest: authHandlers.onUserInfoRequest,
+                identities: identities,
+                keepAliveInterval: config.keepAliveInterval,
+              )
+            : _agentForwardingClientFactory(
+                socket,
+                username: config.username,
+                agentHandler: agentForwarding,
+                onVerifyHostKey: verify,
+                onPasswordRequest: authHandlers.onPasswordRequest,
+                onUserInfoRequest: authHandlers.onUserInfoRequest,
+                identities: identities,
+                keepAliveInterval: config.keepAliveInterval,
+              );
+        agentForwarding?.attachClient(createdClient);
         client = createdClient;
         unownedSocket = null;
         await _awaitAuthentication(
@@ -7917,6 +7955,7 @@ final sshServiceProvider = Provider<SshService>(
       interactiveAuthPromptHandlerProvider,
     ),
     wifiNetworkService: ref.watch(wifiNetworkServiceProvider),
+    agentForwardingResolver: ref.watch(sshAgentForwardingResolverProvider),
   ),
 );
 
