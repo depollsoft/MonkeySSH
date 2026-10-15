@@ -859,6 +859,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isPinchZooming = false;
   bool _shouldFollowLiveOutput = true;
   bool _didPasteDemoImage = false;
+
+  /// Whether a preset launch is creating its git worktree, which can take
+  /// from seconds to minutes; the terminal says so while it does.
+  final _creatingWorktree = ValueNotifier<bool>(false);
+
+  void _setCreatingWorktree(bool creating) {
+    if (mounted) _creatingWorktree.value = creating;
+  }
+
   final _pasteUploadProgress = ValueNotifier<TerminalPasteUploadProgress?>(
     null,
   );
@@ -6606,6 +6615,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ref: ref,
       session: session,
       preset: preset,
+      onCreatingWorktree: _setCreatingWorktree,
       sessionExists: sessionName.isEmpty
           ? null
           : () async {
@@ -7502,6 +7512,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ref: ref,
       session: session,
       preset: preset,
+      onCreatingWorktree: _setCreatingWorktree,
       sessionExists: () async =>
           await _monkeyMuxService.runningServerStatusFromInstalledHelpers(
             session,
@@ -8797,6 +8808,36 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     fit: StackFit.expand,
     children: [
       terminalView,
+      Positioned(
+        left: 0,
+        right: 0,
+        bottom: FluttyTheme.spacingMd,
+        child: SafeArea(
+          top: false,
+          bottom: applyBottomSafeArea,
+          child: Center(
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _creatingWorktree,
+              builder: (context, creating, _) {
+                final disableAnimations =
+                    MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+                return AnimatedSwitcher(
+                  duration: disableAnimations
+                      ? Duration.zero
+                      : const Duration(milliseconds: 150),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeOutCubic,
+                  child: creating
+                      ? const AgentWorktreeCreatingIndicator(
+                          key: Key('terminal-worktree-creating'),
+                        )
+                      : const SizedBox.shrink(),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
       Positioned(
         left: 0,
         right: 0,
@@ -11537,6 +11578,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _settleWorktreeLaunch(launched: true);
     WidgetsBinding.instance.removeObserver(this);
     _pasteUploadProgress.dispose();
+    _creatingWorktree.dispose();
     // Provider notifications must wait until the widget tree finishes unmounting.
     // The owner check preserves any replacement terminal's override.
     scheduleMicrotask(_clearAppThemeOverride);
@@ -12913,10 +12955,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           children: [
             const CursorBlock(size: 32),
             const SizedBox(height: 16),
-            Text(
-              isCancellingConnection ? 'cancelling…' : 'connecting…',
-              style: FluttyTheme.monoStyle.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            ValueListenableBuilder<bool>(
+              valueListenable: _creatingWorktree,
+              builder: (context, creatingWorktree, _) => Text(
+                isCancellingConnection
+                    ? 'cancelling…'
+                    : creatingWorktree
+                    ? AgentWorktreeCreatingIndicator.label
+                    : 'connecting…',
+                style: FluttyTheme.monoStyle.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
             ),
             const SizedBox(height: 16),

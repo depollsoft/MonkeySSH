@@ -47,6 +47,7 @@ void main() {
     AgentLaunchPreset preset = _preset,
     SshSession? session,
     Future<bool> Function()? sessionExists,
+    ValueChanged<bool>? onCreatingWorktree,
   }) async {
     TerminalAgentWorktreeLaunch? launch;
     final launcher = AgentWorktreeLauncher(
@@ -68,6 +69,7 @@ void main() {
                     session: session ?? _session(),
                     preset: preset,
                     sessionExists: sessionExists,
+                    onCreatingWorktree: onCreatingWorktree,
                   );
                 },
                 child: const Text('launch'),
@@ -128,6 +130,64 @@ void main() {
     expect(launch.preset.tmuxSessionName, 'agents');
     expect(service.created, hasLength(1));
     expect(registry.records, service.created);
+  });
+
+  testWidgets('says it is creating the worktree until git is done', (
+    tester,
+  ) async {
+    final creating = <bool>[];
+
+    await prepare(
+      tester,
+      sessionExists: () async => false,
+      onCreatingWorktree: creating.add,
+    );
+
+    expect(creating.first, isTrue);
+    expect(creating.last, isFalse);
+    expect(service.created, hasLength(1));
+  });
+
+  testWidgets('clears the creating state when the worktree fails', (
+    tester,
+  ) async {
+    service.addError = const AgentWorktreeException(
+      AgentWorktreeErrorKind.addFailed,
+    );
+    final creating = <bool>[];
+
+    await prepare(tester, onCreatingWorktree: creating.add);
+
+    expect(creating.first, isTrue);
+    expect(creating.last, isFalse);
+    expect(find.textContaining('Agent not started:'), findsOneWidget);
+  });
+
+  testWidgets('says nothing about a worktree when joining a running session', (
+    tester,
+  ) async {
+    final creating = <bool>[];
+
+    await prepare(
+      tester,
+      sessionExists: () async => true,
+      onCreatingWorktree: creating.add,
+    );
+
+    expect(creating, isEmpty);
+  });
+
+  testWidgets('the creating indicator names what is happening', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: Center(child: AgentWorktreeCreatingIndicator())),
+      ),
+    );
+
+    expect(find.text('creating worktree…'), findsOneWidget);
+    expect(find.bySemanticsLabel('Creating worktree'), findsOneWidget);
+    semantics.dispose();
   });
 
   testWidgets('stops when it cannot tell whether the session runs', (

@@ -12,6 +12,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app/theme.dart';
 import '../../../domain/models/agent_launch_preset.dart';
 import '../../../domain/services/agent_worktree_launcher.dart';
 import '../../../domain/services/agent_worktree_service.dart';
@@ -19,6 +20,7 @@ import '../../../domain/services/diagnostics_log_service.dart';
 import '../../../domain/services/remote_file_service.dart'
     show shellEscapePosix;
 import '../../../domain/services/ssh_service.dart';
+import '../../widgets/cursor_block.dart';
 
 /// A preset launch, with the worktree created for it when it needed one.
 final class TerminalAgentWorktreeLaunch {
@@ -77,6 +79,7 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
   required SshSession session,
   required AgentLaunchPreset preset,
   Future<bool> Function()? sessionExists,
+  ValueChanged<bool>? onCreatingWorktree,
 }) async {
   if (!preset.launchesInNewWorktree) {
     return TerminalAgentWorktreeLaunch(preset: preset);
@@ -124,6 +127,7 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
       return TerminalAgentWorktreeLaunch(preset: preset, attachOnly: true);
     }
   }
+  onCreatingWorktree?.call(true);
   try {
     final launch = await ref
         .read(agentWorktreeLauncherProvider)
@@ -138,8 +142,58 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
       worktree: launch,
     );
   } on AgentWorktreeException catch (error) {
+    onCreatingWorktree?.call(false);
     explain(error.message);
     return null;
+  } finally {
+    onCreatingWorktree?.call(false);
+  }
+}
+
+/// Says over the terminal that a preset launch is creating its worktree,
+/// which can take from seconds to minutes on a large repository.
+class AgentWorktreeCreatingIndicator extends StatelessWidget {
+  /// Creates the indicator.
+  const AgentWorktreeCreatingIndicator({super.key});
+
+  /// What the indicator says, and what screen readers announce.
+  static const label = 'creating worktree…';
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      label: 'Creating worktree',
+      excludeSemantics: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+          border: Border.all(color: colorScheme.outlineVariant),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: FluttyTheme.spacingMd - FluttyTheme.spacingXs,
+            vertical: FluttyTheme.spacingSm,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CursorBlock(size: 10),
+              const SizedBox(width: FluttyTheme.spacingSm),
+              Text(
+                label,
+                style: FluttyTheme.monoStyle.copyWith(
+                  fontSize: 12,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
