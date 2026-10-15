@@ -1,6 +1,8 @@
 /// Saves a previewed `ssh_config` import as hosts and port forwards.
 library;
 
+import 'dart:async';
+
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -14,6 +16,9 @@ import 'telemetry_service.dart';
 
 /// Telemetry creation method for hosts imported from an OpenSSH config.
 const sshConfigHostCreationMethod = 'ssh_config';
+
+/// Most `host_created` events one import sends.
+const sshConfigImportMaxHostCreatedEvents = 20;
 
 const _maxColumnLength = 255;
 
@@ -249,14 +254,22 @@ class SshConfigImportService {
     );
     final telemetry = _telemetry;
     if (telemetry != null) {
+      // Best effort and bounded: the import has finished, so it doesn't wait
+      // on analytics, and a config with hundreds of hosts doesn't send
+      // hundreds of events.
+      var logged = 0;
       for (final entry in plan.entries) {
+        if (logged >= sshConfigImportMaxHostCreatedEvents) break;
         if (!created.containsKey(entry.id)) continue;
-        await telemetry.logHostCreated(
-          method: sshConfigHostCreationMethod,
-          hasKey: false,
-          hasJumpHost: entry.jumpEntryId != null,
-          hasAutoConnect: false,
-          hasAgentPreset: false,
+        logged++;
+        unawaited(
+          telemetry.logHostCreated(
+            method: sshConfigHostCreationMethod,
+            hasKey: false,
+            hasJumpHost: entry.jumpEntryId != null,
+            hasAutoConnect: false,
+            hasAgentPreset: false,
+          ),
         );
       }
     }

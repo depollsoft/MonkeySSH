@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -23,6 +25,26 @@ class _RecordingAnalyticsClient implements TelemetryAnalyticsClient {
     required String name,
     required Map<String, Object> parameters,
   }) async => events.add((name, parameters));
+
+  @override
+  Future<void> resetAnalyticsData() async {}
+
+  @override
+  Future<void> setCollectionEnabled({required bool enabled}) async {}
+}
+
+/// An analytics client whose calls never finish, like a stalled channel.
+class _StalledAnalyticsClient implements TelemetryAnalyticsClient {
+  int calls = 0;
+
+  @override
+  Future<void> logEvent({
+    required String name,
+    required Map<String, Object> parameters,
+  }) {
+    calls++;
+    return Completer<void>().future;
+  }
 
   @override
   Future<void> resetAnalyticsData() async {}
@@ -262,6 +284,37 @@ Host secret-alias
         expect(parameters.values.join(' '), isNot(contains(secret)));
       }
     }
+  });
+
+  test('a bulk import neither waits on nor floods analytics', () async {
+    final stalled = _StalledAnalyticsClient();
+    final bulk = SshConfigImportService(
+      db: db,
+      hostRepository: hosts,
+      portForwardRepository: forwards,
+      telemetry: TelemetryService(
+        status: TelemetryServiceStatus.ready,
+        collectionEnabled: true,
+        diagnosticsLogger: const NoopDiagnosticsLogger(),
+        analyticsClient: stalled,
+      ),
+      diagnostics: diagnostics,
+    );
+    final plan = _plan(
+      [for (var i = 0; i < 30; i++) 'Host h$i\n  HostName h$i.test\n  User me']
+          .join('\n'),
+    );
+
+    final result = await bulk
+        .importEntries(
+          plan,
+          selectedIds: {for (final entry in plan.entries) entry.id},
+          defaultUsername: '',
+        )
+        .timeout(const Duration(seconds: 5));
+
+    expect(result.createdHostIds, hasLength(30));
+    expect(stalled.calls, sshConfigImportMaxHostCreatedEvents);
   });
 
   test('saved-host matching uses the effective user and jump host', () {
