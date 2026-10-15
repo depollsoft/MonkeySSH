@@ -146,15 +146,17 @@ class AcpComposerDraftPersistence {
   }
 
   void _sync({required bool save}) {
-    var shouldSave = save;
     final identity = AcpComposerDraftIdentity.of(_controller.sessionKey);
-    if (identity != _identity) {
-      // A resumed session may come back under a new ACP session id; move the
-      // draft with it.
-      unawaited(_store.move(_identity, identity));
+    final rekeyed = identity != _identity;
+    if (rekeyed) {
+      // A resumed session may come back under a new ACP session id. The
+      // draft moves with it, written under the new id at once and before
+      // the old rows are deleted.
+      _saveTimer?.cancel();
+      _saveTimer = null;
+      _dirty = false;
+      unawaited(_store.move(_identity, identity, _controller.draftSnapshot));
       _identity = identity;
-      _lastText = null;
-      shouldSave = true;
     }
     final notice = _controller.restoredDraftNotice;
     if (_lastNotice != null && notice == null) {
@@ -165,7 +167,8 @@ class AcpComposerDraftPersistence {
     final text = _controller.text;
     final caret = _controller.caret;
     final attachments = _controller.attachments;
-    if (text == _lastText &&
+    if (!rekeyed &&
+        text == _lastText &&
         caret == _lastCaret &&
         _sameAttachments(attachments)) {
       return;
@@ -173,9 +176,13 @@ class AcpComposerDraftPersistence {
     _lastText = text;
     _lastCaret = caret;
     _lastAttachments = attachments;
+    // The move above already remembered and saved this draft.
+    if (rekeyed) {
+      return;
+    }
     final draft = _controller.draftSnapshot;
     _store.remember(_identity, draft);
-    if (!shouldSave) {
+    if (!save) {
       return;
     }
     if (draft.isEmpty) {

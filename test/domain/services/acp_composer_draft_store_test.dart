@@ -78,7 +78,21 @@ class _RecordingSettings extends SettingsService {
   final List<String> written = <String>[];
   int reads = 0;
   Completer<void>? readGate;
+  Completer<void>? keysGate;
+  Completer<void>? writeGate;
   Object? readError;
+
+  @override
+  Future<List<String>> getKeysWithPrefix(String prefix) async {
+    await keysGate?.future;
+    return super.getKeysWithPrefix(prefix);
+  }
+
+  @override
+  Future<void> setStrings(Map<String, String?> values) async {
+    await writeGate?.future;
+    return super.setStrings(values);
+  }
 
   @override
   Future<String?> getString(String key) async {
@@ -739,7 +753,11 @@ void main() {
       );
       expect(draftStore.peek(_identity)!.draft.text, 'typed');
 
-      await draftStore.move(_identity, _otherIdentity);
+      await draftStore.move(
+        _identity,
+        _otherIdentity,
+        AcpComposerDraftSnapshot(text: 'typed'),
+      );
       await draftStore.save(
         _otherIdentity,
         AcpComposerDraftSnapshot(text: 'typed'),
@@ -825,6 +843,104 @@ void main() {
       await settings.setString('${prefix}a', 'x');
       await settings.setString('acp_composer_draft_chipsx', 'y');
       expect(await settings.getKeysWithPrefix(prefix), ['${prefix}a']);
+    });
+  });
+
+  group('pre-merge review', () {
+    AcpComposerDraftIdentity session(int index) => AcpComposerDraftIdentity(
+      hostId: 1,
+      providerId: 'p',
+      acpSessionId: 'session-$index',
+    );
+
+    test(
+      'a session opened while pruning reads its keys keeps its draft',
+      () async {
+        for (var i = 0; i < 4; i++) {
+          now = now.add(const Duration(minutes: 1));
+          await store().save(
+            session(i),
+            AcpComposerDraftSnapshot(text: 'draft $i'),
+          );
+        }
+
+        final draftStore = store(maxSavedDrafts: 2);
+        final gate = settings.keysGate = Completer<void>();
+        final pruning = draftStore.pruneExpired();
+        await pumpEventQueue();
+        // session-0 is the oldest, so this prune picked it for deletion.
+        final opening = draftStore.open(session(0));
+        gate.complete();
+        await pruning;
+
+        expect((await opening).draft.text, 'draft 0');
+        expect(
+          await settings.getString(
+            '${SettingKeys.acpComposerDraftPrefix}${session(0).value}',
+          ),
+          isNotNull,
+        );
+      },
+    );
+
+    test('saves that finish after their draft left memory keep no pasted '
+        'text alive', () async {
+      final draftStore = store(maxRememberedDrafts: 1);
+      final gate = settings.writeGate = Completer<void>();
+      final saves = [
+        for (var i = 0; i < 3; i++)
+          draftStore.save(
+            session(i),
+            AcpComposerDraftSnapshot(
+              text: 'draft $i',
+              attachments: [_pastedText('paste $i')],
+            ),
+          ),
+      ];
+      gate.complete();
+      await Future.wait(saves);
+
+      expect(draftStore.chipsRecordCount, 1);
+      final reopened = await store().open(session(0));
+      expect(reopened.draft.attachments.single.candidate.isPastedText, isTrue);
+    });
+
+    test('a save after its host was forgotten is not kept in memory', () async {
+      final draftStore = store();
+      await draftStore.forgetHost(_identity.hostId);
+
+      await draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'late flush'),
+      );
+      draftStore.remember(
+        _identity,
+        AcpComposerDraftSnapshot(text: 'still typing'),
+      );
+
+      expect(draftStore.peek(_identity), isNull);
+      expect(await draftKeys(), isEmpty);
+    });
+
+    test('a write in flight when its host is forgotten keeps no pasted text '
+        'alive', () async {
+      final draftStore = store();
+      final gate = settings.writeGate = Completer<void>();
+      final saving = draftStore.save(
+        _identity,
+        AcpComposerDraftSnapshot(
+          text: 'gone',
+          attachments: [_pastedText('host paste')],
+        ),
+      );
+      await pumpEventQueue();
+      final forgetting = draftStore.forgetHost(_identity.hostId);
+      gate.complete();
+      await saving;
+      await forgetting;
+
+      expect(draftStore.chipsRecordCount, 0);
+      expect(await draftKeys(), isEmpty);
     });
   });
 

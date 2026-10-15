@@ -114,6 +114,11 @@ class AcpComposerDraftStore {
   final Expando<String> _chipTexts = Expando<String>('chipText');
   Future<void>? _pruning;
 
+  /// How many sessions have a record of their written chips, each holding
+  /// that session's pasted text in memory.
+  @visibleForTesting
+  int get chipsRecordCount => _savedChips.length;
+
   /// This run's state for [identity] when it is known without reading
   /// storage, or `null` when the saved draft still has to be read.
   AcpOpenedComposerDraft? peek(AcpComposerDraftIdentity identity) {
@@ -148,10 +153,14 @@ class AcpComposerDraftStore {
   }
 
   /// Records [draft] as this run's latest draft for [identity], in memory.
+  ///
+  /// Drafts of a host deleted in this run are not kept, even from a chat
+  /// still open on its live connection.
   void remember(
     AcpComposerDraftIdentity identity,
     AcpComposerDraftSnapshot draft,
   ) {
+    if (_forgottenHosts.contains(identity.hostId)) return;
     final key = identity.value;
     _seen.add(key);
     _remembered
@@ -205,27 +214,31 @@ class AcpComposerDraftStore {
     return save(identity, AcpComposerDraftSnapshot(text: ''));
   }
 
-  /// Moves this run's draft state from [from] to [to], for a session that
-  /// came back under a new ACP session id. The caller saves the draft under
-  /// [to] next.
+  /// Moves [from]'s draft to [to], for a session that came back under a new
+  /// ACP session id. [draft], the composer's current contents, is saved
+  /// under [to] before [from]'s rows are deleted, so the draft is on disk
+  /// under one of them at every point.
   ///
   /// When [from]'s saved draft could not be read, its rows are left alone
   /// and [to] is not written either, so the unread draft survives.
   Future<void> move(
     AcpComposerDraftIdentity from,
     AcpComposerDraftIdentity to,
+    AcpComposerDraftSnapshot draft,
   ) {
     final fromKey = from.value;
     final toKey = to.value;
-    if (fromKey == toKey) return Future<void>.value();
+    if (fromKey == toKey) return save(to, draft);
     final notice = _pendingNotices.remove(fromKey);
     if (notice != null) _pendingNotices[toKey] = notice;
     if (_unreadable.contains(fromKey)) {
       _unreadable.add(toKey);
       _remembered.remove(fromKey);
+      remember(to, draft);
       return Future<void>.value();
     }
-    return clear(from);
+    final saved = save(to, draft);
+    return Future.wait(<Future<void>>[saved, clear(from)]);
   }
 
   /// Adds [typed], from a composer that closed before [identity]'s saved
@@ -599,7 +612,7 @@ class AcpComposerDraftStore {
             ? null
             : AcpSavedComposerDraft.encodeChips(chipTexts),
     });
-    _savedChips[key] = chipCandidates;
+    _recordChips(key, chipCandidates);
   }
 
   Future<void> _deleteRows(AcpComposerDraftIdentity identity) async {
@@ -607,7 +620,15 @@ class AcpComposerDraftStore {
       _draftKey(identity): null,
       _chipsKey(identity): null,
     });
-    _savedChips[identity.value] = const <AcpAttachmentCandidate>[];
+    _recordChips(identity.value, const <AcpAttachmentCandidate>[]);
+  }
+
+  /// Records the chips [key]'s row now holds, only while [key]'s draft is
+  /// still remembered. A write that finishes after its draft was evicted, or
+  /// after its host was forgotten, records nothing, so no pastes are kept
+  /// alive without a snapshot; the next save rewrites the chips row.
+  void _recordChips(String key, List<AcpAttachmentCandidate> chips) {
+    if (_remembered.containsKey(key)) _savedChips[key] = chips;
   }
 
   String? _chipText(AcpMemoryAttachmentCandidate candidate) {
@@ -685,8 +706,11 @@ class AcpComposerDraftStore {
       final hasDraft = heads.containsKey(
         '${SettingKeys.acpComposerDraftPrefix}$suffix',
       );
-      if (!hasDraft && !_isActive(suffix)) doomed.add(suffix);
+      if (!hasDraft) doomed.add(suffix);
     }
+    // Checked again after the reads: a session opened meanwhile has its
+    // read queued behind this prune and must still find its draft.
+    doomed.removeWhere(_isActive);
     if (doomed.isEmpty) return;
     await _settings.setStrings(<String, String?>{
       for (final suffix in doomed) ...{

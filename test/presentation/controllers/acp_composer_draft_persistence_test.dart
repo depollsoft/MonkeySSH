@@ -580,6 +580,32 @@ void main() {
     });
   });
 
+  group('pre-merge review', () {
+    testWidgets('a re-keyed draft is written under the new id at once, '
+        'before the old rows are deleted', (tester) async {
+      final settings = MemorySettingsService();
+      final harness = _Harness(settings)..start();
+      addTearDown(harness.dispose);
+      await tester.pump();
+      harness.controller.setText('follow me');
+      await tester.pump(kAcpComposerDraftSaveDelay);
+      settings.writtenKeys.clear();
+
+      final resumed = AcpComposerDraftIdentity.of(
+        _key(acpSessionId: 'resumed'),
+      );
+      harness.controller.rebindSession(
+        _key(acpSessionId: 'resumed'),
+        session: null,
+      );
+      await tester.pump();
+
+      expect(_savedText(settings, resumed), 'follow me');
+      expect(_savedText(settings), isNull);
+      expect(settings.writtenKeys.first, contains(resumed.acpSessionId));
+    });
+  });
+
   group('controller', () {
     test('restoreDraft puts saved text before newer text and never sends', () {
       final manager = RecordingAcpSessionManager();
