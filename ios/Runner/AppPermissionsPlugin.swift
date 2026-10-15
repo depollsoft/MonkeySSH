@@ -33,7 +33,8 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
     },
     schedule: { delay, work in
       DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-    }
+    },
+    isAppActive: { UIApplication.shared.applicationState == .active }
   )
 
   override init() {
@@ -210,7 +211,9 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
 /// from the app, so once the app has been active for a full second with the
 /// status still undecided, the waiting callers read as denied and the next
 /// request prompts again. Losing focus within that second (another system
-/// alert, or iOS showing the location alert again) cancels the check.
+/// alert, or iOS showing the location alert again) cancels the check. A
+/// request made while the app is already inactive (another system alert is
+/// up) gets no resign of its own, so it counts as having lost focus.
 final class LocationPromptQueue {
   typealias Reply = (String) -> Void
 
@@ -220,6 +223,7 @@ final class LocationPromptQueue {
   private let decidedStatus: () -> String?
   private let requestAuthorization: () -> Void
   private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+  private let isAppActive: () -> Bool
 
   private var waiting: [Reply] = []
   /// Bumped on every prompt and every loss of focus, so a scheduled check
@@ -232,11 +236,13 @@ final class LocationPromptQueue {
   init(
     decidedStatus: @escaping () -> String?,
     requestAuthorization: @escaping () -> Void,
-    schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void
+    schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+    isAppActive: @escaping () -> Bool
   ) {
     self.decidedStatus = decidedStatus
     self.requestAuthorization = requestAuthorization
     self.schedule = schedule
+    self.isAppActive = isAppActive
   }
 
   var isWaiting: Bool { !waiting.isEmpty }
@@ -246,6 +252,11 @@ final class LocationPromptQueue {
   func enqueue(_ reply: @escaping Reply) {
     waiting.append(reply)
     promptGeneration += 1
+    if !isAppActive() {
+      // Already inactive, so willResignActive will not fire for this alert;
+      // the next didBecomeActive still has to check whether it was answered.
+      promptTookFocus = true
+    }
     requestAuthorization()
   }
 

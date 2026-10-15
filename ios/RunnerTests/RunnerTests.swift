@@ -151,6 +151,7 @@ private final class SuspendedActivity {
 final class LocationPromptQueueTests: XCTestCase {
   private var decided: String?
   private var authorizationRequests = 0
+  private var appActive = true
   private var scheduled: [() -> Void] = []
   private var replies: [String] = []
   private var queue: LocationPromptQueue!
@@ -159,12 +160,14 @@ final class LocationPromptQueueTests: XCTestCase {
     super.setUp()
     decided = nil
     authorizationRequests = 0
+    appActive = true
     scheduled = []
     replies = []
     queue = LocationPromptQueue(
       decidedStatus: { [unowned self] in self.decided },
       requestAuthorization: { [unowned self] in self.authorizationRequests += 1 },
-      schedule: { [unowned self] _, work in self.scheduled.append(work) }
+      schedule: { [unowned self] _, work in self.scheduled.append(work) },
+      isAppActive: { [unowned self] in self.appActive }
     )
   }
 
@@ -254,6 +257,35 @@ final class LocationPromptQueueTests: XCTestCase {
     XCTAssertEqual(replies, [])
     XCTAssertTrue(queue.isWaiting)
 
+    decided = "granted"
+    queue.authorizationDidChange()
+    XCTAssertEqual(replies, ["granted"])
+  }
+
+  func testRequestWhileAnotherAlertIsUpDetectsAnUnansweredClose() {
+    // Another system alert already holds focus, so the location alert queued
+    // behind it causes no willResignActive. A home swipe closes both.
+    appActive = false
+    enqueue()
+    appActive = true
+    queue.appDidBecomeActive()
+    runScheduled()
+
+    XCTAssertEqual(replies, ["denied"])
+    XCTAssertFalse(queue.isWaiting)
+  }
+
+  func testRequestWhileAnotherAlertIsUpWaitsWhileTheLocationAlertShows() {
+    // The first alert is answered, then the location alert takes focus
+    // before the grace ends.
+    appActive = false
+    enqueue()
+    appActive = true
+    queue.appDidBecomeActive()
+    queue.appWillResignActive()
+    runScheduled()
+
+    XCTAssertEqual(replies, [])
     decided = "granted"
     queue.authorizationDidChange()
     XCTAssertEqual(replies, ["granted"])
