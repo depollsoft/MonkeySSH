@@ -248,6 +248,7 @@ void main() {
     bool supported = true,
     bool clearFails = false,
     Completer<void>? Function(int port)? applyGate,
+    bool Function(int port)? applyFails,
   }) {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -259,6 +260,9 @@ void main() {
                 final port = (call.arguments as Map)['port'] as int;
                 _events.add('apply:$port');
                 await applyGate?.call(port)?.future;
+                if (applyFails?.call(port) ?? false) {
+                  throw PlatformException(code: 'apply_failed');
+                }
               case 'clear':
                 _events.add('clear');
                 if (clearFails) {
@@ -676,6 +680,74 @@ void main() {
     _events.clear();
     await closeBrowser(tester);
     expect(_events, ['apply:$_sinkPort']);
+  });
+
+  testWidgets('retries the sink when a drop could not move the proxy', (
+    tester,
+  ) async {
+    var sinkFailures = 2;
+    mockProxyChannel(
+      applyFails: (port) => port == _sinkPort && sinkFailures-- > 0,
+    );
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    await openAddress(tester, '10.0.0.5:8080');
+
+    _events.clear();
+    source.route = null;
+    await settle(tester);
+    expect(_events, ['load:about:blank', 'apply:$_sinkPort']);
+    expect(find.text('tunnel down'), findsOneWidget);
+    final stuck = find.textContaining('Couldn’t move the browser’s proxy');
+    expect(stuck, findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 1));
+    await settle(tester);
+    expect(_events, hasLength(3));
+    expect(stuck, findsOneWidget);
+    // Backs off: the next attempt waits twice as long.
+    await tester.pump(const Duration(seconds: 2));
+    await settle(tester);
+    expect(_events, [
+      'load:about:blank',
+      'apply:$_sinkPort',
+      'apply:$_sinkPort',
+      'apply:$_sinkPort',
+    ]);
+    expect(stuck, findsNothing);
+    expect(find.text('tunnel down'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 30));
+    expect(_events, hasLength(4));
+    await closeBrowser(tester);
+  });
+
+  testWidgets('a forward coming back ends the sink retries', (tester) async {
+    mockProxyChannel(applyFails: (port) => port == _sinkPort);
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+    await openAddress(tester, '10.0.0.5:8080');
+    source.route = null;
+    await settle(tester);
+    expect(
+      find.textContaining('Couldn’t move the browser’s proxy'),
+      findsOneWidget,
+    );
+
+    _events.clear();
+    source.route = const SocksForwardRoute(connectionId: 2, port: 41090);
+    await settle(tester);
+    expect(_events, ['apply:41090', 'back']);
+    expect(find.text('tunnel down'), findsNothing);
+
+    // No late retry moves the live proxy to the sink.
+    await tester.pump(const Duration(minutes: 1));
+    expect(_events, ['apply:41090', 'back']);
+    await closeBrowser(tester);
   });
 
   testWidgets('a forward that drops while the proxy is applied ends down', (

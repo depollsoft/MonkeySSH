@@ -192,6 +192,11 @@ class _PortForwardBrowserScreenState
   var _socksGeneration = 0;
   // Port the browser is being pointed at, while that is in flight.
   int? _socksRoutingPort;
+  // A drop could not move the proxy to the sink, so it may still name the
+  // stopped forward's free port; retried until it moves or a route replaces
+  // it.
+  var _socksSinkPending = false;
+  Timer? _socksSinkRetry;
   // A loopback browser could not remove a leftover SOCKS proxy.
   var _directProxyBlocked = false;
 
@@ -227,6 +232,7 @@ class _PortForwardBrowserScreenState
     if (_isSocksBrowser) {
       WidgetsBinding.instance.removeObserver(this);
       _socksGeneration++;
+      _socksSinkRetry?.cancel();
       _tearDownSocksBrowser();
     }
     _addressFocusNode.removeListener(_handleAddressFocusChanged);
@@ -490,6 +496,9 @@ class _PortForwardBrowserScreenState
         return;
       }
     }
+    // Routing replaces the sink target, so a pending sink retry must not
+    // run after it. Synchronous with queueing the route below.
+    _cancelSocksSinkRetry();
     try {
       if (_socksProxyHeld) {
         await _socksProxy.reroute(route.port);
@@ -504,6 +513,10 @@ class _PortForwardBrowserScreenState
           _socksStatus = SocksBrowserRouteStatus.down;
           _socksMessage = 'Couldn’t point the browser at the forward.';
         });
+        // The refused apply leaves the proxy's target unknown.
+        if (_tabs.isNotEmpty) {
+          unawaited(_sinkSocksProxy());
+        }
       }
       return;
     }
@@ -617,9 +630,70 @@ class _PortForwardBrowserScreenState
       tab.socksRestoreUri = tab.currentUri;
       unawaited(_loadSafely(tab, _blankSocksUri));
     }
-    if (_socksProxyHeld) {
-      await _socksProxy.block();
+    await _sinkSocksProxy();
+  }
+
+  /// Points a held proxy at the sink. When that fails, says so on the down
+  /// panel and retries with backoff until it works or a route replaces it:
+  /// the stopped forward's port is free for any app to bind.
+  Future<void> _sinkSocksProxy() async {
+    if (!_socksProxyHeld) {
+      return;
     }
+    final sunk = await _socksProxy.block();
+    if (!mounted) {
+      return;
+    }
+    if (sunk) {
+      if (_socksSinkPending) {
+        _cancelSocksSinkRetry();
+        setState(() {});
+      }
+      return;
+    }
+    if (_socksStatus != SocksBrowserRouteStatus.down) {
+      // Moving to a new port; routing there replaces the target.
+      return;
+    }
+    DiagnosticsLogService.instance.warning(
+      'browser.socks',
+      'sink_failed_after_drop',
+    );
+    setState(() => _socksSinkPending = true);
+    _scheduleSocksSinkRetry(_socksSinkRetryInitialDelay);
+  }
+
+  void _scheduleSocksSinkRetry(Duration delay) {
+    _socksSinkRetry?.cancel();
+    _socksSinkRetry = Timer(delay, () {
+      if (!mounted || !_socksSinkPending || !_socksProxyHeld) {
+        return;
+      }
+      unawaited(_retrySocksSink(delay));
+    });
+  }
+
+  Future<void> _retrySocksSink(Duration delay) async {
+    // Queued synchronously, so a route queued later still wins.
+    final sunk = await _socksProxy.block();
+    if (!mounted || !_socksSinkPending) {
+      return;
+    }
+    if (sunk) {
+      DiagnosticsLogService.instance.info('browser.socks', 'sink_recovered');
+      setState(_cancelSocksSinkRetry);
+      return;
+    }
+    final next = delay * 2;
+    _scheduleSocksSinkRetry(
+      next > _socksSinkRetryMaxDelay ? _socksSinkRetryMaxDelay : next,
+    );
+  }
+
+  void _cancelSocksSinkRetry() {
+    _socksSinkRetry?.cancel();
+    _socksSinkRetry = null;
+    _socksSinkPending = false;
   }
 
   Future<void> _goBackSafely(_PortForwardBrowserTabState tab) async {
@@ -741,7 +815,10 @@ class _PortForwardBrowserScreenState
   Widget _buildSocksStatusPanel() => SocksBrowserStatusPanel(
     status: _socksStatus,
     forwardName: widget.socksForward!.name,
-    message: _socksMessage,
+    message: _socksSinkPending
+        ? 'Couldn’t move the browser’s proxy off the stopped forward. '
+              'Pages stay blocked while it retries.'
+        : _socksMessage,
     onRestart: () => unawaited(_restartSocksRoute()),
     onClose: _closeBrowserRoute,
   );
@@ -1849,6 +1926,11 @@ class _PortForwardBrowserScreenState
 enum _BrowserFileSource { camera, files }
 
 final _blankSocksUri = Uri.parse('about:blank');
+
+/// First wait before moving a SOCKS proxy to the sink again after a failure;
+/// it doubles up to [_socksSinkRetryMaxDelay].
+const _socksSinkRetryInitialDelay = Duration(seconds: 1);
+const _socksSinkRetryMaxDelay = Duration(seconds: 30);
 
 /// Whether a scheme-less SOCKS browser address most likely names an internal
 /// service, which usually serves plain HTTP: an IP literal, a single-label
