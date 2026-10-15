@@ -1737,6 +1737,73 @@ void main() {
       },
     );
 
+    test(
+      'merge import remaps and preserves SFTP browser views and filters',
+      () async {
+        final sourceHostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Imported Host',
+            hostname: 'imported.example.com',
+            username: 'root',
+          ),
+        );
+        final sourceSettings = SettingsService(db);
+        await sourceSettings.setJson(SettingKeys.sftpBrowserViews, {
+          '$sourceHostId': {'sort': 'size', 'descending': true},
+        });
+        await sourceSettings.setJson(SettingKeys.sftpBrowserFilters, {
+          '$sourceHostId': {'directory': '/srv/app', 'query': 'log'},
+        });
+        final migrationData = await transferService.createMigrationData();
+
+        final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(importedDb.close);
+        final importedEncryptionService = SecretEncryptionService.forTesting();
+        final importedHostRepository = HostRepository(
+          importedDb,
+          importedEncryptionService,
+        );
+        final importedTransferService = SecureTransferService(
+          importedDb,
+          KeyRepository(importedDb, importedEncryptionService),
+          importedHostRepository,
+        );
+        final importedSettings = SettingsService(importedDb);
+        final localHostId = await importedHostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Local Host',
+            hostname: 'local.example.com',
+            username: 'root',
+          ),
+        );
+        await importedSettings.setJson(SettingKeys.sftpBrowserViews, {
+          '$localHostId': {'sort': 'modified'},
+        });
+        await importedSettings.setJson(SettingKeys.sftpBrowserFilters, {
+          '$localHostId': {'directory': '/home/me', 'query': 'notes'},
+        });
+
+        await importedTransferService.importMigrationData(
+          data: migrationData,
+          mode: MigrationImportMode.merge,
+        );
+
+        final importedHost = await (importedDb.select(
+          importedDb.hosts,
+        )..where((host) => host.label.equals('Imported Host'))).getSingle();
+        expect(importedHost.id, isNot(localHostId));
+        // Each host keeps its own entry; the imported one moves to the new id.
+        expect(await importedSettings.getJson(SettingKeys.sftpBrowserViews), {
+          '$localHostId': {'sort': 'modified'},
+          '${importedHost.id}': {'descending': true, 'sort': 'size'},
+        });
+        expect(await importedSettings.getJson(SettingKeys.sftpBrowserFilters), {
+          '$localHostId': {'directory': '/home/me', 'query': 'notes'},
+          '${importedHost.id}': {'directory': '/srv/app', 'query': 'log'},
+        });
+      },
+    );
+
     test('importMigrationData tolerates out-of-range epoch-millisecond host timestamps', () async {
       await transferService.importMigrationData(
         data: {

@@ -6,10 +6,10 @@ import '../../app/theme.dart';
 import '../../domain/services/settings_service.dart';
 
 /// Settings key holding each host's SFTP sort and hidden-file choices.
-const sftpBrowserViewsSettingKey = 'sftp_browser_views';
+const sftpBrowserViewsSettingKey = SettingKeys.sftpBrowserViews;
 
 /// Settings key holding each host's SFTP filter and the folder it belongs to.
-const sftpBrowserFiltersSettingKey = 'sftp_browser_filters';
+const sftpBrowserFiltersSettingKey = SettingKeys.sftpBrowserFilters;
 
 /// A filter typed into the browser for one directory.
 typedef SftpBrowserFilter = ({String directory, String query});
