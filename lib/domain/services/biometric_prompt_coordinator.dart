@@ -31,10 +31,15 @@ class BiometricPromptCoordinator {
   /// Whether the app is on screen, so the user could answer a prompt.
   bool get isAppInForeground => _isAppInForeground();
 
-  static bool _lifecycleIsForeground() {
-    final state = WidgetsBinding.instance.lifecycleState;
-    return state == null || state == AppLifecycleState.resumed;
-  }
+  // `inactive` counts as on screen: iOS reports it for the whole time a
+  // Face ID, Touch ID or passcode sheet is up, including the app lock's own.
+  static bool _lifecycleIsForeground() =>
+      switch (WidgetsBinding.instance.lifecycleState) {
+        null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+        AppLifecycleState.hidden ||
+        AppLifecycleState.paused ||
+        AppLifecycleState.detached => false,
+      };
 
   /// Records whether the app lock is showing.
   void setAppLocked({required bool locked}) {

@@ -3,6 +3,7 @@
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/hardware_key.dart';
@@ -482,6 +483,65 @@ void main() {
         (await service.generate(requireUserPresence: true)).reference,
       );
 
+      await expectLater(
+        identity
+            .sign(Uint8List.fromList([1]))
+            .timeout(const Duration(seconds: 3)),
+        failsWith(HardwareKeyErrorCode.interactionRequired),
+      );
+      expect(platform.signRequests, isEmpty);
+    });
+
+    test('the app lock biometric prompt does not end the wait', () async {
+      // The default predicate reads the real lifecycle state. iOS reports
+      // `inactive` while the lock screen's Face ID sheet is up.
+      final binding = TestWidgetsFlutterBinding.instance;
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      final lifecycle = BiometricPromptCoordinator()
+        ..setAppLocked(locked: true);
+      final service = HardwareKeyService(
+        platform: platform,
+        isPlatformSupported: true,
+        promptCoordinator: lifecycle,
+      );
+      final identity = service.identityFor(
+        (await service.generate(requireUserPresence: true)).reference,
+      );
+
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      final signing = identity.sign(Uint8List.fromList([1]));
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      // Longer than the lock poll interval.
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      lifecycle.setAppLocked(locked: false);
+
+      await signing.timeout(const Duration(seconds: 3));
+      expect(platform.signRequests, hasLength(1));
+    });
+
+    test('a paused app on the lock screen fails at once', () async {
+      final binding = TestWidgetsFlutterBinding.instance;
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+      final lifecycle = BiometricPromptCoordinator()
+        ..setAppLocked(locked: true);
+      final service = HardwareKeyService(
+        platform: platform,
+        isPlatformSupported: true,
+        promptCoordinator: lifecycle,
+      );
+      final identity = service.identityFor(
+        (await service.generate(requireUserPresence: true)).reference,
+      );
+
+      binding
+        ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+        ..handleAppLifecycleStateChanged(AppLifecycleState.hidden)
+        ..handleAppLifecycleStateChanged(AppLifecycleState.paused);
       await expectLater(
         identity
             .sign(Uint8List.fromList([1]))
