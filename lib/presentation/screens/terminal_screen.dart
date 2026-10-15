@@ -636,7 +636,7 @@ String? _describeMouseMode(
   MouseMode.upDownScrollMove => 'Mouse motion (${mouseReportMode.name})',
 };
 
-enum _TerminalExclusiveAction { sftpBrowser, tmuxNavigator }
+enum _TerminalExclusiveAction { sftpBrowser, tmuxNavigator, workingTreeChanges }
 
 class _PortForwardBrowserOption {
   const _PortForwardBrowserOption({
@@ -1595,12 +1595,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required bool isMobile,
     required bool nativeAgentActive,
   }) => [
-    _terminalOverflowMenuItem(
-      context: context,
-      icon: Icons.difference_outlined,
-      label: 'Working tree changes',
-      action: 'working_tree_changes',
-    ),
     if (!nativeAgentActive && hasTerminalInfo)
       _terminalOverflowMenuItem(
         context: context,
@@ -11797,6 +11791,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       _connectionId != null &&
                       connectionState == SshConnectionState.connected,
                 ),
+                // Always enabled: without a connection the sheet says why.
+                _terminalOverflowMenuItem(
+                  context: context,
+                  icon: Icons.difference_outlined,
+                  label: 'Working tree changes',
+                  action: 'working_tree_changes',
+                ),
                 if (_forceMonkeyMuxReloadMenuState.visible)
                   _terminalOverflowMenuItem(
                     context: context,
@@ -14746,52 +14747,88 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Opens the read-only git changes sheet for this window's directory. An
   /// "Ask agent" prompt goes to the native composer, or into the terminal
-  /// through the same review as a clipboard paste.
-  Future<void> _openWorkingTreeChanges() async {
-    final activeSession = _activeSession();
-    final session =
-        activeSession != null &&
-            _sessionsNotifier?.getState(activeSession.connectionId) ==
-                SshConnectionState.connected
-        ? activeSession
-        : null;
-    final nativeKey = _activeNativeAcpSessionKey;
-    var directory = nativeKey == null
-        ? null
-        : ref
-              .read(acpSessionManagerProvider)
-              .state
-              .byKeyValue(nativeKey.value)
-              ?.cwd;
-    if (directory == null && session != null && _isTmuxActive) {
-      directory = await _resolveCurrentTmuxPaneDirectory();
-      if (!mounted) return;
-    }
-    directory ??= _workingDirectoryPath;
-    final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
-    String? prompt;
-    try {
-      prompt = await showWorkingTreeChangesSheet(
-        context: context,
-        service: session == null
-            ? null
-            : ref.read(gitWorkingTreeServiceFactoryProvider)(session),
-        directory: directory,
-        unavailableMessage: workingTreeChangesUnavailableReason(session),
-        canAskAgent: true,
-      );
-    } finally {
-      _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
-    }
-    if (!mounted || prompt == null) return;
-    if (_activeNativeAcpSessionKey != null) {
-      _nativeComposerFocusController
-        ..insertText(prompt)
-        ..requestFocus();
-      return;
-    }
-    await _pasteClipboard(promptText: prompt);
-  }
+  /// through the same review as a clipboard paste, but only into the window
+  /// that supplied the directory.
+  Future<void> _openWorkingTreeChanges() => _runExclusiveTerminalAction(
+    _TerminalExclusiveAction.workingTreeChanges,
+    () async {
+      final activeSession = _activeSession();
+      final session =
+          activeSession != null &&
+              _sessionsNotifier?.getState(activeSession.connectionId) ==
+                  SshConnectionState.connected
+          ? activeSession
+          : null;
+      final nativeKey = _activeNativeAcpSessionKey;
+      var directory = nativeKey == null
+          ? null
+          : ref
+                .read(acpSessionManagerProvider)
+                .state
+                .byKeyValue(nativeKey.value)
+                ?.cwd;
+      if (directory == null && session != null && _isTmuxActive) {
+        try {
+          directory = await _resolveCurrentTmuxPaneDirectory();
+        } on Object catch (error) {
+          // The window's last known directory still works.
+          DiagnosticsLogService.instance.warning(
+            'git_changes',
+            'pane_directory_failed',
+            fields: {'errorType': error.runtimeType},
+          );
+        }
+        if (!mounted) return;
+      }
+      directory ??= _workingDirectoryPath;
+      final target = _workingTreePromptTarget();
+      final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
+      String? prompt;
+      try {
+        prompt = await showWorkingTreeChangesSheet(
+          context: context,
+          service: session == null
+              ? null
+              : ref.read(gitWorkingTreeServiceFactoryProvider)(session),
+          directory: directory,
+          unavailableMessage: workingTreeChangesUnavailableReason(session),
+          canAskAgent: true,
+        );
+      } finally {
+        _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
+      }
+      if (!mounted || prompt == null) return;
+      // Another client, or an agent, can switch windows while the sheet is
+      // open; the hunk belongs to the window it was read from.
+      if (_workingTreePromptTarget() != target) {
+        DiagnosticsLogService.instance.info(
+          'git_changes',
+          'prompt_dropped_window_changed',
+        );
+        _showClipboardMessage(
+          'The window changed while the sheet was open, so the prompt was '
+          'not sent.',
+        );
+        return;
+      }
+      if (_activeNativeAcpSessionKey != null) {
+        _nativeComposerFocusController
+          ..insertText(prompt)
+          ..requestFocus();
+        return;
+      }
+      await _pasteClipboard(promptText: prompt);
+    },
+  );
+
+  /// The window a working tree prompt is meant for: the native chat, the
+  /// connection and the mux window that were active.
+  ({AcpSessionKey? nativeKey, int? connectionId, String? windowKey})
+  _workingTreePromptTarget() => (
+    nativeKey: _activeNativeAcpSessionKey,
+    connectionId: _connectionId,
+    windowKey: resolveTmuxBarActiveWindowKey(_currentTmuxWindowsSnapshot),
+  );
 
   Future<void> _openPortForwardBrowserOption(
     _PortForwardBrowserOption option,
@@ -15175,7 +15212,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
 
-      final requiredReview = _shouldReviewTerminalCommandInsertion;
+      // A shell prompt always reviews. A hunk prompt is also reviewed in any
+      // other program that is not a known agent (psql, a REPL, a nested
+      // shell), where a line break without bracketed paste runs a line.
+      final requiredReview =
+          _shouldReviewTerminalCommandInsertion ||
+          (promptText != null && !_isAgentToolActive);
       var reviewedBracketedPasteMode = _effectiveTerminalBracketedPasteMode(
         pasteMode,
       );
