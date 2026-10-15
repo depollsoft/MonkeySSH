@@ -29,9 +29,13 @@ String? describeTerminalSearchStatus(
       if (count == 0) {
         return search.status == TerminalSearchStatus.searching ? '…' : '0';
       }
-      final total = search.isCapped ? '$count+' : '$count';
+      // Past the cap the matches kept are those around the viewport, so a
+      // position among them would not say where a match is in the buffer.
+      if (search.isCapped) {
+        return '$count+';
+      }
       final current = search.currentIndex;
-      return current == null ? total : '${current + 1}/$total';
+      return current == null ? '$count' : '${current + 1}/$count';
   }
 }
 
@@ -56,11 +60,13 @@ String? describeTerminalSearchStatusForSemantics(
             ? 'Searching'
             : 'No matches';
       }
-      final total = search.isCapped ? 'more than $count' : '$count';
+      if (search.isCapped) {
+        return 'More than $count matches';
+      }
       final current = search.currentIndex;
       return current == null
-          ? '$total matches'
-          : 'Match ${current + 1} of $total';
+          ? '$count matches'
+          : 'Match ${current + 1} of $count';
   }
 }
 

@@ -238,6 +238,31 @@ void main() {
       });
     }
 
+    testWidgets('a capped count gives the total only', (tester) async {
+      search.dispose();
+      search = TerminalScrollbackSearchController(
+        terminal: terminal,
+        typingDebounce: Duration.zero,
+        maxMatches: 2,
+      );
+      await pumpBar(tester);
+      await tester.enterText(find.byKey(_field), 'alpha');
+      await _settle(tester);
+      expect(search.isCapped, isTrue);
+      expect(_statusText(tester), '2+');
+      expect(
+        describeTerminalSearchStatusForSemantics(search),
+        'More than 2 matches',
+      );
+
+      // Stepping still works, and the count does not pretend to know where
+      // the match is among all of them.
+      await tester.tap(find.byTooltip('Previous match'));
+      await tester.pump();
+      expect(search.currentIndex, 0);
+      expect(_statusText(tester), '2+');
+    });
+
     testWidgets('disables stepping without matches and says so', (
       tester,
     ) async {
