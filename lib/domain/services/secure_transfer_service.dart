@@ -232,6 +232,8 @@ class SecureTransferService {
   static const _hostScopedSettingsKeys = {
     SettingKeys.agentLaunchPresets,
     SettingKeys.hostCliLaunchPreferences,
+    SettingKeys.sftpBrowserViews,
+    SettingKeys.sftpBrowserFilters,
   };
 
   /// Settings that belong to this device's own onboarding and never travel:

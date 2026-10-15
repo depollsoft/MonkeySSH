@@ -22,6 +22,7 @@ import '../../domain/models/monetization.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/monetization_service.dart';
+import '../../domain/services/remote_archive_service.dart';
 import '../../domain/services/remote_file_edit_session.dart';
 import '../../domain/services/remote_file_service.dart';
 import '../../domain/services/settings_service.dart';
@@ -39,9 +40,13 @@ import '../widgets/syntax_highlight_language.dart';
 import '../widgets/syntax_highlight_theme.dart';
 import 'remote_text_editor_conflict.dart';
 import 'remote_text_editor_screen.dart';
+import 'sftp_batch_operations.dart';
 import 'sftp_browser_logic.dart';
+import 'sftp_browser_view.dart';
 
 export 'sftp_browser_logic.dart';
+
+part 'sftp_screen_batch_actions.dart';
 
 const _requestedPathLookupTimeout = Duration(seconds: 5);
 const _sftpFileRowExtentEstimate = 64.0;
@@ -250,8 +255,28 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   String? _connectionStartDirectoryPath;
   String? _tmuxPaneDirectoryPath;
   List<RemoteFileSelection> _selectedFiles = const [];
+  SftpBrowserViewSettings _viewSettings = const SftpBrowserViewSettings();
+  bool _viewSettingsChangedLocally = false;
+  bool _filterChangedLocally = false;
+  final TextEditingController _filterController = TextEditingController();
+  String _filterQuery = '';
+  String? _filterDirectory;
+  SftpBrowserFilter? _rememberedFilter;
+  ({
+    List<SftpName> files,
+    SftpBrowserViewSettings settings,
+    String filter,
+    String? alwaysShow,
+    List<SftpName> visible,
+  })?
+  _visibleFilesCache;
+  bool _isBatchSelecting = false;
+  List<RemoteFileSelection>? _movingFiles;
+  SftpBatchProgress? _batchProgress;
 
   bool get _isSelectionMode => widget.selectionConstraints != null;
+
+  void _update(VoidCallback change) => setState(change);
 
   @override
   void initState() {
@@ -263,6 +288,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     _tmuxPaneDirectoryPath = normalizeSftpAbsolutePath(
       widget.tmuxPaneDirectory,
     );
+    unawaited(_loadViewSettings());
     _connect();
   }
 
@@ -297,8 +323,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   @override
   void dispose() {
+    // Work started here stops with the browser rather than running on with
+    // no progress, Cancel or results.
+    _batchProgress?.cancel();
     _breadcrumbScrollController.dispose();
     _fileListScrollController.dispose();
+    _filterController.dispose();
     _sftp = null;
     super.dispose();
   }
@@ -569,6 +599,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
       setState(() {
         _currentPath = path;
+        _syncFilterWithDirectory(path);
         // OpenSSH always lists `.` and `..`; they are not navigable rows, and
         // keeping them would hide the empty state and skew scroll offsets.
         _files = items
@@ -942,6 +973,13 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (!mounted) {
       return;
     }
+    // Keep a highlight the action moved to another entry here, such as a
+    // copy the editor saved.
+    if (_highlightedDirectoryPath == _currentPath &&
+        _highlightedFileName != null &&
+        _highlightedFileName != file.filename) {
+      return;
+    }
     _highlightFile(_currentPath, file.filename);
   }
 
@@ -990,7 +1028,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         return;
       }
 
-      final highlightedIndex = _files.indexWhere(
+      final highlightedIndex = _visibleFiles.indexWhere(
         (file) => file.filename == _highlightedFileName,
       );
       if (highlightedIndex < 0) {
@@ -1063,7 +1101,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   String? _selectionDisabledReasonForFile(SftpName file) {
-    final constraints = widget.selectionConstraints;
+    final constraints = _activeSelectionConstraints;
     if (constraints == null || file.attr.isDirectory) {
       return null;
     }
@@ -1114,7 +1152,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     SftpName file, {
     bool announceDisabled = true,
   }) {
-    final constraints = widget.selectionConstraints;
+    final constraints = _activeSelectionConstraints;
     if (constraints == null || file.attr.isDirectory) {
       return;
     }
@@ -1147,10 +1185,27 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: _pathHistory.length <= 1,
+    canPop:
+        _pathHistory.length <= 1 &&
+        !_isBatchSelecting &&
+        _movingFiles == null &&
+        !_batchRunning,
     onPopInvokedWithResult: (didPop, _) {
-      if (!didPop && _pathHistory.length > 1) {
+      if (didPop) {
+        return;
+      }
+      // Back walks folder history first, also while selecting or choosing
+      // where to move files, so a selection that spans folders survives it.
+      // At the first folder it ends selection or the pending move, and it
+      // never leaves while a batch runs.
+      if (_pathHistory.length > 1) {
         unawaited(_goBack());
+      } else if (_isBatchSelecting) {
+        _endBatchSelection();
+      } else if (_movingFiles != null) {
+        _cancelMove();
+      } else if (_batchRunning) {
+        _explainRunningBatch();
       }
     },
     child: Scaffold(
@@ -1191,20 +1246,28 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         children: [
           _buildLocationShortcuts(),
           _buildBreadcrumbs(),
+          SftpBrowserToolbar(
+            filterController: _filterController,
+            onFilterChanged: _onFilterChanged,
+            settings: _viewSettings,
+            onShowViewOptions: () => unawaited(_showViewOptions()),
+            onStartSelection:
+                _isSelectionMode ||
+                    _isBatchSelecting ||
+                    _movingFiles != null ||
+                    _batchRunning
+                ? null
+                : _startBatchSelection,
+          ),
           Expanded(child: _buildFileList()),
         ],
       ),
-      bottomNavigationBar: _isSelectionMode
-          ? _RemoteFileSelectionBar(
-              selectedCount: _selectedFiles.length,
-              summaryText: _selectionSummaryText(),
-              onCancel: _closeBrowser,
-              onConfirm: _selectedFiles.isEmpty
-                  ? null
-                  : _confirmRemoteFileSelection,
-            )
-          : null,
-      floatingActionButton: _isSelectionMode
+      bottomNavigationBar: _buildBottomBar(),
+      floatingActionButton:
+          _isSelectionMode ||
+              _isBatchSelecting ||
+              _movingFiles != null ||
+              _batchRunning
           ? null
           : FloatingActionButton(
               onPressed: () {
@@ -1217,7 +1280,42 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     ),
   );
 
+  Widget? _buildBottomBar() {
+    if (_isSelectionMode) {
+      return _RemoteFileSelectionBar(
+        selectedCount: _selectedFiles.length,
+        summaryText: _selectionSummaryText(),
+        onCancel: _closeBrowser,
+        onConfirm: _selectedFiles.isEmpty ? null : _confirmRemoteFileSelection,
+      );
+    }
+    if (_batchProgress case final progress?) {
+      return SftpBatchProgressBar(progress: progress);
+    }
+    if (_movingFiles case final moving?) {
+      return SftpMoveBar(
+        fileNames: [for (final file in moving) file.displayName],
+        onCancel: _cancelMove,
+        onMoveHere: () => unawaited(_moveHere()),
+      );
+    }
+    if (_isBatchSelecting) {
+      return SftpBatchSelectionBar(
+        selectedCount: _selectedFiles.length,
+        onDone: _endBatchSelection,
+        onDownload: () => unawaited(_downloadSelection()),
+        onMove: _startMove,
+        onDelete: () => unawaited(_deleteSelection()),
+      );
+    }
+    return null;
+  }
+
   void _closeBrowser() {
+    if (_batchRunning) {
+      _explainRunningBatch();
+      return;
+    }
     final navigator = Navigator.of(context);
     if (navigator.canPop()) {
       navigator.pop();
@@ -1432,25 +1530,56 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     if (_files.isEmpty) {
-      return _isSelectionMode
-          ? const BrandEmptyState(
-              title: 'empty directory',
-              message: 'No files in this folder yet.',
-            )
-          : BrandEmptyState(
-              title: 'empty directory',
-              message: 'Nothing here yet.',
-              primaryLabel: 'Upload',
-              primaryIcon: Icons.upload_file_outlined,
-              onPrimary: () => unawaited(_showUploadDialog()),
-              secondaryActions: [
-                BrandEmptyAction(
-                  icon: Icons.create_new_folder_outlined,
-                  label: 'New folder',
-                  onTap: () => unawaited(_showCreateDirectoryDialog()),
+      return _scrollableEmptyState(
+        _isSelectionMode
+            ? const BrandEmptyState(
+                title: 'empty directory',
+                message: 'No files in this folder yet.',
+              )
+            : BrandEmptyState(
+                title: 'empty directory',
+                message: 'Nothing here yet.',
+                primaryLabel: 'Upload',
+                primaryIcon: Icons.upload_file_outlined,
+                onPrimary: () => unawaited(_showUploadDialog()),
+                secondaryActions: [
+                  BrandEmptyAction(
+                    icon: Icons.create_new_folder_outlined,
+                    label: 'New folder',
+                    onTap: () => unawaited(_showCreateDirectoryDialog()),
+                  ),
+                ],
+              ),
+      );
+    }
+
+    final visibleFiles = _visibleFiles;
+    if (visibleFiles.isEmpty) {
+      final query = _filterQuery.trim();
+      final hiddenCount = _files
+          .where((file) => isHiddenSftpName(file.filename))
+          .length;
+      return _scrollableEmptyState(
+        query.isNotEmpty
+            ? BrandEmptyState(
+                title: 'no matches',
+                message: 'Nothing in this folder matches "$query".',
+                primaryLabel: 'Clear filter',
+                primaryIcon: Icons.filter_list_off,
+                onPrimary: _clearFilter,
+              )
+            : BrandEmptyState(
+                title: 'only hidden files',
+                message:
+                    '$hiddenCount hidden ${hiddenCount == 1 ? 'item' : 'items'} '
+                    'in this folder.',
+                primaryLabel: 'Show hidden files',
+                primaryIcon: Icons.visibility_outlined,
+                onPrimary: () => unawaited(
+                  _applyViewSettings(_viewSettings.copyWith(showHidden: true)),
                 ),
-              ],
-            );
+              ),
+      );
     }
 
     return RefreshIndicator(
@@ -1460,11 +1589,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       },
       child: ListView.builder(
         controller: _fileListScrollController,
-        itemCount: _files.length,
+        itemCount: visibleFiles.length,
         itemBuilder: (context, index) {
-          final file = _files[index];
+          final file = visibleFiles[index];
           final selectionDisabledReason = _selectionDisabledReasonForFile(file);
-          final isSelected = _isSelectionMode && _isRemoteFileSelected(file);
+          final isSelected = _selectionActive && _isRemoteFileSelected(file);
           return _FileListTile(
             file: file,
             isHighlighted:
@@ -1472,19 +1601,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                     _highlightedFileName == file.filename) ||
                 isSelected,
             onTap: () => _handleFileTap(file),
-            onLongPress: _isSelectionMode ? null : () => _showFileOptions(file),
-            onShowOptions: _isSelectionMode
+            onLongPress: _selectionActive ? null : () => _showFileOptions(file),
+            onShowOptions: _selectionActive
                 ? null
                 : () => _showFileOptions(file),
             disabledReason: selectionDisabledReason,
-            trailingIcon: !_isSelectionMode || file.attr.isDirectory
+            trailingIcon: !_selectionActive || file.attr.isDirectory
                 ? null
                 : selectionDisabledReason != null
                 ? Icons.block_outlined
                 : isSelected
                 ? Icons.check_circle
                 : Icons.radio_button_unchecked,
-            trailingTooltip: _isSelectionMode
+            trailingTooltip: _selectionActive
                 ? remoteFileSelectionTooltip(
                     isDirectory: file.attr.isDirectory,
                     fileName: file.filename,
@@ -1492,7 +1621,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                     disabledReason: selectionDisabledReason,
                   )
                 : null,
-            semanticsLabel: _isSelectionMode
+            semanticsLabel: _selectionActive
                 ? remoteFileSelectionSemanticsLabel(
                     isDirectory: file.attr.isDirectory,
                     fileName: file.filename,
@@ -1500,7 +1629,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                     disabledReason: selectionDisabledReason,
                   )
                 : null,
-            semanticsHint: _isSelectionMode
+            semanticsHint: _selectionActive
                 ? remoteFileSelectionSemanticsHint(
                     isDirectory: file.attr.isDirectory,
                     isSelected: isSelected,
@@ -1513,10 +1642,19 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     );
   }
 
+  /// Lets an empty state scroll when the bottom panels leave it less room
+  /// than it needs, as in landscape, instead of overflowing.
+  Widget _scrollableEmptyState(Widget state) =>
+      SingleChildScrollView(child: Center(child: state));
+
   void _handleFileTap(SftpName file) {
     _clearHighlightedFile();
-    if (_isSelectionMode && !file.attr.isDirectory) {
+    if (_selectionActive && !file.attr.isDirectory) {
       _toggleRemoteFileSelection(file);
+      return;
+    }
+    if (_movingFiles != null && !file.attr.isDirectory) {
+      _showMessage('Open the destination folder, then tap Move here.');
       return;
     }
 
@@ -1531,6 +1669,15 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       case SftpFileTapIntent.previewVideo:
         unawaited(_previewVideoFile(file));
       case SftpFileTapIntent.edit:
+        // Saving could collide with the running batch, as in the options
+        // sheet, where Edit waits too.
+        if (_batchProgress case final progress?) {
+          _showMessage(
+            'Files open for editing once ${progress.verb.toLowerCase()} '
+            'finishes.',
+          );
+          return;
+        }
         unawaited(_editTextFile(file));
     }
   }
@@ -1543,89 +1690,122 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     );
     showModalBottomSheet<void>(
       context: context,
+      // Sized to its options, scrolling only when the screen is too short.
+      isScrollControlled: true,
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('Info'),
-              onTap: () {
-                Navigator.pop(context);
-                _showFileInfo(file);
-              },
-            ),
-            if (previewKind != null)
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.info_outline),
+                title: const Text('Info'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showFileInfo(file);
+                },
+              ),
+              if (!file.attr.isDirectory &&
+                  _movingFiles == null &&
+                  !_batchRunning)
+                ListTile(
+                  leading: const Icon(Icons.checklist),
+                  title: const Text('Select'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _startBatchSelection(file);
+                  },
+                ),
+              if (previewKind != null)
+                ListTile(
+                  leading: Icon(
+                    previewKind == SftpPreviewKind.video
+                        ? Icons.video_file_outlined
+                        : Icons.image_outlined,
+                  ),
+                  title: Text(
+                    previewKind == SftpPreviewKind.video
+                        ? 'Preview video'
+                        : 'View',
+                  ),
+                  onTap: () {
+                    Navigator.pop(context);
+                    switch (previewKind) {
+                      case SftpPreviewKind.image:
+                        unawaited(_previewImageFile(file));
+                      case SftpPreviewKind.video:
+                        unawaited(_previewVideoFile(file));
+                    }
+                  },
+                ),
+              if (!file.attr.isDirectory)
+                ListTile(
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text('Edit'),
+                  enabled: !_batchRunning,
+                  onTap: () {
+                    Navigator.pop(context);
+                    unawaited(_editTextFile(file));
+                  },
+                ),
+              if (!file.attr.isDirectory)
+                ListTile(
+                  leading: const Icon(Icons.download),
+                  title: const Text('Download'),
+                  enabled: !_batchRunning,
+                  onTap: () {
+                    Navigator.pop(context);
+                    unawaited(_downloadFile(file));
+                  },
+                ),
+              if (_canExtract(file))
+                ListTile(
+                  leading: const Icon(Icons.unarchive_outlined),
+                  title: const Text('Extract here'),
+                  enabled: !_batchRunning,
+                  onTap: () {
+                    Navigator.pop(context);
+                    unawaited(_extractArchive(file));
+                  },
+                ),
+              ListTile(
+                leading: const Icon(Icons.copy_all_outlined),
+                title: const Text('Copy as path'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _copyRemotePath(file);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.drive_file_rename_outline),
+                title: const Text('Rename'),
+                enabled: !_batchRunning,
+                onTap: () {
+                  Navigator.pop(context);
+                  unawaited(_showRenameDialog(file));
+                },
+              ),
               ListTile(
                 leading: Icon(
-                  previewKind == SftpPreviewKind.video
-                      ? Icons.video_file_outlined
-                      : Icons.image_outlined,
+                  Icons.delete_outline,
+                  color: _batchRunning
+                      ? null
+                      : Theme.of(context).colorScheme.error,
                 ),
                 title: Text(
-                  previewKind == SftpPreviewKind.video
-                      ? 'Preview video'
-                      : 'View',
+                  'Delete',
+                  style: _batchRunning
+                      ? null
+                      : TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
+                enabled: !_batchRunning,
                 onTap: () {
                   Navigator.pop(context);
-                  switch (previewKind) {
-                    case SftpPreviewKind.image:
-                      unawaited(_previewImageFile(file));
-                    case SftpPreviewKind.video:
-                      unawaited(_previewVideoFile(file));
-                  }
+                  unawaited(_deleteFile(file));
                 },
               ),
-            if (!file.attr.isDirectory)
-              ListTile(
-                leading: const Icon(Icons.edit_outlined),
-                title: const Text('Edit'),
-                onTap: () {
-                  Navigator.pop(context);
-                  unawaited(_editTextFile(file));
-                },
-              ),
-            if (!file.attr.isDirectory)
-              ListTile(
-                leading: const Icon(Icons.download),
-                title: const Text('Download'),
-                onTap: () {
-                  Navigator.pop(context);
-                  unawaited(_downloadFile(file));
-                },
-              ),
-            ListTile(
-              leading: const Icon(Icons.copy_all_outlined),
-              title: const Text('Copy as path'),
-              onTap: () async {
-                Navigator.pop(context);
-                await _copyRemotePath(file);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.drive_file_rename_outline),
-              title: const Text('Rename'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_showRenameDialog(file));
-              },
-            ),
-            ListTile(
-              leading: Icon(
-                Icons.delete_outline,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              title: Text(
-                'Delete',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_deleteFile(file));
-              },
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1849,7 +2029,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   Future<void> _showUploadDialog() async {
-    if (_sftp == null) {
+    if (_sftp == null || _batchRunning) {
       return;
     }
 
@@ -1915,38 +2095,114 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         sizeBytes: sizeBytes,
       ),
     );
-    var uploadedFileCount = 0;
+    final progress = SftpBatchProgress(
+      verb: 'Uploading',
+      total: selectedFiles.length,
+    );
+    _beginBatch(progress);
+    final SftpBatchReport report;
     try {
-      for (final file in selectedFiles) {
-        await remoteFileService.uploadStream(
-          sftp: sftp,
-          remotePath: joinRemotePath(destinationDirectory, file.name),
-          stream: file.readAsByteStream(),
-        );
-        uploadedFileCount++;
-      }
-    } on Object catch (e) {
-      // Remote file implementations can throw Error subtypes as well as
-      // SSH/SFTP errors. Stop the batch and report the failed transfer.
+      // A failure stops the batch: the rest usually fail the same way, and a
+      // dropped connection would otherwise report every file separately.
+      report = await runSftpBatch<PlatformFile>(
+        items: selectedFiles,
+        nameOf: (file) => file.name,
+        progress: progress,
+        stopOnFailure: true,
+        stoppedDetail: 'Not uploaded',
+        run: (file, index) async {
+          int? totalBytes;
+          try {
+            totalBytes = await file.length();
+          } on Exception {
+            // Progress falls back to counting files.
+          }
+          progress.start(index, file.name, totalBytes: totalBytes);
+          final remotePath = joinRemotePath(destinationDirectory, file.name);
+          final existed = await _remoteEntryExists(sftp, remotePath);
+          // Cancel during the checks skips the file before it is opened,
+          // since opening truncates a file that already exists.
+          progress.throwIfCancelled();
+          // Uploads write in place, so a file being replaced runs to the end
+          // after Cancel instead of keeping part of the new contents; the
+          // batch then stops before the next file.
+          if (existed) progress.finishCurrentItem();
+          try {
+            await remoteFileService.uploadStream(
+              sftp: sftp,
+              remotePath: remotePath,
+              stream: file.readAsByteStream(),
+              onProgress: (uploadedBytes) {
+                // A file whose last byte is written is kept even when Cancel
+                // arrives as it finishes.
+                if (!existed &&
+                    (totalBytes == null || uploadedBytes < totalBytes)) {
+                  progress.throwIfCancelled();
+                }
+                progress.updateBytes(uploadedBytes);
+              },
+            );
+          } on Object catch (error) {
+            final cancelled =
+                isSftpBatchCancellation(error) || progress.cancelRequested;
+            if (!existed) {
+              // Any error after Cancel counts as the cancel, so the partial
+              // new file goes either way.
+              if (cancelled) await _removePartialUpload(sftp, remotePath);
+              rethrow;
+            }
+            if (!cancelled) rethrow;
+            // A replacement that fails after Cancel is a failure, not a
+            // skip: the file may now hold part of the upload.
+            throw SftpBatchItemFailure(
+              '${describeSftpBatchError(error)}. It may be partly replaced',
+            );
+          }
+        },
+      );
+    } finally {
+      _endBatch(progress);
+    }
+    final uploadedFileCount = report.doneCount;
+    if (report.cancelled || report.firstError != null) {
+      final error = report.firstError;
       unawaited(
         telemetryService.logSftpTransferFailed(
           direction: 'upload',
           fileCount: selectedFiles.length,
           sizeBytes: sizeBytes,
           duration: DateTime.now().difference(startedAt),
-          failureCategory: _sftpTelemetryFailureCategory(e),
+          failureCategory: error == null
+              ? 'cancelled'
+              : _sftpTelemetryFailureCategory(error),
         ),
       );
       if (uploadedFileCount > 0 && mounted) {
         await _loadDirectory(_currentPath);
       }
-      _showSftpFailureSnackBar(
-        message: uploadedFileCount == 0
+      if (error == null) {
+        _reportBatch(
+          report,
+          title: 'Upload results',
+          pastVerb: 'Uploaded',
+          message: uploadedFileCount == 0
+              ? 'Upload cancelled'
+              : 'Upload cancelled. Uploaded $uploadedFileCount of '
+                    '${selectedFiles.length} files.',
+        );
+        return;
+      }
+      DiagnosticsLogService.instance.warning(
+        'sftp',
+        'upload_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      _showUploadFailure(
+        report,
+        uploadedFileCount == 0
             ? 'Upload failed. Check the connection and try again.'
             : 'Uploaded $uploadedFileCount of ${selectedFiles.length} files. '
                   'Upload failed. Check the connection and try again.',
-        eventName: 'upload_failed',
-        error: e,
       );
       return;
     }
@@ -1968,6 +2224,45 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         duration: DateTime.now().difference(startedAt),
       ),
     );
+  }
+
+  /// Shows an upload failure with a way to see which files made it.
+  void _showUploadFailure(SftpBatchReport report, String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: report.results.length > 1
+            ? SnackBarAction(
+                label: 'Details',
+                onPressed: () => unawaited(
+                  showSftpBatchResults(
+                    context,
+                    title: 'Upload results',
+                    report: report,
+                  ),
+                ),
+              )
+            : null,
+      ),
+    );
+  }
+
+  Future<void> _removePartialUpload(SftpClient sftp, String remotePath) async {
+    try {
+      await sftp.remove(remotePath);
+    } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) {
+        rethrow;
+      }
+      DiagnosticsLogService.instance.warning(
+        'sftp.upload',
+        'partial_cleanup_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
   }
 
   Future<void> _copyRemotePath(SftpName file) async {
@@ -2298,7 +2593,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
 
-    final remotePath = joinRemotePath(_currentPath, file.filename);
+    final directory = _currentPath;
+    final remotePath = joinRemotePath(directory, file.filename);
     final editSession = RemoteFileEditSession(
       remotePath: remotePath,
       service: ref.read(remoteFileServiceProvider),
@@ -2418,6 +2714,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
 
       await _loadDirectory(_currentPath);
+      if (result is RemoteEditorSavedCopy && mounted) {
+        // Highlighting keeps the copy in view even when the filter or the
+        // hidden-file setting would leave it out.
+        _highlightFile(directory, result.fileName);
+      }
       _showMessage(
         result is RemoteEditorSavedCopy
             ? 'Saved your edits as "${result.fileName}"'

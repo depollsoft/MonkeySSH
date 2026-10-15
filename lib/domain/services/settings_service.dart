@@ -104,6 +104,13 @@ abstract final class SettingKeys {
   /// Saved host-scoped coding CLI launch preferences.
   static const hostCliLaunchPreferences = 'host_cli_launch_preferences';
 
+  /// Each host's SFTP browser sort and hidden-file choices, by host id.
+  static const sftpBrowserViews = 'sftp_browser_views';
+
+  /// Each host's SFTP browser filter and the folder it belongs to, by host
+  /// id.
+  static const sftpBrowserFilters = 'sftp_browser_filters';
+
   /// App-wide default for ACP-capable agent windows.
   static const agentWindowModePreference = 'agent_window_mode_preference';
 
