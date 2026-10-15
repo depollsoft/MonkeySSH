@@ -677,6 +677,60 @@ func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
 	}
 }
 
+// The time bound covers the key press itself: a press that waited for window
+// input past the bound is not sent.
+func TestWatchCodexLockedResumeStopsPressingAtTheLimit(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-limit")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes atomic.Int32
+	released := make(chan struct{})
+	var once sync.Once
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		once.Do(func() { close(released) })
+		return false
+	}
+	const limit = 500 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: limit, backoff: time.Hour, maxPresses: 4})
+		close(done)
+	}()
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+
+	window.inputMu.Lock()
+	held.Store(false)
+	select {
+	case <-released: // Within the bound, step has decided to press.
+	case <-done:
+		window.inputMu.Unlock()
+		t.Skip("the watch reached its bound before the lock was released")
+	}
+	time.Sleep(limit) // The watch started before the decision, so the bound has passed.
+	window.inputMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher outlived its time bound")
+	}
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q after the time bound", got)
+	}
+}
+
 func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)

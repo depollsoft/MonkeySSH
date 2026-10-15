@@ -187,7 +187,9 @@ func (s *muxServer) watchCodexLockedResume(
 	lockHeld func() bool,
 	policy codexLockedResumePolicy,
 ) {
-	retry := newCodexLockedResumeRetry(policy, time.Now())
+	started := time.Now()
+	retry := newCodexLockedResumeRetry(policy, started)
+	deadline := started.Add(policy.limit)
 	ticker := time.NewTicker(policy.poll)
 	defer ticker.Stop()
 	var generation uint64
@@ -207,7 +209,7 @@ func (s *muxServer) watchCodexLockedResume(
 		s.mu.Unlock()
 		foreground := ptyForegroundProcessGroup(windowPty)
 		press, done := retry.step(time.Now(), prompt, foreground, resumes, lockHeld)
-		if press && s.pressCodexLockedRetry(window, foreground, lockHeld) {
+		if press && s.pressCodexLockedRetry(window, foreground, deadline, lockHeld) {
 			// The write may have waited for window input; back off from it.
 			retry.pressed(time.Now())
 		}
@@ -218,11 +220,17 @@ func (s *muxServer) watchCodexLockedResume(
 }
 
 // pressCodexLockedRetry writes R only if, once this window's input is
-// serialized, the lock is still free and the prompt is still on screen with
-// the same foreground group. A paste can hold the input lock while the child
-// is blocked, and the program in front or the lock holder can change during
-// the wait. It reports whether R was written.
-func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int, lockHeld func() bool) bool {
+// serialized, the lock is still free, the watch has not run past its deadline,
+// and the prompt is still on screen with the same foreground group. A paste
+// can hold the input lock while the child is blocked, and the program in
+// front or the lock holder can change during the wait. It reports whether R
+// was written.
+func (s *muxServer) pressCodexLockedRetry(
+	window *muxWindow,
+	foreground int,
+	deadline time.Time,
+	lockHeld func() bool,
+) bool {
 	window.inputMu.Lock()
 	var scheduleFlush func()
 	defer func() {
@@ -237,7 +245,7 @@ func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int, loc
 	}
 	// The probe is file I/O, so it runs outside s.mu, and before the checks
 	// below: the program in front can change while it runs.
-	if lockHeld() {
+	if lockHeld() || !time.Now().Before(deadline) {
 		return false
 	}
 	s.mu.Lock()
