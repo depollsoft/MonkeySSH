@@ -24,6 +24,35 @@ const _backgroundParseBytes = 32 * 1024;
 SshConfigImportPlan _planFromText(String text) =>
     buildSshConfigImportPlan(parseSshConfig(text));
 
+/// Whether [text] is over [sshConfigImportMaxBytes] once encoded.
+bool _exceedsImportLimit(String text) =>
+    // UTF-8 never takes fewer bytes than UTF-16 code units, so the length
+    // alone settles most cases without encoding.
+    text.length > sshConfigImportMaxBytes ||
+    (text.length * 3 > sshConfigImportMaxBytes &&
+        utf8.encode(text).length > sshConfigImportMaxBytes);
+
+/// Rejects an edit (usually a paste from the text menu) that would make the
+/// config larger than the importer reads, rather than truncating it.
+class _ImportSizeLimitFormatter extends TextInputFormatter {
+  _ImportSizeLimitFormatter(this.onRejected);
+
+  final VoidCallback onRejected;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    if (newValue.text.length <= oldValue.text.length ||
+        !_exceedsImportLimit(newValue.text)) {
+      return newValue;
+    }
+    onRejected();
+    return oldValue;
+  }
+}
+
 /// Imports hosts from an OpenSSH client config pasted or opened from a file,
 /// with a preview of every host, jump host, forward, and skipped directive
 /// before anything is saved.
@@ -44,8 +73,19 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
   final _defaultUsername = TextEditingController();
   SshConfigImportPlan? _plan;
   Set<String> _selected = {};
+
+  /// Entries the user ticked or unticked; the rest follow the default
+  /// selection as the default username changes.
+  final _touched = <String>{};
   var _importing = false;
   var _parsing = false;
+  ({SshConfigImportPlan plan, List<Host> saved, String username})? _matchesKey;
+  Map<String, Host> _matches = const {};
+  late final _sizeLimit = _ImportSizeLimitFormatter(
+    () => WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tooLarge('text');
+    }),
+  );
 
   @override
   void initState() {
@@ -64,7 +104,24 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
 
   void _sourceChanged() => setState(() {});
 
-  void _defaultUsernameChanged() => setState(() {});
+  void _defaultUsernameChanged() {
+    final plan = _plan;
+    if (plan == null) return;
+    // An entry without User may only match a saved host once the username
+    // is typed. Untouched entries follow the same rule as at Preview: hosts
+    // already saved start unselected.
+    final saved = _savedMatches(plan, ref.read(allHostsProvider).asData?.value);
+    setState(() {
+      for (final entry in plan.entries) {
+        if (entry.isJumpOnly || _touched.contains(entry.id)) continue;
+        if (saved.containsKey(entry.id)) {
+          _selected.remove(entry.id);
+        } else {
+          _selected.add(entry.id);
+        }
+      }
+    });
+  }
 
   Future<void> _paste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -76,6 +133,12 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
       );
       return;
     }
+    // Check before the text reaches the editor; laying out megabytes of
+    // text is the freeze the cap exists to prevent.
+    if (_exceedsImportLimit(text)) {
+      _tooLarge('text');
+      return;
+    }
     _source.text = text;
   }
 
@@ -84,16 +147,18 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
   );
 
   Future<void> _openFile() async {
-    final file = await FilePicker.pickFile();
-    if (!mounted || file == null) return;
-    // Reject a known-large file before reading it into memory.
-    final knownLength = file.lengthSync();
-    if (knownLength != null && knownLength > sshConfigImportMaxBytes) {
-      _tooLarge('file');
-      return;
-    }
     final Uint8List bytes;
     try {
+      // The picker throws, rather than returning null, when the platform
+      // refuses it (a sandboxed macOS build without file access, say).
+      final file = await FilePicker.pickFile();
+      if (!mounted || file == null) return;
+      // Reject a known-large file before reading it into memory.
+      final knownLength = file.lengthSync();
+      if (knownLength != null && knownLength > sshConfigImportMaxBytes) {
+        _tooLarge('file');
+        return;
+      }
       bytes = await file.readAsBytes();
     } on Exception {
       if (mounted) {
@@ -113,7 +178,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
 
   Future<void> _preview(List<Host> savedHosts) async {
     final text = _source.text;
-    if (utf8.encode(text).length > sshConfigImportMaxBytes) {
+    if (_exceedsImportLimit(text)) {
       _tooLarge('text');
       return;
     }
@@ -130,6 +195,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     final saved = _savedMatches(plan, savedHosts);
     setState(() {
       _plan = plan;
+      _touched.clear();
       _selected = {
         for (final entry in plan.entries)
           if (!entry.isJumpOnly && !saved.containsKey(entry.id)) entry.id,
@@ -138,14 +204,28 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
   }
 
   /// The same matching the import uses, so "already saved" is accurate.
+  /// Kept until the plan, the saved hosts or the username change, since the
+  /// preview rebuilds far more often than any of them do.
   Map<String, Host> _savedMatches(
     SshConfigImportPlan plan,
-    List<Host> savedHosts,
-  ) => sshConfigSavedMatches(
-    plan,
-    savedHosts,
-    defaultUsername: _defaultUsername.text,
-  );
+    List<Host>? savedHosts,
+  ) {
+    final saved = savedHosts ?? const <Host>[];
+    final key = (plan: plan, saved: saved, username: _defaultUsername.text);
+    final previous = _matchesKey;
+    if (previous != null &&
+        identical(previous.plan, plan) &&
+        identical(previous.saved, saved) &&
+        previous.username == key.username) {
+      return _matches;
+    }
+    _matchesKey = key;
+    return _matches = sshConfigSavedMatches(
+      plan,
+      saved,
+      defaultUsername: _defaultUsername.text,
+    );
+  }
 
   Future<void> _import(SshConfigImportPlan plan) async {
     final selected = {
@@ -199,20 +279,28 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
     final plan = _plan;
     final savedHosts =
         ref.watch(allHostsProvider).asData?.value ?? const <Host>[];
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Import ssh_config'),
-        leading: plan == null
-            ? null
-            : IconButton(
-                tooltip: 'Edit config text',
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => setState(() => _plan = null),
-              ),
+    // System Back from the preview returns to the config text, like the
+    // app bar arrow, instead of leaving and discarding the paste.
+    return PopScope(
+      canPop: plan == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) setState(() => _plan = null);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Import ssh_config'),
+          leading: plan == null
+              ? null
+              : IconButton(
+                  tooltip: 'Edit config text',
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: () => setState(() => _plan = null),
+                ),
+        ),
+        body: plan == null
+            ? _buildSource(context, savedHosts)
+            : _buildPreview(context, plan, savedHosts),
       ),
-      body: plan == null
-          ? _buildSource(context, savedHosts)
-          : _buildPreview(context, plan, savedHosts),
     );
   }
 
@@ -229,9 +317,9 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
               children: [
                 Text(
                   'Paste your ~/.ssh/config or open the file. Import only '
-                  'reads it: nothing runs, and Match, Include and '
-                  'ProxyCommand are skipped with a reason. You’ll see every '
-                  'host before anything is saved.',
+                  'reads it: nothing runs. Include, ProxyCommand and '
+                  'conditional Match blocks are skipped with a reason, and '
+                  'you’ll see every host before anything is saved.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
@@ -260,6 +348,7 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
                 TextField(
                   key: const ValueKey('ssh-config-source'),
                   controller: _source,
+                  inputFormatters: [_sizeLimit],
                   minLines: 10,
                   maxLines: null,
                   autocorrect: false,
@@ -301,8 +390,14 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
   ) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final hostEntries = plan.entries.where((entry) => !entry.isJumpOnly);
-    final jumpEntries = plan.entries.where((entry) => entry.isJumpOnly);
+    final hostEntries = [
+      for (final entry in plan.entries)
+        if (!entry.isJumpOnly) entry,
+    ];
+    final jumpEntries = [
+      for (final entry in plan.entries)
+        if (entry.isJumpOnly) entry,
+    ];
     final selectable = {
       for (final id in _selected)
         if (sshConfigEntryBlockReason(
@@ -321,114 +416,115 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
       color: colorScheme.onSurfaceVariant,
     );
 
+    // Built lazily: a config near the size cap holds thousands of hosts.
+    final items = <WidgetBuilder>[
+      (_) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: FluttyTheme.spacingMd),
+        child: Text(
+          '${hostEntries.length} '
+          '${hostEntries.length == 1 ? 'host' : 'hosts'} · '
+          '${jumpEntries.length} jump-only · '
+          '${plan.skipped.length} skipped',
+          style: mono,
+        ),
+      ),
+      if (plan.defaultPatterns.isNotEmpty)
+        (_) => Padding(
+          padding: const EdgeInsets.fromLTRB(
+            FluttyTheme.spacingMd,
+            FluttyTheme.spacingXs,
+            FluttyTheme.spacingMd,
+            0,
+          ),
+          child: Text(
+            'Defaults applied from Host ${plan.defaultPatterns.join(', ')}.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      if (needsUsername)
+        (_) => Padding(
+          padding: const EdgeInsets.fromLTRB(
+            FluttyTheme.spacingMd,
+            FluttyTheme.spacingMd,
+            FluttyTheme.spacingMd,
+            0,
+          ),
+          child: TextField(
+            key: const ValueKey('ssh-config-default-username'),
+            controller: _defaultUsername,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'Username for hosts without User',
+              helperText: 'Used where the config sets no User.',
+            ),
+          ),
+        ),
+      if (hostEntries.isEmpty)
+        (_) => Padding(
+          padding: const EdgeInsets.all(FluttyTheme.spacingMd),
+          child: Text(
+            'No hosts to import. Only wildcard Host blocks were found, and '
+            'those become defaults.',
+            style: theme.textTheme.bodyMedium,
+          ),
+        ),
+      (_) => const _SectionHeader(title: 'hosts'),
+      for (final entry in hostEntries)
+        (_) => _EntryTile(
+          plan: plan,
+          entry: entry,
+          selected: _selected.contains(entry.id),
+          requiredBy:
+              closure.contains(entry.id) && !_selected.contains(entry.id)
+              ? 'Needed as a jump host'
+              : null,
+          blockedReason: sshConfigEntryBlockReason(
+            plan,
+            entry,
+            defaultUsername: _defaultUsername.text,
+          ),
+          savedMatch: savedMatches[entry.id],
+          onChanged: (value) => setState(() {
+            _touched.add(entry.id);
+            if (value) {
+              _selected.add(entry.id);
+            } else {
+              _selected.remove(entry.id);
+            }
+          }),
+        ),
+      if (jumpEntries.isNotEmpty) ...[
+        (_) => const _SectionHeader(title: 'jump hosts'),
+        for (final entry in jumpEntries)
+          (_) => _EntryTile(
+            plan: plan,
+            entry: entry,
+            selected: closure.contains(entry.id),
+            requiredBy: closure.contains(entry.id)
+                ? 'Added because a selected host jumps through it'
+                : 'Added only if a selected host needs it',
+            blockedReason: null,
+            savedMatch: savedMatches[entry.id],
+          ),
+      ],
+      if (plan.skipped.isNotEmpty)
+        (_) => _SkippedSection(skipped: plan.skipped),
+    ];
+
     return SafeArea(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: ListView(
+            child: ListView.builder(
               padding: const EdgeInsets.symmetric(
                 vertical: FluttyTheme.spacingSm,
               ),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: FluttyTheme.spacingMd,
-                  ),
-                  child: Text(
-                    '${hostEntries.length} '
-                    '${hostEntries.length == 1 ? 'host' : 'hosts'} · '
-                    '${jumpEntries.length} jump-only · '
-                    '${plan.skipped.length} skipped',
-                    style: mono,
-                  ),
-                ),
-                if (plan.defaultPatterns.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingXs,
-                      FluttyTheme.spacingMd,
-                      0,
-                    ),
-                    child: Text(
-                      'Defaults applied from Host '
-                      '${plan.defaultPatterns.join(', ')}.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                if (needsUsername)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      0,
-                    ),
-                    child: TextField(
-                      key: const ValueKey('ssh-config-default-username'),
-                      controller: _defaultUsername,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      decoration: const InputDecoration(
-                        labelText: 'Username for hosts without User',
-                        helperText: 'Used where the config sets no User.',
-                      ),
-                    ),
-                  ),
-                if (hostEntries.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.all(FluttyTheme.spacingMd),
-                    child: Text(
-                      'No hosts to import. Only wildcard Host blocks were '
-                      'found, and those become defaults.',
-                      style: theme.textTheme.bodyMedium,
-                    ),
-                  ),
-                const _SectionHeader(title: 'hosts'),
-                for (final entry in hostEntries)
-                  _EntryTile(
-                    plan: plan,
-                    entry: entry,
-                    selected: _selected.contains(entry.id),
-                    requiredBy:
-                        closure.contains(entry.id) &&
-                            !_selected.contains(entry.id)
-                        ? 'Needed as a jump host'
-                        : null,
-                    blockedReason: sshConfigEntryBlockReason(
-                      plan,
-                      entry,
-                      defaultUsername: _defaultUsername.text,
-                    ),
-                    savedMatch: savedMatches[entry.id],
-                    onChanged: (value) => setState(() {
-                      if (value) {
-                        _selected.add(entry.id);
-                      } else {
-                        _selected.remove(entry.id);
-                      }
-                    }),
-                  ),
-                if (jumpEntries.isNotEmpty) ...[
-                  const _SectionHeader(title: 'jump hosts'),
-                  for (final entry in jumpEntries)
-                    _EntryTile(
-                      plan: plan,
-                      entry: entry,
-                      selected: closure.contains(entry.id),
-                      requiredBy: closure.contains(entry.id)
-                          ? 'Added because a selected host jumps through it'
-                          : 'Added only if a selected host needs it',
-                      blockedReason: null,
-                      savedMatch: savedMatches[entry.id],
-                    ),
-                ],
-                if (plan.skipped.isNotEmpty)
-                  _SkippedSection(skipped: plan.skipped),
-              ],
+              itemCount: items.length,
+              itemBuilder: (context, index) => items[index](context),
             ),
           ),
           Padding(

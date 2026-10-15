@@ -75,7 +75,7 @@ class SshConfigImportEntry {
 @immutable
 class SshConfigImportPlan {
   /// Creates a plan.
-  const SshConfigImportPlan({
+  SshConfigImportPlan({
     required this.entries,
     required this.skipped,
     required this.defaultPatterns,
@@ -91,13 +91,15 @@ class SshConfigImportPlan {
   /// directives).
   final List<String> defaultPatterns;
 
+  /// Entries by ID, built on first lookup. The preview looks entries up for
+  /// every selected host and every hop of its chain on each rebuild, so a
+  /// linear scan made large configs quadratic.
+  late final Map<String, SshConfigImportEntry> _entriesById = {
+    for (final entry in entries) entry.id: entry,
+  };
+
   /// Looks up an entry by [SshConfigImportEntry.id].
-  SshConfigImportEntry? entryById(String id) {
-    for (final entry in entries) {
-      if (entry.id == id) return entry;
-    }
-    return null;
-  }
+  SshConfigImportEntry? entryById(String id) => _entriesById[id];
 
   /// The jump hosts [entry] connects through, nearest first.
   List<SshConfigImportEntry> jumpChain(SshConfigImportEntry entry) {
