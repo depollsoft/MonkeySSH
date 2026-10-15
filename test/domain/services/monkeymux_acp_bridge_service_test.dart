@@ -1183,10 +1183,63 @@ touch "$HOME/installed"
     expect(bridges.single.providerId, 'builtin:copilot-cli');
     expect(bridges.single.sessionId, 'session-1');
     expect(bridges.single.cwd, '/home/demo/project with spaces');
+    expect(
+      bridges.single.pendingPermissionCount,
+      isNull,
+      reason: 'This helper does not report request kinds.',
+    );
+    expect(bridges.single.pendingInputCount, isNull);
     expect(status.state, MonkeyMuxAcpProviderState.running);
     expect(commands, hasLength(4));
     expect(commands.first, contains(r"'Copilot'\''s CLI'"));
     expect(commands.first, contains("'/home/demo/project with spaces'"));
+  });
+
+  test('reads request kinds only from bridges that track them', () async {
+    final client = _MockSshClient();
+    Map<String, Object?> bridge(String id, Map<String, Object?> extra) => {
+      ..._metadata(id: id),
+      ...extra,
+    };
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async {
+          final channel = _TestChannel();
+          scheduleMicrotask(() async {
+            channel.addText(
+              _frame({
+                'version': 1,
+                'type': 'list',
+                'bridges': [
+                  bridge('a' * 32, {'pendingPermissionCount': 1}),
+                  bridge('b' * 32, {'permissionRequestCount': 3}),
+                  bridge('c' * 32, const {}),
+                  bridge('d' * 32, {
+                    'permissionRequestCount': 1,
+                    'pendingAttentionCount': 1,
+                  }),
+                ],
+              }),
+            );
+            await channel.remoteClose();
+          });
+          return channel.session;
+        });
+    final bridges = await _bridgeService().list(_sshSession(client));
+
+    expect(
+      [
+        for (final bridge in bridges)
+          (bridge.pendingPermissionCount, bridge.pendingInputCount),
+      ],
+      [
+        (1, 0),
+        (0, 0),
+        // Started by a helper that predates request kinds.
+        (null, null),
+        // An earlier build reported only a combined count.
+        (null, null),
+      ],
+    );
   });
 
   test(
