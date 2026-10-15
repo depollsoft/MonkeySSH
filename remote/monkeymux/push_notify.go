@@ -1036,7 +1036,7 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 	if err != nil {
 		return pushResultFailed
 	}
-	job.collapse = pushCollapseKey(salt, deviceID, session, "test")
+	job.collapse = pushCollapseKey(salt, deviceID, session, "test", pushKindTest)
 	// The app is waiting on the answer, so a test gets one attempt.
 	return n.deliverWithRetries(job, nil)
 }
@@ -1212,7 +1212,7 @@ func buildPushJob(
 		deviceID: device.DeviceID,
 		ticket:   device.Ticket,
 		kind:     kind,
-		collapse: pushCollapseKey(salt, device.DeviceID, session, windowID),
+		collapse: pushCollapseKey(salt, device.DeviceID, session, windowID, kind),
 		payload:  payload,
 	}, nil
 }
