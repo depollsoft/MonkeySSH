@@ -178,6 +178,8 @@ final class HardwareKeyPlugin: NSObject, FlutterPlugin {
       return [
         "publicKey": FlutterStandardTypedData(bytes: point),
         "backing": "secureEnclave",
+        // .userPresence accepts the passcode as well as Face ID / Touch ID.
+        "userPresenceAllowsPasscode": true,
       ]
     #endif
   }

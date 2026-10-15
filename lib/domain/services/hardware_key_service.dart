@@ -118,10 +118,15 @@ class HardwareKeyException implements Exception {
 }
 
 /// Public half of a freshly generated hardware key.
+///
+/// [userPresenceAllowsPasscode] says whether a per-use prompt for this key
+/// accepts the screen lock as well as a biometric; it is fixed when the key
+/// is made.
 typedef HardwareKeyGenerationResult = ({
   Uint8List publicKey,
   HardwareKeyBacking backing,
   bool isEmulated,
+  bool userPresenceAllowsPasscode,
 });
 
 /// Native secure-hardware operations.
@@ -198,6 +203,8 @@ class MethodChannelHardwareKeyPlatform implements HardwareKeyPlatform {
       publicKey: publicKey,
       backing: backing,
       isEmulated: result?['isEmulator'] == true,
+      // Unknown means no: key details must not promise the passcode.
+      userPresenceAllowsPasscode: result?['userPresenceAllowsPasscode'] == true,
     );
   }
 
@@ -729,20 +736,15 @@ class HardwareKeyService {
       await _deleteQuietly(alias);
       throw const HardwareKeyException(HardwareKeyErrorCode.failed);
     }
-    // Record whether this key's prompt accepts the screen lock, so key
-    // details can say so; it does not change after an OS upgrade.
-    var allowsPasscode = true;
-    if (requireUserPresence) {
-      final capabilities = await getCapabilities();
-      allowsPasscode =
-          !capabilities.isAvailable || capabilities.userPresenceAllowsPasscode;
-    }
     final reference = HardwareKeyReference(
       alias: alias,
       backing: result.backing,
       publicKeyBlob: publicKeyBlob,
       requiresUserPresence: requireUserPresence,
-      userPresenceAllowsPasscode: allowsPasscode,
+      // Recorded so key details can say whether this key's prompt accepts
+      // the screen lock; it does not change after an OS upgrade.
+      userPresenceAllowsPasscode:
+          !requireUserPresence || result.userPresenceAllowsPasscode,
       isEmulated: result.isEmulated,
     );
     DiagnosticsLogService.instance.info(

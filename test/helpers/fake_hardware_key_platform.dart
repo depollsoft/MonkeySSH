@@ -167,6 +167,9 @@ class FakeHardwareKeyPlatform implements HardwareKeyPlatform {
       publicKey: publicPointOverride ?? pair.publicKey.Q!.getEncoded(false),
       backing: backing,
       isEmulated: false,
+      // Like the native side, the same OS fact as the capability.
+      userPresenceAllowsPasscode:
+          capabilities['userPresenceAllowsPasscode'] != false,
     );
   }
 

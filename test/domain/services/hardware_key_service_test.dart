@@ -297,6 +297,28 @@ void main() {
       expect(noPrompt.reference.userPresenceAllowsPasscode, isTrue);
     });
 
+    test(
+      'takes passcode support from the generated key, not a later check',
+      () async {
+        // An Android 10 device whose capability check fails right after
+        // generation: the key it made is still biometric-only.
+        final platform = _ThrowingCapabilitiesPlatform()
+          ..capabilities = const {
+            'available': true,
+            'backing': 'tee',
+            'userPresenceAvailable': true,
+            'userPresenceAllowsPasscode': false,
+          };
+        final service = HardwareKeyService(
+          platform: platform,
+          isPlatformSupported: true,
+        );
+
+        final generated = await service.generate(requireUserPresence: true);
+        expect(generated.reference.userPresenceAllowsPasscode, isFalse);
+      },
+    );
+
     test('deletes the key when the platform returns a bad point', () async {
       final platform = FakeHardwareKeyPlatform()
         ..publicPointOverride = Uint8List.fromList([0x04, 1, 2]);
@@ -855,6 +877,7 @@ void main() {
           'publicKey': point,
           'backing': 'strongBox',
           'isEmulator': false,
+          'userPresenceAllowsPasscode': true,
         },
       );
       const platform = MethodChannelHardwareKeyPlatform();
@@ -867,10 +890,28 @@ void main() {
       expect(result.publicKey, point);
       expect(result.backing, HardwareKeyBacking.strongBox);
       expect(result.isEmulated, isFalse);
+      expect(result.userPresenceAllowsPasscode, isTrue);
       expect(calls.single.arguments, {
         'alias': 'alias',
         'requireUserPresence': true,
       });
+    });
+
+    test('does not assume passcode support the platform left out', () async {
+      handle(
+        (call) async => {
+          'publicKey': Uint8List.fromList([0x04, ..._bytes(64, 6)]),
+          'backing': 'tee',
+        },
+      );
+      const platform = MethodChannelHardwareKeyPlatform();
+
+      final result = await platform.generateKey(
+        alias: 'alias',
+        requireUserPresence: true,
+      );
+
+      expect(result.userPresenceAllowsPasscode, isFalse);
     });
   });
 }

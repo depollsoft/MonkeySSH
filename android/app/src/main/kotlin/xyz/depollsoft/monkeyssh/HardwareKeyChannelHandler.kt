@@ -91,6 +91,10 @@ object HardwareKeyChannelHandler {
 
     private class GeneratedKey(val publicPoint: ByteArray, val backing: String)
 
+    /** Before Android 11 a per-use key accepts only a strong biometric. */
+    private fun userPresenceAllowsPasscode(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+
     /** Replies at most once, always on the main thread. */
     private class Reply(private val result: MethodChannel.Result) {
         private val replied = AtomicBoolean(false)
@@ -216,6 +220,8 @@ object HardwareKeyChannelHandler {
                         "publicKey" to generated.publicPoint,
                         "backing" to generated.backing,
                         "isEmulator" to isProbablyEmulator(),
+                        // Fixed when the key is made, as keySpec shows.
+                        "userPresenceAllowsPasscode" to userPresenceAllowsPasscode(),
                     )
                 }
             }
@@ -291,8 +297,7 @@ object HardwareKeyChannelHandler {
             "available" to true,
             "backing" to backing,
             "userPresenceAvailable" to userPresenceAvailable(context),
-            // Before Android 11 a per-use key accepts only a strong biometric.
-            "userPresenceAllowsPasscode" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R),
+            "userPresenceAllowsPasscode" to userPresenceAllowsPasscode(),
             "isEmulator" to emulator,
             "strongBoxAvailable" to strongBox,
         )
