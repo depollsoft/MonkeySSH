@@ -36,7 +36,7 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
 
   late int _focusRequest = _search.focusRequest;
   int? _announced;
-  String _announcementLabel = '';
+  String _announcedLabel = '';
 
   @override
   void initState() {
@@ -65,23 +65,32 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
     _focus.requestFocus();
   }
 
-  /// The live region's label, updated only when the controller says the
-  /// result should be announced, so output streaming in stays quiet.
-  String _liveLabel({
+  /// The count's label, and whether it is a live region.
+  ///
+  /// A new search or a step is announced. Output streaming in keeps the
+  /// label current for a screen reader that moves onto the count, but turns
+  /// the live region off until the next announcement, so a changed count
+  /// stays quiet: platforms announce a live region when its label changes,
+  /// or when the region appears.
+  (String, bool) _countSemantics({
     required int count,
     required int? active,
     required bool capped,
   }) {
+    final label = _announcement(
+      count: count,
+      active: active,
+      capped: capped,
+      match: _search.isSettled ? _search.activeMatch : null,
+    );
     if (_announced != _search.announcement) {
       _announced = _search.announcement;
-      _announcementLabel = _announcement(
-        count: count,
-        active: active,
-        capped: capped,
-        match: _search.isSettled ? _search.activeMatch : null,
-      );
+      _announcedLabel = label;
+    } else if (label != _announcedLabel) {
+      // Diverged since the announcement; stays quiet until the next one.
+      _announcedLabel = '';
     }
-    return _announcementLabel;
+    return (label, label == _announcedLabel);
   }
 
   KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
@@ -124,6 +133,13 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
         final active = _search.activeIndex;
         final hasQuery = _search.query.trim().isNotEmpty;
         final canStep = count > 0;
+        final (countLabel, countLive) = hasQuery
+            ? _countSemantics(
+                count: count,
+                active: active,
+                capped: result.capped,
+              )
+            : ('', false);
         return Material(
           key: const ValueKey('acp-transcript-search-bar'),
           color: scheme.surfaceContainerHigh,
@@ -142,56 +158,64 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (hasQuery && _search.isSettled)
+                  // Held at its height while typing pauses, so the bar does
+                  // not grow and shrink by a line with every keystroke.
+                  if (hasQuery)
                     _MatchContext(
-                      match: _search.activeMatch,
+                      match: _search.isSettled ? _search.activeMatch : null,
                       empty: count == 0,
+                      pending: !_search.isSettled,
                     ),
                   Row(
                     children: [
                       Expanded(
-                        child: TextField(
-                          key: const ValueKey('acp-transcript-search-field'),
-                          controller: _text,
-                          focusNode: _focus,
-                          onChanged: _search.setQuery,
-                          onSubmitted: (_) => _submit(),
-                          // Keep the keyboard up so the next press steps on.
-                          onEditingComplete: () {},
-                          textInputAction: TextInputAction.search,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: scheme.onSurface,
-                          ),
-                          decoration: InputDecoration(
-                            hintText: 'Search chat',
-                            isDense: true,
-                            filled: false,
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            prefixIcon: Icon(
-                              Icons.search,
-                              size: 18,
-                              color: scheme.onSurfaceVariant,
+                        // A name of its own, rather than one borrowed from
+                        // the hint, which goes once the field has text.
+                        child: Semantics(
+                          label: 'Search chat',
+                          child: TextField(
+                            key: const ValueKey('acp-transcript-search-field'),
+                            controller: _text,
+                            focusNode: _focus,
+                            onChanged: _search.setQuery,
+                            onSubmitted: (_) => _submit(),
+                            // Keep the keyboard up so the next press steps on.
+                            onEditingComplete: () {},
+                            textInputAction: TextInputAction.search,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: scheme.onSurface,
                             ),
-                            prefixIconConstraints: const BoxConstraints(
-                              minWidth: 32,
-                              minHeight: 44,
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              vertical: 12,
+                            decoration: InputDecoration(
+                              hintText: 'Search chat',
+                              isDense: true,
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              prefixIcon: Icon(
+                                Icons.search,
+                                size: 18,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              prefixIconConstraints: const BoxConstraints(
+                                minWidth: 32,
+                                minHeight: 44,
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                vertical: 12,
+                              ),
                             ),
                           ),
                         ),
                       ),
                       if (hasQuery)
                         Semantics(
-                          liveRegion: true,
-                          label: _liveLabel(
-                            count: count,
-                            active: active,
-                            capped: result.capped,
+                          key: const ValueKey(
+                            'acp-transcript-search-count-semantics',
                           ),
+                          container: true,
+                          liveRegion: countLive,
+                          label: countLabel,
                           child: ExcludeSemantics(
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -284,10 +308,18 @@ class _BarButton extends StatelessWidget {
 
 /// One line of context for the active match, or why there is none.
 class _MatchContext extends StatelessWidget {
-  const _MatchContext({required this.match, required this.empty});
+  const _MatchContext({
+    required this.match,
+    required this.empty,
+    required this.pending,
+  });
 
   final AcpTranscriptMatch? match;
   final bool empty;
+
+  /// A search is waiting for typing to pause: the row keeps its height,
+  /// blank.
+  final bool pending;
 
   static String _label(AcpTranscriptMatchSource source) => switch (source) {
     AcpTranscriptMatchSource.user => 'you',
@@ -307,7 +339,13 @@ class _MatchContext extends StatelessWidget {
     );
     final current = match;
     final Widget content;
-    if (empty || current == null) {
+    if (pending) {
+      content = Text(
+        ' ',
+        key: const ValueKey('acp-transcript-search-pending'),
+        style: muted,
+      );
+    } else if (empty || current == null) {
       content = Text(
         'No matches in the loaded transcript',
         key: const ValueKey('acp-transcript-search-empty'),

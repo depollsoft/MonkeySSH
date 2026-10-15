@@ -107,7 +107,7 @@ void registerAcpTranscriptToolsTests() {
       expect(newer.height, greaterThanOrEqualTo(44));
     });
 
-    testWidgets('streamed output does not re-announce the result', (
+    testWidgets('streamed output updates the count without announcing it', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
@@ -124,8 +124,13 @@ void registerAcpTranscriptToolsTests() {
       await tester.pump(const Duration(milliseconds: 200));
       final count = find.byKey(const ValueKey('acp-transcript-search-count'));
       String liveLabel() => tester.getSemantics(count).label;
-      final announced = liveLabel();
-      expect(announced, startsWith('Match 2 of 2'));
+      bool isLive() => tester
+          .getSemantics(count)
+          .getSemanticsData()
+          .flagsCollection
+          .isLiveRegion;
+      expect(liveLabel(), startsWith('Match 2 of 2'));
+      expect(isLive(), isTrue);
 
       search.updateEntries([
         ...entries,
@@ -133,7 +138,10 @@ void registerAcpTranscriptToolsTests() {
       ]);
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('2/3'), findsOneWidget);
-      expect(liveLabel(), announced);
+      // A screen reader that moves onto the count hears it as it is, but the
+      // change is not announced: the live region is off until the next one.
+      expect(liveLabel(), startsWith('Match 2 of 3'));
+      expect(isLive(), isFalse);
 
       // Stepping is announced.
       await tester.tap(
@@ -141,6 +149,37 @@ void registerAcpTranscriptToolsTests() {
       );
       await tester.pump();
       expect(liveLabel(), startsWith('Match 1 of 3'));
+      expect(isLive(), isTrue);
+      semantics.dispose();
+    });
+
+    testWidgets('bar keeps its height while a search waits for typing', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final search = AcpTranscriptSearchController()
+        ..updateEntries(_longTranscript())
+        ..open();
+      addTearDown(search.dispose);
+      await tester.pumpWidget(_app(AcpTranscriptSearchBar(controller: search)));
+      final bar = find.byKey(const ValueKey('acp-transcript-search-bar'));
+      final field = find.byKey(const ValueKey('acp-transcript-search-field'));
+      await tester.enterText(field, 'needle');
+      await tester.pump(const Duration(milliseconds: 200));
+      final settled = tester.getSize(bar).height;
+
+      await tester.enterText(field, 'needl');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('acp-transcript-search-pending')),
+        findsOneWidget,
+      );
+      expect(tester.getSize(bar).height, settled);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(tester.getSize(bar).height, settled);
+
+      // The field has a name of its own once the hint is gone.
+      expect(tester.getSemantics(field).label, contains('Search chat'));
       semantics.dispose();
     });
 
