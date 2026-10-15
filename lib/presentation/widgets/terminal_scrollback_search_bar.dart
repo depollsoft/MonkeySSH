@@ -291,9 +291,13 @@ class _TerminalScrollbackSearchBarState
       oldWidget.controller.removeListener(_handleSearchChanged);
       widget.controller.addListener(_handleSearchChanged);
       oldWidget.controller.fieldInput.detach(this);
-      widget.controller.fieldInput
-        ..attach(this)
-        ..fieldFocusChanged(hasFocus: _fieldFocusNode.hasFocus);
+      widget.controller.fieldInput.attach(this);
+      // Its listeners rebuild, so they hear of the focus after this build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _handleFieldFocusChanged();
+        }
+      });
       _handledRevealRequest = widget.controller.revealRequest;
       _handledUserUpdate = widget.controller.userUpdateCount;
       _text.text = widget.controller.query;

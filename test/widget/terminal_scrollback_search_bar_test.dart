@@ -238,6 +238,39 @@ void main() {
       });
     }
 
+    testWidgets('hands toolbar input over to a new search', (tester) async {
+      Widget bar(TerminalScrollbackSearchController controller) => MaterialApp(
+        theme: FluttyTheme.dark,
+        home: Scaffold(
+          body: Column(
+            children: [
+              const Expanded(child: SizedBox.expand()),
+              TerminalScrollbackSearchBar(
+                controller: controller,
+                onClose: () {},
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pumpWidget(bar(search));
+      await tester.pump();
+      expect(search.fieldInput.hasFocus, isTrue);
+
+      final next = _controller(terminal);
+      addTearDown(next.dispose);
+      await tester.pumpWidget(bar(next));
+      await tester.pump();
+      expect(search.fieldInput.hasFocus, isFalse);
+      expect(next.fieldInput.hasFocus, isTrue);
+      next.fieldInput.insertText('beta');
+      await _settle(tester);
+      expect(next.query, 'beta');
+      expect(_statusText(tester), '1/1');
+      expect(search.query, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('a capped count gives the total only', (tester) async {
       search.dispose();
       search = TerminalScrollbackSearchController(
