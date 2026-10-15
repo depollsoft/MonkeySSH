@@ -867,6 +867,36 @@ void registerAcpUnreadTests() {
       expect(state.earlierHistoryUnavailable, isTrue);
       expect(state.digest, isNull);
     });
+
+    test('a reply at the size cap that keeps streaming still grows', () {
+      final builder = d.AcpTimelineBuilder(
+        limits: const d.AcpTimelineLimits(maxEntryBytes: 8 * 1024),
+      )..appendLocalUserPrompt(const [AcpTextContent('Go')]);
+      void stream(int chunks) {
+        for (var i = 0; i < chunks; i++) {
+          builder.apply(
+            d.AcpContentChunkUpdate(
+              kind: 'agent_message_chunk',
+              messageId: 'reply',
+              content: AcpTextContent('${'x' * 511}\n'),
+            ),
+          );
+        }
+      }
+
+      stream(40);
+      final leaving = builder.snapshot();
+      final marker = AcpLastSeenMarker.of(leaving)!;
+      stream(40);
+      final back = builder.snapshot();
+      final before = leaving.entries.last as d.AcpMessageEntry;
+      final after = back.entries.last as d.AcpMessageEntry;
+      // The retained text is capped, so it alone no longer shows the growth.
+      expect(d.acpContentSize(after.content), d.acpContentSize(before.content));
+      expect(after.streamedSize, greaterThan(before.streamedSize));
+      expect(acpChangedSince(marker, back), isTrue);
+      expect(_unread(marker, back)?.digest?.replies, 1);
+    });
   });
 
   group('acpSeenSnapshot', () {

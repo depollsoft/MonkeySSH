@@ -99,7 +99,7 @@ final class AcpLastSeenMarker {
     ) {
       final entry = entries[i];
       if (entry is d.AcpMessageEntry && entry.role != d.AcpMessageRole.user) {
-        messageSizes[entry.order] = _contentSize(entry);
+        messageSizes[entry.order] = entry.streamedSize;
       }
     }
     final newestOrder = entries.last.order;
@@ -169,9 +169,10 @@ final class AcpLastSeenMarker {
   /// Tool calls that were still running when the user left.
   final Set<String> runningToolIds;
 
-  /// Content size of the newest agent and reasoning messages up to the last
-  /// seen entry, by order, to notice one that kept streaming while the user
-  /// was away. Only sizes are kept, never the text.
+  /// Streamed size ([d.AcpMessageEntry.streamedSize]) of the newest agent
+  /// and reasoning messages up to the last seen entry, by order, to notice
+  /// one that kept streaming while the user was away. Only sizes are kept,
+  /// never the text.
   final Map<int, int> messageSizes;
 
   /// The last seen tool call, when the last entry was one.
@@ -293,22 +294,15 @@ bool acpChangedSince(
   );
 }
 
-/// Whether [entry] is a message larger than [seenSize], the size it had
-/// when the user left.
+/// Whether [entry] is a message that has received more than [seenSize],
+/// what it had when the user left. The streamed size counts content later
+/// dropped to stay within memory limits, so a reply at the size cap still
+/// grows.
 bool _grewSince(int? seenSize, d.AcpTimelineEntry entry) =>
     seenSize != null &&
     entry is d.AcpMessageEntry &&
     entry.role != d.AcpMessageRole.user &&
-    _contentSize(entry) > seenSize;
-
-/// Text length of [entry], plus one for each other content block.
-int _contentSize(d.AcpMessageEntry entry) {
-  var size = 0;
-  for (final block in entry.content) {
-    size += block is AcpTextContent ? block.text.length : 1;
-  }
-  return size;
-}
+    entry.streamedSize > seenSize;
 
 /// What arrived since the user left, counted from structured data only.
 @immutable

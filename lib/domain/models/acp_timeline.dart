@@ -79,6 +79,15 @@ bool _claudeSubagent(Map<String, Object?> meta) {
 /// them.
 const _localUserMessageIdPrefix = 'monkeyssh-user-';
 
+/// Text length of [content] plus one for each block that is not text.
+int acpContentSize(List<AcpContentBlock> content) {
+  var size = 0;
+  for (final block in content) {
+    size += block is AcpTextContent ? block.text.length : 1;
+  }
+  return size;
+}
+
 /// Role of a streamed ACP message in the domain timeline.
 enum AcpMessageRole {
   /// A prompt authored by the user.
@@ -119,6 +128,7 @@ final class AcpMessageEntry extends AcpTimelineEntry {
     this.messageId,
     this.parentToolCallId,
     this.queued = false,
+    this.droppedSize = 0,
     List<AcpContentBlock> content = const <AcpContentBlock>[],
   }) : content = List<AcpContentBlock>.unmodifiable(content);
 
@@ -139,6 +149,16 @@ final class AcpMessageEntry extends AcpTimelineEntry {
 
   /// Ordered content blocks accumulated for this message.
   final List<AcpContentBlock> content;
+
+  /// Content dropped from this message to stay within memory limits,
+  /// measured like [streamedSize].
+  final int droppedSize;
+
+  /// How much content this message has received: its text length plus one
+  /// for each other block, including content later dropped to stay within
+  /// memory limits. It only grows while the message streams, even once the
+  /// oldest content is dropped and the retained size stays flat.
+  int get streamedSize => droppedSize + acpContentSize(content);
 
   /// Whether this is a prompt this client sent, as opposed to one the agent
   /// echoed or replayed.
@@ -177,6 +197,7 @@ final class AcpMessageEntry extends AcpTimelineEntry {
       messageId: messageId,
       parentToolCallId: parentToolCallId,
       queued: queued,
+      droppedSize: droppedSize,
       content: merged == null
           ? [...content, block]
           : [...content.sublist(0, content.length - 1), merged],
@@ -199,6 +220,7 @@ final class AcpMessageEntry extends AcpTimelineEntry {
           messageId == other.messageId &&
           parentToolCallId == other.parentToolCallId &&
           queued == other.queued &&
+          droppedSize == other.droppedSize &&
           const ListEquality<AcpContentBlock>().equals(content, other.content);
 
   @override
@@ -208,6 +230,7 @@ final class AcpMessageEntry extends AcpTimelineEntry {
     messageId,
     parentToolCallId,
     queued,
+    droppedSize,
     const ListEquality<AcpContentBlock>().hash(content),
   );
 }
@@ -596,6 +619,7 @@ class AcpTimelineBuilder {
           order: entry.order,
           messageId: entry.messageId,
           parentToolCallId: entry.parentToolCallId,
+          droppedSize: entry.droppedSize,
           content: entry.content,
         ),
       );
@@ -851,6 +875,9 @@ class AcpTimelineBuilder {
       messageId: entry.messageId,
       parentToolCallId: entry.parentToolCallId,
       queued: entry.queued,
+      droppedSize:
+          entry.droppedSize +
+          math.max(0, acpContentSize(entry.content) - acpContentSize(content)),
       content: content,
     );
   }
