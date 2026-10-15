@@ -521,6 +521,10 @@ class SftpBottomPanel extends StatelessWidget {
   /// Whether [summary] is a file name, set in mono like other machine text.
   final bool summaryIsMachineText;
 
+  /// Widest the action row grows; on tablets it sits at the trailing edge
+  /// instead of spreading a few labels across the whole panel.
+  static const _maxActionsWidth = 480.0;
+
   /// Lays the actions out in one row, or two per row when large text would
   /// clip their labels.
   List<Widget> _actionRows(BuildContext context) {
@@ -581,15 +585,31 @@ class SftpBottomPanel extends StatelessWidget {
                         : theme.textTheme.bodyMedium?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                    // File names stay on two lines; prose wraps in full so
+                    // large text never cuts an instruction short.
+                    maxLines: summaryIsMachineText ? 2 : null,
+                    overflow: summaryIsMachineText
+                        ? TextOverflow.ellipsis
+                        : null,
                   ),
                   if (child case final child?) ...[
                     const SizedBox(height: 8),
                     child,
                   ],
                   const SizedBox(height: 12),
-                  ..._actionRows(context),
+                  Align(
+                    alignment: AlignmentDirectional.centerEnd,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _maxActionsWidth,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: _actionRows(context),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -725,7 +745,7 @@ class SftpBatchSelectionBar extends StatelessWidget {
           onPressed: onDone,
           child: const Column(
             mainAxisSize: MainAxisSize.min,
-            children: [Icon(Icons.close), Text('Close', maxLines: 1)],
+            children: [Icon(Icons.check), Text('Done', maxLines: 1)],
           ),
         ),
       ],
@@ -737,14 +757,15 @@ class SftpBatchSelectionBar extends StatelessWidget {
 class SftpMoveBar extends StatelessWidget {
   /// Creates the bar.
   const SftpMoveBar({
-    required this.fileCount,
+    required this.fileNames,
     required this.onCancel,
     required this.onMoveHere,
     super.key,
   });
 
-  /// Number of files being moved.
-  final int fileCount;
+  /// Names of the files being moved, which the list no longer marks once
+  /// another folder is open.
+  final List<String> fileNames;
 
   /// Abandons the move.
   final VoidCallback onCancel;
@@ -755,10 +776,12 @@ class SftpMoveBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const size = Size.fromHeight(48);
-    final noun = fileCount == 1 ? 'file' : 'files';
+    final theme = Theme.of(context);
+    final count = fileNames.length;
     return SftpBottomPanel(
-      title: 'move $fileCount $noun',
-      summary: 'Open the destination folder, then move them here.',
+      title: 'move $count ${count == 1 ? 'file' : 'files'}',
+      summary: describeSftpFileNames(fileNames),
+      summaryIsMachineText: true,
       actions: [
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(minimumSize: size),
@@ -773,6 +796,19 @@ class SftpMoveBar extends StatelessWidget {
           label: const Text('Move here'),
         ),
       ],
+      child: Text(
+        'Open the destination folder, then tap Move here.',
+        style: theme.textTheme.bodyMedium?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
     );
   }
+}
+
+/// The first few of [names], then how many more there are:
+/// `a.txt, b.txt, c.txt and 2 more`.
+String describeSftpFileNames(List<String> names, {int shown = 3}) {
+  if (names.length <= shown) return names.join(', ');
+  return '${names.take(shown).join(', ')} and ${names.length - shown} more';
 }

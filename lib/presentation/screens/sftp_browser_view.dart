@@ -415,9 +415,10 @@ class SftpBrowserToolbar extends StatelessWidget {
           IconButton(
             tooltip: viewTooltip,
             onPressed: onShowViewOptions,
-            // The dot marks a non-default view: hidden files are filtered.
+            // The dot marks a non-default view: another sort order, or
+            // hidden files filtered out.
             icon: Badge(
-              isLabelVisible: !settings.showHidden,
+              isLabelVisible: !settings.isDefault,
               smallSize: 8,
               backgroundColor: Theme.of(context).colorScheme.primary,
               child: const Icon(Icons.sort),

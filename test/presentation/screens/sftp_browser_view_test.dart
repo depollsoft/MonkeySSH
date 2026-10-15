@@ -1,5 +1,6 @@
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -178,5 +179,43 @@ void main() {
         isNull,
       );
     });
+  });
+
+  testWidgets('the sort button marks any view that is not the default', (
+    tester,
+  ) async {
+    Future<bool> badgeShown(SftpBrowserViewSettings settings) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SftpBrowserToolbar(
+              filterController: controller,
+              onFilterChanged: (_) {},
+              settings: settings,
+              onShowViewOptions: () {},
+            ),
+          ),
+        ),
+      );
+      return tester.widget<Badge>(find.byType(Badge)).isLabelVisible;
+    }
+
+    expect(await badgeShown(const SftpBrowserViewSettings()), isFalse);
+    expect(
+      await badgeShown(
+        const SftpBrowserViewSettings(sortField: SftpSortField.size),
+      ),
+      isTrue,
+    );
+    expect(
+      await badgeShown(const SftpBrowserViewSettings(descending: true)),
+      isTrue,
+    );
+    expect(
+      await badgeShown(const SftpBrowserViewSettings(showHidden: false)),
+      isTrue,
+    );
   });
 }

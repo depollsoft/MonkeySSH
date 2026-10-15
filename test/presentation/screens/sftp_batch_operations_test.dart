@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/screens/sftp_batch_operations.dart';
 import 'package:path/path.dart' as path;
@@ -259,6 +260,57 @@ void main() {
     expect(find.text('cancelling'), findsOneWidget);
   });
 
+  test('file name lists stop after a few names', () {
+    expect(describeSftpFileNames(['a.txt']), 'a.txt');
+    expect(describeSftpFileNames(['a', 'b', 'c']), 'a, b, c');
+    expect(
+      describeSftpFileNames(['a', 'b', 'c', 'd', 'e']),
+      'a, b, c and 2 more',
+    );
+  });
+
+  testWidgets('the move bar names the files it carries', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: SftpMoveBar(
+            fileNames: const ['README.md', 'notes.txt'],
+            onCancel: () {},
+            onMoveHere: () {},
+          ),
+        ),
+      ),
+    );
+    expect(find.text('move 2 files'), findsOneWidget);
+    expect(find.text('README.md, notes.txt'), findsOneWidget);
+    expect(
+      find.text('Open the destination folder, then tap Move here.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('tablet panels keep their actions to one side', (tester) async {
+    tester.view
+      ..physicalSize = const Size(1024, 1366)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final progress = SftpBatchProgress(verb: 'Uploading', total: 1)
+      ..start(0, 'a.txt');
+    addTearDown(progress.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: SftpBatchProgressBar(progress: progress),
+        ),
+      ),
+    );
+
+    final cancel = find.widgetWithText(OutlinedButton, 'Cancel');
+    expect(tester.getSize(cancel).width, lessThanOrEqualTo(480));
+    // Trailing edge of the 960 px panel, which is centred on the screen.
+    expect(tester.getTopRight(cancel).dx, closeTo(1024 - 32 - 16, 1));
+  });
+
   testWidgets('reduced motion drops the indeterminate bar', (tester) async {
     final progress = SftpBatchProgress(
       verb: 'Extracting',
@@ -383,11 +435,44 @@ void main() {
     double rowOf(String label) => tester.getCenter(find.text(label)).dy;
 
     await tester.pumpWidget(build(1));
-    expect(rowOf('Download'), rowOf('Close'));
+    expect(rowOf('Download'), rowOf('Done'));
 
     await tester.pumpWidget(build(2));
     expect(rowOf('Download'), rowOf('Move'));
     expect(rowOf('Delete'), greaterThan(rowOf('Download')));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('large text wraps panel instructions instead of cutting them', (
+    tester,
+  ) async {
+    tester.view
+      ..physicalSize = const Size(320, 640)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(
+          size: Size(320, 640),
+          textScaler: TextScaler.linear(2),
+        ),
+        child: MaterialApp(
+          home: Scaffold(
+            bottomNavigationBar: SftpBatchSelectionBar(
+              selectedCount: 2,
+              onDone: () {},
+              onDownload: () {},
+              onMove: () {},
+              onDelete: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final summary = tester.renderObject<RenderParagraph>(
+      find.text('Selections stay as you open other folders.'),
+    );
+    expect(summary.didExceedMaxLines, isFalse);
   });
 }

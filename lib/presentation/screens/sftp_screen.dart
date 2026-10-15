@@ -1285,7 +1285,7 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
     if (_movingFiles case final moving?) {
       return SftpMoveBar(
-        fileCount: moving.length,
+        fileNames: [for (final file in moving) file.displayName],
         onCancel: _cancelMove,
         onMoveHere: () => unawaited(_moveHere()),
       );

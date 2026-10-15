@@ -1231,7 +1231,9 @@ void main() {
     await tester.pumpAndSettle();
 
     await _systemBack(tester);
+    // The bar names what is being moved; the rows are in another folder.
     expect(find.text('move 2 files'), findsOneWidget);
+    expect(find.text('a.txt, b.txt'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, 'Move here'));
     await tester.pumpAndSettle();
 
