@@ -125,15 +125,16 @@ List<int> computeRemoteEditorLineStartOffsets(String text) {
   return (line: lineIndex + 1, column: clampedOffset - lineStartOffset + 1);
 }
 
-/// Snackbar text for a failed write: a lost connection and a refusal by the
-/// host need different fixes.
+/// Snackbar text for a failed save or reload: a lost connection, a missing
+/// file and a refusal by the host need different fixes.
 @visibleForTesting
-String describeRemoteEditorWriteFailure(
-  Object error, {
-  required String action,
-}) {
+String describeRemoteEditorFailure(Object error, {required String action}) {
   if (error is RemoteFileRefusedException) {
     return 'Could not $action. ${error.message}';
+  }
+  if (error is SftpStatusError && error.code == SftpStatusCode.noSuchFile) {
+    return 'Could not $action. The file or its folder is no longer on the '
+        'host.';
   }
   final connectionLost =
       error is SSHError ||
@@ -421,7 +422,7 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
       if (mounted) {
         setState(() => _saving = false);
         _showSnackBar(
-          describeRemoteEditorWriteFailure(error, action: 'save changes'),
+          describeRemoteEditorFailure(error, action: 'save changes'),
         );
       }
     }
@@ -434,13 +435,16 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
     String text,
   ) async {
     for (var attempt = 1; ; attempt++) {
-      // After repeated moves under the save, stop re-checking and ask.
-      final change = attempt > 3
-          ? RemoteFileChange.modified
-          : await handler.checkForChanges();
+      final checked = await handler.checkForChanges();
       if (!mounted) {
         return false;
       }
+      // After repeated moves under the save, ask instead of retrying
+      // unattended. Any other result still picks the dialog, so a missing
+      // file is never offered a reload.
+      final change = attempt > 3 && checked == RemoteFileChange.unchanged
+          ? RemoteFileChange.modified
+          : checked;
       try {
         if (change == RemoteFileChange.unchanged) {
           await widget.onSave(text);
@@ -536,7 +540,7 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
       if (mounted) {
         setState(() => _saving = false);
         _showSnackBar(
-          describeRemoteEditorWriteFailure(error, action: 'save a copy'),
+          describeRemoteEditorFailure(error, action: 'save a copy'),
         );
       }
     }
@@ -577,8 +581,7 @@ class _RemoteTextEditorScreenState extends State<RemoteTextEditorScreen> {
         _showSnackBar(
           error is RemoteEditorReloadBlockedException
               ? error.message
-              : 'Could not reload the file. Check the connection and try '
-                    'again.',
+              : describeRemoteEditorFailure(error, action: 'reload the file'),
         );
       }
     }

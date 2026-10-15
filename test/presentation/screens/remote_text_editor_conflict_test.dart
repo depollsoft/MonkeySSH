@@ -431,6 +431,89 @@ void main() {
       expect(_editorIsEditable(tester), isTrue);
     });
 
+    testWidgets('a reload refused by the host does not blame the connection', (
+      tester,
+    ) async {
+      final host = _FakeHost()
+        ..change = RemoteFileChange.modified
+        ..reloadError = SftpStatusError(
+          SftpStatusCode.permissionDenied,
+          'Permission denied',
+        );
+      final harness = await _openEditor(tester, host);
+
+      await _save(tester);
+      await tester.tap(find.text('Reload from host'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Discard and reload'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'Could not reload the file. Check permissions and try again.',
+        ),
+        findsOneWidget,
+      );
+      expect(harness.controller.text, 'phone version');
+    });
+
+    testWidgets('a reload of a file that is gone says so', (tester) async {
+      final host = _FakeHost()
+        ..change = RemoteFileChange.modified
+        ..reloadError = SftpStatusError(SftpStatusCode.noSuchFile, 'No file');
+      await _openEditor(tester, host, edit: null);
+
+      await _save(tester);
+      await tester.tap(find.text('Reload from host'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'Could not reload the file. The file or its folder is no longer on '
+          'the host.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a file that keeps moving under the save asks after three '
+        'tries', (tester) async {
+      final host = _FakeHost()..changesDuringSave = 100;
+      await _openEditor(tester, host);
+
+      await _save(tester);
+
+      expect(host.checks, 4);
+      expect(find.text('File changed on the host'), findsOneWidget);
+      await tester.tap(find.text('Overwrite host file'));
+      await tester.pumpAndSettle();
+      expect(host.overwritten, ['phone version']);
+    });
+
+    testWidgets('a file still missing after repeated recreates is still '
+        'reported as deleted', (tester) async {
+      final host = _FakeHost()
+        ..change = RemoteFileChange.deleted
+        ..recreateConflicts = 3;
+      await _openEditor(tester, host);
+
+      await _save(tester);
+      for (var i = 0; i < 3; i++) {
+        expect(find.text('File deleted on the host'), findsOneWidget);
+        await tester.tap(find.text('Recreate file'));
+        await tester.pumpAndSettle();
+      }
+
+      // The fourth dialog still matches the host: no reload of a file that
+      // is not there.
+      expect(find.text('File deleted on the host'), findsOneWidget);
+      expect(find.text('Reload from host'), findsNothing);
+      await tester.tap(find.text('Recreate file'));
+      await tester.pumpAndSettle();
+      expect(host.recreated, ['phone version']);
+      expect(host.overwritten, isEmpty);
+    });
+
     testWidgets('a lost connection says so instead of permissions', (
       tester,
     ) async {
