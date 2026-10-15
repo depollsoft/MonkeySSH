@@ -56,6 +56,10 @@ func TestCodexLockedPromptShown(t *testing.T) {
 	}
 }
 
+// resumedIn41 stands for the process check: group 41 runs the restored
+// `codex resume`, and any other group is a different program.
+func resumedIn41(foreground int) bool { return foreground == 41 }
+
 type codexLockedResumeFrame struct {
 	prompt     bool
 	foreground int
@@ -74,7 +78,7 @@ func runCodexLockedResumeRetry(
 	retry := newCodexLockedResumeRetry(policy, start)
 	for elapsed := policy.poll; elapsed <= 2*policy.limit; elapsed += policy.poll {
 		current := frame(elapsed)
-		press, done := retry.step(start.Add(elapsed), current.prompt, current.foreground,
+		press, done := retry.step(start.Add(elapsed), current.prompt, current.foreground, resumedIn41,
 			func() bool {
 				if !current.prompt {
 					t.Fatalf("probed the lock at %v without a prompt", elapsed)
@@ -182,6 +186,16 @@ func TestCodexLockedResumeRetry(t *testing.T) {
 			wantEnd: time.Minute + 3*time.Second,
 		},
 		{
+			// The resume showed its prompt and gave the terminal to the next
+			// program before the first look. The leftover prompt is not that
+			// program's, even though the old lease is still held.
+			name: "another program in front at the first look",
+			frame: func(elapsed time.Duration) codexLockedResumeFrame {
+				return codexLockedResumeFrame{prompt: true, foreground: 42, held: elapsed < release}
+			},
+			wantEnd: policy.poll,
+		},
+		{
 			// Without a foreground identity (ConPTY) nothing ties the lock to
 			// the program showing the prompt.
 			name: "no foreground identity",
@@ -212,6 +226,38 @@ func TestCodexLockedResumeRetry(t *testing.T) {
 				t.Fatalf("finished at %v, want %v", end, tc.wantEnd)
 			}
 		})
+	}
+}
+
+// The watch binds to the restored resume: the agent-launch wrapper, the Codex
+// it becomes, or the Node launcher in front of it. The fresh fallback and the
+// recovery shell are other programs.
+func TestCodexResumeCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"agent-launch wrapper", []string{"/opt/monkeymux", "agent-launch", "codex", "resume", "saved-thread"}, true},
+		{"codex after exec", []string{"codex", "-c", "hooks=[]", "-c", "trust=[]", "resume", "saved-thread"}, true},
+		{"yolo", []string{"codex", "--yolo", "resume", "saved-thread"}, true},
+		{"node launcher", []string{"node", "/usr/lib/node_modules/@openai/codex/bin/codex.js", "resume", "saved-thread"}, true},
+		{"fresh fallback", []string{"/opt/monkeymux", "agent-launch", "codex"}, false},
+		{"fresh codex", []string{"codex", "--yolo"}, false},
+		{"recovery shell", []string{"-zsh", "-i"}, false},
+		{"another thread", []string{"codex", "resume", "other-thread"}, false},
+		{"id without resume", []string{"codex", "saved-thread"}, false},
+		{"resume gate", []string{"/opt/monkeymux", "wait-codex-session", "saved-thread"}, false},
+		{"unreadable", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexResumeCommandLine(tc.argv, "saved-thread"); got != tc.want {
+				t.Fatalf("codexResumeCommandLine(%q) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+	if codexResumeCommandLine([]string{"codex", "resume", ""}, "") {
+		t.Fatal("an empty session ID matched")
 	}
 }
 
@@ -273,7 +319,7 @@ func TestWatchCodexLockedResumePressesROnceLockReleases(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, lockHeld, policy)
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld, policy)
 		close(done)
 	}()
 
@@ -310,7 +356,7 @@ func TestWatchCodexLockedResumeStopsWithWindow(t *testing.T) {
 	var probes atomic.Int32
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, func() bool { probes.Add(1); return true },
+		server.watchCodexLockedResume(window, resumedIn41, func() bool { probes.Add(1); return true },
 			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
 				settle: time.Minute, limit: time.Minute, backoff: time.Second, maxPresses: 4})
 		close(done)
@@ -346,7 +392,7 @@ func TestWatchCodexLockedResumeStopsWhenProgramChanges(t *testing.T) {
 	var probes atomic.Int32
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, func() bool { probes.Add(1); return held.Load() },
+		server.watchCodexLockedResume(window, resumedIn41, func() bool { probes.Add(1); return held.Load() },
 			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
 				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
 		close(done)
@@ -392,7 +438,7 @@ func TestWatchCodexLockedResumeRevalidatesBeforeWriting(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, lockHeld,
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
 			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
 				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
 		close(done)
@@ -441,7 +487,7 @@ func TestWatchCodexLockedResumeRechecksLockBeforeWriting(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, lockHeld,
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
 			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
 				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 1})
 		close(done)
@@ -499,7 +545,7 @@ func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
 	const backoff = 200 * time.Millisecond
 	done := make(chan struct{})
 	go func() {
-		server.watchCodexLockedResume(window, lockHeld,
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
 			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
 				settle: time.Minute, limit: time.Minute, backoff: backoff, maxPresses: 4})
 		close(done)
@@ -524,21 +570,76 @@ func TestWatchCodexLockedResumeBacksOffFromTheWrite(t *testing.T) {
 	}
 }
 
+// The resume can show its prompt and hand the terminal to the fresh fallback
+// or the recovery shell before the watcher first looks; in inline mode the
+// prompt stays on screen. The program in front then must not get R, even once
+// the old lease ends.
+func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-leftover")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(42) // The resume ran as group 41 and has exited.
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes atomic.Int32
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		server.mu.Lock()
+		window.closed = true
+		server.mu.Unlock()
+		<-done
+	})
+	waitForCodexLockedResume(t, "the watch to end or probe the lock", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return heldProbes.Load() >= 2
+		}
+	})
+	held.Store(false)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("watcher kept watching the next program; it received %q", pty.String())
+	}
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q into the next program", got)
+	}
+}
+
 func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	var armed []string
 	original := startCodexLockedResumeWatch
 	t.Cleanup(func() { startCodexLockedResumeWatch = original })
-	startCodexLockedResumeWatch = func(_ *muxServer, window *muxWindow, lockPath string) {
-		armed = append(armed, window.id+" "+lockPath)
+	startCodexLockedResumeWatch = func(_ *muxServer, window *muxWindow, sessionID string, lockPath string) {
+		armed = append(armed, window.id+" "+sessionID+" "+lockPath)
 	}
 	options := createWindowOptionsForRestore(
 		restoreWindowState{AgentTool: "codex", AgentSessionID: "saved-thread"}, false)
 	server := newMuxServer("codex-locked-resume-arm")
 	server.watchRestoredCodexResume(&muxWindow{id: "@1", pty: &recordingPty{}}, options)
 	server.watchRestoredCodexResume(&muxWindow{id: "@2", pty: &codexLockedResumeTestPty{}}, options)
-	want := "@2 " + codexSessionLockPath(codexHome, "saved-thread")
+	want := "@2 saved-thread " + codexSessionLockPath(codexHome, "saved-thread")
 	if len(armed) != 1 || armed[0] != want {
 		t.Fatalf("armed = %q, want only %q (ConPTY reports no foreground group)", armed, want)
 	}

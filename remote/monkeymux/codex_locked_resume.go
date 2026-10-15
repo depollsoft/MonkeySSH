@@ -21,13 +21,15 @@ import (
 // competes with a live holder, and it does nothing when it cannot observe the
 // lock, for example under a CODEX_HOME that only the pane's shell sets.
 //
-// The watch belongs to the foreground process group that first showed the
-// prompt and ends when another group takes the terminal: an interrupted
-// resume can leave its prompt on screen while the old lease is still held,
-// and the fresh fallback or recovery shell must not receive the press.
-// ConPTY has no foreground group, so Windows windows are not watched; they
-// keep the launch gate and Codex's own prompt. Presses and time are bounded:
-// a thread that stays open elsewhere keeps Codex's prompt for the user.
+// The watch belongs to the restored `codex resume <id>` process. The first
+// look at the prompt must find that process in front, and the watch ends when
+// another group takes the terminal: an interrupted resume can leave its
+// prompt on screen while the old lease is still held, and the fresh fallback
+// or recovery shell must not receive the press, even when it took over before
+// the first look. ConPTY has no foreground group, so Windows windows are not
+// watched; they keep the launch gate and Codex's own prompt. Presses and time
+// are bounded: a thread that stays open elsewhere keeps Codex's prompt for the
+// user.
 //
 // The prompt text and the lock file are Codex's, so this is Codex-specific.
 // Graceful teardown on the outgoing side is in codex_shutdown_unix.go.
@@ -55,8 +57,9 @@ type codexLockedResumeRetry struct {
 	policy   codexLockedResumePolicy
 	started  time.Time
 	lastSeen time.Time // last poll that showed the prompt
-	// promptForeground is the foreground process group that first showed
-	// the prompt; the watch ends when another group takes the terminal.
+	// promptForeground is the restored resume's process group, in front when
+	// the prompt was first seen; the watch ends when another group takes the
+	// terminal.
 	promptForeground int
 	held             bool // the lock was seen held behind the prompt
 	nextPress        time.Time
@@ -68,13 +71,16 @@ func newCodexLockedResumeRetry(policy codexLockedResumePolicy, started time.Time
 	return &codexLockedResumeRetry{policy: policy, started: started, backoff: policy.backoff}
 }
 
-// step reports whether to press R now and whether watching is over. lockHeld
-// is probed only while the prompt is up. A foreground of 0 is unknown. A
-// press counts toward the bounds only once pressed records it as sent.
+// step reports whether to press R now and whether watching is over. resumes
+// reports whether a foreground group runs the restored `codex resume`; it is
+// asked once, when the prompt is first seen. lockHeld is probed only while the
+// prompt is up. A foreground of 0 is unknown. A press counts toward the bounds
+// only once pressed records it as sent.
 func (r *codexLockedResumeRetry) step(
 	now time.Time,
 	prompt bool,
 	foreground int,
+	resumes func(foreground int) bool,
 	lockHeld func() bool,
 ) (press bool, done bool) {
 	if now.Sub(r.started) >= r.policy.limit {
@@ -94,6 +100,12 @@ func (r *codexLockedResumeRetry) step(
 		return false, false // Nothing ties the lock to the program in front.
 	}
 	if r.promptForeground == 0 {
+		// The poll can come up to one interval after the prompt was drawn. If
+		// the resume has already given the terminal to another program, the
+		// prompt on screen is a leftover and that program must not get R.
+		if !resumes(foreground) {
+			return false, true
+		}
 		r.promptForeground = foreground
 	}
 	if r.presses >= r.policy.maxPresses {
@@ -127,17 +139,37 @@ func (s *muxServer) watchRestoredCodexResume(window *muxWindow, options createWi
 	if _, ok := windowPty.(interface{ foregroundProcessGroup() int }); !ok {
 		return
 	}
-	startCodexLockedResumeWatch(s, window, path)
+	startCodexLockedResumeWatch(s, window, strings.TrimSpace(options.agentSessionID), path)
 }
 
 // startCodexLockedResumeWatch runs the watcher; tests replace it to observe
 // which windows restore arms.
-var startCodexLockedResumeWatch = func(s *muxServer, window *muxWindow, lockPath string) {
+var startCodexLockedResumeWatch = func(s *muxServer, window *muxWindow, sessionID string, lockPath string) {
 	go s.watchCodexLockedResume(
 		window,
+		func(foreground int) bool {
+			// A job's process group is named after its first process, which
+			// is the resume command (exec'd into Codex by agent-launch).
+			return codexResumeCommandLine(processCommandLine(foreground), sessionID)
+		},
 		func() bool { return codexSessionLockHeld(lockPath) },
 		defaultCodexLockedResumePolicy,
 	)
+}
+
+// codexResumeCommandLine reports whether argv resumes the Codex thread
+// sessionID, as `codex resume <id>` or the agent-launch wrapper that becomes
+// it. The fresh fallback and the recovery shell do not.
+func codexResumeCommandLine(argv []string, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "resume" && argv[i+1] == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 // restoredCodexResumeLockPath is the writer lock of the thread a restored CLI
@@ -151,6 +183,7 @@ func restoredCodexResumeLockPath(options createWindowOptions) string {
 
 func (s *muxServer) watchCodexLockedResume(
 	window *muxWindow,
+	resumes func(foreground int) bool,
 	lockHeld func() bool,
 	policy codexLockedResumePolicy,
 ) {
@@ -173,7 +206,7 @@ func (s *muxServer) watchCodexLockedResume(
 		windowPty := window.pty
 		s.mu.Unlock()
 		foreground := ptyForegroundProcessGroup(windowPty)
-		press, done := retry.step(time.Now(), prompt, foreground, lockHeld)
+		press, done := retry.step(time.Now(), prompt, foreground, resumes, lockHeld)
 		if press && s.pressCodexLockedRetry(window, foreground, lockHeld) {
 			// The write may have waited for window input; back off from it.
 			retry.pressed(time.Now())
