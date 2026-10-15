@@ -163,6 +163,40 @@ void registerAcpTranscriptSearchTests() {
       expect(searchAcpTranscript(entries, 'saved').matches, hasLength(1));
     });
 
+    test('skips wrapped payloads in short replies, reasoning and tools', () {
+      final entries = [
+        const AcpAssistantMessageEntry(
+          id: 'reply',
+          markdown:
+              'See ![diagram](data:image/\npng;base64,iVBORw0KGgoAAAA) and '
+              '![chart](data:image/png;base64,QUJD\nREVGRw==) here.',
+        ),
+        const AcpThoughtEntry(
+          id: 'thought',
+          markdown: 'Pasted data:image/png;base64,SElKSw\n  TE1OTw==\nnext',
+        ),
+        AcpToolCallEntry(
+          id: 'tool',
+          toolCall: AcpToolCall(
+            id: 'tool',
+            title: 'Screenshot',
+            rawOutput: 'saved data:image/png;base64,UVJTVA\nVVZXWA==',
+          ),
+        ),
+      ];
+      for (final query in ['iVBORw0K', 'REVGRw', 'TE1OTw', 'VVZXWA']) {
+        expect(
+          searchAcpTranscript(entries, query).matches,
+          isEmpty,
+          reason: query,
+        );
+      }
+      final here = searchAcpTranscript(entries, 'here').matches.single;
+      expect(here.snippet.before, isNot(contains('iVBOR')));
+      expect(searchAcpTranscript(entries, 'next').matches, hasLength(1));
+      expect(searchAcpTranscript(entries, 'saved').matches, hasLength(1));
+    });
+
     test('matches letters whose lower case is longer', () {
       final entries = [
         const AcpAssistantMessageEntry(

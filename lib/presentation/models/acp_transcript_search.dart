@@ -23,8 +23,9 @@ const int _snippetLeadingChars = 32;
 /// Characters of context kept after a match in its snippet.
 const int _snippetTrailingChars = 96;
 
-/// Inline base64 payloads are not searchable text: a short query would
-/// otherwise match random image bytes.
+/// Inline payloads are not searchable text: a short query would otherwise
+/// match random image bytes. A base64 payload wrapped across lines is
+/// [acpBase64DataUriPattern].
 final RegExp _dataUriPattern = RegExp(r'data:[^,\s)>"]*,[^\s)>"]*');
 
 final RegExp _whitespaceRun = RegExp(r'\s+');
@@ -352,7 +353,14 @@ List<_EntryText> _buildEntryTexts(List<AcpThreadChild> children) {
     while (index < children.length && identical(children[index].entry, entry)) {
       starts.add(buffer.length);
       keys.add(children[index].keyValue);
-      buffer.write(_withoutDataUris(_segmentText(children[index])));
+      // A wrapped image is joined as the thread joins it to render, so its
+      // payload is masked whole. Every segment starts at its own offset in
+      // the buffer, so the shorter text still maps to the right child.
+      buffer.write(
+        _withoutDataUris(
+          normalizeAcpMarkdownDataImages(_segmentText(children[index])),
+        ),
+      );
       index++;
     }
     var text = buffer.toString();
@@ -468,14 +476,16 @@ String _toolText(AcpToolCall call) => _joinNonEmpty([
   ],
 ]);
 
-/// Masks inline payloads with spaces of the same length, so offsets into the
+/// Masks inline payloads, including the rest of a base64 payload wrapped
+/// onto following lines, with spaces of the same length, so offsets into the
 /// text still line up with the rendered segments.
-String _withoutDataUris(String text) => text.contains('data:')
-    ? text.replaceAllMapped(_dataUriPattern, (match) {
-        final payload = match[0]!;
-        return 'data:${' ' * (payload.length - 5)}';
-      })
-    : text;
+String _withoutDataUris(String text) {
+  if (!text.toLowerCase().contains('data:')) return text;
+  String mask(Match match) => 'data:${' ' * (match[0]!.length - 5)}';
+  return text
+      .replaceAllMapped(acpBase64DataUriPattern, mask)
+      .replaceAllMapped(_dataUriPattern, mask);
+}
 
 String _joinNonEmpty(Iterable<String?> values) =>
     values.whereType<String>().where((value) => value.isNotEmpty).join('\n');

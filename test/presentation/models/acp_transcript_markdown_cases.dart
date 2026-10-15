@@ -229,6 +229,69 @@ void registerAcpTranscriptMarkdownTests() {
       expect(export.omittedAttachments, 3);
     });
 
+    test('never embeds wrapped, short or percent-encoded inline data', () {
+      // Distinct runs per form, so a leak names the form that leaked.
+      final line1 = 'iVBORw0KGgo${'A' * 65}';
+      final line2 = 'QkJC${'B' * 72}';
+      final tail = 'Q0ND${'C' * 20}==';
+      final export = _export([
+        AcpUserPromptEntry(
+          id: 'u',
+          parts: [
+            AcpTextPart(
+              'Pasted:\ndata:image/png;base64,$line1\n$line2\n$tail\n'
+              'Does that render?',
+            ),
+          ],
+        ),
+        AcpAssistantMessageEntry(
+          id: 'a',
+          markdown:
+              // A break inside the media type, as models often wrap it.
+              'Wrapped type: ![diagram](data:image/\npng;base64,$line1)\n\n'
+              // A break inside the payload.
+              'Wrapped payload: ![chart](data:image/png;base64,$line1\n'
+              '  $line2)\n\n'
+              'A pixel: data:image/gif;base64,R0lGODlhAQABAAAAACw= inline.\n\n'
+              'An SVG: data:image/svg+xml,%3Csvg%3E%3C%2Fsvg%3E done.',
+        ),
+        AcpThoughtEntry(
+          id: 'r',
+          markdown: 'Thinking about ![x](data:image/png;base64,\n$line2)',
+        ),
+      ], includeReasoning: true);
+      final markdown = export.markdown;
+      for (final leaked in [
+        'iVBORw0KGgo',
+        'QkJC',
+        'Q0ND',
+        'R0lGOD',
+        '%3Csvg',
+        'base64',
+      ]) {
+        expect(markdown, isNot(contains(leaked)), reason: leaked);
+      }
+      expect(markdown, contains('Pasted:\n_[inline data not included]_'));
+      // Prose after a wrapped payload is kept.
+      expect(markdown, contains('\nDoes that render?'));
+      expect(
+        markdown,
+        contains('Wrapped type: _[image not included: diagram]_'),
+      );
+      expect(
+        markdown,
+        contains('Wrapped payload: _[image not included: chart]_'),
+      );
+      expect(
+        markdown,
+        contains('A pixel: _[inline data not included]_ inline.'),
+      );
+      expect(markdown, contains('An SVG: _[inline data not included]_ done.'));
+      expect(markdown, contains('Thinking about _[image not included: x]_'));
+      expect(export.omittedAttachments, 6);
+      expect(markdown, contains('6 attachments, each marked where it'));
+    });
+
     test('marks resources a tool returned as not included', () {
       final export = _export([
         AcpToolCallEntry(

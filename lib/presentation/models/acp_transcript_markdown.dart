@@ -9,6 +9,7 @@ library;
 import 'package:flutter/foundation.dart';
 
 import '../../domain/models/acp_session_state.dart' as d;
+import '../widgets/acp_markdown_data_images.dart';
 import 'acp_timeline.dart';
 
 /// Most lines of one diff kept in an export. A larger diff is shortened and
@@ -417,24 +418,36 @@ final class _ExportWriter {
 
   /// Replaces images that would embed or point at device-local data, and
   /// inline data URIs, with a marker.
+  ///
+  /// Image destinations a model wrapped across lines are joined first, as
+  /// the thread does before rendering them, so a wrapped image is caught
+  /// like any other. A bare base64 payload wrapped across lines is replaced
+  /// whole.
   String _withoutEmbeddedImages(String markdown) {
-    var text = markdown.replaceAllMapped(_markdownImage, (match) {
-      var target = (match[2] ?? '').trim();
-      if (target.startsWith('<') && target.endsWith('>')) {
-        target = target.substring(1, target.length - 1).trim();
-      }
-      final scheme = Uri.tryParse(target)?.scheme.toLowerCase();
-      if ((scheme == 'https' || scheme == 'http') && !target.contains(' ')) {
-        return match[0]!;
-      }
-      omittedAttachments++;
-      return _omission('image', match[1]);
-    });
-    if (text.contains('data:')) {
-      text = text.replaceAllMapped(_inlineDataUri, (_) {
+    var text = normalizeAcpMarkdownDataImages(markdown).replaceAllMapped(
+      _markdownImage,
+      (match) {
+        var target = (match[2] ?? '').trim();
+        if (target.startsWith('<') && target.endsWith('>')) {
+          target = target.substring(1, target.length - 1).trim();
+        }
+        final scheme = Uri.tryParse(target)?.scheme.toLowerCase();
+        if ((scheme == 'https' || scheme == 'http') && !target.contains(' ')) {
+          return match[0]!;
+        }
+        omittedAttachments++;
+        return _omission('image', match[1]);
+      },
+    );
+    if (text.toLowerCase().contains('data:')) {
+      String omit(Match _) {
         omittedAttachments++;
         return _omission('inline data');
-      });
+      }
+
+      text = text
+          .replaceAllMapped(acpBase64DataUriPattern, omit)
+          .replaceAllMapped(_inlineMediaDataUri, omit);
     }
     return text;
   }
@@ -486,8 +499,11 @@ final RegExp _markdownImage = RegExp(
   r'''(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)''',
 );
 
-final RegExp _inlineDataUri = RegExp(
-  'data:[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]{64,}',
+/// An image, audio or video `data:` URI that is not base64, such as a
+/// percent-encoded SVG. Base64 payloads are [acpBase64DataUriPattern].
+final RegExp _inlineMediaDataUri = RegExp(
+  r'''data:(?:image|audio|video)/[a-z0-9.+-]+(?:;[^,\s]*)?,[^\s)"'>\]]+''',
+  caseSensitive: false,
 );
 
 // `[^\n]` rather than `.` so a CRLF line's trailing `\r` still matches.
