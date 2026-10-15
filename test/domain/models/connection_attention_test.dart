@@ -269,6 +269,34 @@ void main() {
       );
     });
 
+    test('a detached sign-in yields to anything else using the agent', () {
+      final detached = fakeAcpSession(status: AcpConnectionStatus.detached)
+          .copyWith(pendingAuthentication: true);
+      expect(
+        acpSessionWaitingReason(detached, bridge: bridge()),
+        AttentionReason.signIn,
+      );
+      expect(
+        acpSessionWaitingReason(detached, bridge: bridge(clients: 1)),
+        isNull,
+        reason: 'Another client may have signed the agent in.',
+      );
+      expect(
+        acpSessionWaitingReason(detached, bridge: bridge(inFlight: 1)),
+        isNull,
+        reason: 'An agent working on a request is signed in.',
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(clients: 1),
+          attachedHere: true,
+        ),
+        isNull,
+        reason: 'A live sibling here shares the signed-in agent.',
+      );
+    });
+
     test("this app's client on a fork does not answer a detached fork", () {
       final detached = fakeAcpSession(
         status: AcpConnectionStatus.detached,

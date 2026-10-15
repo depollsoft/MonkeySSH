@@ -118,7 +118,8 @@ bool bridgeRequestUnanswered(
 ///   says so; an older one cannot, so a retained request is trusted).
 ///   Otherwise it waits on whatever the bridge reports, and only when the
 ///   bridge's own session is this one, so a detached fork does not echo a
-///   sibling's request.
+///   sibling's request. A retained sign-in counts only while nothing else
+///   is attached to the agent or waiting on it.
 AttentionReason? acpSessionWaitingReason(
   AcpSessionState session, {
   MonkeyMuxAcpBridgeMetadata? bridge,
@@ -178,7 +179,13 @@ AttentionReason? acpSessionWaitingReason(
       return AttentionReason.input;
     }
   }
-  if (needsSignIn) return AttentionReason.signIn;
+  // The host does not report sign-in, and it belongs to the agent process
+  // that every fork on the bridge shares. An attached client or a request in
+  // flight means something else is talking to the agent and may have signed
+  // it in, so only an untouched bridge keeps the retained sign-in.
+  if (needsSignIn && bridge.clientCount == 0 && bridge.inFlightTurnCount == 0) {
+    return AttentionReason.signIn;
+  }
   final bridgeSession = bridge.sessionId;
   return unanswered &&
           (bridgeSession == null || bridgeSession == session.key.acpSessionId)
