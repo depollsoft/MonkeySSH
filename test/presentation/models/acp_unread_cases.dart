@@ -107,11 +107,19 @@ void registerAcpUnreadTests() {
       expect(digest.toolCalls, {AcpToolKind.edit: 2, AcpToolKind.execute: 1});
       expect(digest.reportedFileChanges, 2);
       expect(digest.pendingRequests, 1);
-      expect(digest.errors, 2);
+      expect(digest.sessionError, isTrue);
+      expect(digest.failedToolCalls, 1);
+      // A failed tool call is part of the agent's work, not an error that
+      // needs the user; only the session error is called one.
       expect(
         digest.summary,
-        '1 request waiting · 2 errors · 1 reply · 3 tool calls (2 edit, 1 run) '
-        '· 2 reported file changes',
+        '1 request waiting · 1 error · 1 reply · 3 tool calls (2 edit, 1 run), '
+        '1 failed · 2 reported file changes',
+      );
+      expect(
+        digest.summaryWith(toolKinds: false),
+        '1 request waiting · 1 error · 1 reply · 3 tool calls, 1 failed · '
+        '2 reported file changes',
       );
     });
 
@@ -212,7 +220,8 @@ void registerAcpUnreadTests() {
       ], source: source);
       final state = _unread(marker, timeline)!;
       expect(state.dividerEntryIndex, 2);
-      expect(state.digest!.errors, 1);
+      expect(state.digest!.failedToolCalls, 1);
+      expect(state.digest!.sessionError, isFalse);
       expect(state.digest!.reportedFileChanges, 1);
       expect(state.digest!.toolCallCount, 2);
     });
@@ -253,7 +262,10 @@ void registerAcpUnreadTests() {
         sessionErrorFingerprint: 1,
       );
       final timeline = _timeline([...seen, _agent(2, 'More')], source: source);
-      expect(_unread(marker, timeline, error: true)!.digest!.errors, 0);
+      expect(
+        _unread(marker, timeline, error: true)!.digest!.sessionError,
+        isFalse,
+      );
     });
 
     test(
@@ -295,7 +307,7 @@ void registerAcpUnreadTests() {
           entries: mapAcpSessionTimeline(before),
           sessionErrorFingerprint: replaced,
         );
-        expect(state?.digest?.errors, 1);
+        expect(state?.digest?.sessionError, isTrue);
       },
     );
 
@@ -519,7 +531,7 @@ void registerAcpUnreadTests() {
           message: 'boom',
         ),
       );
-      expect(visit.evaluate(pending, entries)?.digest?.errors, 1);
+      expect(visit.evaluate(pending, entries)?.digest?.sessionError, isTrue);
     });
 
     test(
@@ -769,7 +781,10 @@ void registerAcpUnreadTests() {
       final state = _unread(marker, timeline, pending: {'r1'})!;
       expect(state.dividerEntryIndex, isNull);
       expect(state.digest!.summary, '1 request waiting');
-      expect(_unread(marker, timeline, error: true)!.digest!.errors, 1);
+      expect(
+        _unread(marker, timeline, error: true)!.digest!.summary,
+        '1 error',
+      );
       // Requests already waiting when the user left are not news.
       final waiting = AcpLastSeenMarker.of(timeline, pendingRequestIds: {'r1'});
       expect(_unread(waiting, timeline, pending: {'r1'}), isNull);

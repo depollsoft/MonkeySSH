@@ -311,9 +311,10 @@ final class AcpUnreadDigest {
   const AcpUnreadDigest({
     this.replies = 0,
     this.toolCalls = const <AcpToolKind, int>{},
+    this.failedToolCalls = 0,
     this.reportedFileChanges = 0,
     this.pendingRequests = 0,
-    this.errors = 0,
+    this.sessionError = false,
     this.partial = false,
   });
 
@@ -325,6 +326,11 @@ final class AcpUnreadDigest {
   /// away.
   final Map<AcpToolKind, int> toolCalls;
 
+  /// How many of [toolCalls] failed. Agents run commands that fail on the
+  /// way to a fix, so these are reported with the tool calls rather than as
+  /// errors.
+  final int failedToolCalls;
+
   /// Distinct file paths that completed tool calls reported diffs for.
   /// Agents report changes voluntarily, so this is never a complete
   /// inventory.
@@ -333,8 +339,8 @@ final class AcpUnreadDigest {
   /// Permission, write and input requests waiting for an answer now.
   final int pendingRequests;
 
-  /// Failed tool calls, plus a session error that appeared while away.
-  final int errors;
+  /// Whether the session error showing now appeared while the user was away.
+  final bool sessionError;
 
   /// Whether earlier unread entries may be missing, so the timeline counts
   /// are minimums.
@@ -343,20 +349,24 @@ final class AcpUnreadDigest {
   /// Total tool calls.
   int get toolCallCount => toolCalls.values.fold(0, (sum, n) => sum + n);
 
-  /// One line such as `1 request waiting · 1 error · 2 replies · 5 tool calls
-  /// (3 edit, 2 run) · 3 reported file changes`. What needs the user comes
-  /// first, so it survives truncation. "at least" qualifies only the counts
-  /// taken from the timeline.
-  String get summary {
+  /// One line such as `1 request waiting · 1 error · 2 replies · 5 tool
+  /// calls (3 edit, 2 run), 1 failed · 3 reported file changes`. What needs
+  /// the user comes first, so it survives truncation. "at least" qualifies
+  /// only the counts taken from the timeline.
+  String get summary => summaryWith();
+
+  /// [summary], leaving out the tool calls' breakdown by kind unless
+  /// [toolKinds], for a line that has to fit a narrow screen.
+  String summaryWith({bool toolKinds = true}) {
     final fromTimeline = <String>[
-      if (errors > 0) _count(errors, 'error'),
       if (replies > 0) _count(replies, 'reply', 'replies'),
-      if (toolCallCount > 0) _toolSummary(),
+      if (toolCallCount > 0) _toolSummary(toolKinds: toolKinds),
       if (reportedFileChanges > 0)
         _count(reportedFileChanges, 'reported file change'),
     ].join(' · ');
     final parts = <String>[
       if (pendingRequests > 0) '${_count(pendingRequests, 'request')} waiting',
+      if (sessionError) '1 error',
       if (fromTimeline.isNotEmpty && partial)
         'at least $fromTimeline'
       else if (fromTimeline.isNotEmpty)
@@ -365,17 +375,22 @@ final class AcpUnreadDigest {
     return parts.isEmpty ? 'new activity' : parts.join(' · ');
   }
 
-  String _toolSummary() {
-    final kinds = toolCalls.entries.where((entry) => entry.value > 0).toList()
-      ..sort((a, b) {
-        final byCount = b.value.compareTo(a.value);
-        return byCount != 0 ? byCount : a.key.index.compareTo(b.key.index);
-      });
-    final shown = kinds
-        .take(3)
-        .map((entry) => '${entry.value} ${_kindLabel(entry.key)}');
-    final more = kinds.length > 3 ? ', …' : '';
-    return '${_count(toolCallCount, 'tool call')} (${shown.join(', ')}$more)';
+  String _toolSummary({required bool toolKinds}) {
+    final buffer = StringBuffer(_count(toolCallCount, 'tool call'));
+    if (toolKinds) {
+      final kinds = toolCalls.entries.where((entry) => entry.value > 0).toList()
+        ..sort((a, b) {
+          final byCount = b.value.compareTo(a.value);
+          return byCount != 0 ? byCount : a.key.index.compareTo(b.key.index);
+        });
+      final shown = kinds
+          .take(3)
+          .map((entry) => '${entry.value} ${_kindLabel(entry.key)}');
+      final more = kinds.length > 3 ? ', …' : '';
+      buffer.write(' (${shown.join(', ')}$more)');
+    }
+    if (failedToolCalls > 0) buffer.write(', $failedToolCalls failed');
+    return buffer.toString();
   }
 
   @override
@@ -383,9 +398,10 @@ final class AcpUnreadDigest {
       other is AcpUnreadDigest &&
       replies == other.replies &&
       mapEquals(toolCalls, other.toolCalls) &&
+      failedToolCalls == other.failedToolCalls &&
       reportedFileChanges == other.reportedFileChanges &&
       pendingRequests == other.pendingRequests &&
-      errors == other.errors &&
+      sessionError == other.sessionError &&
       partial == other.partial;
 
   @override
@@ -394,9 +410,10 @@ final class AcpUnreadDigest {
     Object.hashAllUnordered(
       toolCalls.entries.map((entry) => Object.hash(entry.key, entry.value)),
     ),
+    failedToolCalls,
     reportedFileChanges,
     pendingRequests,
-    errors,
+    sessionError,
     partial,
   );
 }
@@ -473,7 +490,7 @@ AcpUnreadState? computeAcpUnreadState({
           earlierHistoryUnavailable: false,
           digest: AcpUnreadDigest(
             pendingRequests: pendingRequestIds.length,
-            errors: newError ? 1 : 0,
+            sessionError: newError,
           ),
         )
       : null;
@@ -534,9 +551,10 @@ AcpUnreadState? computeAcpUnreadState({
     digest: AcpUnreadDigest(
       replies: counter.replies,
       toolCalls: Map<AcpToolKind, int>.unmodifiable(counter.toolCalls),
+      failedToolCalls: counter.failedTools,
       reportedFileChanges: counter.changedPaths.length,
       pendingRequests: pendingRequestIds.length,
-      errors: counter.failedTools + (newError ? 1 : 0),
+      sessionError: newError,
       partial: trimmed,
     ),
   );
