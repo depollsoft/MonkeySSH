@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -19,6 +20,7 @@ import 'package:monkeyssh/presentation/controllers/acp_unread_tracker.dart';
 import 'package:monkeyssh/presentation/models/acp_timeline.dart';
 import 'package:monkeyssh/presentation/models/acp_unread.dart';
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
+import 'package:monkeyssh/presentation/shortcuts/app_shortcut_scope.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_unread_digest_bar.dart';
@@ -38,7 +40,11 @@ Widget _app(Widget child) => MaterialApp(
   ),
 );
 
-Widget _chat(FakeAcpSessionManager manager, AcpLastSeenRegistry registry) {
+Widget _chat(
+  FakeAcpSessionManager manager,
+  AcpLastSeenRegistry registry, {
+  bool appShortcuts = false,
+}) {
   final ssh = _MockSshService();
   final launchPreferences = _MockLaunchPreferences();
   when(() => ssh.getSessionsForHost(any())).thenReturn(const <SshSession>[]);
@@ -55,6 +61,9 @@ Widget _chat(FakeAcpSessionManager manager, AcpLastSeenRegistry registry) {
       acpLastSeenRegistryProvider.overrideWithValue(registry),
     ],
     child: MaterialApp(
+      builder: appShortcuts
+          ? (context, child) => AppShortcutsHost(child: child!)
+          : null,
       home: MediaQuery(
         data: const MediaQueryData(size: Size(390, 800)),
         child: AgentChatScreen(
@@ -447,6 +456,65 @@ void registerAcpUnreadWidgetTests() {
       expect(find.byType(AcpUnreadDigestBar), findsOneWidget);
       expect(find.text('unread since you left'), findsOneWidget);
       await tester.tap(find.byTooltip('Dismiss'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsNothing);
+      expect(find.text('unread since you left'), findsOneWidget);
+    });
+
+    testWidgets('the keyboard reaches Jump from the composer', (tester) async {
+      final registry = AcpLastSeenRegistry();
+      final source = Object();
+      final before = fakeAcpSession(
+        timeline: d.AcpTimeline(
+          entries: [_message(d.AcpMessageRole.user, 0, 'Go')],
+          source: source,
+        ),
+      );
+      registry.record(fakeAcpKey(), before.timeline);
+      final after = before.copyWith(
+        timeline: d.AcpTimeline(
+          source: source,
+          entries: [
+            _message(d.AcpMessageRole.user, 0, 'Go'),
+            _message(d.AcpMessageRole.agent, 1, 'Went'),
+          ],
+        ),
+      );
+      await tester.pumpWidget(
+        _chat(
+          FakeAcpSessionManager(sessions: [after]),
+          registry,
+          appShortcuts: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final jump = find.byKey(const ValueKey('acp-unread-jump'));
+      expect(jump, findsOneWidget);
+      bool focusOnJump() {
+        final focused = FocusManager.instance.primaryFocus?.context;
+        final target = jump.evaluate().single;
+        if (focused == null) return false;
+        if (identical(focused, target)) return true;
+        var inside = false;
+        focused.visitAncestorElements((element) {
+          inside = identical(element, target);
+          return !inside;
+        });
+        return inside;
+      }
+
+      await tester.tap(find.byKey(const ValueKey('acp-composer-field')));
+      await tester.pump();
+      // Back from the composer: the bar's ✕, then Jump.
+      for (var i = 0; i < 4 && !focusOnJump(); i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pump();
+      }
+      expect(focusOnJump(), isTrue);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       expect(find.byType(AcpUnreadDigestBar), findsNothing);
       expect(find.text('unread since you left'), findsOneWidget);

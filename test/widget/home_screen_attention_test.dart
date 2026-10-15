@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -391,6 +392,52 @@ void main() {
       'b': 'bridge-b',
       's': 'session-1',
     });
+  });
+
+  testWidgets('arrows reach a waiting session and Return opens it', (
+    tester,
+  ) async {
+    await pumpHome(tester);
+    final waiting = fakeAcpSession(
+      key: fakeAcpKey(hostId: 2, bridgeId: 'bridge-b'),
+      title: 'Ship the fix',
+      pendingPermissions: [
+        AcpPendingPermission(
+          requestKey: 'r1',
+          sessionId: 'session-1',
+          toolCallId: 't1',
+          options: const [],
+          requestedAt: DateTime.now(),
+        ),
+      ],
+    );
+    manager.emit(AcpSessionManagerState(sessions: [waiting]));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('waiting on you'), findsOneWidget);
+
+    // The list holds focus on open, and the section is its first row.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    final row = find.byKey(ValueKey('waiting-on-you-${waiting.key.value}'));
+    final focused = FocusManager.instance.primaryFocus?.context;
+    expect(
+      focused != null &&
+          find
+              .ancestor(
+                of: find.byElementPredicate(
+                  (element) => identical(element, focused),
+                ),
+                matching: row,
+              )
+              .evaluate()
+              .isNotEmpty,
+      isTrue,
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(Uri.parse(opened.single).path, '/agents/chat');
   });
 
   testWidgets('polling stops while a terminal covers Connections', (
