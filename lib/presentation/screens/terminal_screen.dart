@@ -61,6 +61,7 @@ import '../../domain/services/app_review_prompt_service.dart';
 import '../../domain/services/clipboard_content_service.dart';
 import '../../domain/services/device_debug_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
+import '../../domain/services/git_working_tree_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/host_notification_prefs_reader.dart';
 import '../../domain/services/local_notification_service.dart';
@@ -124,6 +125,7 @@ import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
 import '../widgets/tmux_alert_tracker.dart';
 import '../widgets/tmux_window_navigator.dart';
+import '../widgets/working_tree_changes_sheet.dart';
 import 'agent_chat_screen.dart';
 import 'agent_management_screen.dart';
 import 'port_forward_browser_screen.dart';
@@ -634,7 +636,7 @@ String? _describeMouseMode(
   MouseMode.upDownScrollMove => 'Mouse motion (${mouseReportMode.name})',
 };
 
-enum _TerminalExclusiveAction { sftpBrowser, tmuxNavigator }
+enum _TerminalExclusiveAction { sftpBrowser, tmuxNavigator, workingTreeChanges }
 
 class _PortForwardBrowserOption {
   const _PortForwardBrowserOption({
@@ -11789,6 +11791,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       _connectionId != null &&
                       connectionState == SshConnectionState.connected,
                 ),
+                // Always enabled: without a connection the sheet says why.
+                _terminalOverflowMenuItem(
+                  context: context,
+                  icon: Icons.difference_outlined,
+                  label: 'Working tree changes',
+                  action: 'working_tree_changes',
+                ),
                 if (_forceMonkeyMuxReloadMenuState.visible)
                   _terminalOverflowMenuItem(
                     context: context,
@@ -13300,6 +13309,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case 'port_forwards':
         await _openPortForwardsFromTerminal();
         break;
+      case 'working_tree_changes':
+        await _openWorkingTreeChanges();
+        break;
       case 'force_monkeymux_reload':
         if (!_forceMonkeyMuxReloadMenuState.enabled) return;
         final sessionName =
@@ -14733,6 +14745,91 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Opens the read-only git changes sheet for this window's directory. An
+  /// "Ask agent" prompt goes to the native composer, or into the terminal
+  /// through the same review as a clipboard paste, but only into the window
+  /// that supplied the directory.
+  Future<void> _openWorkingTreeChanges() => _runExclusiveTerminalAction(
+    _TerminalExclusiveAction.workingTreeChanges,
+    () async {
+      final activeSession = _activeSession();
+      final session =
+          activeSession != null &&
+              _sessionsNotifier?.getState(activeSession.connectionId) ==
+                  SshConnectionState.connected
+          ? activeSession
+          : null;
+      final nativeKey = _activeNativeAcpSessionKey;
+      var directory = nativeKey == null
+          ? null
+          : ref
+                .read(acpSessionManagerProvider)
+                .state
+                .byKeyValue(nativeKey.value)
+                ?.cwd;
+      if (directory == null && session != null && _isTmuxActive) {
+        try {
+          directory = await _resolveCurrentTmuxPaneDirectory();
+        } on Object catch (error) {
+          // The window's last known directory still works.
+          DiagnosticsLogService.instance.warning(
+            'git_changes',
+            'pane_directory_failed',
+            fields: {'errorType': error.runtimeType},
+          );
+        }
+        if (!mounted) return;
+      }
+      directory ??= _workingDirectoryPath;
+      final target = _workingTreePromptTarget();
+      final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
+      String? prompt;
+      try {
+        prompt = await showWorkingTreeChangesSheet(
+          context: context,
+          service: session == null
+              ? null
+              : ref.read(gitWorkingTreeServiceFactoryProvider)(session),
+          directory: directory,
+          unavailableMessage: workingTreeChangesUnavailableReason(session),
+          canAskAgent: true,
+        );
+      } finally {
+        _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
+      }
+      if (!mounted || prompt == null) return;
+      // Another client, or an agent, can switch windows while the sheet is
+      // open; the hunk belongs to the window it was read from.
+      if (_workingTreePromptTarget() != target) {
+        DiagnosticsLogService.instance.info(
+          'git_changes',
+          'prompt_dropped_window_changed',
+        );
+        _showClipboardMessage(
+          'The window changed while the sheet was open, so the prompt was '
+          'not sent.',
+        );
+        return;
+      }
+      if (_activeNativeAcpSessionKey != null) {
+        _nativeComposerFocusController
+          ..insertText(prompt)
+          ..requestFocus();
+        return;
+      }
+      await _pasteClipboard(promptText: prompt);
+    },
+  );
+
+  /// The window a working tree prompt is meant for: the native chat, the
+  /// connection and the mux window that were active.
+  ({AcpSessionKey? nativeKey, int? connectionId, String? windowKey})
+  _workingTreePromptTarget() => (
+    nativeKey: _activeNativeAcpSessionKey,
+    connectionId: _connectionId,
+    windowKey: resolveTmuxBarActiveWindowKey(_currentTmuxWindowsSnapshot),
+  );
+
   Future<void> _openPortForwardBrowserOption(
     _PortForwardBrowserOption option,
   ) => _openPortForwardBrowserOptions([option]);
@@ -15039,10 +15136,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return normalizedSnapshot.normalizedToOriginalEnds[normalizedEnd - 1];
   }
 
-  Future<void> _pasteClipboard() async {
+  /// Pastes the clipboard into the terminal. [promptText], when given, is
+  /// pasted instead of the clipboard, through the same review.
+  Future<void> _pasteClipboard({String? promptText}) async {
     final inputGeneration = _terminalUserInputGeneration;
     try {
-      if (_isAndroidPlatform) {
+      if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
           await _pasteClipboardImage(imageBytes);
@@ -15050,13 +15149,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
 
-      final clipboardFiles = await Pasteboard.files();
+      final clipboardFiles = promptText == null
+          ? await Pasteboard.files()
+          : const <String>[];
       if (clipboardFiles.isNotEmpty) {
         await _pasteClipboardFiles(clipboardFiles);
         return;
       }
 
-      if (!_isAndroidPlatform) {
+      if (!_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
           await _pasteClipboardImage(imageBytes);
@@ -15064,7 +15165,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
 
-      final text = await _readSystemClipboardText();
+      final text = promptText ?? await _readSystemClipboardText();
       if (text == null || text.isEmpty) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
         _showClipboardMessage('Clipboard is empty');
@@ -15111,7 +15212,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
 
-      final requiredReview = _shouldReviewTerminalCommandInsertion;
+      // A shell prompt always reviews. A hunk prompt is also reviewed in any
+      // other program that is not a known agent (psql, a REPL, a nested
+      // shell), where a line break without bracketed paste runs a line.
+      final requiredReview =
+          _shouldReviewTerminalCommandInsertion ||
+          (promptText != null && !_isAgentToolActive);
       var reviewedBracketedPasteMode = _effectiveTerminalBracketedPasteMode(
         pasteMode,
       );
@@ -15125,10 +15231,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               commandText,
               bracketedPasteModeEnabled: reviewedBracketedPasteMode,
             ),
-            title: 'Review clipboard paste',
+            title: promptText == null
+                ? 'Review clipboard paste'
+                : 'Review prompt paste',
             messageBuilder: (review) => review.bracketedPasteModeEnabled
-                ? 'This clipboard content looks risky even with bracketed paste enabled.'
-                : 'This clipboard content could execute multiple or reshaped commands.',
+                ? 'This ${promptText == null ? 'clipboard content' : 'prompt'} looks risky even with bracketed paste enabled.'
+                : 'This ${promptText == null ? 'clipboard content' : 'prompt'} could execute multiple or reshaped commands.',
             confirmLabel: 'Paste anyway',
             onReviewShown: () => reviewShown = true,
           );
@@ -15251,7 +15359,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref
             .read(telemetryServiceProvider)
             .logTerminalPasteUsed(
-              source: 'clipboard_text',
+              source: promptText == null
+                  ? 'clipboard_text'
+                  : 'working_tree_hunk',
               requiredReview: requiredReview,
             ),
       );

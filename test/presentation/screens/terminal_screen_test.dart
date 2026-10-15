@@ -29,6 +29,7 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
@@ -44,6 +45,7 @@ import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
+import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
@@ -78,6 +80,7 @@ import 'package:xterm/xterm.dart';
 import '../../helpers/fake_wakelock_plus_platform.dart';
 import '../../helpers/terminal_screen_mux_fixture.dart';
 import '../../support/fake_acp_session_manager.dart';
+import '../../support/fake_git_working_tree_service.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 String _trueColorLoginShellCommand(
@@ -1789,6 +1792,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
         buildScreen(
@@ -1796,6 +1800,7 @@ void main() {
           monetizationState: monetizationState,
           loadSharedClipboard: () async => sharedClipboard,
           overrides: [
+            ...overrides,
             if (remoteFileService != null)
               remoteFileServiceProvider.overrideWithValue(remoteFileService),
             themeModeNotifierProvider.overrideWith(
@@ -7438,6 +7443,255 @@ void main() {
         variant: TargetPlatformVariant.only(platform),
       );
     }
+
+    FakeGitWorkingTreeService workingTreeService(String root) =>
+        FakeGitWorkingTreeService(
+          snapshots: [
+            GitWorkingTreeSnapshot(
+              state: GitWorkingTreeState.ready,
+              refreshedAt: DateTime(2026, 10, 9, 9),
+              repositoryRoot: root,
+              files: const [
+                GitChangedFile(
+                  path: 'lib/a.dart',
+                  group: GitChangeGroup.unstaged,
+                  kind: GitChangeKind.modified,
+                ),
+              ],
+            ),
+          ],
+          diffs: {
+            'lib/a.dart': GitFileDiff(
+              headerLines: const [],
+              hunks: [
+                GitDiffHunk(
+                  header: '@@ -1 +1 @@',
+                  lines: const ['-old', '+new'],
+                ),
+              ],
+              binary: false,
+              truncated: false,
+            ),
+          },
+        );
+
+    final askAgent = find.byTooltip('Ask the agent about this hunk');
+
+    String pastedText() =>
+        utf8.decode(shellWrites.expand((write) => write).toList());
+
+    testWidgets(
+      'the overflow menu opens working tree changes and pastes a hunk',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // A feature view, next to Port Forwards rather than in Options.
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        // A multi-line prompt at a shell goes through the paste review.
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Paste anyway'));
+        await tester.pumpAndSettle();
+
+        expect(pastedText(), contains('About this hunk in lib/a.dart'));
+        expect(pastedText(), contains('-old'));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'a hunk for a running program that is not an agent is reviewed',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        // psql, a REPL or a nested shell: no shell prompt and no agent, and
+        // a line break without bracketed paste runs a line.
+        session.terminal!.write('\u001b]133;C\u0007');
+        await tester.pump();
+        expect(session.shellStatus, TerminalShellStatus.runningCommand);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(pastedText(), isNot(contains('About this hunk')));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    group('working tree changes in a MonkeyMux window', () {
+      const sessionName = 'work';
+      const shellActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: false, id: '@1'),
+      ];
+      const buildActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: false, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: true, id: '@1'),
+      ];
+
+      Future<TerminalScreenMuxFixture> pumpMux(
+        WidgetTester tester, {
+        required FakeGitWorkingTreeService service,
+        required Future<TmuxPaneContext?> Function() paneContext,
+      }) async {
+        final monkeyMuxService = _MockMonkeyMuxService();
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(_MockTmuxService(), monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => shellActive)
+              ..stubWindowEvents()
+              ..stubThemeRefresh();
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            sessionName,
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => paneContext());
+        await muxFixture.pump(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+        return muxFixture;
+      }
+
+      Future<void> settle(WidgetTester tester) async {
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+      }
+
+      testWidgets('drops the hunk when the active window changed meanwhile', (
+        tester,
+      ) async {
+        final service = workingTreeService('/srv/project');
+        final muxFixture = await pumpMux(
+          tester,
+          service: service,
+          paneContext: () async =>
+              const TmuxPaneContext(currentPath: '/srv/project'),
+        );
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await settle(tester);
+        expect(service.statusDirectories, ['/srv/project']);
+        await tester.tap(find.text('a.dart'));
+        await settle(tester);
+
+        // Another client switches windows while the sheet is open.
+        muxFixture.windowEvents.add(const TmuxWindowListEvent(buildActive));
+        await settle(tester);
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await settle(tester);
+
+        expect(
+          find.text(
+            'The window changed while the sheet was open, so the prompt '
+            'was not sent.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Review prompt paste'), findsNothing);
+        expect(pastedText(), isNot(contains('About this hunk')));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets(
+        'opens on the last known directory when the pane lookup fails',
+        (tester) async {
+          final service = workingTreeService('/srv/fallback');
+          await pumpMux(
+            tester,
+            service: service,
+            paneContext: () async =>
+                throw Exception('MonkeyMux control command timed out'),
+          );
+          session.terminal!.write(
+            '\u001b]7;file://remote.example.com/srv/fallback\u0007',
+          );
+          await tester.pump();
+
+          await openTerminalOverflowMenu(tester);
+          await tester.tap(terminalMenuItemButton('Working tree changes'));
+          await settle(tester);
+
+          expect(tester.takeException(), isNull);
+          expect(find.text('Working tree changes'), findsOneWidget);
+          expect(service.statusDirectories, ['/srv/fallback']);
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    });
 
     testWidgets('overflow menu toggles shell completion popups', (
       tester,
