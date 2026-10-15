@@ -234,6 +234,13 @@ class SecureTransferService {
   /// their host ids would point at other hosts on another device.
   static const _deviceLocalSettingsKeys = {monkeyMuxOfferPendingSettingKey};
 
+  /// Whether [key] is a setting that stays on this device: onboarding state
+  /// in [_deviceLocalSettingsKeys], and unsent chat drafts, which are user
+  /// content tied to this device's sessions and files.
+  static bool _isDeviceLocalSetting(String key) =>
+      _deviceLocalSettingsKeys.contains(key) ||
+      SettingKeys.isAcpComposerDraft(key);
+
   /// Where payloads from before per-host notification settings kept the
   /// hosts whose push was off, by host id. It now lives on each host row.
   static const _legacyPushDisabledHostsKey =
@@ -369,8 +376,7 @@ class SecureTransferService {
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
       for (final setting in settings)
-        if (!_deviceLocalSettingsKeys.contains(setting.key))
-          setting.key: setting.value,
+        if (!_isDeviceLocalSetting(setting.key)) setting.key: setting.value,
     };
 
     return {
@@ -1202,7 +1208,7 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
-      if (_deviceLocalSettingsKeys.contains(entry.key) ||
+      if (_isDeviceLocalSetting(entry.key) ||
           entry.key == _legacyPushDisabledHostsKey) {
         continue;
       }

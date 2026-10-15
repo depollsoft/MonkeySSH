@@ -93,6 +93,7 @@ sealed class AcpAttachmentCandidate {
     required AcpAttachmentStreamFactory openRead,
     int? sizeBytes,
     String? mimeType,
+    String? localPath,
   }) = AcpLocalFileAttachmentCandidate;
 
   /// Creates a remote SFTP attachment that is never downloaded.
@@ -148,12 +149,19 @@ final class AcpLocalFileAttachmentCandidate extends AcpAttachmentCandidate {
     required this.openRead,
     super.sizeBytes,
     super.mimeType,
+    this.localPath,
   });
 
   /// Opens the file byte stream.
   ///
   /// The preparation service invokes this at most once per preparation.
   final AcpAttachmentStreamFactory openRead;
+
+  /// Path of the picked file on this device, when the picker reported one.
+  ///
+  /// A saved composer draft keeps this reference so the attachment can be
+  /// offered again after the app restarts. It is never sent to the agent.
+  final String? localPath;
 
   @override
   AcpAttachmentSourceKind get sourceKind => AcpAttachmentSourceKind.localFile;
