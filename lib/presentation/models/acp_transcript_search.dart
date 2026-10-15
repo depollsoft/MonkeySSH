@@ -232,16 +232,29 @@ final class AcpTranscriptSearchIndex {
     );
   }
 
-  List<_EntryText> _textsFor(List<AcpTimelineEntry> entries, int entryIndex) {
-    final entry = entries[entryIndex];
-    return _texts[entry] ??= _buildEntryTexts(
-      buildAcpThreadChildren(
-        entries,
-        startEntryIndex: entryIndex,
-        endEntryIndex: entryIndex + 1,
-      ),
+  List<_EntryText> _textsFor(List<AcpTimelineEntry> entries, int entryIndex) =>
+      _textsOf(entries[entryIndex]);
+
+  /// The searchable text of [entry], cached per entry. A subagent transcript
+  /// is rebuilt on every mapping while the entries nested in it are not, so
+  /// its text is gathered from theirs.
+  List<_EntryText> _textsOf(AcpTimelineEntry entry) {
+    if (entry case AcpSubagentTranscriptEntry(entries: final nested)) {
+      return [for (final child in nested) ..._textsOf(child)];
+    }
+    return _texts[entry] ??= _buildTexts(entry);
+  }
+
+  List<_EntryText> _buildTexts(AcpTimelineEntry entry) {
+    debugEntryTextBuilds++;
+    return _buildEntryTexts(
+      buildAcpThreadChildren([entry], startEntryIndex: 0, endEntryIndex: 1),
     );
   }
+
+  /// How many entries' searchable text this index has built.
+  @visibleForTesting
+  int debugEntryTextBuilds = 0;
 }
 
 /// Finds every case-insensitive occurrence of [query] in [entries] without

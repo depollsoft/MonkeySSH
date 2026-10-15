@@ -115,6 +115,34 @@ void registerAcpTranscriptSearchTests() {
       expect(match.childKey, 'nested');
     });
 
+    test('re-reads a rebuilt subagent transcript only where it changed', () {
+      const nested = AcpAssistantMessageEntry(
+        id: 'nested',
+        markdown: 'nested answer',
+        parentToolCallId: 'launch',
+      );
+      final launch = AcpToolCallEntry(
+        id: 'tool-launch',
+        isSubagent: true,
+        toolCall: AcpToolCall(id: 'launch', title: 'Launch helper'),
+      );
+      // The mapper builds a new subagent wrapper on every refresh around the
+      // same nested entries.
+      List<AcpTimelineEntry> mapped() => [
+        launch,
+        AcpSubagentTranscriptEntry(
+          id: 'subagent-launch',
+          launchToolCallId: 'launch',
+          entries: const [nested],
+        ),
+      ];
+      final index = AcpTranscriptSearchIndex();
+      expect(index.search(mapped(), 'answer').matches, hasLength(1));
+      final built = index.debugEntryTextBuilds;
+      expect(index.search(mapped(), 'answer').matches, hasLength(1));
+      expect(index.debugEntryTextBuilds, built);
+    });
+
     test('caps the number of matches', () {
       final entries = [
         AcpAssistantMessageEntry(id: 'many', markdown: 'a' * 50),
