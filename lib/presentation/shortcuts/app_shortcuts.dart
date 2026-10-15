@@ -688,18 +688,58 @@ class AppShortcutIntent extends Intent {
   int get hashCode => Object.hash(action, windowNumber);
 }
 
+/// Remembers which app shortcut, if any, the press of each held key spelled.
+///
+/// A key repeat runs a repeating shortcut only when the key's own press ran
+/// it. Otherwise holding ] in the terminal and then adding the modifiers
+/// would switch windows on every repeat while the program also receives
+/// them. [AppShortcutsHost] feeds it every key event from a
+/// [HardwareKeyboard] handler, which runs before shortcuts are matched.
+class AppShortcutPresses {
+  final Map<PhysicalKeyboardKey, AppShortcut?> _byKey =
+      <PhysicalKeyboardKey, AppShortcut?>{};
+
+  /// Records [event].
+  void record(
+    KeyEvent event, {
+    HardwareKeyboard? keyboard,
+    TargetPlatform? platform,
+  }) {
+    switch (event) {
+      case KeyDownEvent():
+        _byKey[event.physicalKey] = matchAppShortcut(
+          event,
+          keyboard: keyboard,
+          platform: platform,
+        );
+      case KeyUpEvent():
+        _byKey.remove(event.physicalKey);
+      case KeyRepeatEvent():
+        break;
+    }
+  }
+
+  /// The shortcut that the press of the held [key] spelled, or null.
+  AppShortcut? shortcutPressedBy(PhysicalKeyboardKey key) => _byKey[key];
+}
+
 /// Activator for one [AppShortcut]. Fires on key down, and on key repeat
-/// only for shortcuts that repeat. It accepts exactly the events
+/// only for shortcuts that repeat and, with [presses], only when the key's
+/// press fired the same shortcut. It accepts exactly the events
 /// [matchAppShortcut] resolves to its shortcut.
 class AppShortcutActivator extends ShortcutActivator {
   /// Creates an activator for [shortcut] on [platform].
-  const AppShortcutActivator(this.shortcut, this.platform);
+  const AppShortcutActivator(this.shortcut, this.platform, {this.presses});
 
   /// Shortcut to match.
   final AppShortcut shortcut;
 
   /// Platform whose chord scheme applies.
   final TargetPlatform platform;
+
+  /// What each held key's press spelled, for telling a repeat of this chord
+  /// from a repeat of a key the terminal took before the modifiers went down.
+  final AppShortcutPresses? presses;
 
   // Null triggers make the shortcut manager test every event, which keeps
   // shifted and physical-key fallbacks working.
@@ -711,8 +751,15 @@ class AppShortcutActivator extends ShortcutActivator {
     if (event is KeyUpEvent) {
       return false;
     }
-    if (event is KeyRepeatEvent && !shortcut.repeats) {
-      return false;
+    if (event is KeyRepeatEvent) {
+      if (!shortcut.repeats) {
+        return false;
+      }
+      final presses = this.presses;
+      if (presses != null &&
+          !identical(presses.shortcutPressedBy(event.physicalKey), shortcut)) {
+        return false;
+      }
     }
     return identical(
       matchAppShortcut(event, keyboard: state, platform: platform),
@@ -724,10 +771,14 @@ class AppShortcutActivator extends ShortcutActivator {
   String debugDescribeKeys() => describeAppShortcutChord(shortcut, platform);
 }
 
-/// Shortcut bindings for [platform], for a [Shortcuts] widget.
-Map<ShortcutActivator, Intent> appShortcutBindings(TargetPlatform platform) => {
+/// Shortcut bindings for [platform], for a [Shortcuts] widget. See
+/// [AppShortcutActivator.presses] for [presses].
+Map<ShortcutActivator, Intent> appShortcutBindings(
+  TargetPlatform platform, {
+  AppShortcutPresses? presses,
+}) => {
   for (final shortcut in appShortcutsFor(platform))
-    AppShortcutActivator(shortcut, platform): shortcut.intent,
+    AppShortcutActivator(shortcut, platform, presses: presses): shortcut.intent,
 };
 
 /// Visible chord text, such as `⌃⌘S` on iPadOS or `Ctrl+Shift+S` on Android.

@@ -107,6 +107,7 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
   bool _peekBuilt = false;
   bool _reduceMotion = false;
   late final _HostAction _action = _HostAction(this);
+  final AppShortcutPresses _presses = AppShortcutPresses();
 
   TargetPlatform get _platform => defaultTargetPlatform;
 
@@ -116,12 +117,12 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    HardwareKeyboard.instance.addHandler(_handlePeekKeyEvent);
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handlePeekKeyEvent);
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
     _peekTimer?.cancel();
     super.dispose();
@@ -191,6 +192,12 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
     }
   }
 
+  bool _handleKeyEvent(KeyEvent event) {
+    // Runs before the focus tree, so the activators see this press.
+    _presses.record(event, platform: _platform);
+    return _handlePeekKeyEvent(event);
+  }
+
   bool _handlePeekKeyEvent(KeyEvent event) {
     if (!_supportsHoldToPeek) {
       return false;
@@ -253,7 +260,7 @@ class _AppShortcutsHostState extends State<AppShortcutsHost>
 
   @override
   Widget build(BuildContext context) {
-    final bindings = appShortcutBindings(_platform);
+    final bindings = appShortcutBindings(_platform, presses: _presses);
     final reduceMotion = _reduceMotion =
         MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     return _AppShortcutsHostScope(

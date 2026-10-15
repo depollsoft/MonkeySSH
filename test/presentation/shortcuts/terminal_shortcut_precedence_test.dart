@@ -34,6 +34,7 @@ Future<_Harness> _pump(WidgetTester tester, {bool kitty = false}) async {
       home: Scaffold(
         body: AppShortcutScope(
           handlers: {
+            AppShortcutAction.nextWindow: appCalls.add,
             AppShortcutAction.newWindow: appCalls.add,
             AppShortcutAction.closeWindow: appCalls.add,
             AppShortcutAction.goToWindow: appCalls.add,
@@ -294,6 +295,42 @@ void main() {
 
       expect(harness.appCalls, const [
         AppShortcutIntent(AppShortcutAction.newWindow),
+      ]);
+      expect(_withoutModifierReports(harness.output), isEmpty);
+    }, variant: android);
+
+    testWidgets('a key held before Ctrl+Shift repeats into the program only', (
+      tester,
+    ) async {
+      final harness = await _pump(tester, kitty: true);
+
+      // ] goes down on its own, so the program has it. Ctrl+Shift pressed
+      // while it is held makes the repeats spell "next window", but they
+      // still belong to the program.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      harness.output.clear();
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.bracketRight);
+      await tester.pump();
+
+      expect(harness.appCalls, isEmpty);
+      expect(_withoutModifierReports(harness.output), isNotEmpty);
+
+      // The chord pressed as a chord still repeats the app action.
+      harness.output.clear();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.bracketRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+
+      expect(harness.appCalls, const [
+        AppShortcutIntent(AppShortcutAction.nextWindow),
+        AppShortcutIntent(AppShortcutAction.nextWindow),
       ]);
       expect(_withoutModifierReports(harness.output), isEmpty);
     }, variant: android);

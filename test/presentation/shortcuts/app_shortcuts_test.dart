@@ -661,6 +661,39 @@ void main() {
     );
   });
 
+  test('a repeat fires only when its press fired the same shortcut', () {
+    final next = appShortcutsFor(android)
+        .firstWhere((s) => s.action == AppShortcutAction.nextWindow);
+    final presses = AppShortcutPresses();
+    final activator = AppShortcutActivator(next, android, presses: presses);
+    final chord = _Keyboard(control: true, shift: true);
+    final plainDown = _down(LogicalKeyboardKey.bracketRight);
+    const repeat = KeyRepeatEvent(
+      physicalKey: PhysicalKeyboardKey.bracketRight,
+      logicalKey: LogicalKeyboardKey.bracketRight,
+      timeStamp: Duration.zero,
+    );
+    const up = KeyUpEvent(
+      physicalKey: PhysicalKeyboardKey.bracketRight,
+      logicalKey: LogicalKeyboardKey.bracketRight,
+      timeStamp: Duration.zero,
+    );
+
+    // ] pressed alone, then Ctrl+Shift added: the repeats are the
+    // terminal's.
+    presses.record(plainDown, keyboard: _Keyboard(), platform: android);
+    expect(activator.accepts(repeat, chord), isFalse);
+
+    // Pressed as the chord: its repeats step windows.
+    presses
+      ..record(up, keyboard: chord, platform: android)
+      ..record(plainDown, keyboard: chord, platform: android);
+    expect(activator.accepts(plainDown, chord), isTrue);
+    expect(activator.accepts(repeat, chord), isTrue);
+    presses.record(up, keyboard: chord, platform: android);
+    expect(activator.accepts(repeat, chord), isFalse);
+  });
+
   test('resolves window numbers and wraps adjacent windows', () {
     expect(resolveAppShortcutWindowNumber(1, [0, 1, 2]), 1);
     expect(resolveAppShortcutWindowNumber(0, [0, 1, 2]), 0);
