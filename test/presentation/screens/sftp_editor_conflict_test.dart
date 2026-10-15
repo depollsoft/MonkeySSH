@@ -9,8 +9,10 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/remote_text_editor_screen.dart';
+import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
 import 'package:monkeyssh/presentation/screens/sftp_screen.dart';
 
 import '../../helpers/in_memory_sftp.dart';
@@ -57,9 +59,17 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
 String _text(InMemorySftpClient server, String path) =>
     utf8.decode(server.files[path]!);
 
-Future<InMemorySftpClient> _openNotesInEditor(WidgetTester tester) async {
+/// Opens [filePath] in the editor by tapping it, or through a path link
+/// with [openFromLink], and types the phone's edit.
+Future<InMemorySftpClient> _openNotesInEditor(
+  WidgetTester tester, {
+  String filePath = _notes,
+  bool openFromLink = false,
+  bool hideHiddenFiles = false,
+  String? browserFilter,
+}) async {
   final server = InMemorySftpClient()
-    ..writeFile(_notes, utf8.encode('line one\n'));
+    ..writeFile(filePath, utf8.encode('line one\n'));
   final ssh = _MockSshClient();
   when(ssh.sftp).thenAnswer((_) async => server);
   final session = SshSession(
@@ -75,6 +85,10 @@ Future<InMemorySftpClient> _openNotesInEditor(WidgetTester tester) async {
   addTearDown(session.close);
   final db = AppDatabase.forTesting(NativeDatabase.memory());
   addTearDown(db.close);
+  if (hideHiddenFiles) {
+    await SettingsSftpBrowserViewStore(SettingsService(db))
+        .save(1, const SftpBrowserViewSettings(showHidden: false));
+  }
 
   await tester.pumpWidget(
     ProviderScope(
@@ -90,12 +104,27 @@ Future<InMemorySftpClient> _openNotesInEditor(WidgetTester tester) async {
           (ref) => Stream.value(_freeMonetizationState),
         ),
       ],
-      child: const MaterialApp(home: SftpScreen(hostId: 1, connectionId: 7)),
+      child: MaterialApp(
+        home: SftpScreen(
+          hostId: 1,
+          connectionId: 7,
+          initialPath: openFromLink ? filePath : null,
+        ),
+      ),
     ),
   );
   await tester.pumpAndSettle();
-  await tester.tap(find.text('notes.txt'));
-  await tester.pumpAndSettle();
+  if (browserFilter != null) {
+    await tester.enterText(
+      find.byKey(const ValueKey('sftpFilterField')),
+      browserFilter,
+    );
+    await tester.pumpAndSettle();
+  }
+  if (!openFromLink) {
+    await tester.tap(find.text(filePath.split('/').last));
+    await tester.pumpAndSettle();
+  }
   expect(find.byType(RemoteTextEditorScreen), findsOneWidget);
   await tester.enterText(
     find.descendant(
@@ -201,6 +230,49 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('notes (copy).txt'), findsOneWidget);
+      await _tearDown(tester);
+    });
+
+    testWidgets('a saved copy stays in view when the filter leaves it out', (
+      tester,
+    ) async {
+      final server = await _openNotesInEditor(tester, browserFilter: 'notes.');
+      server.writeFile(_notes, utf8.encode('line one\nfrom the agent\n'));
+
+      await _tapSave(tester);
+      await tester.tap(find.text('Save as a copy'));
+      await tester.pumpAndSettle();
+
+      expect(
+        _text(server, '/home/demo/notes (copy).txt'),
+        'line one\nfrom the phone\n',
+      );
+      expect(find.text('notes (copy).txt'), findsOneWidget);
+      expect(find.text('notes.txt'), findsOneWidget);
+      await _tearDown(tester);
+    });
+
+    testWidgets('a copy saved from a path link stays in view when hidden', (
+      tester,
+    ) async {
+      const dotNotes = '/home/demo/.notes.txt';
+      final server = await _openNotesInEditor(
+        tester,
+        filePath: dotNotes,
+        openFromLink: true,
+        hideHiddenFiles: true,
+      );
+      server.writeFile(dotNotes, utf8.encode('line one\nfrom the agent\n'));
+
+      await _tapSave(tester);
+      await tester.tap(find.text('Save as a copy'));
+      await tester.pumpAndSettle();
+
+      expect(
+        _text(server, '/home/demo/.notes (copy).txt'),
+        'line one\nfrom the phone\n',
+      );
+      expect(find.text('.notes (copy).txt'), findsOneWidget);
       await _tearDown(tester);
     });
 

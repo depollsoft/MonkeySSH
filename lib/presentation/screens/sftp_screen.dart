@@ -973,6 +973,13 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (!mounted) {
       return;
     }
+    // Keep a highlight the action moved to another entry here, such as a
+    // copy the editor saved.
+    if (_highlightedDirectoryPath == _currentPath &&
+        _highlightedFileName != null &&
+        _highlightedFileName != file.filename) {
+      return;
+    }
     _highlightFile(_currentPath, file.filename);
   }
 
@@ -2586,7 +2593,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       return;
     }
 
-    final remotePath = joinRemotePath(_currentPath, file.filename);
+    final directory = _currentPath;
+    final remotePath = joinRemotePath(directory, file.filename);
     final editSession = RemoteFileEditSession(
       remotePath: remotePath,
       service: ref.read(remoteFileServiceProvider),
@@ -2706,6 +2714,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
 
       await _loadDirectory(_currentPath);
+      if (result is RemoteEditorSavedCopy && mounted) {
+        // Highlighting keeps the copy in view even when the filter or the
+        // hidden-file setting would leave it out.
+        _highlightFile(directory, result.fileName);
+      }
       _showMessage(
         result is RemoteEditorSavedCopy
             ? 'Saved your edits as "${result.fileName}"'
