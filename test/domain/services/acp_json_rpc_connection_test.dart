@@ -79,6 +79,17 @@ final class _GatedTransport extends _MemoryTransport {
   }
 }
 
+/// Fails every write with [error], as a transport does when it closed after
+/// the connection last checked, or when its channel fails mid-write.
+final class _RejectingTransport extends _MemoryTransport {
+  _RejectingTransport(this.error);
+
+  final Exception error;
+
+  @override
+  Future<void> write(List<int> bytes) async => throw error;
+}
+
 void main() {
   group('acp_json_rpc_connection', () {
     group('reports whether a request reached the peer', () {
@@ -113,6 +124,40 @@ void main() {
           throwsA(isA<AcpConnectionClosedException>()),
         );
         expect(started, isFalse);
+      });
+
+      test('not when the transport has already closed', () async {
+        final transport = _RejectingTransport(
+          const AcpTransportClosedException(),
+        );
+        final connection = AcpJsonRpcConnection(transport: transport);
+        addTearDown(connection.close);
+        var started = false;
+        await expectLater(
+          connection.request(
+            'session/prompt',
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpConnectionClosedException>()),
+        );
+        expect(started, isFalse);
+      });
+
+      test('when the transport fails partway through the write', () async {
+        final transport = _RejectingTransport(Exception('channel reset'));
+        final connection = AcpJsonRpcConnection(transport: transport);
+        addTearDown(connection.close);
+        var started = false;
+        await expectLater(
+          connection.request(
+            'session/prompt',
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpConnectionClosedException>()),
+        );
+        expect(started, isTrue);
       });
 
       test('not when the frame is too large', () async {

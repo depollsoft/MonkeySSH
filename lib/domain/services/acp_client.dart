@@ -304,8 +304,9 @@ final class AcpClient {
     );
   }
 
-  /// Sends a prompt turn. [onSent] runs once the request starts reaching
-  /// the agent; a failure before it means the agent never saw the prompt.
+  /// Sends a prompt turn. [onSent] runs once the transport has taken the
+  /// request, or failed partway through writing it; a failure before it
+  /// means the agent never saw the prompt.
   Future<AcpPromptResult> prompt({
     required String sessionId,
     required List<AcpContentBlock> content,

@@ -251,6 +251,15 @@ final class _PendingResponse {
   /// expires while still queued is never written, so the peer needs no
   /// `$/cancel_request` for it.
   bool writeStarted = false;
+
+  var _written = false;
+
+  /// Reports, once, that the peer may have the request.
+  void markWritten() {
+    if (_written) return;
+    _written = true;
+    onWriteStarted?.call();
+  }
 }
 
 /// Default bounded ACP JSON-RPC frame size, large enough for a 10 MiB image
@@ -330,9 +339,10 @@ final class AcpJsonRpcConnection {
   /// explicitly; see [cancelRequest]. Requests that expire or are cancelled
   /// before their queued write begins are not sent, and need no cancel.
   ///
-  /// [onWriteStarted] runs once the frame starts reaching the peer. A request
-  /// that fails without it never left this side: the connection was already
-  /// closed, the frame was too large, or it closed while the write was queued.
+  /// [onWriteStarted] runs once the transport has taken the frame, or failed
+  /// partway through writing it. A request that fails without it never left
+  /// this side: the connection or transport was already closed, the frame
+  /// was too large, or it closed while the write was queued.
   Future<Object?> request(
     String method, {
     Object? params,
@@ -563,6 +573,9 @@ final class AcpJsonRpcConnection {
     if (pending == null) return;
     pending.timer?.cancel();
     pending.cancellation?._unbind(pending);
+    // An answer proves the request arrived, even if it came back before the
+    // transport's write returned.
+    pending.markWritten();
     final error = AcpJson.objectField(message, 'error');
     if (error != null) {
       final code = AcpJson.integer(error, 'code');
@@ -641,9 +654,18 @@ final class AcpJsonRpcConnection {
       if (pending != null) {
         if (!identical(_pending[pending.id], pending)) return;
         pending.writeStarted = true;
-        pending.onWriteStarted?.call();
       }
-      await _transport.write(bytes);
+      try {
+        await _transport.write(bytes);
+      } on AcpTransportClosedException {
+        // The transport closed before this frame, so none of it went out.
+        rethrow;
+      } on Object {
+        // Part of the frame may have gone out before the write failed.
+        pending?.markWritten();
+        rethrow;
+      }
+      pending?.markWritten();
     });
     _writeTail = operation.then<void>(
       (_) {},
