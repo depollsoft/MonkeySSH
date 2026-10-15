@@ -275,15 +275,23 @@ func ptyForegroundProcessGroup(windowPty muxPty) int {
 var codexLockedRetryHint = regexp.MustCompile(`(?i)(?:^|[^\p{L}])r[^\p{L}\s]*\s+to\s+retry`)
 
 // codexLockedRetryHintShown matches the bare "r to retry" key hint, not the
-// "Press R to retry." sentence Codex's other errors print.
-func codexLockedRetryHintShown(row string) bool {
+// "Press R to retry." sentence Codex's other errors print, including when
+// that sentence wraps before the R. previous is the row above row.
+func codexLockedRetryHintShown(previous, row string) bool {
 	for _, match := range codexLockedRetryHint.FindAllStringIndex(row, -1) {
-		before := strings.TrimRightFunc(row[:match[0]], func(r rune) bool { return !unicode.IsLetter(r) })
+		before := trimTrailingNonLetters(row[:match[0]])
+		if before == "" {
+			before = trimTrailingNonLetters(previous) // A wrapped sentence goes on here.
+		}
 		if !strings.HasSuffix(strings.ToLower(before), "press") {
 			return true
 		}
 	}
 	return false
+}
+
+func trimTrailingNonLetters(text string) string {
+	return strings.TrimRightFunc(text, func(r rune) bool { return !unicode.IsLetter(r) })
 }
 
 // codexLockedPromptShown reports whether Codex's locked-thread prompt is on
@@ -292,8 +300,12 @@ func codexLockedRetryHintShown(row string) bool {
 func codexLockedPromptShown(rows []string) bool {
 	var letters strings.Builder
 	hint := false
-	for _, row := range rows {
-		hint = hint || codexLockedRetryHintShown(row)
+	for i, row := range rows {
+		previous := ""
+		if i > 0 {
+			previous = rows[i-1]
+		}
+		hint = hint || codexLockedRetryHintShown(previous, row)
 		for _, r := range row {
 			if unicode.IsLetter(r) {
 				letters.WriteRune(unicode.ToLower(r))

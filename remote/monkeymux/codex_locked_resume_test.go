@@ -13,6 +13,29 @@ const codexLockedPromptFixture = "\x1b[2J\x1b[H" +
 	"Close it there and press R to continue here.\r\n\r\n" +
 	"r to retry"
 
+// Codex 0.162's locked-thread notice, as its rendering snapshots show it
+// (codex-rs/tui/src/chatwidget/snapshots/*external_writer*.snap), and as
+// card_lines lays it out when the title wraps.
+const (
+	codexNoticeAt100 = "\x1b[2J\x1b[H" +
+		"  🔒   This conversation is open in another app" + "                                          r to retry\r\n" +
+		"      Close it there and press R to continue here.\r\n\r\n" +
+		"   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t transcript"
+	codexNoticeAt60 = "\x1b[2J\x1b[H" +
+		"  🔒   This conversation is open in another app  r to retry\r\n" +
+		"      Close it there and press R to continue here.\r\n\r\n" +
+		"   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t\r\n" +
+		"  transcript"
+	codexNoticeNarrow = "\x1b[2J\x1b[H" +
+		"  🔒  This conversation is open in\r\n" +
+		"  another app\r\n" +
+		"  r to retry\r\n" +
+		"      Close it there and press R to\r\n" +
+		"      continue here.\r\n\r\n" +
+		"   r retry   f fork   esc/⌃c/q exit\r\n" +
+		"   ⌃t transcript"
+)
+
 func TestCodexLockedPromptShown(t *testing.T) {
 	render := func(width int, output string) []string {
 		screen := newTerminalScreen(width, 12)
@@ -44,6 +67,17 @@ func TestCodexLockedPromptShown(t *testing.T) {
 			"Close it there and press R to continue here.\r\nRequest interrupted. Press R to retry."), false},
 		{"hint inside a word", render(80, "This conversation is open in another app. "+
 			"Close it there and press R to continue here. It asks the user to retry."), false},
+		// Codex 0.162's ExternalWriterNotice, from its own rendering snapshots:
+		// the hint sits at the end of the title row when it fits, and on a row
+		// of its own when the title wraps.
+		{"codex notice at 100 columns", render(100, codexNoticeAt100), true},
+		{"codex notice at 60 columns", render(60, codexNoticeAt60), true},
+		{"codex notice wrapped narrow", render(40, codexNoticeNarrow), true},
+		// The footer's "r retry" is not the hint.
+		{"codex notice without its hint", render(100, strings.Replace(codexNoticeAt100, "r to retry", "", 1)), false},
+		// A "Press R to retry." that wraps before the R is still that sentence.
+		{"quoted with a wrapped retry error", render(80, "> This conversation is open in another app. "+
+			"Close it there and press R to continue here.\r\nRequest interrupted. Press\r\nR to retry."), false},
 		{"title only", render(80, "This conversation is open in another app"), false},
 		{"other retry prompt", render(80, "Request interrupted. Press R to retry."), false},
 		{"empty", nil, false},
