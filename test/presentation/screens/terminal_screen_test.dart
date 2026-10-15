@@ -4895,6 +4895,75 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    testWidgets('a snippet key sequence stops while a window is closed', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final closeWindowCompleter = Completer<void>();
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(tester, tmuxService);
+      when(
+        () => tmuxService.killWindow(
+          session,
+          'work',
+          any(),
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) => closeWindowCompleter.future);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      // Closing the active window selects another on the server while the
+      // request is in flight, so the sequence must stop before it ends.
+      if (find.byTooltip('Close window').evaluate().isEmpty) {
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+      }
+      await tester.tap(find.byTooltip('Close window').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Close window'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      verify(
+        () => tmuxService.killWindow(
+          session,
+          'work',
+          any(),
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).called(1);
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      closeWindowCompleter.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     for (final interruption in ['none', 'typing', 'window', 'partial']) {
       testWidgets('clipboard content URI upload handles $interruption', (
         tester,
