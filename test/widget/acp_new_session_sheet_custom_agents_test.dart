@@ -8,16 +8,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_authentication.dart';
+import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
+import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/acp_custom_provider_host_service.dart';
 import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
@@ -28,6 +32,7 @@ import 'package:monkeyssh/presentation/widgets/acp_new_session_sheet.dart';
 
 import '../helpers/mocks.dart';
 import '../support/fake_acp_session_manager.dart';
+import '../support/fake_agent_worktree.dart';
 
 class _MockSshService extends Mock implements SshService {}
 
@@ -115,6 +120,20 @@ class _ResumingManager extends FakeAcpSessionManager {
   }
 }
 
+/// Records the prompts a started session is sent.
+class _PromptingManager extends _ResumingManager {
+  final prompts = <List<AcpContentBlock>>[];
+
+  @override
+  Future<AcpPromptResult> prompt(
+    AcpSessionKey key,
+    List<AcpContentBlock> content,
+  ) async {
+    prompts.add(content);
+    return const AcpPromptResult(stopReason: AcpStopReason.endTurn);
+  }
+}
+
 Host _host() => Host(
   id: 1,
   label: 'Alpha',
@@ -172,6 +191,8 @@ Future<void> _pumpSheet(
   required _FakeHostService hostService,
   required List<AcpProvider> providers,
   _FakeLookup? lookup,
+  AgentLaunchPreset? preset,
+  AgentWorktreeLauncher? worktreeLauncher,
 }) async {
   tester.view.physicalSize = const Size(800, 1400);
   tester.view.devicePixelRatio = 1;
@@ -192,7 +213,7 @@ Future<void> _pumpSheet(
   when(() => ssh.getSessionsForHost(any())).thenReturn(<SshSession>[session]);
   when(() => ssh.getSession(any())).thenReturn(session);
   final presets = _MockAgentLaunchPresetService();
-  when(presets.getAllPresets).thenAnswer((_) async => {});
+  when(presets.getAllPresets).thenAnswer((_) async => {1: ?preset});
   final launchPreferences = _MockHostCliLaunchPreferencesService();
   when(() => launchPreferences.getPreferencesForHost(any()))
       .thenAnswer((_) async => const HostCliLaunchPreferences());
@@ -212,6 +233,8 @@ Future<void> _pumpSheet(
         ),
         allHostsProvider.overrideWith((ref) => Stream.value(<Host>[_host()])),
         acpProvidersProvider.overrideWith((ref) => Stream.value(providers)),
+        if (worktreeLauncher != null)
+          agentWorktreeLauncherProvider.overrideWithValue(worktreeLauncher),
       ],
       child: MaterialApp(
         home: Scaffold(
@@ -243,6 +266,153 @@ Future<void> _tapStart(WidgetTester tester, String label) async {
 }
 
 void main() {
+  group('host preset worktree and initial prompt', () {
+    const preset = AgentLaunchPreset(
+      tool: AgentLaunchTool.claudeCode,
+      workingDirectory: '~/src/app',
+      worktree: AgentWorktreeLaunchOptions(baseRef: 'origin/main'),
+      initialPrompt: 'Read AGENTS.md and list the open tasks.',
+    );
+    late FakeAgentWorktreeService worktrees;
+    late AgentWorktreeLauncher launcher;
+
+    setUp(() {
+      worktrees = FakeAgentWorktreeService();
+      launcher = AgentWorktreeLauncher(
+        service: worktrees,
+        registry: MemoryAgentWorktreeRegistry(),
+        wait: (_) async {},
+      );
+    });
+
+    testWidgets('a custom agent starts in the new worktree with the prompt', (
+      tester,
+    ) async {
+      final goose = _goose(environment: const []);
+      final manager = _PromptingManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(
+          fakeAcpKey(providerId: goose.id),
+        );
+      await _pumpSheet(
+        tester,
+        manager: manager,
+        hostService: _FakeHostService(),
+        providers: [...acpBuiltinProviders, goose],
+        preset: preset,
+        worktreeLauncher: launcher,
+      );
+
+      await _tapStart(tester, 'Start session');
+
+      final record = worktrees.created.single;
+      expect(manager.starts.single.providerId, 'goose');
+      expect(manager.starts.single.cwd, record.startDirectory);
+      expect(manager.prompts, hasLength(1));
+      expect(
+        (manager.prompts.single.single as AcpTextContent).text,
+        'Read AGENTS.md and list the open tasks.',
+      );
+    });
+
+    testWidgets('a home-folder agent sends the prompt but makes no '
+        'worktree', (tester) async {
+      final goose = _goose(
+        cwdPolicy: AcpCustomProviderCwdPolicy.homeDirectory,
+        environment: const [],
+      );
+      final manager = _PromptingManager()
+        ..startNewSessionResult = AcpSessionLaunchStarted(
+          fakeAcpKey(providerId: goose.id),
+        );
+      await _pumpSheet(
+        tester,
+        manager: manager,
+        hostService: _FakeHostService(),
+        providers: [...acpBuiltinProviders, goose],
+        preset: preset,
+        worktreeLauncher: launcher,
+      );
+
+      // The agent cannot run in a worktree, so the switch is off and says
+      // why, and the folder row stays the home folder.
+      final worktreeSwitch = tester.widget<SwitchListTile>(
+        find.byKey(const Key('acp-new-session-worktree-switch')),
+      );
+      expect(worktreeSwitch.value, isFalse);
+      expect(worktreeSwitch.onChanged, isNull);
+      expect(
+        find.text('This agent always starts in your home folder.'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('custom-agent-home-folder')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('acp-new-session-worktree-repository')),
+        findsNothing,
+      );
+
+      await _tapStart(tester, 'Start session');
+
+      expect(worktrees.created, isEmpty);
+      expect(manager.starts.single.providerId, 'goose');
+      expect(manager.prompts, hasLength(1));
+    });
+
+    testWidgets('resuming a listed session uses neither preset option', (
+      tester,
+    ) async {
+      final goose = _goose(environment: const []);
+      final manager = _PromptingManager();
+      await _pumpSheet(
+        tester,
+        manager: manager,
+        hostService: _FakeHostService(
+          listing: const AcpCustomAgentSessionListing(
+            AcpCustomAgentSessionListStatus.listed,
+            [
+              AcpSessionInfo(
+                sessionId: 'goose-session-1',
+                cwd: '/work/project',
+                title: 'Refactor the parser',
+              ),
+            ],
+          ),
+        ),
+        providers: [...acpBuiltinProviders, goose],
+        preset: preset,
+        worktreeLauncher: launcher,
+      );
+      expect(
+        find.byKey(const Key('acp-new-session-worktree-switch')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('custom-agent-find-sessions')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Refactor the parser'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('acp-new-session-worktree-switch')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('acp-new-session-initial-prompt-switch')),
+        findsNothing,
+      );
+
+      await _tapStart(tester, 'Resume session');
+
+      expect(manager.resumes.single.cwd, '/work/project');
+      expect(worktrees.created, isEmpty);
+      expect(manager.prompts, isEmpty);
+    });
+  });
+
   testWidgets('starts an approved custom agent after checking its '
       'environment', (tester) async {
     final goose = _goose();

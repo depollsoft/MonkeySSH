@@ -231,6 +231,7 @@ class SecureTransferService {
   static const _schemaVersion = 1;
   static const _hostScopedSettingsKeys = {
     SettingKeys.agentLaunchPresets,
+    SettingKeys.agentWorktrees,
     SettingKeys.hostCliLaunchPreferences,
     SettingKeys.sftpBrowserViews,
     SettingKeys.sftpBrowserFilters,

@@ -57,6 +57,7 @@ import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
 import '../../domain/services/agent_management_service.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
+import '../../domain/services/agent_worktree_service.dart';
 import '../../domain/services/app_review_demo_service.dart';
 import '../../domain/services/app_review_prompt_service.dart';
 import '../../domain/services/clipboard_content_service.dart';
@@ -70,6 +71,7 @@ import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/monkeymux_offer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
 import '../../domain/services/push/push_local_alerts.dart';
@@ -104,6 +106,7 @@ import '../widgets/acp_session_presentation.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/agent_usage_rings.dart';
 import '../widgets/agent_usage_rings_menu_item.dart';
+import '../widgets/agent_worktree_removal.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
@@ -136,6 +139,7 @@ import 'agent_management_screen.dart';
 import 'port_forward_browser_screen.dart';
 import 'sftp_screen.dart';
 import 'snippet_edit_screen.dart';
+import 'terminal/terminal_agent_worktree_launch.dart';
 import 'terminal/terminal_path_verifier.dart';
 import 'terminal/terminal_screen_policy.dart';
 
@@ -875,6 +879,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isPinchZooming = false;
   bool _shouldFollowLiveOutput = true;
   bool _didPasteDemoImage = false;
+
+  /// Whether a preset launch is creating its git worktree, which can take
+  /// from seconds to minutes; the terminal says so while it does.
+  final _creatingWorktree = ValueNotifier<bool>(false);
+
+  void _setCreatingWorktree(bool creating) {
+    if (mounted) _creatingWorktree.value = creating;
+  }
+
   final _pasteUploadProgress = ValueNotifier<TerminalPasteUploadProgress?>(
     null,
   );
@@ -898,6 +911,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _tmuxSessionName;
   String? _muxVersion;
   String? _monkeyMuxReconnectSessionName;
+
+  /// The worktree a MonkeyMux preset launch created, from when its attach
+  /// command is ready until that command reaches the host (kept and then
+  /// checked) or the launch is given up (rolled back).
+  ({
+    TerminalAgentWorktreeLaunch launch,
+    SshSession session,
+    String sessionName,
+  })?
+  _unsettledWorktreeLaunch;
   bool _monkeyMuxReconnectAttachPending = false;
 
   // Set when the user chose MonkeyMux in the first-connect offer, which
@@ -1157,6 +1180,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   ActiveSessionsNotifier? _sessionsNotifier;
   late final TmuxService _tmuxService;
   late final MonkeyMuxService _monkeyMuxService;
+  late final MuxSessionEndHolds _muxSessionEndHolds;
   late final MonkeyMuxInstallerService _monkeyMuxInstallerService;
   late final Listenable _uploadProgressListenable;
   late final TerminalConnectionBackendService _terminalBackendService;
@@ -1797,6 +1821,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ..consumeSendModifier = _toolbarController.consumeOneShot;
     _tmuxService = ref.read(tmuxServiceProvider);
     _monkeyMuxService = ref.read(monkeyMuxServiceProvider);
+    _muxSessionEndHolds = ref.read(muxSessionEndHoldsProvider);
     _monkeyMuxInstallerService = ref.read(monkeyMuxInstallerServiceProvider);
     _uploadProgressListenable = Listenable.merge([
       _pasteUploadProgress,
@@ -4826,7 +4851,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final initialAutoConnect = await _prepareNewShellInitialAutoConnect(
         session,
       );
-      if (!stillOwnsSession()) return;
+      if (!stillOwnsSession()) {
+        _settleWorktreeLaunch(launched: false);
+        return;
+      }
       final startupCommand =
           initialAutoConnect.command?.backend == RemoteMuxBackend.monkeyMux
           ? initialAutoConnect.command
@@ -4850,6 +4878,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         command: startupCommand?.command,
         returnToLoginShell: startupCommand != null,
       );
+      // The attach command ran as the shell's startup command.
+      _settleWorktreeLaunch(launched: true);
       if (!stillOwnsSession()) return;
       _shell = shell;
       DiagnosticsLogService.instance.info(
@@ -4912,6 +4942,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _error = 'Could not reconnect to the MonkeyMux session. Try again.';
       });
     } on Object catch (e) {
+      // The attach command never ran, so its worktree goes.
+      _settleWorktreeLaunch(launched: false);
       DiagnosticsLogService.instance.error(
         'terminal',
         'shell_open_failed',
@@ -6514,6 +6546,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     if (agentPreset != null &&
+        agentPreset.launchesInNewWorktree &&
+        host.autoConnectSnippetId == null) {
+      await _runAgentWorktreeLaunch(session, host, agentPreset, shell);
+      return;
+    }
+
+    if (agentPreset != null &&
         agentPreset.tool.needsExecutableProbe &&
         host.autoConnectSnippetId == null &&
         resolvedStoredCommand != null) {
@@ -6575,6 +6614,113 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       unawaited(
         ref.read(snippetRepositoryProvider).incrementUsage(resolvedSnippetId),
       );
+    }
+  }
+
+  /// Starts an agent preset that asks for a worktree in a tmux session.
+  ///
+  /// The worktree is rolled back unless the launch command reaches the
+  /// shell, whatever fails on the way, and afterwards is checked against the
+  /// session's panes so a launch that joined a running session or whose
+  /// agent window closed at once does not leave it behind.
+  Future<void> _runAgentWorktreeLaunch(
+    SshSession session,
+    Host host,
+    AgentLaunchPreset preset,
+    SSHSession shell,
+  ) async {
+    final sessionName = preset.tmuxSessionName?.trim() ?? '';
+    final worktreeService = ref.read(agentWorktreeServiceProvider);
+    final worktreeShell = SshAgentWorktreeShell(session);
+    // The shell sits at a live prompt for the seconds the probe and the
+    // worktree take, so a line kill first drops anything typed meanwhile
+    // instead of running it joined to the command.
+    void writeCommand(String command) => shell.write(
+      utf8.encode('\x15${formatAutoConnectCommandForShell(command)}'),
+    );
+    Future<List<String>?> panes() =>
+        worktreeService.tmuxSessionDirectories(worktreeShell, sessionName);
+    var probeFailed = false;
+    final launch = await prepareTerminalAgentWorktreeLaunch(
+      context: context,
+      ref: ref,
+      session: session,
+      preset: preset,
+      onCreatingWorktree: _setCreatingWorktree,
+      sessionExists: sessionName.isEmpty
+          ? null
+          : () async {
+              try {
+                return await panes() != null;
+              } on Object {
+                probeFailed = true;
+                rethrow;
+              }
+            },
+    );
+    if (launch == null || launch.attachOnly) {
+      // A running session keeps its windows, so the terminal only reattaches:
+      // `new-session -A` would start the agent in the shared checkout if the
+      // session ended meanwhile. Without an answer no worktree is made, but
+      // the terminal still reattaches, as a preset without one would.
+      if ((launch != null || probeFailed) &&
+          mounted &&
+          identical(_shell, shell)) {
+        writeCommand(buildAgentWorktreeTmuxReattachCommand(sessionName));
+      }
+      return;
+    }
+    var launched = false;
+    try {
+      if (!mounted || !identical(_shell, shell)) return;
+      final tool = launch.preset.tool;
+      final executable = tool.needsExecutableProbe
+          ? await _tmuxService.resolveAgentToolExecutable(session, tool)
+          : null;
+      if (!mounted || !identical(_shell, shell)) return;
+      final String command;
+      try {
+        command = buildAgentLaunchCommand(
+          launch.preset,
+          startInYoloMode: _startClisInYoloMode,
+          windows: session.remoteIsWindows,
+          executable: executable == tool.commandName ? null : executable,
+        );
+      } on FormatException {
+        return;
+      }
+      final review = assessAutoConnectCommandExecution(
+        command,
+        importedNeedsReview: host.autoConnectRequiresConfirmation,
+      );
+      if (review.requiresReview &&
+          !await _reviewImportedAutoConnectCommand(review, host)) {
+        return;
+      }
+      if (!mounted || !identical(_shell, shell)) return;
+      writeCommand(command);
+      launched = true;
+      var seenRunning = false;
+      launch.launched(
+        windowDirectories: () async {
+          final directories = await panes();
+          if (directories == null) {
+            // Until the session has been seen, "absent" may only mean the
+            // probe found a different tmux server than the shell used, so
+            // it is not an answer and the worktree is kept.
+            if (!seenRunning) {
+              throw const AgentWorktreeException(
+                AgentWorktreeErrorKind.unavailable,
+              );
+            }
+            return const <String>[];
+          }
+          seenRunning = true;
+          return directories;
+        },
+      );
+    } finally {
+      if (!launched) launch.abandon();
     }
   }
 
@@ -7348,6 +7494,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted ||
         _connectionId != session.connectionId ||
         !identical(_shell, shell)) {
+      _settleWorktreeLaunch(launched: false);
       return;
     }
     if (session.remoteIsWindows) {
@@ -7356,6 +7503,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         command: command.command,
         requestPty: false,
       );
+      _settleWorktreeLaunch(launched: true);
       DiagnosticsLogService.instance.info(
         'terminal.agent_launch',
         'command_written',
@@ -7369,6 +7517,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     shell.write(utf8.encode(formatAutoConnectCommandForShell(command.command)));
+    _settleWorktreeLaunch(launched: true);
     DiagnosticsLogService.instance.info(
       'terminal.agent_launch',
       'command_written',
@@ -7385,6 +7534,82 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     Host host,
     AgentLaunchPreset preset,
   ) async {
+    final sessionName = preset.tmuxSessionName?.trim();
+    if (sessionName == null || sessionName.isEmpty) {
+      return null;
+    }
+    final worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
+      context: context,
+      ref: ref,
+      session: session,
+      preset: preset,
+      onCreatingWorktree: _setCreatingWorktree,
+      sessionExists: () async =>
+          await _monkeyMuxService.runningServerStatusFromInstalledHelpers(
+            session,
+            sessionName,
+          ) !=
+          null,
+    );
+    if (worktreeLaunch == null) {
+      return null;
+    }
+    _PreparedRemoteMuxCommand? command;
+    try {
+      command = await _prepareMonkeyMuxAgentLaunchCommandIn(
+        session,
+        host,
+        worktreeLaunch.preset,
+        existingOnly: worktreeLaunch.attachOnly,
+      );
+    } finally {
+      if (command == null) {
+        worktreeLaunch.abandon();
+      } else if (worktreeLaunch.worktree != null) {
+        // The caller settles it once it has used the command or given up.
+        _settleWorktreeLaunch(launched: false);
+        _unsettledWorktreeLaunch = (
+          launch: worktreeLaunch,
+          session: session,
+          sessionName: sessionName,
+        );
+      }
+    }
+    return command;
+  }
+
+  /// Settles the worktree of the MonkeyMux preset launch in flight, if any.
+  ///
+  /// [launched] means the attach command reached the host: the worktree is
+  /// kept and then checked against the session's windows. Otherwise the
+  /// command was never used and the worktree is rolled back.
+  void _settleWorktreeLaunch({required bool launched}) {
+    final unsettled = _unsettledWorktreeLaunch;
+    if (unsettled == null) return;
+    _unsettledWorktreeLaunch = null;
+    if (!launched) {
+      unsettled.launch.abandon();
+      return;
+    }
+    final mux = _monkeyMuxService;
+    unsettled.launch.launched(
+      windowDirectories: () async => [
+        for (final window in await mux.listWindows(
+          unsettled.session,
+          unsettled.sessionName,
+        ))
+          window.currentPath,
+      ],
+    );
+  }
+
+  /// [existingOnly] makes the attach fail rather than create the session.
+  Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommandIn(
+    SshSession session,
+    Host host,
+    AgentLaunchPreset preset, {
+    bool existingOnly = false,
+  }) async {
     final sessionName = preset.tmuxSessionName?.trim();
     if (sessionName == null || sessionName.isEmpty) {
       return null;
@@ -7462,6 +7687,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         terminalCapabilityReports: buildTerminalCapabilityHintReports(),
         serverUpdatePolicy: updatePolicy,
         startInYoloMode: _startClisInYoloMode,
+        existingOnly: existingOnly,
         windows: installation.isWindows,
       );
     } on MonkeyMuxInstallDeclinedException {
@@ -8616,6 +8842,36 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       Positioned(
         left: 0,
         right: 0,
+        bottom: FluttyTheme.spacingMd,
+        child: SafeArea(
+          top: false,
+          bottom: applyBottomSafeArea,
+          child: Center(
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _creatingWorktree,
+              builder: (context, creating, _) {
+                final disableAnimations =
+                    MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+                return AnimatedSwitcher(
+                  duration: disableAnimations
+                      ? Duration.zero
+                      : const Duration(milliseconds: 150),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeOutCubic,
+                  child: creating
+                      ? const AgentWorktreeCreatingIndicator(
+                          key: Key('terminal-worktree-creating'),
+                        )
+                      : const SizedBox.shrink(),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+      Positioned(
+        left: 0,
+        right: 0,
         bottom: 0,
         child: ListenableBuilder(
           listenable: _uploadProgressListenable,
@@ -9170,8 +9426,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             windowIndex,
             windowId: windowId,
           );
+          var removalOffered = false;
+          Future<void> offerBeforeSessionEnds() {
+            removalOffered = true;
+            return _offerClosedWindowWorktreeRemoval(
+              session,
+              closingWindow,
+              sessionEnding: true,
+            );
+          }
+
           if (!(closingWindow?.isNativeAcp ?? false)) {
-            await _closeTmuxWindow(session, windowIndex, windowId: windowId);
+            await _closeTmuxWindow(
+              session,
+              windowIndex,
+              windowId: windowId,
+              beforeSessionEnds: offerBeforeSessionEnds,
+            );
+            if (!removalOffered) {
+              unawaited(
+                _offerClosedWindowWorktreeRemoval(session, closingWindow),
+              );
+            }
             break;
           }
 
@@ -9190,7 +9466,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           // controller and concurrency lease until that close is confirmed so
           // a transport/control failure leaves a retryable, still-accounted
           // native window instead of an untracked provider.
-          await _closeTmuxWindow(session, windowIndex, windowId: windowId);
+          await _closeTmuxWindow(
+            session,
+            windowIndex,
+            windowId: windowId,
+            beforeSessionEnds: offerBeforeSessionEnds,
+          );
           if (_activeNativeAcpSessionKey?.bridgeId == bridgeId) {
             _showTerminalViewport();
           }
@@ -9200,6 +9481,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           );
           for (final key in closingKeys) {
             _nativeAcpScrollStates.remove(key.value);
+          }
+          if (!removalOffered) {
+            unawaited(
+              _offerClosedWindowWorktreeRemoval(session, closingWindow),
+            );
           }
       }
     } on Object catch (error) {
@@ -10197,6 +10483,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session,
     String sessionName,
   ) async {
+    await _muxSessionEndHolds.released(session.connectionId);
     if (!mounted ||
         _activeMuxBackend != RemoteMuxBackend.monkeyMux ||
         _connectionId != session.connectionId ||
@@ -10246,16 +10533,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       return false;
     }
-  }
-
-  bool _isExpectedMonkeyMuxFinalCloseError(Object error) {
-    if (error is! MonkeyMuxInstallException) {
-      return false;
-    }
-    final message = error.message.toLowerCase();
-    return message.contains('control channel closed') ||
-        message.contains('control channel unavailable') ||
-        message.contains('closed without a response');
   }
 
   /// Switches to a different tmux window via exec channel.
@@ -10382,6 +10659,49 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         forceVisibleTmux: forceVisibleTmux,
         deferUntilAfterRedraw: deferPostSwitchExec,
       ),
+    );
+  }
+
+  /// Offers to remove the worktree a preset launch created for [closed],
+  /// unless another window still uses it.
+  ///
+  /// When [sessionEnding] is true the closed window was the session's last,
+  /// and this runs before the session's end disconnects.
+  Future<void> _offerClosedWindowWorktreeRemoval(
+    SshSession session,
+    TmuxWindow? closed, {
+    bool sessionEnding = false,
+  }) async {
+    final sessionName = _tmuxSessionName;
+    if (closed == null || !mounted) return;
+    if (sessionName == null && !sessionEnding) return;
+    final mux = _activeRemoteMultiplexerService;
+    final extraFlags = _activeTmuxExtraFlags;
+    await offerAgentWorktreeRemoval(
+      context: context,
+      ref: ref,
+      session: session,
+      closedWindowDirectory: closed.currentPath,
+      remainingWindowDirectories: sessionEnding
+          ? const <String?>[]
+          : [
+              for (final window
+                  in _currentTmuxWindowsSnapshot ?? <TmuxWindow>[])
+                if (closed.id != null
+                    ? window.id != closed.id
+                    : window.index != closed.index)
+                  window.currentPath,
+            ],
+      liveWindowDirectories: sessionEnding || sessionName == null
+          ? null
+          : () async => [
+              for (final window in await mux.listWindows(
+                session,
+                sessionName,
+                extraFlags: extraFlags,
+              ))
+                window.currentPath,
+            ],
     );
   }
 
@@ -10533,6 +10853,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     int windowIndex, {
     String? windowId,
     bool preserveMuxSession = false,
+    Future<void> Function()? beforeSessionEnds,
   }) async {
     final sessionName = _tmuxSessionName;
     if (sessionName == null) return;
@@ -10550,32 +10871,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           windowIndex,
           windowId: windowId,
         );
+    // The session ends with this window, and ending it disconnects, so
+    // anything that still needs the connection runs first. Every observer of
+    // the session (this window bar, and the home badge beneath a terminal
+    // opened from it) sees the empty window list before the close returns;
+    // the hold keeps their session-end handling waiting until then.
+    final releaseSessionEnd =
+        closesLastMonkeyMuxWindow && beforeSessionEnds != null
+        ? _muxSessionEndHolds.hold(session.connectionId)
+        : () {};
+
+    Future<void> endSession() async {
+      try {
+        await beforeSessionEnds?.call();
+      } finally {
+        releaseSessionEnd();
+      }
+      await _handleMuxSessionEnded(session, sessionName);
+    }
+
     try {
-      await _activeTerminalConnectionBackend(session)
-          .killWindow(windowIndex, windowId: windowId);
-    } on Object catch (error) {
-      if (error is! Exception && !isExpectedSshOperationError(error)) {
+      try {
+        await _activeTerminalConnectionBackend(session)
+            .killWindow(windowIndex, windowId: windowId);
+      } on Object catch (error) {
+        if (error is! Exception && !isExpectedSshOperationError(error)) {
+          rethrow;
+        }
+        if (closesLastMonkeyMuxWindow &&
+            _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
+            isExpectedMonkeyMuxFinalCloseError(error)) {
+          DiagnosticsLogService.instance.info(
+            'tmux.ui',
+            'monkeymux_final_close_control_closed',
+            fields: {
+              'connectionId': session.connectionId,
+              'errorType': error.runtimeType,
+            },
+          );
+          await endSession();
+          return;
+        }
         rethrow;
       }
-      if (closesLastMonkeyMuxWindow &&
-          _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
-          _isExpectedMonkeyMuxFinalCloseError(error)) {
-        DiagnosticsLogService.instance.info(
-          'tmux.ui',
-          'monkeymux_final_close_control_closed',
-          fields: {
-            'connectionId': session.connectionId,
-            'errorType': error.runtimeType,
-          },
-        );
-        await _handleMuxSessionEnded(session, sessionName);
+      if (closesLastMonkeyMuxWindow) {
+        await endSession();
         return;
       }
-      rethrow;
-    }
-    if (closesLastMonkeyMuxWindow) {
-      await _handleMuxSessionEnded(session, sessionName);
-      return;
+    } finally {
+      releaseSessionEnd();
     }
     final isMonkeyMux = _activeMuxBackend == RemoteMuxBackend.monkeyMux;
     _prepareTerminalForMuxWindowChange(clearTerminalProgress: !isMonkeyMux);
@@ -11268,8 +11612,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   @override
   void dispose() {
+    // A launch whose command may already be running is kept and checked,
+    // never removed blind.
+    _settleWorktreeLaunch(launched: true);
     WidgetsBinding.instance.removeObserver(this);
     _pasteUploadProgress.dispose();
+    _creatingWorktree.dispose();
     // Provider notifications must wait until the widget tree finishes unmounting.
     // The owner check preserves any replacement terminal's override.
     scheduleMicrotask(_clearAppThemeOverride);
@@ -12733,10 +13081,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           children: [
             const CursorBlock(size: 32),
             const SizedBox(height: 16),
-            Text(
-              isCancellingConnection ? 'cancelling…' : 'connecting…',
-              style: FluttyTheme.monoStyle.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            ValueListenableBuilder<bool>(
+              valueListenable: _creatingWorktree,
+              builder: (context, creatingWorktree, _) => Text(
+                isCancellingConnection
+                    ? 'cancelling…'
+                    : creatingWorktree
+                    ? AgentWorktreeCreatingIndicator.label
+                    : 'connecting…',
+                style: FluttyTheme.monoStyle.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
             ),
             const SizedBox(height: 16),
