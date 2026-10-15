@@ -394,6 +394,14 @@ class AcpComposerController extends ChangeNotifier {
     return true;
   }
 
+  /// Reports that a file, photo or audio picker failed before returning files.
+  void reportAttachmentPickFailed() => _setError(
+    const AcpComposerError(
+      AcpComposerErrorKind.attachment,
+      'Could not add the attachment. Try again.',
+    ),
+  );
+
   /// Collapses a large clipboard insertion into an attachment-like text chip.
   bool addPastedText(String text) {
     if (!isEditable || text.isEmpty) return false;

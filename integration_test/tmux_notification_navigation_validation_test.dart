@@ -42,6 +42,11 @@ Host _buildHost({required int id, required String tmuxSessionName}) => Host(
   autoConnectRequiresConfirmation: false,
   autoForwardPorts: false,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 const _proMonetizationState = MonetizationState(

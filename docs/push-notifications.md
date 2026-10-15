@@ -1,8 +1,8 @@
 # Push notifications for agent events
 
 This is the wire specification for issue #948. When an agent needs the user and
-the app is suspended or closed, the host sends an encrypted, content-free event
-to a Firebase Function, which delivers it through Firebase Cloud Messaging
+the app is suspended or closed, the host sends an encrypted event to a
+Firebase Function, which delivers it through Firebase Cloud Messaging
 (FCM). FCM uses APNs on iOS.
 
 Three components implement it:
@@ -27,10 +27,16 @@ file, and intermediate secrets are checked by their SHA-256 digests.
 | Function, Google, Apple | Sealed ticket and the FCM token inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
 | App (device key holder) | Everything in the payload |
 
-The payload never contains prompts, terminal output, file paths, commands,
-window names or hostnames. The coarse kind is sent in clear text so the
-notification can say something useful without a notification service
-extension.
+Besides opaque ids, the payload names the session and, when known, the
+agent's short command name and the window's title as the window bar shows it.
+The title is whatever the agent, the program or the user named the window (an
+agent's summary of its task, a window name, a folder's name), so it can say
+what the window is working on; MonkeyMux leaves out titles that are only a
+path, a host name or a shell's `user@host`. The payload never contains
+prompts, the agent's messages, terminal output or full paths, and only the
+device can read it. The coarse kind is sent in clear text so a phone that
+cannot open the payload can still say something useful. The phone adds the
+host's label itself, from its own saved hosts.
 
 ## Encodings
 
@@ -52,8 +58,11 @@ vectors include a non-canonical ticket that every implementation must refuse.
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
 - **Collapse key.** Chosen by the host so repeated events for one window replace
   each other on the device: the first 32 hex characters of
-  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window)`, where
-  `hostSalt` is 32 random bytes kept in the host's registration file. Accepted
+  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window + "\n" + group)`,
+  where `group` is `attention` for `permission` and `input` and `update` for
+  every other kind (since 0.1.237), so a routine event never replaces a request
+  still waiting on the user, and `hostSalt` is 32 random bytes kept in the
+  host's registration file. Accepted
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
 - **Session key.** Names a MonkeyMux session in the host's registration file
   without writing the name there: the first 32 hex characters of
@@ -72,12 +81,14 @@ keyId     = 1*32( ALPHA / DIGIT / "_" / "-" )
 nonce     = 12 random bytes
 aad       = "v1." keyId            ; ASCII
 key       = 32 bytes from the PUSH_TICKET_KEYS secret, selected by keyId
-plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android"}
+plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
 ```
 
 AES-256-GCM with a 16-byte tag. Binding the key id into the AAD means a ticket
 cannot be replayed under a different key id. `p` is optional and only used for
-platform-specific message fields and the `platform` log field.
+platform-specific message fields and the `platform` log field. `a` is present
+when the app registered with `appNotifications`: it posts its own
+notifications from data-only messages (see "FCM message").
 
 A ticket stops opening 90 days after `i`, or when `i` is more than a day in the
 future. The app renews its ticket at least weekly, and hosts receive the new one
@@ -129,6 +140,9 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `window` | MonkeyMux window id such as `@3`, empty for a test |
 | `sessionId` | MonkeyMux session name that owns the window, empty for a test |
 | `kind` | One of the kinds below |
+| `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
+| `title` | Since 0.1.237, when the window has one worth showing: its title, the first of the agent's session title, the title the program set (without a leading spinner or status glyph), the window name and the working folder's name that is not generic (a shell's name, the agent's own name, a host name, a path, `user@host`, a bare status word such as `working`, or the home folder). Control characters and runs of space become one space; at most 64 characters, cut with `…` |
+| `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
 | `ts` | Event time, Unix seconds |
 
 Decoders ignore unknown fields. The app trusts the decrypted `kind` over the
@@ -138,9 +152,9 @@ clear-text one.
 
 | Kind | Host signal | Visible text | Priority |
 | --- | --- | --- | --- |
-| `permission` | A native agent asked for permission (`session/request_permission`) and the request is still pending | "Approval needed" / "An agent is waiting for your approval." | high |
-| `input` | A native agent asked for input (`elicitation/create`) and the request is still pending | "Input needed" / "An agent is waiting for your answer." | high |
-| `finished` | A native `session/prompt` turn ended | "Agent finished" / "An agent finished its turn." | normal |
+| `permission` | A native agent asked for permission (`session/request_permission`) and the request is still pending, or a terminal program's status became `blocked` with `kind=permission` | "Approval needed" / "An agent is waiting for your approval." | high |
+| `input` | A native agent asked for input (`elicitation/create`) and the request is still pending, or a terminal program's status became `blocked` with any other kind | "Input needed" / "An agent is waiting for your answer." | high |
+| `finished` | A native `session/prompt` turn ended, or a terminal program's status went from `working` to `done` or `idle` | "Agent finished" / "An agent finished its turn." | normal |
 | `alert` | A bell, an OSC 9 text notification, an OSC 777 `notify`, or an OSC 99 notification (not a `p=?` query or `p=close`) in a window. Shell-integration OSC 777 marks such as `precmd` do not count | "Terminal alert" / "A terminal window wants your attention." | normal |
 | `test` | `push_test` from the app | "MonkeySSH" / "Push notifications are working." | high |
 
@@ -161,8 +175,13 @@ Firebase Auth user is required.
 Request data:
 
 ```json
-{"token": "<FCM registration token>", "platform": "ios", "deviceId": "<optional existing id>"}
+{"token": "<FCM registration token>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
 ```
+
+The Android app sends `appNotifications: true`: it posts its own notifications
+from data-only messages, which Android builds before that could not show. Any
+other value is ignored. A ticket the app holds from before it sent the field
+is renewed at the next start, so its pushes get the new form.
 
 Response data:
 
@@ -173,6 +192,25 @@ Response data:
 Errors use the callable error codes: `invalid-argument` for a bad request,
 `unauthenticated` when the App Check token is missing, invalid or already used,
 and `internal` when the ticket keys are not configured.
+
+On Android, App Check uses Play Integrity. Both Play apps must have Cloud
+project `monkeyssh` (529923319565) linked under Play Console > Protected with
+Play > Play Integrity API. Without that link, App Check fails on every real
+device, however the app was installed. Emulator debug builds use a debug token
+and never exercise this path.
+
+App Check settings differ between the two Android apps:
+
+- **Production** (`xyz.depollsoft.monkeyssh`) accepts only installs Google Play
+  recognizes (the default for Play Integrity).
+- **β** (`xyz.depollsoft.monkeyssh.private`) also accepts installs Play does not
+  recognize (`appIntegrity.allowUnrecognizedVersion`), so PR previews can opt
+  in. Its Firebase app lists one SHA-256 certificate per way a β build reaches a
+  phone: Play's app signing key (Play tracks), the Internal test certificate
+  from Play Console > Test and release > Internal app sharing, and the upload
+  key, which signs the APKs sent through Firebase App Distribution. App Check
+  rejects a build whose signing certificate is not on that list with a 403 from
+  `ExchangePlayIntegrityToken`, even though Play Integrity itself succeeded.
 
 ### `pushNotify` (HTTPS)
 
@@ -228,6 +266,24 @@ header before reading the body, would close it.
 
 ### FCM message
 
+An Android ticket with `a` (see "Ticket") gets a data-only message. The app
+decrypts `p` and posts the notification itself (see "Notification text" under App); `k` and `c` let it
+post the generic text for the kind, tagged with the collapse key, when the
+payload does not open. Every such push ends in a visible notification, so all
+kinds go at high priority to wake the app:
+
+```json
+{
+  "token": "<from the ticket>",
+  "data": {"v": "1", "p": "<payload>", "k": "finished", "c": "<collapse>"},
+  "android": {"priority": "high", "collapseKey": "<collapse>", "ttl": "3600s"}
+}
+```
+
+An iOS ticket, an Android ticket without `a` (a build that cannot show
+data-only messages) and a ticket without a platform get an alert, which the iOS
+notification service extension rewrites on the phone:
+
 ```json
 {
   "token": "<from the ticket>",
@@ -246,10 +302,12 @@ header before reading the body, would close it.
 }
 ```
 
-Normal-priority kinds use `"priority": "normal"`, `apns-priority: 5`, no
-sound, and the quiet Android channel `agent-updates` (on Android 8 and later
-the channel, not the message priority, decides sound and heads-up display). `mutable-content` lets a later notification service extension replace
-the text with decrypted details (see Follow-ups).
+In the alert form, normal-priority kinds use `"priority": "normal"`,
+`apns-priority: 5`, no sound on iOS, and the Android channel
+`agent-updates-v2` (on Android 8 and later the channel, not the message
+priority, decides sound and heads-up display). `mutable-content` lets the iOS
+notification service extension replace the text with decrypted details (see
+[iOS notification service extension](#ios-notification-service-extension)).
 
 ### Logging
 
@@ -309,9 +367,9 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
 `push` object on the control message.
 
 ```json
-{"id": "1", "type": "push_register",   "push": {"deviceId": "...", "ticket": "v1....", "publicKey": "<32 bytes>", "hostRef": "..."}}
+{"id": "1", "type": "push_register",   "push": {"deviceId": "...", "ticket": "v1....", "publicKey": "<32 bytes>", "hostRef": "...", "events": ["attention", "finished", "bell", "notice"]}}
 {"id": "2", "type": "push_unregister", "push": {"deviceId": "...", "hostRef": "<optional>"}}
-{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "bridges": ["<bridge id>"]}}
+{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "notices": true, "bridges": ["<bridge id>"]}}
 {"id": "4", "type": "push_test",       "push": {"deviceId": "..."}}
 ```
 
@@ -320,6 +378,28 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   `push_register_rejected` with result `stale_ticket` (after a 401) or
   `token_unregistered` (after a 410) and stores nothing. The app then fetches a
   new ticket, and for `token_unregistered` a new FCM token first.
+- `events` on `push_register` lists the event categories this saved host
+  wants pushed. Without it (an app from before the list) the
+  registration wants all of them; an empty list wants none; unknown entries
+  are ignored. Registering again replaces the list. The categories are:
+  - `attention`: `permission` and `input`.
+  - `finished`: `finished`.
+  - `bell`: an `alert` raised by a BEL.
+  - `notice`: an `alert` raised by a desktop notification (OSC 9 text, OSC
+    777 `notify`, or an OSC 99 notification that is not a query or close).
+
+  One chunk of output can raise both; such an alert goes to a registration
+  that wants either. `test` is always sent: it checks the path, not a
+  preference. When a device has two registrations for the session (two saved
+  hosts, see Storage), an event goes once, through the newest registration
+  that wants it.
+- `push_registered` echoes the categories the registration will receive in
+  `push.events`. Helpers before 0.1.233 ignore `events` and echo nothing, so
+  they would push everything. When a saved host has any kind turned off and
+  the answer has no echo, the app sends `push_unregister` for that saved host
+  and treats the helper like one without push support (retried later; Send
+  test reports that the host needs a MonkeyMux update). It never leaves a
+  registration in place that sends what the user turned off.
 - `push_unregister` with a `hostRef` removes that one saved host's
   registration; without one it removes every registration of the device. It
   answers `push_unregistered`.
@@ -350,7 +430,7 @@ two servers could both read, change and rename, and one change would be lost.
 
 - A registration is a device as reached through one saved host, for the one
   MonkeyMux session that saved host attaches to: `(deviceId, hostRef,
-  sessionKey)`. Only that session's server sends to it. Saved hosts that reach
+  sessionKey)`, plus the `events` it wants (absent means all). Only that session's server sends to it. Saved hosts that reach
   the same machine with different session names (one per project, say) are
   therefore separate: none receives another's events, and every notification
   names the saved host and session the app opens on a tap. Attaching a saved
@@ -362,14 +442,17 @@ two servers could both read, change and rename, and one change would be lost.
   machine user and session (LAN and Tailscale, say) register separately and
   can be turned off separately; an event still goes to each device once,
   through its most recently updated registration for that session.
-- The file is schema version 2 since 0.1.230, which added `sessionKey`. A
-  helper that only knows version 1 treats a version 2 file as written by a
-  newer MonkeyMux: it neither sends from it nor writes it, and its
-  `push_register` fails, so a session still running an older helper cannot
-  strip the session keys. It sends nothing until the app updates it on the
-  next attach. A version 1 file reads as having no registrations: its records
-  named no session and are replaced by the next `push_register`. Its salt and
-  refused tickets are kept.
+- The file is schema version 3 since 0.1.233, which added `events`; version
+  2 (0.1.230) added `sessionKey`. A helper treats a file with a higher version
+  than its own as written by a newer MonkeyMux: it neither sends from it nor
+  writes it, and its `push_register` fails, so a session still running an
+  older helper cannot strip the session keys or the event lists. It sends
+  nothing until the app updates it on the next attach.
+- A version 2 file is read as it is: its registrations are already scoped to a
+  session and, having no `events`, want everything until the app registers
+  them again. The next write stamps version 3. A version 1 file reads as
+  having no registrations: its records named no session and are replaced by
+  the next `push_register`. Its salt and refused tickets are kept.
 - Each server rereads the file when its size, modification time or identity
   changed, at most once a second. Every write renames a new file into place,
   so the identity check catches a rewrite of the same size within the
@@ -393,20 +476,24 @@ connection's attach client id, and one of three states.
 - **Local** (`local: true`): the app is alive in the background with this
   attach under Android's background service, and raises some notifications
   itself. `alerts` says this connection's window bar is mounted, so the app
-  raises its window alerts; `bridges` lists the native agent bridges whose
-  events it is receiving. Repeated every 20 seconds. iOS suspends a
+  raises its bell alerts; `notices` says it raises desktop notifications
+  itself. Without `notices` (an app from before the field), `alerts`
+  covers desktop notifications too. `bridges` lists the native agent bridges
+  whose events it is receiving. Repeated every 20 seconds. iOS suspends a
   backgrounded app, so iOS reports idle instead.
 - **Idle**: neither. Sent once.
 
 A report counts while it is under 45 seconds old and the attach client is still
 attached. A device **attends** window W when it is viewing and W is the active
 window, or when a report in the last 30 seconds saw it viewing W. A device is
-**covered locally** for window alerts when its last local report said
-`alerts`, and for a native agent event when that report listed the event's
-bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
+**covered locally** for an alert when its last local report covered every
+category of that alert the device wants (`alerts` for a bell, `notices` for a
+desktop notification), and for a native agent event when that report listed
+the event's bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
 slack), so a suspended or killed app stops covering anything within that time.
 A one-off event (`finished`, `alert`) skipped only because of local coverage
-is kept for 2 minutes and sent if the coverage lapses first.
+is kept for 2 minutes and sent if the coverage lapses first; a deferred alert
+remembers its categories, so it is sent when the claim for any of them lapses.
 
 - `permission`, `input` and `finished` skip the devices that attend the window
   or are covered locally.
@@ -433,8 +520,8 @@ is kept for 2 minutes and sent if the coverage lapses first.
 - 401 and 410 delete the registrations carrying that ticket and remember it as
   refused.
 - The PTY reader never waits on any of this: a bell or desktop notification is
-  queued (64 deep, dropped when full, and only while a device is registered)
-  for the notifier goroutine.
+  queued with what raised it (64 deep, dropped when full, and only while a
+  device is registered) for the notifier goroutine.
 
 ### Native agent signals
 
@@ -466,6 +553,26 @@ every 2 seconds.
 
 Polling works the same whether the bridge lives in this server, in the outgoing
 server after an upgrade, or in a detached `acp serve` process.
+
+### Terminal agent signals
+
+A program in a terminal window that reports its status with the Program Status
+Protocol (OSC 7501, which Claude Code and Pi send) raises the same kinds from
+0.1.236 on. The PTY reader compares the window's
+published status before and after each chunk:
+
+- `working` to `done` or `idle` raises `finished`.
+- A newly `blocked` status raises `permission` for `kind=permission` and
+  `input` for any other kind (`question`, `auth` or none). A change from one
+  blocked kind to another raises again; the same block reported twice does not.
+- A rejected prompt (`blocked` to `idle`), an `error`, and a status that ends
+  because the program exited raise nothing.
+
+The push carries only its kind and window, never the report's `msg`, `title` or
+`app`. Unlike a native request, a terminal one is raised once, when the status
+changes: if a device was watching that window or the event was coalesced, it is
+not raised again while the program stays blocked. Native agent windows are
+skipped here because their bridge raises the same events.
 
 The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
 `MONKEYMUX_PUSH_ENDPOINT` in the server's environment overrides it for testing.
@@ -520,6 +627,17 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   reference now, or on its next attach if it is not connected. Deleting a saved
   host leaves its registration on the machine until it expires (30 days without
   a refresh).
+- **Kinds per host:** each saved host stores which kinds it may raise (agent
+  needs you, agent finished, window alerts, shell notifications) and whether
+  it pushes while MonkeySSH is closed; they live on the host row and travel
+  with transfers. The app applies them at once to what it shows, including
+  the foreground snackbar. A registration carries them as `events` and is
+  sent again when they change, so a connected host follows within one sync
+  and one that is not connected on its next attach. The app-wide Desktop
+  notifications switch in Settings removes `notice` from every
+  registration. Presence is per device and session: two saved hosts on one
+  session with different kinds share the claim the last report made, which
+  can let an alert through twice.
 - **Tap:** decrypt `p`, map `hostRef` back to a host by recomputing the HMAC for
   each saved host, and open `/terminal/<hostId>` at that MonkeyMux session and
   window. A live connection is reused only when it is attached to that
@@ -529,19 +647,119 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   rather than showing another session's terminal on a connection to the same
   host. A native agent window opens its chat. A payload
   that does not decrypt opens the app on Connections.
+- **Notification text:** the phone names the agent, the window, the saved
+  host and the MonkeyMux session, from the decrypted payload and its own host
+  labels: "Claude Code finished" / "Fix login bug · build-box · MonkeySSH".
+  Titles are "<Agent> needs approval", "<Agent> has a question" and "<Agent>
+  finished" when the payload names a known agent (otherwise the generic titles
+  in the Kinds table), and "Terminal alert" or "MonkeySSH" for the other
+  kinds. The body joins the window's title, the host label when the phone
+  knows the host, and then the session with ` · `, each once (the session is
+  named after the host by default, so it usually shows once); with none of
+  them it is the generic body.
+  `lib/domain/services/push/push_notification_text.dart` and the iOS
+  extension build the same strings.
+- **Notification context:** to show that text while MonkeySSH is not running,
+  the app stores the device's private key, every saved host's label by host
+  reference, and the categories each host may push now
+  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
+  the host's kinds, without `notice` when Desktop notifications are off in
+  Settings, and none when the host's push is off). It is written after opt-in
+  and whenever a sync follows a change to the saved hosts or that switch, and
+  deleted on opt-out and at any start without a registration (an opt-out the
+  app was killed in, or a delete that failed). Android keeps it in secure storage
+  (`monkeyssh_push_notify_v1`); iOS keeps it in the keychain group
+  `<team>.<bundle id>.push` (service `xyz.depollsoft.monkeyssh.push`, account
+  `notification-context-v1`, readable after first unlock on this device only),
+  which the app and its notification service extension share. It never
+  leaves the phone.
+- **Android:** pushes arrive as data only (for a ticket with `a`). A
+  FlutterFire background handler, registered at startup, opens the payload and
+  posts the notification on the channel for the kind, with an id derived from
+  the collapse key so a newer push for the same window and kind group replaces
+  the older one. It drops a push the context's `allow` says the host no longer
+  raises: a host's registration changes only when the host is reached, so a
+  kind turned off meanwhile still arrives (iOS cannot drop a push this way and
+  shows it). When the payload does not open (no context yet, or a key from an
+  earlier opt-in) it posts the generic text for `k`. A tap comes back through
+  the local notification plugin carrying the encrypted payload and opens like
+  an FCM tap, also when it starts a new activity on the running engine (the
+  bridge reads the activity's launch intent again when the app resumes).
+- **iOS:** the notification service extension
+  (`ios/NotificationServiceExtension`) opens the payload with the shared
+  context, rewrites the title and body, and groups a host's notifications by
+  thread. Anything it cannot open is shown unchanged.
 - **Foreground:** iOS presents nothing while the app is open (the AppDelegate
   answers `willPresent` with no options, as before the app had a notification
   delegate, and runs each completion handler once). `onMessage` drops the push
   when the terminal on screen shows that window, or when it is an `alert` from
   the session on screen, whose window bar raises its own alert. Anything else
   shows a snackbar with an Open action.
-- **Android channels:** "Agent attention" (`agent-attention`, high importance)
-  for approvals and questions, and "Agent updates" (`agent-updates`, low
-  importance, no sound) for finished turns and window alerts.
+- **Android channels:** "Agent attention" (`agent-attention`, high importance,
+  pops up) for approvals and questions, and "Agent updates"
+  (`agent-updates-v2`, default importance: sound and the status bar, no pop-up)
+  for finished turns and window alerts. The first "Agent updates" channel
+  (`agent-updates`) was low importance, which put finished turns in the
+  collapsed Silent section beside the SSH connection notification. Android
+  never raises an existing channel's importance, so the app deletes it and
+  creates the new id. A message naming a channel the app has not created shows
+  on the manifest default, `agent-attention`.
+
+### iOS notification service extension
+
+`ios/NotificationServiceExtension/` decrypts `p` before iOS shows the push and
+replaces the generic text. Android builds the same strings in Dart.
+
+| Kind | Title with a known `agent` | Title otherwise |
+| --- | --- | --- |
+| `permission` | "Claude Code needs approval" | "Approval needed" |
+| `input` | "Claude Code has a question" | "Input needed" |
+| `finished` | "Claude Code finished" | "Agent finished" |
+| `alert` | "Terminal alert" | "Terminal alert" |
+| `test` | "MonkeySSH" | "MonkeySSH" |
+
+Agent labels: `claude` Claude Code, `codex` Codex, `copilot` Copilot,
+`opencode` OpenCode, `antigravity` Antigravity, `cursor-agent` Cursor Agent,
+`pi` Pi, `hermes` Hermes, `openclaw` OpenClaw, `grok` Grok, `muse` Muse Code.
+The body is "Push notifications are working." for a test, otherwise
+"<host label> · <session>" when the app shared a label for `hostRef` (just the
+label when there is no session or the session is named after the host, as it is
+by default), and the generic body when it did not. The thread
+identifier becomes `hostRef`, so each host's notifications group together.
+`userInfo` is never changed, and any failure (no `p`, no keychain item, a
+payload that does not open) delivers the push as sent.
+
+The extension reads the device key and host labels from a keychain item the
+app writes through the `xyz.depollsoft.monkeyssh/push_notification_context`
+method channel (`write` with `{"json": ...}`, `delete`):
+
+| Attribute | Value |
+| --- | --- |
+| Class | generic password |
+| Service | `xyz.depollsoft.monkeyssh.push` |
+| Account | `notification-context-v1` |
+| Access group | `<AppIdentifierPrefix><app bundle id>.push` |
+| Accessible | after first unlock, this device only |
+| Data | `{"v": 1, "seed": "<base64url device private key>", "hosts": {"<hostRef>": "<label>"}}` |
+
+Both targets name the access group in Info.plist (`MonkeySSHPushKeychainGroup`)
+and list it in `keychain-access-groups`. The app lists its own group,
+`<AppIdentifierPrefix><bundle id>`, first: the first group is the default for
+keychain items written without one, so every secret the app already stores
+keeps its group. Builds re-signed by `fastlane resign_ipa` (TestFlight and
+Firebase builds of the private app) are signed with the profile's
+entitlements, whose first group is `TEAMID.*`; the lane keeps that order,
+appends the push group, and writes the concrete group into both Info.plists,
+because an unsigned build leaves `$(AppIdentifierPrefix)` empty. The extension
+lists the push group alone.
+
+The extension ids are `xyz.depollsoft.monkeyssh.NotificationService` and
+`xyz.depollsoft.monkeyssh.private.NotificationService`. The Regenerate iOS
+Provisioning Profiles workflow registers them in the developer portal before
+match creates their profiles. `scripts/test_ios_push_notification_content.sh`
+checks the decryption and text against the shared vectors. The Build iOS CI
+job runs it.
 
 ## Follow-ups
 
-- A notification service extension that shows decrypted text such as "Claude
-  needs approval on build-box". It needs the App Group and keychain access group
-  work in #947.
 - Live Activity push updates for #922.
