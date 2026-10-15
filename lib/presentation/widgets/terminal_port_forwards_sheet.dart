@@ -256,7 +256,7 @@ class _TerminalPortForwardsSheetState
       title: const Text('Detect open ports'),
       subtitle: Text(
         isHeld
-            ? 'Paused because a link opened this connection'
+            ? 'Paused because a link opened this host'
             : switch ((isEnabled, isConnected, hasAutomaticTunnels)) {
                 (false, _, _) =>
                   'Automatically proxy new remote listeners on this host',

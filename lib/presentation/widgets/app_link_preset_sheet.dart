@@ -244,8 +244,9 @@ class _ReviewField extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.baseline,
           textBaseline: TextBaseline.alphabetic,
           children: [
+            // Grows with the text size so the longest label keeps its gap.
             SizedBox(
-              width: 72,
+              width: MediaQuery.textScalerOf(context).scale(72),
               child: Text(
                 label,
                 style: FluttyTheme.monoStyle.copyWith(

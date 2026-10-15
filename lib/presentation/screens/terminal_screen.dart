@@ -16599,15 +16599,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ),
         actions: [
           TextButton(
+            // Neutral, so the dialog's one filled action carries the teal.
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.onSurface,
+            ),
             onPressed: () =>
                 Navigator.pop(context, _AutoConnectReviewDecision.skip),
             child: const Text('Skip'),
           ),
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
-            child: const Text('Run once'),
-          ),
+          if (imported)
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
+              child: const Text('Run once'),
+            )
+          else
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
+              child: const Text('Run once'),
+            ),
           if (imported)
             FilledButton(
               onPressed: () => Navigator.pop(
@@ -16701,16 +16712,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ),
           ],
           const SizedBox(height: 12),
+          // The same command panel the launch preset review uses.
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
             ),
             child: SelectableText(
               commandPreview,
-              style: const TextStyle(fontFamily: 'monospace'),
+              style: FluttyTheme.monoStyle.copyWith(
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
             ),
           ),
         ],
