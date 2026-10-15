@@ -7,6 +7,7 @@ import 'package:xterm/xterm.dart';
 import '../../app/theme.dart';
 import '../../domain/models/acp_attachment.dart';
 import '../../domain/models/acp_updates.dart';
+import '../../domain/services/diagnostics_log_service.dart';
 import '../controllers/acp_composer_controller.dart';
 import 'acp_attachment_strip.dart';
 import 'acp_slash_command_picker.dart';
@@ -481,7 +482,22 @@ class _AcpComposerState extends State<AcpComposer> {
     if (source == null || !_controller.canAddAttachment) {
       return;
     }
-    final candidates = await source(context);
+    final List<AcpAttachmentCandidate> candidates;
+    try {
+      candidates = await source(context);
+    } on Exception catch (error) {
+      // Android pickers report a busy picker or missing document provider as
+      // a PlatformException, and reading a picked file can fail too.
+      DiagnosticsLogService.instance.warning(
+        'acp.composer',
+        'attachment_pick_failed',
+        fields: {'errorType': error.runtimeType},
+      );
+      if (mounted) {
+        _controller.reportAttachmentPickFailed();
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }

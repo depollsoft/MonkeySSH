@@ -5,12 +5,14 @@ import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_device_store.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
+import 'package:monkeyssh/domain/services/push/push_notification_context.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -28,6 +30,7 @@ class _FakeGateway implements PushMessagingGateway {
   Exception? autoInitError;
   final calls = <String>[];
   final registrations = <Map<String, Object?>>[];
+  final appNotificationFlags = <bool>[];
   final tokenRefresh = StreamController<String>.broadcast();
   final messages = StreamController<PushRemoteMessage>.broadcast();
   final opened = StreamController<PushRemoteMessage>.broadcast();
@@ -80,8 +83,10 @@ class _FakeGateway implements PushMessagingGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     calls.add('register');
+    appNotificationFlags.add(appNotifications);
     registrations.add({
       'token': token,
       'platform': platform,
@@ -119,11 +124,17 @@ class _GatedRegisterGateway extends _FakeGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     calls.add('register');
     await gate.future;
     return super
-        .register(token: token, platform: platform, deviceId: deviceId)
+        .register(
+          token: token,
+          platform: platform,
+          deviceId: deviceId,
+          appNotifications: appNotifications,
+        )
         .then((registration) {
           calls.removeLast();
           return registration;
@@ -175,6 +186,13 @@ class _FakeLink implements PushHostLink {
   String? registerResult;
   Completer<void>? registerGate;
 
+  /// Whether the helper applies registration events (0.1.233+) and echoes
+  /// them on push_registered.
+  bool filtersEvents = true;
+
+  /// Whether push_unregister fails, as when the connection drops mid-way.
+  bool failUnregister = false;
+
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
 
@@ -191,6 +209,9 @@ class _FakeLink implements PushHostLink {
         unsupported: command['type'] != 'push_unregister',
       );
     }
+    if (command['type'] == 'push_unregister' && failUnregister) {
+      return const MonkeyMuxPushControlResult(ok: false);
+    }
     if (command['type'] == 'push_register') {
       await registerGate?.future;
       final result = registerResult;
@@ -198,6 +219,12 @@ class _FakeLink implements PushHostLink {
         registerResult = null;
         return MonkeyMuxPushControlResult(ok: true, result: result);
       }
+      final push = command['push']! as Map<String, Object?>;
+      return MonkeyMuxPushControlResult(
+        ok: true,
+        result: 'registered',
+        events: filtersEvents ? (push['events']! as List<String>) : null,
+      );
     }
     return MonkeyMuxPushControlResult(
       ok: true,
@@ -206,6 +233,23 @@ class _FakeLink implements PushHostLink {
           : null,
     );
   }
+}
+
+class _MemoryContextStore implements PushNotificationContextStore {
+  String? stored;
+  int writes = 0;
+
+  @override
+  Future<void> write(String encoded) async {
+    stored = encoded;
+    writes++;
+  }
+
+  @override
+  Future<String?> read() async => stored;
+
+  @override
+  Future<void> delete() async => stored = null;
 }
 
 class _Harness {
@@ -225,6 +269,26 @@ class _Harness {
 
   /// Configured MonkeyMux session per saved host; absent means none.
   final hostSessions = <int, String?>{};
+
+  /// Notification preferences per saved host; absent means all on.
+  final hostPrefs = <int, HostNotificationPrefs>{};
+
+  /// Makes reading the hosts' settings fail while set.
+  bool hostSettingsFail = false;
+  final hostChanges = StreamController<void>.broadcast();
+  bool terminalNotifications = true;
+  final context = _MemoryContextStore();
+
+  /// Saved host labels; absent ids get `host-<id>`.
+  final hostLabels = <int, String>{};
+
+  /// Changes a host's preferences as its edit screen would.
+  Future<void> editHost(int hostId, HostNotificationPrefs prefs) async {
+    hostPrefs[hostId] = prefs;
+    hostChanges.add(null);
+    await pumpEventQueue();
+  }
+
   bool localPresenceSupported = true;
   final alertListeners = <int>{};
   final bridgesByHost = <int, List<String>>{};
@@ -241,10 +305,35 @@ class _Harness {
       diagnosticsLoggerProvider.overrideWithValue(logger),
       pushHostLinksProvider.overrideWithValue(() => List.of(links)),
       pushHostIdsProvider.overrideWithValue(() async => hostIds()),
-      pushHostSessionNamesProvider.overrideWithValue(
-        () async => Map.of(hostSessions),
+      pushHostSettingsProvider.overrideWithValue(
+        () async => {
+          if (hostSettingsFail) ...throw StateError('hosts unreadable'),
+          for (final id in hostIds())
+            id: (
+              sessionName: hostSessions[id],
+              prefs: hostPrefs[id] ?? const HostNotificationPrefs(),
+            ),
+        },
+      ),
+      pushHostPushWriterProvider.overrideWithValue((
+        hostId, {
+        required enabled,
+      }) async {
+        hostPrefs[hostId] = (hostPrefs[hostId] ?? const HostNotificationPrefs())
+            .withPushWhenClosed(enabled: enabled);
+        hostChanges.add(null);
+      }),
+      pushHostChangesProvider.overrideWithValue(() => hostChanges.stream),
+      pushTerminalNotificationsEnabledProvider.overrideWithValue(
+        () => terminalNotifications,
       ),
       pushNotificationChannelInstallerProvider.overrideWithValue(() async {}),
+      pushNotificationContextStoreProvider.overrideWithValue(context),
+      pushHostLabelsProvider.overrideWithValue(
+        () async => {
+          for (final id in hostIds()) id: hostLabels[id] ?? 'host-$id',
+        },
+      ),
       pushClockProvider.overrideWithValue(() => now),
       pushLocalPresenceSupportedProvider.overrideWithValue(
         localPresenceSupported,
@@ -278,6 +367,7 @@ class _Harness {
   Future<void> dispose() async {
     await pumpEventQueue();
     _container?.dispose();
+    await hostChanges.close();
     await gateway.close();
     await database.close();
   }
@@ -405,6 +495,71 @@ void main() {
     expect(h.secrets.values, isEmpty);
   });
 
+  test('the phone keeps what it needs to show a push while the app is '
+      'closed, and drops it on opt-out', () async {
+    h.hostLabels[2] = 'build-box';
+    await h.start();
+    expect(h.context.stored, isNull);
+    await h.controller.enable();
+    await h.controller.syncNow();
+
+    final stored = await PushDeviceStore(secrets: h.secrets).load();
+    final context = PushNotificationContext.decode(h.context.stored);
+    expect(context, isNotNull);
+    expect(context!.seed, stored!.keyPair.seed);
+    final buildBox = await derivePushHostRef(
+      hostRefKey: stored.hostRefKey,
+      hostId: 2,
+    );
+    expect(context.hosts[buildBox], 'build-box');
+    expect(context.hosts, hasLength(3));
+
+    // Unchanged hosts are not written again on every sync.
+    final writes = h.context.writes;
+    await h.controller.syncNow();
+    expect(h.context.writes, writes);
+
+    // A renamed host is.
+    h.hostLabels[2] = 'gpu-rig';
+    h.hostChanges.add(null);
+    await pumpEventQueue();
+    await h.controller.syncNow();
+    expect(
+      PushNotificationContext.decode(h.context.stored)!.hosts[buildBox],
+      'gpu-rig',
+    );
+
+    // What each host may push now, which the phone applies to a push its
+    // registration still asks for.
+    Set<String>? allowed() =>
+        PushNotificationContext.decode(h.context.stored)!.allowed[buildBox];
+    expect(allowed(), {'attention', 'finished', 'bell', 'notice'});
+    h.terminalNotifications = false;
+    await h.editHost(2, const HostNotificationPrefs(agentFinished: false));
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'bell'});
+
+    // A change whose read fails is written once a read succeeds again.
+    h.hostSettingsFail = true;
+    await h.editHost(2, const HostNotificationPrefs());
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'bell'});
+    h.hostSettingsFail = false;
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'finished', 'bell'});
+
+    await h.editHost(
+      2,
+      const HostNotificationPrefs().withPushWhenClosed(enabled: false),
+    );
+    await h.controller.syncNow();
+    expect(allowed(), isEmpty);
+
+    await h.controller.disable();
+    expect(h.context.stored, isNull);
+    h.expectLogsClean();
+  });
+
   test('opting out unregisters reachable hosts, remembers the rest and '
       'deletes the key', () async {
     final online = _FakeLink(connectionId: 10, hostId: 1);
@@ -488,9 +643,10 @@ void main() {
 
     await h.controller.setHostEnabled(1, enabled: false);
     await h.controller.syncNow();
+    // Refused when turned off, and retried by the next sync.
     expect(
-      older.types.where((type) => type == 'push_unregister'),
-      hasLength(2),
+      older.types.where((type) => type == 'push_unregister').length,
+      greaterThanOrEqualTo(2),
     );
 
     // An updated session removes it.
@@ -571,6 +727,208 @@ void main() {
     second.commands.clear();
     await h.controller.syncNow();
     expect(second.types, ['push_presence']);
+  });
+
+  group('per-host notification settings', () {
+    Map<String, Object?> lastOf(_FakeLink link, String type) =>
+        link.commands.lastWhere((command) => command['type'] == type)['push']!
+            as Map<String, Object?>;
+
+    test('a registration carries the host\'s notification kinds', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(agentFinished: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'bell',
+        'notice',
+      ]);
+
+      // Turning a kind back on in the host's edit screen registers again.
+      link.commands.clear();
+      await h.editHost(1, const HostNotificationPrefs());
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'finished',
+        'bell',
+        'notice',
+      ]);
+      link.commands.clear();
+      await h.controller.syncNow();
+      expect(link.types, isNot(contains('push_register')));
+    });
+
+    test(
+      'turning push off in the host\'s edit screen unregisters it',
+      () async {
+        final link = _FakeLink(connectionId: 10, hostId: 1);
+        h.links.add(link);
+        await h.start();
+        await h.controller.enable();
+        await h.controller.syncNow();
+        expect(h.state.registeredHostIds, {1});
+
+        await h.editHost(
+          1,
+          const HostNotificationPrefs().withPushWhenClosed(enabled: false),
+        );
+        await h.controller.syncNow();
+        expect(h.state.disabledHostIds, {1});
+        expect(link.types, contains('push_unregister'));
+        expect(h.state.registeredHostIds, isEmpty);
+
+        // And back on.
+        link.commands.clear();
+        await h.editHost(1, const HostNotificationPrefs());
+        await h.controller.syncNow();
+        expect(h.state.disabledHostIds, isEmpty);
+        expect(link.types, contains('push_register'));
+      },
+    );
+
+    test('a helper that cannot filter is not left sending what was turned '
+        'off', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1)
+        ..filtersEvents = false;
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(windowAlerts: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(
+        link.types,
+        containsAllInOrder(['push_register', 'push_unregister']),
+      );
+      expect(h.state.registeredHostIds, isEmpty);
+      expect(await h.controller.sendTest(), PushTestOutcome.hostNeedsUpdate);
+
+      // With nothing turned off, the same helper is fine.
+      final allOn = _FakeLink(connectionId: 11, hostId: 2)
+        ..filtersEvents = false;
+      h.links.add(allOn);
+      await h.controller.syncNow();
+      expect(allOn.types, contains('push_register'));
+      expect(allOn.types, isNot(contains('push_unregister')));
+    });
+
+    test('a take-back that fails is retried until it lands', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1)
+        ..filtersEvents = false
+        ..failUnregister = true;
+      h.links.add(link);
+      h.hostPrefs[1] = const HostNotificationPrefs(windowAlerts: false);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(
+        await h.settings.getString('push_notifications_pending_unregister'),
+        contains('"1"'),
+      );
+      link
+        ..failUnregister = false
+        ..commands.clear();
+      await h.controller.syncNow();
+      expect(link.types, contains('push_unregister'));
+      expect(
+        await h.settings.getString('push_notifications_pending_unregister'),
+        '{}',
+      );
+    });
+
+    test('a queued unregister that lands late does not leave a turned-back-on '
+        'host unregistered', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      // Turned off while the unregister cannot get through, then on again.
+      link.failUnregister = true;
+      await h.controller.setHostEnabled(1, enabled: false);
+      await h.controller.setHostEnabled(1, enabled: true);
+      await h.controller.syncNow();
+      // The queued unregister finally lands; the host must be registered
+      // again in the same sync, not left without a registration.
+      link
+        ..failUnregister = false
+        ..commands.clear();
+      await h.controller.syncNow();
+      expect(
+        link.types.where((t) => t != 'push_presence'),
+        containsAllInOrder(['push_unregister', 'push_register']),
+      );
+    });
+
+    test('a host turned off by a run that ended mid-way is unregistered at '
+        'the next start', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(h.state.registeredHostIds, {1});
+      // The host row says off, but the app stopped before unregistering.
+      h.hostPrefs[1] = const HostNotificationPrefs().withPushWhenClosed(
+        enabled: false,
+      );
+      link.commands.clear();
+      await h.restart();
+      await h.controller.syncNow();
+      expect(link.types, contains('push_unregister'));
+      expect(h.state.disabledHostIds, {1});
+      expect(h.state.registeredHostIds, isEmpty);
+    });
+
+    test('program notifications are left out of every registration while '
+        'the app-wide switch is off', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.terminalNotifications = false;
+      await h.start();
+      await h.controller.enable();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_register')['events'], [
+        'attention',
+        'finished',
+        'bell',
+      ]);
+    });
+
+    test('setHostEnabled saves the choice on the host', () async {
+      await h.start();
+      await h.controller.enable();
+      await h.controller.setHostEnabled(2, enabled: false);
+      expect(h.hostPrefs[2]!.pushWhenClosed, isFalse);
+      await h.restart();
+      expect(h.state.disabledHostIds, {2});
+    });
+
+    test('the background claims follow the host\'s kinds and the app-wide '
+        'switch for program notifications', () async {
+      final link = _FakeLink(connectionId: 10, hostId: 1);
+      h.links.add(link);
+      h.alertListeners.add(10);
+      await h.start();
+      await h.controller.enable();
+      h.controller.reportVisibility(foreground: false);
+      await pumpEventQueue();
+      await h.controller.syncNow();
+      expect(lastOf(link, 'push_presence'), containsPair('alerts', true));
+      expect(lastOf(link, 'push_presence'), containsPair('notices', true));
+
+      // The app shows no program notifications while the app-wide switch is
+      // off, so the host keeps pushing them.
+      h.terminalNotifications = false;
+      await h.editHost(1, const HostNotificationPrefs(windowAlerts: false));
+      await h.controller.syncNow();
+      final presence = lastOf(link, 'push_presence');
+      expect(presence['local'], isFalse);
+      expect(presence, isNot(contains('alerts')));
+    });
   });
 
   test('sendTest reports what happened', () async {
@@ -862,6 +1220,32 @@ void main() {
       expect(h.gateway.registrations, hasLength(registrations + 1));
     });
 
+    test('a ticket from a build that could not show data-only pushes is '
+        'renewed', () async {
+      await h.start();
+      await h.controller.enable();
+      expect(h.gateway.appNotificationFlags, [true]);
+      // What a build before data-only pushes stored.
+      final store = PushDeviceStore(secrets: h.secrets);
+      final stored = (await store.load())!;
+      expect(stored.appNotifications, isTrue);
+      await store.save(
+        PushDeviceSecrets(
+          keyPair: stored.keyPair,
+          hostRefKey: stored.hostRefKey,
+          deviceId: stored.deviceId,
+          ticket: stored.ticket,
+          tokenFingerprint: stored.tokenFingerprint,
+          ticketIssuedAt: stored.ticketIssuedAt,
+        ),
+      );
+      await h.restart();
+      await pumpEventQueue();
+      await h.controller.syncNow();
+      expect(h.gateway.appNotificationFlags, [true, true]);
+      expect((await store.load())!.appNotifications, isTrue);
+    });
+
     test('a host that refused the ticket gets a new one', () async {
       for (final (result, deletesToken) in [
         ('stale_ticket', false),
@@ -986,8 +1370,19 @@ void main() {
           diagnosticsLoggerProvider.overrideWithValue(harness.logger),
           pushHostLinksProvider.overrideWithValue(() => const []),
           pushHostIdsProvider.overrideWithValue(() async => [1]),
-          pushHostSessionNamesProvider.overrideWithValue(() async => {}),
+          pushHostSettingsProvider.overrideWithValue(() async => {}),
+          pushHostChangesProvider.overrideWithValue(Stream<void>.empty),
+          pushHostPushWriterProvider.overrideWithValue(
+            (_, {required enabled}) async {},
+          ),
+          pushTerminalNotificationsEnabledProvider.overrideWithValue(
+            () => true,
+          ),
           pushLocalBridgesProvider.overrideWithValue((_) => const []),
+          pushNotificationContextStoreProvider.overrideWithValue(
+            _MemoryContextStore(),
+          ),
+          pushHostLabelsProvider.overrideWithValue(() async => {}),
           pushNotificationChannelInstallerProvider.overrideWithValue(
             () async {},
           ),
@@ -1277,6 +1672,7 @@ void main() {
         await h.start();
         await h.controller.enable();
         await h.controller.syncNow();
+        expect(h.context.stored, isNotNull);
         // What a kill right after the opt-out began leaves behind.
         await h.settings.setBool('push_notifications_enabled', value: false);
         await h.settings.setBool(
@@ -1289,6 +1685,8 @@ void main() {
 
         expect(h.state.enabled, isFalse);
         expect(h.secrets.values, isEmpty);
+        // The notification context's copy of the device key goes too.
+        expect(h.context.stored, isNull);
         expect(
           h.gateway.calls,
           containsAllInOrder(['autoInit:false', 'deleteToken']),
