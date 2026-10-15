@@ -1,6 +1,8 @@
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+
+import '../../domain/services/diagnostics_log_service.dart';
 
 const _defaultFileBaseName = 'monkeyssh-transfer';
 
@@ -14,6 +16,40 @@ String sanitizeTransferFileBaseName(String input) {
       .replaceAll(RegExp(r'^\.+|\.+$'), '')
       .replaceAll(RegExp(r'^-+|-+$'), '');
   return normalized.isEmpty ? _defaultFileBaseName : normalized;
+}
+
+/// Opens the single-file picker, or returns null after a snackbar if it fails.
+///
+/// Android pickers report a busy picker or a missing document provider as a
+/// [PlatformException] instead of a cancelled selection.
+Future<PlatformFile?> pickSingleFileOrNotify(
+  BuildContext context, {
+  required String diagnosticsCategory,
+  String? dialogTitle,
+  FileType type = FileType.any,
+  List<String>? allowedExtensions,
+}) async {
+  try {
+    return await FilePicker.pickFile(
+      dialogTitle: dialogTitle,
+      type: type,
+      allowedExtensions: allowedExtensions,
+    );
+  } on Exception catch (error) {
+    DiagnosticsLogService.instance.warning(
+      diagnosticsCategory,
+      'picker_failed',
+      fields: {'errorType': error.runtimeType},
+    );
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not open the file picker. Try again.'),
+        ),
+      );
+    }
+    return null;
+  }
 }
 
 /// Returns the native picker type to use for custom-extension files.

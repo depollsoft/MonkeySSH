@@ -945,6 +945,11 @@ Host _buildHost({
   autoForwardPorts: false,
   remoteMuxBackend: remoteMuxBackend?.storageValue,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 const _proMonetizationState = MonetizationState(
@@ -12725,6 +12730,21 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
+
+    testWidgets('a touch that ends after the terminal closes is ignored', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      final touch = await tester.startGesture(
+        tester.getCenter(find.byType(MonkeyTerminalView)),
+      );
+      await tester.pump();
+
+      // The gesture binding still routes this pointer to the old listener.
+      await tester.pumpWidget(const SizedBox());
+      await touch.cancel();
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets('toolbar navigation keys clear the screen IME buffer', (
       tester,

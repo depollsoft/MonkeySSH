@@ -16,6 +16,7 @@ import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/monkeymux_offer_service.dart';
 import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -346,6 +347,78 @@ void main() {
             'private key for SSH key "Deploy key"',
             'passphrase for SSH key "Deploy key"',
           ]),
+        );
+      });
+
+      test('an older backup keeps its hosts\' push opt-outs', () async {
+        Future<int> host(String label) => db
+            .into(db.hosts)
+            .insert(
+              HostsCompanion.insert(
+                label: label,
+                hostname: '$label.example.com',
+                username: 'demo',
+              ),
+            );
+        await host('alpha');
+        final betaId = await host('beta');
+        // What a backup made before per-host settings looks like.
+        final data = await transferService.createMigrationData();
+        for (final item in data['hosts']! as List) {
+          (item as Map).remove('pushWhenClosed');
+        }
+        (data['settings']! as Map)['push_notifications_disabled_hosts'] =
+            '[$betaId]';
+
+        Future<Map<String, bool>> pushByLabel() async => {
+          for (final row in await db.select(db.hosts).get())
+            row.label: row.pushWhenClosed,
+        };
+        Future<bool> legacyKeyKept() async =>
+            (await (db.select(db.settings)..where(
+                      (row) =>
+                          row.key.equals('push_notifications_disabled_hosts'),
+                    ))
+                    .get())
+                .isNotEmpty;
+
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.replace,
+        );
+        expect(await pushByLabel(), {'alpha': true, 'beta': false});
+        expect(await legacyKeyKept(), isFalse);
+
+        // Merged onto other hosts, the ids move and only beta is muted.
+        await db.delete(db.hosts).go();
+        await host('gamma');
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.merge,
+        );
+        expect(await pushByLabel(), {
+          'gamma': true,
+          'alpha': true,
+          'beta': false,
+        });
+        expect(await legacyKeyKept(), isFalse);
+      });
+
+      test('the MonkeyMux offer list stays on this device', () async {
+        await db
+            .into(db.settings)
+            .insert(
+              SettingsCompanion.insert(
+                key: monkeyMuxOfferPendingSettingKey,
+                value: '[1]',
+              ),
+            );
+        final data = await transferService.createMigrationData();
+        expect(
+          (data['settings']! as Map).containsKey(
+            monkeyMuxOfferPendingSettingKey,
+          ),
+          isFalse,
         );
       });
 
