@@ -17,6 +17,7 @@ import '../../domain/models/host_notifications.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
@@ -31,6 +32,7 @@ import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/wifi_network_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../view_models/host_edit_view_model.dart';
+import '../widgets/agent_preset_workspace_fields.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
@@ -78,6 +80,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   final _usernameFieldLocationKey = GlobalKey();
   final _tmuxSessionFieldLocationKey = GlobalKey();
   final _agentTmuxFlagsFieldLocationKey = GlobalKey();
+  final _agentSessionFieldLocationKey = GlobalKey();
   final _customCommandFieldLocationKey = GlobalKey();
   final _snippetFieldLocationKey = GlobalKey();
   final _portProxyNameFieldLocationKey = GlobalKey();
@@ -97,12 +100,14 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   late TextEditingController _agentTmuxExtraFlagsController;
   late TextEditingController _agentArgumentsController;
   late TextEditingController _portProxyNameController;
+  final _agentWorkspaceForm = AgentPresetWorkspaceFormState();
   late FocusNode _labelFocusNode;
   late FocusNode _hostnameFocusNode;
   late FocusNode _portFocusNode;
   late FocusNode _usernameFocusNode;
   late FocusNode _tmuxSessionFocusNode;
   late FocusNode _agentTmuxFlagsFocusNode;
+  final _agentSessionFocusNode = FocusNode();
   late FocusNode _customCommandFocusNode;
   late FocusNode _snippetFocusNode;
   late FocusNode _portProxyNameFocusNode;
@@ -189,6 +194,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       _agentTmuxExtraFlagsController,
       _agentArgumentsController,
       _portProxyNameController,
+      ..._agentWorkspaceForm.controllers,
     ]) {
       c.addListener(_updateDirtyState);
     }
@@ -300,6 +306,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         _agentTmuxSessionController.text = preset.tmuxSessionName ?? '';
         _agentTmuxExtraFlagsController.text = preset.tmuxExtraFlags ?? '';
         _agentArgumentsController.text = preset.additionalArguments ?? '';
+        _agentWorkspaceForm.load(preset);
         if (presetCommand != null &&
             (_selectedAutoConnectMode == AutoConnectCommandMode.custom ||
                 host.autoConnectCommand == presetCommand)) {
@@ -333,12 +340,14 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _agentTmuxExtraFlagsController.dispose();
     _agentArgumentsController.dispose();
     _portProxyNameController.dispose();
+    _agentWorkspaceForm.dispose();
     _labelFocusNode.dispose();
     _hostnameFocusNode.dispose();
     _portFocusNode.dispose();
     _usernameFocusNode.dispose();
     _tmuxSessionFocusNode.dispose();
     _agentTmuxFlagsFocusNode.dispose();
+    _agentSessionFocusNode.dispose();
     _customCommandFocusNode.dispose();
     _snippetFocusNode.dispose();
     _portProxyNameFocusNode.dispose();
@@ -372,6 +381,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     agentTmuxSession: _agentTmuxSessionController.text,
     agentTmuxExtraFlags: _agentTmuxExtraFlagsController.text,
     agentArguments: _agentArgumentsController.text,
+    agentWorktree: _agentWorkspaceForm.worktree,
+    agentInitialPrompt: _agentWorkspaceForm.initialPrompt.text,
     portProxyName: _portProxyNameController.text,
     selectedAgentMuxBackend: _selectedAgentMuxBackend,
     selectedKeyId: _selectedKeyId,
@@ -1287,25 +1298,42 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               : null,
         ),
         const SizedBox(height: 12),
-        TextFormField(
-          key: const Key('host-agent-tmux-session-field'),
-          controller: _agentTmuxSessionController,
-          readOnly: !hasAgentPresetAccess,
-          decoration: InputDecoration(
-            labelText: isAgentTmuxBackend
-                ? 'tmux session (optional)'
-                : 'MonkeyMux session (optional)',
-            hintText: 'app-agent',
-            prefixIcon: const Icon(Icons.view_carousel_outlined),
-            helperText: isAgentTmuxBackend
-                ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
-                : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
-            helperMaxLines: _hostFieldHelperMaxLines,
+        KeyedSubtree(
+          key: _agentSessionFieldLocationKey,
+          child: TextFormField(
+            key: const Key('host-agent-tmux-session-field'),
+            controller: _agentTmuxSessionController,
+            focusNode: _agentSessionFocusNode,
+            readOnly: !hasAgentPresetAccess,
+            validator: (value) =>
+                _agentWorkspaceForm.worktreeEnabled &&
+                    (value?.trim().isEmpty ?? true)
+                ? 'Worktree launches need a session, so reconnecting returns to '
+                      'the same worktree.'
+                : null,
+            decoration: InputDecoration(
+              // A worktree launch needs the session, so it stops being
+              // optional when worktrees are on.
+              labelText: [
+                if (isAgentTmuxBackend) 'tmux session' else 'MonkeyMux session',
+                if (!_agentWorkspaceForm.worktreeEnabled) '(optional)',
+              ].join(' '),
+              hintText: 'app-agent',
+              prefixIcon: const Icon(Icons.view_carousel_outlined),
+              helperText: _agentWorkspaceForm.worktreeEnabled
+                  ? 'Required for worktree launches, so reconnecting returns '
+                        'to the same worktree.'
+                  : isAgentTmuxBackend
+                  ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
+                  : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
+              helperMaxLines: _hostFieldHelperMaxLines,
+              errorMaxLines: _hostFieldHelperMaxLines,
+            ),
+            autocorrect: false,
+            onChanged: hasAgentPresetAccess
+                ? (_) => _handleAgentPresetFieldChanged()
+                : null,
           ),
-          autocorrect: false,
-          onChanged: hasAgentPresetAccess
-              ? (_) => _handleAgentPresetFieldChanged()
-              : null,
         ),
         if (isAgentTmuxBackend) ...[
           const SizedBox(height: 12),
@@ -1381,6 +1409,17 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             ),
           ),
         ],
+        // After the session it depends on, so the dependency reads top-down.
+        AgentPresetWorkspaceFields(
+          state: _agentWorkspaceForm,
+          enabled: hasAgentPresetAccess,
+          tool: _selectedAgentLaunchTool,
+          workingDirectory: _agentWorkingDirectoryController,
+          onChanged: () {
+            setState(() {});
+            _updateDirtyState();
+          },
+        ),
         const SizedBox(height: 12),
         Text(
           currentPreset.usesMonkeyMuxSession
@@ -1513,7 +1552,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    selectedSnippet.command,
+                    snippetLiteralText(selectedSnippet.command),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                     style: FluttyTheme.monoStyle.copyWith(
@@ -1522,6 +1561,35 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                     ),
                   ),
                 ),
+                if (parseSnippetKeySequence(selectedSnippet.command)
+                    .needsTerminal) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    key: const ValueKey('auto-connect-key-snippet-warning'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Auto-connect sends this snippet as plain text, '
+                          'so its {key:...} and {delay:...} tokens are typed '
+                          'rather than pressed.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ],
           );
@@ -1735,6 +1803,22 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       HostEditValidationTarget.agentTmuxFlags => (
         locationKey: _agentTmuxFlagsFieldLocationKey,
         focusNode: _agentTmuxFlagsFocusNode,
+      ),
+      HostEditValidationTarget.agentSession => (
+        locationKey: _agentSessionFieldLocationKey,
+        focusNode: _agentSessionFocusNode,
+      ),
+      HostEditValidationTarget.agentWorktree => (
+        locationKey: _agentWorkspaceForm.locationKeyFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
+        focusNode: _agentWorkspaceForm.focusNodeFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
       ),
       HostEditValidationTarget.customCommand => (
         locationKey: _customCommandFieldLocationKey,

@@ -1,13 +1,17 @@
 /// Staged new-session flow for launching an ACP coding-agent session.
 ///
 /// Walks the user through: choose a saved host → connect/reuse SSH → choose a
-/// built-in provider → choose a working directory → start a new session or
-/// reconnect a recent one. It handles helper-install confirmation,
-/// missing/auth-required providers (the agent's advertised sign-in methods,
-/// with a safe Open Terminal escape hatch), and the free-tier concurrency
-/// choice.
+/// built-in provider or an approved custom agent → choose a working directory
+/// → start a new session or reconnect a recent one. It handles helper-install
+/// confirmation, missing/auth-required providers (the agent's advertised
+/// sign-in methods, with a safe Open Terminal escape hatch), and the free-tier
+/// concurrency choice.
 ///
-/// No prompts, transcripts, or command text are ever logged.
+/// When the host's agent preset asks for it, a new session starts in a fresh
+/// git worktree (rolled back if the launch fails) and sends the preset's
+/// initial prompt exactly once; resuming a recent session does neither.
+///
+/// No prompts, transcripts, paths, or command text are ever logged.
 library;
 
 import 'dart:async';
@@ -21,24 +25,32 @@ import '../../app/notification_navigation.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../domain/models/acp_authentication.dart';
+import '../../domain/models/acp_content.dart';
+import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_recent_session.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/acp_session_workspace.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/services/acp_custom_provider_host_service.dart';
 import '../../domain/services/acp_launch_profile_service.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_launch_preset_service.dart';
+import '../../domain/services/agent_worktree_launcher.dart';
+import '../../domain/services/agent_worktree_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/monkeymux_acp_bridge_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
 import 'acp_auth_method_sheet.dart';
 import 'acp_concurrency_choice.dart';
 import 'acp_connection_support.dart';
+import 'acp_custom_agent_launch.dart';
 import 'acp_session_presentation.dart';
 import 'acp_session_workspace_section.dart';
 
@@ -211,16 +223,24 @@ class _NewSessionSheet extends ConsumerStatefulWidget {
 }
 
 class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
+  /// The "Start a new session" row among the recent sessions.
+  static const Object _newSessionChoice = Object();
+
   int? _hostId;
   String? _providerId;
   final TextEditingController _cwd = TextEditingController();
   bool _cwdEdited = false;
   AcpRecentSessionRef? _selectedRecent;
+  AcpSessionInfo? _selectedAgentSession;
   var _busy = false;
   var _loadingDefaults = true;
   var _defaultsScheduled = false;
   var _hostDefaultsGeneration = 0;
   var _presets = const <int, AgentLaunchPreset>{};
+  var _useWorktree = true;
+  var _sendInitialPrompt = true;
+  var _initialPromptSent = false;
+  AgentWorktreeLaunch? _pendingWorktree;
   String? _error;
   var _authChooserShown = false;
   var _providerCommandRequested = false;
@@ -254,9 +274,144 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
 
   @override
   void dispose() {
+    // A start still in flight owns its worktree and settles it from the
+    // launch result, even after the sheet is swiped away, so the worktree is
+    // never removed under a session that goes on to start.
     _cwd.dispose();
     _workspace.dispose();
     super.dispose();
+  }
+
+  AgentLaunchPreset? get _selectedPreset =>
+      _hostId == null ? null : _presets[_hostId];
+
+  /// Whether a session is being resumed rather than started: a recent one,
+  /// or one a custom agent listed.
+  bool get _resuming =>
+      _selectedRecent != null || _selectedAgentSession != null;
+
+  /// Whether the selected custom agent always starts in the home folder, so
+  /// a worktree would never be its working directory.
+  bool get _providerStartsInHome =>
+      _customProvider(_providerId)?.cwdPolicy ==
+      AcpCustomProviderCwdPolicy.homeDirectory;
+
+  /// Whether starting now creates a worktree from the host's preset.
+  bool get _startsInWorktree =>
+      _useWorktree &&
+      !_resuming &&
+      !_providerStartsInHome &&
+      !_hostKnownWindows &&
+      (_selectedPreset?.launchesInNewWorktree ?? false);
+
+  /// Whether a live connection has shown the selected host runs Windows,
+  /// where worktree launches are not supported, so the switch starts off
+  /// instead of failing the first start.
+  bool get _hostKnownWindows {
+    final hostId = _hostId;
+    return hostId != null &&
+        ref
+            .read(sshServiceProvider)
+            .getSessionsForHost(hostId)
+            .any((session) => session.remoteIsWindows);
+  }
+
+  /// The preset prompt a new session sends once, if any.
+  String? get _initialPrompt {
+    final prompt = _selectedPreset?.initialPrompt?.trim();
+    return _sendInitialPrompt &&
+            !_resuming &&
+            prompt != null &&
+            prompt.isNotEmpty
+        ? prompt
+        : null;
+  }
+
+  void _abandonPendingWorktree() {
+    _pendingWorktree?.abandon();
+    _pendingWorktree = null;
+  }
+
+  /// Creates the launch's worktree, or reuses the one an earlier attempt of
+  /// the same start made (a sign-in or concurrency retry).
+  Future<String?> _launchWorktreeDirectory(
+    int hostId,
+    String providerId,
+    SshSession? session,
+  ) async {
+    final pending = _pendingWorktree;
+    if (pending != null && pending.record.hostId == hostId) {
+      return pending.record.startDirectory;
+    }
+    _abandonPendingWorktree();
+    final preset = _presets[hostId];
+    if (preset == null || session == null) {
+      setState(() => _error = 'Could not create the worktree on this host.');
+      return null;
+    }
+    try {
+      final launch = await ref
+          .read(agentWorktreeLauncherProvider)
+          .begin(
+            SshAgentWorktreeShell(session),
+            hostId: hostId,
+            preset: preset,
+            windowsHost: session.remoteIsWindows,
+            tool: agentLaunchToolForBuiltinAcpProviderId(providerId),
+          );
+      if (!mounted) {
+        launch.abandon();
+        return null;
+      }
+      _pendingWorktree = launch;
+      return launch.record.startDirectory;
+    } on AgentWorktreeException catch (error) {
+      if (mounted) {
+        setState(
+          () => _error = error.kind == AgentWorktreeErrorKind.unsupportedHost
+              ? '${error.message} Turn off “Start in a new git worktree” to '
+                    'start in the working directory.'
+              : 'Could not create the worktree. ${error.message}',
+        );
+      }
+      return null;
+    }
+  }
+
+  /// Settles a launch that started [key]: keeps its worktree and sends the
+  /// preset's initial prompt, once.
+  ///
+  /// Runs whether or not the sheet is still open, so [manager] and [prompt]
+  /// are read before the launch. A prompt failure is logged and never turns
+  /// a started session into a reported failure.
+  void _settleStarted(
+    AcpSessionKey key, {
+    required AcpSessionManager manager,
+    required String? prompt,
+  }) {
+    _pendingWorktree?.launched();
+    _pendingWorktree = null;
+    if (prompt == null || _initialPromptSent) {
+      return;
+    }
+    _initialPromptSent = true;
+    Future<void>.sync(() => manager.prompt(key, [AcpTextContent(prompt)]))
+        .then<void>(
+          (_) {},
+          onError: (Object error) {
+            DiagnosticsLogService.instance.warning(
+              'acp.launch',
+              'initial_prompt_failed',
+              fields: {'errorType': error.runtimeType},
+            );
+          },
+        )
+        .ignore();
+    DiagnosticsLogService.instance.info(
+      'acp.launch',
+      'initial_prompt_sent',
+      fields: {'hostId': key.hostId},
+    );
   }
 
   void _scheduleDefaults(List<Host> hosts, List<AcpProvider> providers) {
@@ -338,6 +493,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       _hostId = hostId;
       _cwdEdited = false;
       _selectedRecent = null;
+      _selectedAgentSession = null;
       _loadingDefaults = hostId != null;
     });
     _workspace.clearRecent();
@@ -494,6 +650,33 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       }
       launchCommandOverride = launch.override;
     }
+    final customProvider = _customProvider(providerId);
+    // Reattaching to a recent session usually finds its agent still running,
+    // which needs nothing from the host environment; the session switcher
+    // and notifications reattach without the check too.
+    final reattaching =
+        _selectedRecent != null && _selectedAgentSession == null;
+    if (customProvider != null && sshSession != null) {
+      final problem = reattaching
+          ? null
+          : await checkAcpCustomAgentEnvironment(
+              ref,
+              sshSession,
+              customProvider,
+            );
+      if (!mounted) return null;
+      final windowsProblem = sshSession.remoteIsWindows
+          ? acpWindowsCustomLaunchProblem(
+              label: customProvider.label,
+              argv: customProvider.launchCommand.argv,
+              providerId: customProvider.id,
+            )
+          : null;
+      if (problem != null || windowsProblem != null) {
+        setState(() => _error = problem ?? windowsProblem);
+        return null;
+      }
+    }
     _lastResolvedLaunch = (
       hostId: hostId,
       providerId: providerId,
@@ -501,14 +684,48 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       profile: selectedProfile,
     );
 
+    // The folder field is hidden for a home-folder agent, so never fall back
+    // to what it held.
+    final fallbackCwd =
+        customProvider?.cwdPolicy == AcpCustomProviderCwdPolicy.homeDirectory
+        ? '~'
+        : cwd;
+    final agentSession = _selectedAgentSession;
+    if (customProvider != null && agentSession != null) {
+      final sessionCwd = agentSession.cwd.trim();
+      return manager.resumeProviderSession(
+        hostId: hostId,
+        providerId: providerId,
+        acpSessionId: agentSession.sessionId,
+        cwd: sessionCwd.isEmpty ? fallbackCwd : sessionCwd,
+        confirmInstall: _confirmInstall,
+        chooseAuthentication: _chooseAuthentication,
+        autoApprovePermissions: launchPreferences.startInYoloMode,
+        replace: replace,
+        // Re-send the roots the agent reported for this session alongside
+        // the ones chosen here.
+        workspace: _withListedDirectories(_workspace.options, agentSession),
+      );
+    }
+
     final recent = _selectedRecent;
+    var launchCwd = cwd;
+    if (recent == null && _startsInWorktree) {
+      final worktreeDirectory = await _launchWorktreeDirectory(
+        hostId,
+        providerId,
+        sshSession,
+      );
+      if (!mounted || worktreeDirectory == null) return null;
+      launchCwd = worktreeDirectory;
+    }
     if (recent != null) {
       return manager.reconnectSession(
         hostId: recent.hostId,
         providerId: recent.providerId,
         bridgeId: recent.bridgeId,
         acpSessionId: recent.acpSessionId,
-        cwd: recent.cwd ?? cwd,
+        cwd: recent.cwd ?? fallbackCwd,
         confirmInstall: _confirmInstall,
         chooseAuthentication: _chooseAuthentication,
         launchCommandOverride: launchCommandOverride,
@@ -523,7 +740,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     return manager.startNewSession(
       hostId: hostId,
       providerId: providerId,
-      cwd: cwd,
+      cwd: launchCwd,
       confirmInstall: _confirmInstall,
       chooseAuthentication: _chooseAuthentication,
       launchCommandOverride: launchCommandOverride,
@@ -536,6 +753,62 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     );
   }
 
+  static AcpSessionWorkspaceOptions _withListedDirectories(
+    AcpSessionWorkspaceOptions options,
+    AcpSessionInfo session,
+  ) => AcpSessionWorkspaceOptions(
+    mcpServerIds: options.mcpServerIds,
+    additionalDirectories: <String>{
+      ...options.additionalDirectories,
+      ...session.additionalDirectories,
+    }.toList(growable: false),
+  );
+
+  /// The approved custom agent with [providerId], when one is selected.
+  AcpCustomProviderDefinition? _customProvider(String? providerId) => ref
+      .read(acpProvidersProvider)
+      .asData
+      ?.value
+      .whereType<AcpCustomProviderDefinition>()
+      .firstWhereOrNull((provider) => provider.id == providerId);
+
+  Future<AcpCustomAgentSessionListing?> _listAgentSessions(
+    String definitionId,
+  ) async {
+    final hostId = _hostId;
+    if (hostId == null) return null;
+    // Listing starts the agent, so act on the stored definition, not the
+    // copy this sheet was built with.
+    final definition = await ref
+        .read(acpCustomProviderLookupProvider)
+        .getCustomProvider(definitionId);
+    if (!mounted) return null;
+    if (definition == null || !definition.isCommandApproved) {
+      return const AcpCustomAgentSessionListing(
+        AcpCustomAgentSessionListStatus.notApproved,
+      );
+    }
+    final knownHost = ref
+        .read(allHostsProvider)
+        .asData
+        ?.value
+        .where((host) => host.id == hostId)
+        .firstOrNull;
+    final connection = await ensureAcpHostConnection(
+      context,
+      ref,
+      hostId,
+      knownHost: knownHost,
+    );
+    final connectionId = connection.connectionId;
+    if (!mounted || !connection.success || connectionId == null) return null;
+    final session = ref.read(sshServiceProvider).getSession(connectionId);
+    if (session == null) return null;
+    return ref
+        .read(acpCustomProviderHostServiceProvider)
+        .listSessions(session, definition);
+  }
+
   Future<void> _start({bool afterSignIn = false}) async {
     setState(() {
       _busy = true;
@@ -543,15 +816,31 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     });
     _authChooserShown = false;
     _providerCommandRequested = false;
+    final manager = ref.read(acpSessionManagerProvider);
+    final prompt = _initialPrompt;
+    Future<AcpSessionLaunchResult?> launchAndSettle({
+      List<AcpSessionKey> replace = const <AcpSessionKey>[],
+      bool reuseResolvedLaunch = false,
+    }) async {
+      final result = await _launch(
+        replace: replace,
+        reuseResolvedLaunch: reuseResolvedLaunch,
+      );
+      if (result case AcpSessionLaunchStarted(:final key)) {
+        _settleStarted(key, manager: manager, prompt: prompt);
+      }
+      return result;
+    }
+
     try {
-      var result = await _launch(reuseResolvedLaunch: afterSignIn);
+      var result = await launchAndSettle(reuseResolvedLaunch: afterSignIn);
       // Resolve a free-tier concurrency block, then retry once.
       if (result is AcpSessionLaunchBlocked && mounted) {
         final resolved = await resolveAcpConcurrencyBlock(
           context,
           ref,
           result.decision,
-          relaunch: (replace) => _launch(replace: replace),
+          relaunch: (replace) => launchAndSettle(replace: replace),
         );
         // Null also covers the sheet being dismissed while the choice dialog
         // or upgrade route was open, so re-check mounted before touching state.
@@ -615,6 +904,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           _error = 'Could not start the session. Try again.';
         });
       }
+    } finally {
+      // A started launch has already settled its worktree. Anything else
+      // leaves no worktree behind, and a later start creates a fresh one.
+      _abandonPendingWorktree();
     }
   }
 
@@ -703,6 +996,9 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             ));
     final lockedContextUnavailable =
         lockedHostUnavailable || lockedProviderUnavailable;
+    final selectedCustom = providers
+        ?.whereType<AcpCustomProviderDefinition>()
+        .firstWhereOrNull((provider) => provider.id == _providerId);
 
     return PopScope(
       // Block dismissal (back gesture / predictive pop) while a launch is in
@@ -804,21 +1100,29 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                 error: (_, _) => const Text('Could not load providers.'),
               ),
               const SizedBox(height: FluttyTheme.spacingMd),
-              _sectionLabel(context, 'Working directory'),
-              TextField(
-                controller: _cwd,
-                enabled: !controlsDisabled,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: FluttyTheme.monoStyle,
-                onChanged: (_) => _cwdEdited = true,
-                decoration: const InputDecoration(hintText: '~'),
-              ),
+              ..._buildWorkingDirectory(context, disabled: controlsDisabled),
+              _buildPresetOptions(context, disabled: controlsDisabled),
               AcpSessionWorkspaceSection(
                 controller: _workspace,
                 enabled: !controlsDisabled,
               ),
               _buildRecentSessions(),
+              if (selectedCustom != null && _hostId != null)
+                AcpCustomAgentSessions(
+                  key: ValueKey('custom-agent-sessions-${selectedCustom.id}'),
+                  definition: selectedCustom,
+                  hostId: _hostId!,
+                  enabled: !controlsDisabled,
+                  selected: _selectedAgentSession,
+                  onSelected: (session) {
+                    setState(() {
+                      _selectedAgentSession = session;
+                      if (session != null) _selectedRecent = null;
+                    });
+                    if (session != null) _workspace.clearRecent();
+                  },
+                  loadSessions: () => _listAgentSessions(selectedCustom.id),
+                ),
               if (_error != null) ...[
                 const SizedBox(height: FluttyTheme.spacingMd),
                 Row(
@@ -856,13 +1160,131 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                       )
                     : const Icon(Icons.play_arrow_rounded),
                 label: Text(
-                  _selectedRecent != null ? 'Resume session' : 'Start session',
+                  _selectedRecent != null || _selectedAgentSession != null
+                      ? 'Resume session'
+                      : 'Start session',
                 ),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// The working directory field, or, while the start creates a worktree,
+  /// the repository the worktree is made from: the agent's folder is not
+  /// known until then. A home-folder custom agent shows the folder it will
+  /// use instead.
+  List<Widget> _buildWorkingDirectory(
+    BuildContext context, {
+    required bool disabled,
+  }) {
+    if (_providerStartsInHome) {
+      return [
+        _sectionLabel(context, 'Working directory'),
+        _buildHomeFolderRow(),
+      ];
+    }
+    final preset = _selectedPreset;
+    final repository = _startsInWorktree
+        ? preset?.worktree?.resolveRepositoryPath(preset.workingDirectory)
+        : null;
+    if (repository == null) {
+      return [
+        _sectionLabel(context, 'Working directory'),
+        TextField(
+          key: const Key('acp-new-session-cwd-field'),
+          controller: _cwd,
+          enabled: !disabled,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: FluttyTheme.monoStyle,
+          onChanged: (_) => _cwdEdited = true,
+          decoration: const InputDecoration(hintText: '~'),
+        ),
+      ];
+    }
+    return [
+      _sectionLabel(context, 'Repository'),
+      // Read-only: the preset sets it. The resting field look keeps it in
+      // the system, and the lock says it cannot be typed into.
+      InputDecorator(
+        key: const Key('acp-new-session-worktree-repository'),
+        decoration: const InputDecoration(
+          suffixIcon: Icon(Icons.lock_outline, size: 18),
+        ),
+        child: Text(
+          repository,
+          style: FluttyTheme.monoStyle.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    ];
+  }
+
+  /// Worktree and initial-prompt switches from the host's agent preset,
+  /// shown only when starting a new session.
+  Widget _buildPresetOptions(BuildContext context, {required bool disabled}) {
+    final preset = _selectedPreset;
+    if (preset == null || _resuming) {
+      return const SizedBox.shrink();
+    }
+    final worktree = preset.worktree;
+    final prompt = preset.initialPrompt?.trim() ?? '';
+    if (worktree == null && prompt.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final windowsHost = worktree != null && _hostKnownWindows;
+    final startsInHome = worktree != null && _providerStartsInHome;
+    final worktreeUnavailable = windowsHost || startsInHome;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: FluttyTheme.spacingMd),
+        _sectionLabel(context, 'Host preset'),
+        if (worktree != null)
+          SwitchListTile(
+            key: const Key('acp-new-session-worktree-switch'),
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.account_tree_outlined),
+            title: const Text('Start in a new git worktree'),
+            // The repository shows in the field above while this is on.
+            subtitle: Text(
+              windowsHost
+                  ? 'Worktree launches need a macOS or Linux host.'
+                  : startsInHome
+                  ? 'This agent always starts in your home folder.'
+                  : 'A new branch from ${worktree.effectiveBaseRef}, in its '
+                        'own folder.',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            value: _useWorktree && !worktreeUnavailable,
+            onChanged: disabled || worktreeUnavailable
+                ? null
+                : (value) => setState(() => _useWorktree = value),
+          ),
+        if (prompt.isNotEmpty)
+          SwitchListTile(
+            key: const Key('acp-new-session-initial-prompt-switch'),
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.chat_bubble_outline),
+            title: const Text('Send the preset prompt'),
+            subtitle: Text(
+              prompt,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            value: _sendInitialPrompt,
+            onChanged: disabled
+                ? null
+                : (value) => setState(() => _sendInitialPrompt = value),
+          ),
+      ],
     );
   }
 
@@ -896,12 +1318,36 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                   setState(() {
                     _providerId = provider.id;
                     _selectedRecent = null;
+                    _selectedAgentSession = null;
                   });
                   _workspace.clearRecent();
                 },
         ),
     ],
   );
+
+  /// The folder a home-folder agent will use: home for a new session, the
+  /// session's own folder for a resume, as [_launch] passes them.
+  Widget _buildHomeFolderRow() {
+    final agentSession = _selectedAgentSession;
+    final recent = _selectedRecent;
+    final resumeFolder = agentSession != null
+        ? agentSession.cwd.trim()
+        : recent?.cwd?.trim();
+    final resuming = agentSession != null || recent != null;
+    return InputDecorator(
+      key: const ValueKey('custom-agent-home-folder'),
+      decoration: InputDecoration(
+        helperText: resuming
+            ? 'Resumes in the session’s own folder.'
+            : 'New sessions start in your home folder.',
+      ),
+      child: Text(
+        resumeFolder == null || resumeFolder.isEmpty ? '~' : resumeFolder,
+        style: FluttyTheme.monoStyle,
+      ),
+    );
+  }
 
   Widget _buildRecentSessions() {
     final hostId = _hostId;
@@ -923,30 +1369,39 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           children: [
             const SizedBox(height: FluttyTheme.spacingMd),
             _sectionLabel(context, 'Resume a recent session'),
-            RadioGroup<AcpRecentSessionRef?>(
-              groupValue: _selectedRecent,
+            // While one of a custom agent's listed sessions is chosen, no row
+            // here is selected: "Start a new session" would contradict it.
+            RadioGroup<Object?>(
+              groupValue:
+                  _selectedRecent ??
+                  (_selectedAgentSession == null ? _newSessionChoice : null),
               onChanged: (value) {
                 if (_busy) {
                   return;
                 }
-                setState(() => _selectedRecent = value);
+                final recent = value is AcpRecentSessionRef ? value : null;
+                setState(() {
+                  _selectedRecent = recent;
+                  _selectedAgentSession = null;
+                });
                 // A resumed session re-sends its own MCP servers and
                 // directories; starting fresh restores the defaults.
-                if (value == null) {
+                if (recent == null) {
                   _workspace.clearRecent();
                 } else {
-                  _workspace.applyRecent(value.workspace);
+                  _workspace.applyRecent(recent.workspace);
                 }
               },
               child: Column(
                 children: [
-                  const RadioListTile<AcpRecentSessionRef?>(
-                    value: null,
+                  const RadioListTile<Object?>(
+                    key: ValueKey('recent-session-new'),
+                    value: _newSessionChoice,
                     title: Text('Start a new session'),
                     contentPadding: EdgeInsets.zero,
                   ),
                   for (final recent in recents)
-                    RadioListTile<AcpRecentSessionRef?>(
+                    RadioListTile<Object?>(
                       value: recent,
                       contentPadding: EdgeInsets.zero,
                       title: Text(
@@ -992,6 +1447,9 @@ class _ProviderChip extends StatelessWidget {
     label: Text(provider.label),
     selected: selected,
     onSelected: onSelected == null ? null : (_) => onSelected!(),
-    avatar: const Icon(Icons.smart_toy_outlined, size: 18),
+    avatar: Icon(
+      provider.isCustom ? Icons.terminal : Icons.smart_toy_outlined,
+      size: 18,
+    ),
   );
 }

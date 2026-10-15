@@ -13,6 +13,7 @@ import 'app/app_metadata.dart';
 import 'app/host_key_prompt.dart';
 import 'app/interactive_auth_prompt.dart';
 import 'data/database/database.dart';
+import 'data/repositories/snippet_repository.dart';
 import 'domain/services/diagnostics_log_service.dart';
 import 'domain/services/host_agent_forwarding_service.dart';
 import 'domain/services/host_key_prompt_handler_provider.dart';
@@ -22,6 +23,7 @@ import 'domain/services/push/push_background_message.dart';
 import 'domain/services/settings_service.dart';
 import 'domain/services/ssh_error_policy.dart';
 import 'domain/services/telemetry_service.dart';
+import 'presentation/widgets/terminal_scrollback_export.dart';
 
 /// Entry point for the MonkeySSH client.
 Future<void> main() async {
@@ -34,6 +36,7 @@ Future<void> main() async {
     settingsService: settingsService,
   );
   installTelemetryErrorHandlers(telemetryService);
+  await _escapeLegacySnippetKeyTokens(database);
   // Android shows pushes itself (they arrive as data only). Registering the
   // handler only names the entry point; it contacts nothing.
   if (telemetryService.status == TelemetryServiceStatus.ready &&
@@ -59,6 +62,23 @@ Future<void> main() async {
       child: const FluttyApp(),
     ),
   );
+  // Scrollback exports left from an earlier run stay in temporary storage
+  // only until the next start.
+  unawaited(cleanUpTerminalScrollbackExports().catchError((Object _) => 0));
+}
+
+// Snippets saved before `{key:...}` tokens existed must keep sending the same
+// text. A failure only leaves them unescaped; it must not stop the app.
+Future<void> _escapeLegacySnippetKeyTokens(AppDatabase database) async {
+  try {
+    await SnippetRepository(database).escapeLegacyKeyTokens();
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.warning(
+      'snippets',
+      'key_token_escape_failed',
+      fields: {'errorType': error.runtimeType},
+    );
+  }
 }
 
 /// Registers bundled licenses without starting the app in tests.

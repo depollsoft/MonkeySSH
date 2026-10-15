@@ -43,6 +43,85 @@ final remoteUploadFileMode = SftpFileMode(
   otherExecute: false,
 );
 
+/// Permission bits and group that [applyNewRemoteFileAccess] gave a file.
+typedef RemoteNewFileAccess = ({int permissions, int? groupID});
+
+/// Gives a file this client just created the permission bits [permissions]
+/// of the file it stands in for and, when they let the group do more than
+/// everyone else, that file's group [groupID].
+///
+/// [created] holds the new file's attributes before any content went in. A
+/// new file lands in the server's default group, and its owner can only
+/// move it to a group they belong to. When it cannot be moved to [groupID],
+/// or that group is unknown, its group gets only what everyone else gets,
+/// so nobody can open the new file who could not open the original.
+Future<RemoteNewFileAccess> applyNewRemoteFileAccess({
+  required Future<void> Function(SftpFileAttrs attrs) setStat,
+  required SftpFileAttrs? created,
+  required int permissions,
+  required int? groupID,
+}) async {
+  var bits = permissions & 0x1FF;
+  var group = created?.groupID;
+  final groupBits = (bits >> 3) & 7;
+  final otherBits = bits & 7;
+  if (groupBits & ~otherBits != 0 && (groupID == null || group != groupID)) {
+    final owner = created?.userID;
+    if (groupID != null && owner != null) {
+      try {
+        await setStat(SftpFileAttrs(userID: owner, groupID: groupID));
+        group = groupID;
+      } on SftpStatusError {
+        // The owner is not a member of that group.
+      }
+    }
+    if (groupID == null || group != groupID) {
+      bits = (bits & ~0x38) | (otherBits << 3);
+    }
+  }
+  await setStat(SftpFileAttrs(mode: SftpFileMode.value(bits)));
+  return (permissions: bits, groupID: group);
+}
+
+/// Whether a program could have opened a new file between its creation,
+/// with [created]'s permissions, and its restriction to [applied], with
+/// read or write access [applied] does not give it.
+bool _openedWiderThan(SftpFileAttrs? created, RemoteNewFileAccess applied) {
+  final initial = created?.mode?.value;
+  if (initial == null) return true;
+  const readWrite = 6;
+  final finalGroup = (applied.permissions >> 3) & 7;
+  final finalOther = applied.permissions & 7;
+  // Members of a group the file left count as everyone else.
+  final sameGroup =
+      created?.groupID != null && created?.groupID == applied.groupID;
+  final groupAllowed = sameGroup ? finalGroup : finalOther;
+  return (((initial >> 3) & 7) & ~groupAllowed & readWrite) != 0 ||
+      ((initial & 7) & ~finalOther & readWrite) != 0;
+}
+
+Future<SftpFileAttrs?> _statOrNull(SftpClient sftp, String path) async {
+  try {
+    return await sftp.stat(path, followLink: false);
+  } on SftpStatusError {
+    return null;
+  }
+}
+
+/// Attributes of a file just created through [file] at [path], from the
+/// handle when the server supports that.
+Future<SftpFileAttrs?> _createdFileAttrs(
+  SftpClient sftp,
+  SftpFile file,
+  String path,
+) async {
+  try {
+    return await file.stat();
+  } on SftpStatusError {
+    return _statOrNull(sftp, path);
+  }
+}
+
 /// Remote path syntax to use when building paths.
 enum RemotePathStyle {
   /// SFTP/POSIX path syntax using `/` separators.
@@ -460,6 +539,19 @@ class RemoteFileDownloadCancelledException implements Exception {
   String toString() => 'Download cancelled';
 }
 
+/// A remote write was refused for a reason the user can act on. [message]
+/// is user-facing and never contains paths.
+class RemoteFileRefusedException implements Exception {
+  /// Creates the exception.
+  const RemoteFileRefusedException(this.message);
+
+  /// Explanation shown to the user.
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// A download exceeded its configured byte limit.
 class RemoteFileDownloadLimitException implements Exception {
   /// Creates an exception with the observed byte count.
@@ -672,10 +764,25 @@ class RemoteFileService {
   /// the second rename fails. When the directory denies new entries, the
   /// scratch directory cannot be made private, or the original owner cannot
   /// be reproduced, this falls back to writing in place, as editors do.
+  ///
+  /// When [remotePath] does not exist, the new file gets [newFileMode] (the
+  /// server default when null) and, when that mode gives the group more than
+  /// everyone else, the group [newFileGroupID], before it is renamed into
+  /// place (see [applyNewRemoteFileAccess]). Written in place, a new file
+  /// with [newFileMode] is refused when the server created it with wider
+  /// access, since a program that opened it before it was restricted could
+  /// still read what follows. A folder at [remotePath] is refused.
+  /// [beforeReplace] runs just before the rename or in-place write, and
+  /// again before the original is moved aside on servers without
+  /// posix-rename; it may throw to abandon the save with the original
+  /// untouched.
   Future<void> replaceFileBytes({
     required SftpClient sftp,
     required String remotePath,
     required Uint8List bytes,
+    SftpFileMode? newFileMode,
+    int? newFileGroupID,
+    Future<void> Function()? beforeReplace,
   }) async {
     var target = remotePath;
     SftpFileAttrs? original;
@@ -690,12 +797,54 @@ class RemoteFileService {
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
     }
-    Future<void> writeInPlace() => uploadBytes(
-      sftp: sftp,
-      remotePath: target,
-      bytes: bytes,
-      applyPrivateMode: false,
-    );
+    if (original?.isDirectory ?? false) {
+      throw const RemoteFileRefusedException(
+        'The path is now a folder on the host.',
+      );
+    }
+    final isNewFile = original == null;
+    Future<void> writeInPlace() async {
+      await beforeReplace?.call();
+      if (isNewFile && newFileMode != null) {
+        // A new file is created exclusively and restricted on its handle
+        // before any content lands in it. Restricting it does not close a
+        // handle another program opened in between, so a file the server
+        // created with wider access than the one it replaces is refused.
+        final file = await sftp.open(
+          target,
+          mode:
+              SftpFileOpenMode.write |
+              SftpFileOpenMode.create |
+              SftpFileOpenMode.exclusive,
+        );
+        try {
+          final created = await _createdFileAttrs(sftp, file, target);
+          final applied = await applyNewRemoteFileAccess(
+            setStat: file.setStat,
+            created: created,
+            permissions: newFileMode.value,
+            groupID: newFileGroupID,
+          );
+          if (_openedWiderThan(created, applied)) {
+            throw const RemoteFileRefusedException(
+              'New files on this host start with wider access than this '
+              'file had.',
+            );
+          }
+        } on Object {
+          await _cleanUpQuietly(file.close());
+          await _cleanUpQuietly(sftp.remove(target));
+          rethrow;
+        }
+        return _writeAndClose(file, Stream<List<int>>.value(bytes), null);
+      }
+      await uploadBytes(
+        sftp: sftp,
+        remotePath: target,
+        bytes: bytes,
+        applyPrivateMode: false,
+      );
+    }
 
     // The copy is made inside a fresh 0700 directory, so no other user can
     // open it whatever mode the server gives new files. Short names of its
@@ -749,11 +898,28 @@ class RemoteFileService {
         } on SftpStatusError {
           return await writeInPlace();
         }
+      } else if (newFileMode != null) {
+        try {
+          await applyNewRemoteFileAccess(
+            setStat: (attrs) => sftp.setStat(temporaryPath, attrs),
+            created: await _statOrNull(sftp, temporaryPath),
+            permissions: newFileMode.value,
+            groupID: newFileGroupID,
+          );
+        } on SftpStatusError {
+          return await writeInPlace();
+        }
       }
+      await beforeReplace?.call();
       try {
         await sftp.rename(temporaryPath, target);
       } on SftpStatusError catch (error) {
-        if (original == null || error.code != SftpStatusCode.failure) rethrow;
+        if (error.code != SftpStatusCode.failure) rethrow;
+        // Without posix-rename the target's name must be free first. The
+        // refused rename was another round trip, so check again before
+        // moving anything aside.
+        await beforeReplace?.call();
+        if (original == null) rethrow;
         final asidePath = '$scratch/orig';
         await sftp.rename(target, asidePath);
         try {

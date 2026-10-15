@@ -21,6 +21,8 @@ import 'acp_config_option_controls_cases.dart';
 import 'acp_native_starting_view_cases.dart';
 import 'acp_permission_surface_cases.dart';
 import 'acp_slash_command_picker_cases.dart';
+import 'acp_transcript_tools_cases.dart';
+import 'acp_turn_recovery_cases.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
@@ -375,6 +377,63 @@ void main() {}
         expect(find.text('src/file.ts'), findsOneWidget);
         expect(find.text('-a'), findsOneWidget);
         expect(find.text('+b'), findsOneWidget);
+      });
+
+      testWidgets('reads --- and +++ inside a hunk as changed lines', (
+        tester,
+      ) async {
+        Color? rowTint(String line) => tester
+            .widget<Container>(
+              find
+                  .ancestor(
+                    of: find.text(line),
+                    matching: find.byType(Container),
+                  )
+                  .first,
+            )
+            .color;
+
+        // A deleted SQL comment and an added `++counter;`, then a second
+        // file whose headers follow the first hunk's last counted line.
+        await tester.pumpWidget(
+          wrap(
+            const AcpDiffView(
+              diff: AcpDiff(
+                path: 'q.sql',
+                unifiedDiff:
+                    '--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n'
+                    '--- old comment\n+++counter;\n x\n'
+                    'diff --git a/r b/r\n--- a/r\n+++ b/r\n@@ -1 +1 @@\n-r\n+s',
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(rowTint('--- old comment'), isNotNull);
+        expect(rowTint('+++counter;'), isNotNull);
+        expect(rowTint(' x'), isNull);
+        for (final header in ['--- a/q.sql', '+++ b/q.sql', '--- a/r']) {
+          expect(rowTint(header), isNull, reason: header);
+        }
+        expect(rowTint('-r'), isNotNull);
+
+        // A hunk body with no headers at all, as the working tree sheet
+        // shows it.
+        await tester.pumpWidget(
+          wrap(
+            const AcpDiffView(
+              bodyOnly: true,
+              diff: AcpDiff(
+                path: '@@ -1,2 +1,2 @@',
+                unifiedDiff: '--- markdown rule\n+++i;\n kept',
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(rowTint('--- markdown rule'), isNotNull);
+        expect(rowTint('+++i;'), isNotNull);
+        expect(rowTint(' kept'), isNull);
       });
     });
 
@@ -879,4 +938,6 @@ void main() {}
   registerAcpNativeStartingViewTests();
   registerAcpPermissionSurfaceTests();
   registerAcpSlashCommandPickerTests();
+  registerAcpTranscriptToolsTests();
+  registerAcpTurnRecoveryTests();
 }

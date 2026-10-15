@@ -6274,12 +6274,12 @@ func (s *muxServer) restoreOrCreateInitialWindow(
 	var pendingRedraw []string
 	restored := 0
 	for _, state := range restore.Windows {
-		window, err := s.createWindow(
-			createWindowOptionsForRestore(state, restore.StartInYoloMode),
-		)
+		options := createWindowOptionsForRestore(state, restore.StartInYoloMode)
+		window, err := s.createWindow(options)
 		if err != nil {
 			continue
 		}
+		s.watchRestoredCodexResume(window, options)
 		if firstID == "" {
 			firstID = window.id
 		}

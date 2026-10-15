@@ -29,10 +29,13 @@ import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/agent_runtime_info.dart';
 import 'package:monkeyssh/domain/models/agent_usage.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
+import 'package:monkeyssh/domain/models/git_working_tree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
+import 'package:monkeyssh/domain/models/snippet_key_tokens.dart';
 import 'package:monkeyssh/domain/models/terminal_progress.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
@@ -42,13 +45,18 @@ import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_management_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_launcher.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
+import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_service.dart';
+import 'package:monkeyssh/domain/services/mux_session_end_holds.dart';
 import 'package:monkeyssh/domain/services/remote_clipboard_sync_service.dart';
 import 'package:monkeyssh/domain/services/remote_file_service.dart';
 import 'package:monkeyssh/domain/services/remote_multiplexer_service.dart';
@@ -66,8 +74,10 @@ import 'package:monkeyssh/presentation/screens/terminal_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_native_badge.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
+import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
+import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
@@ -78,6 +88,8 @@ import 'package:xterm/xterm.dart';
 import '../../helpers/fake_wakelock_plus_platform.dart';
 import '../../helpers/terminal_screen_mux_fixture.dart';
 import '../../support/fake_acp_session_manager.dart';
+import '../../support/fake_agent_worktree.dart';
+import '../../support/fake_git_working_tree_service.dart';
 
 const _deleteDetectionMarker = '\u200B\u200B';
 String _trueColorLoginShellCommand(
@@ -923,6 +935,7 @@ class _TestThemeModeNotifier extends ThemeModeNotifier {
 Host _buildHost({
   required int id,
   String? autoConnectCommand,
+  int? autoConnectSnippetId,
   String? tmuxSessionName,
   String? tmuxWorkingDirectory,
   String? tmuxExtraFlags,
@@ -935,6 +948,7 @@ Host _buildHost({
   port: 22,
   username: 'root',
   autoConnectCommand: autoConnectCommand,
+  autoConnectSnippetId: autoConnectSnippetId,
   tmuxSessionName: tmuxSessionName,
   tmuxWorkingDirectory: tmuxWorkingDirectory,
   tmuxExtraFlags: tmuxExtraFlags,
@@ -1158,6 +1172,17 @@ void main() {
       );
 
       expect(items.where((item) => item.label == 'Create Snippet'), isEmpty);
+    });
+
+    test('keeps key-token text from a selection literal in the snippet', () {
+      final prefill = buildSnippetPrefillFromTerminalSelection(
+        r'db.c.createIndex({key:1}) \{x',
+      );
+      expect(prefill.command, r'db.c.createIndex(\{key:1}) \{x');
+      expect(
+        parseSnippetKeySequence(prefill.command!).plainText,
+        r'db.c.createIndex({key:1}) \{x',
+      );
     });
 
     test('builds snippet name from selected terminal text', () {
@@ -1789,6 +1814,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
         buildScreen(
@@ -1796,6 +1822,7 @@ void main() {
           monetizationState: monetizationState,
           loadSharedClipboard: () async => sharedClipboard,
           overrides: [
+            ...overrides,
             if (remoteFileService != null)
               remoteFileServiceProvider.overrideWithValue(remoteFileService),
             themeModeNotifierProvider.overrideWith(
@@ -2357,6 +2384,305 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.android),
       );
     }
+
+    Future<void> runSnippetFromSheet(
+      WidgetTester tester,
+      String name, {
+      bool expectReview = false,
+      bool keyTokensReady = true,
+    }) async {
+      // Startup records that stored snippets are written for key tokens.
+      if (keyTokensReady) {
+        await markSnippetKeyTokensEscaped(db);
+      }
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(
+        find.text('Insert command'),
+        expectReview ? findsOneWidget : findsNothing,
+      );
+      if (expectReview) {
+        await tester.tap(find.text('Insert command'));
+        await tester.pump();
+      }
+    }
+
+    // Records when each shell write happened, on the test's fake clock.
+    List<({Duration at, String data})> timeShellWrites(WidgetTester tester) {
+      final writes = <({Duration at, String data})>[];
+      final start = tester.binding.clock.now();
+      when(() => shellChannel.write(any())).thenAnswer((invocation) {
+        final value = invocation.positionalArguments.single as List<int>;
+        shellWrites.add(List<int>.from(value));
+        writes.add((
+          at: tester.binding.clock.now().difference(start),
+          data: utf8.decode(value),
+        ));
+      });
+      return writes;
+    }
+
+    String shellOutput() =>
+        utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+
+    for (final kitty in [false, true]) {
+      testWidgets(
+        'snippet key tokens press keys through the key encoder, kitty=$kitty',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Mode toggle',
+              command: 'ls{key:enter}{key:shift+tab}{key:ctrl+c}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (kitty) {
+            // The kitty disambiguate flag. Claude Code pushes `CSI > 5 u`,
+            // whose Ctrl+letter form is a separate encoder issue.
+            session.terminal!.write('\x1b[>1u');
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Mode toggle');
+          // The Enter pacer holds Return apart from the text before it.
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(
+            shellOutput(),
+            kitty ? 'ls\r\x1b[9;2u\x1b[99;5u' : 'ls\r\x1b[Z\x03',
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    for (final atPrompt in [false, true]) {
+      testWidgets(
+        'key snippets are reviewed only at a shell prompt, prompt=$atPrompt',
+        (tester) async {
+          await SnippetRepository(db).insert(
+            SnippetsCompanion.insert(
+              name: 'Status',
+              command: 'git status{key:enter}',
+            ),
+          );
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          if (atPrompt) {
+            // Shell integration reports a prompt.
+            session.debugHandlePrivateOsc('133', const ['A']);
+            await tester.pump();
+          }
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Status', expectReview: atPrompt);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), 'git status\r');
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'a key snippet that only presses Enter on an empty prompt is not reviewed',
+      (tester) async {
+        await SnippetRepository(db).insert(
+          SnippetsCompanion.insert(name: 'Enter', command: '{key:enter}'),
+        );
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        session.debugHandlePrivateOsc('133', const ['A']);
+        await tester.pump();
+        shellWrites.clear();
+
+        await runSnippetFromSheet(tester, 'Enter');
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+
+        expect(shellOutput(), '\r');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    for (final (command, reviewed) in [
+      ('rm -rf a && rm -rf b{key:enter}', true),
+      ('/clear{key:enter}', false),
+    ]) {
+      testWidgets(
+        'without prompt reporting only suspicious key snippets are reviewed, '
+        'reviewed=$reviewed',
+        (tester) async {
+          await SnippetRepository(db)
+              .insert(SnippetsCompanion.insert(name: 'Keys', command: command));
+          await pumpScreen(tester);
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await runSnippetFromSheet(tester, 'Keys', expectReview: reviewed);
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pumpAndSettle();
+
+          expect(shellOutput(), endsWith('\r'));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets('snippet pauses separate keys on the wire after a held Enter', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Quit vim',
+          command: 'ls{key:enter}{key:esc}{key:esc}:wq{key:enter}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      final writes = timeShellWrites(tester);
+
+      // `:wq` is typed after a submitted line, so it asks first.
+      await runSnippetFromSheet(tester, 'Quit vim', expectReview: true);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(writes.map((write) => write.data), [
+        'ls',
+        '\r',
+        '\x1b',
+        '\x1b',
+        ':wq',
+        '\r',
+      ]);
+      Duration gap(int index) => writes[index].at - writes[index - 1].at;
+      // Text after Enter waits for the Enter to go out, then a gap.
+      expect(gap(2), greaterThanOrEqualTo(kSnippetSubmitSettle));
+      // Each bare Escape settles before the next key leaves.
+      expect(gap(3), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      expect(gap(4), greaterThanOrEqualTo(kSnippetEscapeSettle));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('typing in the terminal stops a running snippet sequence', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      tester
+          .widget<KeyboardToolbar>(find.byType(KeyboardToolbar))
+          .onKeyPressed!();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), isNot(contains('\x1b[Z')));
+      expect(
+        find.text('Snippet stopped: other input went to the terminal.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets(
+      'until stored snippets are upgraded, key tokens paste as text',
+      (tester) async {
+        await SnippetRepository(db).insert(
+          SnippetsCompanion.insert(name: 'Old', command: 'ls{key:enter}'),
+        );
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+
+        await runSnippetFromSheet(tester, 'Old', keyTokensReady: false);
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+
+        expect(shellOutput(), 'ls{key:enter}');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('a snippet key sequence stops when the connection drops', (
+      tester,
+    ) async {
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      final activeSessions = _TestActiveSessionsNotifier(session);
+      await pumpScreen(tester, activeSessions: activeSessions);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Slow keys');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(shellOutput(), '\x03');
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(shellOutput(), '\x03');
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('a snippet with an unknown key token sends nothing', (
+      tester,
+    ) async {
+      await SnippetRepository(
+        db,
+      ).insert(SnippetsCompanion.insert(name: 'Typo', command: 'ls{key:entr}'));
+      await pumpScreen(tester);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await runSnippetFromSheet(tester, 'Typo');
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(shellOutput(), isEmpty);
+      expect(find.text('Unknown key: {key:entr}'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     void enablePlainTuiSignals() {
       session.terminal!.write('\x1b[?1004h');
@@ -2986,6 +3312,265 @@ void main() {
 
       expect(firstOffset, scrollController.position.maxScrollExtent);
       expect(secondOffset, lessThan(firstOffset));
+    });
+
+    testWidgets(
+      'find takes focus from the terminal so the query never reaches the shell',
+      (tester) async {
+        session.terminal!.write('needle near the top\r\n');
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final terminalFocus =
+            tester
+                  .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+                  .focusNode!
+              ..requestFocus();
+        await tester.pump();
+        expect(terminalFocus.hasFocus, isTrue);
+        shellWrites.clear();
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+        // Typed through the platform text input, as a keyboard would.
+        tester.testTextInput.enterText('needle');
+        await tester.pump();
+        expect(tester.widget<TextField>(field).controller!.text, 'needle');
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          isNot(contains('needle')),
+        );
+
+        // Choosing Find again while the bar is open focuses the field again.
+        terminalFocus.requestFocus();
+        await tester.pump();
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Close find'));
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'with the find field focused the toolbar keys act on the search, not '
+      'the shell',
+      (tester) async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'nee\ndle'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final terminal = session.terminal!;
+        for (var row = 0; row < 80; row += 1) {
+          terminal.write(row == 5 ? 'cat a/needle\r\n' : 'output $row\r\n');
+        }
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        final scrollController = tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .scrollController!;
+        String shellText() =>
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList());
+        Future<void> tapKey(String tooltip) async {
+          await tester.ensureVisible(find.byTooltip(tooltip));
+          await tester.tap(find.byTooltip(tooltip));
+          await tester.pump();
+        }
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final field = find.byKey(
+          const ValueKey<String>('terminal-search-field'),
+        );
+        TextField textField() => tester.widget<TextField>(field);
+        shellWrites.clear();
+
+        tester.testTextInput.enterText('a');
+        await tester.pump();
+        await tapKey('Slash');
+        expect(textField().controller!.text, 'a/');
+        expect(textField().focusNode!.hasFocus, isTrue);
+
+        // Paste goes into the field, without the line break.
+        await tapKey('Paste');
+        await tester.pumpAndSettle();
+        expect(textField().controller!.text, 'a/needle');
+        await tester.pump(const Duration(milliseconds: 200));
+        for (var turn = 0; turn < 10; turn++) {
+          await tester.pump(Duration.zero);
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('1/1'), findsOneWidget);
+        final revealed = scrollController.offset;
+        expect(revealed, lessThan(scrollController.position.maxScrollExtent));
+
+        // Enter and the arrows step through the matches and move the caret;
+        // none of them reaches the shell or scrolls the terminal back down.
+        for (final key in ['Enter', 'Up', 'Down', 'Left', 'Right']) {
+          await tapKey(key);
+        }
+        await tester.pumpAndSettle();
+        expect(scrollController.offset, revealed);
+        expect(textField().focusNode!.hasFocus, isTrue);
+        expect(textField().controller!.text, 'a/needle');
+        expect(shellText(), isEmpty);
+
+        // With the terminal focused, the toolbar types into the shell again.
+        tester
+            .widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView))
+            .focusNode!
+            .requestFocus();
+        // The focus change lands after one frame, the toolbar switches in
+        // the next.
+        await tester.pump();
+        await tester.pump();
+        await tapKey('Pipe');
+        await tester.pumpAndSettle();
+        expect(shellText(), '|');
+        expect(textField().controller!.text, 'a/needle');
+
+        // From the field, Escape closes Find.
+        textField().focusNode!.requestFocus();
+        await tester.pump();
+        await tester.pump();
+        shellWrites.clear();
+        await tapKey('Escape');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey<String>('terminal-search-bar')),
+          findsNothing,
+        );
+        expect(shellText(), isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('find searches the scrollback and closes cleanly', (
+      tester,
+    ) async {
+      final terminal = session.terminal!;
+      for (var row = 0; row < 80; row += 1) {
+        terminal.write(
+          row == 5 ? 'needle near the top\r\n' : 'output $row\r\n',
+        );
+      }
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final scrollController = terminalView().scrollController!;
+      scrollController.jumpTo(scrollController.position.maxScrollExtent);
+      await tester.pump();
+      final bottom = scrollController.offset;
+
+      await openTerminalOverflowMenu(tester);
+      expect(terminalMenuItemButton('Export Scrollback'), findsOneWidget);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      expect(terminalView().searchHits, isNotNull);
+
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'NEEDLE',
+      );
+      // Past the typing debounce, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(scrollController.offset, lessThan(bottom));
+
+      await tester.tap(find.byTooltip('Close find'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('terminal-search-bar')),
+        findsNothing,
+      );
+      expect(terminalView().searchHits, isNull);
+    });
+
+    testWidgets('find results follow a local terminal resize', (tester) async {
+      tester.view
+        ..physicalSize = const Size(2400, 1800)
+        ..devicePixelRatio = 3;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      // A long line whose needle sits at its end, so a narrower viewport
+      // wraps the needle onto a new row.
+      final terminal = session.terminal!..write('${'x' * 50}needle\r\n');
+
+      await pumpScreen(tester);
+      MonkeyTerminalView terminalView() =>
+          tester.widget<MonkeyTerminalView>(find.byType(MonkeyTerminalView));
+      final wideColumns = terminal.viewWidth;
+      expect(wideColumns, greaterThan(56));
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Find'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey<String>('terminal-search-field')),
+        'needle',
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('1/1'), findsOneWidget);
+
+      List<int> rowsWithHits() {
+        final hits = terminalView().searchHits!;
+        final rows = terminal.buffer.lines;
+        return [
+          for (var row = 0; row < rows.length; row++)
+            if (hits.hitsForRow(rows[row]).isNotEmpty) row,
+        ];
+      }
+
+      expect(rowsWithHits(), [0]);
+
+      // Narrow the window: the terminal reflows the line over two rows.
+      tester.view.physicalSize = const Size(1200, 1800);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(terminal.viewWidth, lessThan(wideColumns));
+      expect(terminal.viewWidth, lessThan(56));
+
+      // Past the refresh delay, then let the slices and result run.
+      await tester.pump(const Duration(milliseconds: 600));
+      for (var turn = 0; turn < 10; turn++) {
+        await tester.pump(Duration.zero);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('1/1'), findsOneWidget);
+      expect(rowsWithHits(), isNotEmpty);
+      expect(rowsWithHits(), isNot([0]));
     });
 
     for (final (updateAgents, adapters) in [
@@ -4472,6 +5057,183 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
     }
+
+    testWidgets('a snippet key sequence stops when the mux window changes', (
+      tester,
+    ) async {
+      final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+      addTearDown(events.close);
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(
+        tester,
+        _MockTmuxService(),
+        windowEvents: events.stream,
+      );
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      events.add(
+        const TmuxWindowListEvent([
+          TmuxWindow(index: 0, name: 'shell', isActive: false),
+          TmuxWindow(index: 1, name: 'agent', isActive: true),
+        ]),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('a snippet key sequence stops while a window is created', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final createWindowCompleter = Completer<void>();
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(tester, tmuxService);
+      when(
+        () => tmuxService.createWindow(
+          session,
+          'work',
+          command: any(named: 'command'),
+          name: any(named: 'name'),
+          workingDirectory: any(named: 'workingDirectory'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) => createWindowCompleter.future);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      // The server can select the new window while the create request is
+      // still in flight, so the sequence must stop before the request ends.
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('New window'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Empty terminal'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      createWindowCompleter.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets('a snippet key sequence stops while a window is closed', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final closeWindowCompleter = Completer<void>();
+      await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Slow keys',
+          command: '{key:ctrl+c}{delay:5000}{key:shift+tab}',
+        ),
+      );
+      await markSnippetKeyTokensEscaped(db);
+      await pumpTmuxScreen(tester, tmuxService);
+      when(
+        () => tmuxService.killWindow(
+          session,
+          'work',
+          any(),
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).thenAnswer((_) => closeWindowCompleter.future);
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+
+      await openTerminalOverflowMenu(tester);
+      await tester.tap(terminalMenuItemButton('Snippets'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Slow keys'));
+      await tester.pumpAndSettle();
+      expect(utf8.decode(shellWrites.expand((c) => c).toList()), '\x03');
+
+      // Closing the active window selects another on the server while the
+      // request is in flight, so the sequence must stop before it ends.
+      if (find.byTooltip('Close window').evaluate().isEmpty) {
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+      }
+      await tester.tap(find.byTooltip('Close window').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Close window'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+
+      verify(
+        () => tmuxService.killWindow(
+          session,
+          'work',
+          any(),
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+        ),
+      ).called(1);
+      expect(
+        utf8.decode(shellWrites.expand((c) => c).toList()),
+        isNot(contains('\x1b[Z')),
+      );
+      expect(
+        find.text('Snippet stopped: the connection or window changed.'),
+        findsOneWidget,
+      );
+      closeWindowCompleter.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     for (final interruption in ['none', 'typing', 'window', 'partial']) {
       testWidgets('clipboard content URI upload handles $interruption', (
@@ -7043,6 +7805,142 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets(
+      'closing the last window offers to remove its worktree before the '
+      'session ends',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final windowEvents = StreamController<TmuxWindowChangeEvent>();
+        final activeSessions = _TestActiveSessionsNotifier(session);
+        addTearDown(windowEvents.close);
+        const sessionName = 'work';
+        final worktree = AgentWorktreeRecord(
+          hostId: host.id,
+          repository: '/work/project',
+          path: '/work/project.worktrees/agent',
+          branch: 'agent/claude-1',
+          baseCommit: 'abc',
+          createdAt: DateTime.utc(2026),
+        );
+        final registry = MemoryAgentWorktreeRegistry()..records.add(worktree);
+        final worktrees = FakeAgentWorktreeService();
+        const windows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            name: 'claude',
+            isActive: true,
+            id: '@0',
+            currentPath: '/work/project.worktrees/agent',
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        when(() => tmuxService.clearCache(session.connectionId))
+            .thenAnswer((_) async {});
+        when(() => monkeyMuxService.clearCache(session.connectionId))
+            .thenAnswer((_) async {});
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(
+            session,
+            sessionName,
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => true);
+        when(
+          () => monkeyMuxService.listWindows(
+            session,
+            sessionName,
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => windows);
+        when(
+          () => monkeyMuxService.watchWindowChanges(
+            session,
+            sessionName,
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => windowEvents.stream);
+        when(
+          () => monkeyMuxService.killWindow(
+            session,
+            sessionName,
+            0,
+            windowId: '@0',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async {
+          // Like the server: the empty window list arrives before the close
+          // is answered, and the window bar treats it as the session's end.
+          windowEvents.add(const TmuxWindowListEvent(<TmuxWindow>[]));
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            activeSessions: activeSessions,
+            overrides: [
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              agentWorktreeRegistryProvider.overrideWithValue(registry),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+            ],
+            child: MaterialApp(
+              initialRoute: '/terminal',
+              routes: {
+                '/': (_) => const SizedBox.shrink(),
+                '/terminal': (_) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              },
+            ),
+          ),
+        );
+
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        final closeWindowButton = find.byWidgetPredicate(
+          (widget) => widget is IconButton && widget.tooltip == 'Close window',
+        );
+        await tester.tap(closeWindowButton);
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Close window'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(find.text('Remove worktree?'), findsOneWidget);
+        expect(activeSessions.disconnectedConnectionIds, isEmpty);
+        // The hold is shared, so the home badge beneath a terminal opened
+        // from Connections waits for it too.
+        final holds = ProviderScope.containerOf(
+          tester.element(find.byType(TerminalScreen)),
+        ).read(muxSessionEndHoldsProvider);
+        expect(holds.isHeld(session.connectionId), isTrue);
+
+        await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        expect(holds.isHeld(session.connectionId), isFalse);
+        expect(worktrees.removed, [worktree]);
+        expect(registry.records, isEmpty);
+        expect(activeSessions.disconnectedConnectionIds, [
+          session.connectionId,
+        ]);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('does not leak outer tmux focus to a bare shell after detach', (
       tester,
     ) async {
@@ -7438,6 +8336,255 @@ void main() {
         variant: TargetPlatformVariant.only(platform),
       );
     }
+
+    FakeGitWorkingTreeService workingTreeService(String root) =>
+        FakeGitWorkingTreeService(
+          snapshots: [
+            GitWorkingTreeSnapshot(
+              state: GitWorkingTreeState.ready,
+              refreshedAt: DateTime(2026, 10, 9, 9),
+              repositoryRoot: root,
+              files: const [
+                GitChangedFile(
+                  path: 'lib/a.dart',
+                  group: GitChangeGroup.unstaged,
+                  kind: GitChangeKind.modified,
+                ),
+              ],
+            ),
+          ],
+          diffs: {
+            'lib/a.dart': GitFileDiff(
+              headerLines: const [],
+              hunks: [
+                GitDiffHunk(
+                  header: '@@ -1 +1 @@',
+                  lines: const ['-old', '+new'],
+                ),
+              ],
+              binary: false,
+              truncated: false,
+            ),
+          },
+        );
+
+    final askAgent = find.byTooltip('Ask the agent about this hunk');
+
+    String pastedText() =>
+        utf8.decode(shellWrites.expand((write) => write).toList());
+
+    testWidgets(
+      'the overflow menu opens working tree changes and pastes a hunk',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // A feature view, next to Port Forwards rather than in Options.
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        expect(find.text('Working tree changes'), findsOneWidget);
+        expect(service.statusDirectories, [workingDirectory]);
+
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        // A multi-line prompt at a shell goes through the paste review.
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Paste anyway'));
+        await tester.pumpAndSettle();
+
+        expect(pastedText(), contains('About this hunk in lib/a.dart'));
+        expect(pastedText(), contains('-old'));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'a hunk for a running program that is not an agent is reviewed',
+      (tester) async {
+        const workingDirectory = '/Users/tester/project';
+        final service = workingTreeService(workingDirectory);
+        await pumpScreen(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        shellStdoutController.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\u001b]7;file://remote.example.com$workingDirectory\u0007',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        // psql, a REPL or a nested shell: no shell prompt and no agent, and
+        // a line break without bracketed paste runs a line.
+        session.terminal!.write('\u001b]133;C\u0007');
+        await tester.pump();
+        expect(session.shellStatus, TerminalShellStatus.runningCommand);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('a.dart'));
+        await tester.pumpAndSettle();
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Review prompt paste'), findsOneWidget);
+        expect(shellWrites, isEmpty);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(pastedText(), isNot(contains('About this hunk')));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    group('working tree changes in a MonkeyMux window', () {
+      const sessionName = 'work';
+      const shellActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: false, id: '@1'),
+      ];
+      const buildActive = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: false, id: '@0'),
+        TmuxWindow(index: 1, name: 'build', isActive: true, id: '@1'),
+      ];
+
+      Future<TerminalScreenMuxFixture> pumpMux(
+        WidgetTester tester, {
+        required FakeGitWorkingTreeService service,
+        required Future<TmuxPaneContext?> Function() paneContext,
+      }) async {
+        final monkeyMuxService = _MockMonkeyMuxService();
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(_MockTmuxService(), monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => shellActive)
+              ..stubWindowEvents()
+              ..stubThemeRefresh();
+        when(
+          () => monkeyMuxService.currentPaneContext(
+            session,
+            sessionName,
+            priority: any(named: 'priority'),
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => paneContext());
+        await muxFixture.pump(
+          tester,
+          overrides: [
+            gitWorkingTreeServiceFactoryProvider.overrideWithValue(
+              (_) => service,
+            ),
+          ],
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+        return muxFixture;
+      }
+
+      Future<void> settle(WidgetTester tester) async {
+        for (var i = 0; i < 6; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+      }
+
+      testWidgets('drops the hunk when the active window changed meanwhile', (
+        tester,
+      ) async {
+        final service = workingTreeService('/srv/project');
+        final muxFixture = await pumpMux(
+          tester,
+          service: service,
+          paneContext: () async =>
+              const TmuxPaneContext(currentPath: '/srv/project'),
+        );
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Working tree changes'));
+        await settle(tester);
+        expect(service.statusDirectories, ['/srv/project']);
+        await tester.tap(find.text('a.dart'));
+        await settle(tester);
+
+        // Another client switches windows while the sheet is open.
+        muxFixture.windowEvents.add(const TmuxWindowListEvent(buildActive));
+        await settle(tester);
+        shellWrites.clear();
+        await tester.tap(askAgent);
+        await settle(tester);
+
+        expect(
+          find.text(
+            'The window changed while the sheet was open, so the prompt '
+            'was not sent.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Review prompt paste'), findsNothing);
+        expect(pastedText(), isNot(contains('About this hunk')));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+      testWidgets(
+        'opens on the last known directory when the pane lookup fails',
+        (tester) async {
+          final service = workingTreeService('/srv/fallback');
+          await pumpMux(
+            tester,
+            service: service,
+            paneContext: () async =>
+                throw Exception('MonkeyMux control command timed out'),
+          );
+          session.terminal!.write(
+            '\u001b]7;file://remote.example.com/srv/fallback\u0007',
+          );
+          await tester.pump();
+
+          await openTerminalOverflowMenu(tester);
+          await tester.tap(terminalMenuItemButton('Working tree changes'));
+          await settle(tester);
+
+          expect(tester.takeException(), isNull);
+          expect(find.text('Working tree changes'), findsOneWidget);
+          expect(service.statusDirectories, ['/srv/fallback']);
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    });
 
     testWidgets('overflow menu toggles shell completion popups', (
       tester,
@@ -10668,6 +11815,42 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets(
+      'Android back closes find, then the expanded tmux bar, one per press',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService);
+
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        final dismissRegion = find.byKey(
+          const ValueKey('tmux-terminal-dismiss-region'),
+        );
+        expect(dismissRegion, findsOneWidget);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final findBar = find.byKey(
+          const ValueKey<String>('terminal-search-bar'),
+        );
+        expect(findBar, findsOneWidget);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(findBar, findsNothing);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(dismissRegion, findsNothing);
+        expect(find.byType(TerminalScreen), findsOneWidget);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('hiding the expanded tmux bar restores normal back handling', (
       tester,
     ) async {
@@ -10792,6 +11975,425 @@ void main() {
         ),
       ).called(1);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    for (final (running, attachFails) in [
+      (false, false),
+      (true, false),
+      (false, true),
+    ]) {
+      testWidgets(
+        running
+            ? 'a worktree preset attaching to a running session creates nothing'
+            : attachFails
+            ? 'a worktree preset whose attach shell fails rolls back'
+            : 'a worktree preset starts its agent in a new worktree',
+        (tester) async {
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final installer = _MockMonkeyMuxInstallerService();
+          final monkeyMuxService = _MockMonkeyMuxService()
+            ..installedHelpersStatus = running
+                ? const MonkeyMuxServerStatus(
+                    version: '0.1.10',
+                    capabilities: {},
+                  )
+                : null;
+          final tmuxService = _MockTmuxService();
+          final worktrees = FakeAgentWorktreeService(
+            path: '/work/project.worktrees/agent',
+          );
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              workingDirectory: '/work/project',
+              tmuxSessionName: 'agents',
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              worktree: AgentWorktreeLaunchOptions(),
+            ),
+          );
+          when(
+            () => installer.ensureInstalled(
+              session,
+              priority: any(named: 'priority'),
+              confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
+            ),
+          ).thenAnswer(
+            (_) async => const MonkeyMuxInstallation(
+              executablePath: '/tmp/monkeymux',
+              platform: 'darwin-arm64',
+              version: '0.1.10',
+            ),
+          );
+          when(
+            () =>
+                monkeyMuxService.hasForegroundClientOrThrow(session, 'agents'),
+          ).thenAnswer((_) async => true);
+          when(() => monkeyMuxService.listWindows(session, 'agents'))
+              .thenAnswer(
+                (_) async => [
+                  TmuxWindow(
+                    index: 0,
+                    name: 'Copilot CLI',
+                    isActive: true,
+                    currentPath: running
+                        ? '/work/project'
+                        : '/work/project.worktrees/agent',
+                  ),
+                ],
+              );
+          when(() => monkeyMuxService.watchWindowChanges(session, 'agents'))
+              .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          final executedCommands = <String>[];
+          when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                final command = invocation.positionalArguments.single as String;
+                executedCommands.add(command);
+                if (attachFails && command.contains(' attach')) {
+                  throw Exception('channel open refused');
+                }
+                return shellChannel;
+              });
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+                agentWorktreeLauncherProvider.overrideWithValue(
+                  AgentWorktreeLauncher(
+                    service: worktrees,
+                    registry: AgentWorktreeRegistry(settingsService),
+                    wait: (_) async {},
+                  ),
+                ),
+              ],
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          final attach = executedCommands
+              .where((command) => command.contains(' attach'))
+              .single;
+          if (running) {
+            expect(worktrees.created, isEmpty);
+            expect(attach, contains('/work/project'));
+            expect(attach, isNot(contains('.worktrees')));
+            // Attach only: if the session ended after the probe, creating
+            // it would start the agent in the shared checkout.
+            expect(attach, contains('--existing'));
+          } else {
+            expect(worktrees.created, hasLength(1));
+            expect(attach, contains('/work/project.worktrees/agent'));
+            expect(attach, isNot(contains('--existing')));
+          }
+          // An attach that never ran leaves no worktree, even though the
+          // session lists a window there.
+          expect(worktrees.removed, attachFails ? worktrees.created : isEmpty);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+
+    for (final agentStays in [true, false]) {
+      testWidgets(
+        agentStays
+            ? 'a tmux worktree preset launches in the worktree and checks its panes'
+            : 'a tmux worktree preset rolls back when its session is gone',
+        (tester) async {
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final tmuxService = _MockTmuxService();
+          final registry = MemoryAgentWorktreeRegistry();
+          final worktrees =
+              FakeAgentWorktreeService(path: '/work/project.worktrees/agent')
+                ..tmuxAnswers = [
+                  null,
+                  if (agentStays)
+                    ['/work/project.worktrees/agent']
+                  else ...[
+                    // Seen running without the worktree, then gone.
+                    ['/work/project'],
+                    null,
+                  ],
+                ];
+          host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.codex,
+              workingDirectory: '/work/project',
+              tmuxSessionName: 'agents',
+              remoteMuxBackend: RemoteMuxBackend.tmux,
+              worktree: AgentWorktreeLaunchOptions(),
+            ),
+          );
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                agentWorktreeServiceProvider.overrideWithValue(worktrees),
+                agentWorktreeLauncherProvider.overrideWithValue(
+                  AgentWorktreeLauncher(
+                    service: worktrees,
+                    registry: registry,
+                    wait: (_) async {},
+                  ),
+                ),
+              ],
+            ),
+          );
+          for (var frame = 0; frame < 20; frame++) {
+            await tester.pump(const Duration(milliseconds: 100));
+          }
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(growable: false),
+          );
+          // One probe before the launch, then the pane check until it settles.
+          expect(worktrees.tmuxProbes.toSet(), {'agents'});
+          expect(
+            worktrees.tmuxProbes,
+            hasLength(
+              agentStays ? 2 : 1 + agentWorktreeLaunchCheckSchedule.length,
+            ),
+          );
+          expect(worktrees.created, hasLength(1));
+          // A line kill first drops anything typed during the setup.
+          expect(written, contains("\x15tmux new-session -A -s 'agents'"));
+          expect(written, contains("-c '/work/project.worktrees/agent'"));
+          if (agentStays) {
+            expect(worktrees.removed, isEmpty);
+            expect(registry.records, worktrees.created);
+          } else {
+            expect(worktrees.removed, worktrees.created);
+            expect(registry.records, isEmpty);
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(seconds: 2));
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+
+    testWidgets(
+      'a tmux worktree preset joining a running session creates nothing',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final worktrees = FakeAgentWorktreeService()
+          ..tmuxAnswers = [
+            ['/work/project'],
+          ];
+        host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: MemoryAgentWorktreeRegistry(),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(worktrees.created, isEmpty);
+        // Attach only: if the session ended after the probe, creating it
+        // would start the agent in the shared checkout.
+        expect(written, contains("\x15tmux attach-session -t '=agents'"));
+        expect(written, isNot(contains('new-session')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tmux worktree preset keeps its worktree when the session is never seen',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final registry = MemoryAgentWorktreeRegistry();
+        // The probe may be looking at another tmux server than the shell
+        // used, so "absent" after the launch is not a reason to remove.
+        final worktrees = FakeAgentWorktreeService(
+          path: '/work/project.worktrees/agent',
+        );
+        host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: registry,
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(worktrees.created, hasLength(1));
+        expect(written, contains("-c '/work/project.worktrees/agent'"));
+        expect(worktrees.removed, isEmpty);
+        expect(registry.records, worktrees.created);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tmux probe that cannot answer reattaches without a worktree',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final worktrees = FakeAgentWorktreeService()
+          ..tmuxError = const AgentWorktreeException(
+            AgentWorktreeErrorKind.unavailable,
+          );
+        host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: MemoryAgentWorktreeRegistry(),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(worktrees.created, isEmpty);
+        expect(written, contains("tmux attach-session -t '=agents'"));
+        expect(written, isNot(contains('new-session')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
 
     testWidgets(
       'reconnects a lost MonkeyMux session without launching a new agent',
@@ -11008,6 +12610,34 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
+
+    testWidgets('auto-connect sends an upgraded snippet as it reads', (
+      tester,
+    ) async {
+      final snippetId = await SnippetRepository(db).insert(
+        SnippetsCompanion.insert(
+          name: 'Index',
+          command: r"mongosh --eval 'db.c.find(\{key:1})'",
+        ),
+      );
+      host = _buildHost(id: host.id, autoConnectSnippetId: snippetId);
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+
+      await pumpScreen(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        shellWrites.map(utf8.decode).join(),
+        contains("mongosh --eval 'db.c.find({key:1})'\r"),
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
       'still reviews an imported resume command before executing it',

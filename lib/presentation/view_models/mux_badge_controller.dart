@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/diagnostics_log_service.dart';
+import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../../domain/services/tmux_service.dart' show isAppInForeground;
@@ -20,10 +21,11 @@ class MuxBadgeController extends ChangeNotifier {
     required this.extraFlags,
     required this.onWindowsChanged,
     required this.disconnect,
+    MuxSessionEndHolds? sessionEndHolds,
     this.isAppForeground = isAppInForeground,
     this.retryInitialDelay = const Duration(seconds: 2),
     this.retryMaxDelay = const Duration(seconds: 60),
-  });
+  }) : sessionEndHolds = sessionEndHolds ?? MuxSessionEndHolds();
   final SshSession? Function() getSession;
   final RemoteMuxBackend Function(SshSession) resolveBackend;
   final Future<String?> Function(SshSession, RemoteMuxBackend)
@@ -32,6 +34,10 @@ class MuxBadgeController extends ChangeNotifier {
   final String? Function() extraFlags;
   final void Function(List<TmuxWindow>?) onWindowsChanged;
   final Future<void> Function(SshSession) disconnect;
+
+  /// Holds that an ended session's disconnect waits for. Shared with the
+  /// terminal, so a close made there also holds this badge's disconnect.
+  final MuxSessionEndHolds sessionEndHolds;
 
   /// Probes pause while this returns false; the retry timer keeps waiting.
   final bool Function() isAppForeground;
@@ -42,6 +48,15 @@ class MuxBadgeController extends ChangeNotifier {
   final Duration retryMaxDelay;
   bool _disposed = false;
   bool get mounted => !_disposed;
+
+  /// Makes [connectionId]'s ended-session disconnect wait until the returned
+  /// callback runs, so closing the last window can still use the connection,
+  /// for example to offer removing the window's worktree. MonkeyMux announces
+  /// the empty window list before it answers the close. The callback may run
+  /// more than once.
+  void Function() holdSessionEnd(int connectionId) =>
+      sessionEndHolds.hold(connectionId);
+
   void _change(VoidCallback change) {
     change();
     notifyListeners();
@@ -364,6 +379,7 @@ class MuxBadgeController extends ChangeNotifier {
       return;
     }
     _muxSessionEnding = true;
+    await sessionEndHolds.released(session.connectionId);
     DiagnosticsLogService.instance.info(
       'tmux.ui',
       'monkeymux_badge_disconnect',

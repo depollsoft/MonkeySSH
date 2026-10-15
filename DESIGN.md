@@ -392,6 +392,12 @@ rows. Serious where it counts; a wink where it doesn't.
 - Connection states read as a small block/dot + a mono label (`connected`,
   `idle`, `offline`): Signal Teal = active, Muted Steel = idle, Alert Red =
   failed (always with an icon).
+- Window and agent status pills follow one rule on every screen (Connections,
+  the window navigator, the session switcher): Alert Red when the user must
+  act (an agent blocked on them, a bell or notification, an error), Caution
+  Amber for a warning or a finished turn, Signal Teal while it works. A pill
+  is never louder than a row sorted above it, and its small label clears
+  4.5:1 (`legiblePillColors` shades a theme fill that does not).
 
 ## 6. Do's and Don'ts
 

@@ -5,6 +5,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/acp_ssh_exec_transport.dart';
+import 'package:monkeyssh/domain/services/acp_transport.dart';
 
 class _MockSession extends Mock implements SSHSession {}
 
@@ -51,7 +52,10 @@ void registerAcpSshExecTransportTests() {
         final stderr = StreamController<Uint8List>(
           onCancel: () {
             reentrantClose = transport.close();
-            rejectedWrite = expectLater(transport.write([1]), throwsStateError);
+            rejectedWrite = expectLater(
+              transport.write([1]),
+              throwsA(isA<AcpTransportClosedException>()),
+            );
           },
         );
         when(() => session.stderr).thenAnswer((_) => stderr.stream);
@@ -96,7 +100,10 @@ void registerAcpSshExecTransportTests() {
           second,
           failCancellation ? throwsStateError : completes,
         );
-        await expectLater(transport.write([1]), throwsStateError);
+        await expectLater(
+          transport.write([1]),
+          throwsA(isA<AcpTransportClosedException>()),
+        );
         final finishedBeforeCleanup = secondFinished;
         if (failCancellation) {
           finishCancellation.completeError(StateError('cancel failed'));
