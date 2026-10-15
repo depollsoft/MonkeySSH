@@ -884,4 +884,29 @@ void main() {
     expect(sftp.files, contains('$_home/notes.txt'));
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('an empty folder scrolls above a bottom panel', (tester) async {
+    tester.view
+      ..physicalSize = const Size(390, 560)
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final sftp = _HostSftp(
+      files: {'$_home/a.txt': 1},
+      directories: {'$_home/empty'},
+    );
+    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+
+    await _selectFiles(tester, ['a.txt']);
+    await tester.tap(_barAction('Move'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('empty'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('empty directory'), findsOneWidget);
+    await tester.drag(find.text('empty directory'), const Offset(0, -200));
+    await tester.pumpAndSettle();
+    expect(find.text('New folder'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

@@ -1506,25 +1506,27 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     }
 
     if (_files.isEmpty) {
-      return _isSelectionMode
-          ? const BrandEmptyState(
-              title: 'empty directory',
-              message: 'No files in this folder yet.',
-            )
-          : BrandEmptyState(
-              title: 'empty directory',
-              message: 'Nothing here yet.',
-              primaryLabel: 'Upload',
-              primaryIcon: Icons.upload_file_outlined,
-              onPrimary: () => unawaited(_showUploadDialog()),
-              secondaryActions: [
-                BrandEmptyAction(
-                  icon: Icons.create_new_folder_outlined,
-                  label: 'New folder',
-                  onTap: () => unawaited(_showCreateDirectoryDialog()),
-                ),
-              ],
-            );
+      return _scrollableEmptyState(
+        _isSelectionMode
+            ? const BrandEmptyState(
+                title: 'empty directory',
+                message: 'No files in this folder yet.',
+              )
+            : BrandEmptyState(
+                title: 'empty directory',
+                message: 'Nothing here yet.',
+                primaryLabel: 'Upload',
+                primaryIcon: Icons.upload_file_outlined,
+                onPrimary: () => unawaited(_showUploadDialog()),
+                secondaryActions: [
+                  BrandEmptyAction(
+                    icon: Icons.create_new_folder_outlined,
+                    label: 'New folder',
+                    onTap: () => unawaited(_showCreateDirectoryDialog()),
+                  ),
+                ],
+              ),
+      );
     }
 
     final visibleFiles = _visibleFiles;
@@ -1533,25 +1535,27 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       final hiddenCount = _files
           .where((file) => isHiddenSftpName(file.filename))
           .length;
-      return query.isNotEmpty
-          ? BrandEmptyState(
-              title: 'no matches',
-              message: 'Nothing in this folder matches "$query".',
-              primaryLabel: 'Clear filter',
-              primaryIcon: Icons.filter_list_off,
-              onPrimary: _clearFilter,
-            )
-          : BrandEmptyState(
-              title: 'only hidden files',
-              message:
-                  '$hiddenCount hidden ${hiddenCount == 1 ? 'item' : 'items'} '
-                  'in this folder.',
-              primaryLabel: 'Show hidden files',
-              primaryIcon: Icons.visibility_outlined,
-              onPrimary: () => unawaited(
-                _applyViewSettings(_viewSettings.copyWith(showHidden: true)),
+      return _scrollableEmptyState(
+        query.isNotEmpty
+            ? BrandEmptyState(
+                title: 'no matches',
+                message: 'Nothing in this folder matches "$query".',
+                primaryLabel: 'Clear filter',
+                primaryIcon: Icons.filter_list_off,
+                onPrimary: _clearFilter,
+              )
+            : BrandEmptyState(
+                title: 'only hidden files',
+                message:
+                    '$hiddenCount hidden ${hiddenCount == 1 ? 'item' : 'items'} '
+                    'in this folder.',
+                primaryLabel: 'Show hidden files',
+                primaryIcon: Icons.visibility_outlined,
+                onPrimary: () => unawaited(
+                  _applyViewSettings(_viewSettings.copyWith(showHidden: true)),
+                ),
               ),
-            );
+      );
     }
 
     return RefreshIndicator(
@@ -1613,6 +1617,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       ),
     );
   }
+
+  /// Lets an empty state scroll when the bottom panels leave it less room
+  /// than it needs, as in landscape, instead of overflowing.
+  Widget _scrollableEmptyState(Widget state) =>
+      SingleChildScrollView(child: Center(child: state));
 
   void _handleFileTap(SftpName file) {
     _clearHighlightedFile();
