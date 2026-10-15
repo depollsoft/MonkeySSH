@@ -201,6 +201,11 @@ final acpLastSeenRegistryProvider = Provider<AcpLastSeenRegistry>(
 
 /// One stay in a chat view: the marker it returned to, plus whether the
 /// digest was dismissed, whether the user has caught up, and Jump requests.
+///
+/// A visit carries on across a session key change after a reconnect or a
+/// sign-in restart. The new key resumes the same conversation, so the
+/// marker the visit returned to still applies, and a rebuilt timeline
+/// relocates it.
 class AcpUnreadVisit {
   /// Creates a visit tracker over [registry].
   AcpUnreadVisit(this._registry);
