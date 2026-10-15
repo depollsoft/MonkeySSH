@@ -10,6 +10,7 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
+import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_workspace.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
@@ -301,12 +302,154 @@ void main() {
     );
 
     expect(
-      find.text('This agent always starts in the home folder.'),
+      find.text('New sessions start in your home folder.'),
       findsOneWidget,
     );
     // The manager applies the policy; the sheet passes the folder it shows.
     await _tapStart(tester, 'Start session');
     expect(manager.starts.single.providerId, 'goose');
+  });
+
+  testWidgets('a home-folder agent shows the folder a resumed session '
+      'uses', (tester) async {
+    final goose = _goose(
+      cwdPolicy: AcpCustomProviderCwdPolicy.homeDirectory,
+      environment: const [],
+    );
+    final manager = _ResumingManager();
+    await _pumpSheet(
+      tester,
+      manager: manager,
+      hostService: _FakeHostService(
+        listing: const AcpCustomAgentSessionListing(
+          AcpCustomAgentSessionListStatus.listed,
+          [
+            AcpSessionInfo(
+              sessionId: 'in-project',
+              cwd: '/work/project',
+              title: 'Refactor the parser',
+            ),
+            AcpSessionInfo(
+              sessionId: 'no-folder',
+              cwd: '',
+              title: 'Loose ends',
+            ),
+          ],
+        ),
+      ),
+      providers: [...acpBuiltinProviders, goose],
+    );
+    final folderRow = find.byKey(const ValueKey('custom-agent-home-folder'));
+    Finder inRow(String text) =>
+        find.descendant(of: folderRow, matching: find.text(text));
+    expect(inRow('~'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('custom-agent-find-sessions')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Refactor the parser'));
+    await tester.pumpAndSettle();
+
+    expect(inRow('/work/project'), findsOneWidget);
+    expect(inRow('Resumes in the session’s own folder.'), findsOneWidget);
+    expect(find.text('New sessions start in your home folder.'), findsNothing);
+
+    // A session without a folder resumes at home, never in the folder the
+    // hidden field held (/repo here).
+    await tester.tap(find.text('Loose ends'));
+    await tester.pumpAndSettle();
+    expect(inRow('~'), findsOneWidget);
+    await _tapStart(tester, 'Resume session');
+    expect(manager.resumes.single.cwd, '~');
+  });
+
+  testWidgets('choosing a listed session leaves no recent session '
+      'selected', (tester) async {
+    final goose = _goose(environment: const []);
+    final manager = _ResumingManager()
+      ..recents = [
+        AcpRecentSessionRef(
+          hostId: 1,
+          providerId: goose.id,
+          bridgeId: 'bridge-1',
+          acpSessionId: 'recent-1',
+          title: 'Earlier chat',
+          cwd: '/repo',
+          createdAt: DateTime(2026),
+          lastActivityAt: DateTime(2026),
+        ),
+      ];
+    await _pumpSheet(
+      tester,
+      manager: manager,
+      hostService: _FakeHostService(
+        listing: const AcpCustomAgentSessionListing(
+          AcpCustomAgentSessionListStatus.listed,
+          [
+            AcpSessionInfo(
+              sessionId: 'listed-1',
+              cwd: '/work/project',
+              title: 'Refactor the parser',
+            ),
+          ],
+        ),
+      ),
+      providers: [...acpBuiltinProviders, goose],
+    );
+    Object? recentChoice() => tester
+        .widget<RadioGroup<Object?>>(find.byType(RadioGroup<Object?>))
+        .groupValue;
+    // "Start a new session" is chosen at first.
+    expect(recentChoice(), isNotNull);
+
+    await tester.tap(find.byKey(const ValueKey('custom-agent-find-sessions')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Refactor the parser'));
+    await tester.pumpAndSettle();
+
+    expect(recentChoice(), isNull, reason: 'no row looks chosen');
+    expect(find.widgetWithText(FilledButton, 'Resume session'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('recent-session-new')));
+    await tester.pumpAndSettle();
+    expect(recentChoice(), isNotNull);
+    expect(find.widgetWithText(FilledButton, 'Start session'), findsOneWidget);
+  });
+
+  testWidgets('reattaching to a recent session skips the environment check', (
+    tester,
+  ) async {
+    final goose = _goose();
+    final manager = _ResumingManager()
+      ..recents = [
+        AcpRecentSessionRef(
+          hostId: 1,
+          providerId: goose.id,
+          bridgeId: 'bridge-1',
+          acpSessionId: 'recent-1',
+          title: 'Earlier chat',
+          cwd: '/repo',
+          createdAt: DateTime(2026),
+          lastActivityAt: DateTime(2026),
+        ),
+      ]
+      ..reconnectSessionResult = AcpSessionLaunchStarted(
+        fakeAcpKey(providerId: goose.id),
+      );
+    final hostService = _FakeHostService(unset: const ['GOOSE_PROVIDER']);
+    await _pumpSheet(
+      tester,
+      manager: manager,
+      hostService: hostService,
+      providers: [...acpBuiltinProviders, goose],
+    );
+
+    await tester.tap(find.text('Earlier chat'));
+    await tester.pumpAndSettle();
+    await _tapStart(tester, 'Resume session');
+
+    expect(hostService.checkedIds, isEmpty);
+    expect(manager.reconnects.single.acpSessionId, 'recent-1');
+    expect(find.textContaining('is not set on this host'), findsNothing);
   });
 
   testWidgets('resumes a session the agent lists through session/list', (

@@ -216,6 +216,9 @@ class _NewSessionSheet extends ConsumerStatefulWidget {
 }
 
 class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
+  /// The "Start a new session" row among the recent sessions.
+  static const Object _newSessionChoice = Object();
+
   int? _hostId;
   String? _providerId;
   final TextEditingController _cwd = TextEditingController();
@@ -502,12 +505,19 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       launchCommandOverride = launch.override;
     }
     final customProvider = _customProvider(providerId);
+    // Reattaching to a recent session usually finds its agent still running,
+    // which needs nothing from the host environment; the session switcher
+    // and notifications reattach without the check too.
+    final reattaching =
+        _selectedRecent != null && _selectedAgentSession == null;
     if (customProvider != null && sshSession != null) {
-      final problem = await checkAcpCustomAgentEnvironment(
-        ref,
-        sshSession,
-        customProvider,
-      );
+      final problem = reattaching
+          ? null
+          : await checkAcpCustomAgentEnvironment(
+              ref,
+              sshSession,
+              customProvider,
+            );
       if (!mounted) return null;
       final windowsProblem = sshSession.remoteIsWindows
           ? acpWindowsCustomLaunchProblem(
@@ -528,6 +538,12 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       profile: selectedProfile,
     );
 
+    // The folder field is hidden for a home-folder agent, so never fall back
+    // to what it held.
+    final fallbackCwd =
+        customProvider?.cwdPolicy == AcpCustomProviderCwdPolicy.homeDirectory
+        ? '~'
+        : cwd;
     final agentSession = _selectedAgentSession;
     if (customProvider != null && agentSession != null) {
       final sessionCwd = agentSession.cwd.trim();
@@ -535,7 +551,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         hostId: hostId,
         providerId: providerId,
         acpSessionId: agentSession.sessionId,
-        cwd: sessionCwd.isEmpty ? cwd : sessionCwd,
+        cwd: sessionCwd.isEmpty ? fallbackCwd : sessionCwd,
         confirmInstall: _confirmInstall,
         chooseAuthentication: _chooseAuthentication,
         autoApprovePermissions: launchPreferences.startInYoloMode,
@@ -553,7 +569,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
         providerId: recent.providerId,
         bridgeId: recent.bridgeId,
         acpSessionId: recent.acpSessionId,
-        cwd: recent.cwd ?? cwd,
+        cwd: recent.cwd ?? fallbackCwd,
         confirmInstall: _confirmInstall,
         chooseAuthentication: _chooseAuthentication,
         launchCommandOverride: launchCommandOverride,
@@ -911,12 +927,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               _sectionLabel(context, 'Working directory'),
               if (selectedCustom?.cwdPolicy ==
                   AcpCustomProviderCwdPolicy.homeDirectory)
-                InputDecorator(
-                  decoration: const InputDecoration(
-                    helperText: 'This agent always starts in the home folder.',
-                  ),
-                  child: Text('~', style: FluttyTheme.monoStyle),
-                )
+                _buildHomeFolderRow()
               else
                 TextField(
                   controller: _cwd,
@@ -1035,6 +1046,29 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     ],
   );
 
+  /// The folder a home-folder agent will use: home for a new session, the
+  /// session's own folder for a resume, as [_launch] passes them.
+  Widget _buildHomeFolderRow() {
+    final agentSession = _selectedAgentSession;
+    final recent = _selectedRecent;
+    final resumeFolder = agentSession != null
+        ? agentSession.cwd.trim()
+        : recent?.cwd?.trim();
+    final resuming = agentSession != null || recent != null;
+    return InputDecorator(
+      key: const ValueKey('custom-agent-home-folder'),
+      decoration: InputDecoration(
+        helperText: resuming
+            ? 'Resumes in the session’s own folder.'
+            : 'New sessions start in your home folder.',
+      ),
+      child: Text(
+        resumeFolder == null || resumeFolder.isEmpty ? '~' : resumeFolder,
+        style: FluttyTheme.monoStyle,
+      ),
+    );
+  }
+
   Widget _buildRecentSessions() {
     final hostId = _hostId;
     final providerId = _providerId;
@@ -1055,33 +1089,39 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
           children: [
             const SizedBox(height: FluttyTheme.spacingMd),
             _sectionLabel(context, 'Resume a recent session'),
-            RadioGroup<AcpRecentSessionRef?>(
-              groupValue: _selectedRecent,
+            // While one of a custom agent's listed sessions is chosen, no row
+            // here is selected: "Start a new session" would contradict it.
+            RadioGroup<Object?>(
+              groupValue:
+                  _selectedRecent ??
+                  (_selectedAgentSession == null ? _newSessionChoice : null),
               onChanged: (value) {
                 if (_busy) {
                   return;
                 }
+                final recent = value is AcpRecentSessionRef ? value : null;
                 setState(() {
-                  _selectedRecent = value;
+                  _selectedRecent = recent;
                   _selectedAgentSession = null;
                 });
                 // A resumed session re-sends its own MCP servers and
                 // directories; starting fresh restores the defaults.
-                if (value == null) {
+                if (recent == null) {
                   _workspace.clearRecent();
                 } else {
-                  _workspace.applyRecent(value.workspace);
+                  _workspace.applyRecent(recent.workspace);
                 }
               },
               child: Column(
                 children: [
-                  const RadioListTile<AcpRecentSessionRef?>(
-                    value: null,
+                  const RadioListTile<Object?>(
+                    key: ValueKey('recent-session-new'),
+                    value: _newSessionChoice,
                     title: Text('Start a new session'),
                     contentPadding: EdgeInsets.zero,
                   ),
                   for (final recent in recents)
-                    RadioListTile<AcpRecentSessionRef?>(
+                    RadioListTile<Object?>(
                       value: recent,
                       contentPadding: EdgeInsets.zero,
                       title: Text(
