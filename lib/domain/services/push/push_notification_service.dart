@@ -685,18 +685,26 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     return token;
   }
 
+  /// Whether this app posts push notifications itself from data-only
+  /// messages (Android, see push_background_message.dart).
+  bool get _postsOwnNotifications =>
+      defaultTargetPlatform == TargetPlatform.android;
+
   Future<void> _registerToken(String token) async {
     final secrets = await _store.loadOrCreate();
+    final appNotifications = _postsOwnNotifications;
     final registration = await _gateway.register(
       token: token,
       platform: defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android',
       deviceId: secrets.deviceId,
+      appNotifications: appNotifications,
     );
     final next = secrets.withRegistration(
       deviceId: registration.deviceId,
       ticket: registration.ticket,
       tokenFingerprint: _fingerprint(token),
       ticketIssuedAt: _now(),
+      appNotifications: appNotifications,
     );
     await _store.save(next);
     _secrets = next;
@@ -1107,8 +1115,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     final secrets = _secrets;
     if (!state.enabled || secrets == null || !secrets.isRegistered) return;
     final issuedAt = secrets.ticketIssuedAt;
+    // A ticket from a build that could not show data-only messages keeps
+    // Android on the generic alert until it is renewed, so renew it now.
     if (issuedAt == null ||
-        _now().difference(issuedAt) >= pushTicketRefreshAge) {
+        _now().difference(issuedAt) >= pushTicketRefreshAge ||
+        secrets.appNotifications != _postsOwnNotifications) {
       _requestRefresh();
       return;
     }

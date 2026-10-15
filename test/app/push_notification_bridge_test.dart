@@ -51,6 +51,7 @@ class _Gateway implements PushMessagingGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) => throw UnimplementedError();
 
   @override

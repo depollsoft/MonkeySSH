@@ -96,11 +96,14 @@ abstract interface class PushMessagingGateway {
   /// Returns the message whose notification launched the app, once.
   Future<PushRemoteMessage?> getInitialMessage();
 
-  /// Calls `registerPushDevice` with an App Check token.
+  /// Calls `registerPushDevice` with an App Check token. With
+  /// [appNotifications] the ticket says this app posts its own notifications
+  /// from data-only messages, which builds before that could not show.
   Future<PushRegistration> register({
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   });
 }
 
@@ -206,6 +209,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     final appCheckToken = await _appCheckToken();
     final projectId = Firebase.app().options.projectId;
@@ -227,6 +231,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
                 'token': token,
                 'platform': platform,
                 'deviceId': ?deviceId,
+                if (appNotifications) 'appNotifications': true,
               },
             }),
           )

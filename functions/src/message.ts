@@ -90,6 +90,8 @@ export interface FcmMessageInput {
   readonly collapse: string;
   readonly payload: string;
   readonly platform?: TicketPlatform;
+  /** The ticket says the app posts its own notifications (see TicketContents). */
+  readonly appNotifications?: boolean;
   readonly nowSeconds: number;
 }
 
@@ -97,17 +99,19 @@ export interface FcmMessageInput {
  * Builds the FCM message. Visible text comes from the coarse kind only; the
  * encrypted payload travels as data for the app to open.
  *
- * Android gets a data-only message: the app decrypts the payload and posts the
- * notification itself, naming the host and agent, on the channel for the
- * kind. `k` (the kind) and `c` (the collapse key) let it post a generic one
- * when the payload does not open. Every such push must end in a visible
- * notification, so it is sent at high priority to wake the app. iOS (and a
- * ticket without a platform) gets an alert the notification service extension
- * rewrites.
+ * An Android app that posts its own notifications gets a data-only message: it
+ * decrypts the payload and posts the notification itself, naming the window,
+ * host and agent, on the channel for the kind. `k` (the kind) and `c` (the
+ * collapse key) let it post a generic one when the payload does not open.
+ * Every such push must end in a visible notification, so it is sent at high
+ * priority to wake the app. iOS, an Android build from before that (its
+ * ticket lacks appNotifications and it has no handler for data-only
+ * messages), and a ticket without a platform get an alert, which the iOS
+ * notification service extension rewrites.
  */
 export function buildFcmMessage(input: FcmMessageInput): TokenMessage {
   const presentation = presentations[input.kind];
-  if (input.platform === "android") {
+  if (input.platform === "android" && input.appNotifications === true) {
     return {
       token: input.token,
       data: { v: "1", p: input.payload, k: input.kind, c: input.collapse },

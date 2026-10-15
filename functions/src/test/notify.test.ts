@@ -25,6 +25,7 @@ const ticket = sealTicket(keys, {
   deviceId: "dev_test_device_00001",
   issuedAt: 1760000000,
   platform: "android",
+  appNotifications: true,
 });
 const payload = encodeBase64Url(Buffer.alloc(80, 3));
 const collapse = "0123456789abcdef0123456789abcdef";
@@ -107,6 +108,21 @@ test("Android gets data only, at high priority, for the app to show", async () =
     assert.equal(message.android?.priority, "high");
     assert.equal(message.android?.collapseKey, collapse);
   }
+});
+
+test("an Android build from before app notifications keeps the alert", async () => {
+  const older = sealTicket(keys, {
+    token,
+    deviceId: "dev_test_device_00001",
+    issuedAt: 1760000000,
+    platform: "android",
+  });
+  const h = harness();
+  await handlePushNotify(post({ ...valid, ticket: older, kind: "finished" }), h.deps);
+  const message = h.sent[0];
+  assert.deepEqual(message.data, { v: "1", p: payload });
+  assert.equal(message.notification?.title, "Agent finished");
+  assert.equal(message.android?.notification?.channelId, "agent-updates-v2");
 });
 
 test("iOS gets an alert the notification service extension rewrites", async () => {

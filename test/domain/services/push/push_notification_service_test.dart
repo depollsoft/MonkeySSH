@@ -30,6 +30,7 @@ class _FakeGateway implements PushMessagingGateway {
   Exception? autoInitError;
   final calls = <String>[];
   final registrations = <Map<String, Object?>>[];
+  final appNotificationFlags = <bool>[];
   final tokenRefresh = StreamController<String>.broadcast();
   final messages = StreamController<PushRemoteMessage>.broadcast();
   final opened = StreamController<PushRemoteMessage>.broadcast();
@@ -82,8 +83,10 @@ class _FakeGateway implements PushMessagingGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     calls.add('register');
+    appNotificationFlags.add(appNotifications);
     registrations.add({
       'token': token,
       'platform': platform,
@@ -121,11 +124,17 @@ class _GatedRegisterGateway extends _FakeGateway {
     required String token,
     required String platform,
     String? deviceId,
+    bool appNotifications = false,
   }) async {
     calls.add('register');
     await gate.future;
     return super
-        .register(token: token, platform: platform, deviceId: deviceId)
+        .register(
+          token: token,
+          platform: platform,
+          deviceId: deviceId,
+          appNotifications: appNotifications,
+        )
         .then((registration) {
           calls.removeLast();
           return registration;
@@ -1179,6 +1188,32 @@ void main() {
       await pumpEventQueue();
       await h.controller.syncNow();
       expect(h.gateway.registrations, hasLength(registrations + 1));
+    });
+
+    test('a ticket from a build that could not show data-only pushes is '
+        'renewed', () async {
+      await h.start();
+      await h.controller.enable();
+      expect(h.gateway.appNotificationFlags, [true]);
+      // What a build before data-only pushes stored.
+      final store = PushDeviceStore(secrets: h.secrets);
+      final stored = (await store.load())!;
+      expect(stored.appNotifications, isTrue);
+      await store.save(
+        PushDeviceSecrets(
+          keyPair: stored.keyPair,
+          hostRefKey: stored.hostRefKey,
+          deviceId: stored.deviceId,
+          ticket: stored.ticket,
+          tokenFingerprint: stored.tokenFingerprint,
+          ticketIssuedAt: stored.ticketIssuedAt,
+        ),
+      );
+      await h.restart();
+      await pumpEventQueue();
+      await h.controller.syncNow();
+      expect(h.gateway.appNotificationFlags, [true, true]);
+      expect((await store.load())!.appNotifications, isTrue);
     });
 
     test('a host that refused the ticket gets a new one', () async {
