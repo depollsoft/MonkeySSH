@@ -136,12 +136,14 @@ Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
   Duration? saveDelay,
   bool unreadablePassword = false,
   List<Snippet> snippets = const [],
+  String? savedHostSession,
 }) async {
   final fixture = HostEditFixture(
     host: _testHost(
       id: 1,
       label: 'Unused Host',
       autoConnectRequiresConfirmation: false,
+      tmuxSessionName: savedHostSession,
     ),
   );
   final hostRepository = _RejectingHostRepository(
@@ -711,6 +713,32 @@ void main() {
       );
       await tester.pump();
       expect(tester.widget<TextFormField>(session).controller!.text, 'mine');
+    });
+
+    testWidgets('the suggested session follows the destination too', (
+      tester,
+    ) async {
+      // The saved host uses `new-host` on imported.example.com:22.
+      await _pumpHostCreateScreen(tester, savedHostSession: 'new-host');
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'New Host',
+      );
+      await _selectStartupMode(tester, 'MonkeyMux');
+      final session = find.byKey(const Key('host-tmux-session-field'));
+      String name() => tester.widget<TextFormField>(session).controller!.text;
+      expect(name(), 'new-host');
+
+      await tester.enterText(
+        find.byKey(const Key('host-hostname-field')),
+        'imported.example.com',
+      );
+      await tester.pump();
+      expect(name(), 'new-host-2');
+
+      await tester.enterText(find.byKey(const Key('host-port-field')), '2222');
+      await tester.pump();
+      expect(name(), 'new-host');
     });
 
     testWidgets('notifications offer only what the startup choice can raise', (

@@ -5,19 +5,25 @@ import '../models/host_notifications.dart';
 import 'push/push_event.dart';
 
 /// Reads a saved host's notification preferences at the moment a
-/// notification is about to show. A host that is gone or cannot be read
-/// allows everything, as before per-host preferences existed.
+/// notification is about to show. A host that is gone allows everything, as
+/// before per-host preferences existed. A failed read falls back to the
+/// host's last good read, so a passing database error does not turn back on
+/// what the user turned off; with no earlier read it allows everything,
+/// rather than hiding an approval.
 final hostNotificationPrefsReaderProvider =
     Provider<Future<HostNotificationPrefs> Function(int hostId)>((ref) {
       final repository = ref.watch(hostRepositoryProvider);
+      final lastRead = <int, HostNotificationPrefs>{};
       return (hostId) async {
         try {
           final host = await repository.getById(hostId);
-          return host == null
-              ? const HostNotificationPrefs()
-              : HostNotificationPrefs.fromHost(host);
+          if (host == null) {
+            lastRead.remove(hostId);
+            return const HostNotificationPrefs();
+          }
+          return lastRead[hostId] = HostNotificationPrefs.fromHost(host);
         } on Object {
-          return const HostNotificationPrefs();
+          return lastRead[hostId] ?? const HostNotificationPrefs();
         }
       };
     });

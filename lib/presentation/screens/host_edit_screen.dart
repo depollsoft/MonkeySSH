@@ -191,7 +191,11 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     ]) {
       c.addListener(_updateDirtyState);
     }
-    _labelController.addListener(_followLabelInSessionName);
+    // The suggestion avoids sessions other saved hosts use on the same
+    // destination, so it follows the hostname and port as well as the label.
+    for (final c in [_labelController, _hostnameController, _portController]) {
+      c.addListener(_followSuggestedSessionName);
+    }
     unawaited(_loadPresetSessionNames());
 
     if (widget.hostId != null) {
@@ -1839,7 +1843,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     );
   }
 
-  void _followLabelInSessionName() {
+  void _followSuggestedSessionName() {
     if (!_sessionNameFollowsLabel ||
         !_selectedStartupMode.usesRemoteMultiplexer) {
       return;

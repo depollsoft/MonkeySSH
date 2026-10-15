@@ -1,9 +1,15 @@
 import 'dart:convert';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
+
+import '../../../helpers/mocks.dart';
+import '../../../helpers/terminal_session_fixture.dart';
 
 void main() {
   PushEvent? parse(Map<String, Object?> json) =>
@@ -65,5 +71,24 @@ void main() {
       );
     }
     expect(pushKindAllowedByHost(PushEventKind.test, off), isTrue);
+  });
+
+  test('a failed read keeps the last good preferences', () async {
+    final hosts = MockHostRepository();
+    final container = ProviderContainer(
+      overrides: [hostRepositoryProvider.overrideWithValue(hosts)],
+    );
+    addTearDown(container.dispose);
+    final read = container.read(hostNotificationPrefsReaderProvider);
+    when(() => hosts.getById(1)).thenAnswer(
+      (_) async =>
+          buildSelectionTestHost(id: 1).copyWith(notifyAgentFinished: false),
+    );
+    expect((await read(1)).agentFinished, isFalse);
+
+    when(() => hosts.getById(any())).thenThrow(StateError('database'));
+    expect((await read(1)).agentFinished, isFalse);
+    // A host never read before still shows, rather than hiding an approval.
+    expect((await read(2)).agentFinished, isTrue);
   });
 }

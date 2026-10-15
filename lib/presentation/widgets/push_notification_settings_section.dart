@@ -207,11 +207,14 @@ String pushSetupFailureMessage(PushSetupFailure failure) => switch (failure) {
   PushSetupFailure.tokenUnavailable =>
     'This device did not get a push token. Check the network and try again.',
   PushSetupFailure.appCheckFailed => switch (defaultTargetPlatform) {
-    // The Play Integrity check accepts only installs Google Play recognizes,
-    // so side-loaded and Internal App Sharing builds always land here.
+    // Play Integrity failed. Production accepts only installs Google Play
+    // recognizes; the beta app also accepts its preview builds (see
+    // docs/push-notifications.md). A network or Play services failure lands
+    // here too, so the text offers a retry before blaming the install.
     TargetPlatform.android =>
-      'Google Play could not verify this copy of MonkeySSH. Push works in '
-          'copies installed from Google Play.',
+      'Google Play could not verify this copy of MonkeySSH. Check your '
+          'connection and try again. Copies from outside Google Play may not '
+          'be able to use push.',
     _ =>
       'This copy of MonkeySSH could not be verified, so push is unavailable.',
   },

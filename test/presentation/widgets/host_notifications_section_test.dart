@@ -80,8 +80,9 @@ void main() {
 
     expect(
       find.text(
-        'Google Play could not verify this copy of MonkeySSH. Push works in '
-        'copies installed from Google Play.',
+        'Google Play could not verify this copy of MonkeySSH. Check your '
+        'connection and try again. Copies from outside Google Play may not '
+        'be able to use push.',
       ),
       findsOneWidget,
     );
