@@ -8,16 +8,44 @@ import '../../data/database/database.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/services/host_agent_forwarding_service.dart';
 import '../../domain/services/monetization_service.dart';
+import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
 import 'premium_access.dart';
 import 'premium_badge.dart';
 
+/// Whether [hostId] has a connection open that is not forwarding the agent:
+/// it connected while forwarding was off, or forwarding was stopped from a
+/// signature prompt. Turning forwarding on only reaches the next connection,
+/// because the agent is set up while the connection signs in.
+final hostConnectedWithoutAgentForwardingProvider = Provider.autoDispose
+    .family<bool, int>((ref, hostId) {
+      final states = ref.watch(activeSessionsProvider);
+      // A stop from a prompt saves the host as off, which lands here too.
+      ref.watch(hostAgentForwardingSettingsProvider(hostId));
+      final sessions = ref.read(activeSessionsProvider.notifier);
+      for (final connectionId in sessions.getConnectionsForHost(hostId)) {
+        if (states[connectionId] != SshConnectionState.connected) {
+          continue;
+        }
+        final forwarding = sessions
+            .getSession(connectionId)
+            ?.config
+            .agentForwarding;
+        if (forwarding == null || forwarding.status.value.stoppedByUser) {
+          return true;
+        }
+      }
+      return false;
+    });
+
 /// Host editor section for per-host SSH agent forwarding.
 ///
-/// Changes save immediately, like port forwards, and also apply to a
-/// connection that is already open. A host that has not been saved yet
-/// cannot opt in. Only the keys chosen here are offered to the host; turning
-/// forwarding on starts with the host's own key.
+/// Changes save immediately, like port forwards. Turning forwarding off,
+/// choosing keys and turning confirmation on also apply to a connection that
+/// is already open; turning it on starts with the next connection, and the
+/// section says so while such a connection is open. A host that has not been
+/// saved yet cannot opt in. Only the keys chosen here are offered to the
+/// host; turning forwarding on starts with the host's own key.
 class HostAgentForwardingSection extends ConsumerStatefulWidget {
   /// Creates a [HostAgentForwardingSection].
   const HostAgentForwardingSection({
@@ -153,6 +181,11 @@ class _HostAgentForwardingSectionState
       for (final key in signingKeys)
         if (settings.keyIds.contains(key.id)) key.id,
     };
+    final needsReconnect =
+        hostId != null &&
+        settings.enabled &&
+        hasAccess &&
+        ref.watch(hostConnectedWithoutAgentForwardingProvider(hostId));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -178,13 +211,38 @@ class _HostAgentForwardingSectionState
           title: const Text('Forward SSH agent'),
           subtitle: const Text(
             'Lets this host use the keys you choose to sign in elsewhere, for '
-            'example to git push. Applies to open connections too.',
+            'example to git push. Starts on your next connection; turning it '
+            'off applies at once.',
           ),
           value: settings.enabled,
           onChanged: canEdit
               ? (enabled) => unawaited(_setEnabled(settings, enabled: enabled))
               : null,
         ),
+        if (settings.enabled && !hasAccess) ...[
+          const SizedBox(height: 4),
+          _AgentForwardingNote(
+            key: const Key('host-agent-forwarding-pro-inactive'),
+            icon: Icons.lock_outline,
+            iconColor: colorScheme.onSurfaceVariant,
+            text:
+                'Pro is not active, so this host connects without '
+                'forwarding until you upgrade.',
+          ),
+          const SizedBox(height: 8),
+        ],
+        if (needsReconnect) ...[
+          const SizedBox(height: 4),
+          _AgentForwardingNote(
+            key: const Key('host-agent-forwarding-reconnect'),
+            icon: Icons.sync,
+            iconColor: colorScheme.onSurfaceVariant,
+            text:
+                'The open connection to this host started without '
+                'forwarding. Reconnect to use it there.',
+          ),
+          const SizedBox(height: 8),
+        ],
         if (settings.enabled) ...[
           SwitchListTile.adaptive(
             key: const Key('host-agent-forwarding-confirm-switch'),
@@ -203,6 +261,18 @@ class _HostAgentForwardingSectionState
           ),
           const SizedBox(height: 8),
           Text('Keys this host can use', style: theme.textTheme.labelLarge),
+          if (chosenKeys.isEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              signingKeys.isEmpty
+                  ? 'Add a key with its private key to forward it.'
+                  : 'Choose at least one. Until then the host sees no keys.',
+              key: const Key('host-agent-forwarding-key-hint'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
           for (final key in signingKeys)
             CheckboxListTile(
               key: Key('host-agent-forwarding-key-${key.id}'),
@@ -231,17 +301,6 @@ class _HostAgentForwardingSectionState
                     )
                   : null,
             ),
-          if (chosenKeys.isEmpty) ...[
-            const SizedBox(height: 4),
-            _AgentForwardingNote(
-              icon: Icons.info_outline,
-              iconColor: colorScheme.onSurfaceVariant,
-              text: signingKeys.isEmpty
-                  ? 'Add a key with its private key to forward it.'
-                  : 'Choose at least one key. Until then the host sees no '
-                        'keys.',
-            ),
-          ],
         ],
         const SizedBox(height: 8),
         _AgentForwardingNote(
@@ -272,6 +331,7 @@ class _AgentForwardingNote extends StatelessWidget {
     required this.icon,
     required this.iconColor,
     required this.text,
+    super.key,
   });
 
   final IconData icon;
