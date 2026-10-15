@@ -158,7 +158,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
       'Keep multiple native agent chats connected across hosts and providers.',
     MonetizationFeature.hostSpecificThemes => 'Save terminal theme overrides for individual hosts while keeping app-wide defaults unchanged.',
     MonetizationFeature.agentForwarding =>
-      'Let a host use the keys on your phone, for example to git push.',
+      'Let a host use the keys in MonkeySSH, for example to git push.',
   };
 
   /// The blocked action shown at the top of feature-triggered paywalls.
@@ -190,7 +190,7 @@ extension MonetizationFeaturePresentation on MonetizationFeature {
     MonetizationFeature.agentManagement => 'Unlock Pro to install, repair, and update agents, with automatic update checks.',
     MonetizationFeature.agentUsageRings => 'Unlock Pro to see live account-usage rings without leaving the terminal.',
     MonetizationFeature.agentForwarding =>
-      'Unlock Pro to push and pull from a host with the keys on your phone.',
+      'Unlock Pro to push and pull from a host with the keys in MonkeySSH.',
   };
 }
 
