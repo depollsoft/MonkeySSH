@@ -199,6 +199,8 @@ class _PortForwardBrowserScreenState
   Timer? _socksSinkRetry;
   // A loopback browser could not remove a leftover SOCKS proxy.
   var _directProxyBlocked = false;
+  // ...because a SOCKS browser still holds it.
+  var _directProxyHeld = false;
 
   _PortForwardBrowserTabState get _selectedTab => _tabs[_selectedTabIndex];
 
@@ -256,9 +258,11 @@ class _PortForwardBrowserScreenState
         body: BrandErrorState(
           icon: Icons.link_off_rounded,
           title: 'browser proxy stuck',
-          message:
-              'A SOCKS proxy is still set for the in-app browser, so it '
-              'can’t open local forwards yet.',
+          message: _directProxyHeld
+              ? 'A SOCKS browser is still open, so this browser can’t open '
+                    'local forwards. Close the SOCKS browser first.'
+              : 'A SOCKS proxy is still set for the in-app browser, so it '
+                    'can’t open local forwards yet.',
           onRetry: () {
             setState(() => _directProxyBlocked = false);
             unawaited(_initializeBrowser());
@@ -399,9 +403,12 @@ class _PortForwardBrowserScreenState
     // A SOCKS browser that closed earlier leaves its proxy on the sink.
     try {
       await _socksProxy.clearBeforeDirectBrowsing();
-    } on SocksBrowserProxyException {
+    } on SocksBrowserProxyException catch (error) {
       if (mounted) {
-        setState(() => _directProxyBlocked = true);
+        setState(() {
+          _directProxyBlocked = true;
+          _directProxyHeld = error.code == 'held';
+        });
       }
       return;
     }
@@ -824,11 +831,13 @@ class _PortForwardBrowserScreenState
   );
 
   void _showSocksRouteInfo() {
+    final name = widget.socksForward!.name;
     final host = widget.socksHostLabel?.trim();
     _showMessage(
-      'Pages load through ${widget.socksForward!.name}'
-      '${host == null || host.isEmpty ? '' : ' on $host'}. '
-      'If it stops, pages are blocked rather than loaded directly.',
+      _canLoadPages
+          ? 'Pages load through $name'
+                '${host == null || host.isEmpty ? '' : ' on $host'}.'
+          : 'Pages are blocked until $name is running.',
     );
   }
 
@@ -1333,27 +1342,32 @@ class _PortForwardBrowserScreenState
         const SizedBox(width: 4),
         Expanded(child: _buildAddressField(context)),
         const SizedBox(width: 4),
-        IconButton(
-          onPressed: selectedTab.canGoBack && _canLoadPages
-              ? () => unawaited(_goBack())
-              : null,
-          tooltip: 'Back',
-          icon: const Icon(Icons.arrow_back),
-        ),
-        IconButton(
-          onPressed: selectedTab.canGoForward && _canLoadPages
-              ? () => unawaited(_goForward())
-              : null,
-          tooltip: 'Forward',
-          icon: const Icon(Icons.arrow_forward),
-        ),
-        IconButton(
-          onPressed: _canLoadPages && selectedTab.hasStartedLoading
-              ? () => unawaited(selectedTab.controller.reload())
-              : null,
-          tooltip: 'Reload',
-          icon: const Icon(Icons.refresh),
-        ),
+        // A SOCKS browser opens on a blank start page with no history, so
+        // its address field takes the room of the navigation buttons until
+        // the first page loads.
+        if (!_isSocksBrowser || selectedTab.hasStartedLoading) ...[
+          IconButton(
+            onPressed: selectedTab.canGoBack && _canLoadPages
+                ? () => unawaited(_goBack())
+                : null,
+            tooltip: 'Back',
+            icon: const Icon(Icons.arrow_back),
+          ),
+          IconButton(
+            onPressed: selectedTab.canGoForward && _canLoadPages
+                ? () => unawaited(_goForward())
+                : null,
+            tooltip: 'Forward',
+            icon: const Icon(Icons.arrow_forward),
+          ),
+          IconButton(
+            onPressed: _canLoadPages && selectedTab.hasStartedLoading
+                ? () => unawaited(selectedTab.controller.reload())
+                : null,
+            tooltip: 'Reload',
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
         // The system browser would load the page over the device's own
         // network, so a SOCKS browser shows its route instead.
         if (_isSocksBrowser)
@@ -1393,9 +1407,7 @@ class _PortForwardBrowserScreenState
         isDense: true,
         filled: true,
         fillColor: colorScheme.surfaceContainerHighest,
-        hintText: _isSocksBrowser
-            ? 'Address the host can reach'
-            : 'Search or enter URL',
+        hintText: _isSocksBrowser ? 'Enter an address' : 'Search or enter URL',
         prefixIcon: const Icon(Icons.travel_explore),
         suffixIcon: IconButton(
           onPressed: () => unawaited(_loadAddress(_addressController!.text)),
@@ -1934,17 +1946,29 @@ const _socksSinkRetryMaxDelay = Duration(seconds: 30);
 
 /// Whether a scheme-less SOCKS browser address most likely names an internal
 /// service, which usually serves plain HTTP: an IP literal, a single-label
-/// name, or an explicit port.
+/// name, a name under a reserved private suffix, or an explicit port.
 @visibleForTesting
 bool isLikelyInternalBrowserAddress(Uri candidate) {
-  final host = candidate.host;
+  final host = candidate.host.toLowerCase();
   if (host.isEmpty) {
     return false;
   }
   return candidate.hasPort ||
       !host.contains('.') ||
+      _privateNameSuffixes.any(host.endsWith) ||
       InternetAddress.tryParse(host) != null;
 }
+
+/// Suffixes reserved or commonly used for names that never resolve publicly:
+/// mDNS (RFC 6762), home networks (RFC 8375), ICANN's private-use
+/// `.internal`, loopback (RFC 6761), and the de facto `.lan`.
+const _privateNameSuffixes = [
+  '.local',
+  '.home.arpa',
+  '.internal',
+  '.localhost',
+  '.lan',
+];
 
 class _PortForwardBrowserTabState {
   _PortForwardBrowserTabState({

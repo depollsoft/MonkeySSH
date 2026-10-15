@@ -865,6 +865,14 @@ void main() {
       ('[fd00::5]', true),
       ('example.com', false),
       ('docs.internal.example', false),
+      // Reserved and private suffixes never resolve publicly.
+      ('nas.local', true),
+      ('grafana.lan', true),
+      ('app.internal', true),
+      ('router.home.arpa', true),
+      ('dev.localhost', true),
+      ('NAS.Local', true),
+      ('mylocal.com', false),
     ]) {
       expect(
         isLikelyInternalBrowserAddress(Uri.parse('//$address')),
@@ -888,6 +896,73 @@ void main() {
     );
     expect(_events, isEmpty);
     expect(find.text('Close browser'), findsOneWidget);
+  });
+
+  testWidgets('the start page gives the address field the toolbar', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final source = _RouteSource(
+      const SocksForwardRoute(connectionId: 1, port: 41080),
+    );
+    await pumpBrowser(tester, source);
+
+    // Nothing to go back, forward or reload to before the first page.
+    for (final tooltip in ['Back', 'Forward', 'Reload']) {
+      expect(find.byTooltip(tooltip), findsNothing, reason: tooltip);
+    }
+    expect(find.text('Enter an address'), findsOneWidget);
+    expect(find.byTooltip('Routed through Office'), findsOneWidget);
+
+    await openAddress(tester, '10.0.0.5:8080');
+    // A focused address field takes the whole row; leave it.
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    for (final tooltip in ['Back', 'Forward', 'Reload']) {
+      expect(find.byTooltip(tooltip), findsOneWidget, reason: tooltip);
+    }
+
+    await tester.tap(find.byTooltip('Routed through Office'));
+    await tester.pump();
+    expect(find.text('Pages load through Office on Dev box.'), findsOneWidget);
+    await closeBrowser(tester);
+  });
+
+  testWidgets('a loopback browser says to close a SOCKS browser holding it', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final proxy = SocksBrowserProxyService(
+      platform: TargetPlatform.iOS,
+      sinkPort: () async => _sinkPort,
+    );
+    await proxy.hold(41080);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          settingsServiceProvider.overrideWithValue(settings),
+          activeSessionsProvider.overrideWith(_NoSessions.new),
+          socksBrowserProxyServiceProvider.overrideWithValue(proxy),
+        ],
+        child: MaterialApp(
+          home: PortForwardBrowserScreen(
+            initialTabs: [
+              PortForwardBrowserInitialTab(
+                uri: Uri.parse('http://localhost:8080'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await settle(tester);
+
+    expect(find.text('browser proxy stuck'), findsOneWidget);
+    expect(
+      find.textContaining('Close the SOCKS browser first.'),
+      findsOneWidget,
+    );
+    expect(platform.controllers, isEmpty);
   });
 
   testWidgets('a loopback browser will not load past a stuck proxy', (
