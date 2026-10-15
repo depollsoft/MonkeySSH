@@ -119,6 +119,14 @@ void main() {
       sendSnippetKey(target.terminal, parseSnippetKeyChord('enter')!);
       expect(target.enterFlags, [true]);
     });
+
+    test('marks legacy Ctrl+M and Ctrl+J as Enter keystrokes', () {
+      for (final token in ['ctrl+m', 'ctrl+j']) {
+        final target = _terminal();
+        sendSnippetKey(target.terminal, parseSnippetKeyChord(token)!);
+        expect(target.enterFlags, [true], reason: token);
+      }
+    });
   });
 
   group('snippetKeySequenceReviewMode', () {
@@ -203,6 +211,35 @@ void main() {
         'idle',
         'wait 20',
       ]);
+    });
+
+    test('holds a legacy Ctrl+M or Ctrl+J behind text, like Enter', () async {
+      for (final (token, key) in [
+        ('enter', '\r'),
+        ('ctrl+m', '\r'),
+        ('ctrl+j', '\n'),
+      ]) {
+        final wire = <String>[];
+        final pacer = TerminalEnterPacer(write: wire.add);
+        final terminal = Terminal()
+          ..onOutput = (data) =>
+              pacer.add(data, enter: isWritingTerminalEnterKey);
+        await sendSnippetKeySequence(
+          terminal,
+          parseSnippetKeySequence('long prompt text{key:$token}'),
+          canContinue: () => true,
+          outputIdle: () => pacer.idle,
+          wait: (_) async {},
+        );
+
+        // A prompt TUI would read a key in the same read as the text as a
+        // line break inside a paste, so the key waits for the pacer's gap.
+        expect(wire, ['long prompt text'], reason: token);
+        expect(pacer.idle, isNotNull, reason: token);
+        await pacer.idle;
+        expect(wire, ['long prompt text', key], reason: token);
+        pacer.dispose();
+      }
     });
 
     test('keeps text after a typed line break in a later step', () async {

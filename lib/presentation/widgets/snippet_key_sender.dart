@@ -191,7 +191,8 @@ String _forwardingOutput(Terminal terminal, void Function() send) {
 /// Sends one key chord from a snippet to [terminal]. Returns whether
 /// anything was sent.
 ///
-/// Enter goes through [sendTerminalEnterInput], like the toolbar's Enter.
+/// Enter goes through [sendTerminalEnterInput], like the toolbar's Enter,
+/// and legacy Ctrl+M and Ctrl+J are marked as Enter keystrokes too.
 /// When the program has turned on kitty keyboard flags
 /// ([terminalUsesKittyKeyEncoding]) keys go through [Terminal.keyInput],
 /// which encodes them as CSI u. Kitty leaves printable keys without Ctrl or
@@ -232,7 +233,14 @@ bool sendSnippetKey(Terminal terminal, SnippetKeyChord chord) {
     return true;
   }
   if (character != null) {
-    terminal.textInput(legacySnippetCharacterInput(chord, character));
+    final text = legacySnippetCharacterInput(chord, character);
+    if (chord.submitsLine) {
+      // Ctrl+M and Ctrl+J send CR and LF, what Enter sends, so the Enter
+      // pacer must hold them behind the text before them the same way.
+      writeTerminalEnterKey(() => terminal.textInput(text));
+    } else {
+      terminal.textInput(text);
+    }
     return true;
   }
 
