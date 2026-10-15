@@ -11055,9 +11055,13 @@ void main() {
             expect(worktrees.created, isEmpty);
             expect(attach, contains('/work/project'));
             expect(attach, isNot(contains('.worktrees')));
+            // Attach only: if the session ended after the probe, creating
+            // it would start the agent in the shared checkout.
+            expect(attach, contains('--existing'));
           } else {
             expect(worktrees.created, hasLength(1));
             expect(attach, contains('/work/project.worktrees/agent'));
+            expect(attach, isNot(contains('--existing')));
           }
           // An attach that never ran leaves no worktree, even though the
           // session lists a window there.
@@ -11143,7 +11147,8 @@ void main() {
             ),
           );
           expect(worktrees.created, hasLength(1));
-          expect(written, contains("tmux new-session -A -s 'agents'"));
+          // A line kill first drops anything typed during the setup.
+          expect(written, contains("\x15tmux new-session -A -s 'agents'"));
           expect(written, contains("-c '/work/project.worktrees/agent'"));
           if (agentStays) {
             expect(worktrees.removed, isEmpty);
@@ -11213,7 +11218,10 @@ void main() {
           shellWrites.expand((chunk) => chunk).toList(growable: false),
         );
         expect(worktrees.created, isEmpty);
-        expect(written, contains("-c '/work/project'"));
+        // Attach only: if the session ended after the probe, creating it
+        // would start the agent in the shared checkout.
+        expect(written, contains("\x15tmux attach-session -t '=agents'"));
+        expect(written, isNot(contains('new-session')));
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(seconds: 2));
       },

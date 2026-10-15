@@ -6592,6 +6592,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = preset.tmuxSessionName?.trim() ?? '';
     final worktreeService = ref.read(agentWorktreeServiceProvider);
     final worktreeShell = SshAgentWorktreeShell(session);
+    // The shell sits at a live prompt for the seconds the probe and the
+    // worktree take, so a line kill first drops anything typed meanwhile
+    // instead of running it joined to the command.
+    void writeCommand(String command) => shell.write(
+      utf8.encode('\x15${formatAutoConnectCommandForShell(command)}'),
+    );
     Future<List<String>?> panes() =>
         worktreeService.tmuxSessionDirectories(worktreeShell, sessionName);
     var probeFailed = false;
@@ -6611,17 +6617,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               }
             },
     );
-    if (launch == null) {
-      // Without an answer no worktree is made, but the terminal still
-      // reattaches to the session, as a preset without a worktree would.
-      if (probeFailed && mounted && identical(_shell, shell)) {
-        shell.write(
-          utf8.encode(
-            formatAutoConnectCommandForShell(
-              buildAgentWorktreeTmuxReattachCommand(sessionName),
-            ),
-          ),
-        );
+    if (launch == null || launch.attachOnly) {
+      // A running session keeps its windows, so the terminal only reattaches:
+      // `new-session -A` would start the agent in the shared checkout if the
+      // session ended meanwhile. Without an answer no worktree is made, but
+      // the terminal still reattaches, as a preset without one would.
+      if ((launch != null || probeFailed) &&
+          mounted &&
+          identical(_shell, shell)) {
+        writeCommand(buildAgentWorktreeTmuxReattachCommand(sessionName));
       }
       return;
     }
@@ -6653,7 +6657,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
       if (!mounted || !identical(_shell, shell)) return;
-      shell.write(utf8.encode(formatAutoConnectCommandForShell(command)));
+      writeCommand(command);
       launched = true;
       var seenRunning = false;
       launch.launched(
@@ -7514,6 +7518,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         session,
         host,
         worktreeLaunch.preset,
+        existingOnly: worktreeLaunch.attachOnly,
       );
     } finally {
       if (command == null) {
@@ -7556,11 +7561,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  /// [existingOnly] makes the attach fail rather than create the session.
   Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommandIn(
     SshSession session,
     Host host,
-    AgentLaunchPreset preset,
-  ) async {
+    AgentLaunchPreset preset, {
+    bool existingOnly = false,
+  }) async {
     final sessionName = preset.tmuxSessionName?.trim();
     if (sessionName == null || sessionName.isEmpty) {
       return null;
@@ -7638,6 +7645,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         terminalCapabilityReports: buildTerminalCapabilityHintReports(),
         serverUpdatePolicy: updatePolicy,
         startInYoloMode: _startClisInYoloMode,
+        existingOnly: existingOnly,
         windows: installation.isWindows,
       );
     } on MonkeyMuxInstallDeclinedException {

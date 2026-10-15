@@ -99,6 +99,7 @@ void main() {
 
     expect(launch?.preset, same(plain));
     expect(launch?.worktree, isNull);
+    expect(launch?.attachOnly, isFalse);
     expect(service.created, isEmpty);
   });
 
@@ -109,6 +110,9 @@ void main() {
 
       expect(launch?.preset, same(_preset));
       expect(launch?.worktree, isNull);
+      // If the session ends before the command runs, it must not be
+      // created again in the shared checkout.
+      expect(launch?.attachOnly, isTrue);
       expect(service.created, isEmpty);
     },
   );
@@ -119,6 +123,7 @@ void main() {
     final launch = await prepare(tester, sessionExists: () async => false);
 
     expect(launch!.preset.workingDirectory, '/srv/app.worktrees/agent/pkg');
+    expect(launch.attachOnly, isFalse);
     expect(launch.preset.launchesInNewWorktree, isFalse);
     expect(launch.preset.tmuxSessionName, 'agents');
     expect(service.created, hasLength(1));

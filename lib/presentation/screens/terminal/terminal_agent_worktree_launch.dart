@@ -23,7 +23,11 @@ import '../../../domain/services/ssh_service.dart';
 /// A preset launch, with the worktree created for it when it needed one.
 final class TerminalAgentWorktreeLaunch {
   /// Creates a launch.
-  const TerminalAgentWorktreeLaunch({required this.preset, this.worktree});
+  const TerminalAgentWorktreeLaunch({
+    required this.preset,
+    this.worktree,
+    this.attachOnly = false,
+  });
 
   /// Preset to build the launch command from; its working directory is the
   /// new worktree when one was created.
@@ -31,6 +35,14 @@ final class TerminalAgentWorktreeLaunch {
 
   /// Worktree created for this launch, if any.
   final AgentWorktreeLaunch? worktree;
+
+  /// Whether the launch must only attach to the running session it found.
+  ///
+  /// Set for a worktree preset whose session was already running, so no
+  /// worktree was made. If that session ends before the command runs, a
+  /// command that could create it would start the agent in the shared
+  /// checkout; an attach-only command fails instead.
+  final bool attachOnly;
 
   /// Rolls the worktree back because the launch command never reached the
   /// host. Safe to call after the terminal has gone away.
@@ -50,10 +62,11 @@ final class TerminalAgentWorktreeLaunch {
 ///
 /// [sessionExists] reports whether that session is already running.
 /// Attaching to a running session does not start the agent again, so no
-/// worktree is created then; the session keeps the windows (and worktrees)
-/// it already has, which is also how a MonkeyMux update restore returns to a
-/// recorded worktree without recreating it. When [sessionExists] cannot
-/// answer, the launch stops rather than guess.
+/// worktree is created then and the launch is [TerminalAgentWorktreeLaunch.attachOnly];
+/// the session keeps the windows (and worktrees) it already has, which is
+/// also how a MonkeyMux update restore returns to a recorded worktree without
+/// recreating it. When [sessionExists] cannot answer, the launch stops rather
+/// than guess.
 ///
 /// Returns null when the launch must not go ahead; the user has been told
 /// why. Starting the agent in the shared checkout instead would silently
@@ -108,7 +121,7 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
         'skipped_running_session',
         fields: {'connectionId': session.connectionId},
       );
-      return TerminalAgentWorktreeLaunch(preset: preset);
+      return TerminalAgentWorktreeLaunch(preset: preset, attachOnly: true);
     }
   }
   try {
@@ -131,7 +144,7 @@ Future<TerminalAgentWorktreeLaunch?> prepareTerminalAgentWorktreeLaunch({
 }
 
 /// Command that reattaches to tmux session [sessionName] without starting
-/// anything, used when the session probe cannot answer.
+/// anything, used when the session probe found it running or cannot answer.
 String buildAgentWorktreeTmuxReattachCommand(String sessionName) =>
     'tmux attach-session -t ${shellEscapePosix('=$sessionName')}';
 
