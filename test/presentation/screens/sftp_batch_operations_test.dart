@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
@@ -320,6 +321,29 @@ void main() {
         );
         expect(path.windows.dirname(result), directory, reason: name);
       }
+    });
+
+    test('a name taken after the check is never replaced', () {
+      final directory = Directory.systemTemp.createTempSync('sftp-export-');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      File(path.join(directory.path, 'a.txt')).writeAsStringSync('mine');
+
+      // A stale check reports the name free, as when another program
+      // writes it between the check and the copy.
+      final first = reserveLocalExportPath(
+        directory.path,
+        'a.txt',
+        exists: (_) => false,
+      );
+      final second = reserveLocalExportPath(directory.path, 'a.txt');
+
+      expect(path.basename(first), 'a (2).txt');
+      expect(path.basename(second), 'a (3).txt');
+      expect(
+        File(path.join(directory.path, 'a.txt')).readAsStringSync(),
+        'mine',
+      );
+      expect(File(first).lengthSync(), 0);
     });
 
     test('export paths never reuse a taken name', () {

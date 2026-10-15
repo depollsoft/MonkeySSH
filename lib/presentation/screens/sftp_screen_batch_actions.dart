@@ -237,11 +237,16 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     final files = List<RemoteFileSelection>.of(_selectedFiles);
     if (sftp == null || files.isEmpty || _batchRunning) return;
     final noun = files.length == 1 ? 'file' : 'files';
+    final folders = files.map((file) => parentSftpPath(file.remotePath));
+    final folderCount = folders.toSet().length;
     final confirmed = await showDeleteConfirmationDialog(
       context,
       title: 'Delete ${files.length} $noun',
       message: files.length == 1
           ? 'Delete "${files.single.displayName}"? This cannot be undone.'
+          : folderCount > 1
+          ? 'Delete ${files.length} selected files from $folderCount folders? '
+                'This cannot be undone.'
           : 'Delete ${files.length} selected files? This cannot be undone.',
     );
     if (!confirmed || !mounted) return;
@@ -338,18 +343,6 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     final sftp = _sftp;
     final files = List<RemoteFileSelection>.of(_selectedFiles);
     if (sftp == null || files.isEmpty || _batchRunning) return;
-    if (files.length == 1) {
-      final file = files.single;
-      await _downloadFile(
-        SftpName(
-          filename: file.displayName,
-          longname: file.displayName,
-          attr: SftpFileAttrs(size: file.sizeBytes),
-        ),
-        target: (sftp: sftp, remotePath: file.remotePath),
-      );
-      return;
-    }
 
     final telemetryService = ref.read(telemetryServiceProvider);
     final remoteFileService = ref.read(remoteFileServiceProvider);
@@ -374,7 +367,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     _beginBatch(progress);
     Directory? staging;
     var keepStaging = false;
-    final downloaded = <File>[];
+    final downloaded = <(File, String)>[];
     try {
       final SftpBatchReport report;
       try {
@@ -406,7 +399,7 @@ extension _SftpScreenBatchActions on _SftpScreenState {
             } finally {
               removeCancel();
             }
-            downloaded.add(local);
+            downloaded.add((local, file.displayName));
           },
         );
       } finally {
@@ -429,7 +422,15 @@ extension _SftpScreenBatchActions on _SftpScreenState {
         _reportBatch(report, title: 'Download results', pastVerb: 'Downloaded');
         return;
       }
-      final exported = await _exportLocalFiles(downloaded);
+      // One file gets the same save dialog or share sheet as a download
+      // from the file's own menu.
+      final exported = downloaded.length == 1
+          ? await _exportLocalFile(
+              context,
+              file: downloaded.single.$1,
+              fileName: downloaded.single.$2,
+            )
+          : await _exportLocalFiles([for (final (file, _) in downloaded) file]);
       keepStaging = exported == _LocalFileExport.shared;
       if (exported == _LocalFileExport.cancelled) return;
       if (report.allDone) {
@@ -442,7 +443,14 @@ extension _SftpScreenBatchActions on _SftpScreenState {
           ),
         );
       }
-      _reportBatch(report, title: 'Download results', pastVerb: 'Downloaded');
+      _reportBatch(
+        report,
+        title: 'Download results',
+        pastVerb: 'Downloaded',
+        message: files.length == 1 && report.allDone
+            ? 'Downloaded "${files.single.displayName}"'
+            : null,
+      );
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) rethrow;
       _showSftpFailureSnackBar(
@@ -494,7 +502,21 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     );
     if (directory == null) return _LocalFileExport.cancelled;
     for (final file in files) {
-      await file.copy(freeLocalExportPath(directory, path.basename(file.path)));
+      final target = reserveLocalExportPath(
+        directory,
+        path.basename(file.path),
+      );
+      try {
+        await file.copy(target);
+      } on Object {
+        // Leave no empty or partial file behind under the reserved name.
+        try {
+          await File(target).delete();
+        } on FileSystemException {
+          // Already gone.
+        }
+        rethrow;
+      }
     }
     return _LocalFileExport.saved;
   }
@@ -528,16 +550,19 @@ extension _SftpScreenBatchActions on _SftpScreenState {
       cancellable: false,
       indeterminate: true,
     )..start(0, file.filename);
+    // The user may open another folder while the archive extracts.
+    final directory = _currentPath;
     _beginBatch(progress);
     try {
       final result = await extractor.extractHere(
         sftp: sftp,
-        archivePath: joinRemotePath(_currentPath, file.filename),
+        archivePath: joinRemotePath(directory, file.filename),
         kind: kind,
       );
       if (!mounted) return;
-      await _loadDirectory(_currentPath);
-      _highlightFile(_currentPath, result.name);
+      if (_currentPath == directory) await _loadDirectory(directory);
+      if (!mounted) return;
+      _highlightFile(directory, result.name);
       _showMessage(
         result.isDirectory
             ? 'Extracted into "${result.name}"'

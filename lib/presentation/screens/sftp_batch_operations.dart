@@ -364,6 +364,37 @@ String freeLocalExportPath(
   }
 }
 
+/// A path from [freeLocalExportPath] that this call has created, empty, with
+/// an exclusive create. A file that appears between the check and the copy
+/// is therefore never replaced; the copy writes over the reservation instead.
+/// [exists] can be replaced in tests.
+String reserveLocalExportPath(
+  String directory,
+  String remoteName, {
+  bool Function(String path)? exists,
+}) {
+  final raced = <String>{};
+  bool isTaken(String candidate) =>
+      raced.contains(candidate) ||
+      (exists ??
+          (path) =>
+              FileSystemEntity.typeSync(path, followLinks: false) !=
+              FileSystemEntityType.notFound)(candidate);
+  for (;;) {
+    final candidate = freeLocalExportPath(
+      directory,
+      remoteName,
+      exists: isTaken,
+    );
+    try {
+      File(candidate).createSync(exclusive: true);
+      return candidate;
+    } on PathExistsException {
+      raced.add(candidate);
+    }
+  }
+}
+
 /// Shows per-file results for a batch.
 Future<void> showSftpBatchResults(
   BuildContext context, {

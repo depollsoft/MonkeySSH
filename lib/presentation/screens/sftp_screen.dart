@@ -1660,6 +1660,15 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       case SftpFileTapIntent.previewVideo:
         unawaited(_previewVideoFile(file));
       case SftpFileTapIntent.edit:
+        // Saving could collide with the running batch, as in the options
+        // sheet, where Edit waits too.
+        if (_batchProgress case final progress?) {
+          _showMessage(
+            'Files open for editing once ${progress.verb.toLowerCase()} '
+            'finishes.',
+          );
+          return;
+        }
         unawaited(_editTextFile(file));
     }
   }

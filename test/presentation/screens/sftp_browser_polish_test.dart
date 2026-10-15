@@ -1241,4 +1241,179 @@ void main() {
     ]);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('one selected file downloads under the batch lock', (
+    tester,
+  ) async {
+    final temp = Directory.systemTemp.createTempSync('sftp-one-test-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    const channel = MethodChannel('plugins.flutter.io/path_provider');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (_) async => temp.path,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final picker = _Picker();
+    _usePicker(picker);
+    final sftp = _HostSftp(files: {'$_home/a.txt': 1, '$_home/b.txt': 2});
+    final transfers = _TransferService()..downloadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await _selectFiles(tester, ['a.txt']);
+    await tester.runAsync(() async {
+      await tester.tap(_barAction('Download'));
+      for (var i = 0; i < 200; i++) {
+        await tester.pump();
+        if (find.text('downloading').evaluate().isNotEmpty) break;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    // A second tap cannot start another transfer, nor Move or Delete run
+    // while it lasts.
+    expect(find.text('downloading'), findsOneWidget);
+    expect(_barAction('Download'), findsNothing);
+    expect(_barAction('Delete'), findsNothing);
+
+    await tester.runAsync(() async {
+      transfers.downloadGate!.complete();
+      for (var i = 0; i < 200 && picker.savedNames.isEmpty; i++) {
+        await tester.pump();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(picker.savedNames, ['a.txt']);
+    expect(find.text('Downloaded "a.txt"'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('deleting from several folders says so', (tester) async {
+    final sftp = _HostSftp(
+      files: {'$_home/a.txt': 1, '$_home/docs/b.txt': 2},
+      directories: {'$_home/docs'},
+    );
+    await _pumpBrowser(tester, _container(sftp, store: _MemoryViewStore()));
+
+    await _selectFiles(tester, ['a.txt']);
+    await tester.tap(find.text('docs'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('b.txt'));
+    await tester.pump();
+    await tester.tap(_barAction('Delete'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Delete 2 selected files from 2 folders? This cannot be undone.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(sftp.removed, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('tapping a text file waits for a running batch', (tester) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(name: 'up.txt', bytes: Uint8List.fromList([1, 2])),
+        ],
+    );
+    final sftp = _HostSftp(files: {'$_home/notes.txt': 1});
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('notes.txt'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Files open for editing once uploading finishes.'),
+      findsOneWidget,
+    );
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('an extraction marks its result only in the archive folder', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/site.zip': 10},
+      directories: {'$_home/docs', '$_home/docs/site'},
+    );
+    final extracting = Completer<void>();
+    Future<RemoteCommandResult> runner(
+      String script, {
+      required Duration timeout,
+      required int maxOutputBytes,
+    }) async {
+      final marker = RegExp("m='([^']+)'").firstMatch(script)!.group(1);
+      final scratch = RegExp(r'\.monkeyssh-extract-[0-9a-f]+')
+          .firstMatch(script)!
+          .group(0);
+      RemoteCommandResult finish(String output) =>
+          RemoteCommandResult(exitCode: 0, stdout: '$output\n$marker 0\n');
+      if (script.contains('command -v')) return finish('4242');
+      if (script.contains('unzip -Z1')) {
+        return finish('site/\nsite/index.html');
+      }
+      if (script.contains('unzip -Z ')) {
+        return finish(
+          'drwxr-xr-x  3.0 unx        0 bx stor 26-Oct-01 12:00 site/\n'
+          '-rw-r--r--  3.0 unx       10 tx defN 26-Oct-01 12:00 '
+          'site/index.html',
+        );
+      }
+      if (script.contains('unzip -qq')) {
+        await extracting.future;
+        sftp.directories.addAll({
+          '$_home/$scratch/out',
+          '$_home/$scratch/out/site',
+        });
+      }
+      return finish('');
+    }
+
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), runner: runner),
+    );
+    await tester.longPress(find.text('site.zip'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Extract here'));
+    // The extraction's bar animates until it ends, so frames are pumped by
+    // hand while it runs.
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // While it runs, open a folder holding the same name and filter it out.
+    await tester.tap(find.text('docs'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.enterText(
+      find.byKey(const ValueKey('sftpFilterField')),
+      'zzz',
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    extracting.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Extracted into "site"'), findsOneWidget);
+    expect(find.text('site'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
