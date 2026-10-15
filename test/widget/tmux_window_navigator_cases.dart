@@ -13,6 +13,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
+import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
@@ -836,6 +837,7 @@ void registerTmuxWindowNavigatorTests() {
         ValueChanged<TmuxNavigatorAction?>? onActionSelected,
         FakeAcpSessionManager? acpManager,
         bool fromKeyboardShortcut = false,
+        AcpSessionKey? activeNativeAcpSessionKey,
       }) async {
         final resolvedAcpManager = acpManager ?? FakeAcpSessionManager();
         addTearDown(resolvedAcpManager.dispose);
@@ -871,6 +873,7 @@ void registerTmuxWindowNavigatorTests() {
                         remoteMultiplexerService: tmuxService,
                         isProUser: isProUser,
                         startClisInYoloMode: startClisInYoloMode,
+                        activeNativeAcpSessionKey: activeNativeAcpSessionKey,
                       );
                       unawaited(
                         (fromKeyboardShortcut
@@ -1355,6 +1358,39 @@ void registerTmuxWindowNavigatorTests() {
 
           expect(selected, isA<TmuxSwitchWindowAction>());
           expect((selected! as TmuxSwitchWindowAction).windowIndex, 1);
+        });
+
+        testWidgets('focuses the native session on screen', (tester) async {
+          final key = fakeAcpKey(
+            hostId: session.hostId,
+            bridgeId: 'orphan-bridge',
+            acpSessionId: 'orphan-session',
+          );
+          final manager = FakeAcpSessionManager(
+            sessions: [fakeAcpSession(key: key, title: 'Orphan chat')],
+          );
+          when(() => tmuxService.listWindows(session, 'main'))
+              .thenAnswer((_) async => windows);
+          TmuxNavigatorAction? selected;
+          await pumpNavigatorHost(
+            tester,
+            tmuxSessionName: 'main',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+            acpManager: manager,
+            fromKeyboardShortcut: true,
+            activeNativeAcpSessionKey: key,
+            onActionSelected: (action) => selected = action,
+          );
+          await tester.tap(find.text('Open'));
+          await tester.pumpAndSettle();
+
+          expect(focusShows('Orphan chat'), isTrue);
+          expect(focusShows('vim'), isFalse);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pumpAndSettle();
+
+          expect(selected, isA<TmuxOpenAcpSessionAction>());
+          expect((selected! as TmuxOpenAcpSessionAction).key, key);
         });
 
         testWidgets('Esc closes the sheet', (tester) async {

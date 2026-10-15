@@ -316,8 +316,10 @@ AgentLaunchTool? agentLaunchToolForAcpProviderId(String providerId) =>
 /// Shows the tmux window navigator bottom sheet.
 ///
 /// Returns the action the user selected, or `null` if dismissed. Opened from
-/// a keyboard shortcut, the sheet takes focus on the active window's row so
-/// arrows, Return and Esc drive it.
+/// a keyboard shortcut, the sheet takes focus on the row of what is on
+/// screen, so arrows, Return and Esc drive it: the native session
+/// [activeNativeAcpSessionKey] when one fills the viewport, otherwise the
+/// active window.
 Future<TmuxNavigatorAction?> showTmuxNavigator({
   required BuildContext context,
   required SshSession session,
@@ -330,6 +332,7 @@ Future<TmuxNavigatorAction?> showTmuxNavigator({
       AgentWindowModePreference.askEveryTime,
   String? tmuxExtraFlags,
   String? scopeWorkingDirectory,
+  AcpSessionKey? activeNativeAcpSessionKey,
 }) {
   final focusActiveWindow = hardwareKeyboardOverlaysTakeFocus;
   return showModalBottomSheet<TmuxNavigatorAction>(
@@ -348,6 +351,7 @@ Future<TmuxNavigatorAction?> showTmuxNavigator({
         agentWindowModePreference: agentWindowModePreference,
         scopeWorkingDirectory: scopeWorkingDirectory,
         focusActiveWindow: focusActiveWindow,
+        activeNativeAcpSessionKey: activeNativeAcpSessionKey,
       ),
     ),
   );
@@ -886,6 +890,7 @@ class _TmuxNavigatorSheet extends ConsumerStatefulWidget {
     this.tmuxExtraFlags,
     this.scopeWorkingDirectory,
     this.focusActiveWindow = false,
+    this.activeNativeAcpSessionKey,
   });
 
   final SshSession session;
@@ -898,8 +903,11 @@ class _TmuxNavigatorSheet extends ConsumerStatefulWidget {
   final AgentWindowModePreference agentWindowModePreference;
   final String? scopeWorkingDirectory;
 
-  /// Opened from a keyboard shortcut: focus the active window's row.
+  /// Opened from a keyboard shortcut: focus the row of what is on screen.
   final bool focusActiveWindow;
+
+  /// The native session that fills the viewport, if any.
+  final AcpSessionKey? activeNativeAcpSessionKey;
 
   @override
   ConsumerState<_TmuxNavigatorSheet> createState() =>
@@ -1341,6 +1349,9 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
 
   Widget _buildNativeAcpSessionTile(AcpSessionState session) => MuxWindowRow(
     key: ValueKey(('native-session', session.key)),
+    autofocus:
+        widget.focusActiveWindow &&
+        session.key == widget.activeNativeAcpSessionKey,
     presentation: MuxWindowPresentation.session(
       session,
       index: _projection.nativeIndices[session.key]!,
@@ -1395,6 +1406,15 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
     ),
   );
 
+  /// Whether [window] is what the viewport shows: the native session on
+  /// screen when there is one, otherwise the server's active window.
+  bool _showsOnScreen(TmuxWindow window) {
+    final nativeKey = widget.activeNativeAcpSessionKey;
+    return nativeKey == null
+        ? window.isActive
+        : window.isNativeAcp && window.nativeAcpBridgeId == nativeKey.bridgeId;
+  }
+
   Widget _buildWindowTile(TmuxWindow window) {
     final isActive = window.isActive;
     final nativeSession = _projection.sessionForWindow(window);
@@ -1407,7 +1427,7 @@ class _TmuxNavigatorSheetState extends ConsumerState<_TmuxNavigatorSheet> {
     return MuxWindowRow(
       key: ValueKey(('server-window', window.index)),
       presentation: presentation,
-      autofocus: widget.focusActiveWindow && isActive,
+      autofocus: widget.focusActiveWindow && _showsOnScreen(window),
       onClose: () => unawaited(
         _confirmCloseWindow(window, displayTitle: presentation.title),
       ),

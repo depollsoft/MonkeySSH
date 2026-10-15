@@ -8986,6 +8986,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           tmuxWorkingDirectory: _tmuxWorkingDirectory,
           sessionWorkingDirectory: session.workingDirectory,
         ),
+        activeNativeAcpSessionKey: _activeNativeAcpSessionKey,
       );
 
       if (!mounted || action == null) return;
