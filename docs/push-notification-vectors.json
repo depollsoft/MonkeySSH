@@ -60,5 +60,107 @@
         "ticket": "v1.k1.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy41"
       }
     ]
+  },
+  "text": {
+    "description": "Notification text the app (lib/domain/services/push/push_notification_text.dart) and the iOS notification service extension must both produce. genericBodies is the text for each kind that names nothing, which the push function also sends. A null field is absent from the payload or unknown to the phone.",
+    "genericBodies": {
+      "permission": "An agent is waiting for your approval.",
+      "input": "An agent is waiting for your answer.",
+      "finished": "An agent finished its turn.",
+      "alert": "A terminal window wants your attention.",
+      "test": "Push notifications are working."
+    },
+    "cases": [
+      {
+        "kind": "finished",
+        "agent": "claude",
+        "windowTitle": "Fix login bug",
+        "hostLabel": "build-box",
+        "session": "build-box",
+        "title": "Claude Code finished",
+        "body": "Fix login bug · build-box"
+      },
+      {
+        "kind": "permission",
+        "agent": "cursor-agent",
+        "windowTitle": null,
+        "hostLabel": "build-box",
+        "session": "main",
+        "title": "Cursor Agent needs approval",
+        "body": "build-box · main"
+      },
+      {
+        "kind": "input",
+        "agent": "something-new",
+        "windowTitle": null,
+        "hostLabel": null,
+        "session": "main",
+        "title": "Input needed",
+        "body": "An agent is waiting for your answer."
+      },
+      {
+        "kind": "alert",
+        "agent": null,
+        "windowTitle": "deploy",
+        "hostLabel": null,
+        "session": "main",
+        "title": "Terminal alert",
+        "body": "deploy"
+      },
+      {
+        "kind": "test",
+        "agent": "claude",
+        "windowTitle": "deploy",
+        "hostLabel": "build-box",
+        "session": "main",
+        "title": "MonkeySSH",
+        "body": "Push notifications are working."
+      },
+      {
+        "kind": "finished",
+        "agent": "pi",
+        "windowTitle": "build-box",
+        "hostLabel": "build-box",
+        "session": null,
+        "title": "Pi finished",
+        "body": "build-box"
+      },
+      {
+        "kind": "finished",
+        "agent": null,
+        "windowTitle": "Fix login bug",
+        "hostLabel": "build-box",
+        "session": "main",
+        "title": "Agent finished",
+        "body": "Fix login bug · build-box · main"
+      },
+      {
+        "kind": "finished",
+        "agent": null,
+        "windowTitle": null,
+        "hostLabel": " build-box ",
+        "session": " main ",
+        "title": "Agent finished",
+        "body": "build-box · main"
+      },
+      {
+        "kind": "finished",
+        "agent": null,
+        "windowTitle": null,
+        "hostLabel": "﻿",
+        "session": "main",
+        "title": "Agent finished",
+        "body": "An agent finished its turn."
+      },
+      {
+        "kind": "finished",
+        "agent": null,
+        "windowTitle": null,
+        "hostLabel": "café",
+        "session": "café",
+        "title": "Agent finished",
+        "body": "café · café"
+      }
+    ]
   }
 }

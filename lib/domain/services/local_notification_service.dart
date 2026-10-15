@@ -7,6 +7,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/tmux_state.dart';
+import 'diagnostics_log_service.dart';
+import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
 
 /// Local notification channel used for tmux activity alerts.
@@ -705,10 +707,14 @@ class LocalNotificationService {
       StreamController<TerminalNotificationPayload>.broadcast();
   final StreamController<AcpNotificationPayload> _acpNotificationTapController =
       StreamController<AcpNotificationPayload>.broadcast();
+  final StreamController<String> _pushNotificationTapController =
+      StreamController<String>.broadcast();
   Future<bool>? _initializeFuture;
   TmuxAlertNotificationPayload? _launchTmuxAlert;
   TerminalNotificationPayload? _launchTerminalNotification;
   AcpNotificationPayload? _launchAcpNotification;
+  String? _launchPushPayload;
+  bool _didConsumeLaunchPushPayload = false;
   bool _didConsumeLaunchTmuxAlert = false;
   bool _didConsumeLaunchTerminalNotification = false;
   bool _didConsumeLaunchAcpNotification = false;
@@ -725,6 +731,35 @@ class LocalNotificationService {
   Stream<AcpNotificationPayload> get acpNotificationTaps =>
       _acpNotificationTapController.stream;
 
+  /// Emits the encrypted payload whenever the user taps a push notification
+  /// the app posted itself (Android shows data-only pushes locally).
+  Stream<String> get pushNotificationTaps =>
+      _pushNotificationTapController.stream;
+
+  /// Returns the encrypted payload of the push notification that launched the
+  /// app, if one has not been consumed.
+  Future<String?> consumeLaunchPushPayload() async {
+    final didInitialize = await initialize();
+    if (!didInitialize || _didConsumeLaunchPushPayload) return null;
+    _didConsumeLaunchPushPayload = true;
+    return _launchPushPayload;
+  }
+
+  /// The encrypted payload of the push notification whose tap started the
+  /// current Android activity. MainActivity keeps its engine, so when the
+  /// activity was destroyed while the process lived on (swiped from Recents
+  /// during a session), a tap starts a new activity on the running engine;
+  /// the plugin hands that tap over only through the activity's intent,
+  /// which [consumeLaunchPushPayload] read once at startup. Callers drop a
+  /// payload they already opened.
+  Future<String?> currentActivityPushPayload() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return null;
+    if (!await initialize()) return null;
+    final details = await _plugin.getNotificationAppLaunchDetails();
+    if (!(details?.didNotificationLaunchApp ?? false)) return null;
+    return decodePushTapPayload(details?.notificationResponse?.payload);
+  }
+
   /// Ensures the underlying notification plugin is initialized.
   Future<bool> initialize() => _initializeFuture ??= _initializeInternal();
 
@@ -733,6 +768,7 @@ class LocalNotificationService {
     unawaited(_tmuxAlertTapController.close());
     unawaited(_terminalNotificationTapController.close());
     unawaited(_acpNotificationTapController.close());
+    unawaited(_pushNotificationTapController.close());
   }
 
   /// Returns the tmux alert that launched the app, if one has not been consumed.
@@ -979,6 +1015,7 @@ class LocalNotificationService {
         launchPayload,
       );
       _launchAcpNotification = AcpNotificationPayload.decode(launchPayload);
+      _launchPushPayload = decodePushTapPayload(launchPayload);
 
       await _plugin.initialize(
         settings: initializationSettings,
@@ -1043,10 +1080,25 @@ class LocalNotificationService {
       return true;
     } on MissingPluginException {
       return false;
+    } on PlatformException catch (error) {
+      // Operations are serialized per notification ID only, so another ID can
+      // request while the prompt is open. Android rejects that request with
+      // `permissionRequestInProgress`; permission is not granted yet.
+      DiagnosticsLogService.instance.warning(
+        'notifications',
+        'permission_request_failed',
+        fields: {'code': error.code},
+      );
+      return false;
     }
   }
 
   void _handleNotificationResponse(NotificationResponse response) {
+    final pushPayload = decodePushTapPayload(response.payload);
+    if (pushPayload != null) {
+      _pushNotificationTapController.add(pushPayload);
+      return;
+    }
     final tmuxPayload = TmuxAlertNotificationPayload.decode(response.payload);
     if (tmuxPayload != null) {
       _tmuxAlertTapController.add(tmuxPayload);

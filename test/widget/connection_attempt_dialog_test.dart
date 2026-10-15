@@ -85,6 +85,11 @@ Host _host() => Host(
   sortOrder: 0,
   createdAt: DateTime(2024),
   updatedAt: DateTime(2024),
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 void main() {

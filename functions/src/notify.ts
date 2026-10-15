@@ -194,6 +194,7 @@ export async function handlePushNotify(
     collapse,
     payload,
     platform: contents.platform,
+    appNotifications: contents.appNotifications === true,
     nowSeconds: deps.nowSeconds(),
   });
   try {

@@ -5,6 +5,7 @@ import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../models/agent_launch_preset.dart';
 import '../models/host_cli_launch_preferences.dart';
+import '../models/host_notifications.dart';
 import '../models/remote_multiplexer.dart';
 import '../services/agent_launch_preset_service.dart';
 import '../services/host_cli_launch_preferences_service.dart';
@@ -40,6 +41,7 @@ class SaveHostInput {
     this.tmuxExtraFlags,
     this.remoteMuxBackend,
     this.portProxyName,
+    this.notificationPrefs = const HostNotificationPrefs(),
   });
 
   /// Display label.
@@ -110,6 +112,9 @@ class SaveHostInput {
 
   /// Whether this host is marked as a favourite.
   final bool isFavorite;
+
+  /// Which notifications this host may raise.
+  final HostNotificationPrefs notificationPrefs;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +229,11 @@ class SaveHostCommand {
           autoForwardPorts: input.autoForwardPorts,
           portProxyName: drift.Value(input.portProxyName),
           isFavorite: input.isFavorite,
+          notifyAgentAttention: input.notificationPrefs.agentAttention,
+          notifyAgentFinished: input.notificationPrefs.agentFinished,
+          notifyWindowAlerts: input.notificationPrefs.windowAlerts,
+          notifyShellNotifications: input.notificationPrefs.shellNotifications,
+          pushWhenClosed: input.notificationPrefs.pushWhenClosed,
         ),
       );
       savedHostId = existingHostId;
@@ -255,6 +265,17 @@ class SaveHostCommand {
           autoForwardPorts: drift.Value(input.autoForwardPorts),
           portProxyName: drift.Value(input.portProxyName),
           isFavorite: drift.Value(input.isFavorite),
+          notifyAgentAttention: drift.Value(
+            input.notificationPrefs.agentAttention,
+          ),
+          notifyAgentFinished: drift.Value(
+            input.notificationPrefs.agentFinished,
+          ),
+          notifyWindowAlerts: drift.Value(input.notificationPrefs.windowAlerts),
+          notifyShellNotifications: drift.Value(
+            input.notificationPrefs.shellNotifications,
+          ),
+          pushWhenClosed: drift.Value(input.notificationPrefs.pushWhenClosed),
         ),
       );
     }

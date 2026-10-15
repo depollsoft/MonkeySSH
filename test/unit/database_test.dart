@@ -869,6 +869,59 @@ void main() {
     );
 
     test(
+      'v11 moves the per-host push opt-outs from Settings onto the hosts',
+      () async {
+        final dbFile = await createTestDbFile('push-opt-outs-v10');
+        final db1 = AppDatabase.forTesting(NativeDatabase(dbFile));
+        for (final label in ['one', 'two', 'three']) {
+          await db1
+              .into(db1.hosts)
+              .insert(
+                HostsCompanion.insert(
+                  label: label,
+                  hostname: '$label.example',
+                  username: 'u',
+                ),
+              );
+        }
+        await db1
+            .into(db1.settings)
+            .insert(
+              SettingsCompanion.insert(
+                key: 'push_notifications_disabled_hosts',
+                value: '[2,3,99]',
+              ),
+            );
+        await db1.customStatement('PRAGMA user_version = 10');
+        await db1.close();
+
+        final db2 = AppDatabase.forTesting(NativeDatabase(dbFile));
+        addTearDown(() async => db2.close());
+        final hosts = await (db2.select(
+          db2.hosts,
+        )..orderBy([(h) => OrderingTerm.asc(h.id)])).get();
+        expect(hosts.map((host) => host.pushWhenClosed), [true, false, false]);
+        // Everything else stays on.
+        expect(
+          hosts.every(
+            (host) =>
+                host.notifyAgentAttention &&
+                host.notifyAgentFinished &&
+                host.notifyWindowAlerts &&
+                host.notifyShellNotifications,
+          ),
+          isTrue,
+        );
+        final leftover =
+            await (db2.select(db2.settings)..where(
+                  (row) => row.key.equals('push_notifications_disabled_hosts'),
+                ))
+                .get();
+        expect(leftover, isEmpty);
+      },
+    );
+
+    test(
       '_readColumnNames equivalent correctly reports existing columns',
       () async {
         // The migration guards rely on PRAGMA table_info to detect existing
