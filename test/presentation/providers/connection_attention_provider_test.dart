@@ -536,6 +536,46 @@ void main() {
       });
     });
 
+    test('a replacement connection does not inherit the backoff', () {
+      fakeAsync((async) {
+        final sessions = _Sessions([_session(connectionId: 10, hostId: 1)]);
+        final manager = FakeAcpSessionManager();
+        final calls = <int>[];
+        final container = _container(
+          sessions: sessions,
+          manager: manager,
+          lister: (session) async {
+            calls.add(session.connectionId);
+            if (session.connectionId == 10) throw StateError('channel closed');
+            return [_bridge(pending: 1)];
+          },
+        );
+        final subscription = container.listen(
+          connectionBridgeMetadataProvider,
+          (_, _) {},
+        );
+        async
+          ..flushMicrotasks()
+          // Failures at 0, 5, 15 and 35 s leave the old connection backing
+          // off for seven more intervals.
+          ..elapse(connectionAttentionPollInterval * 7);
+        expect(calls, [10, 10, 10, 10]);
+
+        sessions.replace([_session(connectionId: 11, hostId: 1)]);
+        async.elapse(connectionAttentionPollInterval);
+        expect(
+          calls.last,
+          11,
+          reason: 'The new connection is polled at the next interval.',
+        );
+        expect(_read(container).hosts[1]?.connectionId, 11);
+
+        subscription.close();
+        container.dispose();
+        unawaited(manager.dispose());
+      });
+    });
+
     test('a failure that lands after the host switched connection is '
         'ignored', () {
       fakeAsync((async) {

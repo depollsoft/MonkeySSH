@@ -186,8 +186,10 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
   AppLifecycleListener? _lifecycle;
   bool _backgrounded = false;
 
-  /// Connections with a list in flight. Keyed by connection, not host, so a
-  /// request stuck on a dropped connection never blocks its replacement.
+  /// Connections with a list in flight, and the failure backoff of each.
+  /// Keyed by connection, not host, so a request stuck on a dropped
+  /// connection never blocks its replacement, and a replacement starts
+  /// without the old connection's backoff.
   final _inFlight = <int>{};
   final _failures = <int, int>{};
   final _skipPolls = <int, int>{};
@@ -319,20 +321,22 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
     for (final hostId in state.hosts.keys) {
       if (!targets.containsKey(hostId)) next = next.withHost(hostId, null);
     }
-    _failures.removeWhere((hostId, _) => !targets.containsKey(hostId));
-    _skipPolls.removeWhere((hostId, _) => !targets.containsKey(hostId));
+    final polled = {for (final session in targets.values) session.connectionId};
+    _failures.removeWhere((connectionId, _) => !polled.contains(connectionId));
+    _skipPolls.removeWhere((connectionId, _) => !polled.contains(connectionId));
     state = next;
     final lister = ref.read(connectionBridgeListerProvider);
     await Future.wait([
       for (final MapEntry(key: hostId, value: session) in targets.entries)
-        if (!_backingOff(hostId)) _pollHost(lister, hostId, session),
+        if (!_backingOff(session.connectionId))
+          _pollHost(lister, hostId, session),
     ]);
   }
 
-  bool _backingOff(int hostId) {
-    final skip = _skipPolls[hostId] ?? 0;
+  bool _backingOff(int connectionId) {
+    final skip = _skipPolls[connectionId] ?? 0;
     if (skip <= 0) return false;
-    _skipPolls[hostId] = skip - 1;
+    _skipPolls[connectionId] = skip - 1;
     return true;
   }
 
@@ -351,8 +355,8 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
       // The host may have disconnected, or the app gone to the background,
       // while the list was in flight; never resurrect it.
       if (!_stillTarget(hostId, session)) return;
-      _failures.remove(hostId);
-      _skipPolls.remove(hostId);
+      _failures.remove(session.connectionId);
+      _skipPolls.remove(session.connectionId);
       state = state.withHost(
         hostId,
         HostBridges(connectionId: session.connectionId, bridges: bridges),
@@ -363,12 +367,12 @@ class ConnectionBridgeMetadataNotifier extends Notifier<HostBridgeMetadata> {
       if (!_stillTarget(hostId, session)) return;
       // Stale counts would claim an agent is waiting when it may not be.
       state = state.withHost(hostId, null);
-      final failures = (_failures[hostId] ?? 0) + 1;
-      _failures[hostId] = failures;
+      final failures = (_failures[session.connectionId] ?? 0) + 1;
+      _failures[session.connectionId] = failures;
       // An older helper without these fields fails every time; back off
       // 1, 2, 4 ... intervals up to a minute instead of opening a channel
       // every five seconds.
-      _skipPolls[hostId] = math.min(
+      _skipPolls[session.connectionId] = math.min(
         (1 << math.min(failures - 1, 4)) - 1,
         _maxFailureBackoffIntervals - 1,
       );
