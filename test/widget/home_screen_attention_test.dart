@@ -153,6 +153,11 @@ Host _host(int id, String label) => Host(
   tmuxSessionName: _workspace,
   remoteMuxBackend: RemoteMuxBackend.monkeyMux.storageValue,
   sortOrder: id,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 MonkeyMuxAcpBridgeMetadata _bridge({required int pending}) =>
