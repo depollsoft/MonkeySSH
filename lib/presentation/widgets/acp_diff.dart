@@ -41,16 +41,8 @@ Color legibleDiffColor(
   return ink;
 }
 
-_DiffLineKind _classifyDiffLine(String line) {
-  if (line.startsWith('@@')) {
-    return _DiffLineKind.hunk;
-  }
-  if (line.startsWith('+++') ||
-      line.startsWith('---') ||
-      line.startsWith('diff ') ||
-      line.startsWith('index ')) {
-    return _DiffLineKind.meta;
-  }
+/// The kind of a line inside a hunk, where its first character decides.
+_DiffLineKind _classifyHunkLine(String line) {
   if (line.startsWith('+')) {
     return _DiffLineKind.addition;
   }
@@ -58,6 +50,69 @@ _DiffLineKind _classifyDiffLine(String line) {
     return _DiffLineKind.deletion;
   }
   return _DiffLineKind.context;
+}
+
+final _hunkRange = RegExp(r'^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@');
+
+/// Classifies each of [lines]. File headers (`diff`, `index`, `---`, `+++`)
+/// are only recognised outside a hunk. Inside one, for as many lines as its
+/// `@@` header counts, a deleted `-- comment` or an added `++i` is content.
+/// A hunk whose header has no counts (a combined diff) runs until the next
+/// `@@` or `diff` line. When [bodyOnly] is true, [lines] hold one hunk's lines
+/// with no headers at all.
+List<_DiffLineKind> _classifyDiffLines(
+  List<String> lines, {
+  required bool bodyOnly,
+}) {
+  if (bodyOnly) {
+    return [for (final line in lines) _classifyHunkLine(line)];
+  }
+  final kinds = <_DiffLineKind>[];
+  var inHunk = false;
+  int? oldLeft;
+  int? newLeft;
+  for (final line in lines) {
+    if (line.startsWith('@@')) {
+      final match = _hunkRange.firstMatch(line);
+      inHunk = true;
+      oldLeft = match == null ? null : int.parse(match.group(1) ?? '1');
+      newLeft = match == null ? null : int.parse(match.group(2) ?? '1');
+      kinds.add(_DiffLineKind.hunk);
+      continue;
+    }
+    final counted = oldLeft != null && newLeft != null;
+    if (inHunk && counted && oldLeft <= 0 && newLeft <= 0) {
+      inHunk = false;
+    }
+    if (inHunk && (counted || !line.startsWith('diff '))) {
+      final kind = _classifyHunkLine(line);
+      if (counted && !line.startsWith(r'\')) {
+        switch (kind) {
+          case _DiffLineKind.addition:
+            newLeft = newLeft - 1;
+          case _DiffLineKind.deletion:
+            oldLeft = oldLeft - 1;
+          case _DiffLineKind.context ||
+              _DiffLineKind.hunk ||
+              _DiffLineKind.meta:
+            oldLeft = oldLeft - 1;
+            newLeft = newLeft - 1;
+        }
+      }
+      kinds.add(kind);
+      continue;
+    }
+    inHunk = false;
+    kinds.add(
+      line.startsWith('+++') ||
+              line.startsWith('---') ||
+              line.startsWith('diff ') ||
+              line.startsWith('index ')
+          ? _DiffLineKind.meta
+          : _classifyHunkLine(line),
+    );
+  }
+  return kinds;
 }
 
 /// Renders a unified diff as coloured, monospace lines.
@@ -78,6 +133,7 @@ class AcpDiffView extends StatefulWidget {
     this.maxSourceChars = kAcpDiffMaxSourceChars,
     this.headerTrailing,
     this.semanticsLabel,
+    this.bodyOnly = false,
   });
 
   /// The diff to render.
@@ -97,12 +153,18 @@ class AcpDiffView extends StatefulWidget {
   /// Overrides the default `Diff for <path>, N lines` screen-reader label.
   final String? semanticsLabel;
 
+  /// Whether [diff] holds the lines of a single hunk with no file or `@@`
+  /// headers, so every line is content: a deleted `-- comment` reads as a
+  /// deletion rather than a `---` file header.
+  final bool bodyOnly;
+
   @override
   State<AcpDiffView> createState() => _AcpDiffViewState();
 }
 
 class _AcpDiffViewState extends State<AcpDiffView> {
   late List<String> _lines;
+  late List<_DiffLineKind> _kinds;
   late int _visibleCount;
   late bool _sourceTruncated;
 
@@ -117,7 +179,8 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.diff != widget.diff ||
         oldWidget.initialLineCap != widget.initialLineCap ||
-        oldWidget.maxSourceChars != widget.maxSourceChars) {
+        oldWidget.maxSourceChars != widget.maxSourceChars ||
+        oldWidget.bodyOnly != widget.bodyOnly) {
       _prepareSource();
     }
   }
@@ -130,6 +193,7 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     // for a multi-megabyte source or a single enormous line.
     final bounded = _sourceTruncated ? source.substring(0, maxChars) : source;
     _lines = bounded.split('\n');
+    _kinds = _classifyDiffLines(_lines, bodyOnly: widget.bodyOnly);
     _visibleCount = _initialCount;
   }
 
@@ -173,7 +237,7 @@ class _AcpDiffViewState extends State<AcpDiffView> {
     final visible = math.min(_visibleCount, _lines.length);
     for (var i = 0; i < visible; i++) {
       final line = _lines[i];
-      final kind = _classifyDiffLine(line);
+      final kind = _kinds[i];
       final Color? background;
       final Color color;
       switch (kind) {
@@ -218,9 +282,11 @@ class _AcpDiffViewState extends State<AcpDiffView> {
                   'first ${_lines.length} lines'
             : 'Diff for ${widget.diff.path}, ${_lines.length} lines');
     final headerTrailing = widget.headerTrailing;
+    // A header that shares its row with an action, such as a hunk header
+    // with its function name, may wrap rather than lose that context.
     final headerText = Text(
       widget.diff.path,
-      maxLines: 1,
+      maxLines: headerTrailing == null ? 1 : 2,
       overflow: TextOverflow.ellipsis,
       style: AcpChatTypography.monoStyleOf(context).copyWith(
         fontSize: 12,
