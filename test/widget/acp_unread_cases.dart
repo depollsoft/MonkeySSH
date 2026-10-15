@@ -528,7 +528,9 @@ void registerAcpUnreadWidgetTests() {
             navigatorKey: navigatorKey,
             home: AcpChatPresence(
               onAway: () => events.add('away'),
-              onBack: ({required left}) => events.add(left ? 'left' : 'back'),
+              onBack: ({required left, required hidden}) => events.add(
+                '${left ? 'left' : 'back'}${hidden ? ' hidden' : ''}',
+              ),
               child: const Text('chat'),
             ),
           ),
@@ -585,7 +587,7 @@ void registerAcpUnreadWidgetTests() {
         // A system file picker returns within seconds.
         now = now.add(const Duration(seconds: 8));
         lifecycle([AppLifecycleState.inactive, AppLifecycleState.resumed]);
-        expect(events, ['away', 'back']);
+        expect(events, ['away', 'back hidden']);
 
         lifecycle([
           AppLifecycleState.inactive,
@@ -598,7 +600,7 @@ void registerAcpUnreadWidgetTests() {
           AppLifecycleState.inactive,
           AppLifecycleState.resumed,
         ]);
-        expect(events, ['away', 'back', 'away', 'left']);
+        expect(events, ['away', 'back hidden', 'away', 'left hidden']);
       });
     });
 
@@ -680,6 +682,59 @@ void registerAcpUnreadWidgetTests() {
             .data,
         'Since you left: 1 reply',
       );
+    });
+
+    testWidgets('what a suspended app receives once it is shown is unread', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 10, 15, 12);
+      acpChatPresenceClock = () => now;
+      addTearDown(() => acpChatPresenceClock = DateTime.now);
+      final source = Object();
+      AcpSessionState session(int replies) => fakeAcpSession(
+        timeline: d.AcpTimeline(
+          source: source,
+          entries: [
+            _message(d.AcpMessageRole.user, 0, 'Go'),
+            for (var i = 1; i <= replies; i++)
+              _message(d.AcpMessageRole.agent, i, 'Reply $i'),
+          ],
+        ),
+      );
+      final manager = FakeAcpSessionManager(sessions: [session(1)]);
+      await tester.pumpWidget(_chat(manager, AcpLastSeenRegistry()));
+      await tester.pumpAndSettle();
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      // iOS suspends the app: nothing reaches it while it is hidden.
+      now = now.add(const Duration(minutes: 5));
+      for (final state in [
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsNothing);
+
+      // Buffered output arrives just after the app is shown.
+      now = now.add(const Duration(seconds: 1));
+      manager.emit(AcpSessionManagerState(sessions: [session(3)]));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('acp-unread-digest-text')))
+            .data,
+        'Since you left: 1 reply',
+      );
+      expect(find.text('unread since you left'), findsOneWidget);
     });
   });
 }

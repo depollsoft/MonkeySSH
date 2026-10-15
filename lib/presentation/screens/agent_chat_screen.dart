@@ -1053,10 +1053,11 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         onAway: () => _unread.depart(_seenSnapshot()),
         // No frames run while the app is hidden, so read the live session
         // rather than the last one built.
-        onBack: ({required left}) => setState(
+        onBack: ({required left, required hidden}) => setState(
           () => _unread.arrive(
             _key,
             left: left,
+            hidden: hidden,
             current: acpSeenSnapshot(
               ref.read(acpSessionManagerProvider).state.byKeyValue(_key.value),
               null,

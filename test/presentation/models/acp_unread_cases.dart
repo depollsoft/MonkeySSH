@@ -844,4 +844,80 @@ void registerAcpUnreadTests() {
       expect(state.dividerEntryIndex, 3);
     });
   });
+
+  group('returning from the background', () {
+    var now = DateTime(2026, 10, 15, 12);
+    setUp(() {
+      now = DateTime(2026, 10, 15, 12);
+      acpChatPresenceClock = () => now;
+    });
+    tearDown(() => acpChatPresenceClock = DateTime.now);
+
+    final source = Object();
+    AcpSessionState session({required bool replied, bool toolDone = false}) =>
+        fakeAcpSession(
+          timeline: _timeline([
+            _user(0, 'Run the full test suite'),
+            _tool(
+              1,
+              'tests',
+              kind: d.AcpToolKind.execute,
+              status: toolDone
+                  ? d.AcpToolStatus.failed
+                  : d.AcpToolStatus.inProgress,
+            ),
+            if (replied) _agent(2, 'Two tests fail.'),
+          ], source: source),
+        );
+    AcpSeenSnapshot? seen(AcpSessionState s) =>
+        acpSeenSnapshot(s, null, followingTail: true);
+
+    test('what a suspended app receives after it is shown is unread', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final leaving = session(replied: false);
+      // No marker yet, as for the first visit in this app run.
+      // The app was suspended, so nothing changed by the time it is shown.
+      final visit = AcpUnreadVisit(registry)
+        ..begin(key)
+        ..depart(seen(leaving))
+        ..arrive(key, left: true, hidden: true, current: seen(leaving));
+      expect(visit.evaluate(leaving, mapAcpSessionTimeline(leaving)), isNull);
+
+      now = now.add(const Duration(seconds: 2));
+      final back = session(replied: true, toolDone: true);
+      final state = visit.evaluate(back, mapAcpSessionTimeline(back))!;
+      // Above the reply; the test run that failed meanwhile is counted too.
+      expect(state.dividerEntryIndex, 2);
+      expect(state.digest!.replies, 1);
+      expect(state.digest!.toolCallCount, 1);
+    });
+
+    test('a change long after coming back is not from the absence', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final leaving = session(replied: false);
+      final visit = AcpUnreadVisit(registry)
+        ..begin(key)
+        ..depart(seen(leaving))
+        ..arrive(key, left: true, hidden: true, current: seen(leaving));
+      now = now.add(kAcpChatCatchUpWindow + const Duration(seconds: 1));
+      final later = session(replied: true, toolDone: true);
+      expect(visit.evaluate(later, mapAcpSessionTimeline(later)), isNull);
+    });
+
+    test('a page over the chat that changed nothing keeps the visit', () {
+      final registry = AcpLastSeenRegistry();
+      final key = fakeAcpKey();
+      final leaving = session(replied: false);
+      // Covered, not hidden: the app kept running, so nothing changing
+      // while away is known for sure.
+      final visit = AcpUnreadVisit(registry)
+        ..begin(key)
+        ..depart(seen(leaving))
+        ..arrive(key, left: true, current: seen(leaving));
+      final later = session(replied: true, toolDone: true);
+      expect(visit.evaluate(later, mapAcpSessionTimeline(later)), isNull);
+    });
+  });
 }

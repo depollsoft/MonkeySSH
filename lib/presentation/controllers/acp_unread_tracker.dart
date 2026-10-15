@@ -20,7 +20,14 @@ import '../models/acp_unread.dart';
 /// current visit.
 const Duration kAcpChatMinimumAbsence = Duration(seconds: 20);
 
-/// The clock [AcpChatPresence] measures absences with.
+/// How long after the app comes back from the background a change still
+/// counts as having arrived while it was away. A hidden app can be
+/// suspended (iOS does so about 30 s after it is hidden), and then what the
+/// agent did meanwhile reaches the chat only after it is shown again, as
+/// buffered output or a reconnect's replay.
+const Duration kAcpChatCatchUpWindow = Duration(minutes: 2);
+
+/// The clock [AcpChatPresence] and [AcpUnreadVisit] measure absences with.
 @visibleForTesting
 DateTime Function() acpChatPresenceClock = DateTime.now;
 
@@ -164,6 +171,7 @@ class AcpUnreadVisit {
   var _caughtUp = false;
   var _jumpSerial = 0;
   AcpSeenSnapshot? _departure;
+  _CatchUp? _catchUp;
 
   AcpUnreadState? _memo;
   Object? _memoTimeline;
@@ -184,6 +192,7 @@ class AcpUnreadVisit {
     _digestDismissed = false;
     _caughtUp = false;
     _departure = null;
+    _catchUp = null;
     _memo = null;
     _memoTimeline = null;
   }
@@ -197,10 +206,15 @@ class AcpUnreadVisit {
   /// something changed while it was out of view, what was seen at departure
   /// is recorded and a new visit compares against it. Otherwise the visit,
   /// and any divider it shows, carries on.
+  ///
+  /// When the app was [hidden], it may have been suspended, so what changed
+  /// can still be on its way. Then the first change within
+  /// [kAcpChatCatchUpWindow] starts the new visit, as [evaluate] notices it.
   void arrive(
     AcpSessionKey key, {
     required bool left,
     required AcpSeenSnapshot? current,
+    bool hidden = false,
   }) {
     final departure = _departure;
     _departure = null;
@@ -210,15 +224,27 @@ class AcpUnreadVisit {
       sessionErrorFingerprint: departure.sessionErrorFingerprint,
       pendingRequestIds: departure.pendingRequestIds,
     );
-    if (atDeparture == null ||
-        !acpChangedSince(
-          atDeparture,
-          current.timeline,
-          pendingRequestIds: current.pendingRequestIds,
-          sessionErrorFingerprint: current.sessionErrorFingerprint,
-        )) {
-      return;
+    if (atDeparture == null) return;
+    if (acpChangedSince(
+      atDeparture,
+      current.timeline,
+      pendingRequestIds: current.pendingRequestIds,
+      sessionErrorFingerprint: current.sessionErrorFingerprint,
+    )) {
+      _startAfter(key, departure);
+    } else if (hidden) {
+      _catchUp = (
+        key: key,
+        departure: departure,
+        marker: atDeparture,
+        until: acpChatPresenceClock().add(kAcpChatCatchUpWindow),
+      );
     }
+  }
+
+  /// Records [departure] as seen and starts a new visit that compares
+  /// against it.
+  void _startAfter(AcpSessionKey key, AcpSeenSnapshot departure) {
     _record(key, departure);
     begin(key);
   }
@@ -256,6 +282,7 @@ class AcpUnreadVisit {
     AcpSessionState session,
     List<AcpTimelineEntry> entries,
   ) {
+    _catchUpWith(session);
     final marker = _marker;
     if (marker == null || _caughtUp) return null;
     if (acpPromptSentSince(marker, session.timeline)) {
@@ -282,7 +309,33 @@ class AcpUnreadVisit {
       sessionErrorFingerprint: error,
     );
   }
+
+  /// Starts the new visit a return from the background was waiting for, once
+  /// [session] shows a change since departure.
+  void _catchUpWith(AcpSessionState session) {
+    final catchUp = _catchUp;
+    if (catchUp == null) return;
+    if (acpChatPresenceClock().isAfter(catchUp.until)) {
+      _catchUp = null;
+    } else if (acpChangedSince(
+      catchUp.marker,
+      session.timeline,
+      pendingRequestIds: acpPendingRequestIds(session),
+      sessionErrorFingerprint: acpSessionErrorFingerprint(session),
+    )) {
+      _startAfter(catchUp.key, catchUp.departure);
+    }
+  }
 }
+
+/// A return from the background that found nothing new yet, waiting for
+/// what the app may have missed while suspended.
+typedef _CatchUp = ({
+  AcpSessionKey key,
+  AcpSeenSnapshot departure,
+  AcpLastSeenMarker marker,
+  DateTime until,
+});
 
 /// Reports when a chat goes out of view and comes back.
 ///
@@ -302,8 +355,9 @@ class AcpChatPresence extends StatefulWidget {
   /// The chat went out of view.
   final VoidCallback onAway;
 
-  /// The chat is in view again; [left] when the absence was long enough.
-  final void Function({required bool left}) onBack;
+  /// The chat is in view again; [left] when the absence was long enough,
+  /// and [hidden] when the app was hidden at some point during it.
+  final void Function({required bool left, required bool hidden}) onBack;
 
   /// The chat.
   final Widget child;
@@ -316,6 +370,7 @@ class _AcpChatPresenceState extends State<AcpChatPresence> {
   late final AppLifecycleListener _lifecycle;
   var _hidden = false;
   var _covered = false;
+  var _hiddenWhileAway = false;
   DateTime? _awaySince;
 
   @override
@@ -356,12 +411,16 @@ class _AcpChatPresenceState extends State<AcpChatPresence> {
     final since = _awaySince;
     if (away && since == null) {
       _awaySince = acpChatPresenceClock();
+      _hiddenWhileAway = _hidden;
       widget.onAway();
-    } else if (!away && since != null) {
+    } else if (away) {
+      _hiddenWhileAway = _hiddenWhileAway || _hidden;
+    } else if (since != null) {
       _awaySince = null;
       widget.onBack(
         left:
             acpChatPresenceClock().difference(since) >= kAcpChatMinimumAbsence,
+        hidden: _hiddenWhileAway,
       );
     }
   }
