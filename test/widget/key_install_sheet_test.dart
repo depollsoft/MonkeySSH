@@ -1,6 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
 import 'package:collection/collection.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/key_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/services/authorized_key_install_service.dart';
+import 'package:monkeyssh/domain/services/key_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/widgets/key_install_sheet.dart';
@@ -31,6 +33,7 @@ class _FakeInstallService extends AuthorizedKeyInstallService {
 
   AuthorizedKeyInstallOutcome outcome = AuthorizedKeyInstallOutcome.added;
   KeyLoginVerification verification = const KeyLoginVerification(success: true);
+  Object? installError;
   final installedKeyIds = <int>[];
   final switches = <({int hostId, int keyId, bool removePassword})>[];
 
@@ -40,6 +43,10 @@ class _FakeInstallService extends AuthorizedKeyInstallService {
     SshKey key,
   ) async {
     installedKeyIds.add(key.id);
+    // dartssh2's SSHError types are neither Exception nor Error, which is
+    // exactly what this fake must reproduce.
+    // ignore: only_throw_errors
+    if (installError case final error?) throw error;
     return outcome;
   }
 
@@ -71,6 +78,29 @@ class _FakeInstallService extends AuthorizedKeyInstallService {
     keyId: keyId,
     removePassword: removePassword,
   ));
+}
+
+class _CountingKeyService extends KeyService {
+  _CountingKeyService(super.keyRepository);
+
+  int generated = 0;
+
+  @override
+  Future<SshKey?> generateKey({
+    required String name,
+    required SshKeyType keyType,
+    String? passphrase,
+  }) async {
+    generated++;
+    return SshKey(
+      id: 40 + generated,
+      name: name,
+      keyType: 'ssh-ed25519',
+      publicKey: _publicKey,
+      privateKey: 'PRIVATE',
+      createdAt: DateTime(2026),
+    );
+  }
 }
 
 class _FakeSshService extends SshService {
@@ -111,6 +141,7 @@ void main() {
   late HostRepository hosts;
   late _FakeInstallService service;
   late MockSshSession session;
+  late _CountingKeyService keyService;
 
   setUp(() {
     db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -119,11 +150,17 @@ void main() {
     session = MockSshSession();
     when(() => session.connectionId).thenReturn(1);
     when(() => session.hostId).thenReturn(5);
+    keyService = _CountingKeyService(
+      KeyRepository(db, SecretEncryptionService.forTesting()),
+    );
   });
 
   tearDown(() => db.close());
 
-  Future<void> pumpSheet(WidgetTester tester) async {
+  Future<void> pumpSheet(
+    WidgetTester tester, {
+    bool withSavedKey = true,
+  }) async {
     // The flow re-reads the host as saved now, so it must exist.
     await tester.runAsync(
       () => hosts.insert(
@@ -151,7 +188,10 @@ void main() {
           keyRepositoryProvider.overrideWithValue(
             KeyRepository(db, SecretEncryptionService.forTesting()),
           ),
-          allKeysProvider.overrideWith((ref) => Stream.value([key])),
+          allKeysProvider.overrideWith(
+            (ref) => Stream.value([if (withSavedKey) key]),
+          ),
+          keyServiceProvider.overrideWithValue(keyService),
           authorizedKeyInstallServiceProvider.overrideWithValue(service),
           sshServiceProvider.overrideWithValue(_FakeSshService(session)),
         ],
@@ -245,6 +285,47 @@ void main() {
     // hand can't help; offer a fresh key instead.
     expect(find.text('Add the Key by Hand'), findsNothing);
     expect(find.text('Generate a New Key'), findsOneWidget);
+  });
+
+  testWidgets('an SSH error during install offers Try Again', (tester) async {
+    // dartssh2's errors are neither Exception nor Error; a dead reused
+    // session throws one from execute.
+    service.installError = SSHStateError('SSH connection closed');
+    await pumpSheet(tester);
+    await tester.tap(find.text('Install Key'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Couldn’t run the install command on the server.'),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel('Add the key to authorized_keys, failed'),
+      findsOneWidget,
+    );
+    expect(find.text('Try Again'), findsOneWidget);
+    expect(service.switches, isEmpty);
+  });
+
+  testWidgets('a retry reuses the key the failed attempt generated', (
+    tester,
+  ) async {
+    service.verification = const KeyLoginVerification(
+      success: false,
+      error: 'Authentication failed',
+    );
+    await pumpSheet(tester, withSavedKey: false);
+
+    await tester.tap(find.text('Install Key'));
+    await tester.pumpAndSettle();
+    expect(find.text('Authentication failed'), findsOneWidget);
+    await tester.tap(find.text('Try Again'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install Key'));
+    await tester.pumpAndSettle();
+
+    expect(keyService.generated, 1);
+    expect(service.installedKeyIds, [41, 41]);
   });
 
   testWidgets('a failed install explains why and stops', (tester) async {

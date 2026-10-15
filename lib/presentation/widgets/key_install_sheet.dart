@@ -5,6 +5,7 @@ library;
 
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -73,6 +74,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
   var _phase = _Phase.choose;
   final _stages = <KeyInstallStage, _StageState>{};
   String? _error;
+  String? _errorDetail;
   SshKey? _key;
   AuthorizedKeyInstallOutcome? _outcome;
   var _passwordRemoved = false;
@@ -106,21 +108,45 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
     setState(() => _stages[stage] = state);
   }
 
-  void _fail(KeyInstallStage stage, String message) {
+  void _fail(KeyInstallStage stage, String message, {String? detail}) {
     if (!mounted) return;
     setState(() {
       _stages[stage] = _StageState.failed;
       _error = message;
+      _errorDetail = detail;
       _phase = _Phase.failed;
     });
   }
 
+  /// The saved key [_selectedKeyId] names, or null to generate one. A key
+  /// this sheet generated on an earlier attempt counts even before the key
+  /// list catches up, so Try Again reuses it rather than making another.
+  SshKey? _chosenKey(List<SshKey> usableKeys) {
+    final selectedId = _selectedKeyId;
+    if (selectedId == null || selectedId < 0) return null;
+    final previous = _key;
+    return usableKeys.firstWhereOrNull((key) => key.id == selectedId) ??
+        (previous?.id == selectedId ? previous : null);
+  }
+
+  /// What the user reads when [stage] throws instead of returning a result.
+  static String _unexpectedFailure(KeyInstallStage stage) => switch (stage) {
+    KeyInstallStage.generate => 'Couldn’t generate a key.',
+    KeyInstallStage.connect => 'Couldn’t connect with the saved login.',
+    KeyInstallStage.install =>
+      'Couldn’t run the install command on the server.',
+    KeyInstallStage.verify =>
+      'Couldn’t finish checking the key, so the host still uses the '
+          'password.',
+  };
+
   Future<void> _start(List<SshKey> usableKeys) async {
-    final generate =
-        usableKeys.isEmpty || (_selectedKeyId ?? _generateNewKey) < 0;
+    final chosenKey = _chosenKey(usableKeys);
+    final generate = chosenKey == null;
     setState(() {
       _phase = _Phase.working;
       _error = null;
+      _errorDetail = null;
       _outcome = null;
       _stages
         ..clear()
@@ -139,6 +165,8 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
     final monkeyMuxService = ref.read(monkeyMuxServiceProvider);
     final sessions = ref.read(activeSessionsProvider.notifier);
     int? openedConnectionId;
+    // The stage running now, so an unexpected error marks the right row.
+    var stage = generate ? KeyInstallStage.generate : KeyInstallStage.connect;
 
     DiagnosticsLogService.instance.info(
       'onboarding.key',
@@ -146,35 +174,33 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
       fields: {'hostId': hostId, 'generatesKey': generate},
     );
     try {
-      SshKey? key;
-      if (generate) {
+      final SshKey key;
+      if (chosenKey == null) {
         _setStage(KeyInstallStage.generate, _StageState.active);
-        try {
-          key = await ref
-              .read(keyServiceProvider)
-              .generateKey(
-                name: _generatedKeyName(widget.host.label),
-                keyType: SshKeyType.ed25519,
-              );
-        } on Exception {
-          key = null;
-        }
-        if (key == null) {
+        final generated = await ref
+            .read(keyServiceProvider)
+            .generateKey(
+              name: _generatedKeyName(widget.host.label),
+              keyType: SshKeyType.ed25519,
+            );
+        if (generated == null) {
           _fail(KeyInstallStage.generate, 'Couldn’t generate a key.');
           return;
         }
+        key = generated;
+        // A retry after a later stage fails reuses this key.
+        if (mounted) setState(() => _selectedKeyId = generated.id);
         unawaited(
           ref.read(telemetryServiceProvider).logKeyAdded(method: 'generated'),
         );
         _setStage(KeyInstallStage.generate, _StageState.done);
       } else {
-        key = usableKeys.firstWhere(
-          (candidate) => candidate.id == _selectedKeyId,
-        );
+        key = chosenKey;
       }
       _key = key;
       if (!mounted) return;
 
+      stage = KeyInstallStage.connect;
       _setStage(KeyInstallStage.connect, _StageState.active);
       // Install and verify against the host as it is saved now. An open
       // session from before the host was edited may be logged in to another
@@ -213,22 +239,9 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
       }
       _setStage(KeyInstallStage.connect, _StageState.done);
 
+      stage = KeyInstallStage.install;
       _setStage(KeyInstallStage.install, _StageState.active);
-      final AuthorizedKeyInstallOutcome outcome;
-      try {
-        outcome = await service.installKey(session, key);
-      } on Exception catch (error) {
-        DiagnosticsLogService.instance.warning(
-          'onboarding.key',
-          'install_failed',
-          fields: {'hostId': hostId, 'errorType': error.runtimeType},
-        );
-        _fail(
-          KeyInstallStage.install,
-          'Couldn’t run the install command on the server.',
-        );
-        return;
-      }
+      final outcome = await service.installKey(session, key);
       _outcome = outcome;
       if (!authorizedKeyInstallSucceeded(outcome)) {
         _fail(
@@ -239,6 +252,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
       }
       _setStage(KeyInstallStage.install, _StageState.done);
 
+      stage = KeyInstallStage.verify;
       _setStage(KeyInstallStage.verify, _StageState.active);
       final verification = await service.verifyKeyOnlyLogin(
         session,
@@ -249,17 +263,31 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
         _fail(
           KeyInstallStage.verify,
           'The server didn’t accept the key on its own, so the host still '
-                  'uses the password. ${verification.error ?? ''}'
-              .trim(),
+          'uses the password.',
+          detail: verification.error,
         );
         return;
       }
-      _setStage(KeyInstallStage.verify, _StageState.done);
       await service.switchHostToKey(hostId, key.id, removePassword: false);
+      _setStage(KeyInstallStage.verify, _StageState.done);
       if (!mounted) return;
       setState(
         () => _phase = _usesSavedPassword ? _Phase.verified : _Phase.finished,
       );
+      // dartssh2's SSHError types are neither Exception nor Error, and a
+      // write to a closed channel throws StateError. Whatever escapes, the
+      // sheet must show it and offer Try Again rather than sit on "working".
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'onboarding.key',
+        'flow_failed',
+        fields: {
+          'hostId': hostId,
+          'stage': stage.name,
+          'errorType': error.runtimeType,
+        },
+      );
+      _fail(stage, _unexpectedFailure(stage));
     } finally {
       if (openedConnectionId != null) {
         unawaited(
@@ -426,6 +454,7 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final error = _error;
+    final detail = _errorDetail;
     final key = _key;
     return [
       for (final entry in _stages.entries)
@@ -437,7 +466,25 @@ class _KeyInstallSheetState extends ConsumerState<KeyInstallSheet> {
           children: [
             Icon(Icons.error_outline, size: 20, color: colorScheme.error),
             const SizedBox(width: FluttyTheme.spacingSm),
-            Expanded(child: Text(error, style: theme.textTheme.bodyMedium)),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(error, style: theme.textTheme.bodyMedium),
+                  // What the server or SSH library said, kept apart so the
+                  // sentence above reads on its own.
+                  if (detail != null && detail.trim().isNotEmpty) ...[
+                    const SizedBox(height: FluttyTheme.spacingXs),
+                    Text(
+                      detail.trim(),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ),
         const SizedBox(height: FluttyTheme.spacingMd),
