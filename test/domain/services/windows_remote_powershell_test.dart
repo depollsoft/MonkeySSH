@@ -177,21 +177,62 @@ exit 7;
   });
 
   group('windowsSnapshotPathBatches', () {
-    test('bounds each batch by path-length and count', () {
+    test('bounds each batch by command length and count', () {
       final paths = List.generate(
         60,
         (i) =>
             'C:/Users/x/.codex/sessions/2026/07/05/rollout-$i-'
             '${'a' * 40}.jsonl',
       );
-      final batches = windowsSnapshotPathBatches(paths);
+      final batches = windowsSnapshotPathBatches(paths, maxLines: 1);
       expect(batches.length, greaterThan(1));
       for (final batch in batches) {
         expect(batch.length, lessThanOrEqualTo(40));
-        final chars = batch.fold<int>(0, (sum, p) => sum + p.length + 4);
-        expect(chars, lessThanOrEqualTo(1800));
+        final command = buildWindowsPowerShellCommand(
+          windowsFileSnapshotScript(batch, maxLines: 1),
+        );
+        expect(command.length, lessThanOrEqualTo(windowsCommandMaxLength));
       }
       expect(batches.expand((b) => b).toList(), paths);
+    });
+
+    test('keeps head-and-tail reads under the cmd.exe limit', () {
+      // Two dozen untitled Cursor chats: the tail read roughly doubles the
+      // per-file script, so a path-length budget alone overflows cmd.exe.
+      final paths = List.generate(
+        24,
+        (i) =>
+            'C:/Users/firstname.lastname/.cursor/chats/'
+            '${'0123456789abcdef' * 2}/'
+            '${'$i'.padLeft(8, '0')}-1111-4222-8333-444455556666/'
+            'prompt_history.json',
+      );
+      final batches = windowsSnapshotPathBatches(
+        paths,
+        maxLines: 1,
+        tailLines: 8,
+      );
+      for (final batch in batches) {
+        final command = buildWindowsPowerShellCommand(
+          windowsFileSnapshotScript(batch, maxLines: 1, tailLines: 8),
+        );
+        expect(command.length, lessThanOrEqualTo(windowsCommandMaxLength));
+      }
+      expect(batches.expand((b) => b).toList(), paths);
+    });
+
+    test('measures the command length it will send', () {
+      // Non-ASCII text, including a surrogate pair, counts per UTF-16 unit.
+      const script = r'$a="é 😀";';
+      expect(
+        windowsPowerShellCommandLength(script),
+        buildWindowsPowerShellCommand(script).length,
+      );
+      final long = 'Write-Output 1;' * 400;
+      expect(
+        windowsPowerShellCommandLength(long),
+        buildWindowsPowerShellCommand(long).length,
+      );
     });
 
     test('keeps a single over-long path in its own batch', () {
