@@ -151,6 +151,38 @@ void main() {
         // A public key that is not an ecdsa-sha2-nistp256 blob.
         HardwareKeyReference.prefix +
             jsonEncode({'alias': 'a', 'backing': 'tee', 'publicKey': 'AAAA'}),
+        // Right algorithm name, but the curve and point are missing,
+        // the point is short, or data trails the point.
+        for (final blob in [
+          Uint8List.fromList([
+            ...encodeEcdsaP256PublicKeyBlob(
+              Uint8List.fromList([0x04, ..._bytes(64, 1)]),
+            ).take(23),
+          ]),
+          Uint8List.fromList([
+            ...encodeEcdsaP256PublicKeyBlob(
+              Uint8List.fromList([0x04, ..._bytes(64, 1)]),
+            ).take(23 + 12),
+            0,
+            0,
+            0,
+            2,
+            0x04,
+            1,
+          ]),
+          Uint8List.fromList([
+            ...encodeEcdsaP256PublicKeyBlob(
+              Uint8List.fromList([0x04, ..._bytes(64, 1)]),
+            ),
+            0,
+          ]),
+        ])
+          HardwareKeyReference.prefix +
+              jsonEncode({
+                'alias': 'a',
+                'backing': 'tee',
+                'publicKey': base64Encode(blob),
+              }),
       ]) {
         final key = SshKey(
           id: 1,

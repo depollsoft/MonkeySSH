@@ -799,11 +799,28 @@ class HardwareKeyService {
 /// `ecdsa-sha2-nistp256` blob, or returns `null`.
 HardwareKeyReference? parseHardwareKeyReference(String? value) {
   final reference = HardwareKeyReference.tryParse(value);
-  if (reference == null ||
-      readSshHostKeyType(reference.publicKeyBlob) != hardwareKeyAlgorithm) {
+  if (reference == null || !_isP256PublicKeyBlob(reference.publicKeyBlob)) {
     return null;
   }
   return reference;
+}
+
+/// Whether [blob] is exactly what [encodeEcdsaP256PublicKeyBlob] writes:
+/// the algorithm, the curve, one uncompressed point and nothing after it.
+bool _isP256PublicKeyBlob(Uint8List blob) {
+  final type = readSshString(blob, 0);
+  final curve = type == null ? null : readSshString(blob, 4 + type.length);
+  final point = curve == null
+      ? null
+      : readSshString(blob, 8 + type!.length + curve.length);
+  if (point == null) {
+    return false;
+  }
+  try {
+    return listEquals(encodeEcdsaP256PublicKeyBlob(point), blob);
+  } on FormatException {
+    return false;
+  }
 }
 
 /// Hardware-backed key details for stored SSH keys.
