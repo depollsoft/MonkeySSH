@@ -39,6 +39,7 @@ import '../../domain/models/agent_usage_rings.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/command_names.dart';
 import '../../domain/models/host_cli_launch_preferences.dart';
+import '../../domain/models/host_notifications.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/monkeymux_acp_bridge.dart';
 import '../../domain/models/remote_multiplexer.dart';
@@ -61,9 +62,11 @@ import '../../domain/services/clipboard_content_service.dart';
 import '../../domain/services/device_debug_service.dart';
 import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
+import '../../domain/services/host_notification_prefs_reader.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
+import '../../domain/services/monkeymux_offer_service.dart';
 import '../../domain/services/monkeymux_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -87,6 +90,7 @@ import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
 import '../models/app_platform_file.dart';
 import '../providers/connection_actions.dart';
+import '../providers/entity_list_providers.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
@@ -104,6 +108,7 @@ import '../widgets/cursor_block.dart';
 import '../widgets/device_debug_sheet.dart';
 import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
+import '../widgets/monkeymux_offer_sheet.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/system_bottom_inset.dart';
@@ -877,6 +882,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _muxVersion;
   String? _monkeyMuxReconnectSessionName;
   bool _monkeyMuxReconnectAttachPending = false;
+
+  // Set when the user chose MonkeyMux in the first-connect offer, which
+  // described the helper upload; the next fresh install is not asked again.
+  bool _monkeyMuxInstallPreApproved = false;
   bool _monkeyMuxAttachEstablished = false;
   _PendingMonkeyMuxServerReplacement? _pendingMonkeyMuxServerReplacement;
   MonkeyMuxForcedReloadRequest? _forcedMonkeyMuxReloadRequest;
@@ -1656,12 +1665,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   TerminalProgramStatus? get _programStatus => _observedSession?.programStatus;
 
   /// Work a program reported through OSC 7501, otherwise OSC 9;4 progress.
-  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar.
+  /// Any OSC 7501 status replaces OSC 9;4, including one without a bar, and
+  /// so does a program that speaks OSC 7501 but reports nothing right now.
   TerminalProgress? get _terminalProgress {
-    final status = _programStatus;
-    return status == null
-        ? _observedSession?.terminalProgress
-        : status.terminalProgress;
+    final session = _observedSession;
+    final status = session?.programStatus;
+    if (status != null) return status.terminalProgress;
+    return (session?.programStatusReporter ?? false)
+        ? null
+        : session?.terminalProgress;
   }
 
   bool get _shouldReviewTerminalCommandInsertion =>
@@ -6247,7 +6259,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   Future<({_PreparedRemoteMuxCommand? command, bool handled})>
   _prepareNewShellInitialAutoConnect(SshSession session) async {
-    final host = _host;
+    var host = _host;
     if (host == null) {
       return (command: null, handled: false);
     }
@@ -6286,16 +6298,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return (command: attachCommand, handled: true);
     }
 
-    final tmuxSession = _initialTmuxSessionName ?? host.tmuxSessionName;
+    var tmuxSession = _initialTmuxSessionName ?? host.tmuxSessionName;
+    if ((tmuxSession == null || tmuxSession.isEmpty) &&
+        _autoConnectAgentPreset == null &&
+        (host.autoConnectCommand?.trim().isEmpty ?? true) &&
+        host.autoConnectSnippetId == null) {
+      final switched = await _offerMonkeyMuxOnFirstConnect(host);
+      if (switched != null) {
+        host = switched;
+        tmuxSession = switched.tmuxSessionName;
+      }
+    }
     if (tmuxSession != null && tmuxSession.isNotEmpty) {
       if (_configuredRemoteMuxBackend(host) == RemoteMuxBackend.tmux) {
         return (command: null, handled: false);
       }
-      final attachCommand = await _prepareRemoteMuxAttachCommand(
-        session,
-        host,
-        tmuxSession,
-      );
+      final _PreparedRemoteMuxCommand? attachCommand;
+      try {
+        attachCommand = await _prepareRemoteMuxAttachCommand(
+          session,
+          host,
+          tmuxSession,
+        );
+      } finally {
+        // The offer's consent covered this attach only, whatever happened.
+        _monkeyMuxInstallPreApproved = false;
+      }
       if (attachCommand == null) {
         _suppressRemoteMuxDetectionConnectionId = session.connectionId;
         return (command: null, handled: true);
@@ -6319,6 +6347,68 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _applyPreparedRemoteMuxCommand(session, command);
     return (command: command, handled: true);
+  }
+
+  /// On the first connection to a host created as a plain shell, offers to
+  /// switch it to MonkeyMux once. Returns the saved host when the user
+  /// chose MonkeyMux, with a session name of its own.
+  Future<Host?> _offerMonkeyMuxOnFirstConnect(Host host) async {
+    if (isAppReviewDemoHost(host)) return null;
+    final offers = ref.read(monkeyMuxOfferServiceProvider);
+    if (!await offers.takePending(host.id) || !mounted) return null;
+    final repository = ref.read(hostRepositoryProvider);
+    final hostname = host.hostname.trim().toLowerCase();
+    Map<int, AgentLaunchPreset> presets;
+    try {
+      presets = await ref
+          .read(agentLaunchPresetServiceProvider)
+          .getAllPresets();
+    } on Object {
+      presets = const {};
+    }
+    final sessionName = suggestMuxSessionName(
+      label: host.label,
+      hostname: host.hostname,
+      taken: [
+        for (final other in await repository.getAll())
+          if (other.id != host.id &&
+              other.hostname.trim().toLowerCase() == hostname &&
+              other.port == host.port) ...[
+            ?other.tmuxSessionName,
+            ?presets[other.id]?.tmuxSessionName,
+          ],
+      ],
+    );
+    if (!mounted) return null;
+    DiagnosticsLogService.instance.info(
+      'terminal',
+      'monkeymux_offer_shown',
+      fields: {'hostId': host.id},
+    );
+    final accepted = await showMonkeyMuxOfferSheet(
+      context,
+      hostLabel: host.label,
+      sessionName: sessionName,
+    );
+    DiagnosticsLogService.instance.info(
+      'terminal',
+      'monkeymux_offer_answered',
+      fields: {'hostId': host.id, 'accepted': accepted},
+    );
+    if (!accepted || !mounted) return null;
+    await repository.updateFields(
+      host.id,
+      HostsCompanion(
+        tmuxSessionName: drift.Value(sessionName),
+        remoteMuxBackend: drift.Value(RemoteMuxBackend.monkeyMux.storageValue),
+      ),
+    );
+    final saved = await repository.getById(host.id);
+    if (!mounted || saved == null) return null;
+    // The sheet described the upload, so a fresh install is not asked again.
+    _monkeyMuxInstallPreApproved = true;
+    setState(() => _host = saved);
+    return saved;
   }
 
   Future<void> _runAutoConnectCommand(SshSession session) async {
@@ -7137,6 +7227,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             ? updateStatus.installation
             : null,
       );
+    }
+    if (updateStatus == null && _monkeyMuxInstallPreApproved) {
+      _monkeyMuxInstallPreApproved = false;
+      return (install: true, updatePolicy: null, reuseInstallation: null);
     }
     final title = switch ((updateStatus, bundledVersionIsNewer)) {
       (null, _) => 'Install MonkeyMux helper?',
@@ -10476,7 +10570,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final activeWindow = activeTmuxWindow(windows);
     session
       ..synchronizeTerminalProgress(activeWindow?.terminalProgress)
-      ..synchronizeProgramStatus(activeWindow?.programStatus);
+      ..synchronizeProgramStatus(
+        activeWindow?.programStatus,
+        reporter: activeWindow?.programStatusReporter ?? false,
+      );
   }
 
   void _prepareTerminalForMuxWindowChange({
@@ -13869,13 +13966,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
+  // Pointer routing keeps the hit-test path from pointer down, so move, up and
+  // cancel can still reach this listener after the terminal was disposed.
   void _handleTerminalPointerMove(PointerMoveEvent event) {
+    if (!mounted) return;
     _handleTerminalTargetPointerMove(event);
     _handleTerminalDoubleTapPointerMove(event);
     _handleTerminalMouseTapPointerMove(event);
   }
 
   void _handleTerminalPointerUp(PointerUpEvent event) {
+    if (!mounted) return;
     if (!_handleTerminalTargetPointerUp(event)) {
       _handleTerminalDoubleTapPointerUp(event);
       _handleTerminalMouseTapPointerUp(event);
@@ -13887,6 +13988,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _handleTerminalPointerCancel(PointerCancelEvent event) {
+    if (!mounted) return;
     if (_pendingTerminalTargetTapPointer == event.pointer) {
       _clearPendingTerminalTargetTap();
     }

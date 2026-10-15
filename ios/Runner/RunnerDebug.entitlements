@@ -8,5 +8,10 @@
 	<string>development</string>
 	<key>com.apple.developer.networking.wifi-info</key>
 	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<string>$(AppIdentifierPrefix)$(MONKEYSSH_APP_BUNDLE_ID).push</string>
+	</array>
 </dict>
 </plist>

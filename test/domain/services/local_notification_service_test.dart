@@ -92,6 +92,48 @@ void main() {
       ]);
     });
 
+    test('a rejected permission request skips the notification', () async {
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+      FlutterLocalNotificationsPlatform.instance =
+          IOSFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final service = LocalNotificationService();
+      var shown = 0;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'requestPermissions') {
+                // Android's answer while another request's prompt is open.
+                throw PlatformException(code: 'permissionRequestInProgress');
+              }
+              if (call.method == 'show') shown++;
+              return null;
+            });
+      addTearDown(() {
+        service.dispose();
+        messenger.setMockMethodCallHandler(channel, null);
+        FlutterLocalNotificationsPlatform.instance = previousPlatform;
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      expect(
+        await service.showTerminalNotification(
+          notificationId: 42,
+          title: 'Ready',
+          body: 'Done',
+          payload: const TerminalNotificationPayload(
+            hostId: 7,
+            connectionId: 21,
+          ),
+        ),
+        isFalse,
+      );
+      expect(shown, 0);
+    });
+
     for (final delayedMethod in ['requestPermissions', 'show']) {
       test(
         'tmux cancellation waits for delayed $delayedMethod and retires its queue',

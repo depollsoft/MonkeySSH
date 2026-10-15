@@ -1,0 +1,352 @@
+import CryptoKit
+import Foundation
+
+// Decrypts a MonkeyMux push payload and builds the notification text the
+// service extension shows. Foundation and CryptoKit only, so
+// scripts/test_ios_push_notification_content.sh can compile it with swiftc
+// against the shared vectors. The wire format is docs/push-notifications.md
+// ("Payload"); the Dart app builds the same strings on Android.
+
+/// The text a decrypted push replaces the generic notification text with.
+struct PushNotificationPresentation: Equatable {
+  let title: String
+  let body: String
+  /// The host reference, so a host's notifications group together.
+  let threadIdentifier: String
+
+  /// Opens [payload] with the device key in [context] and builds the text.
+  /// Returns nil when anything fails, and the caller then delivers the
+  /// notification unchanged.
+  static func make(
+    payload: String,
+    context: PushNotificationContext,
+    originalBody: String
+  ) -> PushNotificationPresentation? {
+    guard
+      let plaintext = PushPayloadCipher.open(payload: payload, seed: context.seed),
+      let event = PushPayloadEvent(plaintext: plaintext)
+    else {
+      return nil
+    }
+    return PushNotificationPresentation(
+      title: PushNotificationText.title(kind: event.kind, agent: event.agent),
+      body: PushNotificationText.body(
+        kind: event.kind,
+        hostLabel: context.hosts[event.hostRef],
+        sessionId: event.sessionId,
+        windowTitle: event.windowTitle,
+        originalBody: originalBody
+      ),
+      threadIdentifier: event.hostRef
+    )
+  }
+}
+
+/// What the app shares with the extension through the keychain:
+/// `{"v":1,"seed":"<base64url X25519 private key>","hosts":{"<hostRef>":"<label>"}}`.
+struct PushNotificationContext {
+  let seed: Data
+  let hosts: [String: String]
+
+  init(seed: Data, hosts: [String: String]) {
+    self.seed = seed
+    self.hosts = hosts
+  }
+
+  /// Parses the stored JSON. Unknown fields are ignored; anything else
+  /// malformed returns nil.
+  init?(json: Data) {
+    guard
+      let object = try? JSONSerialization.jsonObject(with: json),
+      let root = object as? [String: Any],
+      PushJSON.integer(root["v"]) == 1,
+      let encodedSeed = root["seed"] as? String,
+      let seed = PushBase64URL.decode(encodedSeed),
+      seed.count == PushPayloadCipher.keyBytes
+    else {
+      return nil
+    }
+    var hosts: [String: String] = [:]
+    if let entries = root["hosts"] as? [String: Any] {
+      for (hostRef, label) in entries {
+        if let label = label as? String {
+          hosts[hostRef] = label
+        }
+      }
+    }
+    self.init(seed: seed, hosts: hosts)
+  }
+}
+
+enum PushEventKind: String {
+  case permission
+  case input
+  case finished
+  case alert
+  case test
+}
+
+/// A decrypted payload. Mirrors the checks of Dart's `PushEvent.tryParse`.
+struct PushPayloadEvent {
+  let hostRef: String
+  let kind: PushEventKind
+  /// The MonkeyMux session, nil when absent or blank.
+  let sessionId: String?
+  let agent: String?
+  /// The window's title (MonkeyMux 0.1.237 on), nil when absent, blank or
+  /// longer than MonkeyMux sends.
+  let windowTitle: String?
+
+  init?(plaintext: Data) {
+    guard
+      let object = try? JSONSerialization.jsonObject(with: plaintext),
+      let root = object as? [String: Any],
+      PushJSON.integer(root["v"]) == 1,
+      let hostRef = root["hostRef"] as? String,
+      !hostRef.isEmpty,
+      let kindName = root["kind"] as? String,
+      let kind = PushEventKind(rawValue: kindName),
+      let ts = PushJSON.integer(root["ts"]),
+      ts >= 0,
+      ts <= 1 << 40
+    else {
+      return nil
+    }
+    self.hostRef = hostRef
+    self.kind = kind
+    if let session = root["sessionId"] as? String,
+      !PushNotificationText.trimmed(session).isEmpty
+    {
+      sessionId = session
+    } else {
+      sessionId = nil
+    }
+    agent = root["agent"] as? String
+    windowTitle = (root["title"] as? String).flatMap(PushPayloadEvent.cleanTitle)
+  }
+
+  /// Runs of whitespace and control characters become one space, as Dart's
+  /// `PushEvent.tryParse` does; MonkeyMux cuts titles to 64 characters.
+  static func cleanTitle(_ title: String) -> String? {
+    var cleaned = String.UnicodeScalarView()
+    var pendingSpace = false
+    for scalar in title.unicodeScalars {
+      let value = scalar.value
+      if scalar.properties.isWhitespace || value <= 0x1f || (0x7f...0x9f).contains(value)
+        || value == 0xfeff
+      {
+        pendingSpace = !cleaned.isEmpty
+        continue
+      }
+      if pendingSpace {
+        cleaned.append(" ")
+        pendingSpace = false
+      }
+      cleaned.append(scalar)
+    }
+    guard !cleaned.isEmpty, cleaned.count <= 64 else {
+      return nil
+    }
+    return String(cleaned)
+  }
+}
+
+enum PushNotificationText {
+  static let testBody = "Push notifications are working."
+
+  private static let agentLabels: [String: String] = [
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "copilot": "Copilot",
+    "opencode": "OpenCode",
+    "antigravity": "Antigravity",
+    "cursor-agent": "Cursor Agent",
+    "pi": "Pi",
+    "hermes": "Hermes",
+    "openclaw": "OpenClaw",
+    "grok": "Grok",
+    "muse": "Muse Code",
+  ]
+
+  /// The display name for a payload's `agent`, nil for unknown agents.
+  static func agentLabel(_ agent: String?) -> String? {
+    agent.flatMap { agentLabels[$0] }
+  }
+
+  static func title(kind: PushEventKind, agent: String?) -> String {
+    let label = agentLabel(agent)
+    switch kind {
+    case .permission:
+      return label.map { "\($0) needs approval" } ?? "Approval needed"
+    case .input:
+      return label.map { "\($0) has a question" } ?? "Input needed"
+    case .finished:
+      return label.map { "\($0) finished" } ?? "Agent finished"
+    case .alert:
+      return "Terminal alert"
+    case .test:
+      return "MonkeySSH"
+    }
+  }
+
+  /// "<window> · <host> · <session>", each part once: the window's title,
+  /// the label the app shared for the host and, with a label, the session
+  /// (named after its host by default). With none of them, the original
+  /// generic body. Dart's `pushNotificationText` matches this.
+  static func body(
+    kind: PushEventKind,
+    hostLabel: String?,
+    sessionId: String?,
+    windowTitle: String? = nil,
+    originalBody: String
+  ) -> String {
+    if kind == .test {
+      return testBody
+    }
+    let label = trimmed(hostLabel)
+    var parts: [String] = []
+    // Compared by code point, as Dart compares strings: Swift's `==` would
+    // also match canonically equivalent spellings.
+    for part in [trimmed(windowTitle), label, label.isEmpty ? "" : trimmed(sessionId)]
+    where !part.isEmpty
+      && !parts.contains(where: { $0.unicodeScalars.elementsEqual(part.unicodeScalars) })
+    {
+      parts.append(part)
+    }
+    return parts.isEmpty ? originalBody : parts.joined(separator: " \u{00B7} ")
+  }
+
+  /// Dart's `String.trim`: strips Unicode White_Space and U+FEFF from both
+  /// ends.
+  static func trimmed(_ value: String?) -> String {
+    guard let scalars = value?.unicodeScalars else {
+      return ""
+    }
+    func isSpace(_ scalar: Unicode.Scalar) -> Bool {
+      scalar.properties.isWhitespace || scalar.value == 0xfeff
+    }
+    guard
+      let start = scalars.firstIndex(where: { !isSpace($0) }),
+      let end = scalars.lastIndex(where: { !isSpace($0) })
+    else {
+      return ""
+    }
+    return String(String.UnicodeScalarView(scalars[start...end]))
+  }
+}
+
+/// X25519 + HKDF-SHA256 + AES-256-GCM, as docs/push-notifications.md pins it.
+enum PushPayloadCipher {
+  static let keyBytes = 32
+  static let nonceBytes = 12
+  static let tagBytes = 16
+  static let info = Data("monkeyssh-push-v1".utf8)
+
+  /// Returns the plaintext, or nil when the payload is malformed or does not
+  /// authenticate under this device key.
+  static func open(payload: String, seed: Data) -> Data? {
+    guard
+      seed.count == keyBytes,
+      let sealed = PushBase64URL.decode(payload),
+      sealed.count > keyBytes + nonceBytes + tagBytes
+    else {
+      return nil
+    }
+    let bytes = [UInt8](sealed)
+    let ephemeralPublic = Data(bytes[0..<keyBytes])
+    let nonce = Data(bytes[keyBytes..<(keyBytes + nonceBytes)])
+    let ciphertext = Data(bytes[(keyBytes + nonceBytes)..<(bytes.count - tagBytes)])
+    let tag = Data(bytes[(bytes.count - tagBytes)...])
+    do {
+      let device = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: seed)
+      guard let key = payloadKey(device: device, ephemeralPublic: ephemeralPublic) else {
+        return nil
+      }
+      let box = try AES.GCM.SealedBox(
+        nonce: AES.GCM.Nonce(data: nonce),
+        ciphertext: ciphertext,
+        tag: tag
+      )
+      return try AES.GCM.open(box, using: key)
+    } catch {
+      return nil
+    }
+  }
+
+  /// The AES key both sides derive. Nil for an all-zero shared secret (a
+  /// low-order ephemeral key).
+  static func payloadKey(
+    device: Curve25519.KeyAgreement.PrivateKey,
+    ephemeralPublic: Data
+  ) -> SymmetricKey? {
+    guard
+      let ephemeral = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPublic),
+      let shared = try? device.sharedSecretFromKeyAgreement(with: ephemeral)
+    else {
+      return nil
+    }
+    let isZero = shared.withUnsafeBytes { raw in raw.allSatisfy { $0 == 0 } }
+    if isZero {
+      return nil
+    }
+    return shared.hkdfDerivedSymmetricKey(
+      using: SHA256.self,
+      salt: ephemeralPublic + device.publicKey.rawRepresentation,
+      sharedInfo: info,
+      outputByteCount: keyBytes
+    )
+  }
+}
+
+enum PushBase64URL {
+  /// Decodes base64url with or without padding. Rejects the standard
+  /// alphabet's `+` and `/`, whitespace and anything else.
+  static func decode(_ value: String) -> Data? {
+    var body = Substring(value)
+    while body.hasSuffix("=") {
+      body = body.dropLast()
+    }
+    let padding = value.count - body.count
+    guard
+      padding <= 2,
+      padding == 0 || value.count % 4 == 0,
+      body.count % 4 != 1,
+      body.unicodeScalars.allSatisfy(isAlphabet)
+    else {
+      return nil
+    }
+    var standard = body
+      .replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    standard += String(repeating: "=", count: (4 - standard.count % 4) % 4)
+    return Data(base64Encoded: standard)
+  }
+
+  private static func isAlphabet(_ scalar: Unicode.Scalar) -> Bool {
+    switch scalar {
+    case "A"..."Z", "a"..."z", "0"..."9", "-", "_":
+      return true
+    default:
+      return false
+    }
+  }
+}
+
+enum PushJSON {
+  /// A JSON integer, rejecting booleans and numbers written with a fraction
+  /// or exponent (`1.0`), as Dart's `is int` does.
+  static func integer(_ value: Any?) -> Int64? {
+    guard
+      let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      !CFNumberIsFloatType(number)
+    else {
+      return nil
+    }
+    let double = number.doubleValue
+    guard double.rounded() == double, abs(double) < 9.0e15 else {
+      return nil
+    }
+    return number.int64Value
+  }
+}
