@@ -230,4 +230,30 @@ void main() {
     await tester.pump();
     expect(tester.renderObject(navigation), isNot(ring));
   });
+
+  testWidgets('a focused row rebuilt away does not break the ring', (
+    tester,
+  ) async {
+    Widget list({required bool wrapped}) {
+      final row = ListTile(title: const Text('row'), onTap: () {});
+      return KeyboardListNavigation(
+        autofocus: true,
+        child: ListView(
+          children: [
+            if (wrapped) Padding(padding: EdgeInsets.zero, child: row) else row,
+          ],
+        ),
+      );
+    }
+
+    await tester.pumpWidget(_app(list(wrapped: false)));
+    await tester.pump();
+    await _key(tester, LogicalKeyboardKey.arrowDown);
+
+    // The row moves under a new parent: its old element goes inactive, but
+    // its focus node stays primary until after this frame paints.
+    await tester.pumpWidget(_app(list(wrapped: true)));
+
+    expect(tester.takeException(), isNull);
+  });
 }

@@ -275,12 +275,37 @@ class KeyboardListNavigationState extends State<KeyboardListNavigation> {
         !hasFocusedRow) {
       return null;
     }
-    final rect = FocusManager.instance.primaryFocus!.rect;
-    if (rect.isEmpty || !box.attached) {
+    // A row rebuilt away this frame keeps primary focus until the tree is
+    // finalized, which happens after paint. Its element is inactive by now
+    // and its render object detached, so it has no rect to ring.
+    final rowContext = FocusManager.instance.primaryFocus!.context;
+    if (rowContext is! Element || !_isActive(rowContext)) {
+      return null;
+    }
+    final row = rowContext.findRenderObject();
+    if (row == null || !row.attached || !box.attached) {
+      return null;
+    }
+    final rect = MatrixUtils.transformRect(
+      row.getTransformTo(null),
+      row.semanticBounds,
+    );
+    if (rect.isEmpty) {
       return null;
     }
     final topLeft = box.globalToLocal(rect.topLeft);
     return topLeft & rect.size;
+  }
+
+  /// Whether [element] is still in the tree. Release builds cannot tell;
+  /// the detached render object check covers them.
+  static bool _isActive(Element element) {
+    var active = true;
+    assert(() {
+      active = element.debugIsActive;
+      return true;
+    }());
+    return active;
   }
 
   @override
