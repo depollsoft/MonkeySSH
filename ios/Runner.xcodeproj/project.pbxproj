@@ -16,14 +16,19 @@
 		368C996A2EC5C1820960D9D8 /* ConnectionStatusAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		3E2CF8BC78FB07EDD52634C4 /* ConnectionStatusLiveActivityExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C0B9F2DC4F6E27526B4B2044 /* ConnectionStatusLiveActivityExtension.appex */; };
+		3E51B481ABAA1AF0184BAEB3 /* PushNotificationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F36DEBA9E700BD89E5FB9BAE /* PushNotificationPresentation.swift */; };
 		5A0D5E5A2E8C1A0000A0D5E1 /* AdServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A0D5E592E8C1A0000A0D5E1 /* AdServices.framework */; };
+		6167E7E62F07478D84277493 /* NotificationServiceExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F3C4D832FA62E72B092FF66A /* NotificationServiceExtension.appex */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
+		7F7B4A0F4D2411B7BDAB3A49 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20574657B8B05EC89B46B78C /* NotificationService.swift */; };
+		944B8D0C1DCBA0391C99A4B7 /* PushNotificationContextKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25EB4A49F611F536FDD2D327 /* PushNotificationContextKeychain.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		A2D56B9B41F34E978DB60210 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A2D56B9A41F34E978DB60210 /* PrivacyInfo.xcprivacy */; };
 		DD783BB2BA23C838BCACD3C0 /* AppIcon-private.icon in Resources */ = {isa = PBXBuildFile; fileRef = 47B1DB4833F7FC740D4324B9 /* AppIcon-private.icon */; };
+		E605969F97F6E0350347CAC8 /* PushNotificationContextKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25EB4A49F611F536FDD2D327 /* PushNotificationContextKeychain.swift */; };
 		F282391CEEDF4515759E057E /* AppIcon-production.icon in Resources */ = {isa = PBXBuildFile; fileRef = 9FEC3F55B80F78C630674143 /* AppIcon-production.icon */; };
 		F8EA8191DE4116532C59A3CE /* ConnectionStatusLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA8C22083AFB91079DC3816C /* ConnectionStatusLiveActivityWidget.swift */; };
 /* End PBXBuildFile section */
@@ -35,6 +40,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 97C146ED1CF9000F007C117D;
 			remoteInfo = Runner;
+		};
+		4E9F5E3DACD155FE6364C900 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 33841F8B16628F1E420DD9E9;
+			remoteInfo = NotificationServiceExtension;
 		};
 		5D0B6B6B68D995EA029375AD /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -63,6 +75,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				3E2CF8BC78FB07EDD52634C4 /* ConnectionStatusLiveActivityExtension.appex in Embed App Extensions */,
+				6167E7E62F07478D84277493 /* NotificationServiceExtension.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -73,6 +86,8 @@
 		11A5A1B88F1D4C6EA1B2C300 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
+		20574657B8B05EC89B46B78C /* NotificationService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		25EB4A49F611F536FDD2D327 /* PushNotificationContextKeychain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PushNotificationContextKeychain.swift; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
@@ -81,8 +96,10 @@
 		5A0D5E592E8C1A0000A0D5E1 /* AdServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AdServices.framework; path = System/Library/Frameworks/AdServices.framework; sourceTree = SDKROOT; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		78271A2130483C770E91E597 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
+		7E4D7C0FE322F82653B892DC /* NotificationServiceExtension.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = NotificationServiceExtension.entitlements; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
 		97C146EE1CF9000F007C117D /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -97,6 +114,8 @@
 		EA8C22083AFB91079DC3816C /* ConnectionStatusLiveActivityWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityWidget.swift; sourceTree = "<group>"; };
 		EB229B402BD78D4035BBADEA /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionStatusLiveActivityManager.swift; sourceTree = "<group>"; };
+		F36DEBA9E700BD89E5FB9BAE /* PushNotificationPresentation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PushNotificationPresentation.swift; sourceTree = "<group>"; };
+		F3C4D832FA62E72B092FF66A /* NotificationServiceExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationServiceExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -113,6 +132,13 @@
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
 				5A0D5E5A2E8C1A0000A0D5E1 /* AdServices.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9D12248A6FE63521AA972172 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -142,6 +168,18 @@
 			path = RunnerTests;
 			sourceTree = "<group>";
 		};
+		4556B008A15F4183764F6F99 /* NotificationServiceExtension */ = {
+			isa = PBXGroup;
+			children = (
+				20574657B8B05EC89B46B78C /* NotificationService.swift */,
+				F36DEBA9E700BD89E5FB9BAE /* PushNotificationPresentation.swift */,
+				78271A2130483C770E91E597 /* Info.plist */,
+				7E4D7C0FE322F82653B892DC /* NotificationServiceExtension.entitlements */,
+			);
+			name = NotificationServiceExtension;
+			path = NotificationServiceExtension;
+			sourceTree = "<group>";
+		};
 		9740EEB11CF90186004384FC /* Flutter */ = {
 			isa = PBXGroup;
 			children = (
@@ -163,6 +201,7 @@
 				331C8082294A63A400263BE5 /* RunnerTests */,
 				0397D0AD6EE3931D31DC4383 /* Frameworks */,
 				AAB50C8F47A4F0E624CEC4AB /* ConnectionStatusLiveActivityExtension */,
+				4556B008A15F4183764F6F99 /* NotificationServiceExtension */,
 			);
 			sourceTree = "<group>";
 		};
@@ -172,6 +211,7 @@
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				C0B9F2DC4F6E27526B4B2044 /* ConnectionStatusLiveActivityExtension.appex */,
+				F3C4D832FA62E72B092FF66A /* NotificationServiceExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -192,6 +232,7 @@
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				C26A805B242F5546A209DB80 /* ConnectionStatusAttributes.swift */,
 				EE6E480B21DAC7FC2B72ED72 /* ConnectionStatusLiveActivityManager.swift */,
+				25EB4A49F611F536FDD2D327 /* PushNotificationContextKeychain.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -237,6 +278,24 @@
 			productReference = 331C8081294A63A400263BE5 /* RunnerTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		33841F8B16628F1E420DD9E9 /* NotificationServiceExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CAFDCE33500E062867EFD982 /* Build configuration list for PBXNativeTarget "NotificationServiceExtension" */;
+			buildPhases = (
+				324F3075F92736D268F47812 /* Sources */,
+				9D12248A6FE63521AA972172 /* Frameworks */,
+				7DE59FC73AADCF977E847824 /* Resources */,
+				C191836CA8AC2E39087621BD /* Stamp Extension Version */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotificationServiceExtension;
+			productName = NotificationServiceExtension;
+			productReference = F3C4D832FA62E72B092FF66A /* NotificationServiceExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		8523C1B2B3E7456958B6FE0A /* ConnectionStatusLiveActivityExtension */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6F8EAFC62CA92C6D00B11DFA /* Build configuration list for PBXNativeTarget "ConnectionStatusLiveActivityExtension" */;
@@ -273,6 +332,7 @@
 			);
 			dependencies = (
 				BF01824D252E381CD192DB8E /* PBXTargetDependency */,
+				2D5432ECC690F9BAB62763E8 /* PBXTargetDependency */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -326,12 +386,20 @@
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				8523C1B2B3E7456958B6FE0A /* ConnectionStatusLiveActivityExtension */,
+				33841F8B16628F1E420DD9E9 /* NotificationServiceExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		331C807F294A63A400263BE5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7DE59FC73AADCF977E847824 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -424,6 +492,24 @@
 			shellPath = /bin/sh;
 			shellScript = "set -e\n\nGOOGLE_SERVICE_INFO=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"\nif [ ! -f \"$GOOGLE_SERVICE_INFO\" ]; then\n  echo \"Skipping Crashlytics dSYM upload; Firebase config not present.\"\n  exit 0\nfi\n\n# Swift Package Manager checks the Firebase SDK out under the build root, which\n# is $BUILD_DIR for `flutter build` and the DerivedData root for Xcode builds.\nCRASHLYTICS_RUN=\"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run\"\nif [ ! -x \"$CRASHLYTICS_RUN\" ]; then\n  echo \"warning: Crashlytics run script not found at $CRASHLYTICS_RUN; dSYMs were not uploaded.\"\n  exit 0\nfi\n\n\"$CRASHLYTICS_RUN\"\n";
 		};
+		C191836CA8AC2E39087621BD /* Stamp Extension Version */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"${SRCROOT}/Flutter/flutter_export_environment.sh",
+				"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}",
+			);
+			name = "Stamp Extension Version";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/NotificationServiceExtension-version-stamp.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n\nif [ -f \"${SRCROOT}/Flutter/flutter_export_environment.sh\" ]; then\n  . \"${SRCROOT}/Flutter/flutter_export_environment.sh\"\nfi\n\nMARKETING_VERSION_VALUE=\"${MARKETING_VERSION:-${FLUTTER_BUILD_NAME:-}}\"\nCURRENT_PROJECT_VERSION_VALUE=\"${CURRENT_PROJECT_VERSION:-${FLUTTER_BUILD_NUMBER:-}}\"\n\nif [ -z \"$MARKETING_VERSION_VALUE\" ] || [ -z \"$CURRENT_PROJECT_VERSION_VALUE\" ]; then\n  echo \"error: Extension version build settings are missing.\" >&2\n  exit 1\nfi\n\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\n/usr/libexec/PlistBuddy -c \"Delete :CFBundleShortVersionString\" \"$INFO_PLIST\" >/dev/null 2>&1 || true\n/usr/libexec/PlistBuddy -c \"Delete :CFBundleVersion\" \"$INFO_PLIST\" >/dev/null 2>&1 || true\n/usr/libexec/PlistBuddy -c \"Add :CFBundleShortVersionString string $MARKETING_VERSION_VALUE\" \"$INFO_PLIST\"\n/usr/libexec/PlistBuddy -c \"Add :CFBundleVersion string $CURRENT_PROJECT_VERSION_VALUE\" \"$INFO_PLIST\"\nprintf '%s+%s\\n' \"$MARKETING_VERSION_VALUE\" \"$CURRENT_PROJECT_VERSION_VALUE\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
 		E5C1A441D2E64C77B8A1F901 /* Stamp Extension Version */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -445,6 +531,16 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		324F3075F92736D268F47812 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				944B8D0C1DCBA0391C99A4B7 /* PushNotificationContextKeychain.swift in Sources */,
+				7F7B4A0F4D2411B7BDAB3A49 /* NotificationService.swift in Sources */,
+				3E51B481ABAA1AF0184BAEB3 /* PushNotificationPresentation.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		331C807D294A63A400263BE5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -461,6 +557,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				0BBA2D63F69B026808692429 /* ConnectionStatusAttributes.swift in Sources */,
 				10F236A3A094B53411236F3F /* ConnectionStatusLiveActivityManager.swift in Sources */,
+				E605969F97F6E0350347CAC8 /* PushNotificationContextKeychain.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -477,6 +574,12 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		2D5432ECC690F9BAB62763E8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = NotificationServiceExtension;
+			target = 33841F8B16628F1E420DD9E9 /* NotificationServiceExtension */;
+			targetProxy = 4E9F5E3DACD155FE6364C900 /* PBXContainerItemProxy */;
+		};
 		331C8086294A63A400263BE5 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 97C146ED1CF9000F007C117D /* Runner */;
@@ -510,6 +613,36 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		00233A87E6B9B93F644A3BD2 /* Debug-Production */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Debug-Production";
+		};
 		020DDA331F715B95F0F4D061 /* Debug-Production */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -569,6 +702,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -596,6 +730,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -704,6 +839,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -874,6 +1010,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -941,6 +1078,37 @@
 			};
 			name = "Release-Private";
 		};
+		4D24E809F040733444295017 /* Profile-Private */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.private.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Profile-Private";
+		};
 		5987707DA8D5EF2EEEC1FD00 /* Debug-Production */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -983,6 +1151,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -996,6 +1165,67 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = "Debug-Private";
+		};
+		6B696B01D9EB5D1D57968818 /* Release-Production */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Release-Production";
+		};
+		703E9BD39C4DE0163F523094 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
 		};
 		72FA9068EA57EF56BBD604AA /* Profile-Private */ = {
 			isa = XCBuildConfiguration;
@@ -1040,6 +1270,36 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Release;
+		};
+		7E0BC38738A3FBCFE0913E4C /* Debug-Private */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.private.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Debug-Private";
 		};
 		877EE6188E1E4592A41D3425 /* Profile */ = {
 			isa = XCBuildConfiguration;
@@ -1238,6 +1498,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -1266,6 +1527,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
 				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -1273,6 +1535,36 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Release;
+		};
+		9BE5085D70E3E3EA1838ADDC /* Release-Private */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.private.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Release-Private";
 		};
 		A10F860127CB3CBD23545AA3 /* Profile-Production */ = {
 			isa = XCBuildConfiguration;
@@ -1361,6 +1653,37 @@
 			};
 			name = "Release-Production";
 		};
+		B3595672EDE39CBED72E7641 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Profile;
+		};
 		B3AD2088798CC629AF07A2C8 /* Release-Production */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1403,6 +1726,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -1415,6 +1739,37 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = "Release-Private";
+		};
+		B7EBF4886675743DC573AB46 /* Profile-Production */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Profile-Production";
 		};
 		BFD601D6880C238584362300 /* Debug-Production */ = {
 			isa = XCBuildConfiguration;
@@ -1472,6 +1827,35 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Debug-Production";
+		};
+		C47625BADCF093469EA32737 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = NotificationServiceExtension/NotificationServiceExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationServiceExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.depollsoft.monkeyssh.NotificationService;
+				PRODUCT_NAME = NotificationServiceExtension;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
 		};
 		D5732AAEECD20122ECDCC124 /* Release-Production */ = {
 			isa = XCBuildConfiguration;
@@ -1621,6 +2005,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MONKEYSSH_APP_BUNDLE_ID = xyz.depollsoft.monkeyssh.private;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-weak_framework",
@@ -1697,6 +2082,22 @@
 				15AEC8C326259FCC2DF300C8 /* Debug-Production */,
 				49D50F544DE6046375EA1C3E /* Release-Production */,
 				0BE2F1E2D465605DB56E2A48 /* Profile-Production */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CAFDCE33500E062867EFD982 /* Build configuration list for PBXNativeTarget "NotificationServiceExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				703E9BD39C4DE0163F523094 /* Release */,
+				C47625BADCF093469EA32737 /* Debug */,
+				B3595672EDE39CBED72E7641 /* Profile */,
+				7E0BC38738A3FBCFE0913E4C /* Debug-Private */,
+				9BE5085D70E3E3EA1838ADDC /* Release-Private */,
+				4D24E809F040733444295017 /* Profile-Private */,
+				00233A87E6B9B93F644A3BD2 /* Debug-Production */,
+				6B696B01D9EB5D1D57968818 /* Release-Production */,
+				B7EBF4886675743DC573AB46 /* Profile-Production */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -16,6 +16,7 @@ import 'domain/services/diagnostics_log_service.dart';
 import 'domain/services/host_key_prompt_handler_provider.dart';
 import 'domain/services/interactive_auth_prompt.dart';
 import 'domain/services/performance_diagnostics_service.dart';
+import 'domain/services/push/push_background_message.dart';
 import 'domain/services/settings_service.dart';
 import 'domain/services/ssh_error_policy.dart';
 import 'domain/services/telemetry_service.dart';
@@ -31,6 +32,12 @@ Future<void> main() async {
     settingsService: settingsService,
   );
   installTelemetryErrorHandlers(telemetryService);
+  // Android shows pushes itself (they arrive as data only). Registering the
+  // handler only names the entry point; it contacts nothing.
+  if (telemetryService.status == TelemetryServiceStatus.ready &&
+      defaultTargetPlatform == TargetPlatform.android) {
+    registerPushBackgroundMessageHandler();
+  }
   runApp(
     ProviderScope(
       overrides: [

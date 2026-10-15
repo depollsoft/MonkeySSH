@@ -61,6 +61,7 @@ class PushDeviceSecrets {
     this.ticket,
     this.tokenFingerprint,
     this.ticketIssuedAt,
+    this.appNotifications = false,
   });
 
   /// X25519 key pair payloads are sealed to.
@@ -81,6 +82,10 @@ class PushDeviceSecrets {
   /// When the function issued [ticket]; tickets are renewed weekly.
   final DateTime? ticketIssuedAt;
 
+  /// Whether [ticket] was issued for an app that posts its own notifications
+  /// from data-only messages (see PushMessagingGateway.register).
+  final bool appNotifications;
+
   /// Whether the function has registered this device.
   bool get isRegistered => deviceId != null && ticket != null;
 
@@ -90,6 +95,7 @@ class PushDeviceSecrets {
     required String ticket,
     required String tokenFingerprint,
     required DateTime ticketIssuedAt,
+    required bool appNotifications,
   }) => PushDeviceSecrets(
     keyPair: keyPair,
     hostRefKey: hostRefKey,
@@ -97,6 +103,7 @@ class PushDeviceSecrets {
     ticket: ticket,
     tokenFingerprint: tokenFingerprint,
     ticketIssuedAt: ticketIssuedAt,
+    appNotifications: appNotifications,
   );
 }
 
@@ -142,6 +149,7 @@ class PushDeviceStore {
             DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true),
           _ => null,
         },
+        appNotifications: decoded['appNotifications'] == true,
       );
     } on FormatException {
       return null;
@@ -174,6 +182,7 @@ class PushDeviceStore {
         final DateTime at => at.millisecondsSinceEpoch ~/ 1000,
         null => null,
       },
+      if (secrets.appNotifications) 'appNotifications': true,
     }),
   );
 

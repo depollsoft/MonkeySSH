@@ -85,6 +85,7 @@ class MonkeyMuxPushControlResult {
     required this.ok,
     this.unsupported = false,
     this.result,
+    this.events,
   });
 
   /// Whether the helper accepted the operation.
@@ -95,6 +96,10 @@ class MonkeyMuxPushControlResult {
 
   /// The `push_test` outcome, such as `sent`.
   final String? result;
+
+  /// On `push_registered`, the event categories the helper will send. Null
+  /// from a helper that ignores them (before 0.1.233) and sends everything.
+  final List<String>? events;
 }
 
 /// Version metadata for an already-running MonkeyMux server.
@@ -1039,7 +1044,11 @@ class MonkeyMuxService implements RemoteMultiplexerService {
                 message.contains('written by a newer MonkeyMux')),
       );
     }
-    return MonkeyMuxPushControlResult(ok: true, result: response.pushResult);
+    return MonkeyMuxPushControlResult(
+      ok: true,
+      result: response.pushResult,
+      events: response.pushEvents,
+    );
   }
 
   /// Returns metadata for an already-running MonkeyMux server, if any.
@@ -2332,6 +2341,7 @@ class _MonkeyMuxControlResponse {
     this.imagesAcknowledged = false,
     this.focusChanged = false,
     this.pushResult,
+    this.pushEvents,
   });
 
   factory _MonkeyMuxControlResponse.fromJson(Map<String, Object?> json) =>
@@ -2372,6 +2382,11 @@ class _MonkeyMuxControlResponse {
           {'result': final String result} => result,
           _ => null,
         },
+        pushEvents: switch (json['push']) {
+          {'events': final List<Object?> events} =>
+            events.whereType<String>().toList(growable: false),
+          _ => null,
+        },
       );
 
   static _MonkeyMuxControlResponse? tryParse(String line) {
@@ -2403,6 +2418,7 @@ class _MonkeyMuxControlResponse {
   final bool imagesAcknowledged;
   final bool focusChanged;
   final String? pushResult;
+  final List<String>? pushEvents;
 
   bool get isError => status == 'error' || type == 'error';
 }
@@ -2816,6 +2832,7 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
     programStatus: TerminalProgramStatus.fromJson(value['programStatus']),
+    programStatusReporter: value['programStatusReporter'] == true,
     lastActivityEpochSeconds: value['lastActivityEpochSeconds'] as int?,
     pendingNotifications: _muxWindowNotificationsFromJson(
       value['notifications'],

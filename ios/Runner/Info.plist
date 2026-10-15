@@ -30,6 +30,8 @@
 	<false/>
 	<key>FirebaseAppCheckTokenAutoRefreshEnabled</key>
 	<false/>
+	<key>MonkeySSHPushKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)$(MONKEYSSH_APP_BUNDLE_ID).push</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
