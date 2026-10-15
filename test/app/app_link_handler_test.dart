@@ -76,6 +76,11 @@ Host _host({
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 AcpRecentSessionRef _chat({
