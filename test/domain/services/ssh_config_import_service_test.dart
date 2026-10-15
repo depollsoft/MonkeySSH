@@ -9,7 +9,10 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_offer_service.dart';
+import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_config_import_planner.dart';
 import 'package:monkeyssh/domain/services/ssh_config_import_service.dart';
 import 'package:monkeyssh/domain/services/ssh_config_parser.dart';
@@ -51,6 +54,14 @@ class _StalledAnalyticsClient implements TelemetryAnalyticsClient {
 
   @override
   Future<void> setCollectionEnabled({required bool enabled}) async {}
+}
+
+class _FailingOfferService extends MonkeyMuxOfferService {
+  _FailingOfferService(super.settings);
+
+  @override
+  Future<void> markAllPending(Iterable<int> hostIds) =>
+      Future.error(StateError('settings unavailable'));
 }
 
 SshConfigImportPlan _plan(String text) =>
@@ -521,5 +532,96 @@ Host c
     );
     expect(result.reusedHostCount, 0);
     expect(await hosts.getAll(), hasLength(2));
+  });
+
+  group('new plain-shell hosts', () {
+    const config = '''
+Host bastion
+  HostName bastion.example.com
+  User jump
+Host web
+  HostName web.example.com
+  User me
+Host app
+  HostName 10.0.0.2
+  User deploy
+  ProxyJump bastion
+''';
+
+    test('picked new hosts get the first-connect MonkeyMux offer', () async {
+      final offers = MonkeyMuxOfferService(SettingsService(db));
+      final offering = SshConfigImportService(
+        db: db,
+        hostRepository: hosts,
+        portForwardRepository: forwards,
+        monkeyMuxOffers: offers,
+        diagnostics: diagnostics,
+      );
+      final reusedId = await hosts.insert(
+        HostsCompanion.insert(
+          label: 'saved web',
+          hostname: 'web.example.com',
+          username: 'me',
+        ),
+      );
+      final plan = _plan(config);
+
+      final result = await offering.importEntries(
+        plan,
+        selectedIds: {_idFor(plan, 'app'), _idFor(plan, 'web')},
+        defaultUsername: '',
+      );
+
+      final appId = result.createdHostIds[_idFor(plan, 'app')]!;
+      final bastionId = result.createdHostIds[_idFor(plan, 'bastion')]!;
+      expect(result.createdHostIds.keys, isNot(contains(_idFor(plan, 'web'))));
+      // The jump host was pulled in for the chain, not picked, and the
+      // reused host already existed.
+      expect(await offers.takePending(bastionId), isFalse);
+      expect(await offers.takePending(reusedId), isFalse);
+      expect(await offers.takePending(appId), isTrue);
+    });
+
+    test('imported hosts take the default notification settings', () async {
+      final plan = _plan(config);
+      await service.importEntries(
+        plan,
+        selectedIds: {_idFor(plan, 'app')},
+        defaultUsername: '',
+      );
+
+      final saved = await hosts.getAll();
+      expect(saved, hasLength(2));
+      for (final host in saved) {
+        expect(
+          HostNotificationPrefs.fromHost(host),
+          const HostNotificationPrefs(),
+        );
+      }
+    });
+
+    test('a failed offer mark keeps the import', () async {
+      final failing = SshConfigImportService(
+        db: db,
+        hostRepository: hosts,
+        portForwardRepository: forwards,
+        monkeyMuxOffers: _FailingOfferService(SettingsService(db)),
+        diagnostics: diagnostics,
+      );
+      final plan = _plan(config);
+
+      final result = await failing.importEntries(
+        plan,
+        selectedIds: {_idFor(plan, 'web')},
+        defaultUsername: '',
+      );
+
+      expect(result.createdHostIds, hasLength(1));
+      expect(await hosts.getAll(), hasLength(1));
+      final warning = diagnostics.events.singleWhere(
+        (event) => event.message == 'ssh_config_offer_mark_failed',
+      );
+      expect(warning.fields, {'hostCount': 1, 'errorType': 'StateError'});
+    });
   });
 }

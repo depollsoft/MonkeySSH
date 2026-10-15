@@ -10,6 +10,7 @@ import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import 'diagnostics_log_service.dart';
+import 'monkeymux_offer_service.dart';
 import 'ssh_config_import_planner.dart';
 import 'ssh_config_parser.dart';
 import 'telemetry_service.dart';
@@ -154,25 +155,30 @@ class SshConfigImportService {
     required HostRepository hostRepository,
     required PortForwardRepository portForwardRepository,
     TelemetryService? telemetry,
+    MonkeyMuxOfferService? monkeyMuxOffers,
     DiagnosticsLogger? diagnostics,
   }) : _db = db,
        _hostRepository = hostRepository,
        _portForwardRepository = portForwardRepository,
        _telemetry = telemetry,
+       _monkeyMuxOffers = monkeyMuxOffers,
        _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
 
   final AppDatabase _db;
   final HostRepository _hostRepository;
   final PortForwardRepository _portForwardRepository;
   final TelemetryService? _telemetry;
+  final MonkeyMuxOfferService? _monkeyMuxOffers;
   final DiagnosticsLogger _diagnostics;
 
   /// Saves [selectedIds] (and the jump hosts they need) from [plan].
   ///
   /// An entry that matches a saved host (same hostname, port, user, and jump
   /// host) reuses it instead of creating a duplicate. Everything is written in
-  /// one transaction. Throws [SshConfigImportBlockedException] when a
-  /// selected entry (or a jump host it needs) is blocked.
+  /// one transaction. New hosts take the default notification settings and,
+  /// when the user picked them, the first-connect MonkeyMux offer. Throws
+  /// [SshConfigImportBlockedException] when a selected entry (or a jump host
+  /// it needs) is blocked.
   Future<SshConfigImportResult> importEntries(
     SshConfigImportPlan plan, {
     required Set<String> selectedIds,
@@ -242,6 +248,11 @@ class SshConfigImportService {
       }
     });
 
+    await _markMonkeyMuxOffers([
+      for (final MapEntry(key: entryId, value: hostId) in created.entries)
+        if (selectedIds.contains(entryId)) hostId,
+    ]);
+
     _diagnostics.info(
       'hosts.import',
       'ssh_config_imported',
@@ -278,6 +289,28 @@ class SshConfigImportService {
       reusedHostCount: reused,
       forwardCount: forwardCount,
     );
+  }
+
+  /// Imported hosts open a plain shell, so each new host the user picked is
+  /// offered MonkeyMux on its first connection, like a host added by hand
+  /// with no startup action. Jump hosts pulled in only for a chain and
+  /// reused saved hosts are not. The hosts are already saved, so a failure
+  /// here only loses the offer.
+  Future<void> _markMonkeyMuxOffers(List<int> hostIds) async {
+    final offers = _monkeyMuxOffers;
+    if (offers == null || hostIds.isEmpty) return;
+    try {
+      await offers.markAllPending(hostIds);
+    } on Object catch (error) {
+      _diagnostics.warning(
+        'hosts.import',
+        'ssh_config_offer_mark_failed',
+        fields: {
+          'hostCount': hostIds.length,
+          'errorType': error.runtimeType.toString(),
+        },
+      );
+    }
   }
 
   Future<int> _addMissingForwards(
@@ -358,5 +391,6 @@ final sshConfigImportServiceProvider = Provider<SshConfigImportService>(
     hostRepository: ref.watch(hostRepositoryProvider),
     portForwardRepository: ref.watch(portForwardRepositoryProvider),
     telemetry: ref.watch(telemetryServiceProvider),
+    monkeyMuxOffers: ref.watch(monkeyMuxOfferServiceProvider),
   ),
 );
