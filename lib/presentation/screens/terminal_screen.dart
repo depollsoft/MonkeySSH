@@ -11603,9 +11603,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _TerminalExclusiveAction.tmuxNavigator,
     );
 
+    // A native chat hides the find bar without closing it.
+    final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
     return PopScope(
       canPop: resolveTerminalScreenCanPop(
         isTmuxBarExpanded: _isTmuxBarExpanded,
+        isFindBarOpen: showsFindBar,
       ),
       onPopInvokedWithResult: (didPop, _) {
         _logAndroidPredictiveBackDiagnostics(
@@ -11616,6 +11619,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         if (didPop) {
           _clearAppThemeOverride();
           _offerAppReviewAfterLeaving();
+          return;
+        }
+        // One layer per Back: the find bar, then the mux bar.
+        if (showsFindBar) {
+          _closeScrollbackSearch();
           return;
         }
         _collapseTmuxBarIfExpanded();

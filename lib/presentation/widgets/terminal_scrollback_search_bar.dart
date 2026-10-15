@@ -175,7 +175,8 @@ class TerminalScrollbackSearchOverlay extends StatelessWidget {
 /// resize would make the remote program redraw).
 ///
 /// Up steps to older matches and down to newer ones. On a hardware keyboard,
-/// Enter steps up, Shift+Enter steps down and Escape closes the bar.
+/// Enter steps up, Shift+Enter steps down and Escape closes the bar. Back is
+/// left to the screen, which closes the bar before anything else.
 class TerminalScrollbackSearchBar extends StatefulWidget {
   /// Creates the find bar for [controller].
   const TerminalScrollbackSearchBar({
@@ -444,50 +445,41 @@ class _TerminalScrollbackSearchBarState
       ),
     );
 
-    return PopScope(
-      // Back closes the bar before it leaves the terminal.
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) {
-          widget.onClose();
-        }
-      },
-      child: Material(
-        key: const ValueKey<String>('terminal-search-bar'),
-        color: colorScheme.surface,
-        shape: Border(top: BorderSide(color: colorScheme.outlineVariant)),
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: TerminalScrollbackSearchBar.height,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: Row(
-                children: [
-                  Expanded(child: field),
-                  const SizedBox(width: 4),
-                  IconButton(
-                    key: const ValueKey<String>('terminal-search-previous'),
-                    tooltip: 'Previous match',
-                    icon: const Icon(Icons.keyboard_arrow_up_rounded),
-                    onPressed: _canStep ? search.showPrevious : null,
-                  ),
-                  IconButton(
-                    key: const ValueKey<String>('terminal-search-next'),
-                    tooltip: 'Next match',
-                    icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                    onPressed: _canStep ? search.showNext : null,
-                  ),
-                  // Keep Close clear of the step buttons a thumb is tapping.
-                  const SizedBox(width: 8),
-                  IconButton(
-                    key: const ValueKey<String>('terminal-search-close'),
-                    tooltip: 'Close find',
-                    icon: const Icon(Icons.close_rounded),
-                    onPressed: widget.onClose,
-                  ),
-                ],
-              ),
+    return Material(
+      key: const ValueKey<String>('terminal-search-bar'),
+      color: colorScheme.surface,
+      shape: Border(top: BorderSide(color: colorScheme.outlineVariant)),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: TerminalScrollbackSearchBar.height,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              children: [
+                Expanded(child: field),
+                const SizedBox(width: 4),
+                IconButton(
+                  key: const ValueKey<String>('terminal-search-previous'),
+                  tooltip: 'Previous match',
+                  icon: const Icon(Icons.keyboard_arrow_up_rounded),
+                  onPressed: _canStep ? search.showPrevious : null,
+                ),
+                IconButton(
+                  key: const ValueKey<String>('terminal-search-next'),
+                  tooltip: 'Next match',
+                  icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                  onPressed: _canStep ? search.showNext : null,
+                ),
+                // Keep Close clear of the step buttons a thumb is tapping.
+                const SizedBox(width: 8),
+                IconButton(
+                  key: const ValueKey<String>('terminal-search-close'),
+                  tooltip: 'Close find',
+                  icon: const Icon(Icons.close_rounded),
+                  onPressed: widget.onClose,
+                ),
+              ],
             ),
           ),
         ),

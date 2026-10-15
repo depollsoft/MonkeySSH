@@ -10927,6 +10927,42 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    testWidgets(
+      'Android back closes find, then the expanded tmux bar, one per press',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService);
+
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        final dismissRegion = find.byKey(
+          const ValueKey('tmux-terminal-dismiss-region'),
+        );
+        expect(dismissRegion, findsOneWidget);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Find'));
+        await tester.pumpAndSettle();
+        final findBar = find.byKey(
+          const ValueKey<String>('terminal-search-bar'),
+        );
+        expect(findBar, findsOneWidget);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(findBar, findsNothing);
+        expect(dismissRegion, findsOneWidget);
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(dismissRegion, findsNothing);
+        expect(find.byType(TerminalScreen), findsOneWidget);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('hiding the expanded tmux bar restores normal back handling', (
       tester,
     ) async {
