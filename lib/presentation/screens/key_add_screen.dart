@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -205,28 +206,10 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
           // Key type
           Text('Key Type', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          SegmentedButton<String>(
-            segments: [
-              ButtonSegment(
-                value: 'ed25519',
-                label: Text('Ed25519', style: FluttyTheme.monoStyle),
-                icon: const Icon(Icons.enhanced_encryption),
-              ),
-              ButtonSegment(
-                value: 'rsa',
-                label: Text('RSA', style: FluttyTheme.monoStyle),
-                icon: const Icon(Icons.key),
-              ),
-              ButtonSegment(
-                value: _hardwareKeyType,
-                label: Text('Hardware', style: FluttyTheme.monoStyle),
-                icon: const Icon(Icons.memory),
-                tooltip: 'Non-exportable key in secure hardware',
-              ),
-            ],
-            selected: {_keyType},
-            onSelectionChanged: (value) {
-              setState(() => _keyType = value.first);
+          _KeyTypeSelector(
+            selected: _keyType,
+            onChanged: (value) {
+              setState(() => _keyType = value);
               _notifyUnsavedChangesChanged();
             },
           ),
@@ -445,6 +428,142 @@ class _GenerateKeyTabState extends ConsumerState<_GenerateKeyTab> {
   void _notifyUnsavedChangesChanged() =>
       widget.onUnsavedChangesChanged(_hasUnsavedChanges);
 }
+
+/// Whether this platform can hold keys in secure hardware; elsewhere the
+/// Hardware key type is not offered at all.
+bool get _hardwareKeysSupported =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android);
+
+typedef _KeyTypeOption = ({
+  String value,
+  String label,
+  IconData icon,
+  String? tooltip,
+});
+
+/// Key type picker whose labels never break mid-word.
+///
+/// Shows icons when the row has room, drops them on a narrow phone, and
+/// stacks the types when even bare labels would not fit, as with large text.
+class _KeyTypeSelector extends StatelessWidget {
+  const _KeyTypeSelector({required this.selected, required this.onChanged});
+
+  final String selected;
+  final ValueChanged<String> onChanged;
+
+  static const _software = <_KeyTypeOption>[
+    (
+      value: 'ed25519',
+      label: 'Ed25519',
+      icon: Icons.enhanced_encryption,
+      tooltip: null,
+    ),
+    (value: 'rsa', label: 'RSA', icon: Icons.key, tooltip: null),
+  ];
+
+  static const _hardware = (
+    value: _hardwareKeyType,
+    label: 'Hardware',
+    icon: Icons.memory,
+    tooltip: 'Non-exportable key in secure hardware',
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final options = [..._software, if (_hardwareKeysSupported) _hardware];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final layout = _layoutFor(context, options, constraints.maxWidth);
+        final showIcons = layout != _KeyTypeLayout.compact;
+        final stacked = layout == _KeyTypeLayout.stacked;
+        return SegmentedButton<String>(
+          direction: stacked ? Axis.vertical : Axis.horizontal,
+          // A stadium reads as a pill once the segments are stacked.
+          style: stacked
+              ? SegmentedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+                  ),
+                )
+              : null,
+          showSelectedIcon: showIcons,
+          segments: [
+            for (final option in options)
+              ButtonSegment(
+                value: option.value,
+                label: Text(
+                  option.label,
+                  style: FluttyTheme.monoStyle,
+                  maxLines: 1,
+                  softWrap: false,
+                ),
+                icon: showIcons ? Icon(option.icon) : null,
+                tooltip: option.tooltip,
+              ),
+          ],
+          selected: {selected},
+          onSelectionChanged: (value) => onChanged(value.first),
+        );
+      },
+    );
+  }
+
+  /// Picks the roomiest layout whose equal-width segments fit [maxWidth],
+  /// using the padding SegmentedButton applies at the current text scale.
+  static _KeyTypeLayout _layoutFor(
+    BuildContext context,
+    List<_KeyTypeOption> options,
+    double maxWidth,
+  ) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    final labelStyle =
+        (Theme.of(context).textTheme.labelLarge ?? const TextStyle()).merge(
+          FluttyTheme.monoStyle,
+        );
+    var widestLabel = 0.0;
+    for (final option in options) {
+      final painter = TextPainter(
+        text: TextSpan(text: option.label, style: labelStyle),
+        textDirection: direction,
+        textScaler: textScaler,
+        maxLines: 1,
+      )..layout();
+      if (painter.width > widestLabel) {
+        widestLabel = painter.width;
+      }
+      painter.dispose();
+    }
+    final buttonScale = textScaler.scale(14) / 14;
+    final iconPadding = ButtonStyleButton.scaledPadding(
+      const EdgeInsetsDirectional.fromSTEB(12, 8, 16, 8),
+      const EdgeInsets.symmetric(horizontal: 4),
+      const EdgeInsets.symmetric(horizontal: 4),
+      buttonScale,
+    ).horizontal;
+    final textPadding = ButtonStyleButton.scaledPadding(
+      const EdgeInsets.symmetric(horizontal: 12),
+      const EdgeInsets.symmetric(horizontal: 8),
+      const EdgeInsets.symmetric(horizontal: 4),
+      buttonScale,
+    ).horizontal;
+    final iconGap = 8 - 4 * (buttonScale.clamp(1.0, 2.0) - 1);
+    // Room for the segment borders and rounding.
+    const slack = 4.0;
+    final perSegment = maxWidth / options.length;
+    if (widestLabel + iconPadding + 18 + iconGap + slack <= perSegment) {
+      return _KeyTypeLayout.withIcons;
+    }
+    if (widestLabel + textPadding + slack <= perSegment) {
+      return _KeyTypeLayout.compact;
+    }
+    return _KeyTypeLayout.stacked;
+  }
+}
+
+enum _KeyTypeLayout { withIcons, compact, stacked }
 
 class _ImportKeyTab extends ConsumerStatefulWidget {
   const _ImportKeyTab({

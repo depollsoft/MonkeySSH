@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -503,6 +505,77 @@ void main() {
         findsOneWidget,
       );
       expect(find.byType(KeyAddScreen), findsOneWidget);
+    });
+
+    for (final textScale in [1.0, 1.3, 2.0]) {
+      testWidgets(
+        'key type labels never break mid-word at ${textScale}x text',
+        (tester) async {
+          await tester.binding.setSurfaceSize(const Size(360, 1000));
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final db = AppDatabase.forTesting(NativeDatabase.memory());
+          addTearDown(db.close);
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                databaseProvider.overrideWithValue(db),
+                keyServiceProvider.overrideWithValue(_MockKeyService()),
+              ],
+              child: MaterialApp(
+                builder: (context, child) => MediaQuery(
+                  data: MediaQuery.of(context)
+                      .copyWith(textScaler: TextScaler.linear(textScale)),
+                  child: child!,
+                ),
+                home: const KeyAddScreen(),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          for (final label in ['Ed25519', 'RSA', 'Hardware']) {
+            final paragraph = tester.renderObject<RenderParagraph>(
+              find.descendant(
+                of: find.byType(SegmentedButton<String>),
+                matching: find.text(label),
+              ),
+            );
+            // The whole label sits on one line inside its segment.
+            expect(
+              paragraph.getMaxIntrinsicWidth(double.infinity),
+              lessThanOrEqualTo(paragraph.size.width + 0.01),
+              reason: '$label at ${textScale}x',
+            );
+            expect(
+              paragraph.size.height,
+              lessThan(paragraph.getMinIntrinsicHeight(double.infinity) * 1.5),
+              reason: '$label at ${textScale}x',
+            );
+          }
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
+    testWidgets('desktop does not offer the hardware key type', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            keyServiceProvider.overrideWithValue(_MockKeyService()),
+          ],
+          child: const MaterialApp(home: KeyAddScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Ed25519'), findsOneWidget);
+      expect(find.text('RSA'), findsOneWidget);
+      expect(find.text('Hardware'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 }
