@@ -165,6 +165,25 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     });
   }
 
+  /// Says why Back or Close did not leave while a batch runs. Repeated
+  /// presses replace the message rather than queueing copies.
+  void _explainRunningBatch() {
+    final progress = _batchProgress;
+    if (progress == null || !mounted) return;
+    final verb = progress.verb.toLowerCase();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            progress.cancellable
+                ? 'Still $verb. Tap Cancel or wait for it to finish.'
+                : 'Still $verb. Wait for it to finish.',
+          ),
+        ),
+      );
+  }
+
   void _beginBatch(SftpBatchProgress progress) {
     _update(() => _batchProgress = progress);
   }

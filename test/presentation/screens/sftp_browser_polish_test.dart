@@ -311,6 +311,41 @@ ProviderContainer _container(
   return container;
 }
 
+/// Opens the browser as a pushed route over a home page, so Back and Close
+/// have somewhere to go.
+Future<void> _pumpBrowserRoute(
+  WidgetTester tester,
+  ProviderContainer container, {
+  bool showCloseButton = false,
+}) async {
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: Scaffold(body: Text('home page'))),
+    ),
+  );
+  unawaited(
+    tester
+        .state<NavigatorState>(find.byType(Navigator))
+        .push(
+          MaterialPageRoute<void>(
+            builder: (_) => SftpScreen(
+              hostId: 1,
+              connectionId: 7,
+              showCloseButton: showCloseButton,
+            ),
+          ),
+        ),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// System Back, as the Android back button or the iOS swipe sends it.
+Future<void> _systemBack(WidgetTester tester) async {
+  await tester.state<NavigatorState>(find.byType(Navigator)).maybePop();
+  await tester.pumpAndSettle();
+}
+
 void _usePicker(_Picker picker) {
   final previous = FilePickerPlatform.instance;
   FilePickerPlatform.instance = picker;
@@ -1082,6 +1117,128 @@ void main() {
       find.text('Upload failed. Check the connection and try again.'),
       findsOneWidget,
     );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('leaving the browser cancels its running batch', (tester) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(
+            name: 'first.txt',
+            bytes: Uint8List.fromList([1, 2, 3, 4]),
+          ),
+        ],
+    );
+    final sftp = _HostSftp();
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(transfers.completedUploads, isEmpty);
+    expect(sftp.removed, ['$_home/first.txt']);
+  });
+
+  testWidgets('Back and Close wait for a running batch', (tester) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(name: 'up.txt', bytes: Uint8List.fromList([1, 2])),
+        ],
+    );
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowserRoute(
+      tester,
+      _container(_HostSftp(), store: _MemoryViewStore(), files: transfers),
+      showCloseButton: true,
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await _systemBack(tester);
+    expect(find.byType(SftpScreen), findsOneWidget);
+    expect(
+      find.text('Still uploading. Tap Cancel or wait for it to finish.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Close file browser'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SftpScreen), findsOneWidget);
+
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+    expect(transfers.completedUploads, ['$_home/up.txt']);
+    await _systemBack(tester);
+    expect(find.byType(SftpScreen), findsNothing);
+    expect(find.text('home page'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Back opens the previous folder and keeps the selection', (
+    tester,
+  ) async {
+    final sftp = _HostSftp(
+      files: {'$_home/a.txt': 1, '$_home/docs/c.txt': 3},
+      directories: {'$_home/docs'},
+    );
+    await _pumpBrowserRoute(
+      tester,
+      _container(sftp, store: _MemoryViewStore()),
+    );
+
+    await _selectFiles(tester, ['a.txt']);
+    await tester.tap(find.text('docs'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('c.txt'));
+    await tester.pump();
+    expect(find.text('2 files selected'), findsOneWidget);
+
+    await _systemBack(tester);
+    expect(find.text('a.txt'), findsOneWidget);
+    expect(find.text('2 files selected'), findsOneWidget);
+
+    // At the first folder Back ends selection, and only then leaves.
+    await _systemBack(tester);
+    expect(find.text('2 files selected'), findsNothing);
+    expect(find.byType(SftpScreen), findsOneWidget);
+    await _systemBack(tester);
+    expect(find.text('home page'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Back while moving opens the previous folder', (tester) async {
+    final sftp = _HostSftp(
+      files: {'$_home/src/a.txt': 1, '$_home/src/b.txt': 2},
+      directories: {'$_home/src'},
+    );
+    await _pumpBrowserRoute(
+      tester,
+      _container(sftp, store: _MemoryViewStore()),
+    );
+
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    await _selectFiles(tester, ['a.txt', 'b.txt']);
+    await tester.tap(_barAction('Move'));
+    await tester.pumpAndSettle();
+
+    await _systemBack(tester);
+    expect(find.text('move 2 files'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Move here'));
+    await tester.pumpAndSettle();
+
+    expect(sftp.renamed, [
+      ('$_home/src/a.txt', '$_home/a.txt'),
+      ('$_home/src/b.txt', '$_home/b.txt'),
+    ]);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

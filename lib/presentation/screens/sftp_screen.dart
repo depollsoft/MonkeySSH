@@ -321,6 +321,9 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
 
   @override
   void dispose() {
+    // Work started here stops with the browser rather than running on with
+    // no progress, Cancel or results.
+    _batchProgress?.cancel();
     _breadcrumbScrollController.dispose();
     _fileListScrollController.dispose();
     _filterController.dispose();
@@ -1174,18 +1177,26 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   @override
   Widget build(BuildContext context) => PopScope(
     canPop:
-        _pathHistory.length <= 1 && !_isBatchSelecting && _movingFiles == null,
+        _pathHistory.length <= 1 &&
+        !_isBatchSelecting &&
+        _movingFiles == null &&
+        !_batchRunning,
     onPopInvokedWithResult: (didPop, _) {
       if (didPop) {
         return;
       }
-      // Back leaves selection or a pending move before leaving the folder.
-      if (_isBatchSelecting) {
+      // Back walks folder history first, also while selecting or choosing
+      // where to move files, so a selection that spans folders survives it.
+      // At the first folder it ends selection or the pending move, and it
+      // never leaves while a batch runs.
+      if (_pathHistory.length > 1) {
+        unawaited(_goBack());
+      } else if (_isBatchSelecting) {
         _endBatchSelection();
       } else if (_movingFiles != null) {
         _cancelMove();
-      } else if (_pathHistory.length > 1) {
-        unawaited(_goBack());
+      } else if (_batchRunning) {
+        _explainRunningBatch();
       }
     },
     child: Scaffold(
@@ -1292,6 +1303,10 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
   }
 
   void _closeBrowser() {
+    if (_batchRunning) {
+      _explainRunningBatch();
+      return;
+    }
     final navigator = Navigator.of(context);
     if (navigator.canPop()) {
       navigator.pop();
