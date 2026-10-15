@@ -7,6 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/tmux_state.dart';
+import 'diagnostics_log_service.dart';
 import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
 
@@ -1078,6 +1079,16 @@ class LocalNotificationService {
 
       return true;
     } on MissingPluginException {
+      return false;
+    } on PlatformException catch (error) {
+      // Operations are serialized per notification ID only, so another ID can
+      // request while the prompt is open. Android rejects that request with
+      // `permissionRequestInProgress`; permission is not granted yet.
+      DiagnosticsLogService.instance.warning(
+        'notifications',
+        'permission_request_failed',
+        fields: {'code': error.code},
+      );
       return false;
     }
   }
