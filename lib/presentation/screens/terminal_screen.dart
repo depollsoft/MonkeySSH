@@ -120,6 +120,9 @@ import '../widgets/terminal_paste_upload_strip.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
 import '../widgets/terminal_port_forwards_sheet.dart';
 import '../widgets/terminal_prompt_tail.dart' show scanPromptTail;
+import '../widgets/terminal_scrollback_export.dart';
+import '../widgets/terminal_scrollback_search.dart';
+import '../widgets/terminal_scrollback_search_bar.dart';
 import '../widgets/terminal_text_input_handler.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
@@ -864,6 +867,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   double _lastTerminalScrollOffset = 0;
   bool _isTerminalScrollToBottomQueued = false;
   bool _isNavigatingCommandMarks = false;
+  TerminalScrollbackSearchController? _scrollbackSearch;
+  // Height the find bar covers, so the terminal can scroll its last rows
+  // above it. Set while building the body, before the terminal view.
+  double _scrollbackSearchClearance = 0;
   int? _previousCommandNavigationRow;
   int? _previousCommandNavigationConnectionId;
   int? _previousCommandNavigationMarkCount;
@@ -5039,6 +5046,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       int pixelWidth,
       int pixelHeight,
     ) {
+      // The buffer reflows right after this callback without notifying
+      // listeners, so an open search refreshes on its own timer.
+      _scrollbackSearch?.terminalResized();
       session.updateTerminalWindowMetrics(
         columns: width,
         rows: height,
@@ -11269,6 +11279,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _terminalScrollController
       ..removeListener(_handleTerminalScroll)
       ..dispose();
+    _scrollbackSearch?.dispose();
     unawaited(_releaseShellStreams());
     _terminalFocusNode.dispose();
     _systemKeyboardVisibilityController.removeListener(
@@ -11594,9 +11605,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _TerminalExclusiveAction.tmuxNavigator,
     );
 
+    // A native chat hides the find bar without closing it.
+    final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
     return PopScope(
       canPop: resolveTerminalScreenCanPop(
         isTmuxBarExpanded: _isTmuxBarExpanded,
+        isFindBarOpen: showsFindBar,
       ),
       onPopInvokedWithResult: (didPop, _) {
         _logAndroidPredictiveBackDiagnostics(
@@ -11607,6 +11621,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         if (didPop) {
           _clearAppThemeOverride();
           _offerAppReviewAfterLeaving();
+          return;
+        }
+        // One layer per Back: the find bar, then the mux bar.
+        if (showsFindBar) {
+          _closeScrollbackSearch();
           return;
         }
         _collapseTmuxBarIfExpanded();
@@ -11858,6 +11877,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                         : 'Previous Command ($commandMarkCount)',
                     action: 'previous_command',
                   ),
+                if (showsTerminalViewportMenuActions)
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: Icons.search_rounded,
+                    label: 'Find',
+                    action: 'find_in_scrollback',
+                  ),
+                if (showsTerminalViewportMenuActions)
+                  _terminalOverflowMenuItem(
+                    context: context,
+                    icon: terminalScrollbackExportIcon(defaultTargetPlatform),
+                    label: 'Export Scrollback',
+                    action: 'export_scrollback',
+                  ),
                 if (showsTerminalViewportMenuActions &&
                     _workingDirectoryPath != null)
                   _terminalOverflowMenuItem(
@@ -11920,11 +11953,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 _showKeyboardToolbar &&
                 !showsDisconnectedOverlay &&
                 (!_isNativeSelectionMode || _isMobilePlatform);
-            final terminalArea = _buildTerminalWithTmuxBar(
-              terminalTheme,
-              isMobile,
-              theme,
-              connectionState,
+            // The find bar overlays the terminal area; the terminal gets that
+            // much scroll room below its last row. A native chat hides it.
+            _scrollbackSearch?.paused = showsNativeAgent;
+            final findField = showsNativeAgent
+                ? null
+                : _scrollbackSearch?.fieldInput;
+            _scrollbackSearchClearance =
+                _scrollbackSearch == null || showsNativeAgent
+                ? 0
+                : terminalSearchBarObscuredHeight(
+                    showsKeyboardToolbar
+                        ? removeSystemBottomInset(MediaQuery.of(bodyContext))
+                        : MediaQuery.of(bodyContext),
+                    reservedBottom: _terminalViewportReservedBottomPadding,
+                  );
+            final terminalArea = TerminalScrollbackSearchOverlay(
+              search: showsNativeAgent ? null : _scrollbackSearch,
+              scrollController: _terminalScrollController,
+              lineHeight: () => _terminalLineHeight,
+              onClose: _closeScrollbackSearch,
+              reservedBottom: _terminalViewportReservedBottomPadding,
+              child: _buildTerminalWithTmuxBar(
+                terminalTheme,
+                isMobile,
+                theme,
+                connectionState,
+              ),
             );
             return Column(
               children: [
@@ -11942,42 +11997,77 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       : terminalArea,
                 ),
                 if (showsKeyboardToolbar)
-                  KeyboardToolbar(
-                    controller: _toolbarController,
-                    terminal: _terminal,
-                    onKeyPressed: showsNativeAgent
-                        ? null
-                        : _handleKeyboardToolbarKeyPressed,
-                    onTextInput: showsNativeAgent
-                        ? _nativeComposerFocusController.insertText
-                        : null,
-                    onSpecialKey: showsNativeAgent
-                        ? _nativeComposerFocusController.sendSpecialKey
-                        : null,
-                    onPasteRequested: showsNativeAgent
-                        ? _pasteClipboardIntoNativeComposer
-                        : _pasteClipboard,
-                    onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
-                    onSnippetPasteRequested: showsNativeAgent
-                        ? _pasteSnippetIntoNativeComposer
-                        : _pasteKeyboardToolbarSnippet,
-                    onPasteMediaRequested: showsNativeAgent
-                        ? _nativeComposerFocusController.pickPhotos
-                        : _pastePickedMedia,
-                    onPasteFilesRequested: showsNativeAgent
-                        ? _nativeComposerFocusController.pickFiles
-                        : _pastePickedFiles,
-                    snippets: _keyboardToolbarSnippets,
-                    snippetFolders: _keyboardToolbarSnippetFolders,
-                    terminalFocusNode: showsNativeAgent
-                        ? null
-                        : _terminalFocusNode,
+                  ListenableBuilder(
+                    // Switches the toolbar to the find field while that has
+                    // focus.
+                    listenable: Listenable.merge([findField]),
+                    builder: (context, _) => _buildKeyboardToolbar(
+                      showsNativeAgent: showsNativeAgent,
+                      findField: (findField?.hasFocus ?? false)
+                          ? findField
+                          : null,
+                    ),
                   ),
               ],
             );
           },
         ),
       ),
+    );
+  }
+
+  /// The extra-keys toolbar. It types into the native chat's composer while
+  /// one shows, into the find bar's field while that has focus, and into the
+  /// terminal otherwise.
+  Widget _buildKeyboardToolbar({
+    required bool showsNativeAgent,
+    TerminalSearchFieldInput? findField,
+  }) {
+    if (findField != null) {
+      // Nothing reaches the shell, and the terminal neither takes focus back
+      // nor jumps to the bottom, so the revealed match stays in view.
+      return KeyboardToolbar(
+        controller: _toolbarController,
+        terminal: _terminal,
+        onTextInput: findField.insertText,
+        onSpecialKey: findField.sendSpecialKey,
+        onPasteRequested: () => _pasteClipboardIntoFind(findField),
+        onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
+        onSnippetPasteRequested: (snippet) =>
+            _insertKeyboardToolbarSnippet(snippet, findField.pasteText),
+        snippets: _keyboardToolbarSnippets,
+        snippetFolders: _keyboardToolbarSnippetFolders,
+      );
+    }
+    return KeyboardToolbar(
+      controller: _toolbarController,
+      terminal: _terminal,
+      onKeyPressed: showsNativeAgent ? null : _handleKeyboardToolbarKeyPressed,
+      onTextInput: showsNativeAgent
+          ? _nativeComposerFocusController.insertText
+          : null,
+      onSpecialKey: showsNativeAgent
+          ? _nativeComposerFocusController.sendSpecialKey
+          : null,
+      onPasteRequested: showsNativeAgent
+          ? _pasteClipboardIntoNativeComposer
+          : _pasteClipboard,
+      onPasteMenuOpened: _refreshKeyboardToolbarSnippetMenu,
+      onSnippetPasteRequested: showsNativeAgent
+          ? (snippet) => _insertKeyboardToolbarSnippet(
+              snippet,
+              _nativeComposerFocusController.insertText,
+            )
+          : _pasteKeyboardToolbarSnippet,
+      onPasteMediaRequested: showsNativeAgent
+          ? _nativeComposerFocusController.pickPhotos
+          : _pastePickedMedia,
+      onPasteFilesRequested: showsNativeAgent
+          ? _nativeComposerFocusController.pickFiles
+          : _pastePickedFiles,
+      snippets: _keyboardToolbarSnippets,
+      snippetFolders: _keyboardToolbarSnippetFolders,
+      terminalFocusNode: showsNativeAgent ? null : _terminalFocusNode,
     );
   }
 
@@ -12704,6 +12794,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ((_observedSession ?? _activeSession())
                 ?.monkeyMuxViewportClippingEnabled ??
             false);
+    _scrollbackSearch?.terminal = _terminal;
     Widget terminalView = MonkeyTerminalView(
       key: _terminalViewKey,
       _terminal,
@@ -12725,6 +12816,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       theme: terminalTheme.toXtermTheme(),
       textStyle: terminalTextStyle,
       inlineUnderlines: inlineUnderlines,
+      searchHits: _scrollbackSearch,
+      bottomScrollClearance: _scrollbackSearchClearance,
       keyboardAppearance: keyboardAppearance,
       padding: terminalViewportPadding,
       resizeTerminalToViewport: !clipsMonkeyMuxSharedGrid,
@@ -13178,6 +13271,48 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  void _openScrollbackSearch() {
+    if (_scrollbackSearch case final search?) {
+      search.requestFocus();
+      return;
+    }
+    setState(() {
+      _scrollbackSearch = TerminalScrollbackSearchController(
+        terminal: _terminal,
+        anchorRow: () => terminalViewportBottomRow(
+          _terminalScrollController,
+          lineHeight: _terminalLineHeight,
+          obscuredBottom: _scrollbackSearchClearance,
+        ),
+      );
+    });
+  }
+
+  void _closeScrollbackSearch() {
+    final search = _scrollbackSearch;
+    if (search == null || !mounted) {
+      return;
+    }
+    setState(() => _scrollbackSearch = null);
+    // The terminal view drops its listener in this frame's build.
+    WidgetsBinding.instance.addPostFrameCallback((_) => search.dispose());
+    _restoreTerminalFocus();
+  }
+
+  double get _terminalLineHeight =>
+      _terminalViewKey.currentState?.renderTerminal.lineHeight ?? 0;
+
+  Future<void> _exportScrollback() async {
+    final anchorContext = _terminalOverflowMenuButtonKey.currentContext;
+    await exportTerminalScrollback(
+      context: context,
+      terminal: _terminal,
+      sharePositionOrigin: anchorContext == null
+          ? null
+          : terminalShareOriginFromContext(anchorContext),
+    );
+  }
+
   Future<void> _openAgentManagement() async {
     if (!await requireMonetizationFeatureAccess(
           context: context,
@@ -13363,6 +13498,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         break;
       case 'previous_command':
         await _jumpToPreviousCommandMark();
+        break;
+      case 'find_in_scrollback':
+        _openScrollbackSearch();
+        break;
+      case 'export_scrollback':
+        await _exportScrollback();
         break;
       case 'copy_working_directory':
         await _copyWorkingDirectory();
@@ -16208,6 +16349,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     });
   }
 
+  Future<void> _pasteClipboardIntoFind(TerminalSearchFieldInput field) async {
+    final text = await _readSystemClipboardText();
+    if (!mounted) {
+      return;
+    }
+    if (text == null || text.isEmpty) {
+      _showClipboardMessage('Clipboard has no text to paste.');
+      return;
+    }
+    field.pasteText(text);
+  }
+
   Future<void> _pasteClipboardIntoNativeComposer() async {
     try {
       final imageBytes = await Pasteboard.image;
@@ -16232,8 +16385,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _nativeComposerFocusController.pasteText(text);
   }
 
-  Future<void> _pasteSnippetIntoNativeComposer(
+  /// Inserts [selectedSnippet]'s command, with its variables filled in,
+  /// through [insert]: the native chat's composer or the find field.
+  Future<void> _insertKeyboardToolbarSnippet(
     KeyboardToolbarSnippet selectedSnippet,
+    ValueChanged<String> insert,
   ) async {
     final repository = ref.read(snippetRepositoryProvider);
     final snippet = await repository.getById(selectedSnippet.id);
@@ -16248,7 +16404,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted || substitution == null || substitution.command.isEmpty) {
       return;
     }
-    _nativeComposerFocusController.insertText(substitution.command);
+    insert(substitution.command);
     unawaited(repository.incrementUsage(snippet.id));
   }
 
