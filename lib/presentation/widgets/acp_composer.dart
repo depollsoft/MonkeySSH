@@ -1026,18 +1026,23 @@ class _ErrorBanner extends StatelessWidget {
           FluttyTheme.spacingSm,
           FluttyTheme.spacingSm,
         ),
-        child: Row(
-          children: [
-            Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
-            const SizedBox(width: FluttyTheme.spacingSm),
-            Expanded(
-              child: Text(
-                error.message,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onErrorContainer,
-                ),
-              ),
+        child: AcpNoticeLayout(
+          icon: Icon(
+            Icons.error_outline,
+            size: 18,
+            color: scheme.onErrorContainer,
+          ),
+          message: Text(
+            error.message,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onErrorContainer,
             ),
+          ),
+          actionLabels: [
+            if (onRetry != null) 'Retry',
+            if (onUpload != null) 'Upload',
+          ],
+          actions: [
             if (onRetry != null)
               TextButton(
                 key: const ValueKey('acp-error-retry'),
