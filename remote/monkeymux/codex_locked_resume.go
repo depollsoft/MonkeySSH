@@ -218,8 +218,8 @@ func (s *muxServer) watchCodexLockedResume(
 }
 
 // pressCodexLockedRetry writes R only if, once this window's input is
-// serialized, the prompt is still on screen with the same foreground group
-// and the lock is still free. A paste can hold the input lock while the child
+// serialized, the lock is still free and the prompt is still on screen with
+// the same foreground group. A paste can hold the input lock while the child
 // is blocked, and the program in front or the lock holder can change during
 // the wait. It reports whether R was written.
 func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int, lockHeld func() bool) bool {
@@ -235,13 +235,17 @@ func (s *muxServer) pressCodexLockedRetry(window *muxWindow, foreground int, loc
 	if err := s.writeQueuedWindowRepliesLocked(window); err != nil {
 		return false
 	}
+	// The probe is file I/O, so it runs outside s.mu, and before the checks
+	// below: the program in front can change while it runs.
+	if lockHeld() {
+		return false
+	}
 	s.mu.Lock()
 	current := !s.closed && !window.closed && s.windowByIDLocked(window.id) == window &&
 		window.screen != nil && codexLockedPromptShown(window.screen.TextRows()) &&
 		ptyForegroundProcessGroup(window.pty) == foreground
 	s.mu.Unlock()
-	// The probe is file I/O, so it runs outside s.mu.
-	if !current || lockHeld() {
+	if !current {
 		return false
 	}
 	var err error

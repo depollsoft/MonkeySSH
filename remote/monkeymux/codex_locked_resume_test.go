@@ -625,6 +625,58 @@ func TestWatchCodexLockedResumeIgnoresAPromptLeftForTheNextProgram(t *testing.T)
 	}
 }
 
+// The last lock probe can take a while (a network CODEX_HOME), and the
+// program in front can change meanwhile. The press must check the program
+// after that probe, not before it.
+func TestWatchCodexLockedResumeRechecksAfterTheLastProbe(t *testing.T) {
+	server := newMuxServer("codex-locked-resume-last-probe")
+	pty := &codexLockedResumeTestPty{}
+	pty.foreground.Store(41)
+	window := &muxWindow{id: "@1", agentTool: "codex", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	server.handleWindowOutput("@1", []byte(codexLockedPromptFixture))
+
+	var held atomic.Bool
+	held.Store(true)
+	var heldProbes, freeProbes atomic.Int32
+	lockHeld := func() bool {
+		if held.Load() {
+			heldProbes.Add(1)
+			return true
+		}
+		// The first free probe decides to press; the second is the press's
+		// own, after it has the window's input.
+		if freeProbes.Add(1) == 2 {
+			pty.foreground.Store(42)
+		}
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		server.watchCodexLockedResume(window, resumedIn41, lockHeld,
+			codexLockedResumePolicy{poll: 5 * time.Millisecond, promptWait: time.Minute,
+				settle: time.Minute, limit: time.Minute, backoff: time.Hour, maxPresses: 4})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		server.mu.Lock()
+		window.closed = true
+		server.mu.Unlock()
+		<-done
+	})
+	waitForCodexLockedResume(t, "held lock probes", func() bool { return heldProbes.Load() >= 2 })
+	held.Store(false)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher kept watching the next program")
+	}
+	if got := pty.String(); got != "" {
+		t.Fatalf("pressed %q into the program that took over during the probe", got)
+	}
+}
+
 func TestWatchRestoredCodexResumeNeedsForegroundGroup(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
