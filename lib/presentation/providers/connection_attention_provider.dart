@@ -93,6 +93,8 @@ final class HostBridges {
     bridge.state,
     bridge.clientCount,
     bridge.pendingRequestCount,
+    bridge.pendingPermissionCount,
+    bridge.pendingInputCount,
     bridge.inFlightTurnCount,
     bridge.lastActivity,
   );
@@ -535,7 +537,7 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
         title: acpSessionDisplayTitle(session),
         providerLabel: session.providerLabel,
         cwdSummary: acpCwdSummary(session.cwd),
-        since: reason == AttentionReason.hostRequest && bridge != null
+        since: bridge != null && _waitsOnHostRequest(session, reason)
             ? bridge.lastActivity
             : acpSessionWaitingSince(session),
         tracked: true,
@@ -587,6 +589,18 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
   });
   return items;
 }
+
+/// Whether [session] waits for [reason] only because its host reports a
+/// request, with no retained request of that kind to date it.
+bool _waitsOnHostRequest(AcpSessionState session, AttentionReason reason) =>
+    !session.isLive &&
+    switch (reason) {
+      AttentionReason.hostRequest => true,
+      AttentionReason.permission =>
+        session.pendingPermissions.isEmpty && session.pendingWrites.isEmpty,
+      AttentionReason.input => session.pendingElicitations.isEmpty,
+      _ => false,
+    };
 
 /// Native sessions waiting on the user across every connected host.
 ///

@@ -2052,11 +2052,28 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
       'The helper returned invalid bridge metadata.',
     );
   }
+  // The helper omits per-kind counts when they are zero, and a bridge started
+  // by an older helper never reports them, so they count only from a bridge
+  // that shows it tracks kinds: it reports one pending, or it has asked for a
+  // decision before without the combined count an earlier build reported.
+  final pendingPermissions =
+      _readNonNegativeInt(map['pendingPermissionCount']) ?? 0;
+  final pendingInputs = _readNonNegativeInt(map['pendingInputCount']) ?? 0;
+  final askedBefore =
+      (_readNonNegativeInt(map['permissionRequestCount']) ?? 0) > 0 ||
+      (_readNonNegativeInt(map['inputRequestCount']) ?? 0) > 0;
+  final legacyPending = _readNonNegativeInt(map['pendingAttentionCount']) ?? 0;
+  final reportsKinds =
+      pendingPermissions > 0 ||
+      pendingInputs > 0 ||
+      (askedBefore && legacyPending == 0);
   return MonkeyMuxAcpBridgeMetadata(
     id: id,
     providerId: providerId,
     sessionId: sessionId,
     cwd: cwd,
+    pendingPermissionCount: reportsKinds ? pendingPermissions : null,
+    pendingInputCount: reportsKinds ? pendingInputs : null,
     provider: provider,
     commandHash: commandHash,
     state: _parseProviderState(stateValue),

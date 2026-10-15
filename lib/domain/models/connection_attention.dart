@@ -24,9 +24,9 @@ enum AttentionReason {
   /// A native agent or a terminal program needs the user to sign in.
   signIn,
 
-  /// The host reports a native agent request with no attached client.
-  ///
-  /// The request's kind is unknown until the session is opened.
+  /// The host reports a native agent request with no attached client, of a
+  /// kind it does not name (a file or terminal call, or any request from a
+  /// helper that predates request kinds).
   hostRequest,
 
   /// A terminal program reported it cannot continue until the user acts,
@@ -79,9 +79,12 @@ const terminalQuietAfterSeconds = 15;
 ///   app came back, so retained requests may already be answered, or the poll
 ///   no longer lists the bridge because the agent was stopped.
 /// - [bridge] present: it waits only while the bridge holds a request that no
-///   attached client is answering. Retained requests name the kind; without
-///   one, it is a generic request, and only when the bridge's own session is
-///   this one, so a detached fork does not echo a sibling's request.
+///   attached client is answering. A retained request names the kind while
+///   the bridge still holds one of that kind (a helper that reports kinds
+///   says so; an older one cannot, so a retained request is trusted).
+///   Otherwise it waits on whatever the bridge reports, and only when the
+///   bridge's own session is this one, so a detached fork does not echo a
+///   sibling's request.
 AttentionReason? acpSessionWaitingReason(
   AcpSessionState session, {
   MonkeyMuxAcpBridgeMetadata? bridge,
@@ -121,22 +124,30 @@ AttentionReason? acpSessionWaitingReason(
   }
   final unanswered = bridge.pendingRequestCount > 0 && bridge.clientCount == 0;
   if (unanswered) {
-    if (session.pendingPermissions.isNotEmpty ||
-        session.pendingWrites.isNotEmpty) {
+    final permissions = bridge.pendingPermissionCount;
+    if (session.pendingPermissions.isNotEmpty &&
+        (permissions == null || permissions > 0)) {
       return AttentionReason.permission;
     }
-    if (session.pendingElicitations.isNotEmpty) return AttentionReason.input;
+    // A file write the client asks the user to approve is a file request to
+    // the host, which counts it but does not type it.
+    if (session.pendingWrites.isNotEmpty) return AttentionReason.permission;
+    final questions = bridge.pendingInputCount;
+    if (session.pendingElicitations.isNotEmpty &&
+        (questions == null || questions > 0)) {
+      return AttentionReason.input;
+    }
   }
   if (needsSignIn) return AttentionReason.signIn;
   final bridgeSession = bridge.sessionId;
   return unanswered &&
           (bridgeSession == null || bridgeSession == session.key.acpSessionId)
-      ? AttentionReason.hostRequest
+      ? _hostReportedReason(bridge)
       : null;
 }
 
-/// Returns [AttentionReason.hostRequest] when a running [bridge] holds a
-/// provider request and no client is attached to answer it.
+/// Returns why a running [bridge] waits when it holds a provider request and
+/// no client is attached to answer it.
 ///
 /// An attached client (another device, or a forked sibling) answers its own
 /// file and terminal requests within moments; counting them would flash rows.
@@ -144,8 +155,18 @@ AttentionReason? bridgeWaitingReason(MonkeyMuxAcpBridgeMetadata bridge) =>
     bridge.state == MonkeyMuxAcpProviderState.running &&
         bridge.clientCount == 0 &&
         bridge.pendingRequestCount > 0
-    ? AttentionReason.hostRequest
+    ? _hostReportedReason(bridge)
     : null;
+
+/// The decision a [bridge] with a pending request waits on: a permission or
+/// a question when its helper names one, otherwise a generic request.
+AttentionReason _hostReportedReason(MonkeyMuxAcpBridgeMetadata bridge) {
+  if ((bridge.pendingPermissionCount ?? 0) > 0) {
+    return AttentionReason.permission;
+  }
+  if ((bridge.pendingInputCount ?? 0) > 0) return AttentionReason.input;
+  return AttentionReason.hostRequest;
+}
 
 /// When the oldest decision a tracked [session] waits on was first seen, or
 /// its last activity when no request carries a timestamp.

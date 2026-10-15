@@ -17,10 +17,14 @@ MonkeyMuxAcpBridgeMetadata bridge({
   int pending = 0,
   int inFlight = 0,
   int clients = 0,
+  int? permissions,
+  int? questions,
   MonkeyMuxAcpProviderState state = MonkeyMuxAcpProviderState.running,
 }) => MonkeyMuxAcpBridgeMetadata(
   id: id,
   sessionId: sessionId,
+  pendingPermissionCount: permissions,
+  pendingInputCount: questions,
   provider: 'Copilot CLI',
   commandHash: 'hash',
   state: state,
@@ -179,6 +183,70 @@ void main() {
         ),
         isNull,
         reason: 'Another client is answering it.',
+      );
+    });
+
+    test('a host that names the request kind labels it', () {
+      expect(
+        bridgeWaitingReason(bridge(pending: 2, permissions: 1, questions: 1)),
+        AttentionReason.permission,
+      );
+      expect(
+        bridgeWaitingReason(bridge(pending: 1, permissions: 0, questions: 1)),
+        AttentionReason.input,
+      );
+      expect(
+        bridgeWaitingReason(bridge(pending: 1, permissions: 0, questions: 0)),
+        AttentionReason.hostRequest,
+        reason: 'A file or terminal call is still a request no one answers.',
+      );
+      expect(
+        acpSessionWaitingReason(
+          fakeAcpSession(status: AcpConnectionStatus.detached),
+          bridge: bridge(
+            pending: 1,
+            sessionId: 'session-1',
+            permissions: 0,
+            questions: 1,
+          ),
+        ),
+        AttentionReason.input,
+      );
+    });
+
+    test('a retained request the host no longer holds is not claimed', () {
+      final detached = fakeAcpSession(
+        status: AcpConnectionStatus.detached,
+        pendingPermissions: [permission(DateTime(2026))],
+      );
+      // Answered on another device; the bridge's pending request is a
+      // sibling fork's file read.
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(
+            pending: 1,
+            sessionId: 'sibling',
+            permissions: 0,
+            questions: 0,
+          ),
+        ),
+        isNull,
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(pending: 1, sessionId: 'sibling', permissions: 1),
+        ),
+        AttentionReason.permission,
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(pending: 1, sessionId: 'sibling'),
+        ),
+        AttentionReason.permission,
+        reason: 'A helper that cannot name kinds leaves the retained one.',
       );
     });
 
