@@ -386,6 +386,11 @@ Host _buildHost({
   tmuxExtraFlags: tmuxExtraFlags,
   remoteMuxBackend: remoteMuxBackend?.storageValue,
   sortOrder: sortOrder,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 Snippet _buildSnippet({

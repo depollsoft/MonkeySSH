@@ -15,7 +15,6 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
-import 'package:monkeyssh/presentation/view_models/host_edit_view_model.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 
 import '../helpers/host_edit_fixture.dart';
@@ -54,6 +53,11 @@ Host _testHost({
   terminalThemeDarkId: terminalThemeDarkId,
   terminalFontFamily: terminalFontFamily,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 Snippet _testSnippet({
@@ -132,12 +136,14 @@ Future<({FakeHostRepository hostRepository})> _pumpHostCreateScreen(
   Duration? saveDelay,
   bool unreadablePassword = false,
   List<Snippet> snippets = const [],
+  String? savedHostSession,
 }) async {
   final fixture = HostEditFixture(
     host: _testHost(
       id: 1,
       label: 'Unused Host',
       autoConnectRequiresConfirmation: false,
+      tmuxSessionName: savedHostSession,
     ),
   );
   final hostRepository = _RejectingHostRepository(
@@ -524,12 +530,6 @@ void main() {
     testWidgets('lets long host guidance text wrap', (tester) async {
       await _pumpHostCreateScreen(tester, hasPro: true);
 
-      final startupModeField = tester
-          .widget<DropdownButtonFormField<HostStartupMode>>(
-            find.byKey(const Key('host-startup-mode-field')),
-          );
-      expect(startupModeField.decoration.helperMaxLines, greaterThan(1));
-
       await _selectStartupMode(tester, 'Launch coding agent');
 
       final backendField = tester
@@ -684,12 +684,162 @@ void main() {
       );
     });
 
+    testWidgets('choosing MonkeyMux names the session after the label', (
+      tester,
+    ) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      await _selectStartupMode(tester, 'MonkeyMux');
+      final session = find.byKey(const Key('host-tmux-session-field'));
+      expect(
+        tester.widget<TextFormField>(session).controller!.text,
+        'new-host',
+      );
+
+      // It follows the label until the user types a name of their own.
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'Build Box',
+      );
+      await tester.pump();
+      expect(
+        tester.widget<TextFormField>(session).controller!.text,
+        'build-box',
+      );
+      await tester.enterText(session, 'mine');
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'Other',
+      );
+      await tester.pump();
+      expect(tester.widget<TextFormField>(session).controller!.text, 'mine');
+    });
+
+    testWidgets('the suggested session follows the destination too', (
+      tester,
+    ) async {
+      // The saved host uses `new-host` on imported.example.com:22.
+      await _pumpHostCreateScreen(tester, savedHostSession: 'new-host');
+      await tester.enterText(
+        find.byKey(const Key('host-label-field')),
+        'New Host',
+      );
+      await _selectStartupMode(tester, 'MonkeyMux');
+      final session = find.byKey(const Key('host-tmux-session-field'));
+      String name() => tester.widget<TextFormField>(session).controller!.text;
+      expect(name(), 'new-host');
+
+      await tester.enterText(
+        find.byKey(const Key('host-hostname-field')),
+        'imported.example.com',
+      );
+      await tester.pump();
+      expect(name(), 'new-host-2');
+
+      await tester.enterText(find.byKey(const Key('host-port-field')), '2222');
+      await tester.pump();
+      expect(name(), 'new-host');
+    });
+
+    testWidgets('notifications offer only what the startup choice can raise', (
+      tester,
+    ) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final section = find.byKey(const Key('host-notifications-section'));
+      Finder row(String kind) => find.descendant(
+        of: section,
+        matching: find.byKey(ValueKey('host-notify-$kind')),
+      );
+
+      // A plain shell: shell notifications, and what MonkeyMux would add.
+      expect(row('shellNotifications'), findsOneWidget);
+      expect(row('windowAlerts'), findsNothing);
+      expect(row('agentAttention'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('host-notify-monkeymux-note')),
+        findsOneWidget,
+      );
+
+      await _selectStartupMode(tester, 'tmux');
+      expect(row('windowAlerts'), findsOneWidget);
+      expect(row('agentAttention'), findsNothing);
+
+      await _selectStartupMode(tester, 'MonkeyMux');
+      for (final kind in [
+        'agentAttention',
+        'agentFinished',
+        'windowAlerts',
+        'shellNotifications',
+      ]) {
+        expect(row(kind), findsOneWidget, reason: kind);
+      }
+      expect(
+        find.byKey(const ValueKey('host-notify-monkeymux-note')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('Use MonkeyMux switches a plain-shell host and names its '
+        'session', (tester) async {
+      await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final use = find.byKey(const ValueKey('host-notify-use-monkeymux'));
+      await tester.scrollUntilVisible(
+        use,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(use);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        tester
+            .widget<TextFormField>(
+              find.byKey(const Key('host-tmux-session-field')),
+            )
+            .controller!
+            .text,
+        'new-host',
+      );
+      expect(
+        find.byKey(const ValueKey('host-notify-agentAttention')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a turned-off notification kind is saved on the host', (
+      tester,
+    ) async {
+      final harness = await _pumpHostCreateScreen(tester);
+      await _fillRequiredHostFields(tester);
+      final shell = find.byKey(
+        const ValueKey('host-notify-shellNotifications'),
+      );
+      await tester.scrollUntilVisible(
+        shell,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(shell);
+      await tester.pump();
+      await _tapBottomSave(tester);
+      final inserted = harness.hostRepository.insertedHost!;
+      expect(inserted.notifyShellNotifications.value, isFalse);
+      expect(inserted.notifyWindowAlerts.value, isTrue);
+    });
+
     testWidgets('scrolls to missing tmux session when saving tmux startup', (
       tester,
     ) async {
       final harness = await _pumpHostCreateScreen(tester);
       await _fillRequiredHostFields(tester);
       await _selectStartupMode(tester, 'tmux');
+      // The suggested name is cleared, as a user might.
+      await tester.enterText(
+        find.byKey(const Key('host-tmux-session-field')),
+        '',
+      );
 
       await _tapBottomSave(tester);
 
@@ -1372,7 +1522,7 @@ void main() {
 
       expect(
         find.text(
-          'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',
+          'Choose what MonkeySSH starts after SSH connects. MonkeyMux is recommended: windows survive reconnects, and it adds the window switcher, native agent chats, and alerts when MonkeySSH is closed. Agent, command, and snippet options start a workflow automatically.',
         ),
         findsOneWidget,
       );

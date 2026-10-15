@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -95,6 +96,17 @@ class PushNotificationSettingsSection extends ConsumerWidget {
                   : (value) => unawaited(
                       controller.setHostEnabled(host.id, enabled: value),
                     ),
+            ),
+          if (hosts.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(72, 4, 16, 8),
+              child: Text(
+                "Each host's own settings choose which notifications it "
+                'sends.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
             ),
           _SendTestTile(enabled: !state.busy, controller: controller),
         ],
@@ -194,8 +206,18 @@ String pushSetupFailureMessage(PushSetupFailure failure) => switch (failure) {
         'settings, then try again.',
   PushSetupFailure.tokenUnavailable =>
     'This device did not get a push token. Check the network and try again.',
-  PushSetupFailure.appCheckFailed =>
-    'This copy of the app could not be verified, so push is unavailable.',
+  PushSetupFailure.appCheckFailed => switch (defaultTargetPlatform) {
+    // Play Integrity failed. Production accepts only installs Google Play
+    // recognizes; the beta app also accepts its preview builds (see
+    // docs/push-notifications.md). A network or Play services failure lands
+    // here too, so the text offers a retry before blaming the install.
+    TargetPlatform.android =>
+      'Google Play could not verify this copy of MonkeySSH. Check your '
+          'connection and try again. Copies from outside Google Play may not '
+          'be able to use push.',
+    _ =>
+      'This copy of MonkeySSH could not be verified, so push is unavailable.',
+  },
   PushSetupFailure.registrationFailed =>
     'Push registration failed. Try again later.',
 };

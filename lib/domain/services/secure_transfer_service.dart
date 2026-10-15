@@ -18,6 +18,7 @@ import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
 import 'key_service.dart';
+import 'monkeymux_offer_service.dart';
 import 'port_forward_browser_service.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
@@ -229,9 +230,20 @@ class SecureTransferService {
     SettingKeys.hostCliLaunchPreferences,
   };
 
-  // Opt-ins that must be made again on each device: agent forwarding hands a
-  // host this phone's keys, so an import never turns it on.
-  static const _deviceOnlySettingsKeys = {SettingKeys.hostAgentForwarding};
+  /// Settings that stay on this device and never travel. The MonkeyMux offer
+  /// list belongs to this device's onboarding, and its host ids would point
+  /// at other hosts elsewhere. Agent forwarding hands a host this phone's
+  /// keys, so it is an opt-in made again on each device; an import never
+  /// turns it on.
+  static const _deviceLocalSettingsKeys = {
+    monkeyMuxOfferPendingSettingKey,
+    SettingKeys.hostAgentForwarding,
+  };
+
+  /// Where payloads from before per-host notification settings kept the
+  /// hosts whose push was off, by host id. It now lives on each host row.
+  static const _legacyPushDisabledHostsKey =
+      'push_notifications_disabled_hosts';
 
   /// Creates an encrypted host transfer payload.
   Future<String> createHostPayload({
@@ -363,7 +375,7 @@ class SecureTransferService {
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
       for (final setting in settings)
-        if (!_deviceOnlySettingsKeys.contains(setting.key))
+        if (!_deviceLocalSettingsKeys.contains(setting.key))
           setting.key: setting.value,
     };
 
@@ -571,6 +583,10 @@ class SecureTransferService {
             groupMapping: groupMapping,
             keyMapping: keyMapping,
             snippetMapping: snippetMapping,
+          );
+          await _applyLegacyPushOptOuts(
+            _settingsFromData(data),
+            hostMapping: hostMapping,
           );
           await _importPortForwards(
             _listFromData(data, 'portForwards'),
@@ -804,6 +820,17 @@ class SecureTransferService {
     autoConnectRequiresConfirmation: Value(requiresAutoConnectReview),
     autoForwardPorts: Value((item['autoForwardPorts'] as bool?) ?? false),
     portProxyName: Value(_importedPortProxyName(item['portProxyName'])),
+    // Payloads from before per-host notification settings carry none, and
+    // everything was on then.
+    notifyAgentAttention: Value(
+      (item['notifyAgentAttention'] as bool?) ?? true,
+    ),
+    notifyAgentFinished: Value((item['notifyAgentFinished'] as bool?) ?? true),
+    notifyWindowAlerts: Value((item['notifyWindowAlerts'] as bool?) ?? true),
+    notifyShellNotifications: Value(
+      (item['notifyShellNotifications'] as bool?) ?? true,
+    ),
+    pushWhenClosed: Value((item['pushWhenClosed'] as bool?) ?? true),
     sortOrder: sortOrder,
   );
 
@@ -1069,6 +1096,30 @@ class SecureTransferService {
     }
   }
 
+  /// Turns push off on the imported hosts an older payload listed under
+  /// [_legacyPushDisabledHostsKey], through [hostMapping]; the key itself is
+  /// not imported, since the database migration that reads it has run.
+  Future<void> _applyLegacyPushOptOuts(
+    Map<String, String> settings, {
+    required Map<int, int> hostMapping,
+  }) async {
+    final raw = settings[_legacyPushDisabledHostsKey];
+    if (raw == null) return;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! List) return;
+    for (final oldHostId in decoded.whereType<int>()) {
+      final hostId = hostMapping[oldHostId];
+      if (hostId == null) continue;
+      await (_db.update(_db.hosts)..where((host) => host.id.equals(hostId)))
+          .write(const HostsCompanion(pushWhenClosed: Value(false)));
+    }
+  }
+
   Future<void> _importSettings(
     Map<String, String> settings, {
     required bool clearExisting,
@@ -1146,7 +1197,7 @@ class SecureTransferService {
     for (final entry in rawSettings.entries) {
       if (entry.key is String &&
           entry.value is String &&
-          !_deviceOnlySettingsKeys.contains(entry.key)) {
+          !_deviceLocalSettingsKeys.contains(entry.key)) {
         result[entry.key as String] = entry.value as String;
       }
     }
@@ -1159,6 +1210,10 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
+      if (_deviceLocalSettingsKeys.contains(entry.key) ||
+          entry.key == _legacyPushDisabledHostsKey) {
+        continue;
+      }
       if (!_hostScopedSettingsKeys.contains(entry.key)) {
         preparedSettings[entry.key] = entry.value;
         continue;
