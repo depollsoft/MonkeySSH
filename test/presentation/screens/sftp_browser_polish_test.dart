@@ -124,9 +124,14 @@ class _HostSftp extends Fake implements SftpClient {
   @override
   Future<String> absolute(String path) async => _home;
 
+  /// Holds `stat` for a path until completed, to play a slow server.
+  final statGates = <String, Completer<void>>{};
+
   @override
-  Future<SftpFileAttrs> stat(String path, {bool followLink = true}) async =>
-      _attrs(path);
+  Future<SftpFileAttrs> stat(String path, {bool followLink = true}) async {
+    await statGates[path]?.future;
+    return _attrs(path);
+  }
 
   @override
   Future<List<SftpName>> listdir(String path) async {
@@ -182,7 +187,12 @@ class _HostSftp extends Fake implements SftpClient {
 class _TransferService extends RemoteFileService {
   final downloadFailures = <String, Object>{};
   final uploads = <String>[];
+  final completedUploads = <String>[];
   Completer<void>? uploadGate;
+  Completer<void>? downloadGate;
+
+  /// Fails the write that follows [uploadGate], as a dropped connection.
+  Object? failAfterGate;
 
   @override
   Future<void> downloadFile({
@@ -195,6 +205,7 @@ class _TransferService extends RemoteFileService {
   }) async {
     // ignore: only_throw_errors, dartssh2 models protocol errors this way.
     if (downloadFailures[remotePath] case final failure?) throw failure;
+    await downloadGate?.future;
     File(localPath).writeAsStringSync(remotePath);
     await onProgress?.call(remotePath.length);
   }
@@ -212,13 +223,33 @@ class _TransferService extends RemoteFileService {
     (sftp as _HostSftp).files[remotePath] = 0;
     await onProgress?.call(1);
     await uploadGate?.future;
+    // ignore: only_throw_errors, dartssh2 models protocol errors this way.
+    if (failAfterGate case final failure?) throw failure;
     await onProgress?.call(2);
+    completedUploads.add(remotePath);
   }
 }
 
 class _Picker extends FilePickerPlatform {
   List<PlatformFile> files = [];
   String? directory;
+  final savedNames = <String>[];
+
+  @override
+  Future<Uri?> saveFile({
+    required String fileName,
+    required Uint8List bytes,
+    required String mimeType,
+    String? dialogTitle,
+    String? initialDirectory,
+    Function(FilePickerStatus)? onFileSaving,
+    WindowsOptions windowsOptions = const WindowsOptions(),
+    LinuxOptions linuxOptions = const LinuxOptions(),
+    WebOptions webOptions = const WebOptions(),
+  }) async {
+    savedNames.add(fileName);
+    return Uri.parse('content://saved/$fileName');
+  }
 
   @override
   Future<List<PlatformFile>> pickFiles({
@@ -278,6 +309,12 @@ ProviderContainer _container(
   );
   addTearDown(container.dispose);
   return container;
+}
+
+void _usePicker(_Picker picker) {
+  final previous = FilePickerPlatform.instance;
+  FilePickerPlatform.instance = picker;
+  addTearDown(() => FilePickerPlatform.instance = previous);
 }
 
 Future<void> _pumpBrowser(
@@ -884,7 +921,6 @@ void main() {
     expect(sftp.files, contains('$_home/notes.txt'));
     await tester.pumpWidget(const SizedBox.shrink());
   });
-
   testWidgets('an empty folder scrolls above a bottom panel', (tester) async {
     tester.view
       ..physicalSize = const Size(390, 560)
@@ -907,6 +943,145 @@ void main() {
     await tester.drag(find.text('empty directory'), const Offset(0, -200));
     await tester.pumpAndSettle();
     expect(find.text('New folder'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('cancelling a replacement finishes that file, then stops', (
+    tester,
+  ) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(
+            name: 'notes.txt',
+            bytes: Uint8List.fromList([1, 2, 3, 4]),
+          ),
+          AppPlatformFile(name: 'second.txt', bytes: Uint8List.fromList([5])),
+        ],
+    );
+    final sftp = _HostSftp(files: {'$_home/notes.txt': 9});
+    final transfers = _TransferService()..uploadGate = Completer<void>();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    expect(find.text('cancelling after this file'), findsOneWidget);
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    // Opening the file already dropped its old contents, so the new ones
+    // are written in full rather than cut short.
+    expect(transfers.completedUploads, ['$_home/notes.txt']);
+    expect(transfers.uploads, ['$_home/notes.txt']);
+    expect(sftp.removed, isEmpty);
+    expect(find.text('Upload cancelled. Uploaded 1 of 2 files.'), findsOne);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('cancel during the existence check uploads nothing', (
+    tester,
+  ) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(name: 'new.txt', bytes: Uint8List.fromList([1])),
+        ],
+    );
+    final sftp = _HostSftp();
+    final gate = Completer<void>();
+    sftp.statGates['$_home/new.txt'] = gate;
+    final transfers = _TransferService();
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(transfers.uploads, isEmpty);
+    expect(sftp.files, isNot(contains('$_home/new.txt')));
+    expect(find.text('Upload cancelled'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a write error after Cancel still removes the new file', (
+    tester,
+  ) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(
+            name: 'first.txt',
+            bytes: Uint8List.fromList([1, 2, 3, 4]),
+          ),
+        ],
+    );
+    final sftp = _HostSftp();
+    final transfers = _TransferService()
+      ..uploadGate = Completer<void>()
+      ..failAfterGate = SftpStatusError(SftpStatusCode.failure, 'write');
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(sftp.removed, ['$_home/first.txt']);
+    expect(find.text('Upload cancelled'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('a replacement that fails after Cancel reports the failure', (
+    tester,
+  ) async {
+    _usePicker(
+      _Picker()
+        ..files = [
+          AppPlatformFile(
+            name: 'notes.txt',
+            bytes: Uint8List.fromList([1, 2, 3, 4]),
+          ),
+        ],
+    );
+    final sftp = _HostSftp(files: {'$_home/notes.txt': 9});
+    final transfers = _TransferService()
+      ..uploadGate = Completer<void>()
+      ..failAfterGate = SftpStatusError(SftpStatusCode.failure, 'write');
+    await _pumpBrowser(
+      tester,
+      _container(sftp, store: _MemoryViewStore(), files: transfers),
+    );
+
+    await tester.tap(find.byTooltip('Upload files'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pump();
+    transfers.uploadGate!.complete();
+    await tester.pumpAndSettle();
+
+    // Not "cancelled": the file may now hold part of the new contents.
+    expect(sftp.removed, isEmpty);
+    expect(find.text('Upload cancelled'), findsNothing);
+    expect(
+      find.text('Upload failed. Check the connection and try again.'),
+      findsOneWidget,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

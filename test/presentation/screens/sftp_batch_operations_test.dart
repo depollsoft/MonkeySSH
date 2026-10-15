@@ -104,6 +104,31 @@ void main() {
       );
     });
 
+    test('an item that fails with its own reason after Cancel is a '
+        'failure', () async {
+      final progress = SftpBatchProgress(verb: 'Uploading', total: 3);
+      final report = await runSftpBatch<String>(
+        items: ['a', 'b', 'c'],
+        nameOf: (item) => item,
+        progress: progress,
+        stopOnFailure: true,
+        run: (item, _) async {
+          if (item == 'b') {
+            progress.cancel();
+            throw const SftpBatchItemFailure('Connection lost');
+          }
+        },
+      );
+
+      expect(report.cancelled, isTrue);
+      expect(report.firstError, isA<SftpBatchItemFailure>());
+      expect(report.results.map((r) => (r.outcome, r.detail)), [
+        (SftpBatchOutcome.done, null),
+        (SftpBatchOutcome.failed, 'Connection lost'),
+        (SftpBatchOutcome.skipped, 'Cancelled'),
+      ]);
+    });
+
     test('a batch with only skips does not claim failures', () async {
       final report = await runSftpBatch<String>(
         items: ['a', 'b'],
@@ -199,12 +224,38 @@ void main() {
       tester.getSize(find.widgetWithText(OutlinedButton, 'Cancel')).height,
       greaterThanOrEqualTo(48),
     );
+    expect(
+      tester.getSemantics(find.text('uploading 2 of 3')),
+      isSemantics(isLiveRegion: true),
+    );
     await tester.tap(find.text('Cancel'));
     await tester.pump();
 
     expect(progress.cancelRequested, isTrue);
     expect(find.text('cancelling'), findsOneWidget);
     expect(find.text('Cancelling…'), findsOneWidget);
+  });
+
+  testWidgets('a file that must finish says Cancel waits for it', (
+    tester,
+  ) async {
+    final progress = SftpBatchProgress(verb: 'Uploading', total: 2)
+      ..start(0, 'notes.txt')
+      ..finishCurrentItem()
+      ..cancel();
+    addTearDown(progress.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: SftpBatchProgressBar(progress: progress),
+        ),
+      ),
+    );
+    expect(find.text('cancelling after this file'), findsOneWidget);
+
+    progress.start(1, 'next.txt');
+    await tester.pump();
+    expect(find.text('cancelling'), findsOneWidget);
   });
 
   testWidgets('reduced motion drops the indeterminate bar', (tester) async {

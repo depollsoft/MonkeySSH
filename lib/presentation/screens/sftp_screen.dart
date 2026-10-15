@@ -2086,9 +2086,14 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
           }
           progress.start(index, file.name, totalBytes: totalBytes);
           final remotePath = joinRemotePath(destinationDirectory, file.name);
-          // A cancelled upload removes only a file it created; uploads write
-          // in place, so an existing file it replaced cannot be restored.
           final existed = await _remoteEntryExists(sftp, remotePath);
+          // Cancel during the checks skips the file before it is opened,
+          // since opening truncates a file that already exists.
+          progress.throwIfCancelled();
+          // Uploads write in place, so a file being replaced runs to the end
+          // after Cancel instead of keeping part of the new contents; the
+          // batch then stops before the next file.
+          if (existed) progress.finishCurrentItem();
           try {
             await remoteFileService.uploadStream(
               sftp: sftp,
@@ -2097,15 +2102,28 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
               onProgress: (uploadedBytes) {
                 // A file whose last byte is written is kept even when Cancel
                 // arrives as it finishes.
-                if (totalBytes == null || uploadedBytes < totalBytes) {
+                if (!existed &&
+                    (totalBytes == null || uploadedBytes < totalBytes)) {
                   progress.throwIfCancelled();
                 }
                 progress.updateBytes(uploadedBytes);
               },
             );
-          } on SftpBatchCancelledException {
-            if (!existed) await _removePartialUpload(sftp, remotePath);
-            rethrow;
+          } on Object catch (error) {
+            final cancelled =
+                isSftpBatchCancellation(error) || progress.cancelRequested;
+            if (!existed) {
+              // Any error after Cancel counts as the cancel, so the partial
+              // new file goes either way.
+              if (cancelled) await _removePartialUpload(sftp, remotePath);
+              rethrow;
+            }
+            if (!cancelled) rethrow;
+            // A replacement that fails after Cancel is a failure, not a
+            // skip: the file may now hold part of the upload.
+            throw SftpBatchItemFailure(
+              '${describeSftpBatchError(error)}. It may be partly replaced',
+            );
           }
         },
       );

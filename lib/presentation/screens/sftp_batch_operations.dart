@@ -73,6 +73,9 @@ class SftpBatchCancelledException implements Exception {
 }
 
 /// Thrown from a batch step to fail that item with a specific [detail].
+///
+/// It counts as a failure even after Cancel, unlike other errors, so a step
+/// can report what an interrupted item left behind.
 class SftpBatchItemFailure implements Exception {
   /// Creates the failure.
   const SftpBatchItemFailure(this.detail);
@@ -125,6 +128,7 @@ class SftpBatchProgress extends ChangeNotifier {
   int? _currentBytes;
   int? _currentTotalBytes;
   bool _cancelRequested = false;
+  bool _currentItemFinishes = false;
 
   /// Zero-based index of the item in progress.
   int get index => _index;
@@ -134,6 +138,10 @@ class SftpBatchProgress extends ChangeNotifier {
 
   /// Whether the user asked to stop.
   bool get cancelRequested => _cancelRequested;
+
+  /// Whether the current item runs to the end after Cancel, which then
+  /// stops the batch before the next item.
+  bool get currentItemFinishes => _currentItemFinishes;
 
   /// Overall completion between 0 and 1, counting bytes of the current item
   /// when its size is known.
@@ -153,6 +161,14 @@ class SftpBatchProgress extends ChangeNotifier {
     _currentName = name;
     _currentBytes = 0;
     _currentTotalBytes = totalBytes;
+    _currentItemFinishes = false;
+    notifyListeners();
+  }
+
+  /// Marks the current item as one that Cancel must not interrupt, such as
+  /// an upload writing over a file that already existed.
+  void finishCurrentItem() {
+    _currentItemFinishes = true;
     notifyListeners();
   }
 
@@ -231,7 +247,8 @@ Future<SftpBatchReport> runSftpBatch<T>({
         ),
       );
     } on Object catch (error) {
-      if (isSftpBatchCancellation(error) || progress.cancelRequested) {
+      if (isSftpBatchCancellation(error) ||
+          (progress.cancelRequested && error is! SftpBatchItemFailure)) {
         cancelled = true;
         skipRest(index, 'Cancelled');
         break;
@@ -244,6 +261,11 @@ Future<SftpBatchReport> runSftpBatch<T>({
           detail: describeSftpBatchError(error),
         ),
       );
+      if (progress.cancelRequested) {
+        cancelled = true;
+        skipRest(index + 1, 'Cancelled');
+        break;
+      }
       if (stopOnFailure) {
         skipRest(index + 1, stoppedDetail);
         break;
@@ -445,11 +467,16 @@ class SftpBottomPanel extends StatelessWidget {
     required this.actions,
     this.child,
     this.summaryIsMachineText = false,
+    this.titleIsLive = false,
     super.key,
   });
 
   /// Lowercase mono heading, such as `3 selected`.
   final String title;
+
+  /// Whether screen readers announce [title] when it changes, as for
+  /// progress.
+  final bool titleIsLive;
 
   /// Explanation under the heading.
   final String summary;
@@ -501,14 +528,17 @@ class SftpBottomPanel extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    title,
-                    style: FluttyTheme.displayMono(
-                      fontSize: 16,
-                      color: theme.colorScheme.onSurface,
+                  Semantics(
+                    liveRegion: titleIsLive,
+                    child: Text(
+                      title,
+                      style: FluttyTheme.displayMono(
+                        fontSize: 16,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -552,13 +582,16 @@ class SftpBatchProgressBar extends StatelessWidget {
     listenable: progress,
     builder: (context, _) {
       final position = (progress.index + 1).clamp(1, progress.total);
-      final title = progress.cancelRequested
-          ? 'cancelling'
-          : progress.total == 1
-          ? progress.verb.toLowerCase()
-          : '${progress.verb.toLowerCase()} $position of ${progress.total}';
+      final title = !progress.cancelRequested
+          ? progress.total == 1
+                ? progress.verb.toLowerCase()
+                : '${progress.verb.toLowerCase()} $position of ${progress.total}'
+          : progress.currentItemFinishes
+          ? 'cancelling after this file'
+          : 'cancelling';
       return SftpBottomPanel(
         title: title,
+        titleIsLive: true,
         summary: progress.currentName ?? '',
         summaryIsMachineText: true,
         actions: [
