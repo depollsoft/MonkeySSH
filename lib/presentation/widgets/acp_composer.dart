@@ -12,6 +12,7 @@ import '../controllers/acp_composer_controller.dart';
 import 'acp_attachment_strip.dart';
 import 'acp_restored_draft_banner.dart';
 import 'acp_slash_command_picker.dart';
+import 'acp_turn_recovery_banner.dart';
 import 'terminal_menu_style.dart';
 
 /// Opens an attachment picker and returns the selected candidates.
@@ -590,6 +591,18 @@ class _AcpComposerState extends State<AcpComposer> {
                       ),
                     ),
                   ),
+                if (_controller.turnRecovery case final recovery?)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: AcpTurnRecoveryBanner(
+                      recovery: recovery,
+                      onEdit: () {
+                        _controller.editLastPrompt();
+                        _focusNode.requestFocus();
+                      },
+                      onDismiss: _controller.dismissTurnRecovery,
+                    ),
+                  ),
                 if (_controller.error != null)
                   KeyedSubtree(
                     key: const ValueKey('acp-error-banner'),
@@ -598,6 +611,9 @@ class _AcpComposerState extends State<AcpComposer> {
                       child: _ErrorBanner(
                         error: _controller.error!,
                         onDismiss: _controller.clearError,
+                        onRetry: _controller.canRetryFailedPrompt
+                            ? () => unawaited(_controller.retryFailedPrompt())
+                            : null,
                         onUpload:
                             _controller.error!.isUploadRecoverable &&
                                 _controller.attachments.isNotEmpty
@@ -986,17 +1002,26 @@ class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner({
     required this.error,
     required this.onDismiss,
+    this.onRetry,
     this.onUpload,
   });
 
   final AcpComposerError error;
   final VoidCallback onDismiss;
+  final VoidCallback? onRetry;
   final VoidCallback? onUpload;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    // Accent-coloured text is not guaranteed to clear AA on the error tint.
+    final action = TextButton.styleFrom(
+      foregroundColor: scheme.onErrorContainer,
+      textStyle: theme.textTheme.labelLarge?.copyWith(
+        fontWeight: FontWeight.w700,
+      ),
+    );
     return Semantics(
       liveRegion: true,
       container: true,
@@ -1014,25 +1039,41 @@ class _ErrorBanner extends StatelessWidget {
           top: FluttyTheme.spacingXs,
           bottom: FluttyTheme.spacingXs,
         ),
-        child: Row(
-          children: [
-            Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
-            const SizedBox(width: FluttyTheme.spacingSm),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: FluttyTheme.spacingXs,
-                ),
-                child: Text(
-                  error.message,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onErrorContainer,
-                  ),
-                ),
+        child: AcpNoticeLayout(
+          icon: Icon(
+            Icons.error_outline,
+            size: 18,
+            color: scheme.onErrorContainer,
+          ),
+          message: Padding(
+            padding: const EdgeInsets.symmetric(
+              vertical: FluttyTheme.spacingXs,
+            ),
+            child: Text(
+              error.message,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onErrorContainer,
               ),
             ),
+          ),
+          actionLabels: [
+            if (onRetry != null) 'Retry',
+            if (onUpload != null) 'Upload',
+          ],
+          actions: [
+            if (onRetry != null)
+              TextButton(
+                key: const ValueKey('acp-error-retry'),
+                style: action,
+                onPressed: onRetry,
+                child: const Text('Retry'),
+              ),
             if (onUpload != null)
-              TextButton(onPressed: onUpload, child: const Text('Upload')),
+              TextButton(
+                style: action,
+                onPressed: onUpload,
+                child: const Text('Upload'),
+              ),
             IconButton(
               tooltip: 'Dismiss error',
               constraints: const BoxConstraints(minWidth: 48, minHeight: 48),

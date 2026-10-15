@@ -1039,8 +1039,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   @override
   Future<void> write(List<int> bytes) async {
     if (_closed || _terminalFailure) {
-      throw const MonkeyMuxAcpBridgeException(
-        MonkeyMuxAcpBridgeErrorKind.closed,
+      throw const AcpTransportClosedException(
         'The ACP bridge transport is closed.',
       );
     }

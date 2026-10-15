@@ -772,6 +772,37 @@ void registerAcpUnreadWidgetTests() {
       });
     });
 
+    testWidgets('the digest steps aside while search is open', (tester) async {
+      final registry = AcpLastSeenRegistry();
+      final builder = d.AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('Go')]);
+      final before = fakeAcpSession(timeline: builder.snapshot());
+      registry.record(fakeAcpKey(), before.timeline);
+      builder.apply(
+        const d.AcpContentChunkUpdate(
+          kind: 'agent_message_chunk',
+          content: AcpTextContent('Went'),
+        ),
+      );
+      final manager = FakeAcpSessionManager(
+        sessions: [before.copyWith(timeline: builder.snapshot())],
+      );
+      await tester.pumpWidget(_chat(manager, registry));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Search chat'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Close search'), findsOneWidget);
+      expect(find.byType(AcpUnreadDigestBar), findsNothing);
+      // Only the bar steps aside; the divider stays in the transcript.
+      expect(find.text('unread since you left'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Close search'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpUnreadDigestBar), findsOneWidget);
+    });
+
     testWidgets('sending a prompt from the chat clears the divider', (
       tester,
     ) async {

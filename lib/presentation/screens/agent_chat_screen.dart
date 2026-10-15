@@ -43,14 +43,17 @@ import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/pi_model_scope_metadata_service.dart';
 import '../../domain/services/settings_service.dart';
 import '../../domain/services/ssh_service.dart';
+import '../controllers/acp_chat_actions_controller.dart';
 import '../controllers/acp_composer_controller.dart';
 import '../controllers/acp_composer_draft_persistence.dart';
 import '../controllers/acp_sftp_client_cache.dart';
+import '../controllers/acp_transcript_search_controller.dart';
 import '../controllers/acp_unread_tracker.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../models/acp_attachment_picker_adapters.dart';
 import '../models/acp_timeline.dart' as ui;
 import '../models/acp_timeline_mapper.dart';
+import '../models/acp_transcript_markdown.dart';
 import '../models/acp_unread.dart';
 import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_chat_typography.dart';
@@ -67,6 +70,8 @@ import '../widgets/acp_resource_text_sheet.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
 import '../widgets/acp_terminal_output.dart';
+import '../widgets/acp_transcript_export_sheet.dart';
+import '../widgets/acp_transcript_search_bar.dart';
 import '../widgets/acp_unread_digest_bar.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
@@ -118,6 +123,16 @@ typedef AcpChatScrollChanged = void Function(
 /// Wide-layout breakpoint for the session rail.
 const double kAgentChatWideBreakpoint = 840;
 
+/// Height of the chat below which the composer folds away while the search
+/// field has focus: a phone with its keyboard up, where both would leave the
+/// transcript a sliver.
+const double kAgentChatSearchFoldsComposerBelow = 520;
+
+/// Height of the chat below which the search bar folds away while the
+/// composer has focus: a phone in landscape with its keyboard up, where the
+/// two do not fit together.
+const double kAgentChatComposerFoldsSearchBelow = 300;
+
 /// Clamps native agent text to the same supported range as terminal text.
 double clampAgentChatFontSize(num size) => clampFontSize(size);
 
@@ -142,6 +157,7 @@ class AgentChatScreen extends ConsumerStatefulWidget {
     this.onNativePreviewChanged,
     this.initialScrollState,
     this.onScrollChanged,
+    this.chatActions,
     super.key,
   });
 
@@ -199,6 +215,10 @@ class AgentChatScreen extends ConsumerStatefulWidget {
   /// Persists transcript position for the containing terminal session.
   final AcpChatScrollChanged? onScrollChanged;
 
+  /// Lets an embedding shell open transcript search and export, which this
+  /// view otherwise offers from its own app bar.
+  final AcpChatActionsController? chatActions;
+
   @override
   ConsumerState<AgentChatScreen> createState() => _AgentChatScreenState();
 }
@@ -220,6 +240,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
   final AcpSftpClientCache _sftpCache = AcpSftpClientCache();
+  final AcpTranscriptSearchController _search = AcpTranscriptSearchController();
+  var _composerFocused = false;
   Timer? _previewPublishTimer;
   AcpSessionState? _pendingPreviewSession;
   List<ui.AcpTimelineEntry>? _pendingPreviewEntries;
@@ -263,6 +285,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       store: ref.read(acpComposerDraftStoreProvider),
     )..start();
     _scroll.addListener(_onScroll);
+    _search.addListener(_onSearchChanged);
+    _attachChatActions(widget.chatActions);
     _unread = AcpUnreadVisit(ref.read(acpLastSeenRegistryProvider))
       ..begin(_key);
     if (widget.connectOnMount) {
@@ -284,8 +308,67 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   void _markChatSeen() => _unread.end(_key, _seenSnapshot());
 
   @override
+  void didUpdateWidget(covariant AgentChatScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.chatActions, widget.chatActions)) {
+      oldWidget.chatActions?.detach(this);
+      _attachChatActions(widget.chatActions);
+    }
+  }
+
+  void _attachChatActions(AcpChatActionsController? actions) => actions?.attach(
+    this,
+    openSearch: _openSearch,
+    exportTranscript: () => unawaited(_exportTranscript()),
+  );
+
+  void _onSearchChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// Opens the find bar. Until the session has loaded there is nothing to
+  /// search, and a bar opened now would only appear, and take the keyboard,
+  /// once it connects.
+  void _openSearch() {
+    final session = ref
+        .read(acpSessionManagerProvider)
+        .state
+        .byKeyValue(_key.value);
+    if (session == null) {
+      _showSnack('Nothing to search yet.');
+      return;
+    }
+    _search.open();
+  }
+
+  /// Opens the Markdown export preview for the loaded transcript.
+  Future<void> _exportTranscript() async {
+    final session = ref
+        .read(acpSessionManagerProvider)
+        .state
+        .byKeyValue(_key.value);
+    if (session == null) {
+      _showSnack('Nothing to export yet.');
+      return;
+    }
+    await showAcpTranscriptExportSheet(
+      context,
+      source: AcpTranscriptExportSource(
+        title: acpSessionDisplayTitle(session),
+        agentLabel: session.providerLabel,
+        entries: _timelineMapperCache.map(session),
+        historyGaps: acpTranscriptHistoryGaps(session),
+      ),
+    );
+  }
+
+  @override
   void dispose() {
     _markChatSeen();
+    widget.chatActions?.detach(this);
+    _search
+      ..removeListener(_onSearchChanged)
+      ..dispose();
     _previewPublishTimer?.cancel();
     _initialScrollSettleTimer?.cancel();
     _publishScrollState();
@@ -1061,47 +1144,74 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       fontSize: fontSize,
       fontFamily: fontFamily,
       onFontSizeCommitted: onFontSizeCommitted,
-      child: AcpChatPresence(
-        onAway: () => _unread.depart(_seenSnapshot()),
-        // No frames run while the app is hidden, so read the live session
-        // rather than the last one built.
-        onBack: ({required left, required hidden}) => setState(
-          () => _unread.arrive(
-            _key,
-            left: left,
-            hidden: hidden,
-            current: acpSeenSnapshot(
-              ref.read(acpSessionManagerProvider).state.byKeyValue(_key.value),
-              null,
-              followingTail: true,
+      child: CallbackShortcuts(
+        // Cmd+F on Apple platforms, where Ctrl+F moves the text cursor.
+        bindings: <ShortcutActivator, VoidCallback>{
+          switch (defaultTargetPlatform) {
+            TargetPlatform.iOS || TargetPlatform.macOS => const SingleActivator(
+              LogicalKeyboardKey.keyF,
+              meta: true,
+            ),
+            _ => const SingleActivator(LogicalKeyboardKey.keyF, control: true),
+          }: _openSearch,
+        },
+        child: AcpChatPresence(
+          onAway: () => _unread.depart(_seenSnapshot()),
+          // No frames run while the app is hidden, so read the live session
+          // rather than the last one built.
+          onBack: ({required left, required hidden}) => setState(
+            () => _unread.arrive(
+              _key,
+              left: left,
+              hidden: hidden,
+              current: acpSeenSnapshot(
+                ref
+                    .read(acpSessionManagerProvider)
+                    .state
+                    .byKeyValue(_key.value),
+                null,
+                followingTail: true,
+              ),
             ),
           ),
+          child: AcpTerminalOutputScope(
+            resolver: _terminalDisplay,
+            child: child,
+          ),
         ),
-        child: AcpTerminalOutputScope(resolver: _terminalDisplay, child: child),
       ),
     );
 
     final isWide = MediaQuery.sizeOf(context).width >= kAgentChatWideBreakpoint;
-    if (isWide && !widget.embedded) {
-      return Scaffold(
-        body: Row(
-          children: [
-            AcpSessionRail(currentKey: _key),
-            Expanded(
-              child: _buildConversation(
-                session,
-                showBack: true,
-                contentWrapper: wrapContent,
-              ),
+    final conversation = isWide && !widget.embedded
+        ? Scaffold(
+            body: Row(
+              children: [
+                AcpSessionRail(currentKey: _key),
+                Expanded(
+                  child: _buildConversation(
+                    session,
+                    showBack: true,
+                    contentWrapper: wrapContent,
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      );
-    }
-    return _buildConversation(
-      session,
-      showBack: !widget.embedded,
-      contentWrapper: wrapContent,
+          )
+        : _buildConversation(
+            session,
+            showBack: !widget.embedded,
+            contentWrapper: wrapContent,
+          );
+    // Android's back closes the find bar first, as find in page does. Apple
+    // platforms keep their back swipe; the bar has its own close button.
+    return PopScope(
+      canPop:
+          !(_search.isOpen && defaultTargetPlatform == TargetPlatform.android),
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _search.isOpen) _search.close();
+      },
+      child: conversation,
     );
   }
 
@@ -1201,6 +1311,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     required Widget Function(Widget child) contentWrapper,
   }) {
     if (session == null) {
+      // A find bar left open when the session went away would reappear, and
+      // take the keyboard, when it comes back.
+      if (_search.isOpen) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _search.close();
+        });
+      }
       final content = _connectError != null
           ? _buildConnectError(_connectError!)
           : _connecting
@@ -1227,6 +1344,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     _ensurePiModelScope(session);
     _lastSession = session;
     final entries = _lastEntries = _timelineMapperCache.map(session);
+    _search.updateEntries(entries);
     final unread = _unread.evaluate(session, entries);
     final activity = acpSessionActivityDisplay(session);
     _queuePreviewPublish(session, entries, activity);
@@ -1245,28 +1363,83 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               SafeArea(
                 top: false,
                 bottom: !widget.embedded,
-                child: Column(
-                  children: [
-                    ?_buildBanner(session, activity),
-                    Expanded(child: _buildTranscript(session, entries, unread)),
-                    if (unread != null && !_unread.digestDismissed)
-                      AcpUnreadDigestBar(
-                        state: unread,
-                        onJump: () => setState(_unread.jumpToDivider),
-                        onDismiss: () => setState(_unread.dismissDigest),
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Column(
+                    children: [
+                      ?_buildBanner(session, activity),
+                      Expanded(
+                        child: _buildTranscript(session, entries, unread),
                       ),
-                    if (prompts.isNotEmpty ||
-                        session.pendingElicitations.isNotEmpty ||
-                        session.awaitingElicitations.isNotEmpty)
-                      _buildPendingPanel(session, prompts, toolTitles),
-                    AcpComposer(
-                      controller: _composer,
-                      attachmentActions: _attachmentActions(session),
-                      focusController: widget.composerFocusController,
-                      controls: _buildQuickConfigControls(session),
-                      useBottomSafeArea: !widget.embedded,
-                    ),
-                  ],
+                      // Search steers the scroll position while it is open,
+                      // and a short chat has no room for both bars; the
+                      // digest comes back when search closes.
+                      if (unread != null &&
+                          !_unread.digestDismissed &&
+                          !_search.isOpen)
+                        AcpUnreadDigestBar(
+                          state: unread,
+                          onJump: () => setState(_unread.jumpToDivider),
+                          onDismiss: () => setState(_unread.dismissDigest),
+                        ),
+                      if (prompts.isNotEmpty ||
+                          session.pendingElicitations.isNotEmpty ||
+                          session.awaitingElicitations.isNotEmpty)
+                        _buildPendingPanel(session, prompts, toolTitles),
+                      // Search sits just above the composer, in thumb reach.
+                      // In a short chat (a phone with its keyboard up) the
+                      // composer folds away while the search field has
+                      // focus, to leave the transcript room. In a very short
+                      // one (a phone in landscape) the bar folds too while
+                      // the composer has focus, since both would not fit.
+                      // Both stay mounted and focusable: the terminal
+                      // shell's keyboard, extra keys and paste still reach
+                      // the composer, opening search again reaches the
+                      // field, and focusing either brings it back. A tall
+                      // chat keeps both, so the layout holds still as focus
+                      // moves between them. Keyed, so the bar appearing
+                      // above the composer never takes over the composer's
+                      // element and remounts it.
+                      if (_search.isOpen)
+                        Visibility(
+                          key: const ValueKey('acp-chat-search-slot'),
+                          visible:
+                              !(_composerFocused &&
+                                  !_search.fieldFocusPending &&
+                                  constraints.maxHeight <
+                                      kAgentChatComposerFoldsSearchBelow),
+                          maintainState: true,
+                          maintainFocusability: true,
+                          child: AcpTranscriptSearchBar(controller: _search),
+                        ),
+                      Visibility(
+                        key: const ValueKey('acp-chat-composer-slot'),
+                        visible:
+                            !(_search.isOpen &&
+                                (_search.fieldFocused ||
+                                    _search.fieldFocusPending) &&
+                                constraints.maxHeight <
+                                    kAgentChatSearchFoldsComposerBelow),
+                        maintainState: true,
+                        maintainFocusability: true,
+                        child: Focus(
+                          canRequestFocus: false,
+                          skipTraversal: true,
+                          onFocusChange: (focused) {
+                            if (focused != _composerFocused) {
+                              setState(() => _composerFocused = focused);
+                            }
+                          },
+                          child: AcpComposer(
+                            controller: _composer,
+                            attachmentActions: _attachmentActions(session),
+                            focusController: widget.composerFocusController,
+                            controls: _buildQuickConfigControls(session),
+                            useBottomSafeArea: !widget.embedded,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1329,6 +1502,11 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
         ),
       ),
       actions: [
+        IconButton(
+          tooltip: 'Search chat',
+          icon: const Icon(Icons.search),
+          onPressed: _openSearch,
+        ),
         if (!widget.embedded)
           IconButton(
             tooltip: 'MonkeyMux windows',
@@ -1386,6 +1564,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               entries: entries,
               controller: _scroll,
               followTail: _autoScroll,
+              searchFocus: _search.focus,
               onStickyPromptTap: _handleStickyPromptTap,
               footer: session.promptStatus == AcpPromptStatus.idle
                   ? null
@@ -1420,7 +1599,9 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             ),
           ),
         ),
-      if (_showJumpToLatest)
+      // Search steers the scroll position while it is open, and the button
+      // would sit over the newest match.
+      if (_showJumpToLatest && !_search.isOpen)
         Positioned(
           right: FluttyTheme.spacingMd,
           bottom: FluttyTheme.spacingMd,
@@ -1747,6 +1928,13 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             title: Text('Stop session'),
           ),
         ),
+        PopupMenuItem(
+          value: _ChatAction.export,
+          child: ListTile(
+            leading: Icon(Icons.adaptive.share),
+            title: const Text('Export chat'),
+          ),
+        ),
         if (sessionCaps.fork)
           const PopupMenuItem(
             value: _ChatAction.fork,
@@ -1851,6 +2039,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
           if (mounted) _leaveChat();
         case _ChatAction.fork:
           await _fork();
+        case _ChatAction.export:
+          await _exportTranscript();
         case _ChatAction.delete:
           if (!await _confirmDeleteSession() || !mounted) return;
           await manager.deleteSession(_key);
@@ -2415,6 +2605,7 @@ enum _ChatAction {
   detach,
   stop,
   fork,
+  export,
   delete,
   signOut,
   workingTreeChanges,

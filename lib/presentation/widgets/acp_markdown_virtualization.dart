@@ -21,13 +21,21 @@ final _fenceOpenPattern = RegExp('^(`{3,}|~{3,})');
 /// reopening a fence when a segment boundary falls inside it. Exceptionally
 /// long lines are split near whitespace so provider output cannot bypass the
 /// rendering bound with one giant paragraph.
+///
+/// When [sourceStarts] is given, it receives, for each segment, the offset in
+/// [normalizeAcpMarkdownDataImages]`(source)` where the segment's own text
+/// begins, ignoring the fence lines added to keep segments valid.
 List<String> splitAcpMarkdownForVirtualization(
   String source, {
   int targetChars = kAcpMarkdownVirtualChunkChars,
+  List<int>? sourceStarts,
 }) {
   assert(targetChars > 0);
   final normalizedSource = normalizeAcpMarkdownDataImages(source);
-  if (normalizedSource.length <= targetChars) return <String>[normalizedSource];
+  if (normalizedSource.length <= targetChars) {
+    sourceStarts?.add(0);
+    return <String>[normalizedSource];
+  }
 
   final lines = _markdownLines(normalizedSource);
   final chunks = <String>[];
@@ -35,6 +43,14 @@ List<String> splitAcpMarkdownForVirtualization(
   String? fenceMarker;
   String? fenceOpening;
   var hasPayload = false;
+  var consumed = 0;
+  int? currentStart;
+
+  void writeSource(String text) {
+    currentStart ??= consumed;
+    consumed += text.length;
+    current.write(text);
+  }
 
   void flush({bool reopenFence = false}) {
     if (current.isEmpty) return;
@@ -45,6 +61,8 @@ List<String> splitAcpMarkdownForVirtualization(
         ..write('$fenceMarker\n');
     }
     chunks.add(current.toString());
+    sourceStarts?.add(currentStart ?? consumed);
+    currentStart = null;
     current = StringBuffer();
     hasPayload = false;
     if (reopenFence && fenceOpening != null) {
@@ -73,7 +91,7 @@ List<String> splitAcpMarkdownForVirtualization(
     );
     if (isFenceLine) {
       // Fence delimiters stay atomic even when the requested budget is tiny.
-      current.write(originalLine);
+      writeSource(originalLine);
       if (fenceMarker == null && current.length >= targetChars) flush();
       continue;
     }
@@ -87,6 +105,8 @@ List<String> splitAcpMarkdownForVirtualization(
         // enforces encoded-byte and decoded-pixel limits before display.
         flush();
         chunks.add(line);
+        sourceStarts?.add(consumed);
+        consumed += line.length;
         line = '';
         continue;
       }
@@ -100,18 +120,18 @@ List<String> splitAcpMarkdownForVirtualization(
         // A fence can exhaust a tiny budget. Still consume at least one
         // complete code point so every overflow iteration makes progress.
         final splitAt = _safeLineSplit(line, remaining);
-        current.write(line.substring(0, splitAt));
+        writeSource(line.substring(0, splitAt));
         hasPayload = true;
         line = line.substring(splitAt);
         if (fenceMarker != null && (line == '\n' || line == '\r\n')) {
-          current.write(line);
+          writeSource(line);
           line = '';
         }
         if (line.isNotEmpty) flush(reopenFence: fenceMarker != null);
         continue;
       }
 
-      current.write(line);
+      writeSource(line);
       hasPayload = true;
       line = '';
 
