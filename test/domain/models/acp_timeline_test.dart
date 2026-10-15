@@ -21,6 +21,29 @@ AcpTimeline _run(AcpTimelineBuilder builder, List<AcpSessionUpdate> updates) {
 }
 
 void main() {
+  test('snapshots carry their builder as a source outside equality', () {
+    final builder = AcpTimelineBuilder()
+      ..appendLocalUserPrompt(const [AcpTextContent('hi')]);
+    final first = builder.snapshot();
+    final second = builder.snapshot();
+    expect(first.source, isNotNull);
+    expect(identical(first.source, second.source), isTrue);
+    final other = AcpTimelineBuilder()
+      ..appendLocalUserPrompt(const [AcpTextContent('hi')]);
+    expect(identical(other.snapshot().source, first.source), isFalse);
+    expect(other.snapshot(), first);
+    final prompt = first.entries.single as AcpMessageEntry;
+    expect(prompt.isLocalPrompt, isTrue);
+    expect(
+      AcpMessageEntry(
+        role: AcpMessageRole.user,
+        order: 0,
+        messageId: 'agent-echo',
+      ).isLocalPrompt,
+      isFalse,
+    );
+  });
+
   group('AcpTimelineBuilder content grouping', () {
     test('groups chunks with the same message id into one entry', () {
       final timeline = _run(AcpTimelineBuilder(), [

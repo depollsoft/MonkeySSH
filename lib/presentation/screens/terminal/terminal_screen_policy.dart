@@ -699,9 +699,12 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
 /// Whether Back should leave the connection screen.
 ///
 /// Native ACP focus replaces the terminal viewport but does not create a new
-/// navigation level. Only expanded mux chrome consumes the first Back action.
-bool resolveTerminalScreenCanPop({required bool isTmuxBarExpanded}) =>
-    !isTmuxBarExpanded;
+/// navigation level. An open find bar and expanded mux chrome each consume a
+/// Back action first, the find bar before the mux chrome.
+bool resolveTerminalScreenCanPop({
+  required bool isTmuxBarExpanded,
+  bool isFindBarOpen = false,
+}) => !isTmuxBarExpanded && !isFindBarOpen;
 
 /// Whether the terminal shell should resize for the system keyboard.
 ///
