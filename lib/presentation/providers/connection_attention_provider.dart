@@ -510,9 +510,12 @@ final class WaitingOnYouSnapshot {
 /// Builds the "waiting on you" list from tracked sessions and host-reported
 /// bridges on [connectedHosts].
 ///
-/// Tracked sessions use their own state, falling back to bridge counts only
-/// while detached. A host-reported request on an untracked bridge is listed
-/// when the bridge names its provider and session, so it can be opened.
+/// Tracked sessions use their own state, falling back to bridge counts while
+/// detached. A bridge request that no tracked session claims is listed under
+/// the session the bridge names, when it names its provider and session, so
+/// it can be opened: one this app does not track (another device's fork, or
+/// any session after an app restart), or a tracked one whose transport
+/// failed.
 List<WaitingOnYouItem> buildWaitingOnYouItems({
   required List<AcpSessionState> sessions,
   required HostBridgeMetadata bridges,
@@ -521,14 +524,22 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
 }) {
   String hostLabel(int hostId) => hostLabels[hostId] ?? 'Host $hostId';
   final items = <WaitingOnYouItem>[];
-  final trackedBridges = <(int, String)>{};
+  final attachedHere = locallyAttachedBridges(sessions);
+  final tracked = {for (final session in sessions) session.key.value: session};
+  // Bridges whose pending request a tracked session already lists.
+  final claimed = <(int, String)>{};
   for (final session in sessions) {
     final hostId = session.key.hostId;
-    trackedBridges.add((hostId, session.key.bridgeId));
     if (!connectedHosts.contains(hostId)) continue;
+    final bridgeKey = (hostId, session.key.bridgeId);
     final bridge = bridges.bridge(hostId, session.key.bridgeId);
-    final reason = acpSessionWaitingReason(session, bridge: bridge);
+    final reason = acpSessionWaitingReason(
+      session,
+      bridge: bridge,
+      attachedHere: attachedHere.contains(bridgeKey),
+    );
     if (reason == null) continue;
+    claimed.add(bridgeKey);
     items.add(
       WaitingOnYouItem(
         reason: reason,
@@ -547,8 +558,12 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
   for (final MapEntry(key: hostId, value: host) in bridges.hosts.entries) {
     if (!connectedHosts.contains(hostId)) continue;
     for (final bridge in host.byId.values) {
-      if (trackedBridges.contains((hostId, bridge.id))) continue;
-      final reason = bridgeWaitingReason(bridge);
+      final bridgeKey = (hostId, bridge.id);
+      if (claimed.contains(bridgeKey)) continue;
+      final reason = bridgeWaitingReason(
+        bridge,
+        attachedHere: attachedHere.contains(bridgeKey),
+      );
       final providerId = bridge.providerId?.trim();
       final sessionId = bridge.sessionId?.trim();
       if (reason == null ||
@@ -558,24 +573,31 @@ List<WaitingOnYouItem> buildWaitingOnYouItems({
           sessionId.isEmpty) {
         continue;
       }
+      final key = AcpSessionKey.of(
+        hostId: hostId,
+        providerId: providerId,
+        bridgeId: bridge.id,
+        acpSessionId: sessionId,
+      );
+      final session = tracked[key.value];
+      // A live session shows its own requests; it found none waiting.
+      if (session != null && session.isLive) continue;
       final label = bridge.provider.trim().isEmpty
           ? 'Native agent'
           : bridge.provider.trim();
       items.add(
         WaitingOnYouItem(
           reason: reason,
-          key: AcpSessionKey.of(
-            hostId: hostId,
-            providerId: providerId,
-            bridgeId: bridge.id,
-            acpSessionId: sessionId,
-          ),
+          key: key,
           hostLabel: hostLabel(hostId),
-          title: label,
-          providerLabel: label,
-          cwdSummary: bridge.cwd == null ? null : acpCwdSummary(bridge.cwd),
+          title: session == null ? label : acpSessionDisplayTitle(session),
+          providerLabel: session?.providerLabel ?? label,
+          cwdSummary: switch (session?.cwd ?? bridge.cwd) {
+            final cwd? => acpCwdSummary(cwd),
+            null => null,
+          },
           since: bridge.lastActivity,
-          tracked: false,
+          tracked: session != null,
         ),
       );
     }

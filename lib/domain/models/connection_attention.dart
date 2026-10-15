@@ -68,12 +68,46 @@ const attentionQuietTier = 3;
 /// Matches the idle threshold the existing window status badges use.
 const terminalQuietAfterSeconds = 15;
 
+/// Bridges on which this app holds the client of a live native session, as
+/// `(hostId, bridgeId)`. Forks on one bridge share that one client.
+Set<(int, String)> locallyAttachedBridges(Iterable<AcpSessionState> sessions) =>
+    {
+      for (final session in sessions)
+        if (session.isLive) (session.key.hostId, session.key.bridgeId),
+    };
+
+/// Whether a running [bridge] holds a request that no client is answering.
+///
+/// [attachedHere] says this app holds the bridge's client for a live fork
+/// (see [locallyAttachedBridges]). That client answers only its live
+/// sessions' requests, so it does not count for a detached fork's. Its own
+/// file and terminal requests are answered within moments, though, so while
+/// it is attached only a request the user must decide counts, when the
+/// helper names kinds.
+bool bridgeRequestUnanswered(
+  MonkeyMuxAcpBridgeMetadata bridge, {
+  bool attachedHere = false,
+}) {
+  if (bridge.state != MonkeyMuxAcpProviderState.running ||
+      bridge.pendingRequestCount <= 0) {
+    return false;
+  }
+  if (!attachedHere) return bridge.clientCount == 0;
+  if (bridge.clientCount > 1) return false;
+  final permissions = bridge.pendingPermissionCount;
+  final questions = bridge.pendingInputCount;
+  return permissions == null ||
+      questions == null ||
+      permissions + questions > 0;
+}
+
 /// Returns why a tracked native [session] is blocked on the user, if it is.
 ///
 /// Local session state is authoritative while a client is attached. Once
-/// detached, the session stops hearing about requests, both new ones and ones
-/// another client answers, so only fresh host-reported [bridge] metadata can
-/// say it waits:
+/// detached, or after its transport failed, the session stops hearing about
+/// requests, both new ones and ones another client answers, so only fresh
+/// host-reported [bridge] metadata can say it waits ([attachedHere] as in
+/// [bridgeRequestUnanswered]):
 ///
 /// - No [bridge]: not claimed. Either its host has not been polled since the
 ///   app came back, so retained requests may already be answered, or the poll
@@ -88,6 +122,7 @@ const terminalQuietAfterSeconds = 15;
 AttentionReason? acpSessionWaitingReason(
   AcpSessionState session, {
   MonkeyMuxAcpBridgeMetadata? bridge,
+  bool attachedHere = false,
 }) {
   final authFailed =
       session.error?.kind == AcpSessionErrorKind.authenticationRequired;
@@ -97,7 +132,9 @@ AttentionReason? acpSessionWaitingReason(
         AcpConnectionStatus.providerExited:
       return null;
     case AcpConnectionStatus.failed:
-      return authFailed ? AttentionReason.signIn : null;
+      // Unless sign-in failed, the agent may still run on the host and ask
+      // for the user; read the host as for a detached session.
+      if (authFailed) return AttentionReason.signIn;
     case AcpConnectionStatus.idle ||
         AcpConnectionStatus.connecting ||
         AcpConnectionStatus.initializing ||
@@ -122,7 +159,10 @@ AttentionReason? acpSessionWaitingReason(
   if (bridge == null || bridge.state != MonkeyMuxAcpProviderState.running) {
     return null;
   }
-  final unanswered = bridge.pendingRequestCount > 0 && bridge.clientCount == 0;
+  final unanswered = bridgeRequestUnanswered(
+    bridge,
+    attachedHere: attachedHere,
+  );
   if (unanswered) {
     final permissions = bridge.pendingPermissionCount;
     if (session.pendingPermissions.isNotEmpty &&
@@ -147,14 +187,15 @@ AttentionReason? acpSessionWaitingReason(
 }
 
 /// Returns why a running [bridge] waits when it holds a provider request and
-/// no client is attached to answer it.
+/// no client is attached to answer it ([attachedHere] as in
+/// [bridgeRequestUnanswered]).
 ///
 /// An attached client (another device, or a forked sibling) answers its own
 /// file and terminal requests within moments; counting them would flash rows.
-AttentionReason? bridgeWaitingReason(MonkeyMuxAcpBridgeMetadata bridge) =>
-    bridge.state == MonkeyMuxAcpProviderState.running &&
-        bridge.clientCount == 0 &&
-        bridge.pendingRequestCount > 0
+AttentionReason? bridgeWaitingReason(
+  MonkeyMuxAcpBridgeMetadata bridge, {
+  bool attachedHere = false,
+}) => bridgeRequestUnanswered(bridge, attachedHere: attachedHere)
     ? _hostReportedReason(bridge)
     : null;
 

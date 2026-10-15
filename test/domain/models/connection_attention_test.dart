@@ -250,6 +250,56 @@ void main() {
       );
     });
 
+    test('a failed transport reads the host like a detached session', () {
+      final failed = fakeAcpSession(
+        status: AcpConnectionStatus.failed,
+        error: const AcpSessionError(
+          kind: AcpSessionErrorKind.transport,
+          message: 'The agent connection failed.',
+        ),
+      );
+      expect(acpSessionWaitingReason(failed), isNull);
+      expect(
+        acpSessionWaitingReason(
+          failed,
+          bridge: bridge(pending: 1, sessionId: 'session-1'),
+        ),
+        AttentionReason.hostRequest,
+        reason: 'The agent kept running and asked again after the failure.',
+      );
+    });
+
+    test("this app's client on a fork does not answer a detached fork", () {
+      final detached = fakeAcpSession(
+        status: AcpConnectionStatus.detached,
+        pendingPermissions: [permission(DateTime(2026))],
+      );
+      final shared = bridge(pending: 1, clients: 1, sessionId: 'sibling');
+      expect(acpSessionWaitingReason(detached, bridge: shared), isNull);
+      expect(
+        acpSessionWaitingReason(detached, bridge: shared, attachedHere: true),
+        AttentionReason.permission,
+        reason: 'The only attached client is this app, for a live sibling.',
+      );
+      expect(
+        acpSessionWaitingReason(
+          detached,
+          bridge: bridge(pending: 1, clients: 2),
+          attachedHere: true,
+        ),
+        isNull,
+        reason: 'Another device is attached and may be answering.',
+      );
+      expect(
+        bridgeWaitingReason(
+          bridge(pending: 1, clients: 1, permissions: 0, questions: 0),
+          attachedHere: true,
+        ),
+        isNull,
+        reason: "The live fork's own file read is answered in moments.",
+      );
+    });
+
     test('host requests count only with no client attached to answer', () {
       expect(
         bridgeWaitingReason(bridge(pending: 1)),

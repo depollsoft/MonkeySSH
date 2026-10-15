@@ -58,22 +58,29 @@ class AcpSwitcherEntry {
 ///
 /// A tracked session reads its own state, and its host's [bridges] metadata
 /// while detached. A recent entry has no local state, so only a host-reported
-/// request on its own bridge session counts.
+/// request on its own bridge session counts. [attachedHere] lists the bridges
+/// this app holds a live session's client on (see [locallyAttachedBridges]).
 AttentionReason? acpSwitcherEntryWaitingReason(
   AcpSwitcherEntry entry, {
   HostBridgeMetadata? bridges,
+  Set<(int, String)> attachedHere = const <(int, String)>{},
 }) {
   final session = entry.session;
   if (session != null) {
+    final key = session.key;
     return acpSessionWaitingReason(
       session,
-      bridge: bridges?.bridge(session.key.hostId, session.key.bridgeId),
+      bridge: bridges?.bridge(key.hostId, key.bridgeId),
+      attachedHere: attachedHere.contains((key.hostId, key.bridgeId)),
     );
   }
   final recent = entry.recent!;
   final bridge = bridges?.bridge(recent.hostId, recent.bridgeId);
   if (bridge == null || bridge.sessionId != recent.acpSessionId) return null;
-  return bridgeWaitingReason(bridge);
+  return bridgeWaitingReason(
+    bridge,
+    attachedHere: attachedHere.contains((recent.hostId, recent.bridgeId)),
+  );
 }
 
 /// Merges tracked sessions with recent refs (deduped by key) into ordered
@@ -85,6 +92,7 @@ List<AcpSwitcherEntry> buildAcpSwitcherEntries({
   HostBridgeMetadata? bridges,
 }) {
   final trackedKeys = {for (final s in sessions) s.key.value};
+  final attachedHere = locallyAttachedBridges(sessions);
   final entries = <AcpSwitcherEntry>[
     for (final session in sessions) AcpSwitcherEntry.session(session),
     for (final recent in recents)
@@ -93,7 +101,11 @@ List<AcpSwitcherEntry> buildAcpSwitcherEntries({
   ];
   final waiting = {
     for (final entry in entries)
-      entry.keyValue: acpSwitcherEntryWaitingReason(entry, bridges: bridges),
+      entry.keyValue: acpSwitcherEntryWaitingReason(
+        entry,
+        bridges: bridges,
+        attachedHere: attachedHere,
+      ),
   };
   return entries..sort((a, b) {
     final aReason = waiting[a.keyValue]?.index ?? AttentionReason.values.length;
@@ -225,6 +237,7 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
       _bridges = ref.watch(connectionBridgeMetadataProvider);
     }
     final bridges = _bridges;
+    final attachedHere = locallyAttachedBridges(sessions);
     // A session that ends while the list is open becomes a recent entry.
     if (sessions.length < _trackedCount) _recents = _loadRecents();
     _trackedCount = sessions.length;
@@ -246,6 +259,7 @@ class _SessionEntriesListState extends ConsumerState<_SessionEntriesList> {
                 waitingReason: acpSwitcherEntryWaitingReason(
                   entry,
                   bridges: bridges,
+                  attachedHere: attachedHere,
                 ),
                 onTap: () =>
                     widget.onOpen(entry.session?.key ?? entry.recent!.key),

@@ -218,6 +218,89 @@ void main() {
       expect(items.first.key.acpSessionId, 'remote-session');
     });
 
+    group('forks sharing a bridge', () {
+      HostBridgeMetadata reporting(MonkeyMuxAcpBridgeMetadata bridge) =>
+          HostBridgeMetadata(const {})
+              .withHost(1, HostBridges(connectionId: 10, bridges: [bridge]));
+      List<WaitingOnYouItem> items(
+        List<AcpSessionState> sessions,
+        MonkeyMuxAcpBridgeMetadata bridge,
+      ) => buildWaitingOnYouItems(
+        sessions: sessions,
+        bridges: reporting(bridge),
+        connectedHosts: const {1},
+        hostLabels: const {},
+      );
+
+      test('a tracked fork does not hide an untracked sibling', () {
+        final tracked = fakeAcpSession(
+          key: fakeAcpKey(bridgeId: 'shared', acpSessionId: 'fork-a'),
+          status: AcpConnectionStatus.detached,
+        );
+        final listed = items([
+          tracked,
+        ], _bridge(id: 'shared', sessionId: 'fork-b', pending: 1));
+        expect(listed, hasLength(1));
+        expect(listed.single.key.acpSessionId, 'fork-b');
+        expect(listed.single.tracked, isFalse);
+      });
+
+      test('a tracked fork that lists the request takes it alone', () {
+        final tracked = fakeAcpSession(
+          key: fakeAcpKey(bridgeId: 'shared', acpSessionId: 'fork-a'),
+          status: AcpConnectionStatus.detached,
+          pendingPermissions: [_permission(DateTime(2026))],
+        );
+        final listed = items([
+          tracked,
+        ], _bridge(id: 'shared', sessionId: 'fork-b', pending: 1));
+        expect(listed.map((item) => item.key.acpSessionId), ['fork-a']);
+      });
+
+      test('a detached fork waits while a live sibling holds the client', () {
+        final live = fakeAcpSession(
+          key: fakeAcpKey(bridgeId: 'shared', acpSessionId: 'fork-b'),
+        );
+        final detached = fakeAcpSession(
+          key: fakeAcpKey(bridgeId: 'shared', acpSessionId: 'fork-a'),
+          status: AcpConnectionStatus.detached,
+          pendingPermissions: [_permission(DateTime(2026))],
+        );
+        final listed = items([
+          live,
+          detached,
+        ], _bridge(id: 'shared', sessionId: 'fork-b', pending: 1, clients: 1));
+        expect(listed.map((item) => item.key.acpSessionId), ['fork-a']);
+        expect(listed.single.reason, AttentionReason.permission);
+      });
+    });
+
+    test('a session whose transport failed still surfaces new requests', () {
+      final failed = fakeAcpSession(
+        key: fakeAcpKey(bridgeId: 'b1'),
+        status: AcpConnectionStatus.failed,
+        error: const AcpSessionError(
+          kind: AcpSessionErrorKind.transport,
+          message: 'The agent connection failed.',
+        ),
+      );
+      final listed = buildWaitingOnYouItems(
+        sessions: [failed],
+        bridges: HostBridgeMetadata(const {}).withHost(
+          1,
+          HostBridges(
+            connectionId: 10,
+            bridges: [_bridge(id: 'b1', pending: 1)],
+          ),
+        ),
+        connectedHosts: const {1},
+        hostLabels: const {},
+      );
+      expect(listed.single.key, failed.key);
+      expect(listed.single.tracked, isTrue);
+      expect(listed.single.reason, AttentionReason.hostRequest);
+    });
+
     test('a detached request answered elsewhere leaves the list', () {
       final detached = fakeAcpSession(
         key: fakeAcpKey(bridgeId: 'b1'),

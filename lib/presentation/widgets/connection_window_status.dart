@@ -107,6 +107,9 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
   DateTime? now,
 }) {
   final reference = now ?? DateTime.now();
+  final attachedHere = {
+    for (final (_, bridgeId) in locallyAttachedBridges(sessions)) bridgeId,
+  };
   final boundByBridge = <(String, String), AcpSessionState>{
     for (final session in sessions)
       (session.key.bridgeId, session.key.providerId): session,
@@ -144,11 +147,13 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
     AcpSessionState? session,
     MonkeyMuxAcpBridgeMetadata? bridge,
   }) {
+    final bridgeId = session?.key.bridgeId ?? bridge?.id;
+    final shared = bridgeId != null && attachedHere.contains(bridgeId);
     var reason = session != null
-        ? acpSessionWaitingReason(session, bridge: bridge)
+        ? acpSessionWaitingReason(session, bridge: bridge, attachedHere: shared)
         : bridge == null
         ? null
-        : bridgeWaitingReason(bridge);
+        : bridgeWaitingReason(bridge, attachedHere: shared);
     final tool = agentLaunchToolForBuiltinAcpProviderId(providerId);
     if (reason == null &&
         tool != null &&
