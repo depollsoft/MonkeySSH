@@ -117,6 +117,7 @@ class _FakeHost {
     this.extractExitCode = 0,
     this.unsafeOutput = false,
     this.dropMarker = false,
+    this.losePrepareReply = false,
   });
 
   final _TreeSftp sftp;
@@ -134,12 +135,19 @@ class _FakeHost {
   /// Whether a startup file swallows the script, so no marker comes back.
   final bool dropMarker;
 
+  /// Whether the first step makes the folder and copies the archive, but its
+  /// reply never arrives, as when the copy outlasts the timeout.
+  final bool losePrepareReply;
+
   /// Whole scripts as sent to `/bin/sh` on stdin.
   final scripts = <String>[];
 
   /// Which step each script was: prepare, names, verbose, extract, place or
   /// cleanup.
   final steps = <String>[];
+
+  /// The cleanup scripts, as sent.
+  final cleanupScripts = <String>[];
 
   late String _scratch;
 
@@ -188,10 +196,14 @@ class _FakeHost {
       ).last;
       if (!sftp.files.contains(source)) return finish(13);
       sftp.files.add('$scratch/archive');
+      if (losePrepareReply) {
+        throw TimeoutException('No reply', timeout);
+      }
       return finish(0, '4242');
     }
     if (script.contains('rm -rf -- ')) {
       steps.add('cleanup');
+      cleanupScripts.add(script);
       final scratch = '$directory/${argumentOf('rm -rf -- ')}';
       sftp.directories.removeWhere(
         (p) => p == scratch || p.startsWith('$scratch/'),
@@ -772,6 +784,80 @@ void main() {
           RemoteArchiveKind.tarGzip,
         );
         expect(single.name, 'notes (2).txt');
+      },
+    );
+
+    test('removes the private folder when the first reply is lost', () async {
+      final sftp = _TreeSftp(files: {'/srv/big.tar.gz'});
+      final host = _FakeHost(
+        sftp,
+        names: '',
+        verbose: '',
+        losePrepareReply: true,
+      );
+
+      await expectLater(
+        extract(host, '/srv/big.tar.gz', RemoteArchiveKind.tarGzip),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(host.steps, ['prepare', 'cleanup']);
+      expect(sftp.directories, {'/', '/srv'});
+      expect(sftp.files, {'/srv/big.tar.gz'});
+      // The folder's inode is unknown, so cleanup removes the name only
+      // when this user owns it and never opens it up.
+      final cleanup = host.cleanupScripts.single;
+      expect(cleanup, contains('|| finish 41'));
+      expect(cleanup, isNot(contains('chmod')));
+    });
+
+    test('a refused exec request names the cause and runs nothing', () async {
+      final sftp = _TreeSftp(files: {'/srv/a.zip'});
+      var scripts = 0;
+      final extractor = RemoteArchiveExtractor(
+        runCommand: (script, {required timeout, required maxOutputBytes}) {
+          scripts++;
+          return Future.error(SSHChannelRequestError('exec refused'));
+        },
+      );
+
+      await expectLater(
+        extractor.extractHere(
+          sftp: sftp,
+          archivePath: '/srv/a.zip',
+          kind: RemoteArchiveKind.zip,
+        ),
+        throwsA(
+          isA<RemoteArchiveException>().having(
+            (error) => error.message,
+            'message',
+            contains('does not allow running commands'),
+          ),
+        ),
+      );
+      expect(scripts, 1);
+    });
+
+    test(
+      'cleanup opens up folders inside the verified private folder',
+      () async {
+        final sftp = _TreeSftp(files: {'/srv/broken.tar.gz'});
+        final host = _FakeHost(
+          sftp,
+          names: 'a/\na/b.txt\n',
+          verbose:
+              'drwxr-xr-x me/me 0 2026-10-01 12:00 a/\n'
+              '-rw-r--r-- me/me 5 2026-10-01 12:00 a/b.txt\n',
+          extracted: ['a/', 'a/b.txt'],
+          extractExitCode: 2,
+        );
+
+        await expectLater(
+          extract(host, '/srv/broken.tar.gz', RemoteArchiveKind.tarGzip),
+          throwsA(isA<RemoteArchiveException>()),
+        );
+        final cleanup = host.cleanupScripts.single;
+        expect(cleanup, contains("[ \"\$1\" = '4242' ]"));
+        expect(cleanup, contains('chmod u+rwx'));
       },
     );
 

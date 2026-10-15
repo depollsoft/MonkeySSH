@@ -5,6 +5,7 @@
 @TestOn('mac-os || linux')
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -34,6 +35,9 @@ class _LocalHost {
   /// Replaces a script's output, to play a listing that hides a link.
   RemoteCommandResult? Function(String script)? fakeResult;
 
+  /// Extra environment for every script, as a login shell might export.
+  Map<String, String> environment = const {};
+
   void dispose() {
     for (final directory in [root, home]) {
       if (directory.existsSync()) directory.deleteSync(recursive: true);
@@ -55,6 +59,7 @@ class _LocalHost {
         'PATH': '/usr/bin:/bin',
         'SHELL': '/bin/sh',
         'LC_ALL': 'C',
+        ...environment,
       },
       includeParentEnvironment: false,
     );
@@ -345,15 +350,80 @@ void main() {
           FileSystemEntity.typeSync('$root/docs', followLinks: false),
           FileSystemEntityType.notFound,
         );
+        // Cleanup opens the unreadable folder up before `rm -rf`.
+        expect(
+          Directory(root)
+              .listSync()
+              .where((e) => e.path.contains('.monkeyssh-extract-')),
+          isEmpty,
+        );
       } finally {
-        // The unreadable folder also defeats the host-side rm -rf; make the
-        // leftovers deletable before tearDown.
+        // Keeps tearDown working if cleanup regresses.
         Process.runSync('chmod', ['-R', 'u+rwx', root]);
       }
     },
     skip: hasTools && _has('python3') && !_isRoot
         ? false
         : 'needs tar, python3 and a non-root user',
+  );
+
+  test('an exported CDPATH does not break the private folder checks', () async {
+    Directory('$root/src/project').createSync(recursive: true);
+    File('$root/src/project/main.dart').writeAsStringSync('void main() {}');
+    _run('tar -czf ../project.tar.gz project', inDirectory: '$root/src');
+    // With CDPATH set, POSIX `cd` prints the folder it changed to.
+    host.environment = {'CDPATH': '.:${host.home.path}'};
+
+    final result = await extract(
+      '$root/project.tar.gz',
+      RemoteArchiveKind.tarGzip,
+    );
+
+    expect(result.name, 'project');
+    expect(File('$root/project/main.dart').existsSync(), isTrue);
+  }, skip: hasTools ? false : 'tar is not available');
+
+  test(
+    'a first step whose reply is lost leaves no private folder behind',
+    () async {
+      Directory('$root/src/project').createSync(recursive: true);
+      File('$root/src/project/a.txt').writeAsStringSync('a');
+      _run('tar -czf ../project.tar.gz project', inDirectory: '$root/src');
+      var lost = false;
+      final extractor = RemoteArchiveExtractor(
+        runCommand:
+            (script, {required timeout, required maxOutputBytes}) async {
+              final result = await host.run(
+                script,
+                timeout: timeout,
+                maxOutputBytes: maxOutputBytes,
+              );
+              if (!lost && script.contains('cat -- ')) {
+                // The copy finished on the host, but the reply never came.
+                lost = true;
+                throw TimeoutException('No reply', timeout);
+              }
+              return result;
+            },
+      );
+
+      await expectLater(
+        extractor.extractHere(
+          sftp: _LocalSftp(),
+          archivePath: '$root/project.tar.gz',
+          kind: RemoteArchiveKind.tarGzip,
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(lost, isTrue);
+      expect(
+        Directory(root)
+            .listSync()
+            .map((e) => e.uri.pathSegments.lastWhere((s) => s != '')),
+        unorderedEquals(['src', 'project.tar.gz']),
+      );
+    },
+    skip: hasTools ? false : 'tar is not available',
   );
 
   test('the login PATH survives missing and broken startup files', () {

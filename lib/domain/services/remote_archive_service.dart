@@ -207,11 +207,14 @@ Future<RemoteCommandResult> collectRemoteCommandOutput(
 /// [lines] report their result with `finish <status>`, which prints
 /// [marker] and the status on a line of their own. A script that never
 /// reaches it (a startup file read the script from stdin, say) is detected
-/// by the missing marker rather than read as success.
+/// by the missing marker rather than read as success. `CDPATH` is cleared
+/// because `cd` prints the folder it found through it, which would land in
+/// the output the steps parse.
 @visibleForTesting
 String remoteArchiveScript(List<String> lines, {required String marker}) => [
   '{',
   remoteProfilePathPrefix,
+  'unset CDPATH',
   'm=${shellEscapePosix(marker)}',
   r"""finish() { printf '\n%s %s\n' "$m" "$1"; exit 0; }""",
   ...lines,
@@ -356,20 +359,35 @@ class RemoteArchiveExtractor {
       directory: directory,
       scratchName: '.monkeyssh-extract-${_hex()}',
     );
-    final prepared = await host.run([
-      'command -v ${kind.tool} >/dev/null 2>&1 || finish 10',
-      'umask 077',
-      'cd -- ${host.quotedDirectory} || finish 11',
-      'mkdir -- ${host.quotedScratch} || finish 11',
-      'cd -- ${host.quotedScratch} || finish 12',
-      r'[ -O . ] && [ -z "$(ls -A .)" ] || finish 12',
-      'set -C',
-      'cat -- ${shellEscapePosix(archivePath)} > $_snapshotName || finish 13',
-      r'set -- $(ls -di .)',
-      _printFirstArgument,
-    ], timeout: _extractTimeout);
-    final created = prepared.status != 10 && prepared.status != 11;
+    // Whether the private folder may exist: cleanup runs unless the first
+    // step reported that it never made one.
+    var mayHaveScratch = false;
+    final quotedArchive = shellEscapePosix(archivePath);
     try {
+      final ({String output, int status}) prepared;
+      try {
+        prepared = await host.run([
+          'command -v ${kind.tool} >/dev/null 2>&1 || finish 10',
+          'umask 077',
+          'cd -- ${host.quotedDirectory} || finish 11',
+          'mkdir -- ${host.quotedScratch} || finish 11',
+          'cd -- ${host.quotedScratch} || finish 12',
+          r'[ -O . ] && [ -z "$(ls -A .)" ] || finish 12',
+          'set -C',
+          'cat -- $quotedArchive > $_snapshotName || finish 13',
+          r'set -- $(ls -di .)',
+          _printFirstArgument,
+        ], timeout: _extractTimeout);
+      } on SSHChannelRequestError {
+        // The server refused the exec request, so nothing ran.
+        throw const RemoteArchiveException(_noCommandsMessage);
+      } on Object {
+        // The reply was lost (a timeout while `cat` copied a large archive,
+        // a dropped connection), possibly after `mkdir` ran.
+        mayHaveScratch = true;
+        rethrow;
+      }
+      mayHaveScratch = prepared.status != 10 && prepared.status != 11;
       switch (prepared.status) {
         case 0:
           break;
@@ -449,7 +467,7 @@ class RemoteArchiveExtractor {
         ),
       );
     } finally {
-      if (created) await host.removeScratch();
+      if (mayHaveScratch) await host.removeScratch();
     }
   }
 
@@ -607,6 +625,9 @@ const _linksMessage =
 const _uncheckedMessage =
     'The extracted files could not be checked for links, so they were not '
     'kept.';
+const _noCommandsMessage =
+    'This host does not allow running commands over SSH, so archives cannot '
+    'be extracted here.';
 
 /// Runs the extraction's scripts with a shared marker and checks that each
 /// later step is still inside the private folder the first step made.
@@ -652,8 +673,8 @@ class _ArchiveHost {
       );
     }
     throw const RemoteArchiveException(
-      'The host stopped the extraction early. A shell startup file may be '
-      'reading input.',
+      'The host stopped the extraction early. It may only allow file '
+      'transfers, or a shell startup file may be reading input.',
     );
   }
 
@@ -679,11 +700,31 @@ class _ArchiveHost {
 
   /// Removes the private folder on the host. `rm -rf` removes a link at the
   /// name itself and never follows links inside the tree.
+  ///
+  /// A folder whose owner is someone else is left alone: when the first step
+  /// lost its reply, the name may belong to another user. Inside the verified
+  /// folder, folders an archive left without owner access (mode 0555 or 000)
+  /// are opened up first, or `rm -rf` could not empty them. `find` visits a
+  /// folder before its contents and never follows links.
   Future<void> removeScratch() async {
+    final scratch = quotedScratch;
+    // Runs in a subshell so a failed check leaves the shell in [directory].
+    final openUp = switch (inode) {
+      final inode? =>
+        '[ ! -L $scratch ] && ( cd -- $scratch && set -- \$(ls -di .) && '
+            '[ "\$1" = ${shellEscapePosix(inode)} ] && '
+            r'find . -type d ! -perm -700 -exec chmod u+rwx {} \; '
+            ') >/dev/null 2>&1',
+      null => null,
+    };
+    final ownedOrGone =
+        '[ -L $scratch ] || [ ! -e $scratch ] || [ -O $scratch ] || finish 41';
     try {
       final removed = await run([
         'cd -- $quotedDirectory || finish 11',
-        'rm -rf -- $quotedScratch || finish 40',
+        ?openUp,
+        ownedOrGone,
+        'rm -rf -- $scratch || finish 40',
       ], timeout: _extractTimeout);
       if (removed.status != 0) {
         DiagnosticsLogService.instance.warning(
