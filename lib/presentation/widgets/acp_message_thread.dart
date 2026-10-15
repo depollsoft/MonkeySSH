@@ -28,6 +28,10 @@ const int _earlierTranscriptPageChildren = 8;
 /// summary that can cover the top of the viewport.
 const double _unreadDividerTopInset = 44;
 
+/// Transcript width from which the unread divider's label is set larger,
+/// matching the chat's wide layout breakpoint.
+const double _unreadDividerWideWidth = 840;
+
 /// Where the "unread since you left" divider sits in a thread.
 @immutable
 final class AcpThreadUnreadDivider {
@@ -1314,7 +1318,11 @@ class _UnreadDivider extends StatelessWidget {
                     label,
                     textAlign: TextAlign.center,
                     style: FluttyTheme.monoStyle.copyWith(
-                      fontSize: 11,
+                      // A wide transcript gets a slightly larger label, so
+                      // it does not shrink to a caption on a long rule.
+                      fontSize: constraints.maxWidth >= _unreadDividerWideWidth
+                          ? 12
+                          : 11,
                       fontWeight: FontWeight.w600,
                       color: color,
                     ),

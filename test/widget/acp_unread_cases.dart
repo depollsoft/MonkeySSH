@@ -87,6 +87,13 @@ List<d.AcpTimelineEntry> _seenEntries() => [
     ),
 ];
 
+/// The digest bar's text, with the non-breaking spaces after counts read as
+/// plain spaces.
+String _shownDigest(WidgetTester tester) => tester
+    .widget<Text>(find.byKey(const ValueKey('acp-unread-digest-text')))
+    .data!
+    .replaceAll('\u00A0', ' ');
+
 void registerAcpUnreadWidgetTests() {
   group('unread since you left', () {
     setUp(() => FluttyTheme.debugUseSystemFonts = true);
@@ -206,11 +213,9 @@ void registerAcpUnreadWidgetTests() {
         ),
       );
       expect(
-        find.text(
-          'Since you left: 2 replies · 1 tool call (1 edit) · '
-          '1 reported file change',
-        ),
-        findsOneWidget,
+        _shownDigest(tester),
+        'Since you left: 2 replies · 1 tool call (1 edit) · '
+        '1 reported file change',
       );
       final jump = find.byKey(const ValueKey('acp-unread-jump'));
       expect(tester.getSize(jump).height, greaterThanOrEqualTo(48));
@@ -234,7 +239,120 @@ void registerAcpUnreadWidgetTests() {
           ),
         ),
       );
-      expect(find.textContaining('Earlier history isn’t available'), findsOne);
+      expect(
+        find.text('Can’t tell what changed since you left.'),
+        findsOneWidget,
+      );
+      // The divider is at the top of what is loaded, so the action says so.
+      expect(find.text('Top'), findsOneWidget);
+      expect(find.byTooltip('Jump to the oldest loaded message'), findsOne);
+    });
+
+    Widget sizedBar(
+      AcpUnreadDigest digest, {
+      required double width,
+      double textScale = 1,
+    }) => MaterialApp(
+      theme: FluttyTheme.dark,
+      home: MediaQuery(
+        data: MediaQueryData(
+          size: Size(width, 800),
+          textScaler: TextScaler.linear(textScale),
+        ),
+        child: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: SizedBox(
+              width: width,
+              child: AcpUnreadDigestBar(
+                state: AcpUnreadState(
+                  dividerEntryIndex: 3,
+                  earlierHistoryUnavailable: false,
+                  digest: digest,
+                ),
+                onJump: () {},
+                onDismiss: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const busy = AcpUnreadDigest(
+      replies: 2,
+      toolCalls: {AcpToolKind.edit: 2, AcpToolKind.execute: 2},
+      reportedFileChanges: 2,
+    );
+
+    testWidgets('on a phone the digest bar shows Jump as an icon', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        sizedBar(const AcpUnreadDigest(replies: 2), width: 390),
+      );
+      expect(find.text('Jump'), findsNothing);
+      final jump = find.byKey(const ValueKey('acp-unread-jump'));
+      expect(tester.widget(jump), isA<IconButton>());
+      expect(find.byTooltip('Jump to first unread'), findsOneWidget);
+      expect(tester.getSize(jump).height, greaterThanOrEqualTo(48));
+      final text = tester.getRect(
+        find.byKey(const ValueKey('acp-unread-digest-text')),
+      );
+      // Beside the text, not below it.
+      expect(tester.getRect(jump).left, greaterThanOrEqualTo(text.right));
+    });
+
+    testWidgets('the digest drops its tool breakdown before it truncates', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(sizedBar(busy, width: 560));
+      final text = find.byKey(const ValueKey('acp-unread-digest-text'));
+      expect(
+        _shownDigest(tester),
+        'Since you left: 2 replies · 4 tool calls · 2 reported file changes',
+      );
+      // A count stays on the line of what it counts.
+      expect(tester.widget<Text>(text).data, contains('2\u00A0replies'));
+      // Screen readers still get the breakdown.
+      expect(
+        find.bySemanticsLabel(
+          'Since you left: 2 replies · 4 tool calls (2 edit, 2 run) · '
+          '2 reported file changes',
+        ),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('at a large text size the actions move below the digest', (
+      tester,
+    ) async {
+      await tester.pumpWidget(sizedBar(busy, width: 390, textScale: 2));
+      expect(tester.takeException(), isNull);
+      final text = find.byKey(const ValueKey('acp-unread-digest-text'));
+      final shown = tester.widget<Text>(text).data!;
+      // Nothing is cut off: the file changes, last in the line, still show.
+      expect(_shownDigest(tester), endsWith('2 reported file changes'));
+      final painter = TextPainter(
+        text: TextSpan(text: shown, style: tester.widget<Text>(text).style),
+        textDirection: TextDirection.ltr,
+        textScaler: const TextScaler.linear(2),
+        maxLines: tester.widget<Text>(text).maxLines,
+      )..layout(maxWidth: tester.getSize(text).width);
+      expect(painter.didExceedMaxLines, isFalse);
+      painter.dispose();
+      final jump = find.byKey(const ValueKey('acp-unread-jump'));
+      expect(find.text('Jump'), findsOneWidget);
+      expect(
+        tester.getRect(jump).top,
+        greaterThanOrEqualTo(tester.getRect(text).bottom),
+      );
+      expect(
+        tester.getRect(find.byTooltip('Dismiss')).top,
+        greaterThanOrEqualTo(tester.getRect(text).bottom),
+      );
     });
 
     testWidgets('returning to a chat shows the divider and digest; jumping '
@@ -280,7 +398,7 @@ void registerAcpUnreadWidgetTests() {
       final digest = find.byKey(const ValueKey('acp-unread-digest-text'));
       expect(digest, findsOneWidget);
       expect(
-        tester.widget<Text>(digest).data,
+        _shownDigest(tester),
         'Since you left: 1 reply · 1 tool call (1 edit) · '
         '1 reported file change',
       );
@@ -435,7 +553,7 @@ void registerAcpUnreadWidgetTests() {
           ),
         ),
       );
-      expect(find.text('Since you left: 1 request waiting'), findsOneWidget);
+      expect(_shownDigest(tester), 'Since you left: 1 request waiting');
       expect(find.byKey(const ValueKey('acp-unread-jump')), findsNothing);
       final dismiss = tester.getSize(find.byTooltip('Dismiss'));
       expect(dismiss.width, greaterThanOrEqualTo(48));
@@ -726,12 +844,7 @@ void registerAcpUnreadWidgetTests() {
         tester.binding.handleAppLifecycleStateChanged(state);
       }
       await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('acp-unread-digest-text')))
-            .data,
-        'Since you left: 1 reply',
-      );
+      expect(_shownDigest(tester), 'Since you left: 1 reply');
     });
 
     testWidgets('what a suspended app receives once it is shown is unread', (
@@ -778,12 +891,7 @@ void registerAcpUnreadWidgetTests() {
       now = now.add(const Duration(seconds: 1));
       manager.emit(AcpSessionManagerState(sessions: [session(3)]));
       await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('acp-unread-digest-text')))
-            .data,
-        'Since you left: 1 reply',
-      );
+      expect(_shownDigest(tester), 'Since you left: 1 reply');
       expect(find.text('unread since you left'), findsOneWidget);
     });
   });
