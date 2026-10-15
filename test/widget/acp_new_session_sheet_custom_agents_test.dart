@@ -143,6 +143,11 @@ Host _host() => Host(
   remoteMuxBackend: null,
   autoForwardPorts: false,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 AcpCustomProviderDefinition _goose({
