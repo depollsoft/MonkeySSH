@@ -379,6 +379,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     if (oldWidget.session.hostId != widget.session.hostId) {
       _watchHostNotificationPrefs();
     }
+    if (oldWidget.activeNativeAcpSessionKey !=
+        widget.activeNativeAcpSessionKey) {
+      _dropPendingSelectionReplacedByNativeSession();
+    }
     final sessionChanged =
         oldWidget.session.connectionId != widget.session.connectionId ||
         oldWidget.tmuxSessionName != widget.tmuxSessionName ||
@@ -1280,6 +1284,28 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   ({TmuxWindow? window, AcpSessionState? session})? get _activeKeyboardTarget =>
       _keyboardTargets.where(_isKeyboardTargetActive).firstOrNull;
+
+  /// A native session that now fills the viewport, opened from anywhere (a
+  /// row, the navigator, a notification), replaces a pending switch to a
+  /// server window other than its own. The pending window would otherwise
+  /// still count as active, and ⌘W would close it instead of the chat on
+  /// screen.
+  void _dropPendingSelectionReplacedByNativeSession() {
+    final key = widget.activeNativeAcpSessionKey;
+    final pending = _pendingSelectedWindowIndex;
+    if (key == null || pending == null) {
+      return;
+    }
+    final window = _windows
+        ?.where((candidate) => candidate.index == pending)
+        .firstOrNull;
+    if (window != null &&
+        window.isNativeAcp &&
+        window.nativeAcpBridgeId == key.bridgeId) {
+      return;
+    }
+    _clearPendingSelectedWindow(notify: false);
+  }
 
   Future<void> _activateKeyboardTarget(
     ({TmuxWindow? window, AcpSessionState? session}) target,

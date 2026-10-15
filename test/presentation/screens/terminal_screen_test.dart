@@ -10981,6 +10981,43 @@ void main() {
         await tester.pump(const Duration(seconds: 3));
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+      testWidgets(
+        '⌘W closes the native session a switcher row opened during a switch',
+        (tester) async {
+          await pumpMonkeyMuxWithOrphanSession(tester);
+
+          // ⌘1 leaves a pending switch to "logs". Return on the native
+          // session's row opens it while that switch is still pending.
+          await pressChord(tester, [
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.digit1);
+          await pressChord(tester, [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyS);
+          await tester.pump(const Duration(milliseconds: 400));
+          for (var i = 0; i < 6 && !focusIsOnRow('Orphan chat'); i++) {
+            await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+            await tester.pump();
+          }
+          expect(focusIsOnRow('Orphan chat'), isTrue);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+
+          await pressChord(tester, [
+            LogicalKeyboardKey.metaLeft,
+          ], LogicalKeyboardKey.keyW);
+          await tester.pump(const Duration(milliseconds: 400));
+
+          expect(find.text('Close window?'), findsOneWidget);
+          expect(find.textContaining('Orphan chat'), findsWidgets);
+          expect(find.textContaining('“logs”'), findsNothing);
+          await tester.pump(const Duration(seconds: 3));
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+
       testWidgets('⌘W on a native session hands the keyboard to the terminal', (
         tester,
       ) async {
