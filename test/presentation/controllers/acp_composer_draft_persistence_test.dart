@@ -155,7 +155,10 @@ void main() {
       expect(harness.controller.attachments, isEmpty);
       expect(
         harness.controller.restoredDraftNotice,
-        const AcpRestoredDraftNotice(unavailableAttachmentCount: 1),
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 1,
+          unavailableAttachmentNames: ['Pasted image.png'],
+        ),
       );
     });
 
@@ -367,9 +370,14 @@ void main() {
       await tester.pump();
 
       expect(harness.controller.text, isEmpty);
+      // Nothing of the draft came back, so the note must not say it did.
       expect(
         harness.controller.restoredDraftNotice,
-        const AcpRestoredDraftNotice(unavailableAttachmentCount: 1),
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 1,
+          unavailableAttachmentNames: ['Pasted image.png'],
+          draftRestored: false,
+        ),
       );
     });
 
@@ -675,7 +683,38 @@ void main() {
       expect(controller.attachments, hasLength(controller.limits.maxCount));
       expect(
         controller.restoredDraftNotice,
-        const AcpRestoredDraftNotice(unavailableAttachmentCount: 2),
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 2,
+          unavailableAttachmentNames: ['Pasted image.png'],
+        ),
+      );
+    });
+
+    test('a draft whose attachments all fall over the limit is reported as '
+        'not restored', () {
+      final manager = RecordingAcpSessionManager();
+      final controller = _controller(manager);
+      addTearDown(controller.dispose);
+      for (var i = 0; i < controller.limits.maxCount; i++) {
+        controller.addAttachment(_image());
+      }
+
+      controller.restoreDraft(
+        AcpComposerDraftSnapshot(
+          text: '  ',
+          attachments: [AcpAttachmentDraft(candidate: _image())],
+        ),
+        notice: const AcpRestoredDraftNotice(fromEarlierRun: false),
+      );
+
+      expect(
+        controller.restoredDraftNotice,
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 1,
+          unavailableAttachmentNames: ['Pasted image.png'],
+          fromEarlierRun: false,
+          draftRestored: false,
+        ),
       );
     });
 

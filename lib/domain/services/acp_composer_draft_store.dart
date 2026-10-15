@@ -99,7 +99,8 @@ class AcpComposerDraftStore {
   final LinkedHashMap<String, AcpComposerDraftSnapshot> _remembered =
       LinkedHashMap<String, AcpComposerDraftSnapshot>();
   final Set<String> _seen = <String>{};
-  final Map<String, int> _pendingNotices = <String, int>{};
+  final Map<String, AcpRestoredDraftNotice> _pendingNotices =
+      <String, AcpRestoredDraftNotice>{};
   final Set<String> _unreadable = <String>{};
   final Map<String, Future<AcpOpenedComposerDraft>> _loads = {};
   final Map<String, List<AcpAttachmentCandidate>> _savedChips = {};
@@ -350,10 +351,12 @@ class AcpComposerDraftStore {
     final attachments = <AcpAttachmentDraft>[];
     final restoredChips = <AcpAttachmentCandidate>[];
     var unavailable = saved.unsavedAttachmentCount;
+    final lostNames = <String>[];
     for (final attachment in saved.attachments) {
       final restored = await _restoreAttachment(attachment, chips, now);
       if (restored == null) {
         unavailable++;
+        lostNames.add(attachment.name);
         continue;
       }
       _addedAt[restored.candidate] = attachment.addedAt;
@@ -378,9 +381,20 @@ class AcpComposerDraftStore {
     }
     // A draft from an earlier run is announced. A draft from this run that
     // comes back from disk (its memory copy was evicted) is announced only
-    // if something was lost, such as a pasted image.
+    // if something was lost, such as a pasted image. A notice still pending
+    // from earlier keeps what it reported.
     if (announce ? (!draft.isEmpty || unavailable > 0) : unavailable > 0) {
-      _pendingNotices[key] = unavailable;
+      final pending = _pendingNotices[key];
+      _pendingNotices[key] = AcpRestoredDraftNotice(
+        unavailableAttachmentCount:
+            (pending?.unavailableAttachmentCount ?? 0) + unavailable,
+        unavailableAttachmentNames: [
+          ...?pending?.unavailableAttachmentNames,
+          ...lostNames,
+          ...saved.unsavedAttachmentNames,
+        ],
+        fromEarlierRun: announce || (pending?.fromEarlierRun ?? false),
+      );
     }
     return _finishLoad(identity, generation, draft);
   }
@@ -457,12 +471,7 @@ class AcpComposerDraftStore {
     );
   }
 
-  AcpRestoredDraftNotice? _noticeFor(String key) {
-    final unavailable = _pendingNotices[key];
-    return unavailable == null
-        ? null
-        : AcpRestoredDraftNotice(unavailableAttachmentCount: unavailable);
-  }
+  AcpRestoredDraftNotice? _noticeFor(String key) => _pendingNotices[key];
 
   Future<AcpAttachmentDraft?> _restoreAttachment(
     AcpSavedDraftAttachment attachment,
@@ -542,7 +551,7 @@ class AcpComposerDraftStore {
     final attachments = <AcpSavedDraftAttachment>[];
     final chipCandidates = <AcpAttachmentCandidate>[];
     final chipTexts = <String>[];
-    var unsaved = 0;
+    final unsavedNames = <String>[];
     var budget = pastedTextBudget;
     for (final draftAttachment in draft.attachments) {
       final candidate = draftAttachment.candidate;
@@ -590,7 +599,7 @@ class AcpComposerDraftStore {
           );
       }
       if (saved == null) {
-        unsaved++;
+        unsavedNames.add(candidate.name);
       } else {
         attachments.add(saved);
       }
@@ -600,7 +609,8 @@ class AcpComposerDraftStore {
       caret: draft.caret.clamp(0, draft.text.length),
       savedAt: savedAt,
       attachments: attachments,
-      unsavedAttachmentCount: unsaved,
+      unsavedAttachmentCount: unsavedNames.length,
+      unsavedAttachmentNames: unsavedNames,
     );
     final lastChips = rewriteChips ? null : _savedChips[key];
     final chipsChanged =

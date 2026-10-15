@@ -246,8 +246,8 @@ class AcpComposerController extends ChangeNotifier {
   /// The latest content-free error, if any.
   AcpComposerError? get error => _error;
 
-  /// Set while the draft came back from an earlier run of the app and has
-  /// not yet been sent, emptied, or dismissed.
+  /// Set while a draft that came back from storage has not yet been sent,
+  /// emptied, or dismissed.
   AcpRestoredDraftNotice? get restoredDraftNotice => _restoredDraftNotice;
 
   /// The current text and attachments, for saving the draft.
@@ -339,7 +339,8 @@ class AcpComposerController extends ChangeNotifier {
   /// Saved text goes before anything typed in the meantime, and saved
   /// attachments before current ones, up to the attachment limit. With a
   /// [notice], the composer shows that the draft was restored; attachments
-  /// over the limit are added to its unavailable count.
+  /// over the limit are added to its unavailable attachments, and the notice
+  /// records whether anything of [draft] came back at all.
   ///
   /// Returns `false`, changing nothing, while a send is being prepared.
   bool restoreDraft(
@@ -367,9 +368,16 @@ class AcpComposerController extends ChangeNotifier {
         ),
     ]);
     if (notice != null) {
+      final dropped = draft.attachments.skip(room);
       _restoredDraftNotice = AcpRestoredDraftNotice(
         unavailableAttachmentCount:
-            notice.unavailableAttachmentCount + draft.attachments.length - room,
+            notice.unavailableAttachmentCount + dropped.length,
+        unavailableAttachmentNames: [
+          ...notice.unavailableAttachmentNames,
+          for (final attachment in dropped) attachment.candidate.name,
+        ],
+        fromEarlierRun: notice.fromEarlierRun,
+        draftRestored: draft.text.trim().isNotEmpty || room > 0,
       );
     }
     _recomputeSlash();

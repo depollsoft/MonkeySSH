@@ -262,7 +262,10 @@ void main() {
     expect(opened.draft.isEmpty, isTrue);
     expect(
       opened.notice,
-      const AcpRestoredDraftNotice(unavailableAttachmentCount: 1),
+      const AcpRestoredDraftNotice(
+        unavailableAttachmentCount: 1,
+        unavailableAttachmentNames: ['Pasted image.png'],
+      ),
     );
     await relaunched.pruneExpired(); // queued after the clean-up write
     expect(await draftKeys(), isEmpty);
@@ -282,6 +285,7 @@ void main() {
     final opened = await store().open(_identity);
     expect(opened.draft.isEmpty, isTrue);
     expect(opened.notice?.unavailableAttachmentCount, 1);
+    expect(opened.notice?.unavailableAttachmentNames, ['photo.jpg']);
   });
 
   test('pasted images and pathless files are dropped and counted', () async {
@@ -297,6 +301,31 @@ void main() {
     expect(opened.draft.text, 'Look at this');
     expect(opened.draft.attachments, isEmpty);
     expect(opened.notice?.unavailableAttachmentCount, 2);
+    expect(opened.notice?.unavailableAttachmentNames, [
+      'Pasted image.png',
+      'photo.jpg',
+    ]);
+    expect(opened.notice?.fromEarlierRun, isTrue);
+  });
+
+  test('a row saved before names were kept still counts its losses', () async {
+    await settings.setString(
+      _draftKey,
+      jsonEncode({
+        'savedAt': now.millisecondsSinceEpoch,
+        'v': kAcpSavedComposerDraftVersion,
+        'text': 'older row',
+        'attachments': <Object>[],
+        'unsaved': 2,
+      }),
+    );
+
+    final opened = await store().open(_identity);
+    expect(opened.draft.text, 'older row');
+    expect(
+      opened.notice,
+      const AcpRestoredDraftNotice(unavailableAttachmentCount: 2),
+    );
   });
 
   test('the loss is reported once; the next launch restores what is left '
@@ -811,7 +840,15 @@ void main() {
 
       final reopened = await draftStore.open(_identity);
       expect(reopened.draft.text, 'look');
-      expect(reopened.notice?.unavailableAttachmentCount, 1);
+      // The app never closed, so the note reports only the loss.
+      expect(
+        reopened.notice,
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 1,
+          unavailableAttachmentNames: ['Pasted image.png'],
+          fromEarlierRun: false,
+        ),
+      );
     });
 
     for (final (name, savedAt, attachments) in [

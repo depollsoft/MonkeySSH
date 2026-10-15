@@ -111,23 +111,54 @@ final class AcpComposerDraftSnapshot {
   }
 }
 
-/// Tells the user the composer holds a draft kept from an earlier run of the
-/// app that has not been sent.
+/// Tells the user the composer holds a draft that has not been sent and came
+/// back from storage: one kept from an earlier run of the app, or one from
+/// this run that lost attachments on the way back.
 @immutable
 class AcpRestoredDraftNotice {
   /// Creates a restored-draft notice.
-  const AcpRestoredDraftNotice({this.unavailableAttachmentCount = 0});
+  const AcpRestoredDraftNotice({
+    this.unavailableAttachmentCount = 0,
+    this.unavailableAttachmentNames = const <String>[],
+    this.fromEarlierRun = true,
+    this.draftRestored = true,
+  });
 
   /// Saved attachments that could not be restored and were removed.
   final int unavailableAttachmentCount;
 
+  /// Names of those attachments where known, at most
+  /// [unavailableAttachmentCount] of them. A malformed saved attachment has
+  /// no name. Shown on this device only; never logged.
+  final List<String> unavailableAttachmentNames;
+
+  /// Whether the draft was saved by an earlier run of the app. `false` for a
+  /// draft from this run that came back from storage after its memory copy
+  /// was dropped, which is announced only for what it lost.
+  final bool fromEarlierRun;
+
+  /// Whether any of the draft's text or attachments came back. `false` when
+  /// everything in it was lost.
+  final bool draftRestored;
+
   @override
   bool operator ==(Object other) =>
       other is AcpRestoredDraftNotice &&
-      other.unavailableAttachmentCount == unavailableAttachmentCount;
+      other.unavailableAttachmentCount == unavailableAttachmentCount &&
+      listEquals(
+        other.unavailableAttachmentNames,
+        unavailableAttachmentNames,
+      ) &&
+      other.fromEarlierRun == fromEarlierRun &&
+      other.draftRestored == draftRestored;
 
   @override
-  int get hashCode => unavailableAttachmentCount.hashCode;
+  int get hashCode => Object.hash(
+    unavailableAttachmentCount,
+    Object.hashAll(unavailableAttachmentNames),
+    fromEarlierRun,
+    draftRestored,
+  );
 }
 
 /// Size and modification time of a picked local file, used to tell whether a
@@ -362,7 +393,8 @@ final class AcpSavedRemoteFile extends AcpSavedDraftAttachment {
 /// Text is kept verbatim and pasted-text chips by index into a separate
 /// chips row. Picked files are kept as references only. Attachments that
 /// exist only in memory (a pasted image) are counted in
-/// [unsavedAttachmentCount] rather than stored.
+/// [unsavedAttachmentCount], and named in [unsavedAttachmentNames], rather
+/// than stored.
 @immutable
 final class AcpSavedComposerDraft {
   /// Creates a saved draft.
@@ -373,8 +405,12 @@ final class AcpSavedComposerDraft {
     Iterable<AcpSavedDraftAttachment> attachments =
         const <AcpSavedDraftAttachment>[],
     this.unsavedAttachmentCount = 0,
+    Iterable<String> unsavedAttachmentNames = const <String>[],
     this.version = kAcpSavedComposerDraftVersion,
-  }) : attachments = List<AcpSavedDraftAttachment>.unmodifiable(attachments);
+  }) : attachments = List<AcpSavedDraftAttachment>.unmodifiable(attachments),
+       unsavedAttachmentNames = List<String>.unmodifiable(
+         unsavedAttachmentNames,
+       );
 
   /// Composer text.
   final String text;
@@ -392,6 +428,11 @@ final class AcpSavedComposerDraft {
   /// beyond the size budget, or files that were already gone).
   final int unsavedAttachmentCount;
 
+  /// Names of the attachments that could not be stored, so the restored
+  /// draft can say which were lost. Rows written before names were kept,
+  /// and malformed attachments, have none.
+  final List<String> unsavedAttachmentNames;
+
   /// Format version this draft was read from.
   final int version;
 
@@ -407,6 +448,8 @@ final class AcpSavedComposerDraft {
     'caret': caret,
     'attachments': [for (final attachment in attachments) attachment.toJson()],
     if (unsavedAttachmentCount > 0) 'unsaved': unsavedAttachmentCount,
+    if (unsavedAttachmentNames.isNotEmpty)
+      'unsavedNames': unsavedAttachmentNames,
   };
 
   /// Parses a draft written by [toJson], or returns `null` when [json] is
@@ -430,6 +473,8 @@ final class AcpSavedComposerDraft {
     if (savedAt == null) return null;
     final caret = json['caret'];
     final unsaved = json['unsaved'];
+    final unsavedCount = unsaved is int && unsaved > 0 ? unsaved : 0;
+    final rawUnsavedNames = json['unsavedNames'];
     final attachments = <AcpSavedDraftAttachment>[];
     var unreadable = 0;
     for (final item in rawAttachments) {
@@ -448,8 +493,10 @@ final class AcpSavedComposerDraft {
       caret: caret is int ? caret.clamp(0, text.length) : text.length,
       savedAt: savedAt,
       attachments: attachments,
-      unsavedAttachmentCount:
-          (unsaved is int && unsaved > 0 ? unsaved : 0) + unreadable,
+      unsavedAttachmentCount: unsavedCount + unreadable,
+      unsavedAttachmentNames: rawUnsavedNames is List
+          ? rawUnsavedNames.whereType<String>().take(unsavedCount)
+          : const <String>[],
       version: version,
     );
   }

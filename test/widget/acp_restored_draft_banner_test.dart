@@ -79,10 +79,7 @@ void main() {
     await _pump(tester, controller);
 
     expect(find.text('unsent draft restored'), findsOneWidget);
-    expect(
-      find.text('Saved when MonkeySSH closed. Not sent yet.'),
-      findsOneWidget,
-    );
+    expect(find.text('Saved before MonkeySSH closed.'), findsOneWidget);
     expect(find.text('Summarise the failing CI run'), findsOneWidget);
     final banner = tester.getRect(find.byType(AcpRestoredDraftBanner));
     final field = tester.getRect(find.byType(TextField));
@@ -127,7 +124,7 @@ void main() {
       AcpRestoredDraftBanner.detailFor(
         const AcpRestoredDraftNotice(unavailableAttachmentCount: 1),
       ),
-      'Saved when MonkeySSH closed. Not sent yet. '
+      'Saved before MonkeySSH closed. '
       '1 attachment couldn’t be restored and was removed.',
     );
     expect(
@@ -135,6 +132,91 @@ void main() {
         const AcpRestoredDraftNotice(unavailableAttachmentCount: 3),
       ),
       endsWith('3 attachments couldn’t be restored and were removed.'),
+    );
+  });
+
+  test('the note names lost attachments, then counts the rest', () {
+    String detail(int count, List<String> names) =>
+        AcpRestoredDraftBanner.detailFor(
+          AcpRestoredDraftNotice(
+            unavailableAttachmentCount: count,
+            unavailableAttachmentNames: names,
+            fromEarlierRun: false,
+          ),
+        );
+
+    expect(
+      detail(1, ['ci-log.txt']),
+      'ci-log.txt couldn’t be restored and was removed.',
+    );
+    expect(
+      detail(2, ['ci-log.txt', 'Pasted image.png']),
+      'ci-log.txt and Pasted image.png couldn’t be restored and were '
+      'removed.',
+    );
+    expect(
+      detail(4, ['a.txt', 'b.txt', 'c.txt']),
+      'a.txt, b.txt and 2 more couldn’t be restored and were removed.',
+    );
+    expect(
+      detail(3, ['a.txt']),
+      'a.txt and 2 more couldn’t be restored and were removed.',
+    );
+    expect(
+      detail(1, ['screenshot-2026-10-15-at-09.41.27-terminal.png']),
+      'screenshot-2026-10-15-at-09….png couldn’t be restored and was '
+      'removed.',
+    );
+  });
+
+  test('a draft from this run does not claim the app closed', () {
+    expect(
+      AcpRestoredDraftBanner.detailFor(
+        const AcpRestoredDraftNotice(
+          unavailableAttachmentCount: 1,
+          unavailableAttachmentNames: ['Pasted image.png'],
+          fromEarlierRun: false,
+        ),
+      ),
+      isNot(contains('closed')),
+    );
+  });
+
+  testWidgets('a draft that lost everything is not called restored', (
+    tester,
+  ) async {
+    final manager = RecordingAcpSessionManager();
+    final now = DateTime(2026);
+    final controller =
+        AcpComposerController(
+          manager: manager,
+          sessionKey: _key(),
+          initialSession: AcpSessionState(
+            key: _key(),
+            providerLabel: 'Copilot',
+            cwd: '/home',
+            status: AcpConnectionStatus.ready,
+            createdAt: now,
+            lastActivityAt: now,
+          ),
+        )..restoreDraft(
+          AcpComposerDraftSnapshot(text: ''),
+          notice: const AcpRestoredDraftNotice(
+            unavailableAttachmentCount: 1,
+            unavailableAttachmentNames: ['Pasted image.png'],
+          ),
+        );
+    addTearDown(controller.dispose);
+    await _pump(tester, controller);
+
+    expect(find.text('unsent draft not restored'), findsOneWidget);
+    expect(find.text('unsent draft restored'), findsNothing);
+    expect(
+      find.text(
+        'Saved before MonkeySSH closed. Pasted image.png couldn’t be '
+        'restored and was removed.',
+      ),
+      findsOneWidget,
     );
   });
 

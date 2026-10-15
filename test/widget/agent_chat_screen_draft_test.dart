@@ -178,8 +178,12 @@ void main() {
     await tester.pumpWidget(_app(_container(disk, nextRun)));
     await tester.pumpAndSettle();
 
-    expect(find.text('unsent draft restored'), findsOneWidget);
-    expect(find.textContaining('1 attachment couldn’t be restored'), findsOne);
+    // The draft was only the screenshot, so nothing of it came back.
+    expect(find.text('unsent draft not restored'), findsOneWidget);
+    expect(
+      find.textContaining('Pasted image.png couldn’t be restored'),
+      findsOne,
+    );
     expect(nextRun.prompts, isEmpty);
   });
 
