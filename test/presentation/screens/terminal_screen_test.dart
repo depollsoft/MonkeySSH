@@ -10782,6 +10782,42 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       );
 
+      testWidgets('⌃⌘S drives the wide-layout sidebar from the keyboard', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(1100, 800));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final tmuxService = _MockTmuxService();
+        await pumpTmuxScreen(tester, tmuxService, appShortcuts: true);
+        expect(
+          find.byKey(const ValueKey('tmux-sidebar-window-0')),
+          findsOneWidget,
+        );
+        shellWrites.clear();
+
+        await pressChord(tester, [
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.metaLeft,
+        ], LogicalKeyboardKey.keyS);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(focusIsOnRow('shell'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        expect(focusIsOnRow('agent'), isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        verifySelected(tmuxService, 1);
+
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(terminalFocus(tester).hasFocus, isTrue);
+        expect(shellWrites.map(utf8.decode).join(), isEmpty);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
       testWidgets('Esc closes the switcher and returns focus to the terminal', (
         tester,
       ) async {
