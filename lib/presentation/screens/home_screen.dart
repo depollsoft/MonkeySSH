@@ -3243,21 +3243,28 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
           // Expanded window list.
           if (_expanded) ...[
             const SizedBox(height: 4),
-            for (final entry in entries)
-              if (entry.session case final session?)
-                _buildNativeAcpWindowRow(
-                  theme,
-                  AcpSwitcherEntry.session(session),
-                  windowIndex: entry.index,
-                  status: ConnectionWindowStatusChip(entry: entry),
-                  serverWindow: entry.window,
-                )
-              else
-                _buildWindowRow(
-                  theme,
-                  entry.window!,
-                  status: ConnectionWindowStatusChip(entry: entry),
-                ),
+            _attention.holdOrderWhileTouched(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final entry in entries)
+                    if (entry.session case final session?)
+                      _buildNativeAcpWindowRow(
+                        theme,
+                        AcpSwitcherEntry.session(session),
+                        windowIndex: entry.index,
+                        status: ConnectionWindowStatusChip(entry: entry),
+                        serverWindow: entry.window,
+                      )
+                    else
+                      _buildWindowRow(
+                        theme,
+                        entry.window!,
+                        status: ConnectionWindowStatusChip(entry: entry),
+                      ),
+                ],
+              ),
+            ),
 
             const SizedBox(height: 4),
             if (hasAgentSessionAccess) ...[

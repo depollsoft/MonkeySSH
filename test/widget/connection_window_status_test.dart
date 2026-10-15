@@ -1,6 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -688,4 +689,102 @@ void main() {
       ), reason: 'A legible pair is left as the theme made it.');
     });
   });
+
+  group('row order under a finger', () {
+    testWidgets('rows hold still while touched, then re-sort', (tester) async {
+      TmuxWindow window(
+        String name,
+        int index,
+        int quietFor, {
+        String? flags,
+      }) => TmuxWindow(
+        index: index,
+        name: name,
+        isActive: false,
+        flags: flags,
+        lastActivityEpochSeconds: _epochSecondsAgo(quietFor),
+      );
+      final quietA = window('a', 0, 60);
+      final quietB = window('b', 1, 600);
+      Future<void> pump(List<TmuxWindow> windows) => tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(body: _OrderHarness(windows: windows)),
+          ),
+        ),
+      );
+      double top(String name) => tester.getTopLeft(find.text(name)).dy;
+
+      await pump([quietA, quietB]);
+      expect(top('a'), lessThan(top('b')));
+
+      final finger = await tester.startGesture(
+        tester.getCenter(find.text('a')),
+      );
+      await pump([quietA, window('b', 1, 600, flags: '#')]);
+      expect(
+        top('a'),
+        lessThan(top('b')),
+        reason: 'The bell must not move b under the finger.',
+      );
+      await finger.up();
+      await tester.pump(connectionWindowOrderHold ~/ 2);
+      expect(top('a'), lessThan(top('b')), reason: 'Still settling.');
+
+      await tester.pump(connectionWindowOrderHold);
+      expect(top('b'), lessThan(top('a')), reason: 'Free again: re-sorted.');
+
+      await pump([window('a', 0, 60, flags: '#'), quietB]);
+      expect(
+        top('a'),
+        lessThan(top('b')),
+        reason: 'Untouched, the list follows attention at once.',
+      );
+    });
+  });
+}
+
+class _OrderHarness extends ConsumerStatefulWidget {
+  const _OrderHarness({required this.windows});
+
+  final List<TmuxWindow> windows;
+
+  @override
+  ConsumerState<_OrderHarness> createState() => _OrderHarnessState();
+}
+
+class _OrderHarnessState extends ConsumerState<_OrderHarness> {
+  late final _inputs = ConnectionAttentionInputs(
+    onResort: () {
+      if (mounted) setState(() {});
+    },
+  );
+
+  @override
+  void dispose() {
+    _inputs.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = _inputs.entries(
+      context,
+      ref,
+      windows: widget.windows,
+      sessions: const [],
+      hostId: null,
+      usesMonkeyMux: false,
+      session: null,
+      now: _now,
+    );
+    return _inputs.holdOrderWhileTouched(
+      child: Column(
+        children: [
+          for (final entry in entries)
+            SizedBox(height: 48, child: Text(entry.window!.name)),
+        ],
+      ),
+    );
+  }
 }

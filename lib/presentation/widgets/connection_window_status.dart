@@ -61,6 +61,34 @@ class ConnectionWindowEntry {
 
   /// Most urgent attention reason, if any.
   AttentionReason? get reason => sortKey.reason;
+
+  /// Identity of the row across rebuilds: its native session, otherwise its
+  /// window number.
+  String get identity => switch (session) {
+    final session? => 'session:${session.key.value}',
+    null => 'window:${window?.index ?? index}',
+  };
+}
+
+/// How long rows stay where they are after the last finger leaves the list.
+const connectionWindowOrderHold = Duration(milliseconds: 1500);
+
+/// Puts [sorted] back in the [previous] order of their identities, with rows
+/// that are new since then after them in sorted order, so nothing already on
+/// screen moves.
+List<ConnectionWindowEntry> holdConnectionWindowOrder(
+  List<ConnectionWindowEntry> sorted,
+  List<String> previous,
+) {
+  final position = {
+    for (var index = 0; index < previous.length; index++)
+      previous[index]: index,
+  };
+  return [
+    ...sorted.where((entry) => position.containsKey(entry.identity)).toList()
+      ..sort((a, b) => position[a.identity]!.compareTo(position[b.identity]!)),
+    ...sorted.where((entry) => !position.containsKey(entry.identity)),
+  ];
 }
 
 /// Agent identities (tool plus Pi's model provider) whose account allowance
@@ -231,9 +259,14 @@ List<ConnectionWindowEntry> buildConnectionWindowEntries({
 /// Attention inputs for one connection's window list.
 ///
 /// Reads bridge metadata and quota rings only while the list is on screen,
-/// and keeps the last values otherwise, so a dialog or a covering route does
-/// not reshuffle rows underneath it. Also re-sorts the list when an inferred
-/// "active" terminal row goes quiet, which no window event announces.
+/// and keeps the last values otherwise. Also re-sorts the list when an
+/// inferred "active" terminal row goes quiet, which no window event
+/// announces.
+///
+/// Rows hold their order while the list is covered (a dialog or another
+/// route) and while a finger is on it ([holdOrderWhileTouched]), and for
+/// [connectionWindowOrderHold] after it lifts, so a tap lands on the row it
+/// aimed at; they re-sort once the list is free again.
 class ConnectionAttentionInputs {
   /// Creates the inputs; [onResort] rebuilds the owning list.
   ConnectionAttentionInputs({required this.onResort});
@@ -246,6 +279,9 @@ class ConnectionAttentionInputs {
   Set<(AgentLaunchTool, String?)> _lowQuota =
       const <(AgentLaunchTool, String?)>{};
   Timer? _resort;
+  List<String>? _order;
+  final _touches = <int>{};
+  Timer? _release;
 
   /// Builds the ordered entries for [windows] and [sessions] on [hostId].
   List<ConnectionWindowEntry> entries(
@@ -258,7 +294,8 @@ class ConnectionAttentionInputs {
     required SshSession? session,
     DateTime? now,
   }) {
-    if (attentionSurfaceVisible(context)) {
+    final visible = attentionSurfaceVisible(context);
+    if (visible) {
       _bridges = hostId != null && usesMonkeyMux
           ? ref.watch(connectionBridgeMetadataProvider).forHost(hostId)
           : const <String, MonkeyMuxAcpBridgeMetadata>{};
@@ -273,23 +310,54 @@ class ConnectionAttentionInputs {
       );
     }
     final reference = now ?? DateTime.now();
-    final entries = buildConnectionWindowEntries(
+    final sorted = buildConnectionWindowEntries(
       windows: windows,
       sessions: sessions,
       bridges: _bridges,
       lowQuota: _lowQuota,
       now: reference,
     );
+    final previous = _order;
+    final held = !visible || _touches.isNotEmpty || _release != null;
+    final entries = held && previous != null
+        ? holdConnectionWindowOrder(sorted, previous)
+        : sorted;
+    _order = [for (final entry in entries) entry.identity];
     _resort?.cancel();
     final wait = connectionWindowsNextResort(entries, now: reference);
     _resort = wait == null ? null : Timer(wait, onResort);
     return entries;
   }
 
-  /// Cancels the pending re-sort.
+  /// Wraps the rows of the list so they hold their order while touched.
+  Widget holdOrderWhileTouched({required Widget child}) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: (event) {
+      _touches.add(event.pointer);
+      _release?.cancel();
+      _release = null;
+    },
+    onPointerUp: (event) => _lift(event.pointer),
+    onPointerCancel: (event) => _lift(event.pointer),
+    child: child,
+  );
+
+  void _lift(int pointer) {
+    _touches.remove(pointer);
+    if (_touches.isNotEmpty) return;
+    _release?.cancel();
+    _release = Timer(connectionWindowOrderHold, () {
+      _release = null;
+      onResort();
+    });
+  }
+
+  /// Cancels the pending re-sort and release.
   void dispose() {
     _resort?.cancel();
     _resort = null;
+    _release?.cancel();
+    _release = null;
   }
 }
 
