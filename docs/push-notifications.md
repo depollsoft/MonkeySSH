@@ -58,8 +58,11 @@ vectors include a non-canonical ticket that every implementation must refuse.
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
 - **Collapse key.** Chosen by the host so repeated events for one window replace
   each other on the device: the first 32 hex characters of
-  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window)`, where
-  `hostSalt` is 32 random bytes kept in the host's registration file. Accepted
+  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window + "\n" + group)`,
+  where `group` is `attention` for `permission` and `input` and `update` for
+  every other kind (since 0.1.237), so a routine event never replaces a request
+  still waiting on the user, and `hostSalt` is 32 random bytes kept in the
+  host's registration file. Accepted
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
 - **Session key.** Names a MonkeyMux session in the host's registration file
   without writing the name there: the first 32 hex characters of
@@ -657,22 +660,31 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   `lib/domain/services/push/push_notification_text.dart` and the iOS
   extension build the same strings.
 - **Notification context:** to show that text while MonkeySSH is not running,
-  the app stores the device's private key and every saved host's label by
-  host reference (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"}}`).
-  It is written after opt-in and whenever a sync follows a change to the saved
-  hosts, and deleted on opt-out. Android keeps it in secure storage
+  the app stores the device's private key, every saved host's label by host
+  reference, and the categories each host may push now
+  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
+  the host's kinds, without `notice` when Desktop notifications are off in
+  Settings, and none when the host's push is off). It is written after opt-in
+  and whenever a sync follows a change to the saved hosts or that switch, and
+  deleted on opt-out and at any start without a registration (an opt-out the
+  app was killed in, or a delete that failed). Android keeps it in secure storage
   (`monkeyssh_push_notify_v1`); iOS keeps it in the keychain group
   `<team>.<bundle id>.push` (service `xyz.depollsoft.monkeyssh.push`, account
   `notification-context-v1`, readable after first unlock on this device only),
   which the app and its notification service extension share. It never
   leaves the phone.
-- **Android:** pushes arrive as data only. A FlutterFire background handler,
-  registered at startup, opens the payload and posts the notification on the
-  channel for the kind, with an id derived from the collapse key so a newer
-  push for the same window and kind replaces the older one. When the payload
-  does not open (no context yet, or a key from an earlier opt-in) it posts the
-  generic text for `k`. A tap comes back through the local notification
-  plugin carrying the encrypted payload and opens like an FCM tap.
+- **Android:** pushes arrive as data only (for a ticket with `a`). A
+  FlutterFire background handler, registered at startup, opens the payload and
+  posts the notification on the channel for the kind, with an id derived from
+  the collapse key so a newer push for the same window and kind group replaces
+  the older one. It drops a push the context's `allow` says the host no longer
+  raises: a host's registration changes only when the host is reached, so a
+  kind turned off meanwhile still arrives (iOS cannot drop a push this way and
+  shows it). When the payload does not open (no context yet, or a key from an
+  earlier opt-in) it posts the generic text for `k`. A tap comes back through
+  the local notification plugin carrying the encrypted payload and opens like
+  an FCM tap, also when it starts a new activity on the running engine (the
+  bridge reads the activity's launch intent again when the app resumes).
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

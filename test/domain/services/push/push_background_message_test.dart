@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -105,6 +106,49 @@ void main() {
       }
     },
   );
+
+  test('a kind the host no longer allows does not show', () async {
+    Future<String> event(String kind, {List<String>? alert}) => seal({
+      'v': 1,
+      'hostRef': 'ref',
+      'kind': kind,
+      'alert': ?alert,
+      'ts': 1,
+    });
+    // Agent finished and window alerts were turned off while the host was
+    // out of reach, so its registration still asks for them.
+    final stored = PushNotificationContext(
+      seed: device.seed,
+      hosts: const {'ref': 'build-box'},
+      allowed: const {
+        'ref': {'attention', 'notice'},
+      },
+    ).encode();
+    Future<int> posts(String kind, {List<String>? alert}) async => (await show({
+      'v': '1',
+      'p': await event(kind, alert: alert),
+      'k': kind,
+      'c': 'c',
+    }, context: stored)).length;
+    expect(await posts('permission'), 1);
+    expect(await posts('finished'), 0);
+    expect(await posts('alert', alert: ['bell']), 0);
+    expect(await posts('alert', alert: ['notice']), 1);
+    // An older helper's alert does not say which; it needs both.
+    expect(await posts('alert'), 0);
+    expect(await posts('test'), 1);
+    // A host the context does not filter shows everything.
+    final unfiltered = context({'ref': 'build-box'});
+    expect(
+      (await show({
+        'v': '1',
+        'p': await event('finished'),
+        'k': 'finished',
+        'c': 'c',
+      }, context: unfiltered)).length,
+      1,
+    );
+  });
 
   test('other data messages are ignored', () async {
     expect(await show({'v': '1', 'k': 'finished'}), isEmpty);
@@ -223,6 +267,39 @@ void main() {
     });
   });
 
+  test('the text matches the vectors the iOS extension checks', () {
+    final vectors = jsonDecode(
+      File('docs/push-notification-vectors.json').readAsStringSync(),
+    ) as Map<String, Object?>;
+    final text = vectors['text']! as Map<String, Object?>;
+    final generic = text['genericBodies']! as Map<String, Object?>;
+    for (final MapEntry(:key, :value) in generic.entries) {
+      expect(
+        genericPushNotificationText(PushEventKind.tryParse(key)!).body,
+        value,
+      );
+    }
+    for (final raw in text['cases']! as List<Object?>) {
+      final vector = raw! as Map<String, Object?>;
+      final got = pushNotificationText(
+        PushEvent(
+          hostRef: 'ref',
+          kind: PushEventKind.tryParse(vector['kind'])!,
+          timestamp: DateTime.utc(2026),
+          sessionName: vector['session'] as String?,
+          agent: vector['agent'] as String?,
+          windowTitle: vector['windowTitle'] as String?,
+        ),
+        hostLabel: vector['hostLabel'] as String?,
+      );
+      expect(
+        (got.title, got.body),
+        (vector['title'], vector['body']),
+        reason: jsonEncode(vector),
+      );
+    }
+  });
+
   test('a payload title is cleaned and bounded', () {
     PushEvent? parse(Object? title) => PushEvent.tryParse(
       utf8.encode(
@@ -241,6 +318,17 @@ void main() {
     expect(parse('  ')!.windowTitle, isNull);
     expect(parse(7)!.windowTitle, isNull);
     expect(parse('a' * 65)!.windowTitle, isNull);
+  });
+
+  test('a payload version or time written with a fraction is refused', () {
+    PushEvent? parse(Object v, Object ts) => PushEvent.tryParse(
+      utf8.encode(
+        jsonEncode({'v': v, 'hostRef': 'ref', 'kind': 'finished', 'ts': ts}),
+      ),
+    );
+    expect(parse(1, 1), isNotNull);
+    expect(parse(1.0, 1), isNull);
+    expect(parse(1, 1.0), isNull);
   });
 
   test('a payload names its agent only with a short lowercase id', () {
@@ -267,6 +355,23 @@ void main() {
     final decoded = PushNotificationContext.decode(encoded)!;
     expect(decoded.seed, device.seed);
     expect(decoded.hosts, {'ref': 'build-box'});
+    expect(decoded.allowed, isEmpty);
+    expect(
+      PushNotificationContext.decode(
+        PushNotificationContext(
+          seed: device.seed,
+          hosts: const {'ref': 'build-box'},
+          allowed: const {
+            'ref': {'finished', 'attention'},
+            'off': {},
+          },
+        ).encode(),
+      )!.allowed,
+      {
+        'ref': {'attention', 'finished'},
+        'off': <String>{},
+      },
+    );
     expect(PushNotificationContext.decode(null), isNull);
     expect(
       PushNotificationContext.decode(

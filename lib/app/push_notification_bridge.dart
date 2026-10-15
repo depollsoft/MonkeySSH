@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../domain/models/host_notifications.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/host_notification_prefs_reader.dart';
 import '../domain/services/local_notification_service.dart';
 import '../domain/services/push/push_event.dart';
 import '../domain/services/push/push_messaging_gateway.dart';
 import '../domain/services/push/push_notification_service.dart';
+import '../domain/services/settings_service.dart';
 import 'notification_navigation.dart';
 import 'router.dart';
 
@@ -192,6 +194,24 @@ class _PushNotificationBridgeState
     if (foreground == _foreground) return;
     _foreground = foreground;
     _reportVisibility();
+    if (foreground) unawaited(_handleActivityPush());
+  }
+
+  /// Opens a push whose tap started a new activity on the running engine
+  /// (see LocalNotificationService.currentActivityPushPayload). A payload
+  /// already opened is dropped by [_handleOpenedMessage].
+  Future<void> _handleActivityPush() async {
+    final String? payload;
+    try {
+      payload = await ref
+          .read(localNotificationServiceProvider)
+          .currentActivityPushPayload();
+    } on Object {
+      return;
+    }
+    if (payload != null && mounted) {
+      await _handleOpenedMessage(_localPushMessage(payload));
+    }
   }
 
   /// The host and, when the route names it, the connection whose terminal
@@ -274,10 +294,18 @@ class _PushNotificationBridgeState
     final prefs = await ref.read(hostNotificationPrefsReaderProvider)(
       target.hostId,
     );
+    // The app-wide switch for program notifications turns them off for
+    // every host, as it does for registrations.
+    final effective = ref.read(terminalNotificationsNotifierProvider)
+        ? prefs
+        : prefs.withKind(
+            HostNotificationKind.shellNotifications,
+            enabled: false,
+          );
     if (!mounted ||
         !pushKindAllowedByHost(
           target.kind,
-          prefs,
+          effective,
           alertCategories: target.alertCategories,
         )) {
       return;

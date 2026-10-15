@@ -43,7 +43,7 @@ class PushNotificationPost {
   });
 
   /// Stable per collapse key, so a newer push for the same window and kind
-  /// replaces the older one.
+  /// group (requests, or everything else) replaces the older one.
   final int id;
 
   /// What happened; picks the channel.
@@ -86,6 +86,9 @@ Future<void> showPushNotificationFromData(
   DateTime? timestamp;
   final event = await _openPayload(store, payload);
   if (event != null) {
+    // A host's registration can still ask for a kind turned off while it
+    // was out of reach; what the user turned off does not show.
+    if (!event.allowed) return;
     kind = event.event.kind;
     text = pushNotificationText(event.event, hostLabel: event.hostLabel);
     timestamp = event.event.timestamp;
@@ -102,7 +105,7 @@ Future<void> showPushNotificationFromData(
   );
 }
 
-Future<({PushEvent event, String? hostLabel})?> _openPayload(
+Future<({PushEvent event, String? hostLabel, bool allowed})?> _openPayload(
   PushNotificationContextStore store,
   String payload,
 ) async {
@@ -113,7 +116,11 @@ Future<({PushEvent event, String? hostLabel})?> _openPayload(
     final plaintext = await openPushPayload(device: device, payload: payload);
     final event = plaintext == null ? null : PushEvent.tryParse(plaintext);
     if (event == null) return null;
-    return (event: event, hostLabel: context.hosts[event.hostRef]);
+    return (
+      event: event,
+      hostLabel: context.hosts[event.hostRef],
+      allowed: context.allows(event),
+    );
   } on Object {
     return null;
   }

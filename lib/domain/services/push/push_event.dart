@@ -80,7 +80,10 @@ class PushEvent {
     } on FormatException {
       return null;
     }
-    if (decoded is! Map<String, Object?> || decoded['v'] != 1) {
+    // `1.0` is not an integer here or in the iOS extension.
+    if (decoded is! Map<String, Object?> ||
+        decoded['v'] is! int ||
+        decoded['v'] != 1) {
       return null;
     }
     final hostRef = decoded['hostRef'];

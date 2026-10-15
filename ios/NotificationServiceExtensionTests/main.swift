@@ -209,6 +209,35 @@ check(PushPayloadEvent.cleanTitle("  ") == nil, "blank title kept")
 check(PushPayloadEvent.cleanTitle(String(repeating: "a", count: 65)) == nil, "long title kept")
 equal(PushPayloadEvent.cleanTitle(String(repeating: "a", count: 64)), String(repeating: "a", count: 64), "64-character title")
 
+// The text cases Dart's tests also check (docs/push-notification-vectors.json).
+let textVectors = vectors["text"] as! [String: Any]
+let genericBodies = textVectors["genericBodies"] as! [String: String]
+for case let textCase as [String: Any] in textVectors["cases"] as! [Any] {
+  let kind = PushEventKind(rawValue: textCase["kind"] as! String)!
+  func field(_ name: String) -> String? { textCase[name] as? String }
+  equal(
+    PushNotificationText.title(kind: kind, agent: field("agent")),
+    field("title")!,
+    "title for \(textCase)"
+  )
+  equal(
+    PushNotificationText.body(
+      kind: kind,
+      hostLabel: field("hostLabel"),
+      sessionId: field("session"),
+      windowTitle: field("windowTitle"),
+      originalBody: genericBodies[kind.rawValue]!
+    ),
+    field("body")!,
+    "body for \(textCase)"
+  )
+}
+check(PushJSON.integer(1.0 as NSNumber) == nil, "a fractional integer accepted")
+check(
+  PushPayloadEvent(plaintext: Data(#"{"v":1,"hostRef":"r","kind":"finished","ts":1.0}"#.utf8)) == nil,
+  "ts 1.0 accepted"
+)
+
 // The pinned vector, end to end.
 equal(
   PushNotificationPresentation.make(payload: payload, context: context, originalBody: "generic"),

@@ -489,6 +489,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       // The app-wide switch for program notifications changes what every
       // registration asks for.
       ref.listen(terminalNotificationsNotifierProvider, (_, _) {
+        _contextDirty = true;
         if (state.loaded) scheduleSync();
       });
     }
@@ -1373,32 +1374,50 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   Future<void> _refreshNotificationContext() async {
     final secrets = _secrets;
     if (!_contextDirty || secrets == null) return;
+    // Cleared before reading, so a host change that lands while this runs
+    // marks the context again instead of being lost.
+    _contextDirty = false;
     try {
       final labels = await _hostLabels();
+      Map<int, PushHostSettings>? settings;
+      try {
+        settings = await _hostSettings();
+      } on Object {
+        settings = _lastHostSettings;
+      }
       final hosts = <String, String>{};
+      final allowed = <String, Set<String>>{};
       for (final MapEntry(key: hostId, value: label) in labels.entries) {
         final hostRef = await derivePushHostRef(
           hostRefKey: secrets.hostRefKey,
           hostId: hostId,
         );
         hosts[hostRef] = label;
+        // What the host's registration would ask for now; without a good
+        // read of the settings the host is not filtered.
+        if (settings?[hostId] case (:final prefs, sessionName: _)) {
+          allowed[hostRef] =
+              prefs.pushWhenClosed && !state.disabledHostIds.contains(hostId)
+              ? {..._pushEventsFor(prefs)}
+              : const <String>{};
+        }
       }
       final encoded = PushNotificationContext(
         seed: secrets.keyPair.seed,
         hosts: hosts,
+        allowed: allowed,
       ).encode();
       if (encoded != _lastContext) {
         await _contextStore.write(encoded);
         _lastContext = encoded;
       }
-      _contextDirty = false;
     } on PlatformException catch (error) {
       if (error.code == 'unavailable') {
         // An unsigned or simulator iOS build has no keychain group to share
         // with the extension; pushes keep their generic text there.
-        _contextDirty = false;
         _log.info(_diagnosticsCategory, 'context_unavailable');
       } else {
+        _contextDirty = true;
         _log.warning(
           _diagnosticsCategory,
           'context_write_failed',
@@ -1406,6 +1425,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         );
       }
     } on Object catch (error) {
+      _contextDirty = true;
       _log.warning(
         _diagnosticsCategory,
         'context_write_failed',

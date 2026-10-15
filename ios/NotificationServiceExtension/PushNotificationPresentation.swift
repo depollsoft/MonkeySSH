@@ -115,7 +115,7 @@ struct PushPayloadEvent {
     self.hostRef = hostRef
     self.kind = kind
     if let session = root["sessionId"] as? String,
-      !session.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      !PushNotificationText.trimmed(session).isEmpty
     {
       sessionId = session
     } else {
@@ -203,16 +203,35 @@ enum PushNotificationText {
     if kind == .test {
       return testBody
     }
-    func trimmed(_ value: String?) -> String {
-      value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
     let label = trimmed(hostLabel)
     var parts: [String] = []
+    // Compared by code point, as Dart compares strings: Swift's `==` would
+    // also match canonically equivalent spellings.
     for part in [trimmed(windowTitle), label, label.isEmpty ? "" : trimmed(sessionId)]
-    where !part.isEmpty && !parts.contains(part) {
+    where !part.isEmpty
+      && !parts.contains(where: { $0.unicodeScalars.elementsEqual(part.unicodeScalars) })
+    {
       parts.append(part)
     }
     return parts.isEmpty ? originalBody : parts.joined(separator: " \u{00B7} ")
+  }
+
+  /// Dart's `String.trim`: strips Unicode White_Space and U+FEFF from both
+  /// ends.
+  static func trimmed(_ value: String?) -> String {
+    guard let scalars = value?.unicodeScalars else {
+      return ""
+    }
+    func isSpace(_ scalar: Unicode.Scalar) -> Bool {
+      scalar.properties.isWhitespace || scalar.value == 0xfeff
+    }
+    guard
+      let start = scalars.firstIndex(where: { !isSpace($0) }),
+      let end = scalars.lastIndex(where: { !isSpace($0) })
+    else {
+      return ""
+    }
+    return String(String.UnicodeScalarView(scalars[start...end]))
   }
 }
 
@@ -314,12 +333,13 @@ enum PushBase64URL {
 }
 
 enum PushJSON {
-  /// A JSON integer, rejecting booleans and fractions that NSNumber would
-  /// otherwise convert.
+  /// A JSON integer, rejecting booleans and numbers written with a fraction
+  /// or exponent (`1.0`), as Dart's `is int` does.
   static func integer(_ value: Any?) -> Int64? {
     guard
       let number = value as? NSNumber,
-      CFGetTypeID(number) != CFBooleanGetTypeID()
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      !CFNumberIsFloatType(number)
     else {
       return nil
     }

@@ -525,6 +525,22 @@ void main() {
       'gpu-rig',
     );
 
+    // What each host may push now, which the phone applies to a push its
+    // registration still asks for.
+    Set<String>? allowed() =>
+        PushNotificationContext.decode(h.context.stored)!.allowed[buildBox];
+    expect(allowed(), {'attention', 'finished', 'bell', 'notice'});
+    h.terminalNotifications = false;
+    await h.editHost(2, const HostNotificationPrefs(agentFinished: false));
+    await h.controller.syncNow();
+    expect(allowed(), {'attention', 'bell'});
+    await h.editHost(
+      2,
+      const HostNotificationPrefs().withPushWhenClosed(enabled: false),
+    );
+    await h.controller.syncNow();
+    expect(allowed(), isEmpty);
+
     await h.controller.disable();
     expect(h.context.stored, isNull);
     h.expectLogsClean();

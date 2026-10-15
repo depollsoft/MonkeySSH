@@ -9,9 +9,32 @@ import 'package:monkeyssh/app/router.dart';
 import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
+import 'package:monkeyssh/domain/services/settings_service.dart';
+
+class _TerminalNotifications extends TerminalNotificationsNotifier {
+  _TerminalNotifications({required this.enabled});
+
+  final bool enabled;
+
+  @override
+  bool build() => enabled;
+}
+
+/// Local notifications whose current Android activity was started by a tap
+/// on [activityPayload].
+class _ActivityNotifications extends LocalNotificationService {
+  String? activityPayload;
+
+  @override
+  Future<String?> consumeLaunchPushPayload() async => null;
+
+  @override
+  Future<String?> currentActivityPushPayload() async => activityPayload;
+}
 
 class _UnlockedAuth extends AuthStateNotifier {
   @override
@@ -132,6 +155,8 @@ Future<(_Gateway, _Controller, GoRouter)> _pump(
   PushRemoteMessage? initial,
   PushNavigationTarget? target,
   HostNotificationPrefs prefs = const HostNotificationPrefs(),
+  bool terminalNotifications = true,
+  LocalNotificationService? notifications,
 }) async {
   final gateway = _Gateway()..initial = initial;
   addTearDown(gateway.close);
@@ -148,6 +173,11 @@ Future<(_Gateway, _Controller, GoRouter)> _pump(
         hostNotificationPrefsReaderProvider.overrideWithValue(
           (_) async => prefs,
         ),
+        terminalNotificationsNotifierProvider.overrideWith(
+          () => _TerminalNotifications(enabled: terminalNotifications),
+        ),
+        if (notifications != null)
+          localNotificationServiceProvider.overrideWithValue(notifications),
       ],
       child: PushNotificationBridge(
         child: MaterialApp.router(routerConfig: router),
@@ -319,6 +349,55 @@ void main() {
     gateway.messages.add(_message);
     await tester.pumpAndSettle();
     expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a foreground program notification follows the app-wide '
+      'switch', (tester) async {
+    const notice = PushNavigationTarget(
+      hostId: 4,
+      kind: PushEventKind.alert,
+      sessionName: 'main',
+      windowId: '@3',
+      alertCategories: {'notice'},
+    );
+    for (final enabled in [true, false]) {
+      final (gateway, _, _) = await _pump(
+        tester,
+        target: notice,
+        terminalNotifications: enabled,
+      );
+      gateway.messages.add(_message);
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(SnackBar),
+        enabled ? findsOneWidget : findsNothing,
+        reason: 'app-wide switch on: $enabled',
+      );
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('a tap that started a new activity opens when it resumes', (
+    tester,
+  ) async {
+    final notifications = _ActivityNotifications();
+    await _pump(tester, target: target, notifications: notifications);
+    expect(find.textContaining('terminal /terminal/4?'), findsNothing);
+
+    notifications.activityPayload = 'sealed';
+    for (final state in [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.textContaining('terminal /terminal/4?'), findsOneWidget);
   });
 
   testWidgets('a foreground push for what is on screen is dropped', (

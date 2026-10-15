@@ -744,6 +744,21 @@ class LocalNotificationService {
     return _launchPushPayload;
   }
 
+  /// The encrypted payload of the push notification whose tap started the
+  /// current Android activity. MainActivity keeps its engine, so when the
+  /// activity was destroyed while the process lived on (swiped from Recents
+  /// during a session), a tap starts a new activity on the running engine;
+  /// the plugin hands that tap over only through the activity's intent,
+  /// which [consumeLaunchPushPayload] read once at startup. Callers drop a
+  /// payload they already opened.
+  Future<String?> currentActivityPushPayload() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return null;
+    if (!await initialize()) return null;
+    final details = await _plugin.getNotificationAppLaunchDetails();
+    if (!(details?.didNotificationLaunchApp ?? false)) return null;
+    return decodePushTapPayload(details?.notificationResponse?.payload);
+  }
+
   /// Ensures the underlying notification plugin is initialized.
   Future<bool> initialize() => _initializeFuture ??= _initializeInternal();
 

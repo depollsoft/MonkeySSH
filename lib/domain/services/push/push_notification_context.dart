@@ -6,15 +6,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../../../data/repositories/host_repository.dart';
+import '../../models/host_notifications.dart';
+import '../host_notification_prefs_reader.dart';
 import 'push_crypto.dart';
+import 'push_event.dart';
 
 /// What the phone needs to show a push while MonkeySSH is not running: the
-/// device's private key, to open the payload, and each saved host's label by
-/// the reference its payloads carry. It never leaves the device.
+/// device's private key, to open the payload, each saved host's label by the
+/// reference its payloads carry, and what each host may push now. It never
+/// leaves the device.
 @immutable
 class PushNotificationContext {
   /// Creates a context.
-  const PushNotificationContext({required this.seed, required this.hosts});
+  const PushNotificationContext({
+    required this.seed,
+    required this.hosts,
+    this.allowed = const {},
+  });
 
   /// The device's 32-byte X25519 private key.
   final Uint8List seed;
@@ -22,10 +30,44 @@ class PushNotificationContext {
   /// Saved host labels by host reference.
   final Map<String, String> hosts;
 
-  /// The stored form, shared with the iOS notification service extension:
-  /// `{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"}}`.
-  String encode() =>
-      jsonEncode({'v': 1, 'seed': encodePushBase64(seed), 'hosts': hosts});
+  /// The push categories (`attention`, `finished`, `bell`, `notice`) each
+  /// host may raise now, by host reference. A host's registration lags a
+  /// change made while it could not be reached, so the phone drops what the
+  /// host no longer allows. A host missing here is not filtered.
+  final Map<String, Set<String>> allowed;
+
+  /// Whether the host behind [event] may raise it now (see [allowed]).
+  bool allows(PushEvent event) {
+    final categories = allowed[event.hostRef];
+    if (categories == null) return true;
+    return pushKindAllowedByHost(
+      event.kind,
+      HostNotificationPrefs(
+        agentAttention: categories.contains('attention'),
+        agentFinished: categories.contains('finished'),
+        windowAlerts: categories.contains('bell'),
+        shellNotifications: categories.contains('notice'),
+      ),
+      alertCategories: event.alertCategories,
+    );
+  }
+
+  /// The stored form, shared with the iOS notification service extension,
+  /// which reads only the seed and labels:
+  ///
+  /// ```json
+  /// {"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention"]}}
+  /// ```
+  String encode() => jsonEncode({
+    'v': 1,
+    'seed': encodePushBase64(seed),
+    'hosts': hosts,
+    if (allowed.isNotEmpty)
+      'allow': {
+        for (final MapEntry(:key, :value) in allowed.entries)
+          key: [...value]..sort(),
+      },
+  });
 
   /// Parses [encoded], or returns null when it is missing or malformed.
   static PushNotificationContext? decode(String? encoded) {
@@ -35,12 +77,19 @@ class PushNotificationContext {
       if (decoded is! Map<String, Object?> || decoded['v'] != 1) return null;
       final seed = decodePushBase64(decoded['seed'] as String? ?? '');
       final hosts = decoded['hosts'];
+      final allow = decoded['allow'];
       if (seed == null || seed.length != 32 || hosts is! Map) return null;
       return PushNotificationContext(
         seed: seed,
         hosts: {
           for (final MapEntry(:key, :value) in hosts.entries)
             if (key is String && value is String) key: value,
+        },
+        allowed: {
+          if (allow is Map)
+            for (final MapEntry(:key, :value) in allow.entries)
+              if (key is String && value is List)
+                key: {...value.whereType<String>()},
         },
       );
     } on Object {
