@@ -38,6 +38,22 @@ extension SocksBrowserRoutingSupportText on SocksBrowserRoutingSupport {
     SocksBrowserRoutingSupport.unavailable =>
       'In-app browsing through SOCKS isn’t available on this device.',
   };
+
+  /// Short note for a SOCKS forward's row in a list, or null when the
+  /// in-app browser can route through it.
+  ///
+  /// Where there is no in-app SOCKS browser at all (desktop), the forward is
+  /// still a working `ssh -D` proxy, so the note says how to use it instead
+  /// of reading as a fault.
+  String? get forwardRowNote => switch (this) {
+    SocksBrowserRoutingSupport.supported => null,
+    SocksBrowserRoutingSupport.requiresNewerIos =>
+      'In-app browsing needs iOS 17 or later.',
+    SocksBrowserRoutingSupport.requiresNewerWebView =>
+      'In-app browsing needs a newer Android System WebView.',
+    SocksBrowserRoutingSupport.unavailable =>
+      'Use it as the SOCKS5 proxy in other apps.',
+  };
 }
 
 /// Thrown when the platform could not route the browser through the proxy.

@@ -822,5 +822,95 @@ void registerTerminalPortForwardsSheetTests() {
       await tester.pumpAndSettle();
       expect(find.text('socks Office via Dev box'), findsOneWidget);
     });
+
+    testWidgets('a stopped SOCKS rule browses, leaving the start to it', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final repository = _MockPortForwardRepository();
+      final session = _LiveTestSession(
+        connectionId: 7,
+        hostId: 10,
+        client: MockSshClient(),
+      );
+      addTearDown(session.changes.close);
+      when(() => repository.watchByHostId(10)).thenAnswer(
+        (_) => Stream.value([
+          PortForward(
+            id: 5,
+            name: 'Office',
+            hostId: 10,
+            forwardType: 'dynamic',
+            localHost: '127.0.0.1',
+            localPort: 0,
+            remoteHost: '',
+            remotePort: 0,
+            autoStart: false,
+            createdAt: DateTime(2026),
+          ),
+        ]),
+      );
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => Scaffold(
+              body: FilledButton(
+                onPressed: () => unawaited(
+                  showTerminalPortForwardsSheet(
+                    context: context,
+                    hostId: 10,
+                    connectionId: 7,
+                    session: session,
+                    onOpenInBrowser: (_) async {},
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/port-forwards/browser',
+            name: Routes.portForwardBrowser,
+            builder: (context, state) {
+              final launch = state.extra! as PortForwardBrowserSocksLaunch;
+              return Text('socks ${launch.portForward.name}');
+            },
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            portForwardRepositoryProvider.overrideWithValue(repository),
+            hostRepositoryProvider.overrideWithValue(MockHostRepository()),
+            hostByIdProvider(10).overrideWith((ref) => Stream.value(_host())),
+            activeSessionsProvider.overrideWith(
+              () => _TestActiveSessionsNotifier([session]),
+            ),
+            socksBrowserRoutingSupportProvider.overrideWithValue(
+              const AsyncData(SocksBrowserRoutingSupport.supported),
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Stopped'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('^Browse through Office')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Office'));
+      await tester.pumpAndSettle();
+      expect(find.text('socks Office'), findsOneWidget);
+      // The browser starts the forward; the sheet does not.
+      expect(session.starts, isEmpty);
+      semantics.dispose();
+    });
   });
 }

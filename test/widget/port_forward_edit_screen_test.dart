@@ -326,6 +326,79 @@ void main() {
     expect(savedMessage, 'Port forward added');
   });
 
+  testWidgets(
+    'an existing auto-start rule turned into SOCKS keeps auto-start',
+    (tester) async {
+      final existing = PortForward(
+        id: 4,
+        name: 'Grafana',
+        hostId: 10,
+        forwardType: 'local',
+        localHost: '127.0.0.1',
+        localPort: 3000,
+        remoteHost: 'localhost',
+        remotePort: 3000,
+        autoStart: true,
+        createdAt: DateTime(2026),
+      );
+      registerFallbackValue(existing);
+      final portForwardRepository = _MockPortForwardRepository();
+      when(() => portForwardRepository.update(any()))
+          .thenAnswer((_) async => true);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            hostRepositoryProvider.overrideWithValue(MockHostRepository()),
+            portForwardRepositoryProvider.overrideWithValue(
+              portForwardRepository,
+            ),
+            // Connected to another host only, so nothing applies live.
+            activeSessionsProvider.overrideWith(
+              () => TestActiveSessionsNotifier(
+                _RecordingSshSession(
+                  connectionId: 7,
+                  hostId: 99,
+                  client: MockSshClient(),
+                ),
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: PortForwardEditorForm(
+                hosts: [_host()],
+                existing: existing,
+                onSaved: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('SOCKS'));
+      await tester.pumpAndSettle();
+      // The saved choice is the user's; the switch says what it now means.
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isTrue,
+      );
+      expect(find.textContaining('any app on this device'), findsOneWidget);
+
+      final saveButton = find.bySubtype<FilledButton>();
+      await tester.ensureVisible(saveButton);
+      await tester.tap(saveButton);
+      await tester.pumpAndSettle();
+      final saved =
+          verify(() => portForwardRepository.update(captureAny()))
+                  .captured
+                  .single
+              as PortForward;
+      expect(saved.forwardType, 'dynamic');
+      expect(saved.autoStart, isTrue);
+    },
+  );
+
   testWidgets('host sheet keeps its defaults and cancels without saving', (
     tester,
   ) async {

@@ -362,7 +362,7 @@ class _PortForwardListTile extends ConsumerWidget {
         ? socksSupport?.isSupported ?? false
         : isPortForwardBrowserSupported() &&
               canOpenPortForwardInBrowser(portForward);
-    final socksUnavailableReason = socksSupport?.unavailableReason;
+    final socksNote = socksSupport?.forwardRowNote;
     final isLocal = portForward.forwardType == 'local';
     final endpoint = isDynamic
         ? 'D ${dynamicPortForwardListenerLabel(portForward.localPort)} · '
@@ -370,9 +370,11 @@ class _PortForwardListTile extends ConsumerWidget {
         : isLocal
         ? 'L ${portForward.localHost}:${portForward.localPort} → ${portForward.remoteHost}:${portForward.remotePort}'
         : 'R ${portForward.remoteHost}:${portForward.remotePort} → ${portForward.localHost}:${portForward.localPort}';
+    // Muted Steel, the secondary-text token; the border colour (`outline`)
+    // is far below AA for text.
     final subtitleStyle = FluttyTheme.monoStyle.copyWith(
       fontSize: 12,
-      color: theme.colorScheme.outline,
+      color: theme.textTheme.bodySmall?.color,
     );
 
     return ListTile(
@@ -392,19 +394,14 @@ class _PortForwardListTile extends ConsumerWidget {
         ),
       ),
       title: Text(portForward.name),
-      subtitle: socksUnavailableReason == null
+      subtitle: socksNote == null
           ? Text(endpoint, style: subtitleStyle)
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(endpoint, style: subtitleStyle),
                 const SizedBox(height: 2),
-                Text(
-                  socksUnavailableReason,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
+                Text(socksNote, style: theme.textTheme.bodySmall),
               ],
             ),
       trailing: Row(

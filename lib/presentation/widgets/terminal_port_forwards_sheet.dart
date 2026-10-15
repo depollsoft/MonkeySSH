@@ -456,8 +456,10 @@ class _TerminalPortForwardsSheetState
     final socksSupport = isDynamic
         ? ref.watch(socksBrowserRoutingSupportProvider).asData?.value
         : null;
+    // A stopped SOCKS rule browses too: the browser starts the forward and
+    // stops it again on close, as from the Port Forwards list.
     final canOpenInBrowser = isDynamic
-        ? isActive && (socksSupport?.isSupported ?? false)
+        ? socksSupport?.isSupported ?? false
         : isLocal &&
               activeTunnel?.browserHost != null &&
               activeTunnel?.browserPort != null;
@@ -469,7 +471,7 @@ class _TerminalPortForwardsSheetState
               '${portForward.remoteHost}:${portForward.remotePort}'
         : '${portForward.remoteHost}:${portForward.remotePort} → '
               '${portForward.localHost}:${portForward.localPort}';
-    final socksUnavailableReason = socksSupport?.unavailableReason;
+    final socksNote = socksSupport?.forwardRowNote;
 
     return Semantics(
       button: canOpenInBrowser,
@@ -539,10 +541,10 @@ class _TerminalPortForwardsSheetState
                         fontWeight: isActive ? FontWeight.w600 : null,
                       ),
                     ),
-                    if (socksUnavailableReason != null) ...[
+                    if (socksNote != null) ...[
                       const SizedBox(height: FluttyTheme.spacingXs),
                       Text(
-                        socksUnavailableReason,
+                        socksNote,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: colorScheme.onSurfaceVariant,
                         ),

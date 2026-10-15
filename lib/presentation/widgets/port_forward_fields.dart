@@ -93,8 +93,9 @@ class PortForwardTypeField extends StatelessWidget {
             'SOCKS5 proxy: any address, reached and resolved from the host',
           _ => 'Forward remote port to local host',
         },
-        style: Theme.of(context).textTheme.bodySmall
-            ?.copyWith(color: Theme.of(context).colorScheme.outline),
+        // Muted Steel, the secondary-text token; the border colour
+        // (`outline`) is far below AA for text.
+        style: Theme.of(context).textTheme.bodySmall,
       ),
     ],
   );

@@ -186,41 +186,50 @@ void main() {
       expect(find.text('socks Office via My Server'), findsOneWidget);
     });
 
-    testWidgets('explains when SOCKS browsing is unavailable', (tester) async {
-      final host = _buildHost(id: 1, label: 'My Server');
-      final socksForward = _buildPortForward(
-        id: 3,
-        hostId: 1,
-        name: 'Office',
-        forwardType: 'dynamic',
-      );
-      when(portForwardRepository.watchAll)
-          .thenAnswer((_) => Stream.value([socksForward]));
-      when(hostRepository.watchAll).thenAnswer((_) => Stream.value([host]));
+    for (final (support, note) in [
+      (
+        SocksBrowserRoutingSupport.requiresNewerIos,
+        'In-app browsing needs iOS 17 or later.',
+      ),
+      // Desktop has no in-app SOCKS browser, but the proxy itself works.
+      (
+        SocksBrowserRoutingSupport.unavailable,
+        'Use it as the SOCKS5 proxy in other apps.',
+      ),
+    ]) {
+      testWidgets('notes SOCKS rows when ${support.name}', (tester) async {
+        final host = _buildHost(id: 1, label: 'My Server');
+        final socksForward = _buildPortForward(
+          id: 3,
+          hostId: 1,
+          name: 'Office',
+          forwardType: 'dynamic',
+        );
+        when(portForwardRepository.watchAll)
+            .thenAnswer((_) => Stream.value([socksForward]));
+        when(hostRepository.watchAll).thenAnswer((_) => Stream.value([host]));
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            portForwardRepositoryProvider.overrideWithValue(
-              portForwardRepository,
-            ),
-            hostRepositoryProvider.overrideWithValue(hostRepository),
-            socksBrowserRoutingSupportProvider.overrideWithValue(
-              const AsyncData(SocksBrowserRoutingSupport.requiresNewerIos),
-            ),
-          ],
-          child: const MaterialApp(home: PortForwardsScreen()),
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              portForwardRepositoryProvider.overrideWithValue(
+                portForwardRepository,
+              ),
+              hostRepositoryProvider.overrideWithValue(hostRepository),
+              socksBrowserRoutingSupportProvider.overrideWithValue(
+                AsyncData(support),
+              ),
+            ],
+            child: const MaterialApp(home: PortForwardsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
 
-      expect(find.byTooltip('Browse through Office'), findsNothing);
-      expect(
-        find.text('In-app browsing through SOCKS needs iOS 17 or later.'),
-        findsOneWidget,
-      );
-    });
+        expect(find.byTooltip('Browse through Office'), findsNothing);
+        expect(find.text(note), findsOneWidget);
+      });
+    }
 
     testWidgets('live-updates list when stream emits new data', (tester) async {
       final controller = StreamController<List<PortForward>>();
