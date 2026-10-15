@@ -63,7 +63,7 @@ class AcpCustomProvidersSettingsTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListTile(
     key: const ValueKey('settings-acp-custom-providers'),
-    leading: const Icon(Icons.smart_toy_outlined),
+    leading: const Icon(Icons.terminal),
     title: const Text('Custom agents'),
     subtitle: const Text('Any ACP agent, started by a command you approve'),
     trailing: const Icon(Icons.chevron_right),
@@ -267,7 +267,7 @@ class _AgentTile extends StatelessWidget {
     );
     return ListTile(
       onTap: onTap,
-      leading: const Icon(Icons.smart_toy_outlined),
+      leading: const Icon(Icons.terminal),
       title: Text(
         definition.label,
         style: FluttyTheme.monoStyle.copyWith(
@@ -282,6 +282,7 @@ class _AgentTile extends StatelessWidget {
           Text(
             formatAcpArgvForDisplay(definition.launchCommand.argv),
             style: muted,
+            maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
           const SizedBox(height: FluttyTheme.spacingXs),
@@ -294,10 +295,14 @@ class _AgentTile extends StatelessWidget {
       ),
       trailing: approved
           ? const Icon(Icons.chevron_right)
-          : TextButton(
+          : OutlinedButton(
               // Status already carries the amber cue; keep teal for the FAB.
-              style: TextButton.styleFrom(
+              style: OutlinedButton.styleFrom(
                 foregroundColor: theme.colorScheme.onSurface,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: FluttyTheme.spacingMd,
+                ),
+                minimumSize: const Size(0, 36),
               ),
               onPressed: onReview,
               child: const Text('Review'),
@@ -323,10 +328,12 @@ class _ApprovalStatus extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          approved ? Icons.verified_user_outlined : Icons.gpp_maybe_outlined,
-          size: 14,
-          color: approved ? colorScheme.primary : colorScheme.tertiary,
+        ExcludeSemantics(
+          child: Icon(
+            approved ? Icons.verified_user_outlined : Icons.gpp_maybe_outlined,
+            size: 14,
+            color: approved ? colorScheme.primary : colorScheme.tertiary,
+          ),
         ),
         const SizedBox(width: FluttyTheme.spacingXs),
         Flexible(
@@ -607,6 +614,10 @@ class _AcpCustomProviderEditScreenState
                 controller: _command,
                 autocorrect: false,
                 enableSuggestions: false,
+                // iOS would turn -- into an em dash and quotes into curly
+                // ones, changing the command.
+                smartDashesType: SmartDashesType.disabled,
+                smartQuotesType: SmartQuotesType.disabled,
                 style: FluttyTheme.monoStyle,
                 textInputAction: TextInputAction.next,
                 decoration: const InputDecoration(
@@ -627,6 +638,8 @@ class _AcpCustomProviderEditScreenState
                 controller: _arguments,
                 autocorrect: false,
                 enableSuggestions: false,
+                smartDashesType: SmartDashesType.disabled,
+                smartQuotesType: SmartQuotesType.disabled,
                 minLines: 2,
                 maxLines: 6,
                 style: FluttyTheme.monoStyle,
@@ -634,13 +647,17 @@ class _AcpCustomProviderEditScreenState
                   labelText: 'Arguments',
                   hintText: 'acp',
                   helperText:
-                      'One per line, exactly as written, spaces included. An '
-                      'empty line between arguments passes an empty one; '
-                      'empty lines at the end are ignored. No shell quoting, '
-                      r'~ or $VARIABLE expansion.',
-                  helperMaxLines: 3,
+                      'One per line, exactly as written. No shell quoting, '
+                      r'~ or $VAR expansion. An empty line between arguments '
+                      'passes an empty one.',
+                  helperMaxLines: 5,
                   alignLabelWithHint: true,
                 ),
+              ),
+              _CommandPreview(
+                command: _command,
+                arguments: _arguments,
+                current: _buildCommand,
               ),
               const SizedBox(height: FluttyTheme.spacingMd),
               TextFormField(
@@ -648,6 +665,8 @@ class _AcpCustomProviderEditScreenState
                 controller: _environment,
                 autocorrect: false,
                 enableSuggestions: false,
+                smartDashesType: SmartDashesType.disabled,
+                smartQuotesType: SmartQuotesType.disabled,
                 minLines: 1,
                 maxLines: 4,
                 style: FluttyTheme.monoStyle,
@@ -737,6 +756,60 @@ class _AcpCustomProviderEditScreenState
       ),
     );
   }
+}
+
+/// The argv the editor would save, quoted the way the review sheet shows
+/// it, so empty arguments and stray spaces are visible while typing.
+class _CommandPreview extends StatelessWidget {
+  const _CommandPreview({
+    required this.command,
+    required this.arguments,
+    required this.current,
+  });
+
+  final TextEditingController command;
+  final TextEditingController arguments;
+
+  /// Builds the command from the fields, as saving would.
+  final AcpLaunchCommand Function() current;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Listenable.merge([command, arguments]),
+    builder: (context, _) {
+      final launch = current();
+      if (launch.executable.isEmpty) return const SizedBox.shrink();
+      final theme = Theme.of(context);
+      // Inset like the fields' helper text, which it continues.
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(
+          FluttyTheme.spacingMd + FluttyTheme.spacingXs,
+          FluttyTheme.spacingSm,
+          FluttyTheme.spacingMd,
+          0,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Runs',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: FluttyTheme.spacingSm),
+            Expanded(
+              child: Text(
+                formatAcpArgvForDisplay(launch.argv),
+                key: const ValueKey('custom-agent-command-preview'),
+                style: FluttyTheme.monoStyle.copyWith(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 class _EditorApprovalBanner extends ConsumerWidget {
@@ -896,11 +969,14 @@ class _ReviewSheetState extends ConsumerState<_ReviewSheet> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    'approve agent',
-                    style: FluttyTheme.displayMono(
-                      fontSize: 18,
-                      color: colorScheme.onSurface,
+                  Semantics(
+                    header: true,
+                    child: Text(
+                      'approve agent',
+                      style: FluttyTheme.displayMono(
+                        fontSize: 18,
+                        color: colorScheme.onSurface,
+                      ),
                     ),
                   ),
                   const SizedBox(height: FluttyTheme.spacingSm),
@@ -913,7 +989,7 @@ class _ReviewSheetState extends ConsumerState<_ReviewSheet> {
                   ),
                   const SizedBox(height: FluttyTheme.spacingSm),
                   Text(
-                    'MonkeySSH will run this exact command on the host each time '
+                    'MonkeySSH will run this exact command on any host where '
                     'you start a session with this agent. It runs with your '
                     'account’s permissions there.',
                     style: theme.textTheme.bodyMedium,
@@ -1132,6 +1208,9 @@ class _ImportDialogState extends ConsumerState<_ImportDialog> {
               controller: _text,
               autocorrect: false,
               enableSuggestions: false,
+              // Curly quotes would make the JSON invalid.
+              smartDashesType: SmartDashesType.disabled,
+              smartQuotesType: SmartQuotesType.disabled,
               minLines: 4,
               maxLines: 10,
               style: FluttyTheme.monoStyle.copyWith(fontSize: 12),

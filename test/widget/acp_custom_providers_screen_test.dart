@@ -127,7 +127,10 @@ void main() {
     );
     expect(find.text('approve agent'), findsOneWidget);
     expect(
-      find.text("goose acp --with-builtin 'developer tools'"),
+      find.descendant(
+        of: find.byKey(const ValueKey('custom-agent-review-command')),
+        matching: find.text("goose acp --with-builtin 'developer tools'"),
+      ),
       findsOneWidget,
     );
     expect(
@@ -153,6 +156,58 @@ void main() {
     final stored = (await tester.runAsync(service.listCustomProviders))!;
     expect(stored.single.isCommandApproved, isTrue);
     expect(stored.single.fingerprint, expected.fingerprint);
+    await _unmount(tester);
+  });
+
+  testWidgets('command fields never rewrite dashes or quotes, and the '
+      'editor previews the exact argv', (tester) async {
+    await _pump(tester, db);
+
+    await tester.tap(find.text('Add custom agent'));
+    await tester.pumpAndSettle();
+    for (final key in const [
+      'custom-agent-command',
+      'custom-agent-arguments',
+      'custom-agent-environment',
+    ]) {
+      final field = tester.widget<TextField>(
+        find.descendant(
+          of: find.byKey(ValueKey(key)),
+          matching: find.byType(TextField),
+        ),
+      );
+      // iOS smart punctuation would turn `--acp` into `—acp`.
+      expect(field.smartDashesType, SmartDashesType.disabled, reason: key);
+      expect(field.smartQuotesType, SmartQuotesType.disabled, reason: key);
+    }
+
+    final preview = find.byKey(const ValueKey('custom-agent-command-preview'));
+    expect(preview, findsNothing);
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-agent-command')),
+      'gemini',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('custom-agent-arguments')),
+      '--experimental-acp\n\n trailing ',
+    );
+    await tester.pump();
+    expect(
+      tester.widget<Text>(preview).data,
+      "gemini --experimental-acp '' ' trailing '",
+    );
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Discard'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import'));
+    await tester.pumpAndSettle();
+    final importField = tester.widget<TextField>(
+      find.byKey(const ValueKey('custom-agent-import-text')),
+    );
+    expect(importField.smartDashesType, SmartDashesType.disabled);
+    expect(importField.smartQuotesType, SmartQuotesType.disabled);
     await _unmount(tester);
   });
 
@@ -193,7 +248,7 @@ void main() {
     await _tapVisible(tester, find.text('Not now'));
 
     expect(find.text('needs approval'), findsOneWidget);
-    expect(find.widgetWithText(TextButton, 'Review'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Review'), findsOneWidget);
     final stored = (await tester.runAsync(service.listCustomProviders))!;
     expect(stored.single.isCommandApproved, isFalse);
     await _unmount(tester);
