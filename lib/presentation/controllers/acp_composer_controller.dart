@@ -223,8 +223,7 @@ class AcpComposerController extends ChangeNotifier {
   // that send's clear cannot wipe the restored text and attachments.
   /// Rejected drafts waiting for the in-flight send to clear the field,
   /// oldest first; every one of them is merged back once it does.
-  final List<({String text, List<AcpComposerAttachment> attachments})>
-  _pendingRestores = [];
+  final List<AcpSubmittedDraft> _pendingRestores = [];
 
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
@@ -661,14 +660,14 @@ class AcpComposerController extends ChangeNotifier {
         final keepPrevious = previous != null && !previous.withdrawnBySend;
         _turnRecovery = AcpTurnRecovery(
           kind: keepPrevious ? previous.kind : AcpTurnRecoveryKind.cancelled,
-          drafts: [
+          drafts: _inSendOrder([
             if (keepPrevious) ...previous.drafts,
             (
               text: snapshotText,
               attachments: snapshotAttachments,
               submission: submission,
             ),
-          ],
+          ]),
           submission: _submissions,
         );
         notifyListeners();
@@ -687,7 +686,7 @@ class AcpComposerController extends ChangeNotifier {
           kind: failure == AcpPromptFailure.lost
               ? AcpTurnRecoveryKind.unconfirmed
               : AcpTurnRecoveryKind.failedMidTurn,
-          drafts: [
+          drafts: _inSendOrder([
             if (previous != null && !previous.withdrawnBySend)
               ...previous.drafts,
             (
@@ -695,7 +694,7 @@ class AcpComposerController extends ChangeNotifier {
               attachments: snapshotAttachments,
               submission: submission,
             ),
-          ],
+          ]),
           submission: _submissions,
         );
         notifyListeners();
@@ -708,15 +707,20 @@ class AcpComposerController extends ChangeNotifier {
         _pendingRestores.add((
           text: snapshotText,
           attachments: snapshotAttachments,
+          submission: submission,
         ));
         return;
       }
       _error = null;
-      _restoreInSendOrder(snapshotText, snapshotAttachments);
+      _restoreInSendOrder(snapshotText, snapshotAttachments, submission);
       _recomputeSlash();
       notifyListeners();
     }
   }
+
+  /// [drafts] oldest first, whatever order their turns ended in.
+  static List<AcpSubmittedDraft> _inSendOrder(List<AcpSubmittedDraft> drafts) =>
+      drafts..sort((a, b) => a.submission.compareTo(b.submission));
 
   static const _restoreLimitError = AcpComposerError(
     AcpComposerErrorKind.attachment,
@@ -799,58 +803,59 @@ class AcpComposerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The draft right after the last refused prompt was restored, where that
-  /// restored block's text ends in it, and which attachments it restored.
-  ({String text, int textEnd, Set<String> attachmentIds})? _lastRestore;
+  /// The refused prompts restored since the draft was last edited, in send
+  /// order, with the draft they produced and the text typed before the first
+  /// of them.
+  ({String text, String typed, List<_RestoredPrompt> prompts})? _lastRestore;
 
-  /// Merges a refused prompt back into the draft, after any refused prompt
-  /// restored just before it (with no edit since), so several queued prompts
-  /// that never left come back in the order they were sent. A failure the
-  /// current send already reported stays visible; otherwise the send error is
-  /// shown.
+  /// Merges a refused prompt back into the draft. While the draft is
+  /// unchanged since the last restore, the refused prompts are kept in the
+  /// order they were sent, whatever order their failures arrive in: a queued
+  /// prompt refused at once can come back before an earlier prompt that
+  /// fails later. A failure the current send already reported stays
+  /// visible; otherwise the send error is shown.
   void _restoreInSendOrder(
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
+    int submission,
   ) {
     final last = _lastRestore;
+    final continuing = last != null && last.text == _text;
+    final prompts = continuing ? [...last.prompts] : <_RestoredPrompt>[];
+    final typed = continuing ? last.typed : _text;
     final currentIds = _attachments.map((attachment) => attachment.id).toSet();
     final added = [
       for (final attachment in snapshotAttachments)
         if (!currentIds.contains(attachment.id)) attachment,
     ];
-    int textEnd;
-    final Set<String> restoredIds;
-    if (last != null && last.text == _text) {
-      final before = _text.substring(0, last.textEnd);
-      textEnd = last.textEnd;
-      if (snapshotText.isNotEmpty) {
-        final joined = before.trim().isEmpty
-            ? snapshotText
-            : '$before\n\n$snapshotText';
-        _text = '$joined${_text.substring(last.textEnd)}';
-        _caret = _text.length;
-        textEnd = joined.length;
-      }
-      // After the restored attachments still attached, located by id:
-      // attachments may have been removed since, so a remembered index could
-      // be past the end.
-      final insertAt =
-          _attachments.lastIndexWhere(
-            (attachment) => last.attachmentIds.contains(attachment.id),
-          ) +
-          1;
-      _attachments.insertAll(insertAt, added);
-      restoredIds = {
-        ...last.attachmentIds,
-        for (final attachment in added) attachment.id,
-      };
-    } else {
-      _mergeDraft(snapshotText, snapshotAttachments);
-      textEnd = snapshotText.length;
-      restoredIds = {for (final attachment in added) attachment.id};
+    var position = prompts.indexWhere((p) => p.submission > submission);
+    if (position < 0) position = prompts.length;
+    // After the earlier prompts' attachments still attached, located by id:
+    // attachments may have been removed since, so an index could be stale.
+    final earlierIds = {
+      for (final prompt in prompts.take(position)) ...prompt.attachmentIds,
+    };
+    final insertAt =
+        _attachments.lastIndexWhere(
+          (attachment) => earlierIds.contains(attachment.id),
+        ) +
+        1;
+    _attachments.insertAll(insertAt, added);
+    prompts.insert(position, (
+      submission: submission,
+      text: snapshotText,
+      attachmentIds: {for (final attachment in added) attachment.id},
+    ));
+    final texts = [
+      for (final prompt in prompts)
+        if (prompt.text.isNotEmpty) prompt.text,
+    ];
+    if (texts.isNotEmpty) {
+      _text = [...texts, if (typed.trim().isNotEmpty) typed].join('\n\n');
+      _caret = _text.length;
     }
     _reportRestore();
-    _lastRestore = (text: _text, textEnd: textEnd, attachmentIds: restoredIds);
+    _lastRestore = (text: _text, typed: typed, prompts: prompts);
   }
 
   void _mergeDraft(
@@ -879,7 +884,11 @@ class AcpComposerController extends ChangeNotifier {
     final restores = List.of(_pendingRestores);
     _pendingRestores.clear();
     for (final restore in restores) {
-      _restoreInSendOrder(restore.text, restore.attachments);
+      _restoreInSendOrder(
+        restore.text,
+        restore.attachments,
+        restore.submission,
+      );
     }
   }
 
@@ -976,3 +985,11 @@ class AcpComposerController extends ChangeNotifier {
 }
 
 enum _SendState { idle, preparing }
+
+/// A refused prompt restored into the draft: its send number, its text and
+/// the attachments it added back.
+typedef _RestoredPrompt = ({
+  int submission,
+  String text,
+  Set<String> attachmentIds,
+});

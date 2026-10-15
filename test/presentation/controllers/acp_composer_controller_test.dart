@@ -1001,6 +1001,56 @@ void main() {
       expect(controller.text, 'B\n\nC');
     });
 
+    test('a prompt refused at once still comes back after an earlier one '
+        'refused later', () async {
+      final manager = RecordingAcpSessionManager();
+      final gate = Completer<void>();
+      manager
+        ..promptGate = gate
+        ..throwOnPrompt = const AcpPromptNotSentException();
+      final controller = _controller(manager)..setText('B');
+      addTearDown(controller.dispose);
+      expect(await controller.send(), isTrue);
+      // C overflows the local queue and is refused before B fails.
+      manager
+        ..promptGate = null
+        ..throwOnPrompt = const AcpPromptQueueFullException();
+      controller.setText('C');
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'C');
+
+      manager.throwOnPrompt = const AcpPromptNotSentException();
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'B\n\nC');
+      expect(controller.canRetryFailedPrompt, isTrue);
+    });
+
+    test('lost prompts are offered in send order', () async {
+      final manager = RecordingAcpSessionManager();
+      final gate = Completer<void>();
+      manager
+        ..promptGate = gate
+        ..throwOnPrompt = const AcpConnectionClosedException();
+      final controller = _controller(
+        manager,
+        session: _session(promptStatus: AcpPromptStatus.streaming),
+      )..setText('first');
+      addTearDown(controller.dispose);
+      expect(await controller.send(), isTrue);
+      manager.promptGate = null;
+      controller.setText('second');
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.turnRecovery?.drafts.map((draft) => draft.text), [
+        'first',
+        'second',
+      ]);
+    });
+
     test('removing an attachment between refused prompts is safe', () async {
       final manager = RecordingAcpSessionManager();
       final firstGate = Completer<void>();
