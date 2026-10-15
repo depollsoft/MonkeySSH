@@ -553,6 +553,46 @@ void main() {
       );
     });
 
+    test('a replacement client shows forwarding again', () async {
+      // A changed host key: the first client closes, then a second one
+      // authenticates with the same forwarding.
+      final firstDone = Completer<void>();
+      final first = _MockSshClient();
+      when(() => first.done).thenAnswer((_) => firstDone.future);
+      final second = _MockSshClient();
+      when(() => second.done).thenAnswer((_) => Completer<void>().future);
+      final agent = forwarding()..attachClient(first);
+      await pumpEventQueue();
+
+      firstDone.complete();
+      await pumpEventQueue();
+      expect(agent.status.value.serving, isFalse);
+
+      agent.attachClient(second);
+      await pumpEventQueue();
+
+      expect(agent.status.value.serving, isTrue);
+    });
+
+    test('settings saved before the client attaches apply at once', () async {
+      // Forwarding was turned off while the connection was still signing in,
+      // before the client subscribed to changes.
+      final client = _MockSshClient();
+      when(() => client.done).thenAnswer((_) => Completer<void>().future);
+      final agent = SshAgentForwarding(
+        hostId: 7,
+        hostLabel: 'build box',
+        loadPolicy: () async => SshAgentForwardingPolicy.off,
+        diagnostics: RecordingDiagnosticsLogger(),
+      );
+      expect(agent.status.value.serving, isTrue);
+
+      agent.attachClient(client);
+      await pumpEventQueue();
+
+      expect(agent.status.value.serving, isFalse);
+    });
+
     test('turning confirmation on asks before the next signature', () async {
       var confirm = false;
       var asked = 0;

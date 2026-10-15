@@ -319,11 +319,16 @@ class SshAgentForwarding implements SSHAgentHandler {
   ///
   /// A connection attempt can create more than one client, for example after
   /// a changed host key; the latest one wins.
+  ///
+  /// The settings are read again on attach, so the status shows a change
+  /// saved while the connection was still signing in, and a replacement
+  /// client shows forwarding again after the client before it closed.
   void attachClient(SSHClient client) {
     final closed = Completer<void>();
     _connectionClosed = closed;
     unawaited(_policySubscription?.cancel());
     _policySubscription = _policyChanges?.listen((_) => refreshPolicy());
+    refreshPolicy();
     unawaited(
       client.done
           .then<void>((_) {}, onError: (Object _, StackTrace _) {})
