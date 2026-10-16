@@ -11,6 +11,7 @@ import 'package:dartssh2/dartssh2.dart';
 // ignore: implementation_imports
 import 'package:dartssh2/src/ssh_channel.dart' show SSHChannel;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
 import 'package:xterm/src/utils/unicode_v11.dart';
@@ -1219,7 +1220,13 @@ class _JumpChainContext {
   final Future<List<SshKey>?> Function() loadAutoKeys;
   final void Function(String phase) setPhase;
   final ConnectionProgressCallback? onProgress;
-  ({WifiPermissionStatus permission, String? ssid})? wifiState;
+  ({
+    WifiPermissionStatus permission,
+    String? ssid,
+    bool timedOut,
+    bool channelMissing,
+  })?
+  wifiState;
 }
 
 /// Thrown when an in-flight SSH connection attempt is cancelled by the user.
@@ -1452,6 +1459,8 @@ class SshService {
     this.hostKeyPromptHandler,
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
+    this.wifiPermissionTimeout = const Duration(seconds: 15),
+    this.onNonFatalError,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
     SshAgentForwardingResolver? agentForwardingResolver,
@@ -1492,6 +1501,15 @@ class SshService {
 
   /// Service used to read the current Wi-Fi SSID for jump host bypass.
   final WifiNetworkService wifiNetworkService;
+
+  /// How long the jump host bypass waits for the location permission before
+  /// connecting through the jump host. A prompt the user leaves open, or one
+  /// the OS never answers, must not hold the connection.
+  final Duration wifiPermissionTimeout;
+
+  /// Reports an error the connection recovered from but that points at a bug,
+  /// such as the permissions channel never having been registered.
+  final void Function(Object error, StackTrace stackTrace)? onNonFatalError;
 
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
@@ -1853,12 +1871,32 @@ class SshService {
       context.setPhase('check_wifi_bypass');
       var state = context.wifiState;
       if (state == null) {
-        final permission = await wifiNetworkService.requestPermission();
+        var timedOut = false;
+        var channelMissing = false;
+        WifiPermissionStatus permission;
+        try {
+          permission = await wifiNetworkService.requestPermission().timeout(
+            wifiPermissionTimeout,
+            onTimeout: () {
+              timedOut = true;
+              return WifiPermissionStatus.denied;
+            },
+          );
+        } on MissingPluginException catch (error, stackTrace) {
+          // The permissions channel was never registered, a build bug.
+          // Report it, but the jump host still works, so connect through it
+          // instead of failing the connection.
+          channelMissing = true;
+          onNonFatalError?.call(error, stackTrace);
+          permission = WifiPermissionStatus.denied;
+        }
         state = context.wifiState = (
           permission: permission,
           ssid: permission == WifiPermissionStatus.granted
               ? await wifiNetworkService.getCurrentSsid()
               : null,
+          timedOut: timedOut,
+          channelMissing: channelMissing,
         );
       }
       var skipJumpHost = false;
@@ -1869,9 +1907,13 @@ class SshService {
         );
       } else {
         context.onProgress?.call(
-          const ConnectionProgressUpdate(
+          ConnectionProgressUpdate(
             state: SshConnectionState.connecting,
-            message: 'Wi-Fi permission denied. Using jump host…',
+            message: state.timedOut
+                ? 'Location permission check timed out. Using jump host…'
+                : state.permission == WifiPermissionStatus.approximate
+                ? 'Precise location is off. Using jump host…'
+                : 'Wi-Fi permission denied. Using jump host…',
           ),
         );
       }
@@ -1881,6 +1923,8 @@ class SshService {
         fields: {
           'hostId': context.originHostId,
           'permissionStatus': state.permission.name,
+          'permissionTimedOut': state.timedOut,
+          'permissionChannelMissing': state.channelMissing,
           'hasCurrentSsid': state.ssid != null,
           'skipJumpHost': skipJumpHost,
         },
@@ -8057,9 +8101,16 @@ final sshServiceProvider = Provider<SshService>(
       interactiveAuthPromptHandlerProvider,
     ),
     wifiNetworkService: ref.watch(wifiNetworkServiceProvider),
+    onNonFatalError: _nonFatalReporter(ref.read(telemetryServiceProvider)),
     agentForwardingResolver: ref.watch(sshAgentForwardingResolverProvider),
   ),
 );
+
+void Function(Object, StackTrace) _nonFatalReporter(
+  TelemetryService telemetry,
+) =>
+    (error, stackTrace) =>
+        unawaited(telemetry.recordError(error, stackTrace, fatal: false));
 
 /// Provider for tracking active SSH sessions.
 final activeSessionsProvider =

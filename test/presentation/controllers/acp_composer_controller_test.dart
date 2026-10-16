@@ -10,6 +10,7 @@ import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
+import 'package:monkeyssh/domain/models/acp_writer_lease.dart';
 import 'package:monkeyssh/domain/services/acp_attachment_service.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
@@ -98,6 +99,22 @@ class _StoppingAcpSessionManager extends RecordingAcpSessionManager {
     _calls++;
     await super.prompt(key, content);
     return AcpPromptResult(stopReason: reason);
+  }
+}
+
+/// Leaves every prompt running until the test settles it.
+class _HeldPromptsAcpSessionManager extends RecordingAcpSessionManager {
+  final turns = <Completer<AcpPromptResult>>[];
+
+  @override
+  Future<AcpPromptResult> prompt(
+    AcpSessionKey key,
+    List<AcpContentBlock> content,
+  ) {
+    prompts.add(List<AcpContentBlock>.of(content));
+    final turn = Completer<AcpPromptResult>();
+    turns.add(turn);
+    return turn.future;
   }
 }
 
@@ -283,6 +300,154 @@ void main() {
       expect(controller.activity, AcpComposerActivity.idle);
     },
   );
+
+  test('returns an unsent prompt when another device takes the chat', () async {
+    final manager = RecordingAcpSessionManager()
+      ..throwOnPrompt = const AcpInputHeldElsewhereException(
+        delivery: AcpInputDelivery.notSent,
+      );
+    final controller = _controller(manager)..setText('keep me');
+    addTearDown(controller.dispose);
+
+    expect(await controller.send(), isTrue);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.text, 'keep me');
+    expect(controller.error?.message, contains('Another device'));
+    expect(controller.turnRecovery, isNull);
+
+    // Read-only, nothing can be resent from this device.
+    controller.updateSession(_session(status: AcpConnectionStatus.detached));
+    expect(controller.canRetryFailedPrompt, isFalse);
+    // After taking the chat back, the prompt never ran, so it can be.
+    controller.updateSession(_session());
+    expect(controller.canRetryFailedPrompt, isTrue);
+  });
+
+  test(
+    'keeps a delivered prompt out of the draft when the chat moves',
+    () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.delivered,
+        );
+      final controller = _controller(manager)..setText('already running');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      // The turn keeps running for the other device; offering it again would
+      // invite a duplicate.
+      expect(controller.text, isEmpty);
+      expect(controller.error, isNull);
+      expect(controller.turnRecovery, isNull);
+      expect(controller.canRetryFailedPrompt, isFalse);
+    },
+  );
+
+  test(
+    'returns a prompt that may not have been sent with that warning',
+    () async {
+      final manager = RecordingAcpSessionManager()
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.unknown,
+        );
+      final controller = _controller(manager)..setText('maybe sent');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.text, 'maybe sent');
+      expect(controller.error?.message, contains('may not have been sent'));
+      // It may have run, so it is not resent as is with one tap.
+      expect(controller.canRetryFailedPrompt, isFalse);
+    },
+  );
+
+  test(
+    'a parked restore keeps the reason another device took the chat',
+    () async {
+      final manager = RecordingAcpSessionManager();
+      final promptGate = Completer<void>();
+      final uploadGate = Completer<void>();
+      manager
+        ..promptGate = promptGate
+        ..throwOnPrompt = const AcpInputHeldElsewhereException(
+          delivery: AcpInputDelivery.notSent,
+        );
+      final controller = _controller(
+        manager,
+        preparation: const AcpAttachmentPreparationService(
+          limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+        ),
+        uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+        session: _session(embeddedContext: true),
+      )..setText('first');
+      addTearDown(controller.dispose);
+
+      expect(await controller.send(), isTrue);
+      controller
+        ..setText('second')
+        ..addAttachment(
+          AcpAttachmentCandidate.memory(
+            name: 'big.txt',
+            bytes: Uint8List.fromList('hello world'.codeUnits),
+            mimeType: 'text/plain',
+          ),
+        )
+        ..enableRemoteUploadFallback();
+      final second = controller.send();
+      await Future<void>.delayed(Duration.zero);
+      promptGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      uploadGate.complete();
+      expect(await second, isTrue);
+
+      expect(controller.text, 'first');
+      expect(controller.error?.message, contains('Another device took'));
+    },
+  );
+
+  test('the take-over reason wins over a refusal parked ahead of it', () async {
+    final manager = _HeldPromptsAcpSessionManager();
+    final uploadGate = Completer<void>();
+    final controller = _controller(
+      manager,
+      preparation: const AcpAttachmentPreparationService(
+        limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+      ),
+      uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+      session: _session(embeddedContext: true),
+    );
+    addTearDown(controller.dispose);
+
+    controller.setText('first');
+    expect(await controller.send(), isTrue);
+    controller.setText('second');
+    expect(await controller.send(), isTrue);
+    controller
+      ..setText('third')
+      ..addAttachment(
+        AcpAttachmentCandidate.memory(
+          name: 'big.txt',
+          bytes: Uint8List.fromList('hello world'.codeUnits),
+          mimeType: 'text/plain',
+        ),
+      )
+      ..enableRemoteUploadFallback();
+    final third = controller.send();
+    await Future<void>.delayed(Duration.zero);
+    // Both fail while the third send is still uploading, so they park.
+    manager.turns[0].completeError(_agentError);
+    manager.turns[1].completeError(
+      const AcpInputHeldElsewhereException(delivery: AcpInputDelivery.notSent),
+    );
+    await Future<void>.delayed(Duration.zero);
+    uploadGate.complete();
+    expect(await third, isTrue);
+
+    expect(controller.text, 'first\n\nsecond');
+    expect(controller.error?.message, contains('Another device took'));
+  });
 
   test(
     'parks a rejected prompt restore while a newer send is still preparing',

@@ -7,6 +7,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../app_permission_service.dart';
 import '../diagnostics_log_service.dart';
 
 /// Region the push functions are deployed to.
@@ -113,11 +114,14 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
   FirebasePushMessagingGateway({
     http.Client? httpClient,
     DiagnosticsLogger? diagnosticsLog,
+    AppPermissionService permissions = const AppPermissionService(),
   }) : _httpClient = httpClient ?? http.Client(),
-       _log = diagnosticsLog ?? DiagnosticsLogService.instance;
+       _log = diagnosticsLog ?? DiagnosticsLogService.instance,
+       _permissions = permissions;
 
   final http.Client _httpClient;
   final DiagnosticsLogger _log;
+  final AppPermissionService _permissions;
   bool _appCheckActivated = false;
 
   static const _apnsTokenAttempts = 20;
@@ -127,6 +131,15 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
 
   @override
   Future<bool> requestPermission() async {
+    // Android and iOS share the app's permissions channel with local
+    // notifications. It asks iOS for the alerts, sounds and badges Firebase
+    // asks for by default.
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      final status = await _permissions.request(AppPermission.notifications);
+      return status.isGranted;
+    }
     final settings = await _messaging.requestPermission();
     return settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional;

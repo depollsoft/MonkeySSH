@@ -24,7 +24,6 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterFragmentActivity() {
     companion object {
         private val transferExecutor = Executors.newSingleThreadExecutor()
-        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
         private const val MAX_CLIPBOARD_CONTENT_URI_BYTES = 512 * 1024
         private const val MONKEYSSH_TRANSFER_MIME_TYPE = "application/x-monkeyssh-transfer"
         private const val MONKEYSSH_TRANSFER_EXTENSION = ".monkeysshx"
@@ -335,20 +334,6 @@ class MainActivity : FlutterFragmentActivity() {
         event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
             event.device?.isVirtual == true
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (
-            requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE &&
-            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-        ) {
-            SshConnectionService.refresh(this)
-        }
-    }
-
     fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return
@@ -364,11 +349,21 @@ class MainActivity : FlutterFragmentActivity() {
         if (hasRequestedNotificationPermission) {
             return
         }
+        // The permissions plugin queues this behind any prompt Dart already
+        // has up and records a denial the way Dart's own requests do.
+        val permissions =
+            MonkeySshApplication.from(this)
+                .ensureSharedFlutterEngine()
+                .plugins
+                .get(AppPermissionsPlugin::class.java) as? AppPermissionsPlugin
+                ?: return
         hasRequestedNotificationPermission = true
-        requestPermissions(
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            NOTIFICATION_PERMISSION_REQUEST_CODE,
-        )
+        val appContext = applicationContext
+        permissions.requestNotifications { granted ->
+            if (granted) {
+                SshConnectionService.refresh(appContext)
+            }
+        }
     }
 
     private fun handleTransferIntent(intent: Intent?) {
