@@ -37,6 +37,11 @@ class _Agent implements AcpTransport {
   var _sawRequest = false;
   bool closed = false;
 
+  /// When set, a prompt's write waits until the agent closes and then fails
+  /// as a closed transport, so the prompt never leaves this device.
+  bool stallPromptWrites = false;
+  final _closedSignal = Completer<void>();
+
   @override
   Stream<List<int>> get incoming => _incoming.stream;
 
@@ -48,6 +53,10 @@ class _Agent implements AcpTransport {
     final id = message['id'];
     final method = message['method'];
     if (method is String) methods.add(method);
+    if (method == 'session/prompt' && stallPromptWrites) {
+      await _closedSignal.future;
+      throw const AcpTransportClosedException();
+    }
     if (!_sawRequest && id != null && method != null) {
       _sawRequest = true;
       onFirstRequest?.call(this);
@@ -94,6 +103,7 @@ class _Agent implements AcpTransport {
   Future<void> close() async {
     if (closed) return;
     closed = true;
+    if (!_closedSignal.isCompleted) _closedSignal.complete();
     await _incoming.close();
   }
 }
@@ -603,6 +613,50 @@ void main() {
       await _pump();
 
       expect(_timelineTexts(stateOf(key)), isEmpty);
+    },
+  );
+
+  test(
+    'a prompt whose write never started when the lease moved returns unsent',
+    () async {
+      final started = (await manager.startNewSession(
+        hostId: 1,
+        providerId: AcpBuiltinProviderIds.copilotCli,
+        cwd: '/repo',
+      )) as AcpSessionLaunchStarted;
+      final key = started.key;
+      connector.agents.single.stallPromptWrites = true;
+      // The transport cannot vouch for a prompt it was never handed.
+      connector.promptDeliveries[key.acpSessionId] = AcpInputDelivery.unknown;
+      final sent = manager.prompt(key, const [AcpTextContent('stalled')]);
+      final sentError = expectLater(
+        sent,
+        throwsA(
+          isA<AcpInputHeldElsewhereException>().having(
+            (error) => error.delivery,
+            'delivery',
+            AcpInputDelivery.notSent,
+          ),
+        ),
+      );
+      await _pump();
+
+      connector.states.single.add(
+        MonkeyMuxAcpTransportState(
+          status: MonkeyMuxAcpTransportStatus.heldElsewhere,
+          bridgeId: key.bridgeId,
+          lastDeliveredSequence: 0,
+          writer: ipad,
+        ),
+      );
+      await sentError;
+      await _pump();
+
+      final state = stateOf(key);
+      expect(state.remoteWriter, ipad);
+      // Losing the input is not a failure of this read-only view.
+      expect(state.error, isNull);
+      expect(_timelineTexts(state), isEmpty);
     },
   );
 

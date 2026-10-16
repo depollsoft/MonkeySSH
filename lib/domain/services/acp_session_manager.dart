@@ -3270,23 +3270,31 @@ class _SessionController {
             queued.completer.complete(result);
           }
         } on Object catch (error, stackTrace) {
+          final detached =
+              !identical(attachment, promptAttachment) ||
+              !_holdsAttachment ||
+              !_state.attached ||
+              _state.status == AcpConnectionStatus.detached;
           // A request that never started writing was not in flight.
-          final detachedInFlight =
-              sent &&
-              (!identical(attachment, promptAttachment) ||
-                  !_holdsAttachment ||
-                  !_state.attached ||
-                  _state.status == AcpConnectionStatus.detached);
+          final detachedInFlight = sent && detached;
           if (detachedInFlight) {
             _diagnostics.info(
               'acp.session',
               'prompt_detached_in_flight',
               fields: {'queuedPromptCount': _promptQueue.length},
             );
-            if (isHeldElsewhere) {
-              _completeHeldElsewherePrompt(queued, promptAttachment);
-              continue;
-            }
+          }
+          // Another device took the input. That is no failure of this view,
+          // whether or not the prompt started writing.
+          if (detached && isHeldElsewhere) {
+            _completeHeldElsewherePrompt(
+              queued,
+              promptAttachment,
+              neverSent: !sent,
+            );
+            continue;
+          }
+          if (detachedInFlight) {
             if (!queued.completer.isCompleted) {
               queued.completer.completeError(error, stackTrace);
             }
@@ -3891,12 +3899,16 @@ class _SessionController {
 
   /// Ends a dispatched prompt after another device took the input. One the
   /// agent received keeps its transcript entry, since its turn continues on
-  /// the other device; any other prompt goes back to the composer.
+  /// the other device; any other prompt goes back to the composer. One that
+  /// [neverSent] did not reach the transport, so it cannot have run.
   void _completeHeldElsewherePrompt(
     _QueuedAcpPrompt queued,
-    _BridgeAttachment promptAttachment,
-  ) {
-    final delivery = promptAttachment.promptDelivery(_key.acpSessionId);
+    _BridgeAttachment promptAttachment, {
+    bool neverSent = false,
+  }) {
+    final delivery = neverSent
+        ? AcpInputDelivery.notSent
+        : promptAttachment.promptDelivery(_key.acpSessionId);
     if (delivery != AcpInputDelivery.delivered) {
       final timeline = _timelineBuilder.removeLocalUserPrompt(
         queued.localMessageId,
