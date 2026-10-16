@@ -17,7 +17,8 @@ enum SocksBrowserRouteStatus {
   /// This device cannot route the browser through SOCKS.
   unsupported,
 
-  /// Another SOCKS browser, for a different forward, holds the shared proxy.
+  /// Another in-app browser is open that the shared proxy would also route:
+  /// a SOCKS browser for a different forward, or on Android a direct one.
   busy,
 }
 
@@ -75,7 +76,7 @@ class SocksBrowserStatusPanel extends StatelessWidget {
       ),
       SocksBrowserRouteStatus.busy => (
         'proxy in use',
-        'Another SOCKS browser is still open, and both would share one '
+        'Another in-app browser is still open, and it would share this '
             'proxy, so its pages could load through $forwardName. Close it, '
             'then try again.',
       ),

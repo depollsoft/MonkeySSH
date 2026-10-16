@@ -209,6 +209,10 @@ class _PortForwardBrowserScreenState
   var _directProxyBlocked = false;
   // ...because a SOCKS browser still holds it.
   var _directProxyHeld = false;
+  // Whether the proxy service counts this direct browser as open.
+  var _directBrowsingCounted = false;
+  // Blanks of closed tabs still loading; their web views can outlive them.
+  final _pendingTabBlanks = <Future<void>>[];
 
   _PortForwardBrowserTabState get _selectedTab => _tabs[_selectedTabIndex];
 
@@ -245,6 +249,8 @@ class _PortForwardBrowserScreenState
       _socksGeneration++;
       _socksSinkRetry?.cancel();
       _tearDownSocksBrowser();
+    } else if (_directBrowsingCounted) {
+      _endDirectBrowsing();
     }
     _addressFocusNode.removeListener(_handleAddressFocusChanged);
     _addressController?.dispose();
@@ -449,6 +455,11 @@ class _PortForwardBrowserScreenState
       }
       return;
     }
+    if (!mounted) {
+      _socksProxy.endDirectBrowsing();
+      return;
+    }
+    _directBrowsingCounted = true;
     await _clearLegacySharedCookiesOnce();
     if (!mounted) {
       return;
@@ -814,6 +825,21 @@ class _PortForwardBrowserScreenState
     } on Object catch (error) {
       if (error is! PlatformException && error is! ArgumentError) rethrow;
     }
+  }
+
+  /// Blanks a closing direct browser's pages, then lets a SOCKS browser take
+  /// the proxy. Android's web views can outlive this widget, and the
+  /// process-wide override would route whatever they still request, with
+  /// their cookies, through an SSH host.
+  void _endDirectBrowsing() {
+    final proxy = _socksProxy;
+    final blanks = [
+      ..._pendingTabBlanks,
+      for (final tab in _tabs)
+        if (tab.hasStartedLoading) _loadSafely(tab, _blankSocksUri),
+    ];
+    // Best effort: a failed blank still ends the count.
+    Future.wait(blanks).whenComplete(proxy.endDirectBrowsing).ignore();
   }
 
   /// Leaves nothing able to load directly after the browser closes.
@@ -1650,6 +1676,11 @@ class _PortForwardBrowserScreenState
   void _closeTab(int index) {
     if (_tabs.length == 1) {
       return;
+    }
+    final closed = _tabs[index];
+    if (closed.hasStartedLoading) {
+      // The web view can outlive the tab; leave it nothing to request.
+      _pendingTabBlanks.add(_loadSafely(closed, _blankSocksUri));
     }
     setState(() {
       _tabs.removeAt(index);

@@ -265,6 +265,9 @@ void main() {
       await proxy.clearBeforeDirectBrowsing();
       await proxy.clearBeforeDirectBrowsing();
       expect(calls, ['clear']);
+      proxy
+        ..endDirectBrowsing()
+        ..endDirectBrowsing();
 
       await proxy.hold(41080, owner: _office);
       await expectLater(
@@ -274,6 +277,41 @@ void main() {
       await proxy.release();
       await proxy.clearBeforeDirectBrowsing();
       expect(calls, ['clear', 'apply:41080', 'apply:$_sinkPort', 'clear']);
+    },
+  );
+
+  test('an open direct browser keeps an Android SOCKS hold out', () async {
+    handle((_) async => null);
+    final proxy = service();
+
+    await proxy.clearBeforeDirectBrowsing();
+    // The process-wide override would route the direct browser's pages too.
+    await expectLater(
+      proxy.hold(41080, owner: _office),
+      throwsA(
+        isA<SocksBrowserProxyException>().having(
+          (error) => error.code,
+          'code',
+          'held_elsewhere',
+        ),
+      ),
+    );
+    expect(proxy.isHeld, isFalse);
+
+    proxy.endDirectBrowsing();
+    await proxy.hold(41080, owner: _office);
+    expect(calls, ['clear', 'apply:41080']);
+  });
+
+  test(
+    'iOS routes SOCKS stores only, so a direct browser does not block',
+    () async {
+      handle((_) async => null);
+      final proxy = service(platform: TargetPlatform.iOS);
+
+      await proxy.clearBeforeDirectBrowsing();
+      await proxy.hold(41080, owner: _office);
+      expect(calls, ['clear', 'apply:41080']);
     },
   );
 

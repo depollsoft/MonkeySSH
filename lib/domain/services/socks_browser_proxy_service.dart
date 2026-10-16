@@ -120,6 +120,8 @@ class SocksBrowserProxyService {
   // isolate even when this service never applied it.
   var _mayBeApplied = true;
   var _holders = 0;
+  // Direct (loopback) browsers that are open or still blanking their pages.
+  var _directBrowsers = 0;
 
   /// Loopback port of the forward the browser routes through, or null while
   /// the proxy is unset or pointed at the sink.
@@ -168,9 +170,12 @@ class SocksBrowserProxyService {
   /// Taking it over would send the open browsers' pages, with their host's
   /// cookies, through the other forward's host. [owner] identifies the
   /// forward, not its listener: a stopped forward's port can be bound again
-  /// by another.
+  /// by another. On Android the override would also carry the pages of a
+  /// direct browser, so a hold is refused the same way while one is open.
   Future<void> hold(int port, {required Object owner}) {
-    if (_holders > 0 && _heldOwner != owner) {
+    final directOpen =
+        _directBrowsers > 0 && _targetPlatform == TargetPlatform.android;
+    if (directOpen || (_holders > 0 && _heldOwner != owner)) {
       return Future<void>.error(
         const SocksBrowserProxyException('held_elsewhere'),
       );
@@ -339,30 +344,40 @@ class SocksBrowserProxyService {
     );
   }
 
-  /// Removes the proxy before a browser that must load pages directly.
+  /// Removes the proxy before a browser that must load pages directly, and
+  /// counts that browser as open until [endDirectBrowsing].
   ///
   /// Throws [SocksBrowserProxyException] while a SOCKS browser holds the
   /// proxy or when the platform could not remove it; the caller must not
-  /// load pages then.
+  /// load pages then, and is not counted.
   Future<void> clearBeforeDirectBrowsing() => _queue.run(() async {
     if (_holders > 0) {
       throw const SocksBrowserProxyException('held');
     }
-    if (!_mayBeApplied) {
-      return;
+    if (_mayBeApplied) {
+      try {
+        await _channel.invokeMethod<void>('clear');
+      } on MissingPluginException {
+        // No native bridge here, so nothing was ever applied.
+      } on PlatformException catch (error) {
+        _log('clear_failed', code: error.code);
+        throw SocksBrowserProxyException(error.code);
+      }
+      _mayBeApplied = false;
+      _appliedPort = null;
+      _routedPort = null;
     }
-    try {
-      await _channel.invokeMethod<void>('clear');
-    } on MissingPluginException {
-      // No native bridge here, so nothing was ever applied.
-    } on PlatformException catch (error) {
-      _log('clear_failed', code: error.code);
-      throw SocksBrowserProxyException(error.code);
-    }
-    _mayBeApplied = false;
-    _appliedPort = null;
-    _routedPort = null;
+    _directBrowsers++;
   });
+
+  /// Ends a direct browser counted by [clearBeforeDirectBrowsing]. Call it
+  /// once that browser's pages are blank: its Android web views can outlive
+  /// it, and a SOCKS hold would route whatever they still request.
+  void endDirectBrowsing() {
+    if (_directBrowsers > 0) {
+      _directBrowsers--;
+    }
+  }
 
   void _log(String event, {required String code}) {
     DiagnosticsLogService.instance.warning(
