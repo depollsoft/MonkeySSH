@@ -63,6 +63,28 @@ void registerPermissionPlatformConfigurationTests() {
       );
     });
 
+    test('android native code prompts only through the plugin', () {
+      // One queue for every dialog: Android drops a second requestPermissions
+      // made while a dialog is up, and the plugin's denial tracking only sees
+      // the requests it makes.
+      final kotlinDir = Directory(
+        'android/app/src/main/kotlin/xyz/depollsoft/monkeyssh',
+      );
+      final requesters = [
+        for (final file in kotlinDir.listSync().whereType<File>())
+          if (file.path.endsWith('.kt') &&
+              !file.path.endsWith('AppPermissionsPlugin.kt') &&
+              RegExp(r'\brequestPermissions\(')
+                  .hasMatch(file.readAsStringSync()))
+            file.path,
+      ];
+      expect(requesters, isEmpty);
+      expect(
+        File('${kotlinDir.path}/MainActivity.kt').readAsStringSync(),
+        contains('.requestNotifications {'),
+      );
+    });
+
     test('android declares every permission the plugin requests', () {
       final manifest = File('android/app/src/main/AndroidManifest.xml')
           .readAsStringSync();
@@ -72,6 +94,7 @@ void registerPermissionPlatformConfigurationTests() {
         'android.permission.RECORD_AUDIO',
         'android.permission.ACCESS_COARSE_LOCATION',
         'android.permission.ACCESS_FINE_LOCATION',
+        'android.permission.POST_NOTIFICATIONS',
       ]) {
         expect(manifest, contains(permission));
       }

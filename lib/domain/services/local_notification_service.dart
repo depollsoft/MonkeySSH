@@ -7,6 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/tmux_state.dart';
+import 'app_permission_service.dart';
 import 'diagnostics_log_service.dart';
 import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
@@ -634,8 +635,11 @@ String buildAcpNotificationLocation(AcpNotificationPayload payload) => Uri(
 /// Service for showing local notifications inside the app.
 class LocalNotificationService {
   /// Creates a new [LocalNotificationService].
-  LocalNotificationService({FlutterLocalNotificationsPlugin? plugin})
-    : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
+  LocalNotificationService({
+    FlutterLocalNotificationsPlugin? plugin,
+    AppPermissionService permissions = const AppPermissionService(),
+  }) : _plugin = plugin ?? FlutterLocalNotificationsPlugin(),
+       _permissions = permissions;
 
   static const _tmuxAlertNotificationChannel = AndroidNotificationChannel(
     tmuxAlertNotificationChannelId,
@@ -700,6 +704,7 @@ class LocalNotificationService {
   );
 
   final FlutterLocalNotificationsPlugin _plugin;
+  final AppPermissionService _permissions;
   final StreamController<TmuxAlertNotificationPayload> _tmuxAlertTapController =
       StreamController<TmuxAlertNotificationPayload>.broadcast();
   final StreamController<TerminalNotificationPayload>
@@ -1044,25 +1049,14 @@ class LocalNotificationService {
 
   Future<bool> _requestNotificationPermission({bool allowSound = false}) async {
     try {
-      final androidImplementation = _plugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >();
-      if (androidImplementation != null) {
-        return await androidImplementation.requestNotificationsPermission() ??
-            false;
-      }
-
-      final iOSImplementation = _plugin
-          .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin
-          >();
-      if (iOSImplementation != null) {
-        return await iOSImplementation.requestPermissions(
-              alert: true,
-              sound: allowSound,
-            ) ??
-            false;
+      // Android and iOS ask through the app's permissions channel, which push
+      // shares, so one queue holds every Android prompt and a denial counts
+      // the same wherever it came from. It asks for sound up front.
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS)) {
+        final status = await _permissions.request(AppPermission.notifications);
+        return status.isGranted;
       }
 
       final macOSImplementation = _plugin
@@ -1081,9 +1075,8 @@ class LocalNotificationService {
     } on MissingPluginException {
       return false;
     } on PlatformException catch (error) {
-      // Operations are serialized per notification ID only, so another ID can
-      // request while the prompt is open. Android rejects that request with
-      // `permissionRequestInProgress`; permission is not granted yet.
+      // The permissions channel or the macOS plugin failed the request, so
+      // permission is not granted yet.
       DiagnosticsLogService.instance.warning(
         'notifications',
         'permission_request_failed',

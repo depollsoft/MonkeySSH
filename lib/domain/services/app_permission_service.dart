@@ -4,9 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// Runtime permissions the app asks for through its own platform channel.
 ///
 /// The native handlers live in `AppPermissionsPlugin.swift` (iOS) and
-/// `AppPermissionsPlugin.kt` (Android). Only these three are implemented;
-/// adding one means adding it on both sides and declaring it in the Android
-/// manifest and the iOS `Info.plist`.
+/// `AppPermissionsPlugin.kt` (Android). Only these are implemented; adding one
+/// means adding it on both sides and declaring it in the Android manifest and,
+/// when iOS needs a purpose string for it, the iOS `Info.plist`.
 enum AppPermission {
   /// Camera capture (`AVMediaType.video` / `android.permission.CAMERA`).
   camera,
@@ -18,6 +18,12 @@ enum AppPermission {
   /// Foreground location (`requestWhenInUseAuthorization` /
   /// `ACCESS_COARSE_LOCATION` plus `ACCESS_FINE_LOCATION`).
   locationWhenInUse,
+
+  /// Posting notifications (`UNUserNotificationCenter` alerts, sounds and
+  /// badges / `android.permission.POST_NOTIFICATIONS`). Android before 13 has
+  /// no prompt for it, so notifications turned off there read as
+  /// [AppPermissionStatus.permanentlyDenied].
+  notifications,
 }
 
 /// The outcome of a permission request.

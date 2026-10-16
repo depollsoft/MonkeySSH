@@ -2,10 +2,11 @@ import AVFoundation
 import CoreLocation
 import Flutter
 import UIKit
+import UserNotifications
 
-/// Camera, microphone and when-in-use location permissions for the
-/// `xyz.depollsoft.monkeyssh/permissions` channel (`AppPermissionService` in
-/// Dart).
+/// Camera, microphone, when-in-use location and notification permissions for
+/// the `xyz.depollsoft.monkeyssh/permissions` channel (`AppPermissionService`
+/// in Dart).
 ///
 /// iOS shows each prompt once, so `.denied` always reads as permanently denied:
 /// only the app's Settings page can change it.
@@ -84,6 +85,8 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
         requestCapture(.audio, usageKey: "NSMicrophoneUsageDescription", result: result)
       case "locationWhenInUse":
         requestLocationWhenInUse(result: result)
+      case "notifications":
+        requestNotifications(result: result)
       default:
         result(
           FlutterError(
@@ -179,6 +182,41 @@ final class AppPermissionsPlugin: NSObject, FlutterPlugin, CLLocationManagerDele
 
   @objc private func appDidBecomeActive() {
     locationPrompt.appDidBecomeActive()
+  }
+
+  // MARK: - Notifications
+
+  /// Asks for alerts, sounds and badges, the set Firebase Messaging asked for
+  /// before push and local notifications shared this request. Unlike the
+  /// capture prompts this needs no purpose string, and a request made in the
+  /// background waits for the app to come forward, as it did before.
+  private func requestNotifications(result: @escaping FlutterResult) {
+    let center = UNUserNotificationCenter.current()
+    let reply: (UNAuthorizationStatus) -> Void = { status in
+      DispatchQueue.main.async { result(Self.status(for: status).rawValue) }
+    }
+    center.getNotificationSettings { settings in
+      guard settings.authorizationStatus == .notDetermined else {
+        reply(settings.authorizationStatus)
+        return
+      }
+      center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+        center.getNotificationSettings { reply($0.authorizationStatus) }
+      }
+    }
+  }
+
+  private static func status(for status: UNAuthorizationStatus) -> Status {
+    switch status {
+    case .authorized, .provisional, .ephemeral:
+      return .granted
+    case .denied:
+      return .permanentlyDenied
+    case .notDetermined:
+      return .denied
+    @unknown default:
+      return .denied
+    }
   }
 
   // MARK: - Shared

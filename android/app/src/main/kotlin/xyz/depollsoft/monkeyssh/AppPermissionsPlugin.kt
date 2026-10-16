@@ -7,9 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -71,12 +73,13 @@ internal fun <T> takeSettledBy(
 }
 
 /**
- * Camera, microphone and foreground-location permissions for the
+ * Camera, microphone, foreground-location and notification permissions for the
  * `xyz.depollsoft.monkeyssh/permissions` channel (`AppPermissionService` in Dart).
  *
  * Requests run one at a time, because Android answers a `requestPermissions`
  * call made while another dialog is showing with an empty result. Requests for
- * the same permission that queued behind a dialog share its answer.
+ * the same permission that queued behind a dialog share its answer. Native
+ * code asks through [requestNotifications] so its prompt joins the same queue.
  */
 class AppPermissionsPlugin :
     FlutterPlugin,
@@ -87,7 +90,7 @@ class AppPermissionsPlugin :
         private const val CHANNEL = "xyz.depollsoft.monkeyssh/permissions"
         private const val TAG = "AppPermissions"
 
-        /** Fits the 16 bits FragmentActivity allows; MainActivity uses 1001. */
+        /** Fits the 16 bits FragmentActivity allows. */
         private const val REQUEST_CODE = 4790
 
         /**
@@ -110,6 +113,11 @@ class AppPermissionsPlugin :
         val manifestNames: Array<String>,
         /** Held alone, the other names give [STATUS_APPROXIMATE]. */
         val preciseName: String? = null,
+        /**
+         * First Android version with a runtime prompt. Before it, only the
+         * app's settings page changes the grant.
+         */
+        val promptSinceSdk: Int = Build.VERSION_CODES.BASE,
     ) {
         CAMERA("camera", arrayOf(Manifest.permission.CAMERA)),
         MICROPHONE("microphone", arrayOf(Manifest.permission.RECORD_AUDIO)),
@@ -124,6 +132,14 @@ class AppPermissionsPlugin :
             ),
             preciseName = Manifest.permission.ACCESS_FINE_LOCATION,
         ),
+
+        // Before Android 13 notifications are on unless the user turned them
+        // off in settings; isGranted reads that switch instead.
+        NOTIFICATIONS(
+            "notifications",
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            promptSinceSdk = Build.VERSION_CODES.TIRAMISU,
+        ),
         ;
 
         companion object {
@@ -134,7 +150,8 @@ class AppPermissionsPlugin :
 
     private class PermissionRequest(
         val permission: AppPermission,
-        val result: MethodChannel.Result,
+        /** Receives the wire status, once. */
+        val reply: (String) -> Unit,
     ) {
         /** `shouldShowRequestPermissionRationale` per manifest name, before asking. */
         var rationaleBefore = BooleanArray(0)
@@ -185,7 +202,7 @@ class AppPermissionsPlugin :
         activeRequest?.let { request ->
             activeRequest = null
             orphanedRequest = request
-            request.result.success(currentStatus(request.permission))
+            request.reply(currentStatus(request.permission))
         }
         startNextRequest()
     }
@@ -203,12 +220,24 @@ class AppPermissionsPlugin :
                     result.error("invalid_args", "Unknown permission", call.arguments)
                     return
                 }
-                queuedRequests.addLast(PermissionRequest(permission, result))
-                startNextRequest()
+                enqueue(PermissionRequest(permission) { result.success(it) })
             }
             "openAppSettings" -> result.success(openAppSettings())
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Asks for notification permission on behalf of native code, behind any
+     * prompt already showing, and reports whether the app holds it.
+     */
+    fun requestNotifications(onResult: (granted: Boolean) -> Unit) {
+        enqueue(PermissionRequest(AppPermission.NOTIFICATIONS) { onResult(it == STATUS_GRANTED) })
+    }
+
+    private fun enqueue(request: PermissionRequest) {
+        queuedRequests.addLast(request)
+        startNextRequest()
     }
 
     private fun startNextRequest() {
@@ -218,13 +247,18 @@ class AppPermissionsPlugin :
             val context = activityBinding?.activity ?: applicationContext
             if (context != null && names.all { isGranted(context, it) }) {
                 names.forEach { clearDeniedBefore(context, it) }
-                request.result.success(STATUS_GRANTED)
+                request.reply(STATUS_GRANTED)
+                continue
+            }
+            if (Build.VERSION.SDK_INT < request.permission.promptSinceSdk) {
+                // No dialog exists for it on this version of Android.
+                request.reply(STATUS_PERMANENTLY_DENIED)
                 continue
             }
             val activity = promptableActivity()
             if (activity == null) {
                 // Nothing on screen can host the dialog, so report without asking.
-                request.result.success(currentStatus(request.permission))
+                request.reply(currentStatus(request.permission))
                 continue
             }
             request.rationaleBefore = BooleanArray(names.size) {
@@ -261,9 +295,9 @@ class AppPermissionsPlugin :
             } else {
                 currentStatus(request.permission)
             }
-        request.result.success(status)
+        request.reply(status)
         takeSettledBy(queuedRequests, answered) { it.permission == request.permission }
-            .forEach { it.result.success(status) }
+            .forEach { it.reply(status) }
         startNextRequest()
         return true
     }
@@ -319,7 +353,15 @@ class AppPermissionsPlugin :
     }
 
     private fun isGranted(context: Context, name: String): Boolean =
-        ContextCompat.checkSelfPermission(context, name) == PackageManager.PERMISSION_GRANTED
+        if (
+            name == Manifest.permission.POST_NOTIFICATIONS &&
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+        ) {
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        } else {
+            ContextCompat.checkSelfPermission(context, name) ==
+                PackageManager.PERMISSION_GRANTED
+        }
 
     private fun wasDeniedBefore(context: Context, name: String): Boolean =
         context.getSharedPreferences(name, Context.MODE_PRIVATE)

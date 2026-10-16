@@ -28,6 +28,7 @@ import 'package:monkeyssh/domain/services/acp_provider_service.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
@@ -929,6 +930,21 @@ void registerTmuxWindowNavigatorTests() {
               final shown = <int>[];
               final cancelled = <int>[];
               var started = false;
+              // Notification permission comes from the app's permissions
+              // channel; the plugin channel only shows and cancels.
+              const permissionsChannel = MethodChannel(
+                AppPermissionService.channelName,
+              );
+              tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                permissionsChannel,
+                (call) async {
+                  if (delayedMethod == 'requestPermissions' && !started) {
+                    started = true;
+                    await pending.future;
+                  }
+                  return 'granted';
+                },
+              );
               tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
                 channel,
                 (call) async {
@@ -957,6 +973,10 @@ void registerTmuxWindowNavigatorTests() {
                 notifications.dispose();
                 tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
                   channel,
+                  null,
+                );
+                tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                  permissionsChannel,
                   null,
                 );
                 FlutterLocalNotificationsPlatform.instance = previousPlatform;
