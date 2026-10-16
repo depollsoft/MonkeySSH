@@ -79,8 +79,133 @@ final class _GatedTransport extends _MemoryTransport {
   }
 }
 
+/// Fails every write with [error], as a transport does when it closed after
+/// the connection last checked, or when its channel fails mid-write.
+final class _RejectingTransport extends _MemoryTransport {
+  _RejectingTransport(this.error);
+
+  final Exception error;
+
+  @override
+  Future<void> write(List<int> bytes) async => throw error;
+}
+
 void main() {
   group('acp_json_rpc_connection', () {
+    group('reports whether a request reached the peer', () {
+      test('when it is written', () async {
+        final transport = _MemoryTransport();
+        final connection = AcpJsonRpcConnection(transport: transport);
+        addTearDown(connection.close);
+        var started = false;
+        final pending = connection.request(
+          'session/prompt',
+          id: 1,
+          noTimeout: true,
+          onWriteStarted: () => started = true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(started, isTrue);
+        transport.add(
+          _encodeMessage({'jsonrpc': '2.0', 'id': 1, 'result': 'ok'}),
+        );
+        expect(await pending, 'ok');
+      });
+
+      test('not when the connection is already closed', () async {
+        final connection = AcpJsonRpcConnection(transport: _MemoryTransport());
+        await connection.close();
+        var started = false;
+        expect(
+          () => connection.request(
+            'session/prompt',
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpConnectionClosedException>()),
+        );
+        expect(started, isFalse);
+      });
+
+      test('not when the transport has already closed', () async {
+        final transport = _RejectingTransport(
+          const AcpTransportClosedException(),
+        );
+        final connection = AcpJsonRpcConnection(transport: transport);
+        addTearDown(connection.close);
+        var started = false;
+        await expectLater(
+          connection.request(
+            'session/prompt',
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpConnectionClosedException>()),
+        );
+        expect(started, isFalse);
+      });
+
+      test('when the transport fails partway through the write', () async {
+        final transport = _RejectingTransport(Exception('channel reset'));
+        final connection = AcpJsonRpcConnection(transport: transport);
+        addTearDown(connection.close);
+        var started = false;
+        await expectLater(
+          connection.request(
+            'session/prompt',
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpConnectionClosedException>()),
+        );
+        expect(started, isTrue);
+      });
+
+      test('not when the frame is too large', () async {
+        final connection = AcpJsonRpcConnection(
+          transport: _MemoryTransport(),
+          maxFrameSize: 64,
+        );
+        addTearDown(connection.close);
+        var started = false;
+        await expectLater(
+          connection.request(
+            'session/prompt',
+            params: {'text': 'x' * 200},
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          ),
+          throwsA(isA<AcpProtocolException>()),
+        );
+        expect(started, isFalse);
+      });
+
+      test(
+        'not when the connection closes while it waits to be written',
+        () async {
+          final transport = _GatedTransport();
+          final connection = AcpJsonRpcConnection(transport: transport);
+          transport.finishClose.complete();
+          final first = connection.notify('first');
+          await transport.writeStarted.future;
+          var started = false;
+          final queued = connection.request(
+            'session/prompt',
+            noTimeout: true,
+            onWriteStarted: () => started = true,
+          );
+          final closing = connection.close();
+          await expectLater(
+            queued,
+            throwsA(isA<AcpConnectionClosedException>()),
+          );
+          transport.finishWrite.complete();
+          await first.catchError((Object _) {});
+          await closing;
+          expect(started, isFalse);
+        },
+      );
+    });
+
     for (final reuseId in [false, true]) {
       test('expired queued requests are not sent, reuse ID=$reuseId', () async {
         final transport = _GatedTransport();

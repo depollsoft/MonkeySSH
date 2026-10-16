@@ -272,6 +272,19 @@ MonkeyMuxImageReplayResult resolveMonkeyMuxImageReplayBatchForTesting({
   );
 }
 
+/// Whether [error] is how closing a session's last MonkeyMux window can
+/// fail after it succeeded: the session ends, and its control channel closes
+/// before the close is answered.
+bool isExpectedMonkeyMuxFinalCloseError(Object error) {
+  if (error is! MonkeyMuxInstallException) {
+    return false;
+  }
+  final message = error.message.toLowerCase();
+  return message.contains('control channel closed') ||
+      message.contains('control channel unavailable') ||
+      message.contains('closed without a response');
+}
+
 /// Controls a remote MonkeyMux session through its JSON backchannel.
 class MonkeyMuxService implements RemoteMultiplexerService {
   /// Creates a MonkeyMux service.

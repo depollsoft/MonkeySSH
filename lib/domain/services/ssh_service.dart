@@ -35,6 +35,7 @@ import 'app_review_prompt_service.dart';
 import 'background_ssh_service.dart';
 import 'clipboard_sharing_service.dart';
 import 'diagnostics_log_service.dart';
+import 'host_agent_forwarding_service.dart';
 import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'host_notification_prefs_reader.dart';
@@ -44,6 +45,7 @@ import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
 import 'serial_task_queue.dart';
 import 'settings_service.dart';
+import 'ssh_agent_forwarding.dart';
 import 'ssh_error_policy.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_wire.dart';
@@ -1050,6 +1052,7 @@ class SshConnectionConfig {
     this.passphrase,
     this.identityKeys,
     this.jumpHost,
+    this.agentForwarding,
     this.keepAliveInterval = const Duration(seconds: 30),
     this.connectionTimeout = const Duration(seconds: 30),
   });
@@ -1060,6 +1063,7 @@ class SshConnectionConfig {
     SshKey? key,
     List<SshKey>? identityKeys,
     SshConnectionConfig? jumpHostConfig,
+    SshAgentForwarding? agentForwarding,
   }) => SshConnectionConfig(
     hostname: host.hostname,
     port: host.port,
@@ -1069,6 +1073,7 @@ class SshConnectionConfig {
     passphrase: key?.passphrase,
     identityKeys: identityKeys,
     jumpHost: jumpHostConfig,
+    agentForwarding: agentForwarding,
   );
 
   /// Hostname or IP address.
@@ -1094,6 +1099,10 @@ class SshConnectionConfig {
 
   /// Jump host configuration for proxy connections.
   final SshConnectionConfig? jumpHost;
+
+  /// Serves the app's keys to this endpoint over SSH agent forwarding; null
+  /// when forwarding is off. Never set on a jump host.
+  final SshAgentForwarding? agentForwarding;
 
   /// Keep-alive interval.
   final Duration keepAliveInterval;
@@ -1171,6 +1180,43 @@ Future<void> _closeSshClients(
   } finally {
     await Future.wait(dependentClients.map(closeClient));
   }
+}
+
+/// Thrown when a saved jump host chain is longer than a connection follows.
+class JumpHostChainTooLongException implements Exception {
+  /// Creates the exception for a chain over [maxHops] hops.
+  const JumpHostChainTooLongException(this.maxHops);
+
+  /// Most jump hosts a connection follows.
+  final int maxHops;
+
+  /// User-facing explanation.
+  String get message =>
+      'This host’s jump hosts chain through more than $maxHops hops. '
+      'Shorten the chain in host settings.';
+
+  @override
+  String toString() => message;
+}
+
+class _JumpHostLoop implements Exception {
+  const _JumpHostLoop();
+}
+
+/// Per-connection state shared while resolving a jump host chain.
+class _JumpChainContext {
+  _JumpChainContext({
+    required this.originHostId,
+    required this.loadAutoKeys,
+    required this.setPhase,
+    this.onProgress,
+  });
+
+  final int originHostId;
+  final Future<List<SshKey>?> Function() loadAutoKeys;
+  final void Function(String phase) setPhase;
+  final ConnectionProgressCallback? onProgress;
+  ({WifiPermissionStatus permission, String? ssid})? wifiState;
 }
 
 /// Thrown when an in-flight SSH connection attempt is cancelled by the user.
@@ -1405,15 +1451,24 @@ class SshService {
     WifiNetworkService? wifiNetworkService,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
+    SshAgentForwardingResolver? agentForwardingResolver,
+    SshAgentForwardingClientFactory? agentForwardingClientFactory,
   }) : wifiNetworkService = wifiNetworkService ?? WifiNetworkService(),
        _socketConnector = socketConnector ?? _connectWithKeepAlive,
-       _clientFactory = clientFactory ?? _defaultClientFactory;
+       _clientFactory = clientFactory ?? _defaultClientFactory,
+       _agentForwardingResolver = agentForwardingResolver,
+       _agentForwardingClientFactory =
+           agentForwardingClientFactory ?? createAgentForwardingSshClient;
 
   /// Number of key identities to try per SSH authentication attempt.
   ///
   /// Keeping this below common server `MaxAuthTries` defaults avoids
   /// "too many authentication failures" disconnects in Auto mode.
   static const _maxAutoKeysPerAttempt = 5;
+
+  /// Most jump hosts followed for one connection, so a saved loop or a
+  /// runaway chain cannot recurse forever.
+  static const _maxJumpHostChainLength = 8;
   static const _hostKeyProbeSettleTimeout = Duration(seconds: 1);
 
   /// Host repository for looking up hosts.
@@ -1437,6 +1492,8 @@ class SshService {
 
   final SshSocketConnector _socketConnector;
   final SshClientFactory _clientFactory;
+  final SshAgentForwardingResolver? _agentForwardingResolver;
+  final SshAgentForwardingClientFactory _agentForwardingClientFactory;
 
   final Map<int, SshSession> _sessions = {};
   int _nextConnectionId = 1;
@@ -1514,38 +1571,8 @@ class SshService {
           return cachedAutoKeys;
         }
         didLoadAutoKeys = true;
-        if (keyRepository == null) {
-          return null;
-        }
         preflightPhase = 'load_auto_keys';
-        final keyLoadResult = await keyRepository!.getAllDecryptable();
-        if (keyLoadResult.unreadableCount > 0) {
-          DiagnosticsLogService.instance.warning(
-            'ssh.connect',
-            'auto_key_load_skipped_unreadable',
-            fields: {
-              'hostId': hostId,
-              'unreadableCount': keyLoadResult.unreadableCount,
-              'loadedCount': keyLoadResult.keys.length,
-              'errorType': keyLoadResult.firstUnreadableErrorType,
-            },
-          );
-        }
-        final keys = keyLoadResult.keys
-            .where(
-              (key) =>
-                  !keyRepository!.hasUnreadablePrivateKey(key.id) &&
-                  !keyRepository!.hasUnreadablePassphrase(key.id),
-            )
-            .toList();
-        if (keys.isEmpty) {
-          return null;
-        }
-        final sortedKeys = [...keys]..sort((a, b) => a.id.compareTo(b.id));
-        final autoKeys = sortedKeys.length > _maxAutoKeysPerAttempt
-            ? sortedKeys.take(_maxAutoKeysPerAttempt).toList(growable: false)
-            : sortedKeys;
-        return cachedAutoKeys = autoKeys;
+        return cachedAutoKeys = await _loadAutoKeyIdentities(hostId);
       }
 
       // Get SSH key if explicitly selected, otherwise use auto keys.
@@ -1567,73 +1594,26 @@ class SshService {
 
       // Get jump host config if specified, unless the device is currently
       // connected to a Wi-Fi network on the host's skip list (in which case
-      // the host is reachable directly).
-      SshConnectionConfig? jumpHostConfig;
-      if (host.jumpHostId != null) {
-        var skipJumpHost = false;
-        if (host.skipJumpHostOnSsids != null &&
-            host.skipJumpHostOnSsids!.isNotEmpty) {
-          onProgress?.call(
-            const ConnectionProgressUpdate(
-              state: SshConnectionState.connecting,
-              message: 'Checking Wi-Fi network for jump host bypass…',
-            ),
-          );
-          preflightPhase = 'check_wifi_bypass';
-          final permission = await wifiNetworkService.requestPermission();
-          String? currentSsid;
-          if (permission == WifiPermissionStatus.granted) {
-            currentSsid = await wifiNetworkService.getCurrentSsid();
-            skipJumpHost = shouldSkipJumpHostForSsid(
-              currentSsid: currentSsid,
-              skipJumpHostOnSsids: host.skipJumpHostOnSsids,
-            );
-          } else {
-            onProgress?.call(
-              const ConnectionProgressUpdate(
-                state: SshConnectionState.connecting,
-                message: 'Wi-Fi permission denied. Using jump host…',
-              ),
-            );
-          }
-          DiagnosticsLogService.instance.info(
-            'ssh.connect',
-            'jump_host_ssid_check',
-            fields: {
-              'hostId': hostId,
-              'permissionStatus': permission.name,
-              'hasCurrentSsid': currentSsid != null,
-              'skipJumpHost': skipJumpHost,
-            },
-          );
-        }
-        if (!skipJumpHost) {
-          preflightPhase = 'load_jump_host';
-          final jumpHost = await hostRepository!.getById(host.jumpHostId!);
-          if (jumpHost != null) {
-            SshKey? jumpKey;
-            List<SshKey>? jumpIdentityKeys;
-            if (jumpHost.keyId != null && keyRepository != null) {
-              preflightPhase = 'load_jump_host_key';
-              jumpKey = await keyRepository!.getById(jumpHost.keyId!);
-              if (keyRepository!.hasUnreadablePrivateKey(jumpHost.keyId!) ||
-                  keyRepository!.hasUnreadablePassphrase(jumpHost.keyId!)) {
-                throw const FormatException('Unreadable SSH key secret');
-              }
-              if (jumpKey == null && jumpHost.password == null) {
-                jumpIdentityKeys = await loadAutoKeys();
-              }
-            } else if (jumpHost.password == null) {
-              jumpIdentityKeys = await loadAutoKeys();
-            }
-            jumpHostConfig = SshConnectionConfig.fromHost(
-              jumpHost,
-              key: jumpKey,
-              identityKeys: jumpIdentityKeys,
-            );
-          }
-        }
-      }
+      // the host is reachable directly). A jump host's own jump host is
+      // followed too, so a ProxyJump chain connects hop by hop.
+      final jumpHostConfig = await _resolveJumpHostChain(
+        fromHostId: host.id,
+        jumpHostId: host.jumpHostId,
+        skipJumpHostOnSsids: host.skipJumpHostOnSsids,
+        context: _JumpChainContext(
+          originHostId: hostId,
+          loadAutoKeys: loadAutoKeys,
+          onProgress: onProgress,
+          setPhase: (phase) => preflightPhase = phase,
+        ),
+      );
+
+      preflightPhase = 'agent_forwarding';
+      final resolvingForwarding = _agentForwardingResolver?.call(host);
+      final agentForwarding = resolvingForwarding == null
+          ? null
+          : await (cancellationToken?.guard(resolvingForwarding) ??
+                resolvingForwarding);
 
       preflightPhase = 'build_config';
       final config = SshConnectionConfig.fromHost(
@@ -1641,6 +1621,7 @@ class SshService {
         key: key,
         identityKeys: identityKeys,
         jumpHostConfig: jumpHostConfig,
+        agentForwarding: agentForwarding,
       );
 
       preflightPhase = 'connect';
@@ -1688,6 +1669,7 @@ class SshService {
             'usesJumpHost': config.jumpHost != null,
             'usesPassword': config.password != null,
             'identityCount': config.identityKeys?.length ?? 0,
+            'agentForwarding': agentForwarding != null,
           },
         );
         return SshConnectionResult(
@@ -1714,6 +1696,13 @@ class SshService {
         fields: {'hostId': hostId, 'phase': preflightPhase},
       );
       return const SshConnectionResult.userCancelled();
+    } on JumpHostChainTooLongException catch (e) {
+      DiagnosticsLogService.instance.warning(
+        'ssh.connect',
+        'jump_host_chain_too_long',
+        fields: {'hostId': hostId},
+      );
+      return SshConnectionResult(success: false, error: e.message);
     } on Exception catch (e) {
       DiagnosticsLogService.instance.warning(
         'ssh.connect',
@@ -1730,6 +1719,215 @@ class SshService {
             'Connection setup failed. Check saved credentials and try again.',
       );
     }
+  }
+
+  /// Loads the saved keys tried automatically for a host with no key or
+  /// password, capped so servers don't drop the attempt for too many
+  /// authentication failures.
+  Future<List<SshKey>?> _loadAutoKeyIdentities(int hostId) async {
+    if (keyRepository == null) {
+      return null;
+    }
+    final keyLoadResult = await keyRepository!.getAllDecryptable();
+    if (keyLoadResult.unreadableCount > 0) {
+      DiagnosticsLogService.instance.warning(
+        'ssh.connect',
+        'auto_key_load_skipped_unreadable',
+        fields: {
+          'hostId': hostId,
+          'unreadableCount': keyLoadResult.unreadableCount,
+          'loadedCount': keyLoadResult.keys.length,
+          'errorType': keyLoadResult.firstUnreadableErrorType,
+        },
+      );
+    }
+    final keys = keyLoadResult.keys
+        .where(
+          (key) =>
+              !keyRepository!.hasUnreadablePrivateKey(key.id) &&
+              !keyRepository!.hasUnreadablePassphrase(key.id),
+        )
+        .toList();
+    if (keys.isEmpty) {
+      return null;
+    }
+    final sortedKeys = [...keys]..sort((a, b) => a.id.compareTo(b.id));
+    return sortedKeys.length > _maxAutoKeysPerAttempt
+        ? sortedKeys.take(_maxAutoKeysPerAttempt).toList(growable: false)
+        : sortedKeys;
+  }
+
+  /// Builds the jump host config a connection through [jumpHostId] uses,
+  /// following that host's own jump hosts, for Test Connection on a host
+  /// that isn't saved yet.
+  ///
+  /// Throws [JumpHostChainTooLongException] for a chain longer than a
+  /// connection follows.
+  ///
+  /// Pass the edited host's [fromHostId] when it is already saved, so a loop
+  /// back to it resolves the way a real connection would.
+  Future<SshConnectionConfig?> buildJumpHostChainConfig(
+    int jumpHostId, {
+    int? fromHostId,
+  }) {
+    List<SshKey>? cachedAutoKeys;
+    var didLoadAutoKeys = false;
+    return _resolveJumpHostChain(
+      fromHostId: fromHostId,
+      jumpHostId: jumpHostId,
+      skipJumpHostOnSsids: null,
+      context: _JumpChainContext(
+        originHostId: jumpHostId,
+        loadAutoKeys: () async {
+          if (!didLoadAutoKeys) {
+            didLoadAutoKeys = true;
+            cachedAutoKeys = await _loadAutoKeyIdentities(jumpHostId);
+          }
+          return cachedAutoKeys;
+        },
+        setPhase: (_) {},
+      ),
+    );
+  }
+
+  /// Resolves the jump host chain starting at [jumpHostId], the jump host of
+  /// [fromHostId] (null for a host that isn't saved).
+  ///
+  /// A saved loop falls back to the single jump host the app used before it
+  /// followed chains. A chain longer than [_maxJumpHostChainLength] throws
+  /// [JumpHostChainTooLongException] rather than dialling a hop directly.
+  Future<SshConnectionConfig?> _resolveJumpHostChain({
+    required int? fromHostId,
+    required int? jumpHostId,
+    required String? skipJumpHostOnSsids,
+    required _JumpChainContext context,
+  }) async {
+    // An unsaved host still counts as the first endpoint of the chain.
+    final visited = {fromHostId ?? -1};
+    try {
+      return await _resolveJumpHop(
+        jumpHostId: jumpHostId,
+        skipJumpHostOnSsids: skipJumpHostOnSsids,
+        visited: visited,
+        context: context,
+        followChain: true,
+      );
+    } on _JumpHostLoop {
+      DiagnosticsLogService.instance.warning(
+        'ssh.connect',
+        'jump_host_chain_loop',
+        fields: {'hostId': context.originHostId},
+      );
+      return _resolveJumpHop(
+        jumpHostId: jumpHostId,
+        skipJumpHostOnSsids: skipJumpHostOnSsids,
+        visited: visited,
+        context: context,
+        followChain: false,
+      );
+    }
+  }
+
+  Future<SshConnectionConfig?> _resolveJumpHop({
+    required int? jumpHostId,
+    required String? skipJumpHostOnSsids,
+    required Set<int> visited,
+    required _JumpChainContext context,
+    required bool followChain,
+  }) async {
+    if (jumpHostId == null) {
+      return null;
+    }
+    // The hop's own Wi-Fi bypass comes first: a jump it skips on this network
+    // is never dialled, so it can't close a loop or lengthen the chain.
+    if (skipJumpHostOnSsids != null && skipJumpHostOnSsids.isNotEmpty) {
+      context.onProgress?.call(
+        const ConnectionProgressUpdate(
+          state: SshConnectionState.connecting,
+          message: 'Checking Wi-Fi network for jump host bypass…',
+        ),
+      );
+      context.setPhase('check_wifi_bypass');
+      var state = context.wifiState;
+      if (state == null) {
+        final permission = await wifiNetworkService.requestPermission();
+        state = context.wifiState = (
+          permission: permission,
+          ssid: permission == WifiPermissionStatus.granted
+              ? await wifiNetworkService.getCurrentSsid()
+              : null,
+        );
+      }
+      var skipJumpHost = false;
+      if (state.permission == WifiPermissionStatus.granted) {
+        skipJumpHost = shouldSkipJumpHostForSsid(
+          currentSsid: state.ssid,
+          skipJumpHostOnSsids: skipJumpHostOnSsids,
+        );
+      } else {
+        context.onProgress?.call(
+          const ConnectionProgressUpdate(
+            state: SshConnectionState.connecting,
+            message: 'Wi-Fi permission denied. Using jump host…',
+          ),
+        );
+      }
+      DiagnosticsLogService.instance.info(
+        'ssh.connect',
+        'jump_host_ssid_check',
+        fields: {
+          'hostId': context.originHostId,
+          'permissionStatus': state.permission.name,
+          'hasCurrentSsid': state.ssid != null,
+          'skipJumpHost': skipJumpHost,
+        },
+      );
+      if (skipJumpHost) {
+        return null;
+      }
+    }
+    if (visited.contains(jumpHostId)) {
+      if (followChain) throw const _JumpHostLoop();
+      return null;
+    }
+    if (visited.length > _maxJumpHostChainLength) {
+      throw const JumpHostChainTooLongException(_maxJumpHostChainLength);
+    }
+    context.setPhase('load_jump_host');
+    final jumpHost = await hostRepository!.getById(jumpHostId);
+    if (jumpHost == null) {
+      return null;
+    }
+    SshKey? jumpKey;
+    List<SshKey>? jumpIdentityKeys;
+    if (jumpHost.keyId != null && keyRepository != null) {
+      context.setPhase('load_jump_host_key');
+      jumpKey = await keyRepository!.getById(jumpHost.keyId!);
+      if (keyRepository!.hasUnreadablePrivateKey(jumpHost.keyId!) ||
+          keyRepository!.hasUnreadablePassphrase(jumpHost.keyId!)) {
+        throw const FormatException('Unreadable SSH key secret');
+      }
+      if (jumpKey == null && jumpHost.password == null) {
+        jumpIdentityKeys = await context.loadAutoKeys();
+      }
+    } else if (jumpHost.password == null) {
+      jumpIdentityKeys = await context.loadAutoKeys();
+    }
+    final nextJumpHostConfig = followChain
+        ? await _resolveJumpHop(
+            jumpHostId: jumpHost.jumpHostId,
+            skipJumpHostOnSsids: jumpHost.skipJumpHostOnSsids,
+            visited: {...visited, jumpHostId},
+            context: context,
+            followChain: true,
+          )
+        : null;
+    return SshConnectionConfig.fromHost(
+      jumpHost,
+      key: jumpKey,
+      identityKeys: jumpIdentityKeys,
+      jumpHostConfig: nextJumpHostConfig,
+    );
   }
 
   Future<void> _updateLastConnected(int hostId) async {
@@ -1883,15 +2081,28 @@ class SshService {
           SshConnectionState.authenticating,
           isJumpHost ? 'Authenticating with jump host…' : 'Authenticating…',
         );
-        final createdClient = _clientFactory(
-          socket,
-          username: config.username,
-          onVerifyHostKey: verify,
-          onPasswordRequest: authHandlers.onPasswordRequest,
-          onUserInfoRequest: authHandlers.onUserInfoRequest,
-          identities: identities,
-          keepAliveInterval: config.keepAliveInterval,
-        );
+        final agentForwarding = config.agentForwarding;
+        final createdClient = agentForwarding == null
+            ? _clientFactory(
+                socket,
+                username: config.username,
+                onVerifyHostKey: verify,
+                onPasswordRequest: authHandlers.onPasswordRequest,
+                onUserInfoRequest: authHandlers.onUserInfoRequest,
+                identities: identities,
+                keepAliveInterval: config.keepAliveInterval,
+              )
+            : _agentForwardingClientFactory(
+                socket,
+                username: config.username,
+                agentHandler: agentForwarding,
+                onVerifyHostKey: verify,
+                onPasswordRequest: authHandlers.onPasswordRequest,
+                onUserInfoRequest: authHandlers.onUserInfoRequest,
+                identities: identities,
+                keepAliveInterval: config.keepAliveInterval,
+              );
+        agentForwarding?.attachClient(createdClient);
         client = createdClient;
         unownedSocket = null;
         await _awaitAuthentication(
@@ -7744,6 +7955,7 @@ final sshServiceProvider = Provider<SshService>(
       interactiveAuthPromptHandlerProvider,
     ),
     wifiNetworkService: ref.watch(wifiNetworkServiceProvider),
+    agentForwardingResolver: ref.watch(sshAgentForwardingResolverProvider),
   ),
 );
 

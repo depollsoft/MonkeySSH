@@ -22,12 +22,14 @@ import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../widgets/font_family_picker.dart';
+import '../widgets/keyboard_shortcuts_sheet.dart';
 import '../widgets/message_of_the_day.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/push_notification_settings_section.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
+import 'acp_custom_providers_screen.dart';
 import 'acp_mcp_servers_screen.dart';
 import 'settings_labels.dart';
 import 'transfer_screen.dart';
@@ -645,6 +647,7 @@ class _AgentsSection extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       _SectionHeader(title: 'agents', subtitle: 'Native agent chat sessions'),
+      AcpCustomProvidersSettingsTile(),
       AcpMcpServersSettingsTile(),
     ],
   );
@@ -898,6 +901,7 @@ class _TerminalSection extends ConsumerWidget {
           setEnabled: (notifier, {required enabled}) =>
               notifier.setEnabled(enabled: enabled),
         ),
+        const KeyboardShortcutsSettingsTile(),
       ],
     );
   }
