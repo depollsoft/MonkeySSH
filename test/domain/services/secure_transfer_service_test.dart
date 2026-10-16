@@ -1970,7 +1970,7 @@ void main() {
             username: 'root',
           ),
         );
-        await importedStore.dismiss(localHostId);
+        await importedStore.markDone(localHostId, {HostSetupStep.agents});
 
         await importedTransferService.importMigrationData(
           data: migrationData,
@@ -1983,10 +1983,8 @@ void main() {
         final states = await importedStore.load();
 
         expect(importedHost.id, isNot(localHostId));
-        expect(states[localHostId]?.dismissed, isTrue);
-        expect(states[localHostId]?.done, isEmpty);
+        expect(states[localHostId]?.done, {HostSetupStep.agents});
         expect(states[importedHost.id]?.done, {HostSetupStep.monkeyMux});
-        expect(states[importedHost.id]?.dismissed, isFalse);
         expect(states.keys, {localHostId, importedHost.id});
       },
     );

@@ -1,6 +1,6 @@
-/// The post-connect setup checklist: a one-line hint on a host row, a card for
-/// empty states, and a sheet that lists every step and runs the next one
-/// through the flow that already exists for it.
+/// The host setup checklist: a sheet, opened from a host's actions menu, that
+/// lists every step and runs the next one through the flow that already
+/// exists for it.
 library;
 
 import 'dart:async';
@@ -30,14 +30,6 @@ import 'acp_connection_support.dart'
 import 'acp_new_session_sheet.dart';
 import 'key_install_sheet.dart';
 import 'premium_access.dart';
-
-/// Short, lower-case name of a step for the one-line hint.
-String hostSetupStepShortLabel(HostSetupStep step) => switch (step) {
-  HostSetupStep.keyLogin => 'switch to key login',
-  HostSetupStep.monkeyMux => 'install MonkeyMux',
-  HostSetupStep.agents => 'install an agent',
-  HostSetupStep.agentSignIn => 'sign in to an agent',
-};
 
 /// Title of a step in the checklist sheet.
 String hostSetupStepTitle(HostSetupStep step) => switch (step) {
@@ -76,122 +68,6 @@ String hostSetupStepActionLabel(
   HostSetupStep.agentSignIn => 'Start Agent Chat',
 };
 
-/// Hides [host]'s checklist and offers Undo, since a hidden checklist has no
-/// other way back.
-void _hideChecklist(
-  ScaffoldMessengerState? messenger,
-  HostSetupPersistedStateNotifier notifier,
-  Host host,
-) {
-  final hiding = notifier.dismiss(host.id);
-  unawaited(hiding);
-  messenger?.showSnackBar(
-    SnackBar(
-      content: Text('Setup checklist hidden for ${host.label}.'),
-      action: SnackBarAction(
-        label: 'Undo',
-        onPressed: () =>
-            unawaited(hiding.then((_) => notifier.restore(host.id))),
-      ),
-    ),
-  );
-}
-
-/// The checklist hint inside a host row. Renders nothing when the host has no
-/// known next step, and probes the host while it is connected.
-class HostSetupChecklistLine extends ConsumerWidget {
-  /// Creates the hint for [host].
-  const HostSetupChecklistLine({required this.host, super.key});
-
-  /// Host the row shows.
-  final Host host;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final checklist = ref.watch(hostSetupChecklistProvider(host.id));
-    if (checklist == null) return const SizedBox.shrink();
-    _probeWhenConnected(ref, checklist);
-    final next = checklist.nextStep;
-    if (!checklist.isVisible || next == null) return const SizedBox.shrink();
-
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final total = HostSetupStep.values.length;
-    final mutedStyle = FluttyTheme.monoStyle.copyWith(
-      fontSize: 12,
-      color: colorScheme.onSurfaceVariant,
-    );
-    return Padding(
-      padding: const EdgeInsets.only(top: FluttyTheme.spacingXs),
-      child: Row(
-        children: [
-          Expanded(
-            child: Semantics(
-              button: true,
-              label:
-                  'Setup ${checklist.doneCount} of $total done. Next: '
-                  '${hostSetupStepShortLabel(next)}',
-              // excludeSemantics drops the InkWell's own tap action, so the
-              // node needs one of its own for TalkBack and VoiceOver.
-              onTap: () => showHostSetupChecklistSheet(context, host.id),
-              excludeSemantics: true,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-                onTap: () => showHostSetupChecklistSheet(context, host.id),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 44),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.checklist_rounded,
-                        size: 16,
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '${checklist.doneCount}/$total · ',
-                        style: mutedStyle,
-                      ),
-                      Flexible(
-                        child: Text(
-                          hostSetupStepShortLabel(next),
-                          overflow: TextOverflow.ellipsis,
-                          style: mutedStyle.copyWith(
-                            color: colorScheme.onSurface,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.chevron_right,
-                        size: 16,
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          IconButton(
-            tooltip: 'Hide setup checklist',
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints.tightFor(width: 44, height: 44),
-            iconSize: 18,
-            color: colorScheme.onSurfaceVariant,
-            onPressed: () => _hideChecklist(
-              ScaffoldMessenger.maybeOf(context),
-              ref.read(hostSetupPersistedStateProvider.notifier),
-              host,
-            ),
-            icon: const Icon(Icons.close),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 void _probeWhenConnected(WidgetRef ref, HostSetupChecklist checklist) {
   if (!checklist.needsProbe) return;
   final connectionId = ref.watch(
@@ -202,100 +78,6 @@ void _probeWhenConnected(WidgetRef ref, HostSetupChecklist checklist) {
   WidgetsBinding.instance.addPostFrameCallback(
     (_) => unawaited(notifier.ensureProbed(checklist.hostId, connectionId)),
   );
-}
-
-/// An empty-state card that points at the next setup step for the most
-/// recently connected host that still has one.
-class HostSetupEmptyStateCard extends ConsumerWidget {
-  /// Creates the card.
-  const HostSetupEmptyStateCard({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hosts = ref.watch(allHostsProvider).asData?.value ?? const <Host>[];
-    final candidates =
-        hosts.where((host) => host.lastConnectedAt != null).toList()
-          ..sort((a, b) => b.lastConnectedAt!.compareTo(a.lastConnectedAt!));
-    for (final host in candidates) {
-      final checklist = ref.watch(hostSetupChecklistProvider(host.id));
-      final next = checklist?.nextStep;
-      if (checklist == null || !checklist.isVisible || next == null) continue;
-      return _EmptyStateCard(host: host, checklist: checklist, next: next);
-    }
-    return const SizedBox.shrink();
-  }
-}
-
-class _EmptyStateCard extends StatelessWidget {
-  const _EmptyStateCard({
-    required this.host,
-    required this.checklist,
-    required this.next,
-  });
-
-  final Host host;
-  final HostSetupChecklist checklist;
-  final HostSetupStep next;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    return Padding(
-      padding: const EdgeInsets.only(top: FluttyTheme.spacingLg),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(FluttyTheme.radiusLg),
-            border: Border.all(color: colorScheme.outlineVariant),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(FluttyTheme.spacingMd),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text.rich(
-                  TextSpan(
-                    children: [
-                      const TextSpan(text: 'Finish setting up '),
-                      TextSpan(
-                        text: host.label,
-                        style: FluttyTheme.displayMono(
-                          fontSize: 16,
-                          color: colorScheme.onSurface,
-                        ),
-                      ),
-                    ],
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleMedium,
-                ),
-                const SizedBox(height: FluttyTheme.spacingXs),
-                Text(
-                  'Next: ${hostSetupStepShortLabel(next)} (step '
-                  '${HostSetupStep.values.indexOf(next) + 1} of '
-                  '${HostSetupStep.values.length}).',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: FluttyTheme.spacingSm),
-                OutlinedButton.icon(
-                  onPressed: () =>
-                      showHostSetupChecklistSheet(context, host.id),
-                  icon: const Icon(Icons.checklist_rounded, size: 18),
-                  label: const Text('Continue Setup'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// Opens the checklist sheet for [hostId].
@@ -418,23 +200,6 @@ class _HostSetupChecklistSheetState
                 color: colorScheme.onSurfaceVariant,
               ),
             ),
-          if (!checklist.dismissed && !checklist.isComplete) ...[
-            const SizedBox(height: FluttyTheme.spacingSm),
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: colorScheme.onSurfaceVariant,
-              ),
-              onPressed: () {
-                _hideChecklist(
-                  ScaffoldMessenger.maybeOf(context),
-                  ref.read(hostSetupPersistedStateProvider.notifier),
-                  host,
-                );
-                Navigator.of(context).pop();
-              },
-              child: const Text('Hide Checklist for This Host'),
-            ),
-          ],
         ],
       ),
     );

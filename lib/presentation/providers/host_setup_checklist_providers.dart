@@ -35,20 +35,6 @@ class HostSetupPersistedStateNotifier
     await store.markDone(hostId, steps);
     if (ref.mounted) state = AsyncData(await store.load());
   }
-
-  /// Hides the checklist for [hostId].
-  Future<void> dismiss(int hostId) async {
-    final store = ref.read(hostSetupChecklistStoreProvider);
-    await store.dismiss(hostId);
-    if (ref.mounted) state = AsyncData(await store.load());
-  }
-
-  /// Shows the checklist for [hostId] again after [dismiss].
-  Future<void> restore(int hostId) async {
-    final store = ref.read(hostSetupChecklistStoreProvider);
-    await store.restore(hostId);
-    if (ref.mounted) state = AsyncData(await store.load());
-  }
 }
 
 /// Hosts where a native agent session has started, which proves an agent
@@ -145,7 +131,7 @@ class HostSetupProbeResultsNotifier
   }
 }
 
-/// The setup checklist for one host, or null when it should not appear (the
+/// The setup checklist for one host, or null when there is none to show (the
 /// host is gone, is the App Review demo host, or state is still loading).
 final hostSetupChecklistProvider = Provider.autoDispose
     .family<HostSetupChecklist?, int>((ref, hostId) {
@@ -176,7 +162,5 @@ final hostSetupChecklistProvider = Provider.autoDispose
             (ids) => ids.value?.contains(hostId) ?? false,
           ),
         ),
-        isConnected:
-            ref.watch(hostConnectedConnectionIdProvider(hostId)) != null,
       );
     });
