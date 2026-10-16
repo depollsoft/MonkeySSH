@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -13,6 +14,7 @@ import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
@@ -22,6 +24,8 @@ import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_registry.dart';
+import 'package:monkeyssh/domain/services/agent_worktree_service.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
@@ -38,10 +42,12 @@ import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
+import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
 import 'package:xterm/xterm.dart' hide TerminalThemes;
 
 import '../support/fake_acp_session_manager.dart';
+import '../support/fake_agent_worktree.dart';
 
 import '../support/settings_import_test_helpers.dart'
     show FakeAuthService, MockAuthStateNotifier;
@@ -139,6 +145,12 @@ class _MutableActiveSessionsNotifier extends ActiveSessionsNotifier {
 
   final Map<int, ActiveConnection> _connections = <int, ActiveConnection>{};
   final Map<int, SshSession> _sessions = <int, SshSession>{};
+  final disconnectedConnectionIds = <int>[];
+
+  @override
+  Future<void> disconnect(int connectionId) async {
+    disconnectedConnectionIds.add(connectionId);
+  }
 
   @override
   Map<int, SshConnectionState> build() => {
@@ -735,6 +747,78 @@ void main() {
       verify(() => hostRepository.reorderByIds([2, 1])).called(1);
     });
 
+    testWidgets('an upgraded snippet shows and copies as it reads', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final copied = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied.add((call.arguments as Map)['text'] as String);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.watchAll).thenAnswer(
+        (_) => Stream.value([
+          Snippet(
+            id: 1,
+            name: 'Index',
+            command: r'db.c.createIndex(\{key:1})',
+            autoExecute: false,
+            createdAt: DateTime(2026),
+            usageCount: 0,
+            sortOrder: 0,
+          ),
+        ]),
+      );
+      when(snippetRepository.watchAllFolders)
+          .thenAnswer((_) => Stream.value(const <SnippetFolder>[]));
+      when(() => snippetRepository.incrementUsage(any()))
+          .thenAnswer((_) async => true);
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          overrides: [
+            snippetRepositoryProvider.overrideWithValue(snippetRepository),
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value(const <Host>[]),
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Snippets').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // The row shows the text the snippet types, without the escape.
+      expect(find.text('db.c.createIndex({key:1})'), findsOneWidget);
+      expect(find.text(r'db.c.createIndex(\{key:1})'), findsNothing);
+
+      await tester.tap(find.byTooltip('Snippet actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy command'));
+      await tester.pumpAndSettle();
+
+      expect(copied, ['db.c.createIndex({key:1})']);
+    });
+
     testWidgets('shows reorder handles and persists snippet order on mobile', (
       tester,
     ) async {
@@ -1049,6 +1133,88 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(openedRoutes, ['/terminal/1?connectionId=7']);
+    });
+
+    testWidgets('arrows and Return open a connection from the keyboard', (
+      tester,
+    ) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final openedRoutes = <String>[];
+      final sessionsNotifier = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          _buildActiveConnection(
+            connectionId: 7,
+            hostId: 1,
+            state: SshConnectionState.connecting,
+          ),
+          _buildActiveConnection(
+            connectionId: 8,
+            hostId: 1,
+            state: SshConnectionState.connecting,
+          ),
+        ],
+      );
+      final router = GoRouter(
+        initialLocation: '/',
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) =>
+                const HomeScreen(initialTab: HomeScreenTab.connections),
+          ),
+          GoRoute(
+            path: '/terminal/:hostId',
+            builder: (context, state) => _RecordingTerminalPage(
+              route: state.uri.toString(),
+              openedRoutes: openedRoutes,
+            ),
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          stubLaunchPresets: false,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessionsNotifier),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(id: 1, label: 'Alpha', sortOrder: 0),
+              ]),
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // The list holds focus on open: Up starts at the last connection.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(openedRoutes, ['/terminal/1?connectionId=8']);
+
+      router.pop();
+      await tester.pumpAndSettle();
+      // Back home, Up as far as it goes reaches the first connection.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(openedRoutes, [
+        '/terminal/1?connectionId=8',
+        '/terminal/1?connectionId=7',
+      ]);
     });
 
     testWidgets(
@@ -1860,6 +2026,130 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'closing the last MonkeyMux window from the badge offers its worktree '
+    'even when the close loses its answer',
+    (tester) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      final acpManager = FakeAcpSessionManager();
+      addTearDown(acpManager.dispose);
+      const sessionName = 'work';
+      const worktreePath = '/work/project.worktrees/agent';
+      final session = _badgeSession()
+        ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+        ..remoteMuxSessionName = sessionName;
+      final sessionsNotifier = _MutableActiveSessionsNotifier(
+        initialConnections: [
+          _buildActiveConnection(
+            connectionId: 7,
+            hostId: 1,
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+            remoteMuxSessionName: sessionName,
+          ),
+        ],
+        initialSessions: [session],
+      );
+      final worktree = AgentWorktreeRecord(
+        hostId: 1,
+        repository: '/work/project',
+        path: worktreePath,
+        branch: 'agent/claude-1',
+        baseCommit: 'abc',
+        createdAt: DateTime.utc(2026),
+      );
+      final registry = MemoryAgentWorktreeRegistry()..records.add(worktree);
+      final worktrees = FakeAgentWorktreeService();
+      when(() => monkeyMuxService.watchWindowChanges(session, sessionName))
+          .thenAnswer((_) => _idleWindowChanges());
+      when(() => monkeyMuxService.listWindows(session, sessionName)).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            id: '@1',
+            index: 0,
+            name: 'target',
+            isActive: true,
+            currentPath: worktreePath,
+          ),
+        ],
+      );
+      // The session ends with its last window and closes the control
+      // channel before the close is answered.
+      when(
+        () => monkeyMuxService.killWindow(
+          session,
+          sessionName,
+          0,
+          windowId: '@1',
+        ),
+      ).thenAnswer(
+        (_) async => throw const MonkeyMuxInstallException(
+          'MonkeyMux control channel closed.',
+        ),
+      );
+      when(() => tmuxService.clearCache(7)).thenAnswer((_) async {});
+      when(() => monkeyMuxService.clearCache(7)).thenAnswer((_) async {});
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          overrides: [
+            activeSessionsProvider.overrideWith(() => sessionsNotifier),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value([
+                _buildHost(
+                  id: 1,
+                  label: 'Alpha',
+                  sortOrder: 0,
+                  tmuxSessionName: sessionName,
+                  remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+                ),
+              ]),
+            ),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+            acpSessionManagerProvider.overrideWithValue(acpManager),
+            agentWorktreeRegistryProvider.overrideWithValue(registry),
+            agentWorktreeServiceProvider.overrideWithValue(worktrees),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Connections').first);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('$sessionName · 1 '));
+      await tester.pump();
+
+      final row = find
+          .ancestor(of: find.text('target'), matching: find.byType(InkWell))
+          .first;
+      await tester.tap(
+        find.descendant(of: row, matching: find.byIcon(Icons.close)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Close window'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove worktree?'), findsOneWidget);
+      expect(sessionsNotifier.disconnectedConnectionIds, isEmpty);
+
+      await tester.tap(find.byKey(agentWorktreeRemoveButtonKey));
+      await tester.pumpAndSettle();
+
+      expect(worktrees.removed, [worktree]);
+      expect(sessionsNotifier.disconnectedConnectionIds, [7]);
+      expect(
+        find.text(
+          'Terminal window action failed. Check the session and try again.',
+        ),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets(
     'loads the current tmux query after an overlapping stale refresh finishes',

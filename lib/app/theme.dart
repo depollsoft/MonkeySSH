@@ -380,6 +380,9 @@ abstract final class FluttyTheme {
       snackBarTheme: SnackBarThemeData(
         backgroundColor: snackBarBackground,
         contentTextStyle: _inter(color: snackBarForeground),
+        // The Material default close icon is tuned for an inverse surface,
+        // so it vanishes on the dark theme's raised snackbar background.
+        closeIconColor: snackBarForeground,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         behavior: SnackBarBehavior.floating,
       ),

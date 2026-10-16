@@ -351,6 +351,40 @@ void registerRouterTests() {
         expect(first.key, isNot(repeated.key));
       });
 
+      test('has no onEnter guard, so notification stacks stay synchronous', () {
+        // Any onEnter makes every navigation finish asynchronously, so a
+        // notification tap's go(Connections) is lost under its push and the
+        // terminal stacks on whatever was open. Deep links are taken before
+        // the router by AppLinkNavigationBridge instead.
+        final router = container.read(routerProvider);
+
+        expect(router.configuration.topOnEnter, isNull);
+      });
+
+      test('link-opened terminal routes review automation and refresh', () {
+        final router = container.read(routerProvider);
+        final route = router.configuration.routes
+            .whereType<GoRoute>()
+            .singleWhere((route) => route.name == Routes.terminal);
+        TerminalScreen screen(String query) => _terminalScreenFor(
+          router: router,
+          route: route,
+          uri: Uri.parse('/terminal/3?$query'),
+        );
+
+        final first = screen('tmuxWindow=2&linkTap=first');
+        final repeated = screen('tmuxWindow=2&linkTap=second');
+        final manual = screen('tmuxWindow=2');
+
+        expect(first.openedFromLink, isTrue);
+        expect(first.initialTmuxWindowIndex, 2);
+        expect(first.initialTmuxSessionName, isNull);
+        expect(first.initialTmuxWindowRequiresVisibleSession, isTrue);
+        expect(first.key, isNot(repeated.key));
+        expect(manual.openedFromLink, isFalse);
+        expect(manual.initialTmuxWindowRequiresVisibleSession, isFalse);
+      });
+
       test(
         'intentionally returns a new GoRouter instance when authState changes '
         'to reset protected back-stack history',

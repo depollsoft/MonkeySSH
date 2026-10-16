@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/acp_json.dart';
@@ -30,6 +31,19 @@ class AcpRecentSessionsService {
   final int _maxEntries;
 
   final _mutations = SerializedMutations();
+  final _revision = ValueNotifier<int>(0);
+  var _disposed = false;
+
+  /// Bumps after every change to the stored recent sessions, so readers that
+  /// cache the list (such as the setup checklist) know to read it again.
+  ValueListenable<int> get revision => _revision;
+
+  /// Releases the [revision] notifier. A write still in flight completes
+  /// without notifying.
+  void dispose() {
+    _disposed = true;
+    _revision.dispose();
+  }
 
   /// Loads all persisted recent-session references, most recent first.
   ///
@@ -107,12 +121,13 @@ class AcpRecentSessionsService {
   Future<void> _write(List<AcpRecentSessionRef> refs) async {
     if (refs.isEmpty) {
       await _settings.delete(SettingKeys.acpRecentSessions);
-      return;
+    } else {
+      await _settings.setString(
+        SettingKeys.acpRecentSessions,
+        jsonEncode([for (final ref in refs) ref.toJson()]),
+      );
     }
-    await _settings.setString(
-      SettingKeys.acpRecentSessions,
-      jsonEncode([for (final ref in refs) ref.toJson()]),
-    );
+    if (!_disposed) _revision.value++;
   }
 
   List<AcpRecentSessionRef> _decode(String? raw) {
@@ -160,6 +175,10 @@ class AcpRecentSessionsService {
 }
 
 /// Provider for [AcpRecentSessionsService].
-final acpRecentSessionsServiceProvider = Provider<AcpRecentSessionsService>(
-  (ref) => AcpRecentSessionsService(ref.watch(settingsServiceProvider)),
-);
+final acpRecentSessionsServiceProvider = Provider<AcpRecentSessionsService>((
+  ref,
+) {
+  final service = AcpRecentSessionsService(ref.watch(settingsServiceProvider));
+  ref.onDispose(service.dispose);
+  return service;
+});
