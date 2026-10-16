@@ -118,6 +118,12 @@ dependency_overrides:
   # repo so every build path agrees. Tracking removal in #790.
   permission_handler_apple:
     path: third_party/permission_handler_apple
+  # The SOCKS browser keeps each host's website data in its own iOS 17
+  # WKWebsiteDataStore, which must be set on the web view's configuration
+  # before the plugin creates the WKWebView. 3.26.1 plus two accessors for
+  # that configuration; see third_party/webview_flutter_wkwebview/UPSTREAM.md.
+  webview_flutter_wkwebview:
+    path: third_party/webview_flutter_wkwebview
 
 dev_dependencies:
   flutter_test:
