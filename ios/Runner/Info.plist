@@ -89,6 +89,8 @@
 	<string>$(PRODUCT_NAME) reads the current Wi-Fi network name for trusted network rules and provides location to browser pages you explicitly allow.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>

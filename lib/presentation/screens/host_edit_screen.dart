@@ -15,6 +15,7 @@ import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/auto_connect_command.dart';
 import '../../domain/models/host_notifications.dart';
 import '../../domain/models/monetization.dart';
+import '../../domain/models/port_forward_type.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/models/remote_multiplexer.dart';
 import '../../domain/models/snippet_key_tokens.dart';
@@ -2722,8 +2723,10 @@ class _PortForwardTile extends StatelessWidget {
         style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
       ),
       subtitle: Text(
-        '${portForward.localPort} → '
-        '${portForward.remoteHost}:${portForward.remotePort}',
+        isDynamicPortForwardType(portForward.forwardType)
+            ? '${dynamicPortForwardListenerLabel(portForward.localPort)} · SOCKS5'
+            : '${portForward.localPort} → '
+                  '${portForward.remoteHost}:${portForward.remotePort}',
         style: FluttyTheme.monoStyle.copyWith(
           fontSize: 12,
           color: colorScheme.onSurfaceVariant,

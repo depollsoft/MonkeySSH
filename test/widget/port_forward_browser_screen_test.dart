@@ -1,12 +1,14 @@
 // ignore_for_file: public_member_api_docs, depend_on_referenced_packages
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
@@ -107,6 +109,7 @@ Future<_WebViewPlatform> _pumpBrowser(
   WidgetTester tester,
   List<PortForwardBrowserInitialTab> tabs, {
   AppPermissionService? permissions,
+  SocksBrowserProxyService? proxy,
 }) async {
   FluttyTheme.debugUseSystemFonts = true;
   addTearDown(() => FluttyTheme.debugUseSystemFonts = false);
@@ -118,6 +121,19 @@ Future<_WebViewPlatform> _pumpBrowser(
       WebViewPlatform.instance = previousPlatform;
     }
   });
+  // Opening a loopback browser first clears any SOCKS proxy left behind.
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        ..setMockMethodCallHandler(
+          const MethodChannel(SocksBrowserProxyService.channelName),
+          (_) async => null,
+        );
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(
+      const MethodChannel(SocksBrowserProxyService.channelName),
+      null,
+    ),
+  );
   final settings = _Settings();
   when(
     () => settings.getBool(
@@ -130,6 +146,8 @@ Future<_WebViewPlatform> _pumpBrowser(
         settingsServiceProvider.overrideWithValue(settings),
         if (permissions != null)
           appPermissionServiceProvider.overrideWithValue(permissions),
+        if (proxy != null)
+          socksBrowserProxyServiceProvider.overrideWithValue(proxy),
       ],
       child: MaterialApp(home: PortForwardBrowserScreen(initialTabs: tabs)),
     ),
@@ -159,7 +177,38 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(platform.controllers[1].requests, [second]);
+    // The closed tab's web view can outlive it, so it is left blank.
+    expect(platform.controllers[0].requests, [first, Uri.parse('about:blank')]);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a closed browser blanks its pages before SOCKS may route', (
+    tester,
+  ) async {
+    final proxy = SocksBrowserProxyService(
+      platform: TargetPlatform.android,
+      sinkPort: () async => 9,
+    );
+    final page = Uri.parse('http://localhost:8080');
+    final platform = await _pumpBrowser(tester, [
+      PortForwardBrowserInitialTab(uri: page),
+    ], proxy: proxy);
+    expect(platform.controllers.single.requests, [page]);
+
+    // Android's override is process-wide: it would route these pages too.
+    await expectLater(
+      proxy.hold(41080, owner: 7),
+      throwsA(isA<SocksBrowserProxyException>()),
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(platform.controllers.single.requests, [
+      page,
+      Uri.parse('about:blank'),
+    ]);
+    await proxy.hold(41080, owner: 7);
+    expect(proxy.routedPort, 41080);
   });
 
   group('page camera and microphone requests', () {
@@ -246,5 +295,23 @@ void main() {
       expect(permissions.requested, isEmpty);
       expect(request.granted, isFalse);
     });
+  });
+
+  testWidgets('one tap on the address field opens the keyboard', (
+    tester,
+  ) async {
+    await _pumpBrowser(tester, [
+      PortForwardBrowserInitialTab(uri: Uri.parse('http://localhost:8080')),
+    ]);
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await tester.pump();
+
+    // Focus widens the field to the whole toolbar; the move must keep the
+    // field's input connection, or the keyboard closes again at once.
+    expect(find.byTooltip('Back'), findsNothing);
+    expect(tester.testTextInput.hasAnyClients, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
   });
 }

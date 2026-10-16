@@ -109,6 +109,12 @@ dependency_overrides:
   # packages releases it: https://github.com/flutter/packages/pull/12640
   in_app_purchase_android:
     path: third_party/in_app_purchase_android
+  # The SOCKS browser keeps each host's website data in its own iOS 17
+  # WKWebsiteDataStore, which must be set on the web view's configuration
+  # before the plugin creates the WKWebView. 3.26.1 plus two accessors for
+  # that configuration; see third_party/webview_flutter_wkwebview/UPSTREAM.md.
+  webview_flutter_wkwebview:
+    path: third_party/webview_flutter_wkwebview
 
 dev_dependencies:
   flutter_test:

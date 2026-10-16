@@ -14,6 +14,7 @@ import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/services/acp_composer_draft_store.dart';
 import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/socks_browser_store_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/hosts_screen.dart';
@@ -72,6 +73,16 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
         connection.connectionId: connection.state,
     };
   }
+}
+
+class _RecordingSocksStores extends SocksBrowserStoreService {
+  _RecordingSocksStores(AppDatabase db)
+    : super(settings: SettingsService(db), savedHostIds: () async => {});
+
+  final List<int> forgottenHostIds = <int>[];
+
+  @override
+  Future<void> forgetHost(int hostId) async => forgottenHostIds.add(hostId);
 }
 
 class _RecordingDraftStore extends AcpComposerDraftStore {
@@ -315,7 +326,9 @@ void main() {
     },
   );
 
-  testWidgets('deleting a host forgets its unsent chat drafts', (tester) async {
+  testWidgets('deleting a host forgets its chat drafts and browser data', (
+    tester,
+  ) async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
     final repository = HostRepository(db, SecretEncryptionService.forTesting());
@@ -327,6 +340,7 @@ void main() {
       ),
     );
     final drafts = _RecordingDraftStore(db);
+    final socksStores = _RecordingSocksStores(db);
 
     await tester.pumpWidget(
       _buildHostsScreen(
@@ -335,6 +349,7 @@ void main() {
           activeSessionsProvider.overrideWith(_TestActiveSessionsNotifier.new),
           hostRepositoryProvider.overrideWithValue(repository),
           acpComposerDraftStoreProvider.overrideWithValue(drafts),
+          socksBrowserStoreServiceProvider.overrideWithValue(socksStores),
           allHostsProvider.overrideWith(
             (ref) => Stream.value([
               _buildHost(id: id, label: 'Alpha', sortOrder: 0),
@@ -354,5 +369,6 @@ void main() {
 
     expect(await repository.getById(id), isNull);
     expect(drafts.forgottenHostIds, [id]);
+    expect(socksStores.forgottenHostIds, [id]);
   });
 }

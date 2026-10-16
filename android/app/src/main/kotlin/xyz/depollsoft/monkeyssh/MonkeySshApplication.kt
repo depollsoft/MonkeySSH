@@ -28,6 +28,7 @@ class MonkeySshApplication : Application() {
         engine.plugins.add(AppPermissionsPlugin())
         SshServiceChannelHandler.attachToEngine(engine, applicationContext)
         DeviceDebugChannelHandler.attachToEngine(engine, applicationContext)
+        SocksBrowserProxyChannelHandler.attachToEngine(engine)
         engine.dartExecutor.executeDartEntrypoint(
             DartExecutor.DartEntrypoint.createDefault()
         )
