@@ -527,7 +527,9 @@ class _PortForwardBrowserScreenState
       _socksGeneration++;
       _socksRoutingPort = null;
       final wasReady = _socksStatus == SocksBrowserRouteStatus.ready;
-      if (wasReady || _socksStatus == SocksBrowserRouteStatus.connecting) {
+      if (wasReady ||
+          _socksStatus == SocksBrowserRouteStatus.connecting ||
+          _socksStatus == SocksBrowserRouteStatus.busy) {
         if (wasReady) {
           DiagnosticsLogService.instance.info('browser.socks', 'route_down');
         }
@@ -569,15 +571,27 @@ class _PortForwardBrowserScreenState
         _socksProxyHeld = true;
         await _socksProxy.hold(route.port);
       }
-    } on SocksBrowserProxyException {
+    } on SocksBrowserProxyException catch (error) {
+      // Another browser holds the proxy for its own forward. No hold was
+      // taken, and the proxy is that browser's, so it is neither released
+      // nor sunk from here.
+      final heldElsewhere = error.code == 'held_elsewhere';
+      if (heldElsewhere) {
+        _socksProxyHeld = false;
+      }
       if (mounted && generation == _socksGeneration) {
         _socksRoutingPort = null;
         setState(() {
-          _socksStatus = SocksBrowserRouteStatus.down;
-          _socksMessage = 'Couldn’t point the browser at the forward.';
+          if (heldElsewhere) {
+            _socksStatus = SocksBrowserRouteStatus.busy;
+            _socksMessage = null;
+          } else {
+            _socksStatus = SocksBrowserRouteStatus.down;
+            _socksMessage = 'Couldn’t point the browser at the forward.';
+          }
         });
         // The refused apply leaves the proxy's target unknown.
-        if (_tabs.isNotEmpty) {
+        if (_tabs.isNotEmpty && !heldElsewhere) {
           unawaited(_sinkSocksProxy());
         }
       }
@@ -910,6 +924,7 @@ class _PortForwardBrowserScreenState
               'Pages stay blocked while it retries.'
         : _socksMessage,
     onRestart: () => unawaited(_restartSocksRoute()),
+    onRetry: _handleSocksRouteChanged,
     onClose: _closeBrowserRoute,
   );
 

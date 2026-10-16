@@ -267,6 +267,19 @@ final _forward = PortForward(
   createdAt: DateTime(2026),
 );
 
+final _otherForward = PortForward(
+  id: 8,
+  name: 'Lab',
+  hostId: 43,
+  forwardType: 'dynamic',
+  localHost: '127.0.0.1',
+  localPort: 0,
+  remoteHost: '',
+  remotePort: 0,
+  autoStart: false,
+  createdAt: DateTime(2026),
+);
+
 const _proxyChannel = MethodChannel(SocksBrowserProxyService.channelName);
 const _sinkPort = 9;
 
@@ -370,8 +383,9 @@ void main() {
   Future<void> pumpBrowsers(
     WidgetTester tester,
     ValueNotifier<List<String>> visible,
-    List<_RouteSource> sources,
-  ) async {
+    List<_RouteSource> sources, {
+    Map<String, PortForward> forwards = const {},
+  }) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -397,7 +411,7 @@ void main() {
                   Positioned.fill(
                     key: ValueKey(name),
                     child: PortForwardBrowserScreen.socks(
-                      socksForward: _forward,
+                      socksForward: forwards[name] ?? _forward,
                     ),
                   ),
               ],
@@ -691,6 +705,41 @@ void main() {
     await settle(tester);
     // The last browser out stops the forward a browser started.
     expect(_events, ['apply:$_sinkPort', 'stop-forward:1']);
+  });
+
+  testWidgets('a browser for another forward waits for the shared proxy', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    final visible = ValueNotifier(['office']);
+    addTearDown(visible.dispose);
+    await pumpBrowsers(
+      tester,
+      visible,
+      [
+        _RouteSource(const SocksForwardRoute(connectionId: 1, port: 41080)),
+        _RouteSource(const SocksForwardRoute(connectionId: 2, port: 41090)),
+      ],
+      forwards: {'lab': _otherForward},
+    );
+    expect(_events, _browserCreated);
+
+    _events.clear();
+    visible.value = ['office', 'lab'];
+    await settle(tester);
+    // Taking the proxy would send the office pages through the lab host.
+    expect(find.text('proxy in use'), findsOneWidget);
+    expect(_events, isNot(contains('apply:41090')));
+
+    visible.value = ['lab'];
+    await settle(tester);
+    expect(_events, contains('apply:$_sinkPort'));
+    await tester.tap(find.text('Try again'));
+    await settle(tester);
+    expect(find.text('proxy in use'), findsNothing);
+    expect(find.text('browse via Lab'), findsOneWidget);
+    expect(_events.last, 'attach-store:${_storeIdFor(43)}');
+    expect(_events, contains('apply:41090'));
   });
 
   testWidgets('a start finishing after its browser closed spares a new one', (

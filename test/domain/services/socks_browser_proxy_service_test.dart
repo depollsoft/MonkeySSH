@@ -108,9 +108,10 @@ void main() {
     });
     final proxy = service();
 
+    // Two browsers on one forward; it moves, and one re-routes.
     await proxy.hold(41080);
-    // A second browser takes the proxy for another forward.
-    final second = proxy.hold(41090);
+    await proxy.hold(41080);
+    final second = proxy.reroute(41090);
     bool? released;
     unawaited(proxy.release().then((sunk) => released = sunk));
     await pumpEventQueue();
@@ -122,6 +123,54 @@ void main() {
     await pumpEventQueue();
     expect(released, isTrue);
     expect(calls, ['apply:41080', 'apply:41090']);
+  });
+
+  test('a hold for another forward is refused while one is held', () async {
+    handle((_) async => null);
+    final proxy = service();
+
+    await proxy.hold(41080);
+    // Taking the shared proxy would send the open browser's pages, with its
+    // host's cookies, through the other forward's host.
+    await expectLater(
+      proxy.hold(41090),
+      throwsA(
+        isA<SocksBrowserProxyException>().having(
+          (error) => error.code,
+          'code',
+          'held_elsewhere',
+        ),
+      ),
+    );
+    expect(calls, ['apply:41080']);
+    expect(proxy.routedPort, 41080);
+
+    // The refused hold was not counted, so one release frees the proxy.
+    expect(await proxy.release(), isTrue);
+    expect(proxy.isHeld, isFalse);
+    await proxy.hold(41090);
+    expect(calls, ['apply:41080', 'apply:$_sinkPort', 'apply:41090']);
+  });
+
+  test('a release after a failed re-route sinks the unknown target', () async {
+    handle((call) async {
+      if (call.method == 'apply' && (call.arguments as Map)['port'] == 41090) {
+        throw PlatformException(code: 'apply_failed');
+      }
+      return null;
+    });
+    final proxy = service();
+
+    await proxy.hold(41080);
+    await proxy.hold(41080);
+    await expectLater(
+      proxy.reroute(41090),
+      throwsA(isA<SocksBrowserProxyException>()),
+    );
+    // The other browser still holds, but the native proxy may still target
+    // 41080, so it must move before that port is freed.
+    expect(await proxy.release(), isTrue);
+    expect(calls, ['apply:41080', 'apply:41090', 'apply:$_sinkPort']);
   });
 
   test('block points a held proxy at the sink until it is re-routed', () async {
@@ -276,6 +325,40 @@ void main() {
       await pumpEventQueue();
       expect(sinks, hasLength(2));
       expect(calls.last, 'apply:50001');
+    });
+
+    test('a sink lost while its apply is pending is still replaced', () async {
+      final gate = Completer<void>();
+      handle((call) async {
+        if (call.method == 'apply' &&
+            (call.arguments as Map)['port'] == 50020) {
+          await gate.future;
+        }
+        return null;
+      });
+      final sinks = <_FakeSink>[];
+      final proxy = SocksBrowserProxyService(
+        platform: TargetPlatform.iOS,
+        bindSink: () async {
+          final sink = _FakeSink(50020 + sinks.length);
+          sinks.add(sink);
+          return sink;
+        },
+      );
+
+      await proxy.hold(41080);
+      final released = proxy.release();
+      await pumpEventQueue();
+      expect(calls.last, 'apply:50020');
+
+      // The listener closes before the apply that points at it returns.
+      await sinks.single.connections.close();
+      await pumpEventQueue();
+      gate.complete();
+      expect(await released, isTrue);
+      await pumpEventQueue();
+      expect(sinks, hasLength(2));
+      expect(calls.last, 'apply:50021');
     });
 
     test('a failed bind is retried on the next block', () async {

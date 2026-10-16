@@ -16,6 +16,9 @@ enum SocksBrowserRouteStatus {
 
   /// This device cannot route the browser through SOCKS.
   unsupported,
+
+  /// Another SOCKS browser, for a different forward, holds the shared proxy.
+  busy,
 }
 
 /// Full-surface status for a SOCKS browser that cannot load pages right now.
@@ -29,6 +32,7 @@ class SocksBrowserStatusPanel extends StatelessWidget {
     required this.forwardName,
     this.message,
     this.onRestart,
+    this.onRetry,
     this.onClose,
     super.key,
   });
@@ -44,6 +48,9 @@ class SocksBrowserStatusPanel extends StatelessWidget {
 
   /// Restarts the forward from the down state.
   final VoidCallback? onRestart;
+
+  /// Tries to take the proxy again from the busy state.
+  final VoidCallback? onRetry;
 
   /// Closes the browser.
   final VoidCallback? onClose;
@@ -65,6 +72,12 @@ class SocksBrowserStatusPanel extends StatelessWidget {
       SocksBrowserRouteStatus.unsupported => (
         'socks browsing unavailable',
         message ?? 'This device can’t route the browser through SOCKS.',
+      ),
+      SocksBrowserRouteStatus.busy => (
+        'proxy in use',
+        'Another SOCKS browser is still open, and both would share one '
+            'proxy, so its pages could load through $forwardName. Close it, '
+            'then try again.',
       ),
       SocksBrowserRouteStatus.ready => ('', ''),
     };
@@ -132,6 +145,15 @@ class SocksBrowserStatusPanel extends StatelessWidget {
                       onPressed: onRestart,
                       icon: const Icon(Icons.restart_alt_rounded),
                       label: const Text('Restart forward'),
+                    ),
+                    const SizedBox(height: FluttyTheme.spacingSm),
+                  ],
+                  if (onRetry != null &&
+                      status == SocksBrowserRouteStatus.busy) ...[
+                    FilledButton.icon(
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Try again'),
                     ),
                     const SizedBox(height: FluttyTheme.spacingSm),
                   ],

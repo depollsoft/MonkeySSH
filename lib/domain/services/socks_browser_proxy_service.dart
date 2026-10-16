@@ -112,6 +112,8 @@ class SocksBrowserProxyService {
   Future<int>? _sinkPort;
   int? _appliedPort;
   int? _routedPort;
+  // The forward port every current holder routes through.
+  int? _heldPort;
   // The native override is process state that can outlive this isolate (hot
   // restart, engine re-creation), so a direct browser clears it once per
   // isolate even when this service never applied it.
@@ -156,9 +158,22 @@ class SocksBrowserProxyService {
   /// Takes a hold on the proxy and routes the browser through [port].
   ///
   /// Throws [SocksBrowserProxyException] when the platform refuses; the
-  /// caller must not load pages then. Balance every call with [release].
+  /// caller must not load pages then. Balance every call with [release],
+  /// except one refused as `held_elsewhere`, which takes no hold.
+  ///
+  /// Every SOCKS browser shares one proxy: Android's override is
+  /// process-wide, and iOS points every live SOCKS store at the same port. So
+  /// while browsers hold it for one forward, a hold for another is refused.
+  /// Taking it over would send the open browsers' pages, with their host's
+  /// cookies, through the other forward's host.
   Future<void> hold(int port) {
+    if (_holders > 0 && _heldPort != port) {
+      return Future<void>.error(
+        const SocksBrowserProxyException('held_elsewhere'),
+      );
+    }
     _holders++;
+    _heldPort = port;
     return _route(port);
   }
 
@@ -167,6 +182,7 @@ class SocksBrowserProxyService {
     if (_holders == 0) {
       return Future<void>.error(const SocksBrowserProxyException('not_held'));
     }
+    _heldPort = port;
     return _route(port);
   }
 
@@ -199,13 +215,20 @@ class SocksBrowserProxyService {
   ///
   /// While another browser holds the proxy, the result waits for any apply
   /// already queued (that browser's [hold] or [reroute]), so the proxy has
-  /// moved to its port before the caller stops its own forward.
+  /// moved to its port before the caller stops its own forward. If that
+  /// apply failed, the proxy's target is unknown and it goes to the sink.
   Future<bool> release() {
     if (_holders == 0) {
       return Future<bool>.value(true);
     }
     _holders--;
-    return _queue.run(() async => _holders > 0 || await _blockUnlocked());
+    if (_holders == 0) {
+      _heldPort = null;
+    }
+    return _queue.run(
+      () async =>
+          (_holders > 0 && _appliedPort != null) || await _blockUnlocked(),
+    );
   }
 
   Future<bool> _blockUnlocked() async {
@@ -288,14 +311,12 @@ class SocksBrowserProxyService {
   void _handleSinkLost(int port) {
     _log('sink_lost', code: 'listener_closed');
     _sinkPort = null;
-    if (_appliedPort != port) {
-      return;
-    }
-    _appliedPort = null;
+    // Checked in the queue, after any apply in flight has settled: an apply
+    // of this sink that was still pending when it closed lands on its port.
     unawaited(
       _queue.run(() async {
         // A forward routed meanwhile replaced the sink; leave it.
-        if (_routedPort == null && _appliedPort == null) {
+        if (_appliedPort == port && _routedPort == null) {
           await _blockUnlocked();
         }
       }),
