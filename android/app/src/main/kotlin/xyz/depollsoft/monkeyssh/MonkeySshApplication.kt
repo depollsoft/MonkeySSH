@@ -25,6 +25,7 @@ class MonkeySshApplication : Application() {
 
         val engine = FlutterEngine(this)
         GeneratedPluginRegistrant.registerWith(engine)
+        engine.plugins.add(AppPermissionsPlugin())
         SshServiceChannelHandler.attachToEngine(engine, applicationContext)
         DeviceDebugChannelHandler.attachToEngine(engine, applicationContext)
         engine.dartExecutor.executeDartEntrypoint(
