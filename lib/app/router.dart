@@ -4,9 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../domain/models/acp_session_keys.dart';
-import '../domain/models/app_link.dart';
 import '../domain/models/monetization.dart';
-import '../domain/services/app_link_service.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/local_notification_service.dart';
 import '../domain/services/port_forward_browser_service.dart';
@@ -47,9 +45,6 @@ final routerProvider = Provider<GoRouter>((ref) {
   // notification deep-link navigation remains compatible.
   final authState = ref.watch(authStateProvider);
   final telemetryService = ref.watch(telemetryServiceProvider);
-  // Captured now: a router replaced after an auth change must not read
-  // through this provider's disposed ref.
-  final appLinks = ref.read(appLinkServiceProvider);
 
   return GoRouter(
     navigatorKey: appNavigatorKey,
@@ -58,11 +53,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       TelemetryRouteObserver(telemetryService: telemetryService),
       KeyboardDismissRouteObserver(),
     ],
-    // Platform deep links are the only locations that carry a scheme. They
-    // never become routes: app links are queued for the link bridge, which
-    // waits for unlock, and anything else is dropped.
-    onEnter: (context, current, next, router) =>
-        guardExternalLocation(next.uri, appLinks),
+    // No onEnter guard: any onEnter makes every navigation finish
+    // asynchronously, so `go(home)` followed by `push(terminal)` stacks the
+    // terminal on the old routes instead of above Connections. Platform deep
+    // links never reach the router; AppLinkNavigationBridge takes them first.
     redirect: (context, state) => redirectForAuthState(
       authState: authState,
       matchedLocation: state.matchedLocation,
@@ -510,21 +504,6 @@ CustomTransitionPage<T> _buildSlideUpPage<T>({
       ),
   child: child,
 );
-
-/// Top-level router guard for locations that carry a URL scheme.
-///
-/// In-app navigation never uses a scheme, so a scheme means the platform
-/// delivered a deep link. `monkeyssh://` and `ssh://` links go to [links];
-/// every such location is blocked so the current route stays put.
-OnEnterResult guardExternalLocation(Uri location, AppLinkService links) {
-  if (!location.hasScheme) {
-    return const Allow();
-  }
-  if (isAppLinkUri(location)) {
-    links.receive(location);
-  }
-  return const Block.stop();
-}
 
 /// Computes the route redirect for the given authentication state.
 String? redirectForAuthState({

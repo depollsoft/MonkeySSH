@@ -10,19 +10,28 @@ import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/app_link_handler.dart';
 import 'package:monkeyssh/app/app_link_navigation.dart';
+import 'package:monkeyssh/app/notification_navigation.dart';
+import 'package:monkeyssh/app/push_notification_bridge.dart';
 import 'package:monkeyssh/app/router.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/app_link.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/services/acp_recent_sessions_service.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/app_link_service.dart';
 import 'package:monkeyssh/domain/services/auth_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
+import 'package:monkeyssh/domain/services/push/push_event.dart';
+import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
+import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 
 import '../helpers/mocks.dart';
@@ -63,6 +72,76 @@ class _InstantSessions extends ActiveSessionsNotifier {
   }
 }
 
+/// Push messages a test taps on.
+class _PushGateway implements PushMessagingGateway {
+  // Closed by the test group's tearDown.
+  // ignore: close_sinks
+  final opened = StreamController<PushRemoteMessage>.broadcast();
+
+  @override
+  Stream<PushRemoteMessage> get onMessage =>
+      const Stream<PushRemoteMessage>.empty();
+
+  @override
+  Stream<PushRemoteMessage> get onMessageOpenedApp => opened.stream;
+
+  @override
+  Future<PushRemoteMessage?> getInitialMessage() async => null;
+
+  @override
+  Stream<String> get onTokenRefresh => const Stream<String>.empty();
+
+  @override
+  Future<void> deleteToken() async {}
+
+  @override
+  Future<String?> getToken() async => null;
+
+  @override
+  Future<PushRegistration> register({
+    required String token,
+    required String platform,
+    String? deviceId,
+    bool appNotifications = false,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<bool> requestPermission() async => false;
+
+  @override
+  Future<void> setAutoInitEnabled({required bool enabled}) async {}
+}
+
+/// Resolves every tap to [target].
+class _PushController extends PushNotificationController {
+  _PushController(this.target);
+
+  final PushNavigationTarget target;
+
+  @override
+  PushNotificationState build() =>
+      const PushNotificationState(available: true, loaded: true);
+
+  @override
+  Future<PushNavigationTarget?> resolve(PushRemoteMessage message) async =>
+      target;
+
+  @override
+  void reportVisibility({
+    required bool foreground,
+    int? viewedHostId,
+    int? viewedConnectionId,
+  }) {}
+}
+
+class _NoLaunchNotifications extends LocalNotificationService {
+  @override
+  Future<String?> consumeLaunchPushPayload() async => null;
+
+  @override
+  Future<String?> currentActivityPushPayload() async => null;
+}
+
 const _proState = MonetizationState(
   billingAvailability: MonetizationBillingAvailability.available,
   entitlements: MonetizationEntitlements.pro(),
@@ -98,6 +177,84 @@ Host _host(int id) => Host(
 );
 
 void main() {
+  group('takeExternalLocation', () {
+    late AppLinkService links;
+
+    setUp(() {
+      links = AppLinkService(
+        channel: const MethodChannel('test/app_links'),
+        diagnostics: RecordingDiagnosticsLogger(),
+      );
+    });
+
+    tearDown(() => links.dispose());
+
+    test('leaves in-app locations to the router', () {
+      for (final location in [
+        '/',
+        '/terminal/1',
+        buildTmuxAlertHomeLocation(),
+        // A session name is user text, so it may itself look like a URL.
+        buildPushNotificationTerminalLocation(
+          const PushNavigationTarget(
+            hostId: 3,
+            kind: PushEventKind.permission,
+            sessionName: 'monkeyssh://open?host=4',
+            windowId: '@2',
+            connectionId: 9,
+          ),
+          notificationTapId: 'tap',
+        ),
+        '/hosts/import-ssh-config',
+      ]) {
+        expect(
+          takeExternalLocation(Uri.parse(location), links),
+          isFalse,
+          reason: location,
+        );
+      }
+      expect(links.hasPending, isFalse);
+    });
+
+    test('queues app links', () {
+      expect(
+        takeExternalLocation(
+          Uri.parse('monkeyssh://open/?host=3&window=1'),
+          links,
+        ),
+        isTrue,
+      );
+      expect(
+        links.takePending(),
+        const OpenHostAppLink(hostId: 3, windowIndex: 1),
+      );
+    });
+
+    test('queues ssh links for review', () {
+      takeExternalLocation(Uri.parse('ssh://root@example.com/'), links);
+
+      expect(
+        links.takePending(),
+        const SshHostAppLink(hostname: 'example.com', username: 'root'),
+      );
+    });
+
+    test('drops other deep links without turning them into routes', () {
+      for (final location in [
+        'https://example.com/terminal/1',
+        'content://provider/document/1',
+        'file:///private/var/mobile/a.txt',
+      ]) {
+        expect(
+          takeExternalLocation(Uri.parse(location), links),
+          isTrue,
+          reason: location,
+        );
+      }
+      expect(links.hasPending, isFalse);
+    });
+  });
+
   late MockHostRepository hosts;
   late _MockRecentSessions recentSessions;
   late _MockPresetService presets;
@@ -124,10 +281,10 @@ void main() {
     when(() => monetization.canUseFeature(any())).thenAnswer((_) async => true);
     when(() => monetization.currentState).thenReturn(_proState);
     sessions = _InstantSessions();
+    // Like the production router, no onEnter guard: the bridge takes
+    // platform deep links before the router sees them.
     router = GoRouter(
       navigatorKey: appNavigatorKey,
-      // The production guard: a platform deep link never becomes a route.
-      onEnter: (_, _, next, _) => guardExternalLocation(next.uri, links),
       routes: [
         GoRoute(
           path: '/',
@@ -162,8 +319,16 @@ void main() {
   Future<_TestAuth> pumpBridge(
     WidgetTester tester, {
     AuthState authState = AuthState.notConfigured,
+    _PushGateway? push,
   }) async {
     final auth = _TestAuth(authState);
+    Widget app = AppLinkNavigationBridge(
+      child: MaterialApp.router(theme: FluttyTheme.dark, routerConfig: router),
+    );
+    if (push != null) {
+      // As in the app: push taps and links share the router.
+      app = PushNotificationBridge(child: app);
+    }
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -181,13 +346,29 @@ void main() {
             (ref) => Stream.value(_proState),
           ),
           activeSessionsProvider.overrideWith(() => sessions),
+          if (push != null) ...[
+            pushNotificationsAvailableProvider.overrideWithValue(true),
+            pushMessagingGatewayProvider.overrideWithValue(push),
+            pushNotificationControllerProvider.overrideWith(
+              () => _PushController(
+                const PushNavigationTarget(
+                  hostId: 4,
+                  kind: PushEventKind.permission,
+                  sessionName: 'main',
+                  windowId: '@3',
+                  connectionId: 21,
+                ),
+              ),
+            ),
+            hostNotificationPrefsReaderProvider.overrideWithValue(
+              (_) async => const HostNotificationPrefs(),
+            ),
+            localNotificationServiceProvider.overrideWithValue(
+              _NoLaunchNotifications(),
+            ),
+          ],
         ],
-        child: AppLinkNavigationBridge(
-          child: MaterialApp.router(
-            theme: FluttyTheme.dark,
-            routerConfig: router,
-          ),
-        ),
+        child: app,
       ),
     );
     await tester.pumpAndSettle();
@@ -365,30 +546,128 @@ void main() {
     expect(find.textContaining('terminal'), findsNothing);
   });
 
-  testWidgets('a platform deep link goes through the router guard', (
-    tester,
-  ) async {
-    when(() => hosts.getById(3)).thenAnswer((_) async => _host(3));
-    await pumpBridge(tester);
-
-    // What iOS sends after the first frame for monkeyssh://open?host=3.
+  /// Delivers [location] the way the platform does, as iOS sends
+  /// `monkeyssh://open?host=3` after the first frame.
+  Future<void> platformPush(WidgetTester tester, String location) async {
     await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
       SystemChannels.navigation.name,
       SystemChannels.navigation.codec.encodeMethodCall(
-        const MethodCall('pushRouteInformation', <String, Object?>{
-          'location': 'monkeyssh://open?host=3&window=2',
+        MethodCall('pushRouteInformation', <String, Object?>{
+          'location': location,
           'state': null,
         }),
       ),
       (_) {},
     );
     await tester.pumpAndSettle();
+  }
+
+  testWidgets('a platform deep link reaches the bridge, not the router', (
+    tester,
+  ) async {
+    when(() => hosts.getById(3)).thenAnswer((_) async => _host(3));
+    await pumpBridge(tester);
+
+    await platformPush(tester, 'monkeyssh://open?host=3&window=2');
 
     expect(
       find.textContaining('terminal /terminal/3?tmuxWindow=2&linkTap='),
       findsOneWidget,
     );
     expect(find.textContaining('monkeyssh'), findsNothing);
+  });
+
+  testWidgets('other platform URLs with a scheme leave the route alone', (
+    tester,
+  ) async {
+    await pumpBridge(tester);
+
+    for (final location in [
+      'content://provider/document/1',
+      'file:///private/var/mobile/a.txt',
+      'https://example.com/terminal/1',
+    ]) {
+      await platformPush(tester, location);
+      expect(router.state.uri.toString(), '/', reason: location);
+    }
+    expect(links.hasPending, isFalse);
+    expect(tester.takeException(), isNull);
+
+    // Platform paths without a scheme still reach the router.
+    await platformPush(tester, '/terminal/5');
+    expect(router.state.uri.path, '/terminal/5');
+  });
+
+  group('with push notifications', () {
+    late _PushGateway push;
+
+    setUp(() => push = _PushGateway());
+    tearDown(() => push.opened.close());
+
+    var message = 0;
+    void tapPush() => push.opened.add(
+      PushRemoteMessage(data: {'v': '1', 'p': 'sealed-${message++}'}),
+    );
+
+    testWidgets('push taps and links each open their own terminal', (
+      tester,
+    ) async {
+      when(() => hosts.getById(7)).thenAnswer((_) async => _host(7));
+      await pumpBridge(tester, push: push);
+
+      links.receive(Uri.parse('monkeyssh://open?host=7&window=1'));
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, '/terminal/7');
+      expect(router.state.uri.queryParameters['tmuxWindow'], '1');
+      expect(router.state.uri.queryParameters, contains('linkTap'));
+
+      tapPush();
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, '/terminal/4');
+      expect(router.state.uri.queryParameters['tmuxWindowId'], '@3');
+      expect(router.state.uri.queryParameters['connectionId'], '21');
+      expect(router.state.uri.queryParameters, isNot(contains('linkTap')));
+
+      links.receive(Uri.parse('monkeyssh://open?host=7&window=2'));
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, '/terminal/7');
+      expect(router.state.uri.queryParameters['tmuxWindow'], '2');
+
+      // Each one replaced the stack, leaving Connections underneath.
+      router.pop();
+      await tester.pumpAndSettle();
+      expect(router.state.uri.toString(), '/?tab=connections');
+      expect(router.canPop(), isFalse);
+    });
+
+    testWidgets('a push tap during a preset review opens its terminal and '
+        'runs nothing', (tester) async {
+      stubYoloPreset(7);
+      when(() => hosts.getById(3)).thenAnswer((_) async => _host(3));
+      await pumpBridge(tester, push: push);
+
+      links.receive(Uri.parse('monkeyssh://preset?id=7'));
+      await tester.pumpAndSettle();
+      expect(find.text('Run launch preset?'), findsOneWidget);
+
+      tapPush();
+      await tester.pumpAndSettle();
+      expect(router.state.uri.path, '/terminal/4');
+      expect(sessions.connects, isEmpty);
+
+      // The review is still waiting, and links after it still open.
+      links.receive(Uri.parse('monkeyssh://open?host=3'));
+      await tester.pumpAndSettle();
+      expect(sessions.connects, isEmpty);
+      router.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('Run launch preset?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(sessions.connects, isEmpty);
+      expect(router.state.uri.path, '/terminal/3');
+    });
   });
 
   testWidgets('an ssh link with a password is refused', (tester) async {
