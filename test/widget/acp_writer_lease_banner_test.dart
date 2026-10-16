@@ -15,6 +15,7 @@ import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.da
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/screens/agent_chat_screen.dart';
 import 'package:monkeyssh/presentation/widgets/acp_composer.dart';
+import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/acp_writer_lease_banner.dart';
 
 import '../support/fake_acp_session_manager.dart';
@@ -407,6 +408,39 @@ void main() {
     // Opened read-only from a native window, the chat is in no recent list;
     // the take over still attaches in the session's own directory.
     expect(manager.reconnects.single.cwd, '/home/dev/project');
+  });
+
+  testWidgets('the banner folds with the composer while search has focus', (
+    tester,
+  ) async {
+    // A phone with its keyboard up.
+    tester.view
+      ..physicalSize = const Size(390, 800)
+      ..devicePixelRatio = 1
+      ..viewInsets = const FakeViewPadding(bottom: 320);
+    addTearDown(tester.view.reset);
+    final manager = FakeAcpSessionManager(
+      sessions: [_heldSession(_writer(idle: Duration.zero))],
+    );
+    addTearDown(manager.dispose);
+    await tester.pumpWidget(_chat(manager));
+    await tester.pumpAndSettle();
+    expect(find.byType(AcpWriterLeaseBanner), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Search chat'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AcpTranscriptSearchBar), findsOneWidget);
+    expect(find.byType(AcpComposer), findsNothing);
+    expect(find.byType(AcpWriterLeaseBanner), findsNothing);
+
+    await tester.tap(find.byTooltip('Close search'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AcpComposer), findsOneWidget);
+    expect(find.byType(AcpWriterLeaseBanner), findsOneWidget);
+    expect(
+      tester.getBottomLeft(find.byType(AcpWriterLeaseBanner)).dy,
+      lessThanOrEqualTo(tester.getTopLeft(find.byType(AcpComposer)).dy),
+    );
   });
 
   testWidgets('a failed take over keeps the read-only chat and says so', (
