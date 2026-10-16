@@ -112,7 +112,8 @@ class SocksBrowserProxyService {
   Future<int>? _sinkPort;
   int? _appliedPort;
   int? _routedPort;
-  // The forward port every current holder routes through.
+  // The forward every current holder holds the proxy for, and its port.
+  Object? _heldOwner;
   int? _heldPort;
   // The native override is process state that can outlive this isolate (hot
   // restart, engine re-creation), so a direct browser clears it once per
@@ -165,14 +166,17 @@ class SocksBrowserProxyService {
   /// process-wide, and iOS points every live SOCKS store at the same port. So
   /// while browsers hold it for one forward, a hold for another is refused.
   /// Taking it over would send the open browsers' pages, with their host's
-  /// cookies, through the other forward's host.
-  Future<void> hold(int port) {
-    if (_holders > 0 && _heldPort != port) {
+  /// cookies, through the other forward's host. [owner] identifies the
+  /// forward, not its listener: a stopped forward's port can be bound again
+  /// by another.
+  Future<void> hold(int port, {required Object owner}) {
+    if (_holders > 0 && _heldOwner != owner) {
       return Future<void>.error(
         const SocksBrowserProxyException('held_elsewhere'),
       );
     }
     _holders++;
+    _heldOwner = owner;
     _heldPort = port;
     return _route(port);
   }
@@ -209,26 +213,38 @@ class SocksBrowserProxyService {
   /// sink instead of clearing it, because the closed browser's web view can
   /// outlive its widget and keep issuing requests.
   ///
-  /// Returns false when the last release could not reach the sink. The proxy
-  /// then still targets the forward's port, so the caller must keep that
-  /// forward listening rather than free the port for another app.
+  /// Returns whether the caller may stop its forward: the proxy, once every
+  /// apply queued before this has run, no longer targets that forward's port.
+  /// Otherwise the proxy goes to the sink first. Returns false when the sink
+  /// could not be applied; the proxy then still targets the forward's port,
+  /// so the caller must keep that forward listening rather than free the
+  /// port for another app.
   ///
-  /// While another browser holds the proxy, the result waits for any apply
-  /// already queued (that browser's [hold] or [reroute]), so the proxy has
-  /// moved to its port before the caller stops its own forward. If that
-  /// apply failed, the proxy's target is unknown and it goes to the sink.
+  /// Another browser on the same forward keeps it routed; its lease keeps
+  /// the forward running.
   Future<bool> release() {
     if (_holders == 0) {
       return Future<bool>.value(true);
     }
+    final departingOwner = _heldOwner;
+    final departingPort = _heldPort;
     _holders--;
     if (_holders == 0) {
+      _heldOwner = null;
       _heldPort = null;
     }
-    return _queue.run(
-      () async =>
-          (_holders > 0 && _appliedPort != null) || await _blockUnlocked(),
-    );
+    return _queue.run(() async {
+      final applied = _appliedPort;
+      if (applied != null && applied != departingPort) {
+        // The sink, or a forward that took the proxy meanwhile.
+        return true;
+      }
+      if (applied != null && _holders > 0 && _heldOwner == departingOwner) {
+        return true;
+      }
+      // The departing forward's port, or unknown after a failed apply.
+      return _blockUnlocked();
+    });
   }
 
   Future<bool> _blockUnlocked() async {

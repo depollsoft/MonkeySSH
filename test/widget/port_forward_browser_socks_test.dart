@@ -1046,7 +1046,7 @@ void main() {
       platform: TargetPlatform.iOS,
       sinkPort: () async => _sinkPort,
     );
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _forward.id);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [

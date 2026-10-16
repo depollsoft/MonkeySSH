@@ -7,6 +7,9 @@ import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 
 const _channel = MethodChannel(SocksBrowserProxyService.channelName);
 const _sinkPort = 9;
+// Saved forward ids of two SOCKS rules.
+const _office = 7;
+const _lab = 8;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -84,10 +87,10 @@ void main() {
       handle((_) async => null);
       final proxy = service();
 
-      await proxy.hold(41080);
+      await proxy.hold(41080, owner: _office);
       expect(proxy.routedPort, 41080);
       await proxy.reroute(41081);
-      await proxy.hold(41081);
+      await proxy.hold(41081, owner: _office);
       await proxy.release();
       expect(calls, ['apply:41080', 'apply:41081']);
 
@@ -109,8 +112,8 @@ void main() {
     final proxy = service();
 
     // Two browsers on one forward; it moves, and one re-routes.
-    await proxy.hold(41080);
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
+    await proxy.hold(41080, owner: _office);
     final second = proxy.reroute(41090);
     bool? released;
     unawaited(proxy.release().then((sunk) => released = sunk));
@@ -129,11 +132,11 @@ void main() {
     handle((_) async => null);
     final proxy = service();
 
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
     // Taking the shared proxy would send the open browser's pages, with its
     // host's cookies, through the other forward's host.
     await expectLater(
-      proxy.hold(41090),
+      proxy.hold(41090, owner: _lab),
       throwsA(
         isA<SocksBrowserProxyException>().having(
           (error) => error.code,
@@ -148,7 +151,52 @@ void main() {
     // The refused hold was not counted, so one release frees the proxy.
     expect(await proxy.release(), isTrue);
     expect(proxy.isHeld, isFalse);
-    await proxy.hold(41090);
+    await proxy.hold(41090, owner: _lab);
+    expect(calls, ['apply:41080', 'apply:$_sinkPort', 'apply:41090']);
+  });
+
+  test('a port reused by another forward does not share the hold', () async {
+    handle((_) async => null);
+    final proxy = service();
+
+    await proxy.hold(41080, owner: _office);
+    // The office forward stops; its browser stays open and keeps its hold.
+    expect(await proxy.block(), isTrue);
+    // The lab forward binds the freed port number.
+    await expectLater(
+      proxy.hold(41080, owner: _lab),
+      throwsA(
+        isA<SocksBrowserProxyException>().having(
+          (error) => error.code,
+          'code',
+          'held_elsewhere',
+        ),
+      ),
+    );
+    expect(calls, ['apply:41080', 'apply:$_sinkPort']);
+  });
+
+  test('a release sinks its port before a newer hold is applied', () async {
+    final gate = Completer<void>();
+    handle((call) async {
+      if (call.method == 'apply' && (call.arguments as Map)['port'] == 41080) {
+        await gate.future;
+      }
+      return null;
+    });
+    final proxy = service();
+
+    final first = proxy.hold(41080, owner: _office);
+    // The office browser closes while its apply is still pending, and a lab
+    // browser takes the proxy right after.
+    final released = proxy.release();
+    final second = proxy.hold(41090, owner: _lab);
+    gate.complete();
+    await first;
+    // The office forward may stop only once the proxy has left its port,
+    // whether or not the lab apply then lands.
+    expect(await released, isTrue);
+    await second;
     expect(calls, ['apply:41080', 'apply:$_sinkPort', 'apply:41090']);
   });
 
@@ -161,8 +209,8 @@ void main() {
     });
     final proxy = service();
 
-    await proxy.hold(41080);
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
+    await proxy.hold(41080, owner: _office);
     await expectLater(
       proxy.reroute(41090),
       throwsA(isA<SocksBrowserProxyException>()),
@@ -177,7 +225,7 @@ void main() {
     handle((_) async => null);
     final proxy = service();
 
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
     await proxy.block();
     expect(proxy.routedPort, isNull);
     await proxy.reroute(41090);
@@ -189,7 +237,7 @@ void main() {
     handle((_) async => null);
     final proxy = SocksBrowserProxyService(platform: TargetPlatform.android);
 
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
     await proxy.release();
     expect(calls.last, 'apply:${SocksBrowserProxyService.androidSinkPort}');
   });
@@ -198,7 +246,7 @@ void main() {
     handle((_) async => null);
     final proxy = SocksBrowserProxyService(platform: TargetPlatform.iOS);
 
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
     await proxy.block();
     final sinkPort = int.parse(calls.last.split(':').last);
     expect(sinkPort, isNot(41080));
@@ -218,7 +266,7 @@ void main() {
       await proxy.clearBeforeDirectBrowsing();
       expect(calls, ['clear']);
 
-      await proxy.hold(41080);
+      await proxy.hold(41080, owner: _office);
       await expectLater(
         proxy.clearBeforeDirectBrowsing(),
         throwsA(isA<SocksBrowserProxyException>()),
@@ -266,7 +314,7 @@ void main() {
     final proxy = service();
 
     await expectLater(
-      proxy.hold(41080),
+      proxy.hold(41080, owner: _office),
       throwsA(
         isA<SocksBrowserProxyException>().having(
           (error) => error.code,
@@ -295,7 +343,7 @@ void main() {
     });
     final proxy = service();
 
-    await proxy.hold(41080);
+    await proxy.hold(41080, owner: _office);
     expect(await proxy.block(), isFalse);
     await proxy.reroute(41080);
     // The caller keeps the forward listening while the proxy targets it.
@@ -315,7 +363,7 @@ void main() {
         },
       );
 
-      await proxy.hold(41080);
+      await proxy.hold(41080, owner: _office);
       expect(await proxy.release(), isTrue);
       expect(calls.last, 'apply:50000');
 
@@ -346,7 +394,7 @@ void main() {
         },
       );
 
-      await proxy.hold(41080);
+      await proxy.hold(41080, owner: _office);
       final released = proxy.release();
       await pumpEventQueue();
       expect(calls.last, 'apply:50020');
@@ -375,7 +423,7 @@ void main() {
         },
       );
 
-      await proxy.hold(41080);
+      await proxy.hold(41080, owner: _office);
       expect(await proxy.block(), isFalse);
       expect(calls, ['apply:41080']);
       expect(await proxy.block(), isTrue);

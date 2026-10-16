@@ -569,7 +569,7 @@ class _PortForwardBrowserScreenState
         await _socksProxy.reroute(route.port);
       } else {
         _socksProxyHeld = true;
-        await _socksProxy.hold(route.port);
+        await _socksProxy.hold(route.port, owner: widget.socksForward!.id);
       }
     } on SocksBrowserProxyException catch (error) {
       // Another browser holds the proxy for its own forward. No hold was
