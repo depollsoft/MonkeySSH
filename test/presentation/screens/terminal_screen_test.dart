@@ -19,6 +19,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
@@ -400,6 +401,9 @@ class _MockTmuxService extends Mock implements TmuxService {
   }) async => detectedVersionValue;
 }
 
+class _MockPortForwardRepository extends Mock
+    implements PortForwardRepository {}
+
 class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
   _MockMonkeyMuxService() {
     when(
@@ -770,11 +774,29 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   }) : reconnectSession = reconnectSession ?? session;
 
   SshSession session;
-  final SshSession reconnectSession;
+
+  /// The session the next [connect] returns. A test can swap it so a retry
+  /// gets a fresh session, as a real reconnect does.
+  SshSession reconnectSession;
   final Completer<void>? connectCompleter;
   final disconnectedConnectionIds = <int>[];
   final connectForceNewValues = <bool>[];
+  final automaticForwardHolds = <int>[];
+  final automaticForwardReleases = <int>[];
   ConnectionAttemptStatus? _connectionAttempt;
+
+  @override
+  void holdAutomaticForwardingUntilStarted(int hostId) =>
+      automaticForwardHolds.add(hostId);
+
+  @override
+  bool isAutomaticForwardingHeld(int hostId) =>
+      automaticForwardHolds.contains(hostId) &&
+      !automaticForwardReleases.contains(hostId);
+
+  @override
+  Future<void> releaseAutomaticForwardingHold(int hostId) async =>
+      automaticForwardReleases.add(hostId);
 
   Iterable<SshSession> get _sessions sync* {
     yield session;
@@ -944,6 +966,7 @@ Host _buildHost({
   String? tmuxExtraFlags,
   RemoteMuxBackend? remoteMuxBackend,
   bool autoConnectRequiresConfirmation = false,
+  bool autoForwardPorts = false,
 }) => Host(
   id: id,
   label: 'Terminal test host',
@@ -959,7 +982,7 @@ Host _buildHost({
   createdAt: DateTime(2026),
   updatedAt: DateTime(2026),
   autoConnectRequiresConfirmation: autoConnectRequiresConfirmation,
-  autoForwardPorts: false,
+  autoForwardPorts: autoForwardPorts,
   remoteMuxBackend: remoteMuxBackend?.storageValue,
   sortOrder: 0,
   notifyAgentAttention: true,
@@ -1821,6 +1844,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       bool sharedClipboard = false,
       bool sharedClipboardLocalRead = false,
+      bool openedFromLink = false,
       bool appShortcuts = false,
       List<Override> overrides = const [],
     }) async {
@@ -1872,6 +1896,7 @@ void main() {
               hostId: host.id,
               connectionId: resolveConnection ? null : session.connectionId,
               initialNativeAcpSessionKey: initialNativeAcpSessionKey,
+              openedFromLink: openedFromLink,
             ),
           ),
         ),
@@ -9487,6 +9512,85 @@ void main() {
       }),
     );
 
+    for (final stale in [false, true]) {
+      testWidgets(
+        'a link window target applies to the attached session, stale: $stale',
+        (tester) async {
+          final tmuxService = _MockTmuxService();
+          const tmuxSessionName = 'work';
+          final linkWindowIndex = stale ? 9 : 2;
+          const windows = <TmuxWindow>[
+            TmuxWindow(index: 1, name: 'shell', isActive: true),
+            TmuxWindow(index: 2, name: 'agent', isActive: false),
+          ];
+          when(() => tmuxService.foregroundSessionNameOrThrow(session))
+              .thenAnswer((_) async => tmuxSessionName);
+          when(() => tmuxService.listWindows(session, tmuxSessionName))
+              .thenAnswer((_) async => windows);
+          Future<void> selectTarget() => tmuxService.selectWindow(
+            session,
+            tmuxSessionName,
+            any(),
+            clientImageSignatures: any(named: 'clientImageSignatures'),
+          );
+          when(selectTarget).thenAnswer((_) async {});
+          when(
+            () => tmuxService.hasForegroundClientOrThrow(
+              session,
+              tmuxSessionName,
+            ),
+          ).thenAnswer((_) async => true);
+          when(() => tmuxService.watchWindowChanges(session, tmuxSessionName))
+              .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          when(
+            () => tmuxService.refreshTerminalTheme(
+              session,
+              tmuxSessionName,
+              any(),
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async {});
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [tmuxServiceProvider.overrideWithValue(tmuxService)],
+              child: MaterialApp(
+                home: TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                  initialTmuxWindowIndex: linkWindowIndex,
+                  initialTmuxWindowRequiresVisibleSession: true,
+                  openedFromLink: true,
+                ),
+              ),
+            ),
+          );
+
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+
+          if (stale) {
+            verifyNever(selectTarget);
+            expect(find.text("Window 9 isn't open anymore."), findsOneWidget);
+          } else {
+            verify(
+              () => tmuxService.selectWindow(
+                session,
+                tmuxSessionName,
+                2,
+                clientImageSignatures: any(named: 'clientImageSignatures'),
+              ),
+            ).called(1);
+            expect(find.textContaining("isn't open anymore"), findsNothing);
+          }
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+
     testWidgets(
       'does not type a tmux reattach command when foreground check fails',
       (tester) async {
@@ -13117,6 +13221,1011 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    for (final imported in [false, true]) {
+      testWidgets('a link attaches a preset workspace without its agent, '
+          'imported: $imported', (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final cliLaunchPreferencesService = HostCliLaunchPreferencesService(
+          settingsService,
+        );
+        final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final tmuxService = _MockTmuxService();
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'copilot',
+          autoConnectRequiresConfirmation: imported,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.copilotCli,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          ),
+        );
+        await cliLaunchPreferencesService.setPreferencesForHost(
+          host.id,
+          const HostCliLaunchPreferences(startInYoloMode: true),
+        );
+        when(() => monetizationService.canUseFeature(any()))
+            .thenAnswer((_) async => true);
+        when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+        when(() => monkeyMuxService.clearCache(any())).thenAnswer((_) async {});
+        when(
+          () => monkeyMuxInstallerService.ensureInstalled(
+            session,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer(
+          (_) async => const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          ),
+        );
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(session, 'agents'),
+        ).thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'agents')).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'Copilot CLI', isActive: true),
+          ],
+        );
+        when(() => monkeyMuxService.watchWindowChanges(session, 'agents'))
+            .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        final executedCommands = <String>[];
+        when(
+          () => sshClient.execute(any(), pty: any(named: 'pty')),
+        ).thenAnswer((invocation) async {
+          executedCommands.add(invocation.positionalArguments.single as String);
+          return shellChannel;
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              monkeyMuxInstallerServiceProvider.overrideWithValue(
+                monkeyMuxInstallerService,
+              ),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                openedFromLink: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        final attachCommands = executedCommands
+            .where((command) => command.contains(' attach'))
+            .toList(growable: false);
+        expect(attachCommands, hasLength(1));
+        final attachCommand = attachCommands.single;
+        expect(attachCommand, contains('/tmp/monkeymux'));
+        expect(attachCommand, contains('agents'));
+        expect(attachCommand, isNot(contains('--command')));
+        expect(attachCommand, isNot(contains('--name')));
+        expect(attachCommand, isNot(contains('copilot --yolo')));
+        // Never create a workspace that would then ignore the preset's agent.
+        expect(attachCommand, contains('--existing'));
+        // An attach alone is not the imported command, so it neither asks
+        // about it nor clears its review flag.
+        expect(find.text('Review auto-connect command'), findsNothing);
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        expect(shellWrites.map(utf8.decode).join(), isNot(contains('copilot')));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    for (final (workspaceRunning, attachFindsWorkspace, imported) in [
+      (true, true, false),
+      // The workspace stopped between the status probe and the attach.
+      (true, false, false),
+      (false, true, false),
+      // The link's sheet was the review, so an imported host is not asked
+      // again about the attach that starts the agent.
+      (false, true, true),
+    ]) {
+      testWidgets('a confirmed preset starts its agent once, running: '
+          '$workspaceRunning, attached: $attachFindsWorkspace, '
+          'imported: $imported', (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
+        final monkeyMuxService = _MockMonkeyMuxService()
+          ..runningStatus = workspaceRunning
+              ? const MonkeyMuxServerStatus(
+                  version: '0.1.10',
+                  capabilities: <String>{},
+                )
+              : null;
+        final tmuxService = _MockTmuxService();
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'copilot',
+          autoConnectRequiresConfirmation: imported,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.copilotCli,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          ),
+        );
+        when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+        when(() => monkeyMuxService.clearCache(any())).thenAnswer((_) async {});
+        when(
+          () => monkeyMuxInstallerService.ensureInstalled(
+            session,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer(
+          (_) async => const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          ),
+        );
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => attachFindsWorkspace);
+        when(
+          () => monkeyMuxService.listWindows(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'shell', isActive: true),
+          ],
+        );
+        when(
+          () => monkeyMuxService.watchWindowChanges(
+            session,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+          session,
+          'agents',
+          command: any(named: 'command'),
+          name: any(named: 'name'),
+          workingDirectory: any(named: 'workingDirectory'),
+          extraFlags: any(named: 'extraFlags'),
+        );
+        when(createAgentWindow).thenAnswer((_) async {});
+        when(
+          () => monkeyMuxService.refreshTerminalTheme(
+            session,
+            'agents',
+            any(),
+            extraFlags: any(named: 'extraFlags'),
+            forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+          ),
+        ).thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        final executedCommands = <String>[];
+        when(
+          () => sshClient.execute(any(), pty: any(named: 'pty')),
+        ).thenAnswer((invocation) async {
+          executedCommands.add(invocation.positionalArguments.single as String);
+          return shellChannel;
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              monkeyMuxInstallerServiceProvider.overrideWithValue(
+                monkeyMuxInstallerService,
+              ),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump();
+
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        // Skipping the review once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        final attachCommand = executedCommands.singleWhere(
+          (command) => command.contains(' attach'),
+        );
+        // A new workspace starts the agent itself. A running one ignores the
+        // attach command, so the attach carries none and must find the
+        // workspace, and the agent opens in a new window instead.
+        if (workspaceRunning) {
+          expect(attachCommand, isNot(contains('--command')));
+          expect(attachCommand, contains('--existing'));
+        } else {
+          expect(attachCommand, contains('--command'));
+          expect(attachCommand, isNot(contains('--existing')));
+        }
+        if (workspaceRunning && attachFindsWorkspace) {
+          verify(
+            () => monkeyMuxService.createWindow(
+              session,
+              'agents',
+              command: 'copilot',
+              name: 'Copilot CLI',
+              workingDirectory: '/work/project',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).called(1);
+        } else {
+          verifyNever(createAgentWindow);
+        }
+
+        // Let a failed detection's retries run out before teardown.
+        for (var second = 0; second < 60; second++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        verifyNever(createAgentWindow);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    testWidgets(
+      'a link never creates a worktree for a MonkeyMux worktree preset',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final installer = _MockMonkeyMuxInstallerService();
+        // A stopped workspace is where a launch would create the worktree.
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final tmuxService = _MockTmuxService();
+        final worktrees = FakeAgentWorktreeService(
+          path: '/work/project.worktrees/agent',
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.copilotCli,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+            worktree: AgentWorktreeLaunchOptions(),
+            initialPrompt: 'Fix the flaky test',
+          ),
+        );
+        when(
+          () => installer.ensureInstalled(
+            session,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer(
+          (_) async => const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          ),
+        );
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(session, 'agents'),
+        ).thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'agents')).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'shell', isActive: true),
+          ],
+        );
+        when(() => monkeyMuxService.watchWindowChanges(session, 'agents'))
+            .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        final executedCommands = <String>[];
+        when(
+          () => sshClient.execute(any(), pty: any(named: 'pty')),
+        ).thenAnswer((invocation) async {
+          executedCommands.add(invocation.positionalArguments.single as String);
+          return shellChannel;
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: AgentWorktreeRegistry(settingsService),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                openedFromLink: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(worktrees.created, isEmpty);
+        expect(worktrees.targets, isEmpty);
+        expect(
+          monkeyMuxService.runningServerStatusFromInstalledHelpersCalls,
+          0,
+        );
+        final attach = executedCommands
+            .where((command) => command.contains(' attach'))
+            .single;
+        expect(attach, contains('--existing'));
+        expect(attach, isNot(contains('--command')));
+        expect(attach, isNot(contains('.worktrees')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a link only reattaches to a tmux worktree preset session', (
+      tester,
+    ) async {
+      final settingsService = SettingsService(db);
+      final presetService = AgentLaunchPresetService(settingsService);
+      final tmuxService = _MockTmuxService();
+      // No session: a launch would create the worktree and start codex.
+      final worktrees = FakeAgentWorktreeService(
+        path: '/work/project.worktrees/agent',
+      )..tmuxAnswers = [null];
+      host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+      await presetService.setPresetForHost(
+        host.id,
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '/work/project',
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.tmux,
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+
+      await tester.pumpWidget(
+        buildScreen(
+          overrides: [
+            settingsServiceProvider.overrideWithValue(settingsService),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            agentWorktreeServiceProvider.overrideWithValue(worktrees),
+            agentWorktreeLauncherProvider.overrideWithValue(
+              AgentWorktreeLauncher(
+                service: worktrees,
+                registry: MemoryAgentWorktreeRegistry(),
+                wait: (_) async {},
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              openedFromLink: true,
+            ),
+          ),
+        ),
+      );
+      for (var frame = 0; frame < 20; frame++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      final written = utf8.decode(
+        shellWrites.expand((chunk) => chunk).toList(growable: false),
+      );
+      expect(worktrees.created, isEmpty);
+      expect(worktrees.tmuxProbes, isEmpty);
+      expect(written, contains("\x15tmux attach-session -t '=agents'"));
+      expect(written, isNot(contains('new-session')));
+      expect(written, isNot(contains('codex')));
+      expect(find.text('Review auto-connect command'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 2));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    for (final windowOpens in [true, false]) {
+      testWidgets(
+        windowOpens
+            ? 'a confirmed worktree preset opens its agent window in a new '
+                  'worktree of a running workspace'
+            : 'a confirmed worktree preset rolls back when its agent window '
+                  'fails to open',
+        (tester) async {
+          const worktreePath = '/work/project.worktrees/agent';
+          const running = MonkeyMuxServerStatus(
+            version: '0.1.10',
+            capabilities: <String>{},
+          );
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final installer = _MockMonkeyMuxInstallerService();
+          final monkeyMuxService = _MockMonkeyMuxService()
+            ..installedHelpersStatus = running
+            ..runningStatus = running;
+          final tmuxService = _MockTmuxService();
+          final worktrees = FakeAgentWorktreeService(path: worktreePath);
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              workingDirectory: '/work/project',
+              tmuxSessionName: 'agents',
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              worktree: AgentWorktreeLaunchOptions(),
+            ),
+          );
+          when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+          when(() => monkeyMuxService.clearCache(any()))
+              .thenAnswer((_) async {});
+          when(
+            () => installer.ensureInstalled(
+              session,
+              priority: any(named: 'priority'),
+              confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
+            ),
+          ).thenAnswer(
+            (_) async => const MonkeyMuxInstallation(
+              executablePath: '/tmp/monkeymux',
+              platform: 'darwin-arm64',
+              version: '0.1.10',
+            ),
+          );
+          when(
+            () => monkeyMuxService.hasForegroundClientOrThrow(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async => true);
+          when(
+            () => monkeyMuxService.listWindows(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer(
+            (_) async => [
+              const TmuxWindow(
+                index: 0,
+                name: 'shell',
+                isActive: true,
+                currentPath: '/work/project',
+              ),
+              if (windowOpens)
+                const TmuxWindow(
+                  index: 1,
+                  name: 'Copilot CLI',
+                  isActive: false,
+                  currentPath: worktreePath,
+                ),
+            ],
+          );
+          when(
+            () => monkeyMuxService.watchWindowChanges(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+            session,
+            'agents',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          );
+          when(createAgentWindow).thenAnswer((_) async {
+            if (!windowOpens) throw Exception('window refused');
+          });
+          when(
+            () => monkeyMuxService.refreshTerminalTheme(
+              session,
+              'agents',
+              any(),
+              extraFlags: any(named: 'extraFlags'),
+              forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+            ),
+          ).thenAnswer((_) async {});
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          final executedCommands = <String>[];
+          when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                executedCommands.add(
+                  invocation.positionalArguments.single as String,
+                );
+                return shellChannel;
+              });
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+                agentWorktreeLauncherProvider.overrideWithValue(
+                  AgentWorktreeLauncher(
+                    service: worktrees,
+                    registry: AgentWorktreeRegistry(settingsService),
+                    wait: (_) async {},
+                  ),
+                ),
+              ],
+              child: MaterialApp(
+                home: TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                  startPresetAgent: true,
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await tester.pump();
+
+          final attach = executedCommands
+              .where((command) => command.contains(' attach'))
+              .single;
+          // The running workspace ignores an attach-time agent.
+          expect(attach, contains('--existing'));
+          expect(attach, isNot(contains('--command')));
+          // The agent never starts in the shared checkout.
+          expect(worktrees.created, hasLength(1));
+          verify(
+            () => monkeyMuxService.createWindow(
+              session,
+              'agents',
+              command: 'copilot',
+              name: 'Copilot CLI',
+              workingDirectory: worktreePath,
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).called(1);
+          expect(worktrees.removed, windowOpens ? isEmpty : worktrees.created);
+
+          // Let a failed detection's retries run out before teardown.
+          for (var second = 0; second < 60; second++) {
+            await tester.pump(const Duration(seconds: 1));
+          }
+          verifyNever(createAgentWindow);
+          expect(worktrees.created, hasLength(1));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'a confirmed tmux worktree preset runs on an imported host without a '
+      'second review',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final worktrees =
+            FakeAgentWorktreeService(path: '/work/project.worktrees/agent')
+              ..tmuxAnswers = [
+                null,
+                ['/work/project.worktrees/agent'],
+              ];
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'codex',
+          autoConnectRequiresConfirmation: true,
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: MemoryAgentWorktreeRegistry(),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        expect(worktrees.created, hasLength(1));
+        expect(written, contains("\x15tmux new-session -A -s 'agents'"));
+        expect(written, contains("-c '/work/project.worktrees/agent'"));
+        // Running it once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a confirmed direct preset runs on an imported host without a second '
+      'review',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'claude',
+          autoConnectRequiresConfirmation: true,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(tool: AgentLaunchTool.claudeCode),
+        );
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        expect(shellWrites.map(utf8.decode).join(), contains('claude\r'));
+        // Skipping the review once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a confirmed preset never starts its agent again when a failed '
+        'reconnect is retried', (tester) async {
+      final settingsService = SettingsService(db);
+      final presetService = AgentLaunchPresetService(settingsService);
+      final monkeyMuxInstallerService = _MockMonkeyMuxInstallerService();
+      final monkeyMuxService = _MockMonkeyMuxService()
+        ..runningStatus = const MonkeyMuxServerStatus(
+          version: '0.1.10',
+          capabilities: <String>{},
+        );
+      final tmuxService = _MockTmuxService();
+      final reconnectClient = _MockSshClient();
+      final reconnectShell = _MockShellChannel();
+      final reconnectDone = Completer<void>();
+      final reconnectStdout = StreamController<Uint8List>.broadcast();
+      final reconnectCommands = <String>[];
+      addTearDown(() async {
+        await reconnectStdout.close();
+        if (!reconnectDone.isCompleted) {
+          reconnectDone.complete();
+        }
+      });
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+      final reconnectSession = SshSession(
+        connectionId: 8,
+        hostId: host.id,
+        client: reconnectClient,
+        config: session.config,
+      );
+      final retrySession = SshSession(
+        connectionId: 9,
+        hostId: host.id,
+        client: reconnectClient,
+        config: session.config,
+      );
+      host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+      await presetService.setPresetForHost(
+        host.id,
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.copilotCli,
+          workingDirectory: '/work/project',
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        ),
+      );
+      when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+      when(() => monkeyMuxService.clearCache(any())).thenAnswer((_) async {});
+      // The first reconnect cannot reach MonkeyMux; the retry can.
+      for (final testSession in <SshSession>[
+        session,
+        reconnectSession,
+        retrySession,
+      ]) {
+        when(
+          () => monkeyMuxInstallerService.ensureInstalled(
+            testSession,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer((_) async {
+          if (identical(testSession, reconnectSession)) {
+            throw Exception('MonkeyMux unreachable');
+          }
+          return const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          );
+        });
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) async => true);
+        when(
+          () => monkeyMuxService.listWindows(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'Copilot CLI', isActive: true),
+          ],
+        );
+        when(
+          () => monkeyMuxService.watchWindowChanges(
+            testSession,
+            'agents',
+            extraFlags: any(named: 'extraFlags'),
+          ),
+        ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(
+          () => monkeyMuxService.refreshTerminalTheme(
+            testSession,
+            'agents',
+            any(),
+            extraFlags: any(named: 'extraFlags'),
+            forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+          ),
+        ).thenAnswer((_) async {});
+        when(() => tmuxService.detectInstalledAgentTools(testSession))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(testSession))
+            .thenAnswer((_) async {});
+      }
+      Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+        any(),
+        'agents',
+        command: any(named: 'command'),
+        name: any(named: 'name'),
+        workingDirectory: any(named: 'workingDirectory'),
+        extraFlags: any(named: 'extraFlags'),
+      );
+      when(createAgentWindow).thenAnswer((_) async {});
+      when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => shellChannel);
+      when(
+        () => reconnectClient.execute(any(), pty: any(named: 'pty')),
+      ).thenAnswer((invocation) async {
+        reconnectCommands.add(invocation.positionalArguments.single as String);
+        return reconnectShell;
+      });
+      when(() => reconnectShell.stdout)
+          .thenAnswer((_) => reconnectStdout.stream);
+      when(() => reconnectShell.stderr)
+          .thenAnswer((_) => const Stream<Uint8List>.empty());
+      when(() => reconnectShell.done).thenAnswer((_) => reconnectDone.future);
+      when(() => reconnectShell.write(any())).thenAnswer((_) {});
+      when(() => reconnectShell.resizeTerminal(any(), any(), any(), any()))
+          .thenAnswer((_) {});
+      when(reconnectShell.close).thenAnswer((_) {});
+      final activeSessions = _TestActiveSessionsNotifier(
+        session,
+        reconnectSession: reconnectSession,
+      )..disconnectedConnectionIds.add(reconnectSession.connectionId);
+
+      await tester.pumpWidget(
+        buildScreen(
+          activeSessions: activeSessions,
+          overrides: [
+            settingsServiceProvider.overrideWithValue(settingsService),
+            monkeyMuxInstallerServiceProvider.overrideWithValue(
+              monkeyMuxInstallerService,
+            ),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              startPresetAgent: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      // The workspace was running, so Run opened the agent in a window.
+      verify(createAgentWindow).called(1);
+
+      await activeSessions.disconnect(session.connectionId);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Reconnect'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(
+        find.text('Could not reconnect to the MonkeyMux session. Try again.'),
+        findsOneWidget,
+      );
+
+      activeSessions.reconnectSession = retrySession;
+      await tester.tap(find.text('Reconnect'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+
+      // The retry attaches like any terminal: a running workspace ignores
+      // the attach-time agent, and no second agent window opens.
+      final retryAttach = reconnectCommands.singleWhere(
+        (command) => command.contains(' attach'),
+      );
+      expect(retryAttach, isNot(contains('--existing')));
+      for (var second = 0; second < 60; second++) {
+        await tester.pump(const Duration(seconds: 1));
+      }
+      verifyNever(createAgentWindow);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'reconnects a lost MonkeyMux session without launching a new agent',
       (tester) async {
@@ -13397,6 +14506,259 @@ void main() {
         );
         expect(host.autoConnectRequiresConfirmation, isTrue);
         verifyNever(() => hostRepository.updateFields(any(), any()));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    for (final (runOnce, imported) in [
+      (true, false),
+      (false, false),
+      (true, true),
+    ]) {
+      testWidgets(
+        'a link-opened terminal shows its auto-connect command first, '
+        'run once: $runOnce, imported: $imported',
+        (tester) async {
+          const command = 'claude --dangerously-skip-permissions';
+          host = _buildHost(
+            id: host.id,
+            autoConnectCommand: command,
+            autoConnectRequiresConfirmation: imported,
+          );
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+
+          await pumpScreen(tester, openedFromLink: true);
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(find.text('Review auto-connect command'), findsOneWidget);
+          expect(
+            find.textContaining('Links never run commands'),
+            findsOneWidget,
+          );
+          expect(find.text(command), findsOneWidget);
+          // A link review is one-off; it never offers to trust the host.
+          expect(find.text('Always run'), findsNothing);
+          expect(shellWrites, isEmpty);
+
+          await tester.tap(find.text(runOnce ? 'Run once' : 'Skip'));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          final written = shellWrites.map(utf8.decode).join();
+          expect(
+            written,
+            runOnce ? contains('$command\r') : isNot(contains(command)),
+          );
+          verifyNever(() => hostRepository.updateFields(any(), any()));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+
+    for (final withExtraFlags in [true, false]) {
+      testWidgets('a link reviews a tmux attach with raw extra flags, '
+          'flags: $withExtraFlags', (tester) async {
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: 'work',
+          tmuxExtraFlags: withExtraFlags ? '-L lab' : null,
+          remoteMuxBackend: RemoteMuxBackend.tmux,
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+
+        await pumpScreen(tester, openedFromLink: true);
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final written = shellWrites.map(utf8.decode).join();
+        if (withExtraFlags) {
+          expect(find.text('Review auto-connect command'), findsOneWidget);
+          expect(find.textContaining('-L lab'), findsOneWidget);
+          expect(written, isNot(contains('new-session')));
+          await tester.tap(find.text('Skip'));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(
+            shellWrites.map(utf8.decode).join(),
+            isNot(contains('new-session')),
+          );
+        } else {
+          expect(find.text('Review auto-connect command'), findsNothing);
+          expect(written, contains('new-session'));
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
+
+    testWidgets('auto-start port forwards wait for a tap after a link', (
+      tester,
+    ) async {
+      final portForwards = _MockPortForwardRepository();
+      when(() => portForwards.getByHostId(host.id)).thenAnswer(
+        (_) async => [
+          PortForward(
+            id: 41,
+            hostId: host.id,
+            name: 'db',
+            localHost: '127.0.0.1',
+            localPort: 5432,
+            remoteHost: 'db.internal',
+            remotePort: 5432,
+            forwardType: 'local',
+            autoStart: true,
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+
+      final activeSessions = _TestActiveSessionsNotifier(session);
+      await tester.pumpWidget(
+        buildScreen(
+          activeSessions: activeSessions,
+          overrides: [
+            portForwardRepositoryProvider.overrideWithValue(portForwards),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              openedFromLink: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.textContaining('port forwarding is off'), findsOneWidget);
+      expect(session.isPortForwardActive(41), isFalse);
+      expect(session.isPortForwardStarting(41), isFalse);
+
+      await tester.tap(find.widgetWithText(SnackBarAction, 'Start'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        session.isPortForwardStarting(41) || session.isPortForwardActive(41),
+        isTrue,
+      );
+      expect(activeSessions.automaticForwardReleases, [host.id]);
+      // Let the test's unbound listener time out.
+      await tester.pump(const Duration(seconds: 11));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    for (final (openedFromLink, detectionOn) in [
+      (true, true),
+      // Nothing to hold back: no offer, even though the hold was placed.
+      (true, false),
+      (false, true),
+    ]) {
+      testWidgets('a link holds open-port detection on its new connection, '
+          'link: $openedFromLink, detection: $detectionOn', (tester) async {
+        host = _buildHost(id: host.id, autoForwardPorts: detectionOn);
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        final activeSessions = _TestActiveSessionsNotifier(session);
+
+        await pumpScreen(
+          tester,
+          activeSessions: activeSessions,
+          resolveConnection: true,
+          openedFromLink: openedFromLink,
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final offer = find.textContaining('port forwarding is off');
+        expect(
+          activeSessions.automaticForwardHolds,
+          openedFromLink ? [host.id] : isEmpty,
+        );
+        if (!openedFromLink || !detectionOn) {
+          expect(offer, findsNothing);
+        } else {
+          expect(offer, findsOneWidget);
+          await tester.tap(find.widgetWithText(SnackBarAction, 'Start'));
+          await tester.pump();
+          expect(activeSessions.automaticForwardReleases, [host.id]);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    }
+
+    testWidgets(
+      'detection started from the port forwards sheet stays on after a '
+      'reconnect',
+      (tester) async {
+        host = _buildHost(id: host.id, autoForwardPorts: true);
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        when(() => hostRepository.watchById(host.id))
+            .thenAnswer((_) => Stream.value(host));
+        final activeSessions = _TestActiveSessionsNotifier(session);
+
+        await pumpScreen(
+          tester,
+          activeSessions: activeSessions,
+          resolveConnection: true,
+          openedFromLink: true,
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(activeSessions.automaticForwardHolds, [host.id]);
+
+        await openTerminalOverflowMenu(tester);
+        await tester.tap(terminalMenuItemButton('Port Forwards'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const Key('terminal-auto-forward-ports-resume')),
+        );
+        await tester.pumpAndSettle();
+        expect(activeSessions.automaticForwardReleases, [host.id]);
+        Navigator.of(tester.element(find.text('Detect open ports'))).pop();
+        await tester.pumpAndSettle();
+
+        await activeSessions.disconnect(session.connectionId);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.tap(find.text('Reconnect'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // The user started detection on this screen, so the reconnect does
+        // not pause it again.
+        expect(activeSessions.connectForceNewValues, hasLength(2));
+        expect(activeSessions.automaticForwardHolds, [host.id]);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       },

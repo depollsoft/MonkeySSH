@@ -20,6 +20,7 @@ import '../domain/services/telemetry_service.dart';
 import '../domain/services/terminal_theme_service.dart';
 import '../presentation/shortcuts/app_shortcut_scope.dart';
 import '../presentation/widgets/system_bottom_inset.dart';
+import 'app_link_navigation.dart';
 import 'app_metadata.dart';
 import 'auth_lifecycle_controller.dart';
 import 'notification_navigation.dart';
@@ -70,18 +71,20 @@ class FluttyApp extends ConsumerWidget {
 
     return _BackgroundLifecycleBridge(
       child: PushNotificationBridge(
-        child: MaterialApp.router(
-          title: appName,
-          debugShowCheckedModeBanner: false,
-          theme: lightTheme,
-          darkTheme: darkTheme,
-          themeMode: themeMode,
-          routerConfig: router,
-          // Above the navigator, so every route, sheet, and dialog ignores a
-          // keyboard inset the platform left behind after the IME closed, and
-          // hardware keyboard shortcuts reach every route.
-          builder: (context, child) => PlatformKeyboardInsetMediaQuery(
-            child: AppShortcutsHost(child: child ?? const SizedBox.shrink()),
+        child: AppLinkNavigationBridge(
+          child: MaterialApp.router(
+            title: appName,
+            debugShowCheckedModeBanner: false,
+            theme: lightTheme,
+            darkTheme: darkTheme,
+            themeMode: themeMode,
+            routerConfig: router,
+            // Above the navigator, so every route, sheet, and dialog ignores a
+            // keyboard inset the platform left behind after the IME closed, and
+            // hardware keyboard shortcuts reach every route.
+            builder: (context, child) => PlatformKeyboardInsetMediaQuery(
+              child: AppShortcutsHost(child: child ?? const SizedBox.shrink()),
+            ),
           ),
         ),
       ),

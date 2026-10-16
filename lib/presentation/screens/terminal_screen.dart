@@ -729,6 +729,8 @@ class TerminalScreen extends ConsumerStatefulWidget {
     this.initialTmuxWindowIndex,
     this.initialTmuxWindowId,
     this.initialTmuxWindowRequiresVisibleSession = false,
+    this.openedFromLink = false,
+    this.startPresetAgent = false,
     this.initiallyExpandTmuxWindows = false,
     this.initiallyShowKeyboard = false,
     this.pasteDemoImage = false,
@@ -756,6 +758,21 @@ class TerminalScreen extends ConsumerStatefulWidget {
   /// Whether focusing the initial tmux window must also make tmux visible.
   final bool initialTmuxWindowRequiresVisibleSession;
 
+  /// Whether a `monkeyssh://` or `ssh://` link opened this terminal.
+  ///
+  /// A link never starts anything on its own: a new connection shows the
+  /// host's auto-connect command for review before running it, offers its
+  /// auto-start port forwards instead of opening them, and attaches to a
+  /// running MonkeyMux preset workspace without starting the agent. A target
+  /// window that no longer exists is reported, not ignored.
+  final bool openedFromLink;
+
+  /// Whether the user just confirmed this host's launch preset in a link's
+  /// review, so the screen's first connection runs it without asking again
+  /// and starts its agent even when its MonkeyMux workspace is already
+  /// running. Later reconnects on the same screen run like any terminal.
+  final bool startPresetAgent;
+
   /// Whether the tmux window selector should start expanded.
   final bool initiallyExpandTmuxWindows;
 
@@ -775,12 +792,15 @@ class _InitialTmuxWindowTarget {
     required this.windowIndex,
     required this.requiresVisibleSession,
     this.windowId,
+    this.reportMissing = false,
   });
 
-  final String sessionName;
+  /// Session the window belongs to, or `null` for whichever session attaches.
+  final String? sessionName;
   final int windowIndex;
   final String? windowId;
   final bool requiresVisibleSession;
+  final bool reportMissing;
 }
 
 class _TmuxTerminalThemeRefreshRequest {
@@ -1208,6 +1228,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _sessionEndedCleanly = false;
   int? _suppressNextAutomaticReconnectConnectionId;
   int? _suppressRemoteMuxDetectionConnectionId;
+  ({
+    int connectionId,
+    String sessionName,
+    String command,
+    String name,
+    String? workingDirectory,
+    AgentLaunchPreset? worktreePreset,
+  })?
+  _pendingPresetAgentWindow;
+
+  /// Whether the launch confirmed through [TerminalScreen.startPresetAgent]
+  /// is still owed. The first auto-connect that runs the preset spends it,
+  /// so a reconnect or a retry never starts the agent a second time.
+  late bool _confirmedPresetLaunchPending = widget.startPresetAgent;
+  bool _linkPortForwardsReleased = false;
+  bool _linkPortForwardOfferShown = false;
   bool _restoreKeyboardAfterAppResume = false;
   final GlobalKey _terminalOverflowMenuButtonKey = GlobalKey();
   double? _terminalOverflowMenuAnchorTopCache;
@@ -1948,19 +1984,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sessionName = widget.initialTmuxSessionName?.trim();
     final windowIndex = widget.initialTmuxWindowIndex;
     final windowId = widget.initialTmuxWindowId?.trim();
-    if (sessionName == null ||
-        sessionName.isEmpty ||
-        windowIndex == null ||
-        windowIndex < 0) {
+    if (windowIndex == null || windowIndex < 0) {
       return null;
     }
     return _InitialTmuxWindowTarget(
-      sessionName: sessionName,
+      // A link names only the window, which then applies to the session
+      // the terminal attaches to.
+      sessionName: sessionName == null || sessionName.isEmpty
+          ? null
+          : sessionName,
       windowIndex: windowIndex,
       windowId: windowId != null && isValidTmuxWindowId(windowId)
           ? windowId
           : null,
       requiresVisibleSession: widget.initialTmuxWindowRequiresVisibleSession,
+      reportMissing: widget.openedFromLink,
     );
   }
 
@@ -4700,6 +4738,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref.read(monetizationServiceProvider).currentState;
 
     if (!mounted) return;
+    if (_holdsLinkPortForwards) {
+      _sessionsNotifier!.holdAutomaticForwardingUntilStarted(widget.hostId);
+    }
     final result = showProgressDialog && _host != null
         ? await connectToHostWithProgressDialog(
             context,
@@ -4924,6 +4965,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         await _runAutoConnectCommand(session);
         if (!stillOwnsSession()) return;
       }
+      unawaited(_offerLinkPortForwards(session));
 
       // Detect tmux after the auto-connect command has had time to start.
       // A small delay ensures tmux has initialized if the auto-connect
@@ -6267,12 +6309,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// Starts auto-start port forwards for this host.
-  Future<void> _startPortForwards(SshSession session) async {
+  Future<void> _startPortForwards(
+    SshSession session, {
+    bool confirmed = false,
+  }) async {
     final portForwardRepo = ref.read(portForwardRepositoryProvider);
     final forwards = await portForwardRepo.getByHostId(widget.hostId);
 
     final autoStartForwards = forwards.where((f) => f.autoStart).toList();
     if (autoStartForwards.isEmpty) return;
+    // A link never opens tunnels on its own; _offerLinkPortForwards asks.
+    if (_holdsLinkPortForwards && !confirmed) return;
 
     var startedCount = 0;
     final failedNames = <String>[];
@@ -6314,6 +6361,71 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
       }
     }
+  }
+
+  /// Whether a link or a link's preset review opened this terminal and the
+  /// user has not started its port forwarding yet.
+  bool get _holdsLinkPortForwards =>
+      (widget.openedFromLink || widget.startPresetAgent) &&
+      !_linkPortForwardsReleased;
+
+  /// Spends the launch the user confirmed in a link's preset review and
+  /// reports whether it was still owed.
+  bool _takeConfirmedPresetLaunch() {
+    final pending = _confirmedPresetLaunchPending;
+    _confirmedPresetLaunchPending = false;
+    return pending;
+  }
+
+  /// Offers, once per screen and after any command review, the port
+  /// forwarding a link held back: auto-start forwards and open-port
+  /// detection.
+  Future<void> _offerLinkPortForwards(SshSession session) async {
+    if (!_holdsLinkPortForwards || _linkPortForwardOfferShown) return;
+    final forwards = await ref
+        .read(portForwardRepositoryProvider)
+        .getByHostId(widget.hostId);
+    if (!mounted) return;
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    // Offer only what the link actually held back: detection the host has
+    // switched on, and auto-start forwards not already running.
+    final heldDetection =
+        (_host?.autoForwardPorts ?? false) &&
+        sessions.isAutomaticForwardingHeld(widget.hostId);
+    final idleAutoStart = forwards.any(
+      (forward) =>
+          forward.autoStart &&
+          !isPortForwardActiveOnConnectedSession(
+            sessions: sessions,
+            portForward: forward,
+          ),
+    );
+    if (!heldDetection && !idleAutoStart) return;
+    _linkPortForwardOfferShown = true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          'A link opened this connection, so port forwarding is off until '
+          'you start it.',
+        ),
+        action: SnackBarAction(
+          label: 'Start',
+          onPressed: () {
+            if (!mounted) return;
+            _linkPortForwardsReleased = true;
+            unawaited(
+              ref
+                  .read(activeSessionsProvider.notifier)
+                  .releaseAutomaticForwardingHold(widget.hostId),
+            );
+            unawaited(_startPortForwards(session, confirmed: true));
+          },
+        ),
+        persist: false,
+        showCloseIcon: true,
+        duration: const Duration(seconds: 12),
+      ),
+    );
   }
 
   Future<({_PreparedRemoteMuxCommand? command, bool handled})>
@@ -6607,9 +6719,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    // The user reviewed this preset's command in the link's sheet just now.
+    final confirmedLaunch =
+        _takeConfirmedPresetLaunch() &&
+        agentPreset != null &&
+        host.autoConnectSnippetId == null;
     final review = assessAutoConnectCommandExecution(
       command,
-      importedNeedsReview: host.autoConnectRequiresConfirmation,
+      importedNeedsReview:
+          host.autoConnectRequiresConfirmation && !confirmedLaunch,
+      openedFromLink: widget.openedFromLink,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -6630,6 +6749,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// shell, whatever fails on the way, and afterwards is checked against the
   /// session's panes so a launch that joined a running session or whose
   /// agent window closed at once does not leave it behind.
+  ///
+  /// A link-opened terminal only reattaches to the session, so it never
+  /// creates a worktree or starts the agent.
   Future<void> _runAgentWorktreeLaunch(
     SshSession session,
     Host host,
@@ -6645,6 +6767,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     void writeCommand(String command) => shell.write(
       utf8.encode('\x15${formatAutoConnectCommandForShell(command)}'),
     );
+    if (widget.openedFromLink) {
+      // The reattach fails rather than create the session, so a link that
+      // finds it stopped starts nothing and leaves a plain shell.
+      if (sessionName.isNotEmpty && mounted && identical(_shell, shell)) {
+        writeCommand(buildAgentWorktreeTmuxReattachCommand(sessionName));
+      }
+      return;
+    }
+    // The user reviewed this preset in the link's sheet just now. Spent here
+    // even when the session is running, so a reconnect never counts as
+    // confirmed.
+    final confirmedLaunch = _takeConfirmedPresetLaunch();
     Future<List<String>?> panes() =>
         worktreeService.tmuxSessionDirectories(worktreeShell, sessionName);
     var probeFailed = false;
@@ -6698,7 +6832,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       final review = assessAutoConnectCommandExecution(
         command,
-        importedNeedsReview: host.autoConnectRequiresConfirmation,
+        importedNeedsReview:
+            host.autoConnectRequiresConfirmation && !confirmedLaunch,
       );
       if (review.requiresReview &&
           !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -6757,11 +6892,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // auto-connect command. Keep its review flag pending until it is used.
     // Reviewing the attach adds a second prompt after Update and restore;
     // choosing Always run would also trust a saved command we never showed.
+    final rawTmuxFlags =
+        attachCommand.backend != RemoteMuxBackend.monkeyMux &&
+        (host.tmuxExtraFlags?.trim().isNotEmpty ?? false);
     final review = assessAutoConnectCommandExecution(
       attachCommand.command,
       importedNeedsReview:
           attachCommand.backend != RemoteMuxBackend.monkeyMux &&
           host.autoConnectRequiresConfirmation,
+      // Extra tmux flags are raw shell text, so a link shows them first.
+      openedFromLink: widget.openedFromLink && rawTmuxFlags,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -7545,6 +7685,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (sessionName == null || sessionName.isEmpty) {
       return null;
     }
+    // A link attaches to the preset's workspace but never starts its agent,
+    // so it has no worktree to create either.
+    if (widget.openedFromLink) {
+      return _prepareMonkeyMuxAgentLaunchCommandIn(
+        session,
+        host,
+        preset,
+        launchesAgent: false,
+      );
+    }
     final worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
       context: context,
       ref: ref,
@@ -7611,11 +7761,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// [existingOnly] makes the attach fail rather than create the session.
+  /// Without [launchesAgent] the attach never starts the preset's agent, and
+  /// is always [existingOnly].
   Future<_PreparedRemoteMuxCommand?> _prepareMonkeyMuxAgentLaunchCommandIn(
     SshSession session,
     Host host,
     AgentLaunchPreset preset, {
     bool existingOnly = false,
+    bool launchesAgent = true,
   }) async {
     final sessionName = preset.tmuxSessionName?.trim();
     if (sessionName == null || sessionName.isEmpty) {
@@ -7643,6 +7796,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       },
     );
     late String attachCommand;
+    var agentInNewWindow = false;
+    var confirmedLaunch = false;
     try {
       MonkeyMuxServerUpdatePolicy? requestedUpdatePolicy;
       MonkeyMuxInstallation? deferredInstallation;
@@ -7676,6 +7831,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionName,
         preferredUpdatePolicy: requestedUpdatePolicy,
       );
+      // A running workspace ignores the attach-time command, so a confirmed
+      // preset launch attaches to it with --existing and no command, then
+      // opens its agent in a new window. If the workspace stops before the
+      // attach, the attach fails rather than starting the agent twice.
+      confirmedLaunch = launchesAgent && _takeConfirmedPresetLaunch();
+      if (confirmedLaunch) {
+        final running = await _monkeyMuxService.runningServerStatus(
+          session,
+          installation,
+          sessionName,
+        );
+        agentInNewWindow = running != null;
+        _pendingPresetAgentWindow = agentInNewWindow
+            ? (
+                connectionId: session.connectionId,
+                sessionName: sessionName,
+                command: launchCommand,
+                name: preset.tool.label,
+                workingDirectory: preset.workingDirectory,
+                // A worktree preset that found its workspace running made no
+                // worktree yet; the new window still needs one.
+                worktreePreset: preset.launchesInNewWorktree ? preset : null,
+              )
+            : null;
+      }
+      final attachStartsAgent = launchesAgent && !agentInNewWindow;
       final terminalThemeReports = buildTerminalThemeHintReports(
         session.terminalTheme ?? _resolveEffectiveTerminalTheme(),
       );
@@ -7688,13 +7869,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         terminalColumns: viewportCellSize.columns,
         terminalRows: viewportCellSize.rows,
         workingDirectory: preset.workingDirectory,
-        windowName: preset.tool.label,
-        launchCommand: launchCommand,
+        windowName: attachStartsAgent ? preset.tool.label : null,
+        launchCommand: attachStartsAgent ? launchCommand : null,
+        // A link never creates a workspace, which would then ignore the
+        // preset's agent on every later connect.
+        existingOnly: existingOnly || !attachStartsAgent,
         terminalThemeReports: terminalThemeReports,
         terminalCapabilityReports: buildTerminalCapabilityHintReports(),
         serverUpdatePolicy: updatePolicy,
         startInYoloMode: _startClisInYoloMode,
-        existingOnly: existingOnly,
         windows: installation.isWindows,
       );
     } on MonkeyMuxInstallDeclinedException {
@@ -7725,9 +7908,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!mounted) {
       return null;
     }
+    // An attach without the agent is not the imported command, so it must
+    // neither ask about nor clear the host's imported-command review. A
+    // confirmed preset's agent was just reviewed in the link's sheet, which
+    // never offers Always run, so it is not asked about again either.
+    final attachStartsAgent = launchesAgent && !agentInNewWindow;
     final review = assessAutoConnectCommandExecution(
       attachCommand,
-      importedNeedsReview: host.autoConnectRequiresConfirmation,
+      importedNeedsReview:
+          attachStartsAgent &&
+          !confirmedLaunch &&
+          host.autoConnectRequiresConfirmation,
     );
     if (review.requiresReview &&
         !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -7738,7 +7929,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       backend: RemoteMuxBackend.monkeyMux,
       command: attachCommand,
       sessionName: sessionName,
-      tool: preset.tool,
+      tool: attachStartsAgent ? preset.tool : null,
     );
   }
 
@@ -8428,6 +8619,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _primeTmuxTerminalTheme(session);
         }
         await _activateInitialTmuxWindowIfNeeded(session, sessionName, windows);
+        await _startPendingPresetAgentWindow(session, sessionName);
         return true;
       }
 
@@ -8586,6 +8778,74 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _startTmuxForegroundVerification(session, sessionName);
   }
 
+  /// Opens the confirmed preset's agent in a new window of a workspace that
+  /// was already running when the terminal attached.
+  ///
+  /// A worktree preset gets its worktree now, so the agent never starts in
+  /// the shared checkout. The worktree is rolled back if the window fails to
+  /// open, and otherwise checked against the workspace's windows.
+  Future<void> _startPendingPresetAgentWindow(
+    SshSession session,
+    String sessionName,
+  ) async {
+    final pending = _pendingPresetAgentWindow;
+    if (pending == null ||
+        pending.connectionId != session.connectionId ||
+        pending.sessionName != sessionName) {
+      return;
+    }
+    _pendingPresetAgentWindow = null;
+    var workingDirectory = pending.workingDirectory;
+    TerminalAgentWorktreeLaunch? worktreeLaunch;
+    if (pending.worktreePreset case final preset?) {
+      if (!mounted) return;
+      worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
+        context: context,
+        ref: ref,
+        session: session,
+        preset: preset,
+        onCreatingWorktree: _setCreatingWorktree,
+      );
+      // Not created; the user has been told why.
+      if (worktreeLaunch == null) return;
+      workingDirectory = worktreeLaunch.preset.workingDirectory;
+    }
+    var opened = false;
+    try {
+      if (!mounted) return;
+      await _createTmuxWindow(
+        session,
+        command: pending.command,
+        name: pending.name,
+        workingDirectory: workingDirectory,
+      );
+      opened = true;
+    } on Object catch (error) {
+      if (error is! Exception && !isExpectedSshOperationError(error)) {
+        rethrow;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Couldn't start ${pending.name}.")),
+        );
+      }
+    } finally {
+      if (worktreeLaunch != null) {
+        if (opened) {
+          final mux = _monkeyMuxService;
+          worktreeLaunch.launched(
+            windowDirectories: () async => [
+              for (final window in await mux.listWindows(session, sessionName))
+                window.currentPath,
+            ],
+          );
+        } else {
+          worktreeLaunch.abandon();
+        }
+      }
+    }
+  }
+
   Future<void> _activateInitialTmuxWindowIfNeeded(
     SshSession session,
     String sessionName,
@@ -8608,7 +8868,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     final target = _pendingInitialTmuxWindowTarget;
-    if (target == null || target.sessionName != sessionName) {
+    if (target == null ||
+        (target.sessionName != null && target.sessionName != sessionName)) {
       return;
     }
     final targetWindow = target.windowId == null
@@ -8617,6 +8878,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               .firstOrNull
         : windows.where((window) => window.id == target.windowId).firstOrNull;
     if (targetWindow == null) {
+      if (target.reportMissing) {
+        _pendingInitialTmuxWindowTarget = null;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Window ${target.windowIndex} isn't open anymore."),
+          ),
+        );
+      }
       return;
     }
     _pendingInitialTmuxWindowTarget = null;
@@ -15308,6 +15577,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         connectionId: connectionId,
         session: session,
         onOpenInBrowser: _openPortForwardBrowserTunnel,
+        // The user chose here, so a reconnect must not place the hold again.
+        onLinkHoldEnded: () => _linkPortForwardsReleased = true,
       );
     } finally {
       _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
@@ -17190,31 +17461,58 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     TerminalCommandReview review,
     Host host,
   ) async {
+    // Trusting an imported host is persistent; a link review is one-off, so
+    // it never offers to trust the host even when the host was imported.
+    final imported =
+        review.reasons.contains(
+          TerminalCommandReviewReason.importedAutoConnect,
+        ) &&
+        !review.reasons.contains(TerminalCommandReviewReason.openedFromLink);
     final decision = await showDialog<_AutoConnectReviewDecision>(
       context: context,
       requestFocus: terminalOverlayRouteRequestFocus(context),
       builder: (context) => AlertDialog(
-        title: const Text('Review imported auto-connect command'),
+        title: Text(
+          imported
+              ? 'Review imported auto-connect command'
+              : 'Review auto-connect command',
+        ),
         content: _buildCommandReviewContent(
           review: review,
-          message: 'Imported auto-connect commands never run silently. Review this one before letting it execute.',
+          message: imported
+              ? 'Imported auto-connect commands never run silently. Review this one before letting it execute.'
+              : 'Links never run commands on their own. Review this one before letting it execute.',
         ),
         actions: [
           TextButton(
+            // Neutral, so the dialog's one filled action carries the teal.
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.onSurface,
+            ),
             onPressed: () =>
                 Navigator.pop(context, _AutoConnectReviewDecision.skip),
             child: const Text('Skip'),
           ),
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
-            child: const Text('Run once'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(context, _AutoConnectReviewDecision.trustAndRun),
-            child: const Text('Always run'),
-          ),
+          if (imported)
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
+              child: const Text('Run once'),
+            )
+          else
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(context, _AutoConnectReviewDecision.runOnce),
+              child: const Text('Run once'),
+            ),
+          if (imported)
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                _AutoConnectReviewDecision.trustAndRun,
+              ),
+              child: const Text('Always run'),
+            ),
         ],
       ),
     );
@@ -17300,16 +17598,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ),
           ],
           const SizedBox(height: 12),
+          // The same command panel the launch preset review uses.
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(FluttyTheme.spacingSm + 4),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
             ),
             child: SelectableText(
               commandPreview,
-              style: const TextStyle(fontFamily: 'monospace'),
+              style: FluttyTheme.monoStyle.copyWith(
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
             ),
           ),
         ],

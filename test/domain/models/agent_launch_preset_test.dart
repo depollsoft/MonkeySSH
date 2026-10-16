@@ -656,4 +656,53 @@ void main() {
     expect(agentLaunchToolFromStorageName('codex'), AgentLaunchTool.codex);
     expect(agentLaunchToolFromStorageName('unknownTool'), isNull);
   });
+
+  group('agentArgumentsEnableYolo', () {
+    for (final (tool, arguments) in [
+      (AgentLaunchTool.copilotCli, '--allow-all-tools'),
+      (AgentLaunchTool.copilotCli, '--model gpt-6 --allow-all'),
+      (AgentLaunchTool.copilotCli, "'--yolo'"),
+      (AgentLaunchTool.codex, '--dangerously-bypass-approvals-and-sandbox'),
+      (AgentLaunchTool.codex, '-s danger-full-access'),
+      (AgentLaunchTool.codex, '--sandbox=danger-full-access'),
+      (AgentLaunchTool.codex, '-a never'),
+      (AgentLaunchTool.claudeCode, '--permission-mode bypassPermissions'),
+      (AgentLaunchTool.claudeCode, '"--dangerously-skip-permissions"'),
+      (AgentLaunchTool.cursorAgent, '-f'),
+      (AgentLaunchTool.openCode, r'\--auto'),
+      (AgentLaunchTool.grokBuild, '--always-approve'),
+    ]) {
+      test('flags ${tool.name} $arguments', () {
+        expect(agentArgumentsEnableYolo(tool, arguments), isTrue);
+      });
+    }
+
+    for (final (tool, arguments) in [
+      (AgentLaunchTool.claudeCode, null),
+      (AgentLaunchTool.claudeCode, '   '),
+      (AgentLaunchTool.claudeCode, '--permission-mode plan'),
+      (AgentLaunchTool.codex, '--sandbox workspace-write'),
+      (AgentLaunchTool.codex, '-a on-request'),
+      (AgentLaunchTool.codex, "--prompt '--yolo is a flag'"),
+      (AgentLaunchTool.copilotCli, '--model gpt-6'),
+      // Another tool's switch means nothing to this one.
+      (AgentLaunchTool.hermes, '--dangerously-skip-permissions'),
+      (AgentLaunchTool.pi, '--yolo'),
+    ]) {
+      test('ignores ${tool.name} $arguments', () {
+        expect(agentArgumentsEnableYolo(tool, arguments), isFalse);
+      });
+    }
+
+    test('never throws on unbalanced quotes', () {
+      expect(
+        () => agentArgumentsEnableYolo(AgentLaunchTool.codex, "'--yolo"),
+        returnsNormally,
+      );
+      expect(
+        agentArgumentsEnableYolo(AgentLaunchTool.codex, '"--yolo'),
+        isTrue,
+      );
+    });
+  });
 }
