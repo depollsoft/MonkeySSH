@@ -102,6 +102,22 @@ class _StoppingAcpSessionManager extends RecordingAcpSessionManager {
   }
 }
 
+/// Leaves every prompt running until the test settles it.
+class _HeldPromptsAcpSessionManager extends RecordingAcpSessionManager {
+  final turns = <Completer<AcpPromptResult>>[];
+
+  @override
+  Future<AcpPromptResult> prompt(
+    AcpSessionKey key,
+    List<AcpContentBlock> content,
+  ) {
+    prompts.add(List<AcpContentBlock>.of(content));
+    final turn = Completer<AcpPromptResult>();
+    turns.add(turn);
+    return turn.future;
+  }
+}
+
 AcpSessionKey _key() => AcpSessionKey.of(
   hostId: 1,
   providerId: 'copilot',
@@ -390,6 +406,48 @@ void main() {
       expect(controller.error?.message, contains('Another device took'));
     },
   );
+
+  test('the take-over reason wins over a refusal parked ahead of it', () async {
+    final manager = _HeldPromptsAcpSessionManager();
+    final uploadGate = Completer<void>();
+    final controller = _controller(
+      manager,
+      preparation: const AcpAttachmentPreparationService(
+        limits: AcpAttachmentLimits(maxEmbeddedBytes: 1),
+      ),
+      uploaderBuilder: () => _GatedUploader(gate: uploadGate),
+      session: _session(embeddedContext: true),
+    );
+    addTearDown(controller.dispose);
+
+    controller.setText('first');
+    expect(await controller.send(), isTrue);
+    controller.setText('second');
+    expect(await controller.send(), isTrue);
+    controller
+      ..setText('third')
+      ..addAttachment(
+        AcpAttachmentCandidate.memory(
+          name: 'big.txt',
+          bytes: Uint8List.fromList('hello world'.codeUnits),
+          mimeType: 'text/plain',
+        ),
+      )
+      ..enableRemoteUploadFallback();
+    final third = controller.send();
+    await Future<void>.delayed(Duration.zero);
+    // Both fail while the third send is still uploading, so they park.
+    manager.turns[0].completeError(_agentError);
+    manager.turns[1].completeError(
+      const AcpInputHeldElsewhereException(delivery: AcpInputDelivery.notSent),
+    );
+    await Future<void>.delayed(Duration.zero);
+    uploadGate.complete();
+    expect(await third, isTrue);
+
+    expect(controller.text, 'first\n\nsecond');
+    expect(controller.error?.message, contains('Another device took'));
+  });
 
   test(
     'parks a rejected prompt restore while a newer send is still preparing',
