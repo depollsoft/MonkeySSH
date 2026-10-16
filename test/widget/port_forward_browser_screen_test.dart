@@ -1,12 +1,14 @@
 // ignore_for_file: public_member_api_docs, depend_on_referenced_packages
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
@@ -118,6 +120,19 @@ Future<_WebViewPlatform> _pumpBrowser(
       WebViewPlatform.instance = previousPlatform;
     }
   });
+  // Opening a loopback browser first clears any SOCKS proxy left behind.
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        ..setMockMethodCallHandler(
+          const MethodChannel(SocksBrowserProxyService.channelName),
+          (_) async => null,
+        );
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(
+      const MethodChannel(SocksBrowserProxyService.channelName),
+      null,
+    ),
+  );
   final settings = _Settings();
   when(
     () => settings.getBool(
