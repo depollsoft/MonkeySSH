@@ -483,6 +483,9 @@ void main() {
     await tester.pump();
     expect(find.text('tunnel down'), findsOneWidget);
     expect(find.text('Restart forward'), findsOneWidget);
+    // The route button says the route is gone, not just its icon.
+    expect(find.byTooltip('Routed through Office'), findsNothing);
+    expect(find.byTooltip('Blocked until Office is running'), findsOneWidget);
     // The page is stopped and the proxy moved off the freed port; nothing
     // clears it, which would let requests go direct.
     expect(_events, ['load:about:blank', 'apply:$_sinkPort']);
@@ -505,6 +508,7 @@ void main() {
     // lands on it.
     expect(_events, ['apply:41090', 'back']);
     expect(find.text('tunnel down'), findsNothing);
+    expect(find.byTooltip('Routed through Office'), findsOneWidget);
     expect(platform.controllers.single.reloads, 0);
     final controller = platform.controllers.single;
     expect(controller.history[controller.index], page);

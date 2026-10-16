@@ -1453,7 +1453,9 @@ class _PortForwardBrowserScreenState
         if (_isSocksBrowser)
           IconButton(
             onPressed: _showSocksRouteInfo,
-            tooltip: 'Routed through ${widget.socksForward!.name}',
+            tooltip: _canLoadPages
+                ? 'Routed through ${widget.socksForward!.name}'
+                : 'Blocked until ${widget.socksForward!.name} is running',
             icon: Icon(
               _canLoadPages ? Icons.lan_outlined : Icons.link_off_rounded,
             ),
