@@ -77,6 +77,9 @@ enum AcpSessionErrorKind {
   /// A requested ACP capability is not advertised by the agent.
   unsupportedCapability,
 
+  /// A custom agent's current command has not been approved for launch.
+  commandNotApproved,
+
   /// The SSH transport failed or could not reconnect.
   transport,
 

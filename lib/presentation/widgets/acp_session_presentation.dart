@@ -259,11 +259,14 @@ AcpStatusDisplay _muxStatusSnapshotDisplay(AcpActivitySnapshot snapshot) {
   if (snapshot.status != AcpConnectionStatus.ready) {
     return acpStatusDisplay(snapshot.status);
   }
+  // Red like a terminal program that reports it is blocked on the user, and
+  // like the Connections tab; amber stays for a session waiting for its next
+  // prompt.
   if (snapshot.needsInput) {
     return const AcpStatusDisplay(
       label: 'waiting',
       icon: Icons.pending_actions,
-      tone: AcpStatusTone.warning,
+      tone: AcpStatusTone.error,
       needsInput: true,
     );
   }

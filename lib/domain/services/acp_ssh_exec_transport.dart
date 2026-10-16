@@ -25,7 +25,9 @@ final class AcpSshExecTransport implements AcpTransport {
 
   @override
   Future<void> write(List<int> bytes) async {
-    if (_closeFuture != null) throw StateError('ACP SSH transport is closed');
+    if (_closeFuture != null) {
+      throw const AcpTransportClosedException('ACP SSH transport is closed');
+    }
     _session.write(Uint8List.fromList(bytes));
   }
 
