@@ -17,6 +17,8 @@ class AppLinkPresetReview {
     this.yoloSwitches = const [],
     this.muxSessionName,
     this.muxBackend,
+    this.newWorktree = false,
+    this.worktreeRepository,
   });
 
   /// Saved host label, as the user named it.
@@ -39,6 +41,14 @@ class AppLinkPresetReview {
 
   /// The parts of [command] that turn YOLO mode on, as they appear there.
   final List<String> yoloSwitches;
+
+  /// Whether the agent starts in a new git worktree on a new branch rather
+  /// than in the directory [command] names.
+  final bool newWorktree;
+
+  /// Repository the new worktree branches from, when [newWorktree] is set
+  /// and the preset names one.
+  final String? worktreeRepository;
 }
 
 /// Shows the review sheet for a launch-preset link.
@@ -158,6 +168,20 @@ class AppLinkPresetSheet extends StatelessWidget {
                 if (review.yoloMode) ...[
                   const SizedBox(height: FluttyTheme.spacingMd),
                   _YoloWarning(review: review),
+                ],
+                if (review.newWorktree) ...[
+                  const SizedBox(height: FluttyTheme.spacingMd),
+                  AcpElicitationNotice(
+                    icon: Icons.account_tree_outlined,
+                    text: switch (review.worktreeRepository) {
+                      final repository? =>
+                        '${review.tool.label} starts in a new git worktree '
+                            'of $repository, on a new branch.',
+                      null =>
+                        '${review.tool.label} starts in a new git worktree, '
+                            'on a new branch.',
+                    },
+                  ),
                 ],
                 if (muxSessionName != null &&
                     review.muxBackend == RemoteMuxBackend.tmux) ...[

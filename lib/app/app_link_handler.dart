@@ -268,6 +268,10 @@ class AppLinkHandler {
         muxBackend: muxSessionName == null
             ? null
             : preset.effectiveRemoteMuxBackend,
+        newWorktree: preset.launchesInNewWorktree,
+        worktreeRepository: preset.worktree?.resolveRepositoryPath(
+          preset.workingDirectory,
+        ),
       ),
     );
     if (!confirmed) {

@@ -219,6 +219,40 @@ void main() {
     );
   });
 
+  testWidgets('worktree presets say the agent starts in a new worktree', (
+    tester,
+  ) async {
+    await _openSheet(
+      tester,
+      const AppLinkPresetReview(
+        hostLabel: 'build box',
+        tool: AgentLaunchTool.codex,
+        command: "cd '~/src/app' && codex",
+        yoloMode: false,
+        muxSessionName: 'agents',
+        muxBackend: RemoteMuxBackend.monkeyMux,
+        newWorktree: true,
+        worktreeRepository: '~/src/app',
+      ),
+    );
+
+    expect(
+      find.text(
+        'Codex starts in a new git worktree of ~/src/app, on a new '
+        'branch.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('presets that run in place say nothing about worktrees', (
+    tester,
+  ) async {
+    await _openSheet(tester, _review());
+
+    expect(find.textContaining('worktree'), findsNothing);
+  });
+
   testWidgets('long commands scroll inside the sheet', (tester) async {
     final review = AppLinkPresetReview(
       hostLabel: 'build box',

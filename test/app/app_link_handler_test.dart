@@ -6,6 +6,7 @@ import 'package:monkeyssh/app/app_link_handler.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/app_link.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
@@ -429,6 +430,37 @@ void main() {
       final review = effects.reviews.single;
       expect(review.muxSessionName, 'agents');
       expect(review.muxBackend, RemoteMuxBackend.monkeyMux);
+    });
+
+    test('say when the preset starts in a new worktree', () async {
+      stubPreset(
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          worktree: AgentWorktreeLaunchOptions(repositoryPath: '~/src/repo'),
+          initialPrompt: 'Fix the flaky test',
+        ),
+      );
+
+      await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+      final review = effects.reviews.single;
+      expect(review.newWorktree, isTrue);
+      expect(review.worktreeRepository, '~/src/repo');
+      // Terminal launches never send a preset's initial prompt.
+      expect(review.command, isNot(contains('flaky')));
+    });
+
+    test('a preset without a worktree runs in place', () async {
+      stubPreset(preset);
+
+      await handler.handle(const LaunchPresetAppLink(presetId: 7));
+
+      final review = effects.reviews.single;
+      expect(review.newWorktree, isFalse);
+      expect(review.worktreeRepository, isNull);
     });
 
     test('report a missing preset without reviewing anything', () async {
