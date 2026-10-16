@@ -1021,7 +1021,12 @@ class AcpComposerController extends ChangeNotifier {
     final restores = List.of(_pendingRestores);
     _pendingRestores.clear();
     for (final restore in restores) {
-      if (restore.error case final reason?) _error ??= reason;
+      // A newer send's own failure stays; the generic send error gives way
+      // to the reason another device took the chat.
+      if (restore.error case final reason?
+          when _error == null || _error == _sendFailedError) {
+        _error = reason;
+      }
       _noteRestoreRetryable(restore.retryable);
       _restoreInSendOrder(
         restore.draft.text,

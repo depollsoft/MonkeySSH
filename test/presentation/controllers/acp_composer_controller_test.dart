@@ -297,6 +297,14 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(controller.text, 'keep me');
     expect(controller.error?.message, contains('Another device'));
+    expect(controller.turnRecovery, isNull);
+
+    // Read-only, nothing can be resent from this device.
+    controller.updateSession(_session(status: AcpConnectionStatus.detached));
+    expect(controller.canRetryFailedPrompt, isFalse);
+    // After taking the chat back, the prompt never ran, so it can be.
+    controller.updateSession(_session());
+    expect(controller.canRetryFailedPrompt, isTrue);
   });
 
   test(
@@ -315,6 +323,8 @@ void main() {
       // invite a duplicate.
       expect(controller.text, isEmpty);
       expect(controller.error, isNull);
+      expect(controller.turnRecovery, isNull);
+      expect(controller.canRetryFailedPrompt, isFalse);
     },
   );
 
@@ -332,6 +342,8 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(controller.text, 'maybe sent');
       expect(controller.error?.message, contains('may not have been sent'));
+      // It may have run, so it is not resent as is with one tap.
+      expect(controller.canRetryFailedPrompt, isFalse);
     },
   );
 
