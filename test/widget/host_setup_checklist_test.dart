@@ -170,27 +170,16 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('a password host shows the key step and opens the sheet', (
-    tester,
-  ) async {
+  testWidgets('a password host starts the sheet at key login', (tester) async {
     final host = _host();
     await pump(
       tester,
       host: host,
-      child: HostSetupChecklistLine(host: host),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
-
-    expect(find.text('0/4 · '), findsOneWidget);
-    expect(find.text('switch to key login'), findsOneWidget);
-    expect(
-      find.bySemanticsLabel('Setup 0 of 4 done. Next: switch to key login'),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.text('switch to key login'));
-    await tester.pumpAndSettle();
 
     expect(find.text('Host Setup'), findsOneWidget);
+    expect(find.text('gpu-box · 0 of 4 done'), findsOneWidget);
     expect(find.text('Set Up Key Login'), findsOneWidget);
     expect(find.bySemanticsLabel('Key login: next'), findsOneWidget);
     expect(
@@ -200,63 +189,36 @@ void main() {
     expect(find.bySemanticsLabel('Agent signed in: to do'), findsOneWidget);
   });
 
-  testWidgets('hiding the checklist persists per host', (tester) async {
-    final host = _host();
-    await pump(
-      tester,
-      host: host,
-      child: HostSetupChecklistLine(host: host),
-    );
-
-    await tester.tap(find.byTooltip('Hide setup checklist'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('0/4 · '), findsNothing);
-    final states = await tester.runAsync(
-      () => HostSetupChecklistStore(SettingsService(db)).load(),
-    );
-    expect(states![3]!.dismissed, isTrue);
-  });
-
-  testWidgets('Undo brings a hidden checklist back', (tester) async {
-    final host = _host();
-    await pump(
-      tester,
-      host: host,
-      child: HostSetupChecklistLine(host: host),
-    );
-
-    await tester.tap(find.byTooltip('Hide setup checklist'));
-    await tester.pumpAndSettle();
-    expect(find.text('Setup checklist hidden for gpu-box.'), findsOneWidget);
-    await tester.tap(find.text('Undo'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('0/4 · '), findsOneWidget);
-    final states = await tester.runAsync(
-      () => HostSetupChecklistStore(SettingsService(db)).load(),
-    );
-    expect(states![3]!.dismissed, isFalse);
-  });
-
-  testWidgets('screen readers can open the sheet from the row line', (
+  testWidgets('a host hidden by an older version opens and probes', (
     tester,
   ) async {
-    final semantics = tester.ensureSemantics();
-    final host = _host();
+    // Older versions showed the checklist on host rows until hidden, and
+    // a hidden host skipped its probes. Opening it from the menu is a
+    // request to see it.
+    await tester.runAsync(
+      () => SettingsService(
+        db,
+      ).setString(SettingKeys.hostSetupChecklist, '{"3":{"dismissed":true}}'),
+    );
+    var probes = 0;
+    final host = _host(keyId: 1, password: null);
     await pump(
       tester,
       host: host,
-      child: HostSetupChecklistLine(host: host),
+      connected: {7: host.id},
+      prober: HostSetupProber(
+        probeMonkeyMux: (_) async {
+          probes++;
+          return false;
+        },
+        probeAgents: (_) async => true,
+      ),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
 
-    tester.semantics.tap(
-      find.semantics.byLabel('Setup 0 of 4 done. Next: switch to key login'),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Host Setup'), findsOneWidget);
-    semantics.dispose();
+    expect(probes, 1);
+    expect(find.text('Install MonkeyMux'), findsOneWidget);
+    expect(find.text('Hide Checklist for This Host'), findsNothing);
   });
 
   testWidgets('the agent step says Pro only to users without it', (
@@ -342,12 +304,12 @@ void main() {
     await pump(
       tester,
       host: host,
-      child: HostSetupChecklistLine(host: host),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
-    expect(find.text('sign in to an agent'), findsOneWidget);
+    expect(find.bySemanticsLabel('Agent signed in: next'), findsOneWidget);
 
     final container = ProviderScope.containerOf(
-      tester.element(find.byType(HostSetupChecklistLine)),
+      tester.element(find.byType(HostSetupChecklistSheet)),
     );
     await tester.runAsync(
       () => container
@@ -365,18 +327,26 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('sign in to an agent'), findsNothing);
-    expect(find.textContaining('/4 · '), findsNothing);
+    expect(find.bySemanticsLabel('Agent signed in: done'), findsOneWidget);
+    expect(
+      find.text('All set. This host is ready for agents.'),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('a key host stays quiet until a probe has run', (tester) async {
+  testWidgets('a key host waits for a connection to check the rest', (
+    tester,
+  ) async {
     final host = _host(keyId: 1, password: null);
     await pump(
       tester,
       host: host,
-      child: HostSetupChecklistLine(host: host),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
-    expect(find.textContaining('/4 · '), findsNothing);
+    expect(
+      find.text('Connect to this host to check the remaining steps.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('probes a connected host once and shows the next step', (
@@ -395,13 +365,13 @@ void main() {
         },
         probeAgents: (_) async => true,
       ),
-      child: HostSetupChecklistLine(host: host),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
     await tester.pumpAndSettle();
 
     expect(probes, 1);
-    expect(find.text('2/4 · '), findsOneWidget);
-    expect(find.text('install MonkeyMux'), findsOneWidget);
+    expect(find.text('gpu-box · 2 of 4 done'), findsOneWidget);
+    expect(find.text('Install MonkeyMux'), findsOneWidget);
     final states = await tester.runAsync(
       () => HostSetupChecklistStore(SettingsService(db)).load(),
     );
@@ -430,12 +400,12 @@ void main() {
       host: host,
       connected: {7: host.id},
       prober: prober,
-      child: HostSetupChecklistLine(host: host),
+      child: const HostSetupChecklistSheet(hostId: 3),
     );
     expect(probedConnections, [7]);
 
     final container = ProviderScope.containerOf(
-      tester.element(find.byType(HostSetupChecklistLine)),
+      tester.element(find.byType(HostSetupChecklistSheet)),
     );
     (container.read(activeSessionsProvider.notifier) as _Sessions).reconnect(
       8,
@@ -443,40 +413,5 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(probedConnections, [7, 8]);
-  });
-
-  testWidgets('the card numbers the next step by its position', (tester) async {
-    final host = _host(keyId: 1, password: null);
-    await pump(
-      tester,
-      host: host,
-      probes: {
-        host.id: const HostSetupProbeResult(
-          connectionId: 7,
-          monkeyMuxInstalled: false,
-          agentsDetected: true,
-        ),
-      },
-      child: const HostSetupEmptyStateCard(),
-    );
-    // Agents are detected but MonkeyMux is missing: MonkeyMux is step 2.
-    expect(find.text('Next: install MonkeyMux (step 2 of 4).'), findsOneWidget);
-  });
-
-  testWidgets('the empty-state card points at the next step', (tester) async {
-    final host = _host();
-    await pump(tester, host: host, child: const HostSetupEmptyStateCard());
-
-    expect(
-      find.textContaining('Finish setting up', findRichText: true),
-      findsOneWidget,
-    );
-    expect(
-      find.text('Next: switch to key login (step 1 of 4).'),
-      findsOneWidget,
-    );
-    await tester.tap(find.text('Continue Setup'));
-    await tester.pumpAndSettle();
-    expect(find.text('Host Setup'), findsOneWidget);
   });
 }

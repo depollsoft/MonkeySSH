@@ -2,7 +2,6 @@
 
 import 'dart:async';
 
-import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -41,13 +40,11 @@ HostSetupChecklist _checklist({
   HostSetupPersistedState persisted = const HostSetupPersistedState(),
   HostSetupProbeResult? probe,
   bool hasAgentSession = false,
-  bool isConnected = false,
 }) => computeHostSetupChecklist(
   host: host ?? _host(),
   persisted: persisted,
   probe: probe,
   hasAgentSession: hasAgentSession,
-  isConnected: isConnected,
 );
 
 void main() {
@@ -55,7 +52,6 @@ void main() {
     test('a password-only host starts with key login', () {
       final checklist = _checklist();
       expect(checklist.nextStep, HostSetupStep.keyLogin);
-      expect(checklist.isVisible, isTrue);
       expect(checklist.doneCount, 0);
     });
 
@@ -82,7 +78,6 @@ void main() {
         HostSetupStepStatus.unknown,
       );
       expect(checklist.nextStep, isNull);
-      expect(checklist.isVisible, isFalse);
       expect(checklist.needsProbe, isTrue);
     });
 
@@ -152,29 +147,7 @@ void main() {
         hasAgentSession: true,
       );
       expect(checklist.isComplete, isTrue);
-      expect(checklist.isVisible, isFalse);
-    });
-
-    test('dismissed or never-connected hosts hide the checklist', () {
-      expect(
-        _checklist(persisted: const HostSetupPersistedState(dismissed: true))
-            .isVisible,
-        isFalse,
-      );
-      final neverConnected = computeHostSetupChecklist(
-        host: _host().copyWith(lastConnectedAt: const Value(null)),
-        persisted: const HostSetupPersistedState(),
-        hasAgentSession: false,
-        isConnected: false,
-      );
-      expect(neverConnected.isVisible, isFalse);
-      final connectedNow = computeHostSetupChecklist(
-        host: _host().copyWith(lastConnectedAt: const Value(null)),
-        persisted: const HostSetupPersistedState(),
-        hasAgentSession: false,
-        isConnected: true,
-      );
-      expect(connectedNow.isVisible, isTrue);
+      expect(checklist.nextStep, isNull);
     });
   });
 
@@ -189,15 +162,27 @@ void main() {
 
     tearDown(() => db.close());
 
-    test('records done steps and dismissals per host', () async {
+    test('records done steps per host', () async {
       await store.markDone(1, {HostSetupStep.monkeyMux});
       await store.markDone(1, {HostSetupStep.agents});
-      await store.dismiss(2);
+      await store.markDone(2, {HostSetupStep.keyLogin});
       final states = await store.load();
       expect(states[1]!.done, {HostSetupStep.monkeyMux, HostSetupStep.agents});
-      expect(states[1]!.dismissed, isFalse);
-      expect(states[2]!.dismissed, isTrue);
-      expect(states[2]!.done, isEmpty);
+      expect(states[2]!.done, {HostSetupStep.keyLogin});
+    });
+
+    test('ignores the dismissed flag older versions saved', () {
+      // The checklist used to show on host rows until hidden; it now opens
+      // only from the host menu, so an old hide no longer applies.
+      expect(
+        decodeHostSetupPersistedState(
+          '{"3":{"done":["agents"],"dismissed":true},"4":{"dismissed":true}}',
+        ),
+        {
+          3: const HostSetupPersistedState(done: {HostSetupStep.agents}),
+          4: const HostSetupPersistedState(),
+        },
+      );
     });
 
     test('ignores malformed storage', () {

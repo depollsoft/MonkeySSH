@@ -1,5 +1,6 @@
-/// The post-connect setup checklist shown on host rows: key login, MonkeyMux,
-/// a detected coding agent, and a first signed-in agent session.
+/// The host setup checklist a user opens from a host's actions menu: key
+/// login, MonkeyMux, a detected coding agent, and a first signed-in agent
+/// session.
 ///
 /// Completed steps are remembered per host; probe results that say a step is
 /// still missing only live for the app run, so the checklist re-checks after a
@@ -19,7 +20,7 @@ import 'settings_service.dart';
 import 'ssh_service.dart';
 import 'tmux_service.dart';
 
-/// Settings key holding completed and dismissed checklist state per host.
+/// Settings key holding completed checklist steps per host.
 ///
 /// The value is a JSON object keyed by host ID, so migration import remaps
 /// and merges it like the other host-scoped settings.
@@ -62,25 +63,17 @@ enum HostSetupStepStatus {
 @immutable
 class HostSetupPersistedState {
   /// Creates persisted state.
-  const HostSetupPersistedState({
-    this.done = const <HostSetupStep>{},
-    this.dismissed = false,
-  });
+  const HostSetupPersistedState({this.done = const <HostSetupStep>{}});
 
   /// Steps known to be complete.
   final Set<HostSetupStep> done;
 
-  /// Whether the user hid the checklist for this host.
-  final bool dismissed;
-
   @override
   bool operator ==(Object other) =>
-      other is HostSetupPersistedState &&
-      setEquals(other.done, done) &&
-      other.dismissed == dismissed;
+      other is HostSetupPersistedState && setEquals(other.done, done);
 
   @override
-  int get hashCode => Object.hash(Object.hashAllUnordered(done), dismissed);
+  int get hashCode => Object.hashAllUnordered(done);
 }
 
 /// Result of probing one connection.
@@ -118,24 +111,13 @@ class HostSetupProbeResult {
 @immutable
 class HostSetupChecklist {
   /// Creates a checklist.
-  const HostSetupChecklist({
-    required this.hostId,
-    required this.statuses,
-    required this.dismissed,
-    required this.hasConnected,
-  });
+  const HostSetupChecklist({required this.hostId, required this.statuses});
 
   /// Saved host ID.
   final int hostId;
 
   /// Status of every step.
   final Map<HostSetupStep, HostSetupStepStatus> statuses;
-
-  /// Whether the user hid the checklist.
-  final bool dismissed;
-
-  /// Whether the host has connected at least once.
-  final bool hasConnected;
 
   /// Status of [step].
   HostSetupStepStatus statusOf(HostSetupStep step) =>
@@ -166,31 +148,23 @@ class HostSetupChecklist {
   /// Whether every step is done.
   bool get isComplete => doneCount == HostSetupStep.values.length;
 
-  /// Whether the host row should show the checklist.
-  bool get isVisible => hasConnected && !dismissed && nextStep != null;
-
   /// Whether a connection probe could change a step: MonkeyMux or the agent
   /// check isn't done yet. A "missing" result is re-checked on each new
   /// connection, since the user may have fixed it meanwhile.
   bool get needsProbe =>
-      !dismissed &&
-      (statusOf(HostSetupStep.monkeyMux) != HostSetupStepStatus.done ||
-          statusOf(HostSetupStep.agents) != HostSetupStepStatus.done);
+      statusOf(HostSetupStep.monkeyMux) != HostSetupStepStatus.done ||
+      statusOf(HostSetupStep.agents) != HostSetupStepStatus.done;
 
   @override
   bool operator ==(Object other) =>
       other is HostSetupChecklist &&
       other.hostId == hostId &&
-      mapEquals(other.statuses, statuses) &&
-      other.dismissed == dismissed &&
-      other.hasConnected == hasConnected;
+      mapEquals(other.statuses, statuses);
 
   @override
   int get hashCode => Object.hash(
     hostId,
     Object.hashAllUnordered(statuses.entries.map((e) => (e.key, e.value))),
-    dismissed,
-    hasConnected,
   );
 }
 
@@ -203,7 +177,6 @@ HostSetupChecklist computeHostSetupChecklist({
   required Host host,
   required HostSetupPersistedState persisted,
   required bool hasAgentSession,
-  required bool isConnected,
   HostSetupProbeResult? probe,
 }) {
   HostSetupStepStatus fromProbe(HostSetupStep step, {bool? value}) {
@@ -217,8 +190,6 @@ HostSetupChecklist computeHostSetupChecklist({
 
   return HostSetupChecklist(
     hostId: host.id,
-    dismissed: persisted.dismissed,
-    hasConnected: isConnected || host.lastConnectedAt != null,
     statuses: {
       HostSetupStep.keyLogin: hostUsesPasswordOnly(host)
           ? HostSetupStepStatus.missing
@@ -239,7 +210,8 @@ HostSetupChecklist computeHostSetupChecklist({
   );
 }
 
-/// Decodes the persisted settings value.
+/// Decodes the persisted settings value. A `dismissed` flag left by older
+/// versions, which showed the checklist on host rows until hidden, is ignored.
 Map<int, HostSetupPersistedState> decodeHostSetupPersistedState(String? raw) {
   if (raw == null || raw.isEmpty) return const {};
   Object? decoded;
@@ -261,7 +233,6 @@ Map<int, HostSetupPersistedState> decodeHostSetupPersistedState(String? raw) {
           for (final step in HostSetupStep.values)
             if (doneValues.contains(step.storageValue)) step,
       },
-      dismissed: value['dismissed'] == true,
     );
   }
   return states;
@@ -295,14 +266,6 @@ class HostSetupChecklistStore {
       return {...current, 'done': done.toList()..sort()};
     });
   }
-
-  /// Hides the checklist for [hostId].
-  Future<void> dismiss(int hostId) =>
-      _update(hostId, (current) => {...current, 'dismissed': true});
-
-  /// Shows the checklist for [hostId] again.
-  Future<void> restore(int hostId) =>
-      _update(hostId, (current) => {...current}..remove('dismissed'));
 
   Future<void> _update(
     int hostId,

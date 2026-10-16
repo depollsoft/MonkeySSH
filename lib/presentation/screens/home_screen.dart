@@ -24,6 +24,7 @@ import '../../domain/models/tmux_state.dart';
 import '../../domain/services/acp_composer_draft_store.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
+import '../../domain/services/app_review_demo_service.dart';
 import '../../domain/services/auth_service.dart';
 import '../../domain/services/home_screen_shortcut_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
@@ -1045,6 +1046,7 @@ enum _HostContextAction {
   toggleHomeScreen,
   disconnect,
   edit,
+  setupChecklist,
   duplicate,
   export,
   delete,
@@ -1347,11 +1349,6 @@ class _HostRow extends ConsumerWidget {
                   ),
                 ],
               ),
-              if (!_redactStoreScreenshotIdentities)
-                Padding(
-                  padding: const EdgeInsets.only(left: 20),
-                  child: HostSetupChecklistLine(host: host),
-                ),
               if (previewEntries.isNotEmpty &&
                   !_redactStoreScreenshotIdentities) ...[
                 const SizedBox(height: 8),
@@ -1619,6 +1616,15 @@ class _HostRow extends ConsumerWidget {
             title: Text('Edit'),
           ),
         ),
+        if (!isAppReviewDemoHost(host))
+          const PopupMenuItem<_HostContextAction>(
+            value: _HostContextAction.setupChecklist,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.checklist_rounded),
+              title: Text('Setup Checklist'),
+            ),
+          ),
         const PopupMenuItem<_HostContextAction>(
           value: _HostContextAction.duplicate,
           child: ListTile(
@@ -1673,6 +1679,9 @@ class _HostRow extends ConsumerWidget {
         return;
       case _HostContextAction.edit:
         unawaited(context.push('/hosts/edit/${host.id}'));
+        return;
+      case _HostContextAction.setupChecklist:
+        await showHostSetupChecklistSheet(context, host.id);
         return;
       case _HostContextAction.duplicate:
         await _duplicateHost(context, ref);
@@ -1792,7 +1801,6 @@ class _ConnectionsPanel extends ConsumerWidget {
                               'Open a host and your live terminals show up '
                               'here.',
                         ),
-                        HostSetupEmptyStateCard(),
                       ],
                     ),
                   ),
