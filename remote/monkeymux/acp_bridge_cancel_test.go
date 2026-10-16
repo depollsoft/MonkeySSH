@@ -257,7 +257,7 @@ func TestAcpProviderCancelIgnoresAnsweredAndUnknownRequests(t *testing.T) {
 	answer := parseAcpEnvelope(json.RawMessage(
 		`{"jsonrpc":"2.0","id":"permission-1","result":{"outcome":{"outcome":"cancelled"}}}`,
 	))
-	if !bridge.claimClientResponse(answer) {
+	if bridge.claimClientResponse(answer) != acpClaimForward {
 		t.Fatal("first client answer was not forwarded")
 	}
 	bridge.observeClientMessage(answer)
@@ -282,7 +282,7 @@ func TestAcpReusedRequestIDIsForwardedAfterCancellation(t *testing.T) {
 	answer := parseAcpEnvelope(json.RawMessage(
 		`{"jsonrpc":"2.0","id":"permission-1","result":{}}`,
 	))
-	if !bridge.claimClientResponse(answer) {
+	if bridge.claimClientResponse(answer) != acpClaimForward {
 		t.Fatal("answer to the new request with a reused id was dropped")
 	}
 }

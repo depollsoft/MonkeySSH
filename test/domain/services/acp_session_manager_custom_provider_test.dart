@@ -151,6 +151,7 @@ class _Connector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     final agent = agents[bridgeId] = _Agent();
     final client = AcpClient(AcpJsonRpcConnection(transport: agent));

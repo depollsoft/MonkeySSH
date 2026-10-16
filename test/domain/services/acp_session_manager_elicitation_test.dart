@@ -147,6 +147,7 @@ class _Connector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     final agent = agents[bridgeId] = _Agent()..holdSetup = holdSessionSetup;
     final states = StreamController<MonkeyMuxAcpTransportState>.broadcast();

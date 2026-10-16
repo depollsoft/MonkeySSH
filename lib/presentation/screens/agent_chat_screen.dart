@@ -75,6 +75,7 @@ import '../widgets/acp_terminal_output.dart';
 import '../widgets/acp_transcript_export_sheet.dart';
 import '../widgets/acp_transcript_search_bar.dart';
 import '../widgets/acp_unread_digest_bar.dart';
+import '../widgets/acp_writer_lease_banner.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -238,6 +239,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Timer? _initialScrollSettleTimer;
   var _userDraggingTranscript = false;
   var _connecting = true;
+  var _takingOver = false;
+  var _takeOverFailed = false;
   AcpSessionError? _connectError;
   var _providerSignInRequested = false;
   final AcpTimelineMapperCache _timelineMapperCache = AcpTimelineMapperCache();
@@ -450,7 +453,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       .firstOrNull
       ?.connectionId;
 
-  Future<void> _ensureConnected() async {
+  Future<void> _ensureConnected({bool takeOver = false}) async {
     final manager = ref.read(acpSessionManagerProvider);
     final existing = manager.state.byKeyValue(_key.value);
     if (existing != null && existing.isLive) {
@@ -465,7 +468,12 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     try {
       final recents = await manager.loadRecentSessions();
       final match = recents.where((r) => r.key.value == _key.value).firstOrNull;
-      final result = await _reconnect(cwd: match?.cwd ?? '~');
+      // A chat first opened read-only from a native window is tracked but
+      // not recorded as recent; its tracked directory is the session's own.
+      final result = await _reconnect(
+        cwd: existing?.cwd ?? match?.cwd ?? '~',
+        takeOver: takeOver,
+      );
       if (!mounted) {
         return;
       }
@@ -529,9 +537,30 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     }
   }
 
+  Future<void> _takeOver() async {
+    if (_takingOver) return;
+    setState(() {
+      _takingOver = true;
+      _takeOverFailed = false;
+    });
+    try {
+      await _ensureConnected(takeOver: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _takingOver = false;
+          // The read-only view is kept on failure, so the banner reports it
+          // and offers to try again.
+          _takeOverFailed = _connectError != null;
+        });
+      }
+    }
+  }
+
   Future<AcpSessionLaunchResult?> _reconnect({
     required String cwd,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
+    bool takeOver = false,
   }) async {
     final manager = ref.read(acpSessionManagerProvider);
     final connection = await ensureAcpHostConnection(context, ref, _key.hostId);
@@ -564,13 +593,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       ),
       autoApprovePermissions: launchPreferences.startInYoloMode,
       replace: replace,
+      takeOver: takeOver,
     );
     if (result is AcpSessionLaunchBlocked && mounted) {
       return resolveAcpConcurrencyBlock(
         context,
         ref,
         result.decision,
-        relaunch: (replace) => _reconnect(cwd: cwd, replace: replace),
+        relaunch: (replace) =>
+            _reconnect(cwd: cwd, replace: replace, takeOver: takeOver),
       );
     }
     return result;
@@ -1396,84 +1427,101 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                 top: false,
                 bottom: !widget.embedded,
                 child: LayoutBuilder(
-                  builder: (context, constraints) => Column(
-                    children: [
-                      ?_buildBanner(session, activity),
-                      Expanded(
-                        child: _buildTranscript(session, entries, unread),
-                      ),
-                      // Search steers the scroll position while it is open,
-                      // and a short chat has no room for both bars; the
-                      // digest comes back when search closes.
-                      if (unread != null &&
-                          !_unread.digestDismissed &&
-                          !_search.isOpen)
-                        AcpUnreadDigestBar(
-                          state: unread,
-                          onJump: () => setState(_unread.jumpToDivider),
-                          onDismiss: () => setState(_unread.dismissDigest),
+                  builder: (context, constraints) {
+                    final composerVisible =
+                        !(_search.isOpen &&
+                            (_search.fieldFocused ||
+                                _search.fieldFocusPending) &&
+                            constraints.maxHeight <
+                                kAgentChatSearchFoldsComposerBelow);
+                    return Column(
+                      children: [
+                        ?_buildBanner(session, activity),
+                        Expanded(
+                          child: _buildTranscript(session, entries, unread),
                         ),
-                      if (prompts.isNotEmpty ||
-                          session.pendingElicitations.isNotEmpty ||
-                          session.awaitingElicitations.isNotEmpty)
-                        _buildPendingPanel(session, prompts, toolTitles),
-                      // Search sits just above the composer, in thumb reach.
-                      // In a short chat (a phone with its keyboard up) the
-                      // composer folds away while the search field has
-                      // focus, to leave the transcript room. In a very short
-                      // one (a phone in landscape) the bar folds too while
-                      // the composer has focus, since both would not fit.
-                      // Both stay mounted and focusable: the terminal
-                      // shell's keyboard, extra keys and paste still reach
-                      // the composer, opening search again reaches the
-                      // field, and focusing either brings it back. A tall
-                      // chat keeps both, so the layout holds still as focus
-                      // moves between them. Keyed, so the bar appearing
-                      // above the composer never takes over the composer's
-                      // element and remounts it.
-                      if (_search.isOpen)
+                        // Search steers the scroll position while it is open,
+                        // and a short chat has no room for both bars; the
+                        // digest comes back when search closes.
+                        if (unread != null &&
+                            !_unread.digestDismissed &&
+                            !_search.isOpen)
+                          AcpUnreadDigestBar(
+                            state: unread,
+                            onJump: () => setState(_unread.jumpToDivider),
+                            onDismiss: () => setState(_unread.dismissDigest),
+                          ),
+                        if (prompts.isNotEmpty ||
+                            session.pendingElicitations.isNotEmpty ||
+                            session.awaitingElicitations.isNotEmpty)
+                          _buildPendingPanel(session, prompts, toolTitles),
+                        // Search sits just above the composer, in thumb reach.
+                        // In a short chat (a phone with its keyboard up) the
+                        // composer folds away while the search field has
+                        // focus, to leave the transcript room. In a very short
+                        // one (a phone in landscape) the bar folds too while
+                        // the composer has focus, since both would not fit.
+                        // Both stay mounted and focusable: the terminal
+                        // shell's keyboard, extra keys and paste still reach
+                        // the composer, opening search again reaches the
+                        // field, and focusing either brings it back. A tall
+                        // chat keeps both, so the layout holds still as focus
+                        // moves between them. Keyed, so the bar appearing
+                        // above the composer never takes over the composer's
+                        // element and remounts it.
+                        if (_search.isOpen)
+                          Visibility(
+                            key: const ValueKey('acp-chat-search-slot'),
+                            visible:
+                                !(_composerFocused &&
+                                    !_search.fieldFocusPending &&
+                                    constraints.maxHeight <
+                                        kAgentChatComposerFoldsSearchBelow),
+                            maintainState: true,
+                            maintainFocusability: true,
+                            child: AcpTranscriptSearchBar(controller: _search),
+                          ),
+                        // The take-over sits on the composer it unlocks, in
+                        // thumb reach, and folds away with it.
+                        if (session.remoteWriter case final writer?
+                            when composerVisible)
+                          AcpWriterLeaseBanner(
+                            key: const ValueKey('acp-chat-writer-lease-banner'),
+                            writer: writer,
+                            busy: _takingOver,
+                            failed: _takeOverFailed,
+                            onTakeOver: () => unawaited(_takeOver()),
+                            onRefresh: () => ref
+                                .read(acpSessionManagerProvider)
+                                .refreshHeldSession(_key),
+                          ),
                         Visibility(
-                          key: const ValueKey('acp-chat-search-slot'),
-                          visible:
-                              !(_composerFocused &&
-                                  !_search.fieldFocusPending &&
-                                  constraints.maxHeight <
-                                      kAgentChatComposerFoldsSearchBelow),
+                          key: const ValueKey('acp-chat-composer-slot'),
+                          visible: composerVisible,
                           maintainState: true,
                           maintainFocusability: true,
-                          child: AcpTranscriptSearchBar(controller: _search),
-                        ),
-                      Visibility(
-                        key: const ValueKey('acp-chat-composer-slot'),
-                        visible:
-                            !(_search.isOpen &&
-                                (_search.fieldFocused ||
-                                    _search.fieldFocusPending) &&
-                                constraints.maxHeight <
-                                    kAgentChatSearchFoldsComposerBelow),
-                        maintainState: true,
-                        maintainFocusability: true,
-                        child: Focus(
-                          canRequestFocus: false,
-                          skipTraversal: true,
-                          onFocusChange: (focused) {
-                            if (focused != _composerFocused) {
-                              setState(() => _composerFocused = focused);
-                            }
-                          },
-                          child: AcpComposer(
-                            controller: _composer,
-                            attachmentActions: _attachmentActions(session),
-                            focusController:
-                                widget.composerFocusController ??
-                                _ownComposerFocusController,
-                            controls: _buildQuickConfigControls(session),
-                            useBottomSafeArea: !widget.embedded,
+                          child: Focus(
+                            canRequestFocus: false,
+                            skipTraversal: true,
+                            onFocusChange: (focused) {
+                              if (focused != _composerFocused) {
+                                setState(() => _composerFocused = focused);
+                              }
+                            },
+                            child: AcpComposer(
+                              controller: _composer,
+                              attachmentActions: _attachmentActions(session),
+                              focusController:
+                                  widget.composerFocusController ??
+                                  _ownComposerFocusController,
+                              controls: _buildQuickConfigControls(session),
+                              useBottomSafeArea: !widget.embedded,
+                            ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ),
@@ -1553,6 +1601,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   }
 
   Widget? _buildBanner(AcpSessionState session, AcpStatusDisplay activity) {
+    // A read-only chat explains itself beside the composer instead.
+    if (session.remoteWriter != null) return null;
     if (session.status != AcpConnectionStatus.ready) {
       return _buildSessionStatusBanner(session);
     }
