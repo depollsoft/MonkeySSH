@@ -11,6 +11,7 @@ import 'package:monkeyssh/domain/models/acp_writer_lease.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_device_label.dart';
 import 'package:monkeyssh/domain/services/acp_json_rpc_connection.dart';
+import 'package:monkeyssh/domain/services/acp_transport.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_acp_bridge_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
@@ -288,7 +289,8 @@ void main() {
     expect(channels, hasLength(1));
     await expectLater(
       transport.write(utf8.encode('{"jsonrpc":"2.0","id":2,"method":"x"}\n')),
-      throwsA(isA<MonkeyMuxAcpBridgeException>()),
+      // Nothing left the device, so the connection counts it as not sent.
+      throwsA(isA<AcpTransportClosedException>()),
     );
   });
 
@@ -339,7 +341,8 @@ void main() {
     expect(errors, isEmpty);
     await expectLater(
       transport.write(utf8.encode('{"jsonrpc":"2.0","id":3,"method":"x"}\n')),
-      throwsA(isA<MonkeyMuxAcpBridgeException>()),
+      // Nothing left the device, so the connection counts it as not sent.
+      throwsA(isA<AcpTransportClosedException>()),
     );
     expect(channels.single.types, ['hello']);
   });
