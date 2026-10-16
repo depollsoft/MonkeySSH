@@ -66,13 +66,16 @@ class _WebViewWidget extends PlatformWebViewWidget {
 }
 
 void main() {
-  testWidgets('closing the selected tab loads its unvisited replacement', (
-    tester,
+  late _WebViewPlatform platform;
+
+  Future<void> pumpBrowser(
+    WidgetTester tester,
+    List<PortForwardBrowserInitialTab> tabs,
   ) async {
     FluttyTheme.debugUseSystemFonts = true;
     addTearDown(() => FluttyTheme.debugUseSystemFonts = false);
     final previousPlatform = WebViewPlatform.instance;
-    final platform = _WebViewPlatform();
+    platform = _WebViewPlatform();
     WebViewPlatform.instance = platform;
     addTearDown(() {
       if (previousPlatform != null) {
@@ -98,23 +101,25 @@ void main() {
         SettingKeys.portForwardBrowserCookieIsolationMigration,
       ),
     ).thenAnswer((_) async => true);
-    final first = Uri.parse('http://localhost:8080');
-    final second = Uri.parse('http://localhost:8081');
     await tester.pumpWidget(
       ProviderScope(
         overrides: [settingsServiceProvider.overrideWithValue(settings)],
-        child: MaterialApp(
-          home: PortForwardBrowserScreen(
-            initialTabs: [
-              PortForwardBrowserInitialTab(uri: first, title: 'First'),
-              PortForwardBrowserInitialTab(uri: second, title: 'Second'),
-            ],
-          ),
-        ),
+        child: MaterialApp(home: PortForwardBrowserScreen(initialTabs: tabs)),
       ),
     );
     await tester.pump();
     await tester.pump();
+  }
+
+  testWidgets('closing the selected tab loads its unvisited replacement', (
+    tester,
+  ) async {
+    final first = Uri.parse('http://localhost:8080');
+    final second = Uri.parse('http://localhost:8081');
+    await pumpBrowser(tester, [
+      PortForwardBrowserInitialTab(uri: first, title: 'First'),
+      PortForwardBrowserInitialTab(uri: second, title: 'Second'),
+    ]);
     expect(platform.controllers[0].requests, [first]);
     expect(platform.controllers[1].requests, isEmpty);
 
@@ -126,5 +131,23 @@ void main() {
     await tester.pump();
     expect(platform.controllers[1].requests, [second]);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('one tap on the address field opens the keyboard', (
+    tester,
+  ) async {
+    await pumpBrowser(tester, [
+      PortForwardBrowserInitialTab(uri: Uri.parse('http://localhost:8080')),
+    ]);
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await tester.pump();
+
+    // Focus widens the field to the whole toolbar; the move must keep the
+    // field's input connection, or the keyboard closes again at once.
+    expect(find.byTooltip('Back'), findsNothing);
+    expect(tester.testTextInput.hasAnyClients, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
   });
 }

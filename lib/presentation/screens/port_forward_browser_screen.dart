@@ -178,6 +178,9 @@ class _PortForwardBrowserScreenState
   TextEditingController? _addressController;
   List<_PortForwardBrowserTabState> _tabs = [];
   final _addressFocusNode = FocusNode();
+  // Focus moves the field out of the toolbar row; the key carries its state
+  // along, so the input connection and keyboard it just opened survive.
+  final _addressFieldKey = GlobalKey();
 
   var _selectedTabIndex = 0;
   var _nextTabId = 0;
@@ -1474,6 +1477,7 @@ class _PortForwardBrowserScreenState
     final colorScheme = Theme.of(context).colorScheme;
 
     return TextField(
+      key: _addressFieldKey,
       controller: _addressController,
       focusNode: _addressFocusNode,
       autocorrect: false,
