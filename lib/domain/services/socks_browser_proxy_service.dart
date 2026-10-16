@@ -71,10 +71,10 @@ class SocksBrowserProxyException implements Exception {
 /// Routes the in-app browser's web views through a loopback SOCKS5 listener.
 ///
 /// `webview_flutter` exposes no proxy settings, so a small platform channel
-/// sets them natively: `proxyConfigurations` on the default
-/// `WKWebsiteDataStore` on iOS 17+, and a process-wide `ProxyController`
-/// override on Android. Neither configuration falls back to a direct
-/// connection.
+/// sets them natively: `proxyConfigurations` on the hosts' own
+/// `WKWebsiteDataStore`s on iOS 17+ (see `SocksBrowserStoreService`), and a
+/// process-wide `ProxyController` override on Android. Neither configuration
+/// falls back to a direct connection.
 ///
 /// Once applied, the proxy is never simply removed while web content may
 /// still be alive. When the forward drops ([block]) or the SOCKS browser

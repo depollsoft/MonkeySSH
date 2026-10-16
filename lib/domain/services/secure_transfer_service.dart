@@ -243,10 +243,12 @@ class SecureTransferService {
   /// list belongs to this device's onboarding, and its host ids would point
   /// at other hosts elsewhere. Agent forwarding hands a host this phone's
   /// keys, so it is an opt-in made again on each device; an import never
-  /// turns it on.
+  /// turns it on. SOCKS browser store ids name website data stores that only
+  /// exist on this device.
   static const _deviceLocalSettingsKeys = {
     monkeyMuxOfferPendingSettingKey,
     SettingKeys.hostAgentForwarding,
+    SettingKeys.socksBrowserStores,
   };
 
   /// Whether [key] is a setting that stays on this device: onboarding state

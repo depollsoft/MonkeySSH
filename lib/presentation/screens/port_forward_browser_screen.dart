@@ -25,6 +25,7 @@ import '../../domain/services/socks_forward_route.dart';
 import '../../domain/services/ssh_service.dart';
 import '../browser/browser_file_picker.dart';
 import '../browser/socks_browser_panels.dart';
+import '../browser/socks_browser_store_binder.dart';
 import '../widgets/brand_error_state.dart';
 
 /// Group used to prioritize and separate forwarded browser tabs.
@@ -185,6 +186,10 @@ class _PortForwardBrowserScreenState
   // SOCKS mode only.
   late final SocksBrowserProxyService _socksProxy;
   late final SocksForwardBrowserLeases _socksLeases;
+  late final SocksBrowserStoreBinder _socksStores;
+  // The website data store of the forward's host, set before the route
+  // starts; see [SocksBrowserStoreService].
+  late final String _socksStoreId;
   SocksForwardRouteSource? _socksRoute;
   var _socksStatus = SocksBrowserRouteStatus.connecting;
   String? _socksMessage;
@@ -218,6 +223,7 @@ class _PortForwardBrowserScreenState
     _socksLeases = ref.read(socksForwardBrowserLeasesProvider);
     _addressFocusNode.addListener(_handleAddressFocusChanged);
     if (_isSocksBrowser) {
+      _socksStores = ref.read(socksBrowserStoreBinderProvider);
       // Released in [_tearDownSocksBrowser].
       _socksLeases.acquire(widget.socksForward!.id);
       WidgetsBinding.instance.addObserver(this);
@@ -344,10 +350,6 @@ class _PortForwardBrowserScreenState
   }
 
   _PortForwardBrowserTabState _createTab(PortForwardBrowserInitialTab seed) {
-    final initialUri = _isSocksBrowser
-        ? seed.uri
-        : normalizePortForwardBrowserUri(seed.uri);
-    late final _PortForwardBrowserTabState tab;
     var creationParams = const PlatformWebViewControllerCreationParams();
     if (WebViewPlatform.instance is WebKitWebViewPlatform) {
       creationParams =
@@ -356,27 +358,40 @@ class _PortForwardBrowserScreenState
             allowsInlineMediaPlayback: true,
           );
     }
-    final controller =
-        WebViewController.fromPlatformCreationParams(
-            creationParams,
-            onPermissionRequest: (request) =>
-                unawaited(_handleWebPermissionRequest(tab, request)),
-          )
-          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-          ..setNavigationDelegate(
-            NavigationDelegate(
-              onNavigationRequest: (request) =>
-                  _handleNavigationRequest(tab, request),
-              onWebResourceError: (error) =>
-                  unawaited(_handleWebResourceError(tab, error)),
-              onProgress: (progress) => _handleProgress(tab, progress),
-              onPageStarted: (url) => _handlePageStarted(tab, url),
-              onPageFinished: (url) => unawaited(_handlePageFinished(tab, url)),
-              onUrlChange: (change) => _handleUrlChange(tab, change.url),
-              onHttpAuthRequest: (request) =>
-                  unawaited(_handleHttpAuthRequest(tab, request)),
-            ),
-          );
+    final tab = _newTab(seed, creationParams);
+    _configureTabController(tab);
+    return tab;
+  }
+
+  /// Creates the SOCKS browser's tab, with its web view in the host's own
+  /// data store. Throws [SocksBrowserProxyException] when the store could
+  /// not be set; that web view then never loads anything.
+  Future<_PortForwardBrowserTabState> _createSocksTab(String storeId) async {
+    final creationParams = await _socksStores.creationParams(storeId);
+    final tab = _newTab(
+      PortForwardBrowserInitialTab(uri: _blankSocksUri),
+      creationParams,
+    );
+    // Before anything else uses the web view: Android only lets a profile
+    // be set on one that is unused.
+    await _socksStores.attach(storeId, tab.controller);
+    _configureTabController(tab);
+    return tab;
+  }
+
+  _PortForwardBrowserTabState _newTab(
+    PortForwardBrowserInitialTab seed,
+    PlatformWebViewControllerCreationParams creationParams,
+  ) {
+    final initialUri = _isSocksBrowser
+        ? seed.uri
+        : normalizePortForwardBrowserUri(seed.uri);
+    late final _PortForwardBrowserTabState tab;
+    final controller = WebViewController.fromPlatformCreationParams(
+      creationParams,
+      onPermissionRequest: (request) =>
+          unawaited(_handleWebPermissionRequest(tab, request)),
+    );
 
     return tab = _PortForwardBrowserTabState(
       id: _nextTabId++,
@@ -392,6 +407,25 @@ class _PortForwardBrowserScreenState
       initialTitle: seed.title,
       group: seed.group,
     );
+  }
+
+  void _configureTabController(_PortForwardBrowserTabState tab) {
+    tab.controller
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onNavigationRequest: (request) =>
+              _handleNavigationRequest(tab, request),
+          onWebResourceError: (error) =>
+              unawaited(_handleWebResourceError(tab, error)),
+          onProgress: (progress) => _handleProgress(tab, progress),
+          onPageStarted: (url) => _handlePageStarted(tab, url),
+          onPageFinished: (url) => unawaited(_handlePageFinished(tab, url)),
+          onUrlChange: (change) => _handleUrlChange(tab, change.url),
+          onHttpAuthRequest: (request) =>
+              unawaited(_handleHttpAuthRequest(tab, request)),
+        ),
+      );
   }
 
   Future<void> _initializeBrowser() async {
@@ -442,6 +476,25 @@ class _PortForwardBrowserScreenState
       return;
     }
     await _clearLegacySharedCookiesOnce();
+    if (!mounted) {
+      return;
+    }
+    try {
+      _socksStoreId = await _socksStores.openHostStore(socksForward.hostId);
+    } on Object catch (error) {
+      DiagnosticsLogService.instance.warning(
+        'browser.socks',
+        'store_open_failed',
+        fields: {'code': error.runtimeType.toString()},
+      );
+      if (mounted) {
+        setState(() {
+          _socksStatus = SocksBrowserRouteStatus.unsupported;
+          _socksMessage = _socksStoreFailedMessage;
+        });
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
@@ -530,14 +583,40 @@ class _PortForwardBrowserScreenState
     if (!mounted || generation != _socksGeneration) {
       return;
     }
-    _socksRoutingPort = null;
     if (_socksRoute?.route != route) {
       // The forward moved or stopped while the proxy was being applied.
+      _socksRoutingPort = null;
       _handleSocksRouteChanged();
       return;
     }
     if (_tabs.isEmpty) {
-      final tab = _createTab(PortForwardBrowserInitialTab(uri: _blankSocksUri));
+      // Still routing until the tab exists, so a refresh of the same route
+      // meanwhile does not start over.
+      final _PortForwardBrowserTabState tab;
+      try {
+        tab = await _createSocksTab(_socksStoreId);
+      } on SocksBrowserProxyException {
+        if (mounted && generation == _socksGeneration) {
+          _socksRoutingPort = null;
+          // No tab, so nothing loads; like a refused apply, the proxy is
+          // left as it is.
+          setState(() {
+            _socksStatus = SocksBrowserRouteStatus.unsupported;
+            _socksMessage = _socksStoreFailedMessage;
+          });
+        }
+        return;
+      }
+      if (!mounted || generation != _socksGeneration) {
+        // The route dropped or moved meanwhile; routing it again makes the
+        // tab, and this unused one is dropped.
+        return;
+      }
+      _socksRoutingPort = null;
+      if (_socksRoute?.route != route) {
+        _handleSocksRouteChanged();
+        return;
+      }
       setState(() {
         _tabs = [tab];
         _selectedTabIndex = 0;
@@ -547,6 +626,7 @@ class _PortForwardBrowserScreenState
       });
       return;
     }
+    _socksRoutingPort = null;
     setState(() {
       _socksStatus = SocksBrowserRouteStatus.ready;
       _socksMessage = null;
@@ -1938,6 +2018,10 @@ class _PortForwardBrowserScreenState
 enum _BrowserFileSource { camera, files }
 
 final _blankSocksUri = Uri.parse('about:blank');
+
+const _socksStoreFailedMessage =
+    'Couldn’t open this host’s own browser storage, so no pages load. '
+    'Close the browser and try again.';
 
 /// First wait before moving a SOCKS proxy to the sink again after a failure;
 /// it doubles up to [_socksSinkRetryMaxDelay].

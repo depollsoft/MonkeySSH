@@ -424,6 +424,27 @@ void main() {
         );
       });
 
+      test('SOCKS browser store ids stay on this device', () async {
+        const storeId = '00000000-0000-4000-8000-000000000001';
+        await SettingsService(db)
+            .setJson(SettingKeys.socksBrowserStores, {'1': storeId});
+        final data = await transferService.createMigrationData();
+        final settings = data['settings']! as Map;
+        expect(settings.containsKey(SettingKeys.socksBrowserStores), isFalse);
+
+        // Another device's ids name stores that don't exist here.
+        settings[SettingKeys.socksBrowserStores] =
+            '{"1":"00000000-0000-4000-8000-000000000009"}';
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.merge,
+        );
+        expect(
+          await SettingsService(db).getJson(SettingKeys.socksBrowserStores),
+          {'1': storeId},
+        );
+      });
+
       test('host export can omit an unreadable referenced key', () async {
         final keyId = await db
             .into(db.sshKeys)

@@ -34,6 +34,7 @@ import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
 import '../../domain/services/secure_transfer_service.dart';
 import '../../domain/services/settings_service.dart';
+import '../../domain/services/socks_browser_store_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
@@ -1744,6 +1745,9 @@ class _HostRow extends ConsumerWidget {
           .delete(host.id);
       if (deletedCount > 0) {
         unawaited(ref.read(acpComposerDraftStoreProvider).forgetHost(host.id));
+        unawaited(
+          ref.read(socksBrowserStoreServiceProvider).forgetHost(host.id),
+        );
         await ref
             .read(homeScreenShortcutPreferencesServiceProvider)
             .setHostPinned(host.id, pinned: false);

@@ -13,9 +13,11 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 import 'package:monkeyssh/domain/services/socks_forward_route.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
+import 'package:monkeyssh/presentation/browser/socks_browser_store_binder.dart';
 import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
-import 'package:webview_flutter/webview_flutter.dart' show WebViewWidget;
+import 'package:webview_flutter/webview_flutter.dart'
+    show WebViewController, WebViewWidget;
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
 class _Settings extends Mock implements SettingsService {}
@@ -202,6 +204,56 @@ class _RouteSource extends ChangeNotifier implements SocksForwardRouteSource {
   }
 }
 
+/// Stands in for the native per-host data stores: each host's store id is
+/// derived from its id, and binding is recorded on the shared timeline.
+class _StoreBinder implements SocksBrowserStoreBinder {
+  final openedHosts = <int>[];
+  String? failOpen;
+  String? failBind;
+  String? failAttach;
+
+  @override
+  Future<String> openHostStore(int hostId) async {
+    openedHosts.add(hostId);
+    if (failOpen case final code?) {
+      throw SocksBrowserProxyException(code);
+    }
+    return _storeIdFor(hostId);
+  }
+
+  @override
+  Future<PlatformWebViewControllerCreationParams> creationParams(
+    String storeId,
+  ) async {
+    _events.add('bind-store:$storeId');
+    if (failBind case final code?) {
+      throw SocksBrowserProxyException(code);
+    }
+    return const PlatformWebViewControllerCreationParams();
+  }
+
+  @override
+  Future<void> attach(String storeId, WebViewController controller) async {
+    _events.add('attach-store:$storeId');
+    if (failAttach case final code?) {
+      throw SocksBrowserProxyException(code);
+    }
+  }
+}
+
+String _storeIdFor(int hostId) =>
+    '00000000-0000-4000-8000-${hostId.toString().padLeft(12, '0')}';
+
+final _store = _storeIdFor(42);
+
+/// The proxy goes in place, then the web view is created in the host's store.
+final _browserCreated = [
+  'apply:41080',
+  'bind-store:$_store',
+  'webview',
+  'attach-store:$_store',
+];
+
 final _forward = PortForward(
   id: 7,
   name: 'Office',
@@ -221,6 +273,7 @@ const _sinkPort = 9;
 void main() {
   late _WebViewPlatform platform;
   late _Settings settings;
+  late _StoreBinder stores;
 
   setUp(() {
     _events.clear();
@@ -235,6 +288,7 @@ void main() {
       }
     });
     settings = _Settings();
+    stores = _StoreBinder();
     when(
       () => settings.getBool(
         SettingKeys.portForwardBrowserCookieIsolationMigration,
@@ -290,6 +344,7 @@ void main() {
               sinkPort: () async => _sinkPort,
             ),
           ),
+          socksBrowserStoreBinderProvider.overrideWithValue(stores),
           if (source != null)
             socksForwardRouteSourceFactoryProvider.overrideWithValue(
               (_) => source,
@@ -328,6 +383,7 @@ void main() {
               sinkPort: () async => _sinkPort,
             ),
           ),
+          socksBrowserStoreBinderProvider.overrideWithValue(stores),
           socksForwardRouteSourceFactoryProvider.overrideWithValue(
             (_) => sources.removeAt(0),
           ),
@@ -403,8 +459,9 @@ void main() {
     );
     await pumpBrowser(tester, source);
 
-    // The proxy is in place before any web view exists.
-    expect(_events, ['apply:41080', 'webview']);
+    // The proxy is in place before any web view exists, and the web view
+    // keeps its data in the host's own store.
+    expect(_events, _browserCreated);
     expect(find.text('browse via Office'), findsOneWidget);
     expect(find.byTooltip('Open in system browser'), findsNothing);
     expect(find.byTooltip('Routed through Office'), findsOneWidget);
@@ -614,7 +671,7 @@ void main() {
       _RouteSource(route),
     ]);
     // The first browser started the forward.
-    expect(_events, ['apply:41080', 'webview']);
+    expect(_events, _browserCreated);
 
     // The rule is browsed again while the first browser's route is still
     // popping, so both are mounted for a moment.
@@ -803,7 +860,7 @@ void main() {
       await tester.pump();
     }
     expect(source.restarts, 2);
-    expect(_events, ['apply:41080', 'webview']);
+    expect(_events, _browserCreated);
     expect(find.text('browse via Office'), findsOneWidget);
 
     _events.clear();
@@ -981,5 +1038,96 @@ void main() {
     expect(_events, ['clear']);
     expect(find.text('browser proxy stuck'), findsOneWidget);
     expect(platform.controllers, isEmpty);
+  });
+
+  testWidgets('keeps each host\'s pages in that host\'s own store', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    const route = SocksForwardRoute(connectionId: 1, port: 41080);
+    await pumpBrowser(tester, _RouteSource(route));
+    expect(stores.openedHosts, [42]);
+    expect(_events, _browserCreated);
+    expect(
+      find.textContaining('Cookies and site data stay with Dev box.'),
+      findsOneWidget,
+    );
+
+    await openAddress(tester, '10.0.0.5:8080');
+    // Pages load only after the web view is in the host's store.
+    expect(_events.last, 'load:http://10.0.0.5:8080');
+    await closeBrowser(tester);
+
+    _events.clear();
+    await pumpScreen(
+      tester,
+      PortForwardBrowserScreen.socks(
+        socksForward: _forward.copyWith(id: 8, hostId: 43),
+      ),
+      source: _RouteSource(route),
+    );
+    expect(stores.openedHosts, [42, 43]);
+    expect(_events, [
+      'apply:41080',
+      'bind-store:${_storeIdFor(43)}',
+      'webview',
+      'attach-store:${_storeIdFor(43)}',
+    ]);
+    await closeBrowser(tester);
+  });
+
+  testWidgets('starts nothing when the host\'s store cannot open', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    stores.failOpen = 'unavailable';
+    final source = _RouteSource(null)
+      ..onRestart = () => const SocksForwardRoute(connectionId: 1, port: 41080);
+    await pumpBrowser(tester, source);
+
+    expect(source.restarts, 0);
+    expect(_events, isEmpty);
+    expect(find.text('socks browsing unavailable'), findsOneWidget);
+    expect(find.textContaining('own browser storage'), findsOneWidget);
+    await closeBrowser(tester);
+    expect(_events, isEmpty);
+  });
+
+  testWidgets('creates no web view when the store cannot be bound', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    stores.failBind = 'configuration_missing';
+    await pumpBrowser(
+      tester,
+      _RouteSource(const SocksForwardRoute(connectionId: 1, port: 41080)),
+    );
+
+    expect(_events, ['apply:41080', 'bind-store:$_store']);
+    expect(platform.controllers, isEmpty);
+    expect(find.text('socks browsing unavailable'), findsOneWidget);
+    expect(find.textContaining('own browser storage'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    await closeBrowser(tester);
+  });
+
+  testWidgets('loads nothing in a web view that kept another store', (
+    tester,
+  ) async {
+    mockProxyChannel();
+    stores.failAttach = 'store_mismatch';
+    await pumpBrowser(
+      tester,
+      _RouteSource(const SocksForwardRoute(connectionId: 1, port: 41080)),
+    );
+
+    expect(_events, _browserCreated);
+    expect(platform.controllers.single.requests, isEmpty);
+    expect(platform.delegates, isEmpty);
+    expect(find.text('socks browsing unavailable'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.byType(WebViewWidget), findsNothing);
+    await closeBrowser(tester);
+    expect(platform.controllers.single.requests, isEmpty);
   });
 }

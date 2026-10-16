@@ -236,6 +236,15 @@ class SocksBrowserStartPanel extends StatelessWidget {
                     color: colorScheme.onSurfaceVariant,
                   ),
                 ),
+                const SizedBox(height: FluttyTheme.spacingXs),
+                Text(
+                  'Cookies and site data stay with ${host ?? 'this host'}. '
+                  'Other hosts and the browser for local forwards can’t '
+                  'see them, and deleting the host deletes them.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ],
             ),
           ),

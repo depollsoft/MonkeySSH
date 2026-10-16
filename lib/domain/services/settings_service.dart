@@ -115,6 +115,11 @@ abstract final class SettingKeys {
   /// exported or imported with migration data.
   static const hostAgentForwarding = 'host_agent_forwarding';
 
+  /// The random id of each host's SOCKS browser website data store, by host
+  /// id. The stores exist only on this device, so this is never exported or
+  /// imported.
+  static const socksBrowserStores = 'socks_browser_stores';
+
   /// Each host's SFTP browser sort and hidden-file choices, by host id.
   static const sftpBrowserViews = 'sftp_browser_views';
 
