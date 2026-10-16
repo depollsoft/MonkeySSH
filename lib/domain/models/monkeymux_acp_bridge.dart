@@ -56,6 +56,8 @@ final class MonkeyMuxAcpBridgeMetadata {
     this.providerId,
     this.sessionId,
     this.cwd,
+    this.pendingPermissionCount,
+    this.pendingInputCount,
     this.writer,
   });
 
@@ -85,6 +87,17 @@ final class MonkeyMuxAcpBridgeMetadata {
 
   /// Number of pending provider-to-client requests.
   final int pendingRequestCount;
+
+  /// How many of [pendingRequestCount] are permission requests
+  /// (`session/request_permission`), when the helper reports request kinds.
+  ///
+  /// Null, like [pendingInputCount], when the bridge cannot say: one started
+  /// by a helper that predates request kinds.
+  final int? pendingPermissionCount;
+
+  /// How many of [pendingRequestCount] are questions (`elicitation/create`),
+  /// when the helper reports request kinds.
+  final int? pendingInputCount;
 
   /// Number of in-flight client-to-provider requests.
   final int inFlightTurnCount;

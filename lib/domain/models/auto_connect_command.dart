@@ -28,6 +28,10 @@ enum TerminalCommandReviewReason {
   /// The command came from imported auto-connect configuration.
   importedAutoConnect,
 
+  /// The command would run because a `monkeyssh://` or `ssh://` link opened
+  /// the terminal, and links never run commands on their own.
+  openedFromLink,
+
   /// The command spans multiple lines.
   multiline,
 
@@ -193,15 +197,20 @@ TerminalCommandReview assessSnippetCommandInsertion(
 }
 
 /// Assesses an auto-connect command before it is executed automatically.
+///
+/// [openedFromLink] marks a terminal opened by an app link, which must show
+/// the command for review instead of running it.
 TerminalCommandReview assessAutoConnectCommandExecution(
   String command, {
   required bool importedNeedsReview,
+  bool openedFromLink = false,
 }) {
-  final reasons = <TerminalCommandReviewReason>[];
-  if (importedNeedsReview) {
-    reasons
-      ..add(TerminalCommandReviewReason.importedAutoConnect)
-      ..addAll(_collectSuspiciousCommandReasons(command));
+  final reasons = <TerminalCommandReviewReason>[
+    if (importedNeedsReview) TerminalCommandReviewReason.importedAutoConnect,
+    if (openedFromLink) TerminalCommandReviewReason.openedFromLink,
+  ];
+  if (reasons.isNotEmpty) {
+    reasons.addAll(_collectSuspiciousCommandReasons(command));
   }
   return TerminalCommandReview(command: command, reasons: reasons);
 }
@@ -364,6 +373,9 @@ String _describeReviewReason(TerminalCommandReviewReason reason) =>
     switch (reason) {
       TerminalCommandReviewReason.importedAutoConnect =>
         'Imported auto-connect commands need review before they can run.',
+      TerminalCommandReviewReason.openedFromLink =>
+        'A link opened this terminal, so its auto-connect command waits for '
+            'you.',
       TerminalCommandReviewReason.multiline =>
         'This command spans multiple lines.',
       TerminalCommandReviewReason.controlCharacters =>

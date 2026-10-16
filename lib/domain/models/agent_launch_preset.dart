@@ -1,4 +1,5 @@
 import '../services/windows_remote_powershell.dart';
+import 'agent_worktree.dart';
 import 'command_names.dart';
 import 'remote_multiplexer.dart';
 import 'tmux_state.dart';
@@ -284,6 +285,8 @@ class AgentLaunchPreset {
     this.tmuxExtraFlags,
     this.tmuxDisableStatusBar = false,
     this.additionalArguments,
+    this.worktree,
+    this.initialPrompt,
   });
 
   /// Decodes an [AgentLaunchPreset] from JSON, or `null` when invalid.
@@ -292,6 +295,14 @@ class AgentLaunchPreset {
       _readTrimmedString(json['tool']),
     );
     if (tool == null) {
+      return null;
+    }
+    // A worktree setting that is present but unreadable must not decode as
+    // "no worktree": that would launch in the shared checkout the preset
+    // asked to stay out of. The whole preset is unsupported instead.
+    final worktreeJson = json['worktree'];
+    final worktree = AgentWorktreeLaunchOptions.tryFromJson(worktreeJson);
+    if (worktreeJson != null && worktree == null) {
       return null;
     }
     return AgentLaunchPreset(
@@ -304,6 +315,8 @@ class AgentLaunchPreset {
       tmuxExtraFlags: _readTrimmedString(json['tmuxExtraFlags']),
       tmuxDisableStatusBar: json['tmuxDisableStatusBar'] == true,
       additionalArguments: _readTrimmedString(json['additionalArguments']),
+      worktree: worktree,
+      initialPrompt: _readTrimmedString(json['initialPrompt']),
     );
   }
 
@@ -329,6 +342,36 @@ class AgentLaunchPreset {
 
   /// Optional extra arguments passed to the CLI.
   final String? additionalArguments;
+
+  /// Git worktree settings; when set, each launch starts the agent in a new
+  /// worktree on a new branch instead of in [workingDirectory].
+  final AgentWorktreeLaunchOptions? worktree;
+
+  /// Prompt sent once when a native session started from this preset begins.
+  ///
+  /// Terminal launches ignore it, and resuming or reconnecting a session never
+  /// sends it again.
+  final String? initialPrompt;
+
+  /// Whether each launch creates a new git worktree first.
+  bool get launchesInNewWorktree => worktree != null;
+
+  /// Whether a native session started from this preset sends a prompt.
+  bool get hasInitialPrompt =>
+      initialPrompt != null && initialPrompt!.trim().isNotEmpty;
+
+  /// This preset launching in [directory] without creating a worktree, used
+  /// once the worktree for a launch exists.
+  AgentLaunchPreset launchingIn(String directory) => AgentLaunchPreset(
+    tool: tool,
+    workingDirectory: directory,
+    tmuxSessionName: tmuxSessionName,
+    remoteMuxBackend: remoteMuxBackend,
+    tmuxExtraFlags: tmuxExtraFlags,
+    tmuxDisableStatusBar: tmuxDisableStatusBar,
+    additionalArguments: additionalArguments,
+    initialPrompt: initialPrompt,
+  );
 
   /// Whether this preset uses a remote window session.
   bool get usesMuxSession =>
@@ -365,6 +408,9 @@ class AgentLaunchPreset {
     if (tmuxDisableStatusBar) 'tmuxDisableStatusBar': true,
     if (additionalArguments case final value? when value.trim().isNotEmpty)
       'additionalArguments': value.trim(),
+    if (worktree case final value?) 'worktree': value.toJson(),
+    if (initialPrompt case final value? when value.trim().isNotEmpty)
+      'initialPrompt': value.trim(),
   };
 }
 
@@ -455,6 +501,192 @@ final _yoloConflictPatterns = <AgentLaunchTool, List<RegExp>>{
     _valued('--permission-mode'),
   ],
 };
+
+/// The permissive part of [_yoloConflictPatterns]: switches that, on their
+/// own, let each tool act without asking. Valued options count only with the
+/// listed values, so `--permission-mode plan` is not YOLO but
+/// `--permission-mode bypassPermissions` is.
+final _yoloSwitches =
+    <AgentLaunchTool, ({Set<String> flags, Map<String, Set<String>> valued})>{
+      AgentLaunchTool.claudeCode: (
+        flags: {'--dangerously-skip-permissions'},
+        valued: {
+          '--permission-mode': {'bypassPermissions'},
+        },
+      ),
+      AgentLaunchTool.copilotCli: (
+        flags: {
+          '--allow-all',
+          '--yolo',
+          '--allow-all-tools',
+          '--allow-all-paths',
+          '--allow-all-urls',
+        },
+        valued: const {},
+      ),
+      AgentLaunchTool.codex: (
+        flags: {
+          '--full-auto',
+          '--yolo',
+          '--dangerously-bypass-approvals-and-sandbox',
+        },
+        valued: {
+          '--approval-mode': {'never'},
+          '--ask-for-approval': {'never'},
+          '-a': {'never'},
+          '--sandbox': {'danger-full-access'},
+          '-s': {'danger-full-access'},
+        },
+      ),
+      AgentLaunchTool.openCode: (
+        flags: {'--auto', '--yolo', '--dangerously-skip-permissions'},
+        valued: const {},
+      ),
+      AgentLaunchTool.antigravity: (
+        flags: {'--dangerously-skip-permissions'},
+        valued: const {},
+      ),
+      AgentLaunchTool.cursorAgent: (
+        flags: {'--force', '--yolo', '-f'},
+        valued: const {},
+      ),
+      AgentLaunchTool.hermes: (flags: {'--yolo'}, valued: const {}),
+      AgentLaunchTool.museCode: (
+        flags: {
+          '--yolo',
+          '--disable-approval',
+          '--disable-sandbox',
+          '--trust-workspace',
+        },
+        valued: const {},
+      ),
+      AgentLaunchTool.grokBuild: (
+        flags: {'--always-approve', '--yolo', '--dangerously-skip-permissions'},
+        valued: {
+          '--permission-mode': {'bypassPermissions'},
+        },
+      ),
+    };
+
+/// Whether [arguments], read as shell words, switch [tool] into YOLO mode on
+/// their own, whatever the host's YOLO preference says.
+bool agentArgumentsEnableYolo(AgentLaunchTool tool, String? arguments) =>
+    agentYoloSwitchesInArguments(tool, arguments).isNotEmpty;
+
+/// The switches in [arguments], read as shell words, that put [tool] in
+/// YOLO mode, written as they appear (`--sandbox danger-full-access`).
+List<String> agentYoloSwitchesInArguments(
+  AgentLaunchTool tool,
+  String? arguments,
+) {
+  final switches = _yoloSwitches[tool];
+  if (switches == null || arguments == null || arguments.trim().isEmpty) {
+    return const [];
+  }
+  final found = <String>[];
+  final words = _splitShellWords(arguments);
+  for (var index = 0; index < words.length; index++) {
+    final word = words[index];
+    if (switches.flags.contains(word)) {
+      found.add(word);
+      continue;
+    }
+    final equals = word.indexOf('=');
+    if (equals > 0) {
+      final allowed = switches.valued[word.substring(0, equals)];
+      if (allowed != null && allowed.contains(word.substring(equals + 1))) {
+        found.add(word);
+      }
+      continue;
+    }
+    final allowed = switches.valued[word];
+    if (allowed != null &&
+        index + 1 < words.length &&
+        allowed.contains(words[index + 1])) {
+      found.add('$word ${words[++index]}');
+    }
+  }
+  return found;
+}
+
+/// The switches that put [tool] in YOLO mode in the command
+/// [buildAgentToolCommand] builds from the same inputs, written as that
+/// command spells them: the tool's own YOLO environment and flags when
+/// [startInYoloMode] is on, then any permissive switch still left in
+/// [additionalArguments]. YOLO mode strips the extra arguments that conflict
+/// with its own flags, so those are not listed.
+List<String> agentLaunchYoloSwitches(
+  AgentLaunchTool tool, {
+  required String? additionalArguments,
+  required bool startInYoloMode,
+}) => <String>{
+  ..._buildAgentToolEnvironmentAssignments(
+    tool,
+    startInYoloMode: startInYoloMode,
+  ),
+  if (startInYoloMode) ...tool.yoloArguments,
+  ...agentYoloSwitchesInArguments(
+    tool,
+    _normalizeAgentToolArguments(
+      tool: tool,
+      additionalArguments: additionalArguments,
+      startInYoloMode: startInYoloMode,
+    ),
+  ),
+}.toList(growable: false);
+
+/// Splits [value] into words the way a POSIX shell would for plain
+/// arguments: quotes group and are removed, and backslashes escape. It never
+/// throws; an unterminated quote runs to the end.
+List<String> _splitShellWords(String value) {
+  final words = <String>[];
+  final current = StringBuffer();
+  var started = false;
+  var quote = _ShellQuoteMode.none;
+  for (var index = 0; index < value.length; index++) {
+    final character = value[index];
+    switch (quote) {
+      case _ShellQuoteMode.single:
+        if (character == "'") {
+          quote = _ShellQuoteMode.none;
+        } else {
+          current.write(character);
+        }
+      case _ShellQuoteMode.double:
+        if (character == '"') {
+          quote = _ShellQuoteMode.none;
+        } else if (character.codeUnitAt(0) == _backslashCodeUnit &&
+            index + 1 < value.length &&
+            r'"\$`'.contains(value[index + 1])) {
+          current.write(value[++index]);
+        } else {
+          current.write(character);
+        }
+      case _ShellQuoteMode.none:
+        if (character.trim().isEmpty) {
+          if (started) {
+            words.add(current.toString());
+            current.clear();
+            started = false;
+          }
+          continue;
+        }
+        started = true;
+        if (character == "'") {
+          quote = _ShellQuoteMode.single;
+        } else if (character == '"') {
+          quote = _ShellQuoteMode.double;
+        } else if (character.codeUnitAt(0) == _backslashCodeUnit &&
+            index + 1 < value.length) {
+          current.write(value[++index]);
+        } else {
+          current.write(character);
+        }
+    }
+  }
+  if (started) words.add(current.toString());
+  return words;
+}
 
 /// Builds the shell command for a saved agent launch preset.
 String buildAgentLaunchCommand(

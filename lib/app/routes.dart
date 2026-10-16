@@ -15,6 +15,9 @@ abstract final class Routes {
   /// Edit host route.
   static const hostEdit = 'host-edit';
 
+  /// Import hosts from an OpenSSH client config.
+  static const hostImportSshConfig = 'host-import-ssh-config';
+
   /// Terminal session route.
   static const terminal = 'terminal';
 

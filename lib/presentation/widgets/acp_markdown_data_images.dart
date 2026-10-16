@@ -78,6 +78,25 @@ String normalizeAcpMarkdownDataImages(String source) {
   return output.toString();
 }
 
+/// A `data:` URI with a base64 payload, together with the rest of a payload
+/// wrapped onto following lines.
+///
+/// A continuation line holds only base64 characters, after optional
+/// indentation, and ends there or at a closing delimiter such as `)`. It
+/// must also look like base64: at least 16 characters, a digit, `+` or `/`,
+/// or `=` padding. So a blank line, a rule such as `---`, or a one-word line
+/// of prose after the payload ends it instead of being taken for part of it.
+final RegExp acpBase64DataUriPattern = RegExp(
+  'data:[a-z0-9.+-]+/[a-z0-9.+-]+(?:;[a-z0-9.+_=-]+)*;base64,'
+  '[a-z0-9+/=_-]+'
+  r'(?:[ \t]*\r?\n[ \t]*'
+  '(?:(?=[a-z0-9+/=_-]{16})[a-z0-9+/=_-]*[a-z0-9+/][a-z0-9+/=_-]*'
+  '|[a-z_-]*[0-9+/][a-z0-9+/=_-]*'
+  '|[a-z0-9+/_-]*[a-z0-9+/]=+)'
+  r'''(?=[ \t]*(?:\r?\n|\r?$|[)"'>\]`])))*''',
+  caseSensitive: false,
+);
+
 /// Whether [line] contains a complete normalized inline base64 image.
 ///
 /// Virtual Markdown segmentation keeps such lines atomic so a data URI never

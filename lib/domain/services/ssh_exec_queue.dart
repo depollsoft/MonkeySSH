@@ -165,7 +165,13 @@ class _SshExecQueue {
     return _lowJobs.removeFirst();
   }
 
-  void _start(_QueuedSshExecJob<dynamic> job) {
+  /// Starts [job] in the zone it was submitted from. A queued job is started
+  /// by whichever job finishes first, and must not run, or log, in that job's
+  /// zone (for example a diagnostics quiet scope).
+  void _start(_QueuedSshExecJob<dynamic> job) =>
+      job.zone.run(() => _startInZone(job));
+
+  void _startInZone(_QueuedSshExecJob<dynamic> job) {
     _activeCount += 1;
     if (job.priority == SshExecPriority.low) {
       _activeLowPriorityCount += 1;
@@ -234,6 +240,9 @@ class _QueuedSshExecJob<T> {
   final DateTime enqueuedAt;
   final Future<T> Function() operation;
   final completer = Completer<T>();
+
+  /// Zone the job was submitted from.
+  final Zone zone = Zone.current;
 
   Future<T> get future => completer.future;
 }

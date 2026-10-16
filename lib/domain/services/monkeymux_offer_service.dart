@@ -22,9 +22,15 @@ class MonkeyMuxOfferService {
   final _queue = SerialTaskQueue();
 
   /// Marks [hostId] to be offered MonkeyMux on its first connection.
-  Future<void> markPending(int hostId) => _queue.run(() async {
+  Future<void> markPending(int hostId) => markAllPending([hostId]);
+
+  /// Marks every host in [hostIds] to be offered MonkeyMux on its first
+  /// connection, with one settings write.
+  Future<void> markAllPending(Iterable<int> hostIds) => _queue.run(() async {
     final pending = await _read();
-    if (pending.add(hostId)) await _write(pending);
+    final before = pending.length;
+    pending.addAll(hostIds);
+    if (pending.length != before) await _write(pending);
   });
 
   /// Whether [hostId] should be offered MonkeyMux now. Returns true at most
