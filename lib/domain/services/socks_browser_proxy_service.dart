@@ -354,12 +354,16 @@ class SocksBrowserProxyService {
     if (_holders > 0) {
       throw const SocksBrowserProxyException('held');
     }
+    // Counted before the clear is awaited, so a hold made meanwhile is
+    // refused rather than queued to apply once this browser is loading.
+    _directBrowsers++;
     if (_mayBeApplied) {
       try {
         await _channel.invokeMethod<void>('clear');
       } on MissingPluginException {
         // No native bridge here, so nothing was ever applied.
       } on PlatformException catch (error) {
+        _directBrowsers--;
         _log('clear_failed', code: error.code);
         throw SocksBrowserProxyException(error.code);
       }
@@ -367,7 +371,6 @@ class SocksBrowserProxyService {
       _appliedPort = null;
       _routedPort = null;
     }
-    _directBrowsers++;
   });
 
   /// Ends a direct browser counted by [clearBeforeDirectBrowsing]. Call it

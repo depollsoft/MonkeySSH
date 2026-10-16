@@ -303,6 +303,47 @@ void main() {
     expect(calls, ['clear', 'apply:41080']);
   });
 
+  test('a hold made while a direct clear is in flight is refused', () async {
+    final gate = Completer<void>();
+    handle((call) async {
+      if (call.method == 'clear') {
+        await gate.future;
+      }
+      return null;
+    });
+    final proxy = service();
+
+    final clear = proxy.clearBeforeDirectBrowsing();
+    await pumpEventQueue();
+    // The clear is awaiting the platform; a SOCKS browser opens now.
+    await expectLater(
+      proxy.hold(41080, owner: _office),
+      throwsA(isA<SocksBrowserProxyException>()),
+    );
+    gate.complete();
+    await clear;
+    await pumpEventQueue();
+    expect(calls, ['clear']);
+    expect(proxy.isHeld, isFalse);
+  });
+
+  test('a failed clear does not count a direct browser', () async {
+    handle((call) async {
+      if (call.method == 'clear') {
+        throw PlatformException(code: 'clear_failed');
+      }
+      return null;
+    });
+    final proxy = service();
+
+    await expectLater(
+      proxy.clearBeforeDirectBrowsing(),
+      throwsA(isA<SocksBrowserProxyException>()),
+    );
+    await proxy.hold(41080, owner: _office);
+    expect(proxy.routedPort, 41080);
+  });
+
   test(
     'iOS routes SOCKS stores only, so a direct browser does not block',
     () async {
