@@ -91,6 +91,7 @@ final class SocksBrowserProxyChannel {
     case "deleteDataStore":
       deleteDataStore(call, result: result)
     case "listDataStores":
+      Self.startWebKit()
       WKWebsiteDataStore.fetchAllDataStoreIdentifiers { identifiers in
         result(identifiers.map { $0.uuidString.lowercased() })
       }
@@ -127,6 +128,15 @@ final class SocksBrowserProxyChannel {
       store.proxyConfigurations = [configuration]
     }
     result(nil)
+  }
+
+  /// `fetchAllDataStoreIdentifiers` and `remove(forIdentifier:)` do not
+  /// start WebKit themselves. As the first WebKit call in a launch, which the
+  /// purge or a host deletion can be, their completion is sent to a main run
+  /// loop WebKit never set up, and the app crashes. Getting the default store
+  /// starts WebKit.
+  private static func startWebKit() {
+    _ = WKWebsiteDataStore.default()
   }
 
   private static func storeIdentifier(_ call: FlutterMethodCall) -> UUID? {
@@ -213,6 +223,7 @@ final class SocksBrowserProxyChannel {
       result(Self.invalidStore())
       return
     }
+    Self.startWebKit()
     WKWebsiteDataStore.remove(forIdentifier: identifier) { error in
       if error == nil {
         result(nil)
