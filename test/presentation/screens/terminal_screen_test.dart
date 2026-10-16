@@ -13523,6 +13523,454 @@ void main() {
     }
 
     testWidgets(
+      'a link never creates a worktree for a MonkeyMux worktree preset',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final installer = _MockMonkeyMuxInstallerService();
+        // A stopped workspace is where a launch would create the worktree.
+        final monkeyMuxService = _MockMonkeyMuxService();
+        final tmuxService = _MockTmuxService();
+        final worktrees = FakeAgentWorktreeService(
+          path: '/work/project.worktrees/agent',
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.copilotCli,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+            worktree: AgentWorktreeLaunchOptions(),
+            initialPrompt: 'Fix the flaky test',
+          ),
+        );
+        when(
+          () => installer.ensureInstalled(
+            session,
+            priority: any(named: 'priority'),
+            confirmInstall: any(named: 'confirmInstall'),
+            reuseInstallation: any(named: 'reuseInstallation'),
+          ),
+        ).thenAnswer(
+          (_) async => const MonkeyMuxInstallation(
+            executablePath: '/tmp/monkeymux',
+            platform: 'darwin-arm64',
+            version: '0.1.10',
+          ),
+        );
+        when(
+          () => monkeyMuxService.hasForegroundClientOrThrow(session, 'agents'),
+        ).thenAnswer((_) async => true);
+        when(() => monkeyMuxService.listWindows(session, 'agents')).thenAnswer(
+          (_) async => const <TmuxWindow>[
+            TmuxWindow(index: 0, name: 'shell', isActive: true),
+          ],
+        );
+        when(() => monkeyMuxService.watchWindowChanges(session, 'agents'))
+            .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+        when(() => tmuxService.detectInstalledAgentTools(session))
+            .thenAnswer((_) async => const <AgentLaunchTool>{});
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+        final executedCommands = <String>[];
+        when(
+          () => sshClient.execute(any(), pty: any(named: 'pty')),
+        ).thenAnswer((invocation) async {
+          executedCommands.add(invocation.positionalArguments.single as String);
+          return shellChannel;
+        });
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: AgentWorktreeRegistry(settingsService),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                openedFromLink: true,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(worktrees.created, isEmpty);
+        expect(worktrees.targets, isEmpty);
+        expect(
+          monkeyMuxService.runningServerStatusFromInstalledHelpersCalls,
+          0,
+        );
+        final attach = executedCommands
+            .where((command) => command.contains(' attach'))
+            .single;
+        expect(attach, contains('--existing'));
+        expect(attach, isNot(contains('--command')));
+        expect(attach, isNot(contains('.worktrees')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a link only reattaches to a tmux worktree preset session', (
+      tester,
+    ) async {
+      final settingsService = SettingsService(db);
+      final presetService = AgentLaunchPresetService(settingsService);
+      final tmuxService = _MockTmuxService();
+      // No session: a launch would create the worktree and start codex.
+      final worktrees = FakeAgentWorktreeService(
+        path: '/work/project.worktrees/agent',
+      )..tmuxAnswers = [null];
+      host = _buildHost(id: host.id, autoConnectCommand: 'codex');
+      session = SshSession(
+        connectionId: 7,
+        hostId: host.id,
+        client: sshClient,
+        config: session.config,
+      );
+      await presetService.setPresetForHost(
+        host.id,
+        const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '/work/project',
+          tmuxSessionName: 'agents',
+          remoteMuxBackend: RemoteMuxBackend.tmux,
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+
+      await tester.pumpWidget(
+        buildScreen(
+          overrides: [
+            settingsServiceProvider.overrideWithValue(settingsService),
+            tmuxServiceProvider.overrideWithValue(tmuxService),
+            agentWorktreeServiceProvider.overrideWithValue(worktrees),
+            agentWorktreeLauncherProvider.overrideWithValue(
+              AgentWorktreeLauncher(
+                service: worktrees,
+                registry: MemoryAgentWorktreeRegistry(),
+                wait: (_) async {},
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            home: TerminalScreen(
+              hostId: host.id,
+              connectionId: session.connectionId,
+              openedFromLink: true,
+            ),
+          ),
+        ),
+      );
+      for (var frame = 0; frame < 20; frame++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      final written = utf8.decode(
+        shellWrites.expand((chunk) => chunk).toList(growable: false),
+      );
+      expect(worktrees.created, isEmpty);
+      expect(worktrees.tmuxProbes, isEmpty);
+      expect(written, contains("\x15tmux attach-session -t '=agents'"));
+      expect(written, isNot(contains('new-session')));
+      expect(written, isNot(contains('codex')));
+      expect(find.text('Review auto-connect command'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 2));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    for (final windowOpens in [true, false]) {
+      testWidgets(
+        windowOpens
+            ? 'a confirmed worktree preset opens its agent window in a new '
+                  'worktree of a running workspace'
+            : 'a confirmed worktree preset rolls back when its agent window '
+                  'fails to open',
+        (tester) async {
+          const worktreePath = '/work/project.worktrees/agent';
+          const running = MonkeyMuxServerStatus(
+            version: '0.1.10',
+            capabilities: <String>{},
+          );
+          final settingsService = SettingsService(db);
+          final presetService = AgentLaunchPresetService(settingsService);
+          final installer = _MockMonkeyMuxInstallerService();
+          final monkeyMuxService = _MockMonkeyMuxService()
+            ..installedHelpersStatus = running
+            ..runningStatus = running;
+          final tmuxService = _MockTmuxService();
+          final worktrees = FakeAgentWorktreeService(path: worktreePath);
+          session = SshSession(
+            connectionId: 7,
+            hostId: host.id,
+            client: sshClient,
+            config: session.config,
+          );
+          host = _buildHost(id: host.id, autoConnectCommand: 'copilot');
+          await presetService.setPresetForHost(
+            host.id,
+            const AgentLaunchPreset(
+              tool: AgentLaunchTool.copilotCli,
+              workingDirectory: '/work/project',
+              tmuxSessionName: 'agents',
+              remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+              worktree: AgentWorktreeLaunchOptions(),
+            ),
+          );
+          when(() => tmuxService.clearCache(any())).thenAnswer((_) async {});
+          when(() => monkeyMuxService.clearCache(any()))
+              .thenAnswer((_) async {});
+          when(
+            () => installer.ensureInstalled(
+              session,
+              priority: any(named: 'priority'),
+              confirmInstall: any(named: 'confirmInstall'),
+              reuseInstallation: any(named: 'reuseInstallation'),
+            ),
+          ).thenAnswer(
+            (_) async => const MonkeyMuxInstallation(
+              executablePath: '/tmp/monkeymux',
+              platform: 'darwin-arm64',
+              version: '0.1.10',
+            ),
+          );
+          when(
+            () => monkeyMuxService.hasForegroundClientOrThrow(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async => true);
+          when(
+            () => monkeyMuxService.listWindows(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer(
+            (_) async => [
+              const TmuxWindow(
+                index: 0,
+                name: 'shell',
+                isActive: true,
+                currentPath: '/work/project',
+              ),
+              if (windowOpens)
+                const TmuxWindow(
+                  index: 1,
+                  name: 'Copilot CLI',
+                  isActive: false,
+                  currentPath: worktreePath,
+                ),
+            ],
+          );
+          when(
+            () => monkeyMuxService.watchWindowChanges(
+              session,
+              'agents',
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+          Future<void> createAgentWindow() => monkeyMuxService.createWindow(
+            session,
+            'agents',
+            command: any(named: 'command'),
+            name: any(named: 'name'),
+            workingDirectory: any(named: 'workingDirectory'),
+            extraFlags: any(named: 'extraFlags'),
+          );
+          when(createAgentWindow).thenAnswer((_) async {
+            if (!windowOpens) throw Exception('window refused');
+          });
+          when(
+            () => monkeyMuxService.refreshTerminalTheme(
+              session,
+              'agents',
+              any(),
+              extraFlags: any(named: 'extraFlags'),
+              forceForegroundRedraw: any(named: 'forceForegroundRedraw'),
+            ),
+          ).thenAnswer((_) async {});
+          when(() => tmuxService.detectInstalledAgentTools(session))
+              .thenAnswer((_) async => const <AgentLaunchTool>{});
+          when(() => tmuxService.prefetchInstalledAgentTools(session))
+              .thenAnswer((_) async {});
+          final executedCommands = <String>[];
+          when(() => sshClient.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                executedCommands.add(
+                  invocation.positionalArguments.single as String,
+                );
+                return shellChannel;
+              });
+
+          await tester.pumpWidget(
+            buildScreen(
+              overrides: [
+                settingsServiceProvider.overrideWithValue(settingsService),
+                monkeyMuxInstallerServiceProvider.overrideWithValue(installer),
+                tmuxServiceProvider.overrideWithValue(tmuxService),
+                monkeyMuxServiceProvider.overrideWithValue(monkeyMuxService),
+                agentWorktreeLauncherProvider.overrideWithValue(
+                  AgentWorktreeLauncher(
+                    service: worktrees,
+                    registry: AgentWorktreeRegistry(settingsService),
+                    wait: (_) async {},
+                  ),
+                ),
+              ],
+              child: MaterialApp(
+                home: TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                  startPresetAgent: true,
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 500));
+          await tester.pump();
+
+          final attach = executedCommands
+              .where((command) => command.contains(' attach'))
+              .single;
+          // The running workspace ignores an attach-time agent.
+          expect(attach, contains('--existing'));
+          expect(attach, isNot(contains('--command')));
+          // The agent never starts in the shared checkout.
+          expect(worktrees.created, hasLength(1));
+          verify(
+            () => monkeyMuxService.createWindow(
+              session,
+              'agents',
+              command: 'copilot',
+              name: 'Copilot CLI',
+              workingDirectory: worktreePath,
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).called(1);
+          expect(worktrees.removed, windowOpens ? isEmpty : worktrees.created);
+
+          // Let a failed detection's retries run out before teardown.
+          for (var second = 0; second < 60; second++) {
+            await tester.pump(const Duration(seconds: 1));
+          }
+          verifyNever(createAgentWindow);
+          expect(worktrees.created, hasLength(1));
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'a confirmed tmux worktree preset runs on an imported host without a '
+      'second review',
+      (tester) async {
+        final settingsService = SettingsService(db);
+        final presetService = AgentLaunchPresetService(settingsService);
+        final tmuxService = _MockTmuxService();
+        final worktrees =
+            FakeAgentWorktreeService(path: '/work/project.worktrees/agent')
+              ..tmuxAnswers = [
+                null,
+                ['/work/project.worktrees/agent'],
+              ];
+        host = _buildHost(
+          id: host.id,
+          autoConnectCommand: 'codex',
+          autoConnectRequiresConfirmation: true,
+        );
+        session = SshSession(
+          connectionId: 7,
+          hostId: host.id,
+          client: sshClient,
+          config: session.config,
+        );
+        await presetService.setPresetForHost(
+          host.id,
+          const AgentLaunchPreset(
+            tool: AgentLaunchTool.codex,
+            workingDirectory: '/work/project',
+            tmuxSessionName: 'agents',
+            remoteMuxBackend: RemoteMuxBackend.tmux,
+            worktree: AgentWorktreeLaunchOptions(),
+          ),
+        );
+        when(() => tmuxService.prefetchInstalledAgentTools(session))
+            .thenAnswer((_) async {});
+
+        await tester.pumpWidget(
+          buildScreen(
+            overrides: [
+              settingsServiceProvider.overrideWithValue(settingsService),
+              tmuxServiceProvider.overrideWithValue(tmuxService),
+              agentWorktreeServiceProvider.overrideWithValue(worktrees),
+              agentWorktreeLauncherProvider.overrideWithValue(
+                AgentWorktreeLauncher(
+                  service: worktrees,
+                  registry: MemoryAgentWorktreeRegistry(),
+                  wait: (_) async {},
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              home: TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+                startPresetAgent: true,
+              ),
+            ),
+          ),
+        );
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final written = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(growable: false),
+        );
+        expect(find.text('Review imported auto-connect command'), findsNothing);
+        expect(worktrees.created, hasLength(1));
+        expect(written, contains("\x15tmux new-session -A -s 'agents'"));
+        expect(written, contains("-c '/work/project.worktrees/agent'"));
+        // Running it once must not trust the host for later.
+        verifyNever(() => hostRepository.updateFields(any(), any()));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 2));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'a confirmed direct preset runs on an imported host without a second '
       'review',
       (tester) async {

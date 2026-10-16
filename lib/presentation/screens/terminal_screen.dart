@@ -1234,6 +1234,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     String command,
     String name,
     String? workingDirectory,
+    AgentLaunchPreset? worktreePreset,
   })?
   _pendingPresetAgentWindow;
 
@@ -6748,6 +6749,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// shell, whatever fails on the way, and afterwards is checked against the
   /// session's panes so a launch that joined a running session or whose
   /// agent window closed at once does not leave it behind.
+  ///
+  /// A link-opened terminal only reattaches to the session, so it never
+  /// creates a worktree or starts the agent.
   Future<void> _runAgentWorktreeLaunch(
     SshSession session,
     Host host,
@@ -6763,6 +6767,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     void writeCommand(String command) => shell.write(
       utf8.encode('\x15${formatAutoConnectCommandForShell(command)}'),
     );
+    if (widget.openedFromLink) {
+      // The reattach fails rather than create the session, so a link that
+      // finds it stopped starts nothing and leaves a plain shell.
+      if (sessionName.isNotEmpty && mounted && identical(_shell, shell)) {
+        writeCommand(buildAgentWorktreeTmuxReattachCommand(sessionName));
+      }
+      return;
+    }
+    // The user reviewed this preset in the link's sheet just now. Spent here
+    // even when the session is running, so a reconnect never counts as
+    // confirmed.
+    final confirmedLaunch = _takeConfirmedPresetLaunch();
     Future<List<String>?> panes() =>
         worktreeService.tmuxSessionDirectories(worktreeShell, sessionName);
     var probeFailed = false;
@@ -6816,7 +6832,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       final review = assessAutoConnectCommandExecution(
         command,
-        importedNeedsReview: host.autoConnectRequiresConfirmation,
+        importedNeedsReview:
+            host.autoConnectRequiresConfirmation && !confirmedLaunch,
       );
       if (review.requiresReview &&
           !await _reviewImportedAutoConnectCommand(review, host)) {
@@ -7833,6 +7850,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 command: launchCommand,
                 name: preset.tool.label,
                 workingDirectory: preset.workingDirectory,
+                // A worktree preset that found its workspace running made no
+                // worktree yet; the new window still needs one.
+                worktreePreset: preset.launchesInNewWorktree ? preset : null,
               )
             : null;
       }
@@ -8760,6 +8780,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Opens the confirmed preset's agent in a new window of a workspace that
   /// was already running when the terminal attached.
+  ///
+  /// A worktree preset gets its worktree now, so the agent never starts in
+  /// the shared checkout. The worktree is rolled back if the window fails to
+  /// open, and otherwise checked against the workspace's windows.
   Future<void> _startPendingPresetAgentWindow(
     SshSession session,
     String sessionName,
@@ -8771,13 +8795,31 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     _pendingPresetAgentWindow = null;
+    var workingDirectory = pending.workingDirectory;
+    TerminalAgentWorktreeLaunch? worktreeLaunch;
+    if (pending.worktreePreset case final preset?) {
+      if (!mounted) return;
+      worktreeLaunch = await prepareTerminalAgentWorktreeLaunch(
+        context: context,
+        ref: ref,
+        session: session,
+        preset: preset,
+        onCreatingWorktree: _setCreatingWorktree,
+      );
+      // Not created; the user has been told why.
+      if (worktreeLaunch == null) return;
+      workingDirectory = worktreeLaunch.preset.workingDirectory;
+    }
+    var opened = false;
     try {
+      if (!mounted) return;
       await _createTmuxWindow(
         session,
         command: pending.command,
         name: pending.name,
-        workingDirectory: pending.workingDirectory,
+        workingDirectory: workingDirectory,
       );
+      opened = true;
     } on Object catch (error) {
       if (error is! Exception && !isExpectedSshOperationError(error)) {
         rethrow;
@@ -8786,6 +8828,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Couldn't start ${pending.name}.")),
         );
+      }
+    } finally {
+      if (worktreeLaunch != null) {
+        if (opened) {
+          final mux = _monkeyMuxService;
+          worktreeLaunch.launched(
+            windowDirectories: () async => [
+              for (final window in await mux.listWindows(session, sessionName))
+                window.currentPath,
+            ],
+          );
+        } else {
+          worktreeLaunch.abandon();
+        }
       }
     }
   }
