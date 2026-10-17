@@ -26,6 +26,7 @@ import 'package:monkeyssh/data/repositories/known_hosts_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
 import 'package:monkeyssh/domain/models/terminal_themes.dart' as monkey_themes;
@@ -33,6 +34,7 @@ import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/background_ssh_service.dart';
 import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
@@ -65,6 +67,8 @@ class _CapturingSshService extends SshService {
     required super.hostRepository,
     required super.keyRepository,
     super.wifiNetworkService,
+    super.wifiPermissionTimeout,
+    super.onNonFatalError,
   });
 
   SshConnectionConfig? capturedConfig;
@@ -89,17 +93,21 @@ class _StubWifiNetworkService extends WifiNetworkService {
   _StubWifiNetworkService(
     this.ssid, {
     this.permissionStatus = WifiPermissionStatus.granted,
+    this.permissionReply,
   });
 
   final String? ssid;
   final WifiPermissionStatus permissionStatus;
+
+  /// When set, requestPermission returns this instead of answering at once.
+  final Future<WifiPermissionStatus> Function()? permissionReply;
   int requestPermissionCallCount = 0;
   int getCurrentSsidCallCount = 0;
 
   @override
   Future<WifiPermissionStatus> requestPermission() async {
     requestPermissionCallCount++;
-    return permissionStatus;
+    return permissionReply?.call() ?? permissionStatus;
   }
 
   @override
@@ -408,6 +416,11 @@ Host _automaticForwardHost({
   autoForwardPorts: enabled,
   portProxyName: portProxyName,
   sortOrder: 0,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -3771,6 +3784,19 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
     });
 
+    test('answers OSC 7501 feature detection only in a plain shell', () async {
+      final opened = await openShell();
+      opened.session.debugHandlePrivateOsc('7501', const ['?']);
+
+      expect(utf8.decode(opened.shellWrites.single), '\x1b]7501;?\x1b\\');
+
+      // MonkeyMux answers for its windows, and tmux never forwards the query.
+      opened.session
+        ..remoteMuxBackend = RemoteMuxBackend.monkeyMux
+        ..debugHandlePrivateOsc('7501', const ['?']);
+      expect(opened.shellWrites, hasLength(1));
+    });
+
     test('applies mixed OSC 4 setters before answering queries', () async {
       final opened = await openShell();
       opened.session
@@ -4355,6 +4381,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     late _RecordingSessionTelemetry telemetry;
     late _DelayedTerminalNotificationService notificationService;
     late List<MethodCall> methodCalls;
+    var hostPrefs = const HostNotificationPrefs();
+    // Holds every preference read until completed, when set.
+    Completer<void>? prefsGate;
 
     setUp(() {
       fakeSshService = _FakeActiveSessionsSshService();
@@ -4383,11 +4412,17 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           terminalNotificationsNotifierProvider.overrideWith(
             _EnabledTerminalNotificationsNotifier.new,
           ),
+          hostNotificationPrefsReaderProvider.overrideWithValue((_) async {
+            await prefsGate?.future;
+            return hostPrefs;
+          }),
         ],
       );
     });
 
     tearDown(() async {
+      hostPrefs = const HostNotificationPrefs();
+      prefsGate = null;
       BackgroundSshService.debugIsSupportedPlatformOverride = null;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_backgroundSshChannel, null);
@@ -4452,6 +4487,129 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             failureCategory: 'host_key',
           ),
         ).called(1);
+      },
+    );
+
+    test(
+      'a failed link connection does not leave its forwarding hold',
+      () async {
+        final sshService = _MockSshService();
+        final telemetry = _MockTelemetryService();
+        when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
+        when(
+          () => sshService.connectToHost(
+            any(),
+            onProgress: any(named: 'onProgress'),
+            useHostThemeOverrides: any(named: 'useHostThemeOverrides'),
+            cancellationToken: any(named: 'cancellationToken'),
+          ),
+        ).thenAnswer(
+          (_) async =>
+              const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        when(
+          () => telemetry.logConnectionAttempted(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => telemetry.logConnectionFailed(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+            duration: any(named: 'duration'),
+            failureCategory: any(named: 'failureCategory'),
+          ),
+        ).thenAnswer((_) async {});
+        final failureContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(sshService),
+            telemetryServiceProvider.overrideWithValue(telemetry),
+            hostRepositoryProvider.overrideWithValue(
+              container.read(hostRepositoryProvider),
+            ),
+          ],
+        );
+        addTearDown(failureContainer.dispose);
+        final notifier = failureContainer.read(activeSessionsProvider.notifier)
+          ..holdAutomaticForwardingUntilStarted(42);
+        expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+
+        final result = await notifier.connect(42);
+
+        expect(result.success, isFalse);
+        // No session took the hold, so a later normal connect must not inherit
+        // it with no Start action to release it.
+        expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+      },
+    );
+
+    test(
+      'a failed link connection keeps the hold for another attempt in flight',
+      () async {
+        final sshService = _MockSshService();
+        final telemetry = _MockTelemetryService();
+        when(() => sshService.sessions).thenReturn({});
+        when(() => sshService.allSessions).thenReturn(const []);
+        final attempts = <Completer<SshConnectionResult>>[];
+        when(
+          () => sshService.connectToHost(
+            any(),
+            onProgress: any(named: 'onProgress'),
+            useHostThemeOverrides: any(named: 'useHostThemeOverrides'),
+            cancellationToken: any(named: 'cancellationToken'),
+          ),
+        ).thenAnswer((_) {
+          final attempt = Completer<SshConnectionResult>();
+          attempts.add(attempt);
+          return attempt.future;
+        });
+        when(
+          () => telemetry.logConnectionAttempted(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+          ),
+        ).thenAnswer((_) async {});
+        when(
+          () => telemetry.logConnectionFailed(
+            authMethod: any(named: 'authMethod'),
+            usesJumpHost: any(named: 'usesJumpHost'),
+            duration: any(named: 'duration'),
+            failureCategory: any(named: 'failureCategory'),
+          ),
+        ).thenAnswer((_) async {});
+        final failureContainer = ProviderContainer(
+          overrides: [
+            sshServiceProvider.overrideWithValue(sshService),
+            telemetryServiceProvider.overrideWithValue(telemetry),
+            hostRepositoryProvider.overrideWithValue(
+              container.read(hostRepositoryProvider),
+            ),
+          ],
+        );
+        addTearDown(failureContainer.dispose);
+        final notifier = failureContainer.read(activeSessionsProvider.notifier)
+          ..holdAutomaticForwardingUntilStarted(42);
+        // The same link tapped twice: both attempts share the host's hold.
+        final first = notifier.connect(42);
+        final second = notifier.connect(42);
+        await pumpEventQueue();
+        expect(attempts, hasLength(2));
+
+        attempts.first.complete(
+          const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        expect((await first).success, isFalse);
+
+        // The second attempt may still open a connection the link held.
+        expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+
+        attempts.last.complete(
+          const SshConnectionResult(success: false, error: 'Timed out'),
+        );
+        expect((await second).success, isFalse);
+        expect(notifier.isAutomaticForwardingHeld(42), isFalse);
       },
     );
 
@@ -4648,6 +4806,27 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test('a notification whose preference read outlives its connection is '
+        'not shown', () async {
+      final gate = prefsGate = Completer<void>();
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final connectionId = result.connectionId!;
+      final session = notifier.getSession(connectionId)!;
+      notificationService.releaseShow.complete();
+
+      session.debugHandlePrivateOsc('99', const ['i=late', 'Late']);
+      await pumpEventQueue();
+      await notifier.disconnect(connectionId);
+      gate.complete();
+      await pumpEventQueue();
+
+      expect(
+        notificationService.calls.where((call) => call.startsWith('show')),
+        isEmpty,
+      );
+    });
+
     test('disconnect clears native timed notifications', () async {
       final notifier = container.read(activeSessionsProvider.notifier);
       final result = await notifier.connect(42, forceNew: true);
@@ -4705,6 +4884,42 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       );
       expect(notifier.debugTerminalNotificationExpiryTimerCount, limit);
       expect(notificationService.calls, contains('clear:$oldestId'));
+    });
+
+    test('a host whose shell notifications are off shows none', () async {
+      hostPrefs = const HostNotificationPrefs(shellNotifications: false);
+      final notifier = container.read(activeSessionsProvider.notifier);
+      final result = await notifier.connect(42, forceNew: true);
+      final session = notifier.getSession(result.connectionId!)!;
+      notificationService.releaseShow.complete();
+
+      session.debugHandlePrivateOsc('99', const ['i=muted', 'Hidden']);
+      for (var attempt = 0; attempt < 20; attempt += 1) {
+        await pumpEventQueue();
+      }
+      expect(
+        notificationService.calls.where((call) => call.startsWith('show')),
+        isEmpty,
+      );
+
+      hostPrefs = const HostNotificationPrefs();
+      session.debugHandlePrivateOsc('99', const ['i=shown', 'Shown']);
+      for (
+        var attempt = 0;
+        attempt < 20 &&
+            !notificationService.calls.any(
+              (call) => call.startsWith('show-finish:'),
+            );
+        attempt += 1
+      ) {
+        await pumpEventQueue();
+      }
+      expect(
+        notificationService.calls.where(
+          (call) => call.startsWith('show-finish:'),
+        ),
+        hasLength(1),
+      );
     });
 
     test('disabled updates preserve an existing native expiry', () async {
@@ -5170,6 +5385,88 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         isNotNull,
         reason: 'a reused session belongs to the earlier caller',
       );
+    });
+
+    test('a link hold keeps automatic forwarding off until released', () async {
+      final session = _RecordingAutomaticForwardSession(
+        connectionId: 1,
+        hostId: 42,
+        client: _MockSshClient(),
+        config: const SshConnectionConfig(
+          hostname: 'dev.example.com',
+          port: 22,
+          username: 'tester',
+        ),
+        name: 'link',
+        configurationLog: <String>[],
+      );
+      final hostRepository = _MockHostRepository();
+      when(() => hostRepository.getById(42))
+          .thenAnswer((_) async => _automaticForwardHost(enabled: true));
+      final sessions = <SshSession>[];
+      final connectionStates = <int, SshConnectionState>{};
+      final localContainer = ProviderContainer(
+        overrides: [
+          hostRepositoryProvider.overrideWithValue(hostRepository),
+          portForwardRepositoryProvider.overrideWithValue(
+            _emptyPortForwardRepository(),
+          ),
+          activeSessionsProvider.overrideWith(
+            () => _OwnershipActiveSessionsNotifier(
+              sessions: sessions,
+              connectionStates: connectionStates,
+            ),
+          ),
+        ],
+      );
+      addTearDown(localContainer.dispose);
+      final notifier = localContainer.read(activeSessionsProvider.notifier)
+        // A link is about to open the host's first connection.
+        ..holdAutomaticForwardingUntilStarted(42);
+      sessions.add(session);
+      connectionStates[session.connectionId] = SshConnectionState.connected;
+
+      await notifier.reconfigureAutomaticPortForwardingForHost(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isTrue);
+      expect(session.automaticConfigurations.last.enabled, isFalse);
+
+      await notifier.releaseAutomaticForwardingHold(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isFalse);
+      expect(session.automaticConfigurations.last.enabled, isTrue);
+    });
+
+    test('a link never holds a host that already has a connection', () async {
+      final session = _RecordingAutomaticForwardSession(
+        connectionId: 1,
+        hostId: 42,
+        client: _MockSshClient(),
+        config: const SshConnectionConfig(
+          hostname: 'dev.example.com',
+          port: 22,
+          username: 'tester',
+        ),
+        name: 'existing',
+        configurationLog: <String>[],
+      );
+      final localContainer = ProviderContainer(
+        overrides: [
+          activeSessionsProvider.overrideWith(
+            () => _OwnershipActiveSessionsNotifier(
+              sessions: [session],
+              connectionStates: {
+                session.connectionId: SshConnectionState.connected,
+              },
+            ),
+          ),
+        ],
+      );
+      addTearDown(localContainer.dispose);
+      final notifier = localContainer.read(activeSessionsProvider.notifier)
+        ..holdAutomaticForwardingUntilStarted(42);
+
+      expect(notifier.isAutomaticForwardingHeld(42), isFalse);
     });
 
     test('keeps ownership on a connected sibling during reconnect', () async {
@@ -8728,6 +9025,97 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(wifiNetworkService.getCurrentSsidCallCount, 0);
     });
 
+    test('uses jump host when the Wi-Fi permission never answers', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final encryption = SecretEncryptionService.forTesting();
+      final hostRepo = HostRepository(db, encryption);
+      final keyRepo = KeyRepository(db, encryption);
+      final wifiNetworkService = _StubWifiNetworkService(
+        'home',
+        permissionReply: () => Completer<WifiPermissionStatus>().future,
+      );
+      final service = _CapturingSshService(
+        hostRepository: hostRepo,
+        keyRepository: keyRepo,
+        wifiNetworkService: wifiNetworkService,
+        wifiPermissionTimeout: const Duration(milliseconds: 20),
+      );
+      final messages = <String?>[];
+
+      final hostId = await seedHostWithJump(db, skipJumpHostOnSsids: 'home');
+      await service
+          .connectToHost(
+            hostId,
+            onProgress: (update) => messages.add(update.message),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      expect(service.capturedConfig?.jumpHost, isNotNull);
+      expect(wifiNetworkService.getCurrentSsidCallCount, 0);
+      expect(
+        messages,
+        contains('Location permission check timed out. Using jump host…'),
+      );
+    });
+
+    test('uses jump host and reports a non-fatal when the permissions channel '
+        'is missing', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final encryption = SecretEncryptionService.forTesting();
+      final hostRepo = HostRepository(db, encryption);
+      final keyRepo = KeyRepository(db, encryption);
+      final wifiNetworkService = _StubWifiNetworkService(
+        'home',
+        permissionReply: () =>
+            Future.error(MissingPluginException('No implementation found')),
+      );
+      final reported = <Object>[];
+      final service = _CapturingSshService(
+        hostRepository: hostRepo,
+        keyRepository: keyRepo,
+        wifiNetworkService: wifiNetworkService,
+        onNonFatalError: (error, _) => reported.add(error),
+      );
+
+      final hostId = await seedHostWithJump(db, skipJumpHostOnSsids: 'home');
+      final result = await service.connectToHost(hostId);
+
+      expect(result.error, 'stubbed');
+      expect(service.capturedConfig?.jumpHost, isNotNull);
+      expect(wifiNetworkService.getCurrentSsidCallCount, 0);
+      expect(reported, [isA<MissingPluginException>()]);
+    });
+
+    test('uses jump host when only approximate location is allowed', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final encryption = SecretEncryptionService.forTesting();
+      final hostRepo = HostRepository(db, encryption);
+      final keyRepo = KeyRepository(db, encryption);
+      final wifiNetworkService = _StubWifiNetworkService(
+        'home',
+        permissionStatus: WifiPermissionStatus.approximate,
+      );
+      final service = _CapturingSshService(
+        hostRepository: hostRepo,
+        keyRepository: keyRepo,
+        wifiNetworkService: wifiNetworkService,
+      );
+      final messages = <String?>[];
+
+      final hostId = await seedHostWithJump(db, skipJumpHostOnSsids: 'home');
+      await service.connectToHost(
+        hostId,
+        onProgress: (update) => messages.add(update.message),
+      );
+
+      expect(service.capturedConfig?.jumpHost, isNotNull);
+      expect(wifiNetworkService.getCurrentSsidCallCount, 0);
+      expect(messages, contains('Precise location is off. Using jump host…'));
+    });
+
     test('uses jump host when SSID detection returns null', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -8748,6 +9136,253 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(wifiNetworkService.requestPermissionCallCount, 1);
       expect(wifiNetworkService.getCurrentSsidCallCount, 1);
     });
+  });
+
+  group('connectToHost jump host chains', () {
+    Future<int> insertHost(
+      AppDatabase db,
+      String name, {
+      int? jumpHostId,
+      String? skipJumpHostOnSsids,
+    }) => db
+        .into(db.hosts)
+        .insert(
+          HostsCompanion.insert(
+            label: name,
+            hostname: '$name.example.com',
+            username: name,
+            jumpHostId: Value(jumpHostId),
+            skipJumpHostOnSsids: Value(skipJumpHostOnSsids),
+          ),
+        );
+
+    _CapturingSshService buildService(
+      AppDatabase db, {
+      _StubWifiNetworkService? wifi,
+    }) {
+      final encryption = SecretEncryptionService.forTesting();
+      return _CapturingSshService(
+        hostRepository: HostRepository(db, encryption),
+        keyRepository: KeyRepository(db, encryption),
+        wifiNetworkService: wifi ?? _StubWifiNetworkService('cafe'),
+      );
+    }
+
+    test('follows a jump host’s own jump host', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(db, 'inner', jumpHostId: outer);
+      final target = await insertHost(db, 'target', jumpHostId: inner);
+
+      await service.connectToHost(target);
+
+      final config = service.capturedConfig!;
+      expect(config.hostname, 'target.example.com');
+      expect(config.jumpHost!.hostname, 'inner.example.com');
+      expect(config.jumpHost!.jumpHost!.hostname, 'outer.example.com');
+      expect(config.jumpHost!.jumpHost!.jumpHost, isNull);
+    });
+
+    test('a loop through the target keeps the single-hop behaviour', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final a = await insertHost(db, 'a');
+      final b = await insertHost(db, 'b', jumpHostId: a);
+      await (db.update(db.hosts)..where((h) => h.id.equals(a))).write(
+        HostsCompanion(jumpHostId: Value(b)),
+      );
+
+      await service.connectToHost(a);
+
+      final config = service.capturedConfig!;
+      expect(config.hostname, 'a.example.com');
+      expect(config.jumpHost!.hostname, 'b.example.com');
+      expect(config.jumpHost!.jumpHost, isNull);
+    });
+
+    test(
+      'a loop between jump hosts falls back to the first hop only',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db);
+        final j = await insertHost(db, 'j');
+        final k = await insertHost(db, 'k', jumpHostId: j);
+        await (db.update(db.hosts)..where((h) => h.id.equals(j))).write(
+          HostsCompanion(jumpHostId: Value(k)),
+        );
+        final target = await insertHost(db, 'target', jumpHostId: j);
+
+        await service.connectToHost(target);
+
+        // As before chains were followed: T through J, with J dialled directly.
+        final jump = service.capturedConfig!.jumpHost!;
+        expect(jump.hostname, 'j.example.com');
+        expect(jump.jumpHost, isNull);
+      },
+    );
+
+    test('a chain longer than eight hops fails instead of dialling', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      int? previous;
+      for (var i = 9; i >= 1; i--) {
+        previous = await insertHost(db, 'h$i', jumpHostId: previous);
+      }
+      final target = await insertHost(db, 'target', jumpHostId: previous);
+
+      final result = await service.connectToHost(target);
+
+      expect(service.capturedConfig, isNull);
+      expect(result.success, isFalse);
+      expect(result.error, contains('more than 8'));
+    });
+
+    test('exactly eight hops still connect', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      int? previous;
+      for (var i = 8; i >= 1; i--) {
+        previous = await insertHost(db, 'h$i', jumpHostId: previous);
+      }
+      final target = await insertHost(db, 'target', jumpHostId: previous);
+
+      await service.connectToHost(target);
+
+      var hops = 0;
+      for (
+        var c = service.capturedConfig!.jumpHost;
+        c != null;
+        c = c.jumpHost
+      ) {
+        hops++;
+      }
+      expect(hops, 8);
+    });
+
+    test('Test Connection counts the edited host as the chain start', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final edited = await insertHost(db, 'edited');
+      final jump = await insertHost(db, 'jump', jumpHostId: edited);
+
+      // Saving `edited` with `jump` as its jump host makes a loop, so a real
+      // connection dials `jump` directly; Test Connection must match.
+      final config = await service.buildJumpHostChainConfig(
+        jump,
+        fromHostId: edited,
+      );
+
+      expect(config!.hostname, 'jump.example.com');
+      expect(config.jumpHost, isNull);
+    });
+
+    test('Test Connection builds the same multi-hop chain', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final service = buildService(db);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(db, 'inner', jumpHostId: outer);
+
+      final config = await service.buildJumpHostChainConfig(inner);
+
+      expect(config!.hostname, 'inner.example.com');
+      expect(config.jumpHost!.hostname, 'outer.example.com');
+    });
+
+    test('a hop’s Wi-Fi skip list bypasses only its own jump', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final wifi = _StubWifiNetworkService('home');
+      final service = buildService(db, wifi: wifi);
+      final outer = await insertHost(db, 'outer');
+      final inner = await insertHost(
+        db,
+        'inner',
+        jumpHostId: outer,
+        skipJumpHostOnSsids: 'home',
+      );
+      final target = await insertHost(db, 'target', jumpHostId: inner);
+
+      await service.connectToHost(target);
+
+      final jump = service.capturedConfig!.jumpHost!;
+      expect(jump.hostname, 'inner.example.com');
+      expect(jump.jumpHost, isNull);
+      expect(wifi.requestPermissionCallCount, 1);
+    });
+
+    test(
+      'a hop that skips its jump on this Wi-Fi never closes a loop',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db, wifi: _StubWifiNetworkService('home'));
+        // T → J → K → J, but K dials directly on "home", so the route is
+        // device → K → J → T and the loop is never reached.
+        final j = await insertHost(db, 'j');
+        final k = await insertHost(
+          db,
+          'k',
+          jumpHostId: j,
+          skipJumpHostOnSsids: 'home',
+        );
+        await (db.update(db.hosts)..where((h) => h.id.equals(j))).write(
+          HostsCompanion(jumpHostId: Value(k)),
+        );
+        final target = await insertHost(db, 'target', jumpHostId: j);
+
+        await service.connectToHost(target);
+
+        final jump = service.capturedConfig!.jumpHost!;
+        expect(jump.hostname, 'j.example.com');
+        expect(jump.jumpHost!.hostname, 'k.example.com');
+        expect(jump.jumpHost!.jumpHost, isNull);
+      },
+    );
+
+    test(
+      'a bypass that trims a ninth hop leaves a chain that connects',
+      () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        final service = buildService(db, wifi: _StubWifiNetworkService('home'));
+        int? previous;
+        for (var i = 9; i >= 1; i--) {
+          previous = await insertHost(
+            db,
+            'h$i',
+            jumpHostId: previous,
+            // h8 skips its jump (h9) on this network.
+            skipJumpHostOnSsids: i == 8 ? 'home' : null,
+          );
+        }
+        final target = await insertHost(db, 'target', jumpHostId: previous);
+
+        await service.connectToHost(target);
+
+        // Dialled, rather than refused as a chain over eight hops.
+        expect(service.capturedConfig, isNotNull);
+        var hops = 0;
+        SshConnectionConfig? last;
+        for (
+          var c = service.capturedConfig!.jumpHost;
+          c != null;
+          c = c.jumpHost
+        ) {
+          hops++;
+          last = c;
+        }
+        expect(hops, 8);
+        expect(last!.hostname, 'h8.example.com');
+      },
+    );
   });
 
   group('connection cancellation', () {

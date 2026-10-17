@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
@@ -282,6 +283,16 @@ resolveAcpRemoteProviderLaunch({
   for (final candidate in provider.executableProbe.candidateExecutableNames) {
     final executable = found[candidate];
     if (executable != null) {
+      final status = await _checkAcpSupport(session, provider, executable);
+      if (status == AcpSupportStatus.missing) {
+        if (!context.mounted ||
+            !await _confirmAcpSupportInstall(context, provider) ||
+            !context.mounted ||
+            !await _installAcpSupport(context, session, provider, executable)) {
+          return null;
+        }
+      }
+      if (!context.mounted) return null;
       final resolved = AcpLaunchCommand(
         executable: executable,
         arguments: provider.launchCommand.arguments,
@@ -354,6 +365,242 @@ resolveAcpRemoteProviderLaunch({
     'terminal' => (override: null, terminal: true),
     _ => null,
   };
+}
+
+const _acpSupportCheckTimeout = Duration(seconds: 30);
+const _acpSupportInstallTimeout = Duration(minutes: 10);
+final _acpSupportedExecutables = Expando<Set<String>>('acp-supported');
+
+/// Runs [command] in the exec queue, bounded by one [timeout] from opening
+/// the channel to its exit, and returns stdout, all output, and the exit
+/// status.
+Future<({String stdout, String output, int? exitCode})> _runAcpSupportCommand(
+  SshSession session,
+  String command,
+  Duration timeout,
+) => session.runQueuedExec(() async {
+  // Opening is bounded too: a stalled connection must not hold the launch,
+  // and a channel that opens after the deadline is destroyed.
+  final deadline = DateTime.now().add(timeout);
+  final shell = await openSshExec(session.execute(command), timeout);
+  var finished = false;
+  try {
+    final stdout = StringBuffer();
+    final output = StringBuffer();
+    // Time out inside the queued exec so a hung command frees its channel
+    // before the queue slot is released.
+    await Future.wait<void>([
+      shell.stdout.cast<List<int>>().transform(utf8.decoder).forEach((chunk) {
+        stdout.write(chunk);
+        output.write(chunk);
+      }),
+      shell.stderr
+          .cast<List<int>>()
+          .transform(utf8.decoder)
+          .forEach(output.write),
+      shell.done,
+    ]).timeout(deadline.difference(DateTime.now()));
+    finished = true;
+    return (
+      stdout: stdout.toString(),
+      output: output.toString(),
+      exitCode: shell.exitCode,
+    );
+  } finally {
+    if (finished) {
+      shell.close();
+    } else {
+      // close() only sends EOF, which a hung command can ignore.
+      await closeAbandonedSshExec(shell);
+    }
+  }
+});
+
+/// Runs [provider]'s support check against [executable].
+///
+/// A passing check is remembered for the SSH session. A check that fails to
+/// run or times out reports [AcpSupportStatus.unknown], which never blocks the
+/// launch.
+Future<AcpSupportStatus> _checkAcpSupport(
+  SshSession session,
+  AcpBuiltinProvider provider,
+  String executable,
+) async {
+  final check = provider.supportCheck;
+  if (check == null) return AcpSupportStatus.supported;
+  final supported = _acpSupportedExecutables[session] ??= <String>{};
+  if (supported.contains(executable)) return AcpSupportStatus.supported;
+  final startedAt = DateTime.now();
+  try {
+    final result = await _runAcpSupportCommand(
+      session,
+      buildAcpSupportCheckCommand(
+        check,
+        executable,
+        isWindows: session.remoteIsWindows,
+      ),
+      _acpSupportCheckTimeout,
+    );
+    final status = parseAcpSupportCheckOutput(result.stdout);
+    if (status == AcpSupportStatus.supported) supported.add(executable);
+    DiagnosticsLogService.instance.info(
+      'acp.launch',
+      'support_check_complete',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
+        'status': status.name,
+      },
+    );
+    return status;
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.warning(
+      'acp.launch',
+      'support_check_failed',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'errorType': error.runtimeType,
+      },
+    );
+    return AcpSupportStatus.unknown;
+  }
+}
+
+/// Explains that [provider] cannot serve ACP on this host and asks whether to
+/// install what it is missing.
+Future<bool> _confirmAcpSupportInstall(
+  BuildContext context,
+  AcpBuiltinProvider provider,
+) async {
+  final install = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('${provider.label} needs ACP support'),
+      content: Text(
+        '${provider.supportCheck!.missingMessage} MonkeySSH can install them '
+        'into the Python environment ${provider.label} runs from, then start '
+        'the chat.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Install and start'),
+        ),
+      ],
+    ),
+  );
+  return install ?? false;
+}
+
+/// Installs [provider]'s ACP support for [executable] behind a progress
+/// dialog, returning whether the support check passes afterwards.
+///
+/// A failure shows the end of the install output, which stays on screen and
+/// out of diagnostics.
+Future<bool> _installAcpSupport(
+  BuildContext context,
+  SshSession session,
+  AcpBuiltinProvider provider,
+  String executable,
+) async {
+  final navigator = Navigator.of(context);
+  // Track the route itself: the install can finish before the dialog builds,
+  // and an app lock can remove the dialog while the install runs.
+  final progress = DialogRoute<void>(
+    context: context,
+    barrierDismissible: false,
+    themes: InheritedTheme.capture(from: context, to: navigator.context),
+    builder: (context) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 20),
+            Expanded(child: Text('Installing ${provider.label} ACP support…')),
+          ],
+        ),
+      ),
+    ),
+  );
+  unawaited(navigator.push(progress));
+  final startedAt = DateTime.now();
+  String? failure;
+  try {
+    final result = await _runAcpSupportCommand(
+      session,
+      buildAcpSupportRepairCommand(
+        provider.supportCheck!,
+        executable,
+        isWindows: session.remoteIsWindows,
+      ),
+      _acpSupportInstallTimeout,
+    );
+    DiagnosticsLogService.instance.info(
+      'acp.launch',
+      'support_install_complete',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
+        'exitCode': result.exitCode,
+      },
+    );
+    if (result.exitCode == 0) {
+      (_acpSupportedExecutables[session] ??= <String>{}).add(executable);
+    } else {
+      final lines = const LineSplitter().convert(result.output.trim());
+      failure = lines
+          .skip(lines.length > 12 ? lines.length - 12 : 0)
+          .join('\n');
+      if (failure.isEmpty) {
+        failure = 'The install exited with ${result.exitCode}.';
+      }
+    }
+  } on Object catch (error) {
+    DiagnosticsLogService.instance.warning(
+      'acp.launch',
+      'support_install_failed',
+      fields: {
+        'connectionId': session.connectionId,
+        'provider': provider.telemetryCategory,
+        'errorType': error.runtimeType,
+      },
+    );
+    failure = error is TimeoutException
+        ? 'The install did not finish in time.'
+        : 'The install could not run on this host.';
+  } finally {
+    // Popping blindly could remove whatever replaced the dialog.
+    if (progress.isActive) navigator.removeRoute(progress);
+  }
+  if (failure == null) return true;
+  if (!context.mounted) return false;
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Could not install ${provider.label} ACP support'),
+      content: SingleChildScrollView(
+        child: SelectableText(
+          failure!,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+  return false;
 }
 
 /// Applies global terminal-agent settings before a provider's ACP entrypoint.

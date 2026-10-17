@@ -118,6 +118,13 @@ class NotificationNavigationScheduler<T extends Object> {
     flush();
   }
 
+  /// Puts back [payload] after it could not open, unless a newer payload
+  /// is already waiting, which stays the one to open.
+  void restore(T payload) {
+    _pending ??= payload;
+    flush();
+  }
+
   /// Retries pending navigation, for example after unlocking.
   void flush() {
     if (_queued || _pending == null || !canNavigate()) return;

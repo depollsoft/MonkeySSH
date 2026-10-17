@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart';
@@ -115,6 +116,30 @@ class Hosts extends Table {
 
   /// Display order within the hosts list.
   IntColumn get sortOrder => integer().withDefault(const Constant(0))();
+
+  /// Whether this host may notify when a native agent needs approval, a file
+  /// write, or an answer.
+  BoolColumn get notifyAgentAttention =>
+      boolean().withDefault(const Constant(true))();
+
+  /// Whether this host may notify when a native agent finishes its turn.
+  BoolColumn get notifyAgentFinished =>
+      boolean().withDefault(const Constant(true))();
+
+  /// Whether this host may notify when a background multiplexer window rings
+  /// the bell or shows activity.
+  BoolColumn get notifyWindowAlerts =>
+      boolean().withDefault(const Constant(true))();
+
+  /// Whether this host may show notifications that remote programs post
+  /// (OSC 9, 777 and 99).
+  BoolColumn get notifyShellNotifications =>
+      boolean().withDefault(const Constant(true))();
+
+  /// Whether this host's MonkeyMux session may push notifications to this
+  /// device while MonkeySSH is closed.
+  BoolColumn get pushWhenClosed =>
+      boolean().withDefault(const Constant(true))();
 }
 
 /// SSH Keys table - stores SSH key pairs.
@@ -232,7 +257,10 @@ class PortForwards extends Table {
   /// Associated host.
   IntColumn get hostId => integer().references(Hosts, #id)();
 
-  /// Forward type: 'local' or 'remote'.
+  /// Forward type: 'local', 'remote', or 'dynamic' (SOCKS5).
+  ///
+  /// A dynamic forward listens on loopback [localPort] (zero picks a free
+  /// port) and leaves [remoteHost] empty and [remotePort] zero.
   TextColumn get forwardType => text().withLength(min: 1, max: 10)();
 
   /// Local bind address.
@@ -333,7 +361,7 @@ class AppDatabase extends _$AppDatabase {
   final AppleDatabaseFilePolicyApplier _appleDatabaseFilePolicyApplier;
 
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 11;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -415,6 +443,21 @@ class AppDatabase extends _$AppDatabase {
           await m.addColumn(hosts, hosts.portProxyName);
         }
       }
+      if (from < 11) {
+        final hostColumnNames = await _readColumnNames('hosts');
+        for (final column in [
+          hosts.notifyAgentAttention,
+          hosts.notifyAgentFinished,
+          hosts.notifyWindowAlerts,
+          hosts.notifyShellNotifications,
+          hosts.pushWhenClosed,
+        ]) {
+          if (!hostColumnNames.contains(column.$name)) {
+            await m.addColumn(hosts, column);
+          }
+        }
+        await _moveDisabledPushHostsToHosts();
+      }
     },
     beforeOpen: (details) async {
       final databaseFileFuture = _databaseFileFuture;
@@ -460,6 +503,34 @@ class AppDatabase extends _$AppDatabase {
       }
     },
   );
+
+  /// Moves the per-host push opt-outs that Settings kept under
+  /// `push_notifications_disabled_hosts` onto each host's `push_when_closed`.
+  /// The setting held host ids, which a full transfer import does not remap;
+  /// the host row travels with the host.
+  Future<void> _moveDisabledPushHostsToHosts() async {
+    const key = 'push_notifications_disabled_hosts';
+    final rows = await customSelect(
+      'SELECT value FROM settings WHERE key = ?',
+      variables: [Variable.withString(key)],
+    ).get();
+    if (rows.isEmpty) return;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(rows.single.read<String>('value'));
+    } on FormatException {
+      // A corrupt list loses only the opt-outs; the key is still removed.
+    }
+    if (decoded is List) {
+      for (final id in decoded.whereType<int>()) {
+        await customStatement(
+          'UPDATE hosts SET push_when_closed = 0 WHERE id = ?',
+          [id],
+        );
+      }
+    }
+    await customStatement('DELETE FROM settings WHERE key = ?', [key]);
+  }
 
   Future<Set<String>> _readColumnNames(String tableName) async {
     final columns = await customSelect('PRAGMA table_info($tableName)').get();

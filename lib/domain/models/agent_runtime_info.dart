@@ -54,6 +54,7 @@ class AgentRuntimeDefinition {
     this.versionArguments = const ['--version'],
     this.registry,
     this.packageName,
+    this.packageExtras = const [],
     this.homebrewFormula,
     this.posixInstallerUrl,
     this.windowsInstallerUrl,
@@ -92,6 +93,16 @@ class AgentRuntimeDefinition {
 
   /// Registry package name.
   final String? packageName;
+
+  /// Optional extras installed with [packageName].
+  final List<String> packageExtras;
+
+  /// [packageName] with its [packageExtras], as an installer accepts it.
+  String? get installPackageSpec {
+    final package = packageName;
+    if (package == null || packageExtras.isEmpty) return package;
+    return '$package[${packageExtras.join(',')}]';
+  }
 
   /// Homebrew formula used when an existing installation resolves to Homebrew.
   final String? homebrewFormula;

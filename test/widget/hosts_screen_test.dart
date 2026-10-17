@@ -2,6 +2,7 @@
 
 import 'dart:async';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,7 +11,11 @@ import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
+import 'package:monkeyssh/data/security/secret_encryption_service.dart';
+import 'package:monkeyssh/domain/services/acp_composer_draft_store.dart';
 import 'package:monkeyssh/domain/services/home_screen_shortcut_service.dart';
+import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/socks_browser_store_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/hosts_screen.dart';
@@ -71,6 +76,25 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   }
 }
 
+class _RecordingSocksStores extends SocksBrowserStoreService {
+  _RecordingSocksStores(AppDatabase db)
+    : super(settings: SettingsService(db), savedHostIds: () async => {});
+
+  final List<int> forgottenHostIds = <int>[];
+
+  @override
+  Future<void> forgetHost(int hostId) async => forgottenHostIds.add(hostId);
+}
+
+class _RecordingDraftStore extends AcpComposerDraftStore {
+  _RecordingDraftStore(AppDatabase db) : super(SettingsService(db));
+
+  final List<int> forgottenHostIds = <int>[];
+
+  @override
+  Future<void> forgetHost(int hostId) async => forgottenHostIds.add(hostId);
+}
+
 Host _buildHost({
   required int id,
   required String label,
@@ -100,6 +124,11 @@ Host _buildHost({
   autoConnectSnippetId: null,
   autoConnectRequiresConfirmation: false,
   sortOrder: sortOrder,
+  notifyAgentAttention: true,
+  notifyAgentFinished: true,
+  notifyWindowAlerts: true,
+  notifyShellNotifications: true,
+  pushWhenClosed: true,
 );
 
 ActiveConnection _buildActiveConnection({
@@ -255,9 +284,46 @@ void main() {
     expect(find.text('Disconnect'), findsNothing);
     expect(find.text('Disconnect all'), findsNothing);
     expect(find.text('Edit'), findsOneWidget);
+    expect(find.text('Setup Checklist'), findsOneWidget);
     expect(find.text('Duplicate'), findsOneWidget);
     expect(find.text('Export Encrypted File (Pro)'), findsOneWidget);
     expect(find.text('Delete'), findsOneWidget);
+  });
+
+  testWidgets('the setup checklist opens only from the host menu', (
+    tester,
+  ) async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    // A connected host that still signs in with a password: the checklist
+    // used to put its next step on this row by itself.
+    final host = _buildHost(id: 1, label: 'Alpha', sortOrder: 0).copyWith(
+      password: const Value('secret'),
+      lastConnectedAt: Value(DateTime(2026, 10)),
+    );
+
+    await tester.pumpWidget(
+      _buildHostsScreen(
+        db: db,
+        overrides: [
+          activeSessionsProvider.overrideWith(_TestActiveSessionsNotifier.new),
+          allHostsProvider.overrideWith((ref) => Stream.value([host])),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('switch to key login'), findsNothing);
+    expect(find.byIcon(Icons.checklist_rounded), findsNothing);
+
+    await tester.tap(find.byTooltip('Host actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Setup Checklist'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Host Setup'), findsOneWidget);
+    expect(find.text('Set Up Key Login'), findsOneWidget);
+    expect(find.text('Hide Checklist for This Host'), findsNothing);
   });
 
   testWidgets(
@@ -297,4 +363,50 @@ void main() {
       expect(sessionsNotifier.disconnectedConnectionIds, orderedEquals([7]));
     },
   );
+
+  testWidgets('deleting a host forgets its chat drafts and browser data', (
+    tester,
+  ) async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repository = HostRepository(db, SecretEncryptionService.forTesting());
+    final id = await repository.insert(
+      HostsCompanion.insert(
+        label: 'Alpha',
+        hostname: 'alpha.example.com',
+        username: 'root',
+      ),
+    );
+    final drafts = _RecordingDraftStore(db);
+    final socksStores = _RecordingSocksStores(db);
+
+    await tester.pumpWidget(
+      _buildHostsScreen(
+        db: db,
+        overrides: [
+          activeSessionsProvider.overrideWith(_TestActiveSessionsNotifier.new),
+          hostRepositoryProvider.overrideWithValue(repository),
+          acpComposerDraftStoreProvider.overrideWithValue(drafts),
+          socksBrowserStoreServiceProvider.overrideWithValue(socksStores),
+          allHostsProvider.overrideWith(
+            (ref) => Stream.value([
+              _buildHost(id: id, label: 'Alpha', sortOrder: 0),
+            ]),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Host actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(await repository.getById(id), isNull);
+    expect(drafts.forgottenHostIds, [id]);
+    expect(socksStores.forgottenHostIds, [id]);
+  });
 }

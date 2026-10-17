@@ -34,6 +34,8 @@ void registerAcpAttachmentPickerAdaptersTests() {
       final local = candidate as AcpLocalFileAttachmentCandidate;
       expect(local.name, 'notes.txt');
       expect(local.sizeBytes, 5);
+      // A saved draft keeps the file by this path.
+      expect(local.localPath, 'unopened/notes.txt');
     });
 
     test('adapts XFile data while preserving MIME type and label', () async {
@@ -51,11 +53,26 @@ void registerAcpAttachmentPickerAdaptersTests() {
       expect(local.name, 'photo.png');
       expect(local.mimeType, 'image/png');
       expect(local.sizeBytes, 3);
+      expect(local.localPath, isNull);
       expect(await local.openRead().expand((chunk) => chunk).toList(), <int>[
         1,
         2,
         3,
       ]);
+    });
+
+    test('keeps the path of a picked photo for saved drafts', () async {
+      final candidate = await acpAttachmentCandidateFromXFile(
+        XFile.fromData(
+          Uint8List.fromList(<int>[1, 2, 3]),
+          name: 'photo.png',
+          mimeType: 'image/png',
+          path: 'picked/photo.png',
+        ),
+      );
+
+      final local = candidate as AcpLocalFileAttachmentCandidate;
+      expect(local.localPath, 'picked/photo.png');
     });
 
     test('maps RemoteFileSelection without reading or downloading', () {

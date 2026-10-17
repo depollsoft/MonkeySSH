@@ -54,3 +54,38 @@ RemoteMuxBackend resolveRemoteMuxBackendForStartup({
   }
   return parsedBackend ?? RemoteMuxBackend.auto;
 }
+
+/// Suggests a multiplexer session name for a host from its label (or its
+/// hostname), so saved hosts that reach the same machine get sessions of
+/// their own instead of sharing one by default.
+///
+/// The name is lowercase letters, digits and dashes, which both MonkeyMux
+/// and tmux accept. [taken] holds the session names other saved hosts on the
+/// same machine already use; a clash gets a numeric suffix.
+String suggestMuxSessionName({
+  required String label,
+  required String hostname,
+  Iterable<String> taken = const [],
+}) {
+  String slug(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp('[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
+  var base = slug(label);
+  if (base.isEmpty) base = slug(hostname.split('.').first);
+  if (base.isEmpty) base = 'main';
+  if (base.length > 32) {
+    base = base.substring(0, 32).replaceAll(RegExp(r'-+$'), '');
+  }
+  final used = {for (final name in taken) name.trim().toLowerCase()};
+  if (!used.contains(base)) return base;
+  for (var suffix = 2; ; suffix++) {
+    // Trim the stem so the suffix still fits within 32 characters.
+    final tail = '-$suffix';
+    final stem = base.length + tail.length > 32
+        ? base.substring(0, 32 - tail.length).replaceAll(RegExp(r'-+$'), '')
+        : base;
+    final candidate = '$stem$tail';
+    if (!used.contains(candidate)) return candidate;
+  }
+}

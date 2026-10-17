@@ -7,6 +7,7 @@ import '../data/database/database.dart';
 import '../data/repositories/host_repository.dart';
 import '../domain/models/terminal_theme.dart';
 import '../domain/models/terminal_themes.dart';
+import '../domain/services/acp_composer_draft_store.dart';
 import '../domain/services/acp_lifecycle_service.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/background_ssh_service.dart';
@@ -17,10 +18,13 @@ import '../domain/services/settings_service.dart';
 import '../domain/services/ssh_service.dart';
 import '../domain/services/telemetry_service.dart';
 import '../domain/services/terminal_theme_service.dart';
+import '../presentation/shortcuts/app_shortcut_scope.dart';
 import '../presentation/widgets/system_bottom_inset.dart';
+import 'app_link_navigation.dart';
 import 'app_metadata.dart';
 import 'auth_lifecycle_controller.dart';
 import 'notification_navigation.dart';
+import 'push_notification_bridge.dart';
 import 'router.dart';
 import 'theme.dart';
 
@@ -66,17 +70,22 @@ class FluttyApp extends ConsumerWidget {
     final appName = ref.watch(appDisplayNameProvider);
 
     return _BackgroundLifecycleBridge(
-      child: MaterialApp.router(
-        title: appName,
-        debugShowCheckedModeBanner: false,
-        theme: lightTheme,
-        darkTheme: darkTheme,
-        themeMode: themeMode,
-        routerConfig: router,
-        // Above the navigator, so every route, sheet, and dialog ignores a
-        // keyboard inset the platform left behind after the IME closed.
-        builder: (context, child) => PlatformKeyboardInsetMediaQuery(
-          child: child ?? const SizedBox.shrink(),
+      child: PushNotificationBridge(
+        child: AppLinkNavigationBridge(
+          child: MaterialApp.router(
+            title: appName,
+            debugShowCheckedModeBanner: false,
+            theme: lightTheme,
+            darkTheme: darkTheme,
+            themeMode: themeMode,
+            routerConfig: router,
+            // Above the navigator, so every route, sheet, and dialog ignores a
+            // keyboard inset the platform left behind after the IME closed, and
+            // hardware keyboard shortcuts reach every route.
+            builder: (context, child) => PlatformKeyboardInsetMediaQuery(
+              child: AppShortcutsHost(child: child ?? const SizedBox.shrink()),
+            ),
+          ),
         ),
       ),
     );
@@ -202,6 +211,11 @@ class _BackgroundLifecycleBridgeState
     _runLifecycleSync(
       _recordAppStartedTelemetry,
       errorContext: 'while recording app startup telemetry',
+      defer: true,
+    );
+    _runLifecycleSync(
+      () => ref.read(acpComposerDraftStoreProvider).pruneExpired(),
+      errorContext: 'while pruning old native chat drafts during app startup',
       defer: true,
     );
     // Activates the ACP auth-lock and SSH-disconnect cleanup listeners; both

@@ -137,11 +137,54 @@ if [ -z "$version_output" ]; then
 fi;
 ''';
 
-const _profilePrefix =
-    r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; '
-    r'__fl_profile_path=$( set +e; . ~/.profile >/dev/null 2>&1 || true; . ~/.bash_profile >/dev/null 2>&1 || true; . ~/.zprofile >/dev/null 2>&1 || true; if [ "${SHELL##*/}" = zsh ]; then . ~/.zshrc >/dev/null 2>&1 || true; elif [ "${SHELL##*/}" = bash ]; then . ~/.bashrc >/dev/null 2>&1 || true; fi; printf "%s" "$PATH" ) || true; '
-    r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path:$PATH"; unset __fl_profile_path; '
+const _defaultPathExport =
     r'export PATH="$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/homebrew/bin:$HOME/homebrew/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"; ';
+
+/// Startup files whose PATH the host scripts take, in login order. The
+/// last is the interactive file of the user's shell, if bash or zsh.
+const _profileFiles = [
+  r'"$HOME/.profile"',
+  r'"$HOME/.bash_profile"',
+  r'"$HOME/.zprofile"',
+  r'"$__fl_rc"',
+];
+
+/// Sources [_profileFiles] from [index] on, each inside the subshell of the
+/// one before, so a later file still sees what an earlier one exported (a
+/// `.zshrc` that builds on `$HOMEBREW_PREFIX` from `.zprofile`), and prints
+/// the resulting PATH.
+///
+/// A missing file is skipped. A file that ends its subshell early (POSIX sh
+/// leaves on a syntax error, such as zsh syntax in `.zshrc`, and a file may
+/// `exit` or `exec` another shell) prints nothing, and the files after it
+/// then run without it, so one bad file never drops the others. Startup
+/// files read `/dev/null`, so one that waits for input cannot stall.
+String _profileSourcing([int index = 0]) {
+  const printPath = r'printf "%s" "$PATH"';
+  if (index == _profileFiles.length) return printPath;
+  final file = _profileFiles[index];
+  final rest = _profileSourcing(index + 1);
+  return '__fl_p=\$( [ -n $file ] && [ -r $file ] && '
+      '. $file >/dev/null 2>&1 </dev/null; $rest ); '
+      r'if [ -n "$__fl_p" ]; then printf "%s" "$__fl_p"; '
+      'else $rest; fi';
+}
+
+final String _profilePrefix = [
+  _defaultPathExport,
+  r'__fl_rc=; case "${SHELL##*/}" in zsh) __fl_rc="$HOME/.zshrc";; ',
+  r'bash) __fl_rc="$HOME/.bashrc";; esac; ',
+  // The result starts from the current PATH, so it already holds every
+  // earlier entry and is exported as is.
+  '__fl_profile_path=\$( set +e; ${_profileSourcing()} ); ',
+  r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; ',
+  'unset __fl_rc __fl_p __fl_profile_path; ',
+  _defaultPathExport,
+].join();
+
+/// The login PATH setup above, for other host scripts that must find tools
+/// installed through profile files (Homebrew, `~/.local/bin`, nix).
+final String remoteProfilePathPrefix = _profilePrefix;
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
@@ -251,6 +294,8 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     executableNames: ['hermes', 'hermes-agent'],
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
+    // Native chat runs `hermes acp`, which needs the optional `acp` extra.
+    packageExtras: ['acp'],
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
   ),
@@ -376,6 +421,7 @@ const agentAcpRuntimeDefinitions = <AgentRuntimeDefinition>[
     executableNames: ['hermes', 'hermes-agent'],
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
+    packageExtras: ['acp'],
     sharesCliInstallation: true,
   ),
   AgentRuntimeDefinition(
@@ -602,8 +648,16 @@ String? buildAgentInstallCommand(
   }
   final package = definition.packageName;
   if (package == null) return null;
+  // pipx upgrade and reinstall take the installed name; install commands take
+  // the spec so a package's extras come with it.
+  final spec = definition.installPackageSpec!;
+  // pipx reinstall keeps the spec an installation was made with, so it cannot
+  // add extras an older install left out. Repair those by reinstalling from
+  // the spec instead.
+  final pipxRepairsFromSpec = definition.packageExtras.isNotEmpty;
   if (windows) {
     final quotedPackage = powerShellSingleQuote(package);
+    final quotedSpec = powerShellSingleQuote(spec);
     final quotedLatest = powerShellSingleQuote('$package@latest');
     final script = switch (definition.registry) {
       AgentPackageRegistry.npm => [
@@ -618,19 +672,21 @@ String? buildAgentInstallCommand(
       AgentPackageRegistry.pipx => [
         powerShellProfilePathPreamble,
         'if(Get-Command pipx -ErrorAction SilentlyContinue){',
-        if (repair)
+        if (repair && pipxRepairsFromSpec)
+          '& pipx install --force $quotedSpec;'
+        else if (repair)
           '& pipx reinstall $quotedPackage;'
         else if (update)
           '& pipx upgrade $quotedPackage;'
         else
-          '& pipx install $quotedPackage;',
+          '& pipx install $quotedSpec;',
         r'if($LASTEXITCODE -eq 0){exit 0}};',
         if (repair)
-          '& py -m pip install --user --upgrade --force-reinstall $quotedPackage;'
+          '& py -m pip install --user --upgrade --force-reinstall $quotedSpec;'
         else if (update)
-          '& py -m pip install --user --upgrade $quotedPackage;'
+          '& py -m pip install --user --upgrade $quotedSpec;'
         else
-          '& py -m pip install --user $quotedPackage;',
+          '& py -m pip install --user $quotedSpec;',
         r'exit $LASTEXITCODE',
       ].join(),
       null => null,
@@ -646,10 +702,10 @@ String? buildAgentInstallCommand(
           : '$_profilePrefix npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest',
     AgentPackageRegistry.pipx =>
       repair
-          ? '$_profilePrefix pipx reinstall ${_shellQuote(package)} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(package)}'
+          ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${_shellQuote(spec)}' : 'pipx reinstall ${_shellQuote(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
           : update
-          ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(package)}'
-          : '$_profilePrefix pipx install ${_shellQuote(package)} || python3 -m pip install --user ${_shellQuote(package)}',
+          ? '$_profilePrefix pipx upgrade ${_shellQuote(package)} || python3 -m pip install --user --upgrade ${_shellQuote(spec)}'
+          : '$_profilePrefix pipx install ${_shellQuote(spec)} || python3 -m pip install --user ${_shellQuote(spec)}',
     null => null,
   };
 }

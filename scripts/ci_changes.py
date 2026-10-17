@@ -12,8 +12,17 @@ PLATFORMS = ('android', 'ios', 'macos', 'windows', 'linux')
 # inputs such as pubspec.lock). CI uses it to keep the expensive Apple/Windows
 # builds off the pull_request path unless the platform itself changed.
 NATIVE_OUTPUTS = tuple(f'{platform}_native' for platform in PLATFORMS)
-OUTPUTS = ('run_check', 'go', 'tooling', 'third_party', 'deps',
+OUTPUTS = ('run_check', 'go', 'tooling', 'third_party', 'deps', 'functions',
            *PLATFORMS, *NATIVE_OUTPUTS)
+
+# Inputs of the Cloud Functions in functions/. deploy-functions.yml deploys on
+# the same paths; the regression test checks its trigger against this list.
+FUNCTIONS_PATHS = [
+    'functions/**',
+    'firebase.json',
+    '.firebaserc',
+    '.github/workflows/deploy-functions.yml',
+]
 
 # Lockfiles that key the Apple compilation caches. Only a run on main can write
 # a cache that later PR and merge-queue runs restore, so CI keeps the otherwise
@@ -37,6 +46,12 @@ WINDOWS_TEST_INPUTS = {
     'lib/domain/services/windows_remote_powershell.dart',
     'test/domain/services/monkeymux_installer_service_test.dart',
     'test/domain/services/monkeymux_windows_cleanup_test.dart',
+}
+# Inputs of build-ios's notification text test that live outside ios/. They
+# count as native iOS changes so a pull request that edits them runs the test.
+IOS_TEST_INPUTS = {
+    'docs/push-notification-vectors.json',
+    'scripts/test_ios_push_notification_content.sh',
 }
 # Inputs of the other Windows-only tests in build-windows. They gate only the
 # merge-queue build (not `windows_native`), so a PR keeps the cheap path.
@@ -120,6 +135,11 @@ def classify(paths):
         result['windows'] |= windows_test_input
         result['windows_native'] |= path in WINDOWS_TEST_INPUTS
         result['go'] |= daemon or payload or path == '.github/workflows/ci.yml'
+        result['functions'] |= (
+            path.startswith('functions/')
+            or path in FUNCTIONS_PATHS
+            or path == '.github/workflows/ci.yml'
+        )
 
         # Changes to the CI builder itself must exercise all its build jobs.
         # Other workflow/tooling edits use the independent tooling job.
@@ -148,7 +168,7 @@ def classify(paths):
         for platform in PLATFORMS:
             platform_source = (
                 path.startswith(f'{platform}/') and '/fastlane/' not in path
-            )
+            ) or (platform == 'ios' and path in IOS_TEST_INPUTS)
             result[f'{platform}_native'] |= platform_source
             result[platform] |= global_build or platform_source or (
                 firebase and platform in {'android', 'ios'})

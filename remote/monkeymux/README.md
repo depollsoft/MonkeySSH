@@ -111,6 +111,49 @@ writer disconnects. Provider-originated JSON-RPC requests, including permission
 requests, remain pending while no client is attached. MonkeyMux never creates a
 permission response.
 
+The bridge hello advertises `"capabilities":["writer_lease"]`. A client that
+lists the same capability in its own hello may also send a short `deviceLabel`
+(for example `iPad`; never a hostname or user name) and an opaque per-process
+`clientToken`. When such a client cannot write, the bridge answers with a hello
+carrying `canSend:false` and `writer:{"label":...,"idleSeconds":N}`, where
+`idleSeconds` counts from the writer's last input, and then sends nothing else;
+the client closes the connection. `list` and `status` report the same `writer`
+for an attached writer, with `stale:true` once it has gone quiet. Attaching
+with `"takeover":true` moves the lease to the new client. The lease also moves
+without asking when the attaching client presents the writer's own
+`clientToken` (the same app process reconnecting while its old connection is
+half-open), or when a lease-aware writer has sent no frame for 90 seconds;
+those writers send an `ack` heartbeat well inside that bound. An older client
+sends nothing while its user reads, so it keeps the lease until another client
+takes it over explicitly. A lease-aware client resuming from a `lastAck` after
+a different client held the lease gets the same `canSend:false` answer even if
+the lease is free, because the replay from that position may contain requests
+the other client already answered; it continues with a fresh attach.
+
+The displaced writer stops receiving output at once. A lease-aware one is sent
+`{"type":"lease","writer":{"label":...},"acceptedInputs":N}` ahead of any
+queued output, where `acceptedInputs` counts the input frames the bridge took
+from that connection before the lease moved (later ones were dropped; zero is
+written out), and is disconnected 10 seconds later even if it never reads it.
+If the provider fails to take an input frame, that frame is not counted and
+the connection's later input is refused with the provider error, so the count
+is always the exact prefix the provider received. The bridge also remembers
+each lease-aware connection's count when it ends. A client names, as
+`previousClientId`, the `clientId` of its last connection whose hello it read,
+and the next hello reports that connection's count as
+`previousAcceptedInputs` (only for the same `clientToken`), so a client that
+reconnects knows which of its prompts the old connection delivered, even if a
+reconnect in between never got its hello back. Any other client is
+disconnected so it reattaches as a reader. Pending provider requests and
+in-flight turns belong to the bridge, so they carry over to the new writer,
+which receives them through the normal attach replay. Only one answer to a
+provider request reaches the provider; a second answer from another client is
+dropped without touching the request, so it can still be replayed if the
+first answer cannot be written. If the provider cancels the request while
+that answer is being written and the write then fails, the bridge answers it
+as cancelled instead of replaying it. A resuming client without a token is always
+sent to a fresh attach, since the bridge cannot tell it wrote last.
+
 The replay buffer is memory-only. Bridge metadata exposed by `list` and
 `status` contains bounded provider/session IDs, working directory, state,
 counts, timing, and a command hash so clients can rediscover native windows; it
@@ -119,6 +162,33 @@ Explicit `stop` terminates the provider process tree. Bridges persist until
 explicitly stopped, like MonkeyMux terminal windows. `gc` performs deliberate
 idle cleanup and removes stale socket artifacts. ACP children use ordinary
 pipes on every platform—never a POSIX PTY or Windows ConPTY.
+
+`status` also reports cumulative counts of permission requests, input
+(elicitation) requests and completed prompt turns, plus how many permission and
+input requests are pending right now. Push notifications use them; see below.
+
+### Push notifications
+
+When the app opts in, it registers each device with the `push_register`
+control operation. Registrations live in `~/.monkeyssh/state/push-devices.json`
+(mode 0600, at most 8 devices and 4 saved hosts per device, expiring after 30
+days without a refresh) and are shared by every MonkeyMux server for the user,
+which lock `push-devices.json.lock` around every read and write. Each entry
+holds a device id, a ticket sealed by the MonkeySSH Firebase Function, the
+device's public key and an opaque host reference; the host never sees the push
+token itself.
+
+A native agent waiting for permission or input, a finished native turn, and a
+bell or desktop notification (OSC 9 text, OSC 777 `notify`, OSC 99) in a window
+raise an event. MonkeyMux skips devices that are looking at that window or did
+so in the last 30 seconds, and devices whose app is alive in the background and
+alerting by itself. A permission or input request that is still pending is
+raised again once that stops being true. Repeats are coalesced, each device has
+separate hourly budgets for approval requests and for routine events, and the
+event is encrypted to the device before it is posted to the function. Only the
+coarse kind is readable outside the device. The full protocol is in
+`docs/push-notifications.md` at the repository root. `MONKEYMUX_PUSH_ENDPOINT`
+overrides the function URL for testing.
 
 ### Terminal session details
 
@@ -172,6 +242,15 @@ usable terminal hints. They also advertise `FORCE_HYPERLINK=1` (unless already
 set) so OSC 8 capable CLIs such as Copilot and `gh` emit clickable hyperlinks,
 which MonkeySSH renders and opens.
 
+SSH agent forwarding outlives reconnects through a stable path. sshd gives
+each forwarding connection its own agent socket and deletes it when the
+connection closes, while windows outlive connections. On POSIX hosts every
+`attach`, `new-session`, `control` and `acp` command whose `SSH_AUTH_SOCK` is a
+live socket points `agent.sock` in the MonkeyMux runtime directory at it, and
+windows and ACP agents started after that get `SSH_AUTH_SOCK` set to the link,
+so `git push` in a window opened before a reconnect uses the agent the client
+is forwarding now. Hosts that never forward keep their own `SSH_AUTH_SOCK`.
+
 Window switching and reconnect repaint from raw byte history for the selected
 window. Main-screen shell history is capped for responsive switching; active
 alternate-screen, agent, and non-shell foreground program windows replay the
@@ -200,7 +279,26 @@ independently. Normal reconnects and live native ACP handoffs retain progress.
 Upgrade restores that relaunch CLI or shell processes start without the old
 process's progress, so an idle resumed agent does not inherit a stuck busy bar.
 Restored shell history also drops old OSC 9;4 markers; normal reconnect history
-is unchanged. It also tracks the PTY foreground process group for snapshots,
+is unchanged.
+
+MonkeyMux implements the [Program Status Protocol](https://superlogical.com/rex/docs/build/program-status)
+(OSC 7501, revision 0.3) as each window's terminal. It answers the `OSC 7501 ; ?`
+feature query itself, even in a window no client is showing, and strips that
+query from what clients receive (it answers exactly the queries it strips, so
+none is answered twice); Claude Code reports nothing until it gets the reply. Each window keeps up to 64 records with the spec's id hierarchy, `app`
+inheritance and limits, and window snapshots carry the most urgent one as
+`programStatus` (blocked, then error, working, done, idle). Idle, working and
+blocked records end at an OSC 133 or 633 `A` prompt, on RIS, or when the process group
+that sent them has exited (checked every two seconds, so a crashed agent in a
+shell without prompt marks does not stay "working"). Windows has no process
+groups, so there the sender is the window shell's only child process, found on
+the next check. Done and error records
+outlive their program. Restored shell history drops OSC 7501 like OSC 9;4.
+A window whose program asked the feature query or sent a report also carries
+`programStatusReporter` until that program exits (or RIS). Clients then show
+only what it reports, or a neutral status when it reports nothing, instead of
+guessing from output timing, and ignore its OSC 9;4 progress. MonkeyMux
+also tracks the PTY foreground process group for snapshots,
 so shell-launched tools
 such as Codex can be surfaced as agent windows even when the terminal title is
 only the current directory. Window replay resets stale local mouse/focus modes

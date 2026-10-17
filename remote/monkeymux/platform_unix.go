@@ -590,6 +590,28 @@ func attachOutputWriter(w io.Writer) io.Writer {
 	return w
 }
 
+// programStatusReportOwner attributes an OSC 7501 report to the window's
+// foreground process group, read as the report arrives.
+var programStatusReportOwner = func(window *muxWindow) int {
+	if pgrp := window.foregroundProcessGroupLocked(); pgrp > 0 {
+		return pgrp
+	}
+	return programStatusOwnerUntracked
+}
+
+// resolveProgramStatusOwner is not needed here: every POSIX report is
+// attributed as it arrives.
+var resolveProgramStatusOwner = func(int) int { return programStatusOwnerUntracked }
+
+func programStatusOwnerAlive(pgrp int) bool { return processGroupAlive(pgrp) }
+
+// programStatusWindowProcessInForeground reports whether the window's own
+// process still has the terminal; a shell that started another job does not.
+var programStatusWindowProcessInForeground = func(window *muxWindow) bool {
+	foreground := foregroundProcessGroupForWindow(window)
+	return foreground <= 0 || foreground == window.processID()
+}
+
 var foregroundProcessGroupForWindow = func(window *muxWindow) int {
 	if window == nil || window.pty == nil {
 		return 0

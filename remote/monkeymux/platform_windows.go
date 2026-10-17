@@ -830,6 +830,61 @@ func attachOutputWriter(w io.Writer) io.Writer {
 	return newWin32InputModeRequestStripper(w)
 }
 
+// programStatusReportOwner leaves Windows reports unattributed: there is no
+// foreground process group, and the process table must not be read under the
+// server lock that output handling holds. dropExitedProgramStatus resolves
+// them on its next tick with resolveProgramStatusOwner.
+var programStatusReportOwner = func(*muxWindow) int { return programStatusOwnerUnattributed }
+
+// resolveProgramStatusOwner attributes a report to the window process's only
+// child, which is the program its shell is running. A window launched with a
+// program closes with it, so this matters for programs started in a shell.
+// With no child, the program that reported has exited (or the shell itself
+// reported), so its running records end now. With several, the window
+// process owns the records, and it outlives them.
+var resolveProgramStatusOwner = func(windowPID int) int {
+	if windowPID <= 0 {
+		return programStatusOwnerUntracked
+	}
+	child, several := onlyChildProcess(cachedProcessTable(time.Now()), windowPID)
+	if child == 0 && !several {
+		// The cached table can predate a program that just started, so a
+		// missing child is confirmed against a fresh one before its sender
+		// is treated as gone.
+		child, several = onlyChildProcess(readProcessTable(), windowPID)
+	}
+	switch {
+	case several:
+		return windowPID
+	case child == 0:
+		return programStatusOwnerGone
+	default:
+		return child
+	}
+}
+
+// onlyChildProcess returns parentPID's child when it has exactly one, and
+// whether it has several.
+func onlyChildProcess(processes map[int]processInfo, parentPID int) (child int, several bool) {
+	for _, process := range processes {
+		if process.ppid != parentPID || process.pid == parentPID {
+			continue
+		}
+		if child != 0 {
+			return 0, true
+		}
+		child = process.pid
+	}
+	return child, false
+}
+
+func programStatusOwnerAlive(pid int) bool { return processIDAlive(pid) }
+
+// programStatusWindowProcessInForeground is always true here: Windows has no
+// foreground process group, and a reporter is never left owned by the window
+// process (attributeProgramStatusLocked drops it instead).
+var programStatusWindowProcessInForeground = func(*muxWindow) bool { return true }
+
 // foregroundProcessGroupForWindow approximates the POSIX foreground process
 // group with the window's own process id. Windows has no controlling-terminal
 // foreground group, but pairing this with a parent-based process table lets

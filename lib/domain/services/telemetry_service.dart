@@ -123,6 +123,7 @@ class TelemetryService {
     'generated',
     'import',
     'manual',
+    'ssh_config',
   };
   static const _allowedAuthMethods = <String>{
     'key',
@@ -175,6 +176,7 @@ class TelemetryService {
     'clipboard_text',
     'picked_files',
     'picked_media',
+    'working_tree_hunk',
   };
   static const _allowedSelectionActions = <String>{
     'copy',
@@ -692,6 +694,13 @@ class TelemetryService {
       _logEvent('keyboard_toolbar_key_pressed', <String, Object?>{
         'has_modifier': hasModifier,
       });
+
+  /// Records that closed-app push notifications were turned on or off.
+  Future<void> logPushNotificationsToggled({required bool enabled}) =>
+      _logEvent(
+        enabled ? 'push_opt_in' : 'push_opt_out',
+        const <String, Object?>{},
+      );
 
   /// Records explicit system-keyboard toggles from terminal UI.
   Future<void> logSystemKeyboardToggled({required bool visible}) => _logEvent(

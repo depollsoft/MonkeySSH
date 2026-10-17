@@ -2355,6 +2355,78 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, Host> {
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _notifyAgentAttentionMeta =
+      const VerificationMeta('notifyAgentAttention');
+  @override
+  late final GeneratedColumn<bool> notifyAgentAttention = GeneratedColumn<bool>(
+    'notify_agent_attention',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("notify_agent_attention" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _notifyAgentFinishedMeta =
+      const VerificationMeta('notifyAgentFinished');
+  @override
+  late final GeneratedColumn<bool> notifyAgentFinished = GeneratedColumn<bool>(
+    'notify_agent_finished',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("notify_agent_finished" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _notifyWindowAlertsMeta =
+      const VerificationMeta('notifyWindowAlerts');
+  @override
+  late final GeneratedColumn<bool> notifyWindowAlerts = GeneratedColumn<bool>(
+    'notify_window_alerts',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("notify_window_alerts" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _notifyShellNotificationsMeta =
+      const VerificationMeta('notifyShellNotifications');
+  @override
+  late final GeneratedColumn<bool> notifyShellNotifications =
+      GeneratedColumn<bool>(
+        'notify_shell_notifications',
+        aliasedName,
+        false,
+        type: DriftSqlType.bool,
+        requiredDuringInsert: false,
+        defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'CHECK ("notify_shell_notifications" IN (0, 1))',
+        ),
+        defaultValue: const Constant(true),
+      );
+  static const VerificationMeta _pushWhenClosedMeta = const VerificationMeta(
+    'pushWhenClosed',
+  );
+  @override
+  late final GeneratedColumn<bool> pushWhenClosed = GeneratedColumn<bool>(
+    'push_when_closed',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("push_when_closed" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -2387,6 +2459,11 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, Host> {
     autoForwardPorts,
     portProxyName,
     sortOrder,
+    notifyAgentAttention,
+    notifyAgentFinished,
+    notifyWindowAlerts,
+    notifyShellNotifications,
+    pushWhenClosed,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -2628,6 +2705,51 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, Host> {
         sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
       );
     }
+    if (data.containsKey('notify_agent_attention')) {
+      context.handle(
+        _notifyAgentAttentionMeta,
+        notifyAgentAttention.isAcceptableOrUnknown(
+          data['notify_agent_attention']!,
+          _notifyAgentAttentionMeta,
+        ),
+      );
+    }
+    if (data.containsKey('notify_agent_finished')) {
+      context.handle(
+        _notifyAgentFinishedMeta,
+        notifyAgentFinished.isAcceptableOrUnknown(
+          data['notify_agent_finished']!,
+          _notifyAgentFinishedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('notify_window_alerts')) {
+      context.handle(
+        _notifyWindowAlertsMeta,
+        notifyWindowAlerts.isAcceptableOrUnknown(
+          data['notify_window_alerts']!,
+          _notifyWindowAlertsMeta,
+        ),
+      );
+    }
+    if (data.containsKey('notify_shell_notifications')) {
+      context.handle(
+        _notifyShellNotificationsMeta,
+        notifyShellNotifications.isAcceptableOrUnknown(
+          data['notify_shell_notifications']!,
+          _notifyShellNotificationsMeta,
+        ),
+      );
+    }
+    if (data.containsKey('push_when_closed')) {
+      context.handle(
+        _pushWhenClosedMeta,
+        pushWhenClosed.isAcceptableOrUnknown(
+          data['push_when_closed']!,
+          _pushWhenClosedMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -2757,6 +2879,26 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, Host> {
         DriftSqlType.int,
         data['${effectivePrefix}sort_order'],
       )!,
+      notifyAgentAttention: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}notify_agent_attention'],
+      )!,
+      notifyAgentFinished: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}notify_agent_finished'],
+      )!,
+      notifyWindowAlerts: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}notify_window_alerts'],
+      )!,
+      notifyShellNotifications: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}notify_shell_notifications'],
+      )!,
+      pushWhenClosed: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}push_when_closed'],
+      )!,
     );
   }
 
@@ -2867,6 +3009,25 @@ class Host extends DataClass implements Insertable<Host> {
 
   /// Display order within the hosts list.
   final int sortOrder;
+
+  /// Whether this host may notify when a native agent needs approval, a file
+  /// write, or an answer.
+  final bool notifyAgentAttention;
+
+  /// Whether this host may notify when a native agent finishes its turn.
+  final bool notifyAgentFinished;
+
+  /// Whether this host may notify when a background multiplexer window rings
+  /// the bell or shows activity.
+  final bool notifyWindowAlerts;
+
+  /// Whether this host may show notifications that remote programs post
+  /// (OSC 9, 777 and 99).
+  final bool notifyShellNotifications;
+
+  /// Whether this host's MonkeyMux session may push notifications to this
+  /// device while MonkeySSH is closed.
+  final bool pushWhenClosed;
   const Host({
     required this.id,
     required this.label,
@@ -2898,6 +3059,11 @@ class Host extends DataClass implements Insertable<Host> {
     required this.autoForwardPorts,
     this.portProxyName,
     required this.sortOrder,
+    required this.notifyAgentAttention,
+    required this.notifyAgentFinished,
+    required this.notifyWindowAlerts,
+    required this.notifyShellNotifications,
+    required this.pushWhenClosed,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -2972,6 +3138,13 @@ class Host extends DataClass implements Insertable<Host> {
       map['port_proxy_name'] = Variable<String>(portProxyName);
     }
     map['sort_order'] = Variable<int>(sortOrder);
+    map['notify_agent_attention'] = Variable<bool>(notifyAgentAttention);
+    map['notify_agent_finished'] = Variable<bool>(notifyAgentFinished);
+    map['notify_window_alerts'] = Variable<bool>(notifyWindowAlerts);
+    map['notify_shell_notifications'] = Variable<bool>(
+      notifyShellNotifications,
+    );
+    map['push_when_closed'] = Variable<bool>(pushWhenClosed);
     return map;
   }
 
@@ -3043,6 +3216,11 @@ class Host extends DataClass implements Insertable<Host> {
           ? const Value.absent()
           : Value(portProxyName),
       sortOrder: Value(sortOrder),
+      notifyAgentAttention: Value(notifyAgentAttention),
+      notifyAgentFinished: Value(notifyAgentFinished),
+      notifyWindowAlerts: Value(notifyWindowAlerts),
+      notifyShellNotifications: Value(notifyShellNotifications),
+      pushWhenClosed: Value(pushWhenClosed),
     );
   }
 
@@ -3098,6 +3276,17 @@ class Host extends DataClass implements Insertable<Host> {
       autoForwardPorts: serializer.fromJson<bool>(json['autoForwardPorts']),
       portProxyName: serializer.fromJson<String?>(json['portProxyName']),
       sortOrder: serializer.fromJson<int>(json['sortOrder']),
+      notifyAgentAttention: serializer.fromJson<bool>(
+        json['notifyAgentAttention'],
+      ),
+      notifyAgentFinished: serializer.fromJson<bool>(
+        json['notifyAgentFinished'],
+      ),
+      notifyWindowAlerts: serializer.fromJson<bool>(json['notifyWindowAlerts']),
+      notifyShellNotifications: serializer.fromJson<bool>(
+        json['notifyShellNotifications'],
+      ),
+      pushWhenClosed: serializer.fromJson<bool>(json['pushWhenClosed']),
     );
   }
   @override
@@ -3136,6 +3325,13 @@ class Host extends DataClass implements Insertable<Host> {
       'autoForwardPorts': serializer.toJson<bool>(autoForwardPorts),
       'portProxyName': serializer.toJson<String?>(portProxyName),
       'sortOrder': serializer.toJson<int>(sortOrder),
+      'notifyAgentAttention': serializer.toJson<bool>(notifyAgentAttention),
+      'notifyAgentFinished': serializer.toJson<bool>(notifyAgentFinished),
+      'notifyWindowAlerts': serializer.toJson<bool>(notifyWindowAlerts),
+      'notifyShellNotifications': serializer.toJson<bool>(
+        notifyShellNotifications,
+      ),
+      'pushWhenClosed': serializer.toJson<bool>(pushWhenClosed),
     };
   }
 
@@ -3170,6 +3366,11 @@ class Host extends DataClass implements Insertable<Host> {
     bool? autoForwardPorts,
     Value<String?> portProxyName = const Value.absent(),
     int? sortOrder,
+    bool? notifyAgentAttention,
+    bool? notifyAgentFinished,
+    bool? notifyWindowAlerts,
+    bool? notifyShellNotifications,
+    bool? pushWhenClosed,
   }) => Host(
     id: id ?? this.id,
     label: label ?? this.label,
@@ -3226,6 +3427,12 @@ class Host extends DataClass implements Insertable<Host> {
         ? portProxyName.value
         : this.portProxyName,
     sortOrder: sortOrder ?? this.sortOrder,
+    notifyAgentAttention: notifyAgentAttention ?? this.notifyAgentAttention,
+    notifyAgentFinished: notifyAgentFinished ?? this.notifyAgentFinished,
+    notifyWindowAlerts: notifyWindowAlerts ?? this.notifyWindowAlerts,
+    notifyShellNotifications:
+        notifyShellNotifications ?? this.notifyShellNotifications,
+    pushWhenClosed: pushWhenClosed ?? this.pushWhenClosed,
   );
   Host copyWithCompanion(HostsCompanion data) {
     return Host(
@@ -3292,6 +3499,21 @@ class Host extends DataClass implements Insertable<Host> {
           ? data.portProxyName.value
           : this.portProxyName,
       sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
+      notifyAgentAttention: data.notifyAgentAttention.present
+          ? data.notifyAgentAttention.value
+          : this.notifyAgentAttention,
+      notifyAgentFinished: data.notifyAgentFinished.present
+          ? data.notifyAgentFinished.value
+          : this.notifyAgentFinished,
+      notifyWindowAlerts: data.notifyWindowAlerts.present
+          ? data.notifyWindowAlerts.value
+          : this.notifyWindowAlerts,
+      notifyShellNotifications: data.notifyShellNotifications.present
+          ? data.notifyShellNotifications.value
+          : this.notifyShellNotifications,
+      pushWhenClosed: data.pushWhenClosed.present
+          ? data.pushWhenClosed.value
+          : this.pushWhenClosed,
     );
   }
 
@@ -3329,7 +3551,12 @@ class Host extends DataClass implements Insertable<Host> {
           ..write('remoteMuxBackend: $remoteMuxBackend, ')
           ..write('autoForwardPorts: $autoForwardPorts, ')
           ..write('portProxyName: $portProxyName, ')
-          ..write('sortOrder: $sortOrder')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('notifyAgentAttention: $notifyAgentAttention, ')
+          ..write('notifyAgentFinished: $notifyAgentFinished, ')
+          ..write('notifyWindowAlerts: $notifyWindowAlerts, ')
+          ..write('notifyShellNotifications: $notifyShellNotifications, ')
+          ..write('pushWhenClosed: $pushWhenClosed')
           ..write(')'))
         .toString();
   }
@@ -3366,6 +3593,11 @@ class Host extends DataClass implements Insertable<Host> {
     autoForwardPorts,
     portProxyName,
     sortOrder,
+    notifyAgentAttention,
+    notifyAgentFinished,
+    notifyWindowAlerts,
+    notifyShellNotifications,
+    pushWhenClosed,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -3401,7 +3633,12 @@ class Host extends DataClass implements Insertable<Host> {
           other.remoteMuxBackend == this.remoteMuxBackend &&
           other.autoForwardPorts == this.autoForwardPorts &&
           other.portProxyName == this.portProxyName &&
-          other.sortOrder == this.sortOrder);
+          other.sortOrder == this.sortOrder &&
+          other.notifyAgentAttention == this.notifyAgentAttention &&
+          other.notifyAgentFinished == this.notifyAgentFinished &&
+          other.notifyWindowAlerts == this.notifyWindowAlerts &&
+          other.notifyShellNotifications == this.notifyShellNotifications &&
+          other.pushWhenClosed == this.pushWhenClosed);
 }
 
 class HostsCompanion extends UpdateCompanion<Host> {
@@ -3435,6 +3672,11 @@ class HostsCompanion extends UpdateCompanion<Host> {
   final Value<bool> autoForwardPorts;
   final Value<String?> portProxyName;
   final Value<int> sortOrder;
+  final Value<bool> notifyAgentAttention;
+  final Value<bool> notifyAgentFinished;
+  final Value<bool> notifyWindowAlerts;
+  final Value<bool> notifyShellNotifications;
+  final Value<bool> pushWhenClosed;
   const HostsCompanion({
     this.id = const Value.absent(),
     this.label = const Value.absent(),
@@ -3466,6 +3708,11 @@ class HostsCompanion extends UpdateCompanion<Host> {
     this.autoForwardPorts = const Value.absent(),
     this.portProxyName = const Value.absent(),
     this.sortOrder = const Value.absent(),
+    this.notifyAgentAttention = const Value.absent(),
+    this.notifyAgentFinished = const Value.absent(),
+    this.notifyWindowAlerts = const Value.absent(),
+    this.notifyShellNotifications = const Value.absent(),
+    this.pushWhenClosed = const Value.absent(),
   });
   HostsCompanion.insert({
     this.id = const Value.absent(),
@@ -3498,6 +3745,11 @@ class HostsCompanion extends UpdateCompanion<Host> {
     this.autoForwardPorts = const Value.absent(),
     this.portProxyName = const Value.absent(),
     this.sortOrder = const Value.absent(),
+    this.notifyAgentAttention = const Value.absent(),
+    this.notifyAgentFinished = const Value.absent(),
+    this.notifyWindowAlerts = const Value.absent(),
+    this.notifyShellNotifications = const Value.absent(),
+    this.pushWhenClosed = const Value.absent(),
   }) : label = Value(label),
        hostname = Value(hostname),
        username = Value(username);
@@ -3532,6 +3784,11 @@ class HostsCompanion extends UpdateCompanion<Host> {
     Expression<bool>? autoForwardPorts,
     Expression<String>? portProxyName,
     Expression<int>? sortOrder,
+    Expression<bool>? notifyAgentAttention,
+    Expression<bool>? notifyAgentFinished,
+    Expression<bool>? notifyWindowAlerts,
+    Expression<bool>? notifyShellNotifications,
+    Expression<bool>? pushWhenClosed,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -3572,6 +3829,15 @@ class HostsCompanion extends UpdateCompanion<Host> {
       if (autoForwardPorts != null) 'auto_forward_ports': autoForwardPorts,
       if (portProxyName != null) 'port_proxy_name': portProxyName,
       if (sortOrder != null) 'sort_order': sortOrder,
+      if (notifyAgentAttention != null)
+        'notify_agent_attention': notifyAgentAttention,
+      if (notifyAgentFinished != null)
+        'notify_agent_finished': notifyAgentFinished,
+      if (notifyWindowAlerts != null)
+        'notify_window_alerts': notifyWindowAlerts,
+      if (notifyShellNotifications != null)
+        'notify_shell_notifications': notifyShellNotifications,
+      if (pushWhenClosed != null) 'push_when_closed': pushWhenClosed,
     });
   }
 
@@ -3606,6 +3872,11 @@ class HostsCompanion extends UpdateCompanion<Host> {
     Value<bool>? autoForwardPorts,
     Value<String?>? portProxyName,
     Value<int>? sortOrder,
+    Value<bool>? notifyAgentAttention,
+    Value<bool>? notifyAgentFinished,
+    Value<bool>? notifyWindowAlerts,
+    Value<bool>? notifyShellNotifications,
+    Value<bool>? pushWhenClosed,
   }) {
     return HostsCompanion(
       id: id ?? this.id,
@@ -3640,6 +3911,12 @@ class HostsCompanion extends UpdateCompanion<Host> {
       autoForwardPorts: autoForwardPorts ?? this.autoForwardPorts,
       portProxyName: portProxyName ?? this.portProxyName,
       sortOrder: sortOrder ?? this.sortOrder,
+      notifyAgentAttention: notifyAgentAttention ?? this.notifyAgentAttention,
+      notifyAgentFinished: notifyAgentFinished ?? this.notifyAgentFinished,
+      notifyWindowAlerts: notifyWindowAlerts ?? this.notifyWindowAlerts,
+      notifyShellNotifications:
+          notifyShellNotifications ?? this.notifyShellNotifications,
+      pushWhenClosed: pushWhenClosed ?? this.pushWhenClosed,
     );
   }
 
@@ -3748,6 +4025,25 @@ class HostsCompanion extends UpdateCompanion<Host> {
     if (sortOrder.present) {
       map['sort_order'] = Variable<int>(sortOrder.value);
     }
+    if (notifyAgentAttention.present) {
+      map['notify_agent_attention'] = Variable<bool>(
+        notifyAgentAttention.value,
+      );
+    }
+    if (notifyAgentFinished.present) {
+      map['notify_agent_finished'] = Variable<bool>(notifyAgentFinished.value);
+    }
+    if (notifyWindowAlerts.present) {
+      map['notify_window_alerts'] = Variable<bool>(notifyWindowAlerts.value);
+    }
+    if (notifyShellNotifications.present) {
+      map['notify_shell_notifications'] = Variable<bool>(
+        notifyShellNotifications.value,
+      );
+    }
+    if (pushWhenClosed.present) {
+      map['push_when_closed'] = Variable<bool>(pushWhenClosed.value);
+    }
     return map;
   }
 
@@ -3785,7 +4081,12 @@ class HostsCompanion extends UpdateCompanion<Host> {
           ..write('remoteMuxBackend: $remoteMuxBackend, ')
           ..write('autoForwardPorts: $autoForwardPorts, ')
           ..write('portProxyName: $portProxyName, ')
-          ..write('sortOrder: $sortOrder')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('notifyAgentAttention: $notifyAgentAttention, ')
+          ..write('notifyAgentFinished: $notifyAgentFinished, ')
+          ..write('notifyWindowAlerts: $notifyWindowAlerts, ')
+          ..write('notifyShellNotifications: $notifyShellNotifications, ')
+          ..write('pushWhenClosed: $pushWhenClosed')
           ..write(')'))
         .toString();
   }
@@ -4087,7 +4388,10 @@ class PortForward extends DataClass implements Insertable<PortForward> {
   /// Associated host.
   final int hostId;
 
-  /// Forward type: 'local' or 'remote'.
+  /// Forward type: 'local', 'remote', or 'dynamic' (SOCKS5).
+  ///
+  /// A dynamic forward listens on loopback [localPort] (zero picks a free
+  /// port) and leaves [remoteHost] empty and [remotePort] zero.
   final String forwardType;
 
   /// Local bind address.
@@ -6882,6 +7186,11 @@ typedef $$HostsTableCreateCompanionBuilder = HostsCompanion Function({
   Value<bool> autoForwardPorts,
   Value<String?> portProxyName,
   Value<int> sortOrder,
+  Value<bool> notifyAgentAttention,
+  Value<bool> notifyAgentFinished,
+  Value<bool> notifyWindowAlerts,
+  Value<bool> notifyShellNotifications,
+  Value<bool> pushWhenClosed,
 });
 typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
   Value<int> id,
@@ -6914,6 +7223,11 @@ typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
   Value<bool> autoForwardPorts,
   Value<String?> portProxyName,
   Value<int> sortOrder,
+  Value<bool> notifyAgentAttention,
+  Value<bool> notifyAgentFinished,
+  Value<bool> notifyWindowAlerts,
+  Value<bool> notifyShellNotifications,
+  Value<bool> pushWhenClosed,
 });
 
 final class $$HostsTableReferences
@@ -7144,6 +7458,31 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
 
   ColumnFilters<int> get sortOrder => $composableBuilder(
     column: $table.sortOrder,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get notifyAgentAttention => $composableBuilder(
+    column: $table.notifyAgentAttention,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get notifyAgentFinished => $composableBuilder(
+    column: $table.notifyAgentFinished,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get notifyWindowAlerts => $composableBuilder(
+    column: $table.notifyWindowAlerts,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get notifyShellNotifications => $composableBuilder(
+    column: $table.notifyShellNotifications,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get pushWhenClosed => $composableBuilder(
+    column: $table.pushWhenClosed,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -7405,6 +7744,31 @@ class $$HostsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get notifyAgentAttention => $composableBuilder(
+    column: $table.notifyAgentAttention,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get notifyAgentFinished => $composableBuilder(
+    column: $table.notifyAgentFinished,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get notifyWindowAlerts => $composableBuilder(
+    column: $table.notifyWindowAlerts,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get notifyShellNotifications => $composableBuilder(
+    column: $table.notifyShellNotifications,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get pushWhenClosed => $composableBuilder(
+    column: $table.pushWhenClosed,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$SshKeysTableOrderingComposer get keyId {
     final $$SshKeysTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -7614,6 +7978,31 @@ class $$HostsTableAnnotationComposer
   GeneratedColumn<int> get sortOrder =>
       $composableBuilder(column: $table.sortOrder, builder: (column) => column);
 
+  GeneratedColumn<bool> get notifyAgentAttention => $composableBuilder(
+    column: $table.notifyAgentAttention,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get notifyAgentFinished => $composableBuilder(
+    column: $table.notifyAgentFinished,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get notifyWindowAlerts => $composableBuilder(
+    column: $table.notifyWindowAlerts,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get notifyShellNotifications => $composableBuilder(
+    column: $table.notifyShellNotifications,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get pushWhenClosed => $composableBuilder(
+    column: $table.pushWhenClosed,
+    builder: (column) => column,
+  );
+
   $$SshKeysTableAnnotationComposer get keyId {
     final $$SshKeysTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -7797,6 +8186,11 @@ class $$HostsTableTableManager
                 Value<bool> autoForwardPorts = const Value.absent(),
                 Value<String?> portProxyName = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
+                Value<bool> notifyAgentAttention = const Value.absent(),
+                Value<bool> notifyAgentFinished = const Value.absent(),
+                Value<bool> notifyWindowAlerts = const Value.absent(),
+                Value<bool> notifyShellNotifications = const Value.absent(),
+                Value<bool> pushWhenClosed = const Value.absent(),
               }) => HostsCompanion(
                 id: id,
                 label: label,
@@ -7829,6 +8223,11 @@ class $$HostsTableTableManager
                 autoForwardPorts: autoForwardPorts,
                 portProxyName: portProxyName,
                 sortOrder: sortOrder,
+                notifyAgentAttention: notifyAgentAttention,
+                notifyAgentFinished: notifyAgentFinished,
+                notifyWindowAlerts: notifyWindowAlerts,
+                notifyShellNotifications: notifyShellNotifications,
+                pushWhenClosed: pushWhenClosed,
               ),
           createCompanionCallback:
               ({
@@ -7863,6 +8262,11 @@ class $$HostsTableTableManager
                 Value<bool> autoForwardPorts = const Value.absent(),
                 Value<String?> portProxyName = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
+                Value<bool> notifyAgentAttention = const Value.absent(),
+                Value<bool> notifyAgentFinished = const Value.absent(),
+                Value<bool> notifyWindowAlerts = const Value.absent(),
+                Value<bool> notifyShellNotifications = const Value.absent(),
+                Value<bool> pushWhenClosed = const Value.absent(),
               }) => HostsCompanion.insert(
                 id: id,
                 label: label,
@@ -7895,6 +8299,11 @@ class $$HostsTableTableManager
                 autoForwardPorts: autoForwardPorts,
                 portProxyName: portProxyName,
                 sortOrder: sortOrder,
+                notifyAgentAttention: notifyAgentAttention,
+                notifyAgentFinished: notifyAgentFinished,
+                notifyWindowAlerts: notifyWindowAlerts,
+                notifyShellNotifications: notifyShellNotifications,
+                pushWhenClosed: pushWhenClosed,
               ),
           withReferenceMapper: (p0) => p0
               .map(

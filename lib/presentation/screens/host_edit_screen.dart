@@ -2,9 +2,9 @@ import 'dart:async';
 
 import 'package:drift/drift.dart' show InvalidDataException;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
@@ -13,12 +13,17 @@ import '../../data/repositories/key_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../../domain/models/agent_launch_preset.dart';
 import '../../domain/models/auto_connect_command.dart';
+import '../../domain/models/host_notifications.dart';
 import '../../domain/models/monetization.dart';
+import '../../domain/models/port_forward_type.dart';
 import '../../domain/models/port_proxy_name.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_theme.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/agent_launch_preset_service.dart';
+import '../../domain/services/app_permission_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/port_forward_browser_service.dart';
 import '../../domain/services/port_forward_runtime_service.dart';
@@ -29,9 +34,12 @@ import '../../domain/services/terminal_theme_service.dart';
 import '../../domain/services/wifi_network_service.dart';
 import '../providers/entity_list_providers.dart';
 import '../view_models/host_edit_view_model.dart';
+import '../widgets/agent_preset_workspace_fields.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/font_family_picker.dart';
+import '../widgets/host_agent_forwarding_section.dart';
+import '../widgets/host_notifications_section.dart';
 import '../widgets/host_port_forward_editor_sheet.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
@@ -42,8 +50,8 @@ import 'transfer_screen.dart';
 
 const _hostFieldHelperMaxLines = 4;
 const _hostStartupModeOptions = <HostStartupMode>[
-  HostStartupMode.none,
   HostStartupMode.monkeyMux,
+  HostStartupMode.none,
   HostStartupMode.tmux,
   HostStartupMode.agent,
   HostStartupMode.customCommand,
@@ -74,6 +82,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   final _usernameFieldLocationKey = GlobalKey();
   final _tmuxSessionFieldLocationKey = GlobalKey();
   final _agentTmuxFlagsFieldLocationKey = GlobalKey();
+  final _agentSessionFieldLocationKey = GlobalKey();
   final _customCommandFieldLocationKey = GlobalKey();
   final _snippetFieldLocationKey = GlobalKey();
   final _portProxyNameFieldLocationKey = GlobalKey();
@@ -93,12 +102,14 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   late TextEditingController _agentTmuxExtraFlagsController;
   late TextEditingController _agentArgumentsController;
   late TextEditingController _portProxyNameController;
+  final _agentWorkspaceForm = AgentPresetWorkspaceFormState();
   late FocusNode _labelFocusNode;
   late FocusNode _hostnameFocusNode;
   late FocusNode _portFocusNode;
   late FocusNode _usernameFocusNode;
   late FocusNode _tmuxSessionFocusNode;
   late FocusNode _agentTmuxFlagsFocusNode;
+  final _agentSessionFocusNode = FocusNode();
   late FocusNode _customCommandFocusNode;
   late FocusNode _snippetFocusNode;
   late FocusNode _portProxyNameFocusNode;
@@ -122,6 +133,16 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
   bool _disableAgentTmuxStatusBar = false;
   bool _startClisInYoloMode = false;
   bool _autoForwardPorts = false;
+  HostNotificationPrefs _notificationPrefs = const HostNotificationPrefs();
+
+  // Whether the session name field holds a name suggested from the label. It
+  // follows label edits until the user types a name of their own.
+  bool _sessionNameFollowsLabel = false;
+
+  // Sessions that agent-startup hosts keep in their launch presets, by host
+  // id, so a suggested name avoids them too.
+  Map<int, String> _presetSessionNames = const {};
+  final _startupSectionKey = GlobalKey();
 
   List<PortForward> _portForwards = [];
 
@@ -175,9 +196,16 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       _agentTmuxExtraFlagsController,
       _agentArgumentsController,
       _portProxyNameController,
+      ..._agentWorkspaceForm.controllers,
     ]) {
       c.addListener(_updateDirtyState);
     }
+    // The suggestion avoids sessions other saved hosts use on the same
+    // destination, so it follows the hostname and port as well as the label.
+    for (final c in [_labelController, _hostnameController, _portController]) {
+      c.addListener(_followSuggestedSessionName);
+    }
+    unawaited(_loadPresetSessionNames());
 
     if (widget.hostId != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -258,6 +286,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       _disableAgentTmuxStatusBar = preset?.tmuxDisableStatusBar ?? false;
       _startClisInYoloMode = cliLaunchPreferences.startInYoloMode;
       _autoForwardPorts = host.autoForwardPorts;
+      _notificationPrefs = HostNotificationPrefs.fromHost(host);
       _portProxyNameController.text = host.portProxyName ?? '';
       _selectedAutoConnectMode = resolveAutoConnectCommandMode(
         command: host.autoConnectCommand,
@@ -279,6 +308,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         _agentTmuxSessionController.text = preset.tmuxSessionName ?? '';
         _agentTmuxExtraFlagsController.text = preset.tmuxExtraFlags ?? '';
         _agentArgumentsController.text = preset.additionalArguments ?? '';
+        _agentWorkspaceForm.load(preset);
         if (presetCommand != null &&
             (_selectedAutoConnectMode == AutoConnectCommandMode.custom ||
                 host.autoConnectCommand == presetCommand)) {
@@ -312,12 +342,14 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     _agentTmuxExtraFlagsController.dispose();
     _agentArgumentsController.dispose();
     _portProxyNameController.dispose();
+    _agentWorkspaceForm.dispose();
     _labelFocusNode.dispose();
     _hostnameFocusNode.dispose();
     _portFocusNode.dispose();
     _usernameFocusNode.dispose();
     _tmuxSessionFocusNode.dispose();
     _agentTmuxFlagsFocusNode.dispose();
+    _agentSessionFocusNode.dispose();
     _customCommandFocusNode.dispose();
     _snippetFocusNode.dispose();
     _portProxyNameFocusNode.dispose();
@@ -351,6 +383,8 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     agentTmuxSession: _agentTmuxSessionController.text,
     agentTmuxExtraFlags: _agentTmuxExtraFlagsController.text,
     agentArguments: _agentArgumentsController.text,
+    agentWorktree: _agentWorkspaceForm.worktree,
+    agentInitialPrompt: _agentWorkspaceForm.initialPrompt.text,
     portProxyName: _portProxyNameController.text,
     selectedAgentMuxBackend: _selectedAgentMuxBackend,
     selectedKeyId: _selectedKeyId,
@@ -369,6 +403,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     disableAgentTmuxStatusBar: _disableAgentTmuxStatusBar,
     startClisInYoloMode: _startClisInYoloMode,
     autoForwardPorts: _autoForwardPorts,
+    notificationPrefs: _notificationPrefs,
   );
 
   void _closeWithoutUnsavedPrompt(SnackBar snackBar) {
@@ -670,11 +705,19 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                         ),
                         const SizedBox(height: 24),
 
-                        _buildStartupSection(
-                          context: context,
-                          hasAutomationAccess: hasAutomationAccess,
+                        KeyedSubtree(
+                          key: _startupSectionKey,
+                          child: _buildStartupSection(
+                            context: context,
+                            hasAutomationAccess: hasAutomationAccess,
+                            hasAgentPresetAccess: hasAgentPresetAccess,
+                            snippetsAsync: snippetsAsync,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+
+                        _buildNotificationsSection(
                           hasAgentPresetAccess: hasAgentPresetAccess,
-                          snippetsAsync: snippetsAsync,
                         ),
                         const SizedBox(height: 24),
 
@@ -826,6 +869,12 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                         ),
                         const SizedBox(height: 32),
 
+                        HostAgentForwardingSection(
+                          hostId: widget.hostId,
+                          hostKeyId: _selectedKeyId,
+                        ),
+                        const SizedBox(height: 32),
+
                         // Port Forwards section
                         _buildPortForwardsSection(context, isEditing),
                         const SizedBox(height: 32),
@@ -917,35 +966,21 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Launch After Connect', style: theme.textTheme.titleMedium),
+        Text(
+          'launch after connect',
+          style: FluttyTheme.displayMono(
+            fontSize: 15,
+            color: colorScheme.onSurface,
+          ),
+        ),
         const SizedBox(height: 8),
         Text(
-          'Choose what MonkeySSH starts after SSH connects. MonkeyMux and tmux keep remote shells alive across reconnects and add the window switcher; agent, command, and snippet options start a workflow automatically.',
+          'Choose what MonkeySSH starts after SSH connects. MonkeyMux is recommended: windows survive reconnects, and it adds the window switcher, native agent chats, and alerts when MonkeySSH is closed. Agent, command, and snippet options start a workflow automatically.',
           style: theme.textTheme.bodySmall?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
         ),
-        const SizedBox(height: 12),
-        CheckboxListTile(
-          key: const Key('host-cli-yolo-mode-checkbox'),
-          value: _startClisInYoloMode,
-          contentPadding: EdgeInsets.zero,
-          controlAffinity: ListTileControlAffinity.leading,
-          title: const Text('Start supported coding CLIs in YOLO mode'),
-          subtitle: Text(
-            hasAgentPresetAccess
-                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
-                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
-          ),
-          onChanged: hasAgentPresetAccess
-              ? (value) {
-                  setState(() => _startClisInYoloMode = value ?? false);
-                  _updateDirtyState();
-                  _syncAutoConnectCommandFromPreset();
-                }
-              : null,
-        ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         DropdownButtonFormField<HostStartupMode>(
           key: const Key('host-startup-mode-field'),
           // ignore: deprecated_member_use
@@ -954,16 +989,26 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
           decoration: const InputDecoration(
             labelText: 'Startup behavior',
             prefixIcon: Icon(Icons.play_circle_outline),
-            helperText: 'Pick the startup flow for this host. Choose MonkeyMux for the bundled window manager, or tmux for an existing remote tmux setup.',
-            helperMaxLines: _hostFieldHelperMaxLines,
           ),
           items: _hostStartupModeOptions
               .map(
                 (mode) => DropdownMenuItem<HostStartupMode>(
                   value: mode,
-                  child: Text(mode.label),
+                  child: mode == HostStartupMode.monkeyMux
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(mode.label),
+                            const SizedBox(width: 8),
+                            const _RecommendedBadge(),
+                          ],
+                        )
+                      : Text(mode.label),
                 ),
               )
+              .toList(growable: false),
+          selectedItemBuilder: (context) => _hostStartupModeOptions
+              .map((mode) => Text(mode.label))
               .toList(growable: false),
           onChanged: (value) {
             if (value == null) {
@@ -990,6 +1035,28 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             hasAutomationAccess: hasAutomationAccess,
           ),
         },
+        // A host-wide default for every coding CLI launch on this host, not
+        // only the startup choice above.
+        const SizedBox(height: 12),
+        CheckboxListTile(
+          key: const Key('host-cli-yolo-mode-checkbox'),
+          value: _startClisInYoloMode,
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          title: const Text('Start supported coding CLIs in YOLO mode'),
+          subtitle: Text(
+            hasAgentPresetAccess
+                ? 'Applies to coding CLI launches on this host. Supported agents use their startup permission settings.'
+                : 'MonkeySSH Pro unlocks host-specific coding CLI defaults like YOLO mode.',
+          ),
+          onChanged: hasAgentPresetAccess
+              ? (value) {
+                  setState(() => _startClisInYoloMode = value ?? false);
+                  _updateDirtyState();
+                  _syncAutoConnectCommandFromPreset();
+                }
+              : null,
+        ),
       ],
     );
   }
@@ -1039,7 +1106,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               helperMaxLines: _hostFieldHelperMaxLines,
             ),
             autocorrect: false,
-            onChanged: (_) => setState(() {}),
+            onChanged: (_) => setState(() => _sessionNameFollowsLabel = false),
             validator: (value) {
               if (!_selectedStartupMode.usesRemoteMultiplexer) {
                 return null;
@@ -1233,25 +1300,42 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
               : null,
         ),
         const SizedBox(height: 12),
-        TextFormField(
-          key: const Key('host-agent-tmux-session-field'),
-          controller: _agentTmuxSessionController,
-          readOnly: !hasAgentPresetAccess,
-          decoration: InputDecoration(
-            labelText: isAgentTmuxBackend
-                ? 'tmux session (optional)'
-                : 'MonkeyMux session (optional)',
-            hintText: 'app-agent',
-            prefixIcon: const Icon(Icons.view_carousel_outlined),
-            helperText: isAgentTmuxBackend
-                ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
-                : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
-            helperMaxLines: _hostFieldHelperMaxLines,
+        KeyedSubtree(
+          key: _agentSessionFieldLocationKey,
+          child: TextFormField(
+            key: const Key('host-agent-tmux-session-field'),
+            controller: _agentTmuxSessionController,
+            focusNode: _agentSessionFocusNode,
+            readOnly: !hasAgentPresetAccess,
+            validator: (value) =>
+                _agentWorkspaceForm.worktreeEnabled &&
+                    (value?.trim().isEmpty ?? true)
+                ? 'Worktree launches need a session, so reconnecting returns to '
+                      'the same worktree.'
+                : null,
+            decoration: InputDecoration(
+              // A worktree launch needs the session, so it stops being
+              // optional when worktrees are on.
+              labelText: [
+                if (isAgentTmuxBackend) 'tmux session' else 'MonkeyMux session',
+                if (!_agentWorkspaceForm.worktreeEnabled) '(optional)',
+              ].join(' '),
+              hintText: 'app-agent',
+              prefixIcon: const Icon(Icons.view_carousel_outlined),
+              helperText: _agentWorkspaceForm.worktreeEnabled
+                  ? 'Required for worktree launches, so reconnecting returns '
+                        'to the same worktree.'
+                  : isAgentTmuxBackend
+                  ? 'Add a tmux session to keep agent workspaces visible in the window bar.'
+                  : 'Add a MonkeyMux session to keep agent workspaces visible in the window bar.',
+              helperMaxLines: _hostFieldHelperMaxLines,
+              errorMaxLines: _hostFieldHelperMaxLines,
+            ),
+            autocorrect: false,
+            onChanged: hasAgentPresetAccess
+                ? (_) => _handleAgentPresetFieldChanged()
+                : null,
           ),
-          autocorrect: false,
-          onChanged: hasAgentPresetAccess
-              ? (_) => _handleAgentPresetFieldChanged()
-              : null,
         ),
         if (isAgentTmuxBackend) ...[
           const SizedBox(height: 12),
@@ -1327,6 +1411,17 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
             ),
           ),
         ],
+        // After the session it depends on, so the dependency reads top-down.
+        AgentPresetWorkspaceFields(
+          state: _agentWorkspaceForm,
+          enabled: hasAgentPresetAccess,
+          tool: _selectedAgentLaunchTool,
+          workingDirectory: _agentWorkingDirectoryController,
+          onChanged: () {
+            setState(() {});
+            _updateDirtyState();
+          },
+        ),
         const SizedBox(height: 12),
         Text(
           currentPreset.usesMonkeyMuxSession
@@ -1459,7 +1554,7 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    selectedSnippet.command,
+                    snippetLiteralText(selectedSnippet.command),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                     style: FluttyTheme.monoStyle.copyWith(
@@ -1468,6 +1563,35 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
                     ),
                   ),
                 ),
+                if (parseSnippetKeySequence(selectedSnippet.command)
+                    .needsTerminal) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    key: const ValueKey('auto-connect-key-snippet-warning'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Auto-connect sends this snippet as plain text, '
+                          'so its {key:...} and {delay:...} tokens are typed '
+                          'rather than pressed.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ],
           );
@@ -1682,6 +1806,22 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         locationKey: _agentTmuxFlagsFieldLocationKey,
         focusNode: _agentTmuxFlagsFocusNode,
       ),
+      HostEditValidationTarget.agentSession => (
+        locationKey: _agentSessionFieldLocationKey,
+        focusNode: _agentSessionFocusNode,
+      ),
+      HostEditValidationTarget.agentWorktree => (
+        locationKey: _agentWorkspaceForm.locationKeyFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
+        focusNode: _agentWorkspaceForm.focusNodeFor(
+          _agentWorkspaceForm.problemField(
+            _agentWorkingDirectoryController.text,
+          ),
+        ),
+      ),
       HostEditValidationTarget.customCommand => (
         locationKey: _customCommandFieldLocationKey,
         focusNode: _customCommandFocusNode,
@@ -1746,11 +1886,117 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         case HostStartupMode.snippet:
           _selectedAutoConnectMode = AutoConnectCommandMode.snippet;
       }
+      if (value.usesRemoteMultiplexer &&
+          _tmuxSessionController.text.trim().isEmpty) {
+        _tmuxSessionController.text = _suggestedMuxSessionName();
+        _sessionNameFollowsLabel = true;
+      }
     });
     _updateDirtyState();
     if (value == HostStartupMode.agent) {
       _syncAutoConnectCommandFromPreset();
     }
+  }
+
+  Future<void> _loadPresetSessionNames() async {
+    try {
+      final presets = await ref
+          .read(agentLaunchPresetServiceProvider)
+          .getAllPresets();
+      if (!mounted) return;
+      _presetSessionNames = {
+        for (final MapEntry(:key, :value) in presets.entries)
+          if (value.tmuxSessionName?.trim() case final name?
+              when name.isNotEmpty)
+            key: name,
+      };
+    } on Object {
+      // Suggestions then avoid only the hosts' own session names.
+    }
+  }
+
+  /// A session name for this host from its label, distinct from the
+  /// sessions of other saved hosts that reach the same machine.
+  String _suggestedMuxSessionName() {
+    final hostname = _hostnameController.text.trim().toLowerCase();
+    final port = int.tryParse(_portController.text.trim()) ?? 22;
+    final hosts = ref.read(allHostsProvider).asData?.value ?? const <Host>[];
+    return suggestMuxSessionName(
+      label: _labelController.text,
+      hostname: _hostnameController.text,
+      taken: [
+        for (final host in hosts)
+          if (host.id != widget.hostId &&
+              host.hostname.trim().toLowerCase() == hostname &&
+              host.port == port) ...[
+            ?host.tmuxSessionName,
+            ?_presetSessionNames[host.id],
+          ],
+      ],
+    );
+  }
+
+  void _followSuggestedSessionName() {
+    if (!_sessionNameFollowsLabel ||
+        !_selectedStartupMode.usesRemoteMultiplexer) {
+      return;
+    }
+    final suggestion = _suggestedMuxSessionName();
+    if (_tmuxSessionController.text != suggestion) {
+      setState(() => _tmuxSessionController.text = suggestion);
+    }
+  }
+
+  Widget _buildNotificationsSection({required bool hasAgentPresetAccess}) {
+    final isAgent = _selectedStartupMode == HostStartupMode.agent;
+    final sessionName =
+        (isAgent ? _agentTmuxSessionController : _tmuxSessionController).text
+            .trim();
+    return HostNotificationsSection(
+      key: const Key('host-notifications-section'),
+      sessionKind: hostSessionKindForStartup(
+        mode: _selectedStartupMode,
+        agentMuxBackend: _selectedAgentMuxBackend,
+        agentSessionName: _agentTmuxSessionController.text,
+      ),
+      sessionName: sessionName.isEmpty ? null : sessionName,
+      prefs: _notificationPrefs,
+      onChanged: (prefs) {
+        setState(() => _notificationPrefs = prefs);
+        _updateDirtyState();
+      },
+      // Agent startup fields are Pro; without it the note points at them.
+      onUseMonkeyMux: isAgent && !hasAgentPresetAccess
+          ? null
+          : () => unawaited(_useMonkeyMux()),
+    );
+  }
+
+  /// Switches the host to MonkeyMux from the notifications section, then
+  /// brings Startup behavior into view so the change is visible.
+  Future<void> _useMonkeyMux() async {
+    if (_selectedStartupMode == HostStartupMode.agent) {
+      setState(() {
+        _selectedAgentMuxBackend = RemoteMuxBackend.monkeyMux;
+        if (_agentTmuxSessionController.text.trim().isEmpty) {
+          _agentTmuxSessionController.text = _suggestedMuxSessionName();
+        }
+      });
+      _updateDirtyState();
+      _syncAutoConnectCommandFromPreset();
+    } else {
+      await _handleStartupModeSelection(HostStartupMode.monkeyMux);
+    }
+    final startup = _startupSectionKey.currentContext;
+    if (!mounted || startup == null || !startup.mounted) return;
+    await Scrollable.ensureVisible(
+      startup,
+      duration: MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 250),
+      curve: Curves.easeOutCubic,
+      alignment: 0.05,
+    );
   }
 
   void _carryWindowConfigAcrossModeChange(
@@ -1821,19 +2067,14 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
         key = await keyRepo.getById(_selectedKeyId!);
       }
 
-      SshConnectionConfig? jumpHostConfig;
-      if (_selectedJumpHostId != null) {
-        final jumpHost = await ref
-            .read(hostRepositoryProvider)
-            .getById(_selectedJumpHostId!);
-        if (jumpHost != null) {
-          SshKey? jumpKey;
-          if (jumpHost.keyId != null) {
-            jumpKey = await keyRepo.getById(jumpHost.keyId!);
-          }
-          jumpHostConfig = SshConnectionConfig.fromHost(jumpHost, key: jumpKey);
-        }
-      }
+      // The same chain a real connection follows, including the jump
+      // host's own jump hosts.
+      final jumpHostConfig = _selectedJumpHostId == null
+          ? null
+          : await sshService.buildJumpHostChainConfig(
+              _selectedJumpHostId!,
+              fromHostId: widget.hostId,
+            );
 
       final config = SshConnectionConfig(
         hostname: _hostnameController.text.trim(),
@@ -1884,6 +2125,11 @@ class _HostEditScreenState extends ConsumerState<HostEditScreen> {
       messenger.showSnackBar(
         const SnackBar(content: Text('Connection successful')),
       );
+    } on JumpHostChainTooLongException catch (e) {
+      testingSnackBar.close();
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(content: Text(e.message)));
+      }
     } on Exception catch (e) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -2477,8 +2723,10 @@ class _PortForwardTile extends StatelessWidget {
         style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
       ),
       subtitle: Text(
-        '${portForward.localPort} → '
-        '${portForward.remoteHost}:${portForward.remotePort}',
+        isDynamicPortForwardType(portForward.forwardType)
+            ? '${dynamicPortForwardListenerLabel(portForward.localPort)} · SOCKS5'
+            : '${portForward.localPort} → '
+                  '${portForward.remoteHost}:${portForward.remotePort}',
         style: FluttyTheme.monoStyle.copyWith(
           fontSize: 12,
           color: colorScheme.onSurfaceVariant,
@@ -2523,44 +2771,58 @@ class _SkipJumpHostOnWifiSection extends ConsumerStatefulWidget {
 
 class _SkipJumpHostOnWifiSectionState
     extends ConsumerState<_SkipJumpHostOnWifiSection> {
+  /// Longer than anyone takes to answer the prompt; a prompt the OS never
+  /// answers must not leave the button spinning.
+  static const _permissionTimeout = Duration(seconds: 60);
+
   bool _detecting = false;
 
+  /// What the last "Add current Wi-Fi" tap found, shown under the buttons
+  /// until the next tap or until a network is added.
+  _WifiLookupNotice? _notice;
+
   Future<void> _addCurrentSsid() async {
-    setState(() => _detecting = true);
-    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _detecting = true;
+      _notice = null;
+    });
+    // Read before any await: the widget can be gone when the reply arrives.
+    final telemetry = ref.read(telemetryServiceProvider);
     try {
       final wifiService = ref.read(wifiNetworkServiceProvider);
-      final permission = await wifiService.requestPermission();
+      var timedOut = false;
+      final WifiPermissionStatus permission;
+      try {
+        permission = await wifiService.requestPermission().timeout(
+          _permissionTimeout,
+          onTimeout: () {
+            timedOut = true;
+            return WifiPermissionStatus.denied;
+          },
+        );
+      } on MissingPluginException catch (error, stackTrace) {
+        // The permissions channel was never registered, a build bug. Report
+        // it and say so instead of letting the tap fail silently.
+        unawaited(telemetry.recordError(error, stackTrace, fatal: false));
+        _showNotice(_WifiLookupNotice.unavailable);
+        return;
+      }
       if (!mounted) return;
       if (permission != WifiPermissionStatus.granted) {
-        messenger.showSnackBar(
-          SnackBar(
-            content: const Text(
-              'Location permission is required to read the current Wi-Fi '
-              'network name. You can also add the SSID manually.',
-            ),
-            action: permission == WifiPermissionStatus.permanentlyDenied
-                ? SnackBarAction(
-                    label: 'Settings',
-                    onPressed: () => unawaited(openAppSettings()),
-                  )
-                : null,
-          ),
-        );
+        _showNotice(switch (permission) {
+          _ when timedOut => _WifiLookupNotice.noAnswer,
+          WifiPermissionStatus.approximate =>
+            _WifiLookupNotice.preciseLocationOff,
+          WifiPermissionStatus.permanentlyDenied =>
+            _WifiLookupNotice.permissionOff,
+          _ => _WifiLookupNotice.permissionDenied,
+        });
         return;
       }
       final ssid = await wifiService.getCurrentSsid();
       if (!mounted) return;
       if (ssid == null) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not detect the current Wi-Fi network. Make sure you '
-              'are connected to Wi-Fi and try again, or add the SSID '
-              'manually.',
-            ),
-          ),
-        );
+        _showNotice(_WifiLookupNotice.notDetected);
         return;
       }
       _addSsid(ssid);
@@ -2568,6 +2830,13 @@ class _SkipJumpHostOnWifiSectionState
       if (mounted) setState(() => _detecting = false);
     }
   }
+
+  void _showNotice(_WifiLookupNotice notice) {
+    if (mounted) setState(() => _notice = notice);
+  }
+
+  void _openAppSettings() =>
+      unawaited(ref.read(appPermissionServiceProvider).openAppSettings());
 
   Future<void> _promptForSsid() async {
     final entered = await showDialog<String>(
@@ -2583,6 +2852,7 @@ class _SkipJumpHostOnWifiSectionState
   void _addSsid(String ssid) {
     final sanitized = sanitizeSsidInput(ssid);
     if (sanitized.isEmpty) return;
+    if (_notice != null) setState(() => _notice = null);
     if (widget.ssids.contains(sanitized)) return;
     widget.onChanged([...widget.ssids, sanitized]);
   }
@@ -2657,7 +2927,10 @@ class _SkipJumpHostOnWifiSectionState
                     ? const SizedBox(
                         width: 16,
                         height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          semanticsLabel: 'Reading the Wi-Fi network',
+                        ),
                       )
                     : const Icon(Icons.my_location, size: 18),
                 label: const Text('Add current Wi-Fi'),
@@ -2670,7 +2943,118 @@ class _SkipJumpHostOnWifiSectionState
             ),
           ],
         ),
+        if (_notice case final notice?)
+          _WifiLookupNoticeRow(
+            notice: notice,
+            onOpenSettings: notice.opensSettings ? _openAppSettings : null,
+          ),
       ],
+    );
+  }
+}
+
+/// Outcomes of "Add current Wi-Fi" that need the user's attention.
+enum _WifiLookupNotice {
+  permissionDenied(
+    Icons.location_off_outlined,
+    'Location permission is needed to read the Wi-Fi network name. You can '
+    'also add it manually.',
+  ),
+  permissionOff(
+    Icons.location_off_outlined,
+    'Location permission is off. Turn it on in Settings to read the Wi-Fi '
+    'network name.',
+    opensSettings: true,
+  ),
+  preciseLocationOff(
+    Icons.location_off_outlined,
+    'Precise location is off. Turn it on in Settings to read the Wi-Fi '
+    'network name.',
+    opensSettings: true,
+  ),
+  noAnswer(
+    Icons.info_outline,
+    'No answer from the location prompt. Tap Add current Wi-Fi to try again.',
+  ),
+  unavailable(
+    Icons.info_outline,
+    'Location access is not available in this build. Add the network '
+    'manually.',
+  ),
+  notDetected(
+    Icons.info_outline,
+    'Could not detect the current Wi-Fi network. Connect to Wi-Fi and try '
+    'again, or add it manually.',
+  );
+
+  const _WifiLookupNotice(
+    this.icon,
+    this.message, {
+    this.opensSettings = false,
+  });
+
+  final IconData icon;
+  final String message;
+
+  /// Whether only the app's system settings can fix it.
+  final bool opensSettings;
+}
+
+/// The last "Add current Wi-Fi" outcome, under the button that produced it,
+/// with a way to the app's settings when only they can fix it.
+class _WifiLookupNoticeRow extends StatelessWidget {
+  const _WifiLookupNoticeRow({required this.notice, this.onOpenSettings});
+
+  final _WifiLookupNotice notice;
+  final VoidCallback? onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.onSurfaceVariant;
+    return Padding(
+      key: const Key('skip-jump-wifi-notice'),
+      padding: const EdgeInsets.only(top: 8),
+      // Announced when it appears, as the snackbar it replaces was.
+      child: Semantics(
+        liveRegion: true,
+        container: true,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(notice.icon, size: 16, color: color),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    notice.message,
+                    style: theme.textTheme.bodySmall?.copyWith(color: color),
+                  ),
+                  if (onOpenSettings != null)
+                    TextButton(
+                      key: const Key('skip-jump-open-settings'),
+                      onPressed: onOpenSettings,
+                      // Lined up with the message; 44 pt keeps the target
+                      // thumb-sized without a gap above the link.
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(48, 44),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        alignment: Alignment.centerLeft,
+                      ),
+                      child: const Text('Open Settings'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2717,4 +3101,30 @@ class _SsidPromptDialogState extends State<_SsidPromptDialog> {
       ),
     ],
   );
+}
+
+/// Marks MonkeyMux as the recommended startup choice in the menu.
+class _RecommendedBadge extends StatelessWidget {
+  const _RecommendedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        child: Text(
+          'recommended',
+          style: FluttyTheme.monoStyle.copyWith(
+            fontSize: 11,
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
 }

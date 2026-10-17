@@ -102,6 +102,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
   final List<AcpSessionWorkspaceOptions?> reconnectWorkspaces =
       <AcpSessionWorkspaceOptions?>[];
 
+  /// Whether each [reconnectSession] call asked to take the input over.
+  final List<bool> reconnectTakeOvers = <bool>[];
+
   /// MCP servers returned by [loadMcpServers].
   List<AcpMcpServerConfig> mcpServers = const <AcpMcpServerConfig>[];
   final List<bool> reconnectSelectOnSuccess = <bool>[];
@@ -351,7 +354,9 @@ class FakeAcpSessionManager extends AcpSessionManager {
     MonkeyMuxAcpBridgeMetadata? knownRemoteBridge,
     List<AcpSessionKey> replace = const <AcpSessionKey>[],
     AcpSessionWorkspaceOptions? workspace,
+    bool takeOver = false,
   }) async {
+    reconnectTakeOvers.add(takeOver);
     reconnectWorkspaces.add(workspace);
     reconnectChoosers.add(chooseAuthentication);
     await _askChooser(chooseAuthentication);

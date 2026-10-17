@@ -1,7 +1,12 @@
+import 'dart:convert';
+
 import 'package:collection/collection.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
+
+part 'acp_custom_provider.dart';
 
 /// ID prefix shared by every built-in ACP provider.
 const acpBuiltinProviderIdPrefix = 'builtin:';
@@ -260,6 +265,61 @@ bool isValidAcpLaunchProfileName(String name) =>
     name.length <= 128 &&
     !name.contains(RegExp(r'[\x00-\x1f\x7f/\\]'));
 
+/// Confirms that an installed CLI can start its ACP server before a native
+/// launch, for CLIs that ship that server as an optional Python extra, and
+/// describes how MonkeySSH installs that extra.
+@immutable
+class AcpSupportCheck {
+  /// Creates an immutable support check.
+  const AcpSupportCheck({
+    required this.arguments,
+    required this.missingMessage,
+    required this.distribution,
+    required this.extra,
+    this.selfInstallArguments = const [],
+  });
+
+  /// Arguments passed to the resolved executable. Exit status 1 means the
+  /// installation cannot serve ACP. Any other result lets the launch proceed,
+  /// so a CLI too old to know these arguments still launches.
+  final List<String> arguments;
+
+  /// Explains what the installation is missing.
+  final String missingMessage;
+
+  /// Python distribution that declares [extra].
+  final String distribution;
+
+  /// Optional extra whose requirements provide the ACP server.
+  final String extra;
+
+  /// Arguments for the CLI's own installer, used when the executable does not
+  /// run from a Python environment MonkeySSH can find.
+  final List<String> selfInstallArguments;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AcpSupportCheck &&
+          _listEquality.equals(arguments, other.arguments) &&
+          missingMessage == other.missingMessage &&
+          distribution == other.distribution &&
+          extra == other.extra &&
+          _listEquality.equals(
+            selfInstallArguments,
+            other.selfInstallArguments,
+          );
+
+  @override
+  int get hashCode => Object.hash(
+    _listEquality.hash(arguments),
+    missingMessage,
+    distribution,
+    extra,
+    _listEquality.hash(selfInstallArguments),
+  );
+}
+
 /// Immutable, app-bundled definition of an ACP-compatible coding-agent
 /// provider.
 @immutable
@@ -276,6 +336,7 @@ class AcpBuiltinProvider implements AcpProvider {
     this.adapterFallbackCommand,
     this.launchProfileSupport,
     this.windowsLaunchPreamble,
+    this.supportCheck,
   });
 
   /// Stable identifier for this provider.
@@ -319,6 +380,13 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Windows host.
   final String? windowsLaunchPreamble;
 
+  /// Optional check, run before a native launch, that the installed CLI
+  /// includes its ACP server.
+  final AcpSupportCheck? supportCheck;
+
+  @override
+  bool get isCustom => false;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -332,7 +400,8 @@ class AcpBuiltinProvider implements AcpProvider {
           terminalAuthCommand == other.terminalAuthCommand &&
           adapterFallbackCommand == other.adapterFallbackCommand &&
           launchProfileSupport == other.launchProfileSupport &&
-          windowsLaunchPreamble == other.windowsLaunchPreamble;
+          windowsLaunchPreamble == other.windowsLaunchPreamble &&
+          supportCheck == other.supportCheck;
 
   @override
   int get hashCode => Object.hash(
@@ -346,6 +415,7 @@ class AcpBuiltinProvider implements AcpProvider {
     adapterFallbackCommand,
     launchProfileSupport,
     windowsLaunchPreamble,
+    supportCheck,
   );
 
   @override
@@ -566,6 +636,17 @@ final acpHermesProvider = AcpBuiltinProvider(
     activeProfileFile: 'active_profile',
     defaultProfileArgument: 'default',
   ),
+  // `hermes acp` needs the optional `acp` extra, which a plain pip, pipx or
+  // uv install of hermes-agent leaves out; Hermes's own installer includes it.
+  supportCheck: const AcpSupportCheck(
+    arguments: ['acp', '--check'],
+    missingMessage:
+        'Hermes on this host was installed without its ACP packages, so '
+        'native chat cannot start.',
+    distribution: 'hermes-agent',
+    extra: 'acp',
+    selfInstallArguments: ['pm', 'install', '--extra', 'acp'],
+  ),
 );
 
 /// Built-in OpenClaw ACP provider.
@@ -690,7 +771,8 @@ final acpBuiltinProviders = List<AcpBuiltinProvider>.unmodifiable([
   acpMuseCodeProvider,
 ]);
 
-/// An ACP provider available to launch.
+/// An ACP provider available to launch: one bundled with the app or one the
+/// user defined.
 sealed class AcpProvider {
   /// Stable identifier for this provider.
   String get id;
@@ -700,4 +782,7 @@ sealed class AcpProvider {
 
   /// The launch command that would be used to start this provider.
   AcpLaunchCommand get launchCommand;
+
+  /// Whether the user defined this provider rather than the app bundling it.
+  bool get isCustom;
 }

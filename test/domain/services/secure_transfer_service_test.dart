@@ -10,12 +10,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/key_repository.dart';
+import 'package:monkeyssh/data/repositories/snippet_repository.dart';
 import 'package:monkeyssh/data/security/secret_encryption_service.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
 import 'package:monkeyssh/domain/models/host_cli_launch_preferences.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
+import 'package:monkeyssh/domain/services/host_setup_checklist_service.dart';
+import 'package:monkeyssh/domain/services/monkeymux_offer_service.dart';
 import 'package:monkeyssh/domain/services/secure_transfer_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 
@@ -346,6 +349,99 @@ void main() {
             'private key for SSH key "Deploy key"',
             'passphrase for SSH key "Deploy key"',
           ]),
+        );
+      });
+
+      test('an older backup keeps its hosts\' push opt-outs', () async {
+        Future<int> host(String label) => db
+            .into(db.hosts)
+            .insert(
+              HostsCompanion.insert(
+                label: label,
+                hostname: '$label.example.com',
+                username: 'demo',
+              ),
+            );
+        await host('alpha');
+        final betaId = await host('beta');
+        // What a backup made before per-host settings looks like.
+        final data = await transferService.createMigrationData();
+        for (final item in data['hosts']! as List) {
+          (item as Map).remove('pushWhenClosed');
+        }
+        (data['settings']! as Map)['push_notifications_disabled_hosts'] =
+            '[$betaId]';
+
+        Future<Map<String, bool>> pushByLabel() async => {
+          for (final row in await db.select(db.hosts).get())
+            row.label: row.pushWhenClosed,
+        };
+        Future<bool> legacyKeyKept() async =>
+            (await (db.select(db.settings)..where(
+                      (row) =>
+                          row.key.equals('push_notifications_disabled_hosts'),
+                    ))
+                    .get())
+                .isNotEmpty;
+
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.replace,
+        );
+        expect(await pushByLabel(), {'alpha': true, 'beta': false});
+        expect(await legacyKeyKept(), isFalse);
+
+        // Merged onto other hosts, the ids move and only beta is muted.
+        await db.delete(db.hosts).go();
+        await host('gamma');
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.merge,
+        );
+        expect(await pushByLabel(), {
+          'gamma': true,
+          'alpha': true,
+          'beta': false,
+        });
+        expect(await legacyKeyKept(), isFalse);
+      });
+
+      test('the MonkeyMux offer list stays on this device', () async {
+        await db
+            .into(db.settings)
+            .insert(
+              SettingsCompanion.insert(
+                key: monkeyMuxOfferPendingSettingKey,
+                value: '[1]',
+              ),
+            );
+        final data = await transferService.createMigrationData();
+        expect(
+          (data['settings']! as Map).containsKey(
+            monkeyMuxOfferPendingSettingKey,
+          ),
+          isFalse,
+        );
+      });
+
+      test('SOCKS browser store ids stay on this device', () async {
+        const storeId = '00000000-0000-4000-8000-000000000001';
+        await SettingsService(db)
+            .setJson(SettingKeys.socksBrowserStores, {'1': storeId});
+        final data = await transferService.createMigrationData();
+        final settings = data['settings']! as Map;
+        expect(settings.containsKey(SettingKeys.socksBrowserStores), isFalse);
+
+        // Another device's ids name stores that don't exist here.
+        settings[SettingKeys.socksBrowserStores] =
+            '{"1":"00000000-0000-4000-8000-000000000009"}';
+        await transferService.importMigrationData(
+          data: data,
+          mode: MigrationImportMode.merge,
+        );
+        expect(
+          await SettingsService(db).getJson(SettingKeys.socksBrowserStores),
+          {'1': storeId},
         );
       });
 
@@ -864,6 +960,53 @@ void main() {
       },
     );
 
+    test('exports SOCKS rules so older versions can still import', () async {
+      final hostId = await hostRepository.insert(
+        HostsCompanion.insert(
+          label: 'Production',
+          hostname: 'prod.example.com',
+          username: 'root',
+        ),
+      );
+      await db
+          .into(db.portForwards)
+          .insert(
+            PortForwardsCompanion.insert(
+              name: 'office',
+              hostId: hostId,
+              forwardType: 'dynamic',
+              localPort: 0,
+              remoteHost: '',
+              remotePort: 0,
+            ),
+          );
+
+      final migrationData = await transferService.createMigrationData();
+      final exported = Map<String, dynamic>.from(
+        (migrationData['portForwards'] as List).single as Map,
+      );
+      // Older importers require a non-empty remote host.
+      expect(exported['forwardType'], 'dynamic');
+      expect(exported['remoteHost'], isNotEmpty);
+
+      final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(importedDb.close);
+      final importedEncryptionService = SecretEncryptionService.forTesting();
+      await SecureTransferService(
+        importedDb,
+        KeyRepository(importedDb, importedEncryptionService),
+        HostRepository(importedDb, importedEncryptionService),
+      ).importMigrationData(
+        data: migrationData,
+        mode: MigrationImportMode.replace,
+      );
+      final imported = await importedDb
+          .select(importedDb.portForwards)
+          .getSingle();
+      expect(imported.forwardType, 'dynamic');
+      expect(imported.remoteHost, isEmpty);
+    });
+
     test(
       'includes referenced key data when requested for host export',
       () async {
@@ -1130,6 +1273,79 @@ void main() {
       },
     );
 
+    group('key token upgrade on import', () {
+      Future<String?> flag() async =>
+          (await (db.select(
+                    db.settings,
+                  )..where((s) => s.key.equals(snippetKeyTokensEscapedSetting)))
+                  .getSingleOrNull())
+              ?.value;
+
+      Future<List<String>> commands() async => [
+        for (final snippet in await (db.select(
+          db.snippets,
+        )..orderBy([(s) => OrderingTerm.asc(s.name)])).get())
+          snippet.command,
+      ];
+
+      for (final mode in MigrationImportMode.values) {
+        test(
+          'escapes snippets from a build without key tokens, $mode',
+          () async {
+            // A snippet already here, saved before the upgrade ran.
+            await db
+                .into(db.snippets)
+                .insert(
+                  SnippetsCompanion.insert(
+                    name: 'A local',
+                    command: 'f({key:1})',
+                  ),
+                );
+
+            await transferService.importMigrationData(
+              data: {
+                'snippets': [
+                  {'id': 1, 'name': 'B old', 'command': r'echo {key:esc} \{x'},
+                ],
+                'settings': {'theme_mode': 'dark'},
+              },
+              mode: mode,
+            );
+
+            expect(await commands(), [
+              if (mode == MigrationImportMode.merge) r'f(\{key:1})',
+              r'echo \{key:esc} \{x',
+            ]);
+            expect(await flag(), 'true');
+
+            // A snippet written with tokens afterwards survives a later
+            // upgrade check.
+            final repository = SnippetRepository(db);
+            final keysId = await repository.insert(
+              SnippetsCompanion.insert(name: 'C keys', command: '{key:esc}'),
+            );
+            expect(await repository.escapeLegacyKeyTokens(), 0);
+            expect((await repository.getById(keysId))!.command, '{key:esc}');
+          },
+        );
+      }
+
+      test('keeps snippets from a build with key tokens as written', () async {
+        await transferService.importMigrationData(
+          data: {
+            'snippets': [
+              {'id': 1, 'name': 'Keys', 'command': '{key:esc}{key:esc}'},
+            ],
+            'settings': {snippetKeyTokensEscapedSetting: 'true'},
+          },
+          mode: MigrationImportMode.replace,
+        );
+
+        expect(await commands(), ['{key:esc}{key:esc}']);
+        expect(await flag(), 'true');
+      });
+    });
+
     test('rejects invalid passphrase', () async {
       final hostId = await db
           .into(db.hosts)
@@ -1291,6 +1507,48 @@ void main() {
       },
     );
 
+    test('imports SOCKS forwards, which have no destination', () async {
+      await transferService.importMigrationData(
+        mode: MigrationImportMode.replace,
+        data: {
+          'hosts': [
+            {
+              'id': 301,
+              'label': 'A',
+              'hostname': 'a.example.com',
+              'username': 'root',
+            },
+          ],
+          'portForwards': [
+            {
+              'name': 'socks',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+              'localPort': 1080,
+              // What an export writes for older versions; discarded here.
+              'remoteHost': 'socks',
+              'remotePort': 9,
+            },
+            {
+              'name': 'socks without destination fields',
+              'hostId': 301,
+              'forwardType': 'dynamic',
+            },
+          ],
+        },
+      );
+
+      final portForwards = await db.select(db.portForwards).get();
+      expect(portForwards, hasLength(2));
+      expect(portForwards.map((forward) => forward.forwardType), [
+        'dynamic',
+        'dynamic',
+      ]);
+      expect(portForwards.map((forward) => forward.remoteHost), ['', '']);
+      expect(portForwards.map((forward) => forward.remotePort), [0, 0]);
+      expect(portForwards.map((forward) => forward.localPort), [1080, 0]);
+    });
+
     test(
       'imports full migration in replace mode with self references',
       () async {
@@ -1413,7 +1671,14 @@ void main() {
           (await db.select(db.knownHosts).get()).single.hostname,
           'example.com',
         );
-        expect((await db.select(db.settings).get()).single.value, 'dark');
+        // Besides the imported setting, only the key-token upgrade marker.
+        expect(
+          {
+            for (final setting in await db.select(db.settings).get())
+              setting.key: setting.value,
+          },
+          {'theme_mode': 'dark', snippetKeyTokensEscapedSetting: 'true'},
+        );
       },
     );
 
@@ -1438,7 +1703,12 @@ void main() {
         final settings = await db.select(db.settings).get();
         expect(
           {for (final setting in settings) setting.key: setting.value},
-          {'theme_mode': 'dark', 'incoming': 'new', 'extra': '1'},
+          {
+            'theme_mode': 'dark',
+            'incoming': 'new',
+            'extra': '1',
+            snippetKeyTokensEscapedSetting: 'true',
+          },
         );
       },
     );
@@ -1661,6 +1931,128 @@ void main() {
         expect(importedPreset?.additionalArguments, '--model gpt-5.4');
         expect(localPreferences.startInYoloMode, isTrue);
         expect(importedPreferences.startInYoloMode, isTrue);
+      },
+    );
+
+    test(
+      'merge import remaps and preserves host setup checklist state',
+      () async {
+        final sourceStore = HostSetupChecklistStore(SettingsService(db));
+        final sourceHostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Imported Host',
+            hostname: 'imported.example.com',
+            username: 'root',
+          ),
+        );
+        await sourceStore.markDone(sourceHostId, {HostSetupStep.monkeyMux});
+        final migrationData = await transferService.createMigrationData();
+
+        final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(importedDb.close);
+        final importedEncryptionService = SecretEncryptionService.forTesting();
+        final importedHostRepository = HostRepository(
+          importedDb,
+          importedEncryptionService,
+        );
+        final importedTransferService = SecureTransferService(
+          importedDb,
+          KeyRepository(importedDb, importedEncryptionService),
+          importedHostRepository,
+        );
+        final importedStore = HostSetupChecklistStore(
+          SettingsService(importedDb),
+        );
+        final localHostId = await importedHostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Local Host',
+            hostname: 'local.example.com',
+            username: 'root',
+          ),
+        );
+        await importedStore.markDone(localHostId, {HostSetupStep.agents});
+
+        await importedTransferService.importMigrationData(
+          data: migrationData,
+          mode: MigrationImportMode.merge,
+        );
+
+        final importedHost = await (importedDb.select(
+          importedDb.hosts,
+        )..where((host) => host.label.equals('Imported Host'))).getSingle();
+        final states = await importedStore.load();
+
+        expect(importedHost.id, isNot(localHostId));
+        expect(states[localHostId]?.done, {HostSetupStep.agents});
+        expect(states[importedHost.id]?.done, {HostSetupStep.monkeyMux});
+        expect(states.keys, {localHostId, importedHost.id});
+      },
+    );
+
+    test(
+      'merge import remaps and preserves SFTP browser views and filters',
+      () async {
+        final sourceHostId = await hostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Imported Host',
+            hostname: 'imported.example.com',
+            username: 'root',
+          ),
+        );
+        final sourceSettings = SettingsService(db);
+        await sourceSettings.setJson(SettingKeys.sftpBrowserViews, {
+          '$sourceHostId': {'sort': 'size', 'descending': true},
+        });
+        await sourceSettings.setJson(SettingKeys.sftpBrowserFilters, {
+          '$sourceHostId': {'directory': '/srv/app', 'query': 'log'},
+        });
+        final migrationData = await transferService.createMigrationData();
+
+        final importedDb = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(importedDb.close);
+        final importedEncryptionService = SecretEncryptionService.forTesting();
+        final importedHostRepository = HostRepository(
+          importedDb,
+          importedEncryptionService,
+        );
+        final importedTransferService = SecureTransferService(
+          importedDb,
+          KeyRepository(importedDb, importedEncryptionService),
+          importedHostRepository,
+        );
+        final importedSettings = SettingsService(importedDb);
+        final localHostId = await importedHostRepository.insert(
+          HostsCompanion.insert(
+            label: 'Local Host',
+            hostname: 'local.example.com',
+            username: 'root',
+          ),
+        );
+        await importedSettings.setJson(SettingKeys.sftpBrowserViews, {
+          '$localHostId': {'sort': 'modified'},
+        });
+        await importedSettings.setJson(SettingKeys.sftpBrowserFilters, {
+          '$localHostId': {'directory': '/home/me', 'query': 'notes'},
+        });
+
+        await importedTransferService.importMigrationData(
+          data: migrationData,
+          mode: MigrationImportMode.merge,
+        );
+
+        final importedHost = await (importedDb.select(
+          importedDb.hosts,
+        )..where((host) => host.label.equals('Imported Host'))).getSingle();
+        expect(importedHost.id, isNot(localHostId));
+        // Each host keeps its own entry; the imported one moves to the new id.
+        expect(await importedSettings.getJson(SettingKeys.sftpBrowserViews), {
+          '$localHostId': {'sort': 'modified'},
+          '${importedHost.id}': {'descending': true, 'sort': 'size'},
+        });
+        expect(await importedSettings.getJson(SettingKeys.sftpBrowserFilters), {
+          '$localHostId': {'directory': '/home/me', 'query': 'notes'},
+          '${importedHost.id}': {'directory': '/srv/app', 'query': 'log'},
+        });
       },
     );
 
@@ -2115,6 +2507,32 @@ void main() {
         );
       },
     );
+
+    test('unsent chat drafts never leave or enter through migration', () async {
+      final settings = SettingsService(db);
+      const draftKey = '${SettingKeys.acpComposerDraftPrefix}[1,"p","s"]';
+      await settings.setString(draftKey, '{"text":"private draft"}');
+      await settings.setString(SettingKeys.themeMode, 'dark');
+
+      final data = await transferService.createMigrationData();
+      final exported = data['settings'] as Map<String, dynamic>;
+      expect(exported, contains(SettingKeys.themeMode));
+      expect(exported.keys.where(SettingKeys.isAcpComposerDraft), isEmpty);
+
+      const importedKey = '${SettingKeys.acpComposerDraftPrefix}[2,"p","s"]';
+      await transferService.importMigrationData(
+        data: {
+          'settings': {
+            importedKey: '{"text":"foreign draft"}',
+            SettingKeys.themeMode: 'light',
+          },
+        },
+        mode: MigrationImportMode.merge,
+      );
+      expect(await settings.getString(importedKey), isNull);
+      expect(await settings.getString(draftKey), '{"text":"private draft"}');
+      expect(await settings.getString(SettingKeys.themeMode), 'light');
+    });
   });
 }
 

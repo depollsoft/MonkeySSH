@@ -14,20 +14,22 @@ const codexResumeLockPoll = 50 * time.Millisecond
 // writer lock beyond the lifetime of the CLI. Other agents have no equivalent
 // lock contract. Never delete the lock or terminate its owner.
 func waitForCodexSession(sessionID string) {
-	home := os.Getenv("CODEX_HOME")
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		home = filepath.Join(userHome, ".codex")
-	}
-	path := codexSessionLockPath(home, sessionID)
+	path := codexSessionLockPathFromEnvironment(sessionID)
 	if path == "" {
 		return
 	}
 	waitForCodexSessionLock(func() bool { return codexSessionLockHeld(path) },
 		codexResumeLockWait, time.Now, time.Sleep)
+}
+
+// codexSessionLockPathFromEnvironment resolves the thread's writer lock under
+// this process's CODEX_HOME, or ~/.codex.
+func codexSessionLockPathFromEnvironment(sessionID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil && strings.TrimSpace(os.Getenv("CODEX_HOME")) == "" {
+		return ""
+	}
+	return codexSessionLockPath(codexHomeDirectory(home), sessionID)
 }
 
 func codexSessionLockPath(home, sessionID string) string {

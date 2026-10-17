@@ -10,6 +10,7 @@ import 'package:monkeyssh/domain/models/acp_elicitation.dart';
 import 'package:monkeyssh/domain/models/acp_provider.dart';
 import 'package:monkeyssh/domain/models/acp_session_keys.dart';
 import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/host_notifications.dart';
 import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
 import 'package:monkeyssh/domain/services/acp_bridge_connector.dart';
 import 'package:monkeyssh/domain/services/acp_client.dart';
@@ -220,6 +221,7 @@ class _FakeConnector implements AcpBridgeConnector {
     required String bridgeId,
     required String providerId,
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
   }) {
     final server = serverFactory?.call(hostId, bridgeId) ?? _FakeAcpServer();
     servers[bridgeId] = server;
@@ -499,6 +501,60 @@ void main() {
     // The working directory and write path never reach the notification.
     expect(call.subtitle, isNot(contains('/')));
   });
+
+  test(
+    'a host whose "agent needs you" is off raises no approval alert',
+    () async {
+      final key = fakeAcpKey();
+      final initial = fakeAcpSession(key: key);
+      final fakeManager = FakeAcpSessionManager(sessions: [initial]);
+      final notifications = _RecordingAcpNotificationService();
+      var prefs = const HostNotificationPrefs(agentAttention: false);
+      final testLifecycle = AcpLifecycleService(
+        sessionManager: fakeManager,
+        hasActiveSshSession: (_) => true,
+        notificationService: notifications,
+        resolveNotificationPrefs: (_) async => prefs,
+        diagnostics: const NoopDiagnosticsLogger(),
+      )..start();
+      addTearDown(testLifecycle.dispose);
+      addTearDown(fakeManager.dispose);
+      addTearDown(notifications.dispose);
+
+      await _pump();
+      await testLifecycle.handleBackground();
+      AcpPendingWrite write(String id) => AcpPendingWrite(
+        requestKey: 's:$id',
+        sessionId: key.acpSessionId,
+        path: '/never',
+        contentByteLength: 1,
+        requestedAt: DateTime(2026),
+      );
+      fakeManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(pendingWrites: [write('write-1')]),
+          ],
+        ),
+      );
+      await _pump();
+      expect(notifications.calls, isEmpty);
+
+      // "Agent finished" being off does not silence approvals.
+      prefs = const HostNotificationPrefs(agentFinished: false);
+      fakeManager.emit(
+        AcpSessionManagerState(
+          sessions: [
+            initial.copyWith(
+              pendingWrites: [write('write-1'), write('write-2')],
+            ),
+          ],
+        ),
+      );
+      await _pump();
+      expect(notifications.calls, hasLength(1));
+    },
+  );
 
   test('a new elicitation raises a content-free input alert', () async {
     final key = fakeAcpKey();

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_launch_preset.dart';
 import '../models/terminal_backend.dart';
+import '../models/terminal_program_status.dart';
 import '../models/terminal_progress.dart';
 import '../models/terminal_theme.dart';
 import '../models/tmux_state.dart';
@@ -74,6 +75,31 @@ enum MonkeyMuxServerUpdatePolicy {
 
   /// CLI flag value passed to the MonkeyMux helper.
   final String cliValue;
+}
+
+/// Outcome of a push notification control operation.
+@immutable
+class MonkeyMuxPushControlResult {
+  /// Creates a result.
+  const MonkeyMuxPushControlResult({
+    required this.ok,
+    this.unsupported = false,
+    this.result,
+    this.events,
+  });
+
+  /// Whether the helper accepted the operation.
+  final bool ok;
+
+  /// Whether the helper predates push support.
+  final bool unsupported;
+
+  /// The `push_test` outcome, such as `sent`.
+  final String? result;
+
+  /// On `push_registered`, the event categories the helper will send. Null
+  /// from a helper that ignores them (before 0.1.233) and sends everything.
+  final List<String>? events;
 }
 
 /// Version metadata for an already-running MonkeyMux server.
@@ -244,6 +270,19 @@ MonkeyMuxImageReplayResult resolveMonkeyMuxImageReplayBatchForTesting({
     served: served,
     retryableFailure: acknowledged && requested.difference(served).isNotEmpty,
   );
+}
+
+/// Whether [error] is how closing a session's last MonkeyMux window can
+/// fail after it succeeded: the session ends, and its control channel closes
+/// before the close is answered.
+bool isExpectedMonkeyMuxFinalCloseError(Object error) {
+  if (error is! MonkeyMuxInstallException) {
+    return false;
+  }
+  final message = error.message.toLowerCase();
+  return message.contains('control channel closed') ||
+      message.contains('control channel unavailable') ||
+      message.contains('closed without a response');
 }
 
 /// Controls a remote MonkeyMux session through its JSON backchannel.
@@ -982,6 +1021,49 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     );
   }
 
+  /// Sends a push notification control operation (`push_register`,
+  /// `push_unregister`, `push_presence` or `push_test`; see
+  /// docs/push-notifications.md).
+  Future<MonkeyMuxPushControlResult> runPushControl(
+    SshSession session,
+    String sessionName,
+    Map<String, Object?> command, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) async {
+    if (isAppReviewDemoSession(session)) {
+      return const MonkeyMuxPushControlResult(ok: false, unsupported: true);
+    }
+    final _MonkeyMuxControlResponse response;
+    try {
+      response = await _runControlCommand(
+        session,
+        sessionName,
+        command,
+        priority: priority,
+      );
+    } on _MonkeyMuxControlCommandException catch (error) {
+      // The helper answered with an error. One too old for push does not
+      // know the command; one older than the registration file refuses a
+      // file a newer MonkeyMux wrote. Neither can take part until it is
+      // updated. An unregister either refused still fails: another session
+      // on the machine may run a newer helper that holds the registration,
+      // so it stays pending for an updated session to remove.
+      final message = error.message;
+      return MonkeyMuxPushControlResult(
+        ok: false,
+        unsupported:
+            command['type'] != 'push_unregister' &&
+            (message.startsWith('unsupported command') ||
+                message.contains('written by a newer MonkeyMux')),
+      );
+    }
+    return MonkeyMuxPushControlResult(
+      ok: true,
+      result: response.pushResult,
+      events: response.pushEvents,
+    );
+  }
+
   /// Returns metadata for an already-running MonkeyMux server, if any.
   Future<MonkeyMuxServerStatus?> runningServerStatus(
     SshSession session,
@@ -1572,7 +1654,9 @@ Future<_MonkeyMuxControlResponse> _runOneShotControlCommand(
 }
 
 Duration _oneShotResponseTimeout(Map<String, Object?> request) =>
-    request['type'] == 'run_command' || request['type'] == 'start_acp_bridge'
+    request['type'] == 'run_command' ||
+        request['type'] == 'start_acp_bridge' ||
+        request['type'] == 'push_test'
     ? _oneShotRunCommandResponseTimeout
     : _oneShotControlResponseTimeout;
 
@@ -2269,6 +2353,8 @@ class _MonkeyMuxControlResponse {
     this.imageIds = const [],
     this.imagesAcknowledged = false,
     this.focusChanged = false,
+    this.pushResult,
+    this.pushEvents,
   });
 
   factory _MonkeyMuxControlResponse.fromJson(Map<String, Object?> json) =>
@@ -2305,6 +2391,15 @@ class _MonkeyMuxControlResponse {
         },
         imagesAcknowledged: json['imagesAcknowledged'] == true,
         focusChanged: json['focusChanged'] == true,
+        pushResult: switch (json['push']) {
+          {'result': final String result} => result,
+          _ => null,
+        },
+        pushEvents: switch (json['push']) {
+          {'events': final List<Object?> events} =>
+            events.whereType<String>().toList(growable: false),
+          _ => null,
+        },
       );
 
   static _MonkeyMuxControlResponse? tryParse(String line) {
@@ -2335,6 +2430,8 @@ class _MonkeyMuxControlResponse {
   final List<String> imageIds;
   final bool imagesAcknowledged;
   final bool focusChanged;
+  final String? pushResult;
+  final List<String>? pushEvents;
 
   bool get isError => status == 'error' || type == 'error';
 }
@@ -2747,6 +2844,8 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalMouseReportSgr: terminalMouseReportSgr,
     terminalBracketedPasteMode: terminalBracketedPasteMode,
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
+    programStatus: TerminalProgramStatus.fromJson(value['programStatus']),
+    programStatusReporter: value['programStatusReporter'] == true,
     lastActivityEpochSeconds: value['lastActivityEpochSeconds'] as int?,
     pendingNotifications: _muxWindowNotificationsFromJson(
       value['notifications'],

@@ -15,21 +15,27 @@ import '../../data/repositories/snippet_repository.dart';
 import '../../domain/commands/duplicate_host_command.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/models/acp_session_state.dart';
+import '../../domain/models/connection_attention.dart';
 import '../../domain/models/monetization.dart';
 import '../../domain/models/remote_multiplexer.dart';
+import '../../domain/models/snippet_key_tokens.dart';
 import '../../domain/models/terminal_themes.dart';
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/acp_composer_draft_store.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../../domain/services/agent_session_discovery_service.dart';
+import '../../domain/services/app_review_demo_service.dart';
 import '../../domain/services/auth_service.dart';
 import '../../domain/services/home_screen_shortcut_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_service.dart';
+import '../../domain/services/mux_session_end_holds.dart';
 import '../../domain/services/remote_multiplexer_service.dart';
 import '../../domain/services/secure_transfer_service.dart';
 import '../../domain/services/settings_service.dart';
+import '../../domain/services/socks_browser_store_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../../domain/services/terminal_theme_service.dart';
@@ -39,26 +45,33 @@ import '../providers/connection_actions.dart';
 import '../providers/entity_list_providers.dart';
 import '../providers/host_row_providers.dart';
 import '../view_models/mux_badge_controller.dart';
-import '../widgets/acp_mux_window_status_badge.dart';
 import '../widgets/acp_session_presentation.dart';
 import '../widgets/acp_session_switcher.dart';
+import '../widgets/adaptive_button_row.dart';
 import '../widgets/agent_tool_icon.dart';
+import '../widgets/agent_worktree_removal.dart';
 import '../widgets/ai_session_picker.dart';
+import '../widgets/attention_presentation.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/connection_preview_snippet.dart';
 import '../widgets/connection_status_dot.dart';
+import '../widgets/connection_window_status.dart';
+import '../widgets/connections_waiting_section.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/file_picker_helpers.dart';
+import '../widgets/host_setup_checklist.dart';
+import '../widgets/keyboard_list_navigation.dart';
+import '../widgets/mux_window_status_badge.dart' show statusPillIconSize;
 import '../widgets/panel_header.dart';
 import '../widgets/premium_access.dart';
+import '../widgets/public_key_share_sheet.dart';
 import '../widgets/reorder_helpers.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/tmux_window_navigator.dart' show confirmMuxWindowClose;
-import '../widgets/tmux_window_status_badge.dart';
 import 'snippet_edit_screen.dart';
 import 'transfer_screen.dart';
 
@@ -658,7 +671,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       Expanded(
         child: switch (_selectedIndex) {
           0 => const HostsPanel(),
-          1 => const _ConnectionsPanel(),
+          // Arrows, Return and Esc drive the list from a hardware keyboard.
+          1 => const KeyboardListNavigation(
+            autofocus: true,
+            child: _ConnectionsPanel(),
+          ),
           2 => const _KeysPanel(),
           3 => const SnippetsPanel(),
           _ => const HostsPanel(),
@@ -882,6 +899,11 @@ class HostsPanel extends ConsumerWidget {
         PanelHeader(
           title: 'hosts',
           actions: [
+            _SmallIconButton(
+              icon: Icons.upload_file_outlined,
+              tooltip: 'Import ssh_config',
+              onTap: () => context.push('/hosts/import-ssh-config'),
+            ),
             _ActionButton(
               icon: Icons.add,
               label: 'Add Host',
@@ -919,6 +941,11 @@ class HostsPanel extends ConsumerWidget {
       primaryLabel: 'Add Host',
       onPrimary: () => context.push('/hosts/add'),
       secondaryActions: [
+        BrandEmptyAction(
+          icon: Icons.upload_file_outlined,
+          label: 'Import ssh_config',
+          onTap: () => context.push('/hosts/import-ssh-config'),
+        ),
         BrandEmptyAction(
           icon: Icons.content_paste_go_outlined,
           label: 'Paste SSH URL',
@@ -1019,6 +1046,7 @@ enum _HostContextAction {
   toggleHomeScreen,
   disconnect,
   edit,
+  setupChecklist,
   duplicate,
   export,
   delete,
@@ -1588,6 +1616,15 @@ class _HostRow extends ConsumerWidget {
             title: Text('Edit'),
           ),
         ),
+        if (!isAppReviewDemoHost(host))
+          const PopupMenuItem<_HostContextAction>(
+            value: _HostContextAction.setupChecklist,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.checklist_rounded),
+              title: Text('Setup Checklist'),
+            ),
+          ),
         const PopupMenuItem<_HostContextAction>(
           value: _HostContextAction.duplicate,
           child: ListTile(
@@ -1642,6 +1679,9 @@ class _HostRow extends ConsumerWidget {
         return;
       case _HostContextAction.edit:
         unawaited(context.push('/hosts/edit/${host.id}'));
+        return;
+      case _HostContextAction.setupChecklist:
+        await showHostSetupChecklistSheet(context, host.id);
         return;
       case _HostContextAction.duplicate:
         await _duplicateHost(context, ref);
@@ -1713,6 +1753,10 @@ class _HostRow extends ConsumerWidget {
           .read(hostRepositoryProvider)
           .delete(host.id);
       if (deletedCount > 0) {
+        unawaited(ref.read(acpComposerDraftStoreProvider).forgetHost(host.id));
+        unawaited(
+          ref.read(socksBrowserStoreServiceProvider).forgetHost(host.id),
+        );
         await ref
             .read(homeScreenShortcutPreferencesServiceProvider)
             .setHostPinned(host.id, pinned: false);
@@ -1746,20 +1790,27 @@ class _ConnectionsPanel extends ConsumerWidget {
         Expanded(
           child: connectionIds.isEmpty
               ? const Center(
-                  child: Padding(
+                  child: SingleChildScrollView(
                     padding: EdgeInsets.symmetric(horizontal: 24),
-                    child: BrandEmptyState(
-                      title: 'no active sessions',
-                      message:
-                          'Open a host and your live terminals show up here.',
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        BrandEmptyState(
+                          title: 'no active sessions',
+                          message:
+                              'Open a host and your live terminals show up '
+                              'here.',
+                        ),
+                      ],
                     ),
                   ),
                 )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 4),
-                  itemCount: connectionIds.length,
+                  itemCount: connectionIds.length + 1,
                   itemBuilder: (context, index) {
-                    final connectionId = connectionIds[index];
+                    if (index == 0) return const ConnectionsWaitingSection();
+                    final connectionId = connectionIds[index - 1];
                     final connection = sessionsNotifier.getActiveConnection(
                       connectionId,
                     );
@@ -2224,10 +2275,19 @@ class _KeyRow extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () => _copyPublicKey(context),
-                icon: const Icon(Icons.copy, size: 16),
-                label: const Text('Copy Public Key'),
+              AdaptiveButtonRow(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _copyPublicKey(context),
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('Copy Public Key'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                    icon: const Icon(Icons.qr_code_2, size: 16),
+                    label: const Text('QR & Share'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -2724,7 +2784,9 @@ class _SnippetRow extends ConsumerWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      snippet.command.replaceAll('\n', ' '),
+                      // What the snippet types: an escaped `\{key:1}` from
+                      // the key-token upgrade shows as the text it sends.
+                      snippetLiteralText(snippet.command).replaceAll('\n', ' '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: FluttyTheme.monoStyle.copyWith(
@@ -2845,7 +2907,7 @@ class _SnippetRow extends ConsumerWidget {
   }
 
   void _copySnippet(BuildContext context, WidgetRef ref) {
-    Clipboard.setData(ClipboardData(text: snippet.command));
+    Clipboard.setData(ClipboardData(text: snippetLiteralText(snippet.command)));
     unawaited(ref.read(snippetRepositoryProvider).incrementUsage(snippet.id));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Copied "${snippet.name}" to clipboard')),
@@ -2949,6 +3011,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     onWindowsChanged: _syncConnectionSessionTitle,
     disconnect: (session) =>
         disconnectConnectionAndClearMuxCaches(ref, session.connectionId),
+    sessionEndHolds: ref.read(muxSessionEndHoldsProvider),
   )..addListener(_badgeChanged);
 
   void _badgeChanged() {
@@ -2958,10 +3021,13 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     setState(() {});
   }
 
+  late final _attention = ConnectionAttentionInputs(onResort: _badgeChanged);
+
   @override
   void dispose() {
     _badge.removeListener(_badgeChanged);
     _badge.dispose();
+    _attention.dispose();
     super.dispose();
   }
 
@@ -3168,8 +3234,16 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                 .toList(growable: false);
           }()
         : const <AcpSessionState>[];
-    final nativeAcpEntries = buildAcpMuxWindowEntries(nativeAcpSessions);
-    if (windows.isEmpty && nativeAcpEntries.isEmpty) {
+    final entries = _attention.entries(
+      context,
+      ref,
+      windows: windows,
+      sessions: nativeAcpSessions,
+      hostId: hostId,
+      usesMonkeyMux: _badge.muxBackend == RemoteMuxBackend.monkeyMux,
+      session: activeSession,
+    );
+    if (entries.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -3177,14 +3251,12 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final hasAgentSessionAccess = _allowsAgentSessions(
       ref.watch(monetizationStateProvider),
     );
-    final totalWindowCount = windows.length + nativeAcpEntries.length;
-    final firstNativeWindowIndex =
-        windows.fold<int>(
-          -1,
-          (maximum, window) => window.index > maximum ? window.index : maximum,
-        ) +
-        1;
-    final alertCount = windows.where((w) => w.hasAlert).length;
+    final totalWindowCount = entries.length;
+    // Blocked agents and program-reported alerts; warnings stay in the rows.
+    final alerts = [
+      for (final entry in entries)
+        if (entry.reason case final reason? when reason.tier <= 1) reason,
+    ];
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(56, 0, 16, 8),
@@ -3212,21 +3284,9 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (alertCount > 0) ...[
-                    const SizedBox(width: 4),
-                    Icon(
-                      Icons.notifications_active,
-                      size: 12,
-                      color: theme.colorScheme.error,
-                    ),
-                    const SizedBox(width: 2),
-                    Text(
-                      '$alertCount',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.error,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                  if (alerts.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    _buildAttentionCount(theme, alerts),
                   ],
                   const Spacer(),
                   Icon(
@@ -3242,13 +3302,28 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
           // Expanded window list.
           if (_expanded) ...[
             const SizedBox(height: 4),
-            for (final window in windows) _buildWindowRow(theme, window),
-            for (var index = 0; index < nativeAcpEntries.length; index++)
-              _buildNativeAcpWindowRow(
-                theme,
-                nativeAcpEntries[index],
-                windowIndex: firstNativeWindowIndex + index,
+            _attention.holdOrderWhileTouched(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final entry in entries)
+                    if (entry.session case final session?)
+                      _buildNativeAcpWindowRow(
+                        theme,
+                        AcpSwitcherEntry.session(session),
+                        windowIndex: entry.index,
+                        status: ConnectionWindowStatusChip(entry: entry),
+                        serverWindow: entry.window,
+                      )
+                    else
+                      _buildWindowRow(
+                        theme,
+                        entry.window!,
+                        status: ConnectionWindowStatusChip(entry: entry),
+                      ),
+                ],
               ),
+            ),
 
             const SizedBox(height: 4),
             if (hasAgentSessionAccess) ...[
@@ -3413,7 +3488,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     final closesLastMonkeyMuxWindow =
         _badge.muxBackend == RemoteMuxBackend.monkeyMux &&
         (_badge.windows?.length ?? 0) <= 1;
-    _runTmuxPreviewAction(() async {
+    final releaseSessionEnd = _badge.holdSessionEnd(session.connectionId);
+    final closing = () async {
       if (window.isNativeAcp) {
         await ref
             .read(acpSessionManagerProvider)
@@ -3422,19 +3498,57 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               bridgeId: window.nativeAcpBridgeId!,
             );
       }
-      await mux.killWindow(
-        session,
-        _badge.sessionName!,
-        window.index,
-        windowId: window.id,
-        extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
-            ? widget.tmuxExtraFlags
-            : null,
-      );
+      try {
+        await mux.killWindow(
+          session,
+          _badge.sessionName!,
+          window.index,
+          windowId: window.id,
+          extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
+              ? widget.tmuxExtraFlags
+              : null,
+        );
+      } on Object catch (error) {
+        // The session ended with its last window and closed the control
+        // channel before answering: the close worked.
+        if (!closesLastMonkeyMuxWindow ||
+            !isExpectedMonkeyMuxFinalCloseError(error)) {
+          rethrow;
+        }
+      }
+      if (mounted) {
+        await offerAgentWorktreeRemoval(
+          context: context,
+          ref: ref,
+          session: session,
+          closedWindowDirectory: window.currentPath,
+          remainingWindowDirectories: [
+            for (final other in _badge.windows ?? const <TmuxWindow>[])
+              if (window.id != null
+                  ? other.id != window.id
+                  : other.index != window.index)
+                other.currentPath,
+          ],
+          liveWindowDirectories: closesLastMonkeyMuxWindow
+              ? null
+              : () async => [
+                  for (final other in await mux.listWindows(
+                    session,
+                    _badge.sessionName!,
+                    extraFlags: _badge.muxBackend == RemoteMuxBackend.tmux
+                        ? widget.tmuxExtraFlags
+                        : null,
+                  ))
+                    other.currentPath,
+                ],
+        );
+      }
+      releaseSessionEnd();
       if (closesLastMonkeyMuxWindow) {
         await _badge.disconnectEndedMonkeyMuxSession(session);
       }
-    }());
+    }();
+    _runTmuxPreviewAction(closing.whenComplete(releaseSessionEnd));
 
     // Optimistically remove from the list.
     setState(() {
@@ -3621,6 +3735,8 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     ThemeData theme,
     AcpSwitcherEntry entry, {
     required int windowIndex,
+    required Widget status,
+    TmuxWindow? serverWindow,
   }) {
     final session = entry.session!;
     final key = session.key;
@@ -3734,10 +3850,23 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ),
             Padding(
               padding: const EdgeInsets.only(left: 6, right: 6),
-              child: AcpMuxWindowStatusBadge(session: session),
+              child: status,
             ),
             GestureDetector(
+              key: ValueKey('connection-native-acp-close-${key.value}'),
               onTap: () async {
+                // A server-owned window closes like any window, with the
+                // close confirmation; a session without one confirms first.
+                if (serverWindow != null) {
+                  await _closeWindow(serverWindow);
+                  return;
+                }
+                final confirmed = await confirmMuxWindowClose(
+                  context: context,
+                  ref: ref,
+                  title: entry.title,
+                );
+                if (!confirmed || !mounted) return;
                 try {
                   await ref.read(acpSessionManagerProvider).stopSession(key);
                 } on Object {
@@ -3763,9 +3892,59 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
     );
   }
 
-  Widget _buildWindowRow(ThemeData theme, TmuxWindow window) {
+  /// The collapsed list's count of rows that need the user, in the pill
+  /// style and with the icon of the most urgent of them.
+  Widget _buildAttentionCount(ThemeData theme, List<AttentionReason> alerts) {
+    final urgent = alerts.reduce((a, b) => a.index <= b.index ? a : b);
+    final (foreground, background) = attentionToneColors(
+      theme.colorScheme,
+      urgent.tone,
+    );
+    final count = alerts.length;
+    return Semantics(
+      label: count == 1
+          ? '1 window needs attention'
+          : '$count windows need attention',
+      excludeSemantics: true,
+      child: DecoratedBox(
+        key: const ValueKey('connection-attention-count'),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                urgent.icon,
+                size: statusPillIconSize(context),
+                color: foreground,
+              ),
+              const SizedBox(width: 2),
+              Text(
+                '$count',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: foreground,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWindowRow(
+    ThemeData theme,
+    TmuxWindow window, {
+    required Widget status,
+  }) {
     final title = window.displayTitle;
-    final secondaryTitle = window.secondaryTitle;
+    final secondaryTitle =
+        window.programStatus?.attentionMessage ?? window.secondaryTitle;
     final iconColor = agentWindowIdentityColor(
       theme.colorScheme,
       isActive: window.isActive,
@@ -3801,16 +3980,6 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
               ),
             ),
             const SizedBox(width: 6),
-            // Alert icon.
-            if (window.hasAlert)
-              Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: Icon(
-                  Icons.notifications_active,
-                  size: 12,
-                  color: theme.colorScheme.error,
-                ),
-              ),
             Padding(
               padding: const EdgeInsets.only(right: 6),
               child: AgentToolIcon(
@@ -3854,7 +4023,7 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
             ),
             Padding(
               padding: const EdgeInsets.only(left: 6, right: 6),
-              child: TmuxWindowStatusBadge(window: window),
+              child: status,
             ),
             // Close button.
             GestureDetector(

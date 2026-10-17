@@ -1,0 +1,6 @@
+# Vendored upstream package (see UPSTREAM.md). The root analysis_options.yaml
+# already excludes third_party/**; this file only keeps `dart format` on
+# flutter/packages' page width, so the copy stays comparable with the
+# published package.
+formatter:
+  page_width: 100

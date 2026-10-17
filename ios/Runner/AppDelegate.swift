@@ -1,5 +1,7 @@
 import Flutter
+import Security
 import UIKit
+import UserNotifications
 
 @main
 @MainActor
@@ -12,11 +14,20 @@ import UIKit
   private let appleDatabaseChannelName = "xyz.depollsoft.monkeyssh/apple_file_protection"
   private let keyboardVisibilityChannelName =
     "xyz.depollsoft.monkeyssh/keyboard_visibility"
+  private let pushNotificationContextChannelName =
+    "xyz.depollsoft.monkeyssh/push_notification_context"
   private let maxTransferPayloadBytes = 10 * 1024 * 1024
   private var backgroundSshChannel: FlutterMethodChannel?
   private var transferChannel: FlutterMethodChannel?
   private var appleDatabaseChannel: FlutterMethodChannel?
   private var keyboardVisibilityChannel: FlutterMethodChannel?
+  private var socksBrowserProxyChannel: SocksBrowserProxyChannel?
+  private var pushNotificationContextChannel: FlutterMethodChannel?
+  /// Serial, so a delete and a later write reach the keychain in call order.
+  private let pushNotificationContextQueue = DispatchQueue(
+    label: "xyz.depollsoft.monkeyssh.push-notification-context",
+    qos: .utility
+  )
   private var keyboardVisible = false
   private var pendingTransferPayload: String?
 
@@ -29,11 +40,14 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    AppPermissionsPlugin.register(in: self)
     if let registrar = self.registrar(forPlugin: "AppDelegateBridge") {
       setupBackgroundSshChannel(with: registrar)
       setupTransferChannel(with: registrar)
       setupAppleDatabaseChannel(with: registrar)
       setupKeyboardVisibilityChannel(with: registrar)
+      socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
+      setupPushNotificationContextChannel(with: registrar)
     } else {
       NSLog("Failed to configure AppDelegate method channels.")
     }
@@ -52,7 +66,51 @@ import UIKit
     if let launchUrl = launchOptions?[.url] as? URL {
       _ = handleTransferFile(url: launchUrl)
     }
+    // FlutterAppDelegate forwards notification center callbacks to every
+    // plugin that registered as an application delegate, which is how both
+    // flutter_local_notifications and firebase_messaging receive taps and
+    // foreground presentations. It must be the delegate before launch ends,
+    // and before firebase_messaging configures itself in super, so that
+    // firebase_messaging keeps this delegate instead of replacing it.
+    UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // FlutterAppDelegate hands each notification callback to every registered
+  // plugin, and both flutter_local_notifications and firebase_messaging call
+  // the completion handler. These overrides make each handler run exactly
+  // once with a fixed policy.
+  //
+  // Foreground policy: nothing is presented while the app is open, which is
+  // how iOS behaved before the app had a notification delegate. Plugins
+  // still see the notification (firebase_messaging forwards it to Dart's
+  // onMessage, which decides whether to show an in-app message).
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler:
+      @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    super.userNotificationCenter(center, willPresent: notification) { _ in }
+    completionHandler([])
+  }
+
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    var completed = false
+    let completeOnce = {
+      if !completed {
+        completed = true
+        completionHandler()
+      }
+    }
+    super.userNotificationCenter(center, didReceive: response) { completeOnce() }
+    // Both plugins answer synchronously; this covers a notification neither
+    // of them claims.
+    completeOnce()
   }
 
   override func application(
@@ -111,6 +169,70 @@ import UIKit
       result(self?.keyboardVisible ?? false)
     }
     keyboardVisibilityChannel = channel
+  }
+
+  // Shares the push device key and host labels with the notification service
+  // extension through PushNotificationContextKeychain.
+  private func setupPushNotificationContextChannel(with registrar: FlutterPluginRegistrar) {
+    let channel = FlutterMethodChannel(
+      name: pushNotificationContextChannelName,
+      binaryMessenger: registrar.messenger()
+    )
+    let queue = pushNotificationContextQueue
+    channel.setMethodCallHandler { call, result in
+      let data: Data?
+      switch call.method {
+      case "write":
+        guard
+          let arguments = call.arguments as? [String: Any],
+          let json = arguments["json"] as? String
+        else {
+          result(
+            FlutterError(
+              code: "invalid_args",
+              message: "Missing push notification context",
+              details: nil
+            )
+          )
+          return
+        }
+        data = Data(json.utf8)
+      case "delete":
+        data = nil
+      default:
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      guard let accessGroup = PushNotificationContextKeychain.accessGroup() else {
+        result(
+          FlutterError(
+            code: "unavailable",
+            message: "This build has no push keychain access group",
+            details: nil
+          )
+        )
+        return
+      }
+      queue.async {
+        let status = data.map {
+          PushNotificationContextKeychain.write($0, accessGroup: accessGroup)
+        } ?? PushNotificationContextKeychain.delete(accessGroup: accessGroup)
+        DispatchQueue.main.async {
+          if status == errSecSuccess {
+            result(true)
+          } else {
+            result(
+              FlutterError(
+                code: "keychain_error",
+                message: "Push notification context keychain update failed",
+                details: Int(status)
+              )
+            )
+          }
+        }
+      }
+    }
+    pushNotificationContextChannel = channel
   }
 
   @objc private func keyboardWillShow(_ notification: Notification) {

@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.226"
+	monkeyMuxVersion                  = "0.1.241"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -286,6 +286,7 @@ var capabilities = []string{
 	"acp-bridge-control-start-v1",
 	"acp-window-v1",
 	"native-acp-upgrade-handoff-v1",
+	"push-v1",
 }
 
 var (
@@ -529,6 +530,8 @@ type controlMessage struct {
 	// but never received (or has evicted) their bytes. Sent with request_images
 	// so the server can replay exactly those retained transmissions.
 	ImageIDs []string `json:"imageIds,omitempty"`
+	// Push carries the push_* operation fields (push_notify.go).
+	Push *pushControlRequest `json:"push,omitempty"`
 }
 
 type controlResponse struct {
@@ -551,6 +554,9 @@ type controlResponse struct {
 	ImagesAcknowledged bool             `json:"imagesAcknowledged,omitempty"`
 	FocusChanged       bool             `json:"focusChanged,omitempty"`
 	Restore            *serverRestore   `json:"restore,omitempty"`
+
+	// Push carries push_test results (push_notify.go).
+	Push *pushControlResult `json:"push,omitempty"`
 }
 
 type windowSnapshot struct {
@@ -579,6 +585,13 @@ type windowSnapshot struct {
 	TerminalBracketedPaste    bool                      `json:"terminalBracketedPasteMode,omitempty"`
 	PrivateModes              map[string]bool           `json:"privateModes,omitempty"`
 	TerminalProgress          *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
+	// ProgramStatus is the window's most urgent OSC 7501 record, absent when
+	// no program has reported one.
+	ProgramStatus *programStatusSnapshot `json:"programStatus,omitempty"`
+	// ProgramStatusReporter reports that the window's program speaks OSC
+	// 7501, so clients show what it reports (or nothing) instead of guessing
+	// its state from output timing.
+	ProgramStatusReporter bool `json:"programStatusReporter,omitempty"`
 	// Notifications holds unacknowledged desktop notification escapes
 	// captured from this window while it ran in the background, oldest
 	// first. Absent for plain shells and older clients ignore it.
@@ -747,6 +760,9 @@ type muxServer struct {
 	// beforeInstallRepublishedSocket is a test seam for the narrow interval
 	// after a replacement is bound but before it is installed under s.mu.
 	beforeInstallRepublishedSocket func()
+	// push holds push notification state, created on first use.
+	push     *pushNotifier
+	pushOnce sync.Once
 }
 
 type muxWindow struct {
@@ -785,6 +801,9 @@ type muxWindow struct {
 	// interactiveShell marks a window started as the user's shell rather than
 	// with a command.
 	interactiveShell bool
+	// directProcess marks a window whose process is the program itself,
+	// started from args rather than through a shell.
+	directProcess bool
 	// inPlaceRedrawPid is the foreground process group that last moved the
 	// cursor back up to redraw what it had drawn.
 	inPlaceRedrawPid int
@@ -838,6 +857,19 @@ type muxWindow struct {
 	kittyKeyboard     [2]kittyKeyboardModes
 	modifyOtherKeys   int
 	keyboardModesUsed bool
+	// programStatus holds the window's OSC 7501 records by id; the root
+	// record's id is "". programStatusClock orders their updates, and
+	// programStatusQueries counts feature-detection queries owed a reply.
+	programStatus         map[string]*programStatusRecord
+	programStatusClock    uint64
+	programStatusQueries  int
+	programStatusReporter *programStatusReporter
+	// programStatusSteps collects, while handleWindowOutput applies a PTY
+	// read (programStatusStepping), the summary after each OSC 7501 report
+	// or prompt mark that changes its state or kind, so a read carrying
+	// several reports raises the push each change calls for.
+	programStatusSteps    []programStatusSummary
+	programStatusStepping bool
 	// win32InputMode mirrors DEC private mode 9001, which ConPTY (conhost)
 	// enables at startup on Windows to request that terminal input — including
 	// escape-sequence replies — be delivered as win32-input-mode key events.
@@ -964,6 +996,8 @@ type windowBroadcastIdentity struct {
 	progressState         int
 	progressPercentage    int
 	progressHasPercentage bool
+	programStatus         programStatusSummary
+	programStatusReporter bool
 }
 
 type controlClient struct {
@@ -1115,10 +1149,14 @@ type attachClient struct {
 
 func main() {
 	if len(os.Args) < 2 {
+		linkForwardedAgent()
 		attachCommand(nil)
 		return
 	}
 
+	if commandRepointsForwardedAgent(os.Args[1]) {
+		linkForwardedAgent()
+	}
 	switch os.Args[1] {
 	case "attach":
 		attachCommand(os.Args[2:])
@@ -1156,6 +1194,19 @@ func main() {
 		printUsage(os.Stdout)
 	default:
 		usageAndExit()
+	}
+}
+
+// commandRepointsForwardedAgent reports whether command runs as a client of a
+// connection, whose SSH_AUTH_SOCK is that connection's forwarded agent. The
+// server and the helpers that run inside windows are left out: their
+// environment is a window's or the server's, not a live connection's.
+func commandRepointsForwardedAgent(command string) bool {
+	switch command {
+	case "attach", "attach-session", "a", "at", "new-session", "new", "control", "acp":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -6086,6 +6137,7 @@ func serveSession(
 	}()
 	server.startSocketRepublisher()
 	server.startAgentSessionTitleRefresher()
+	server.startPushLoop()
 
 	for {
 		conn, err := server.acceptConnection()
@@ -6222,12 +6274,12 @@ func (s *muxServer) restoreOrCreateInitialWindow(
 	var pendingRedraw []string
 	restored := 0
 	for _, state := range restore.Windows {
-		window, err := s.createWindow(
-			createWindowOptionsForRestore(state, restore.StartInYoloMode),
-		)
+		options := createWindowOptionsForRestore(state, restore.StartInYoloMode)
+		window, err := s.createWindow(options)
 		if err != nil {
 			continue
 		}
+		s.watchRestoredCodexResume(window, options)
 		if firstID == "" {
 			firstID = window.id
 		}
@@ -6574,7 +6626,7 @@ func (s *muxServer) createWindowWithStarter(
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.Env = terminalEnvironment(os.Environ())
+	cmd.Env = withForwardedAgentSocket(terminalEnvironment(os.Environ()))
 
 	s.mu.Lock()
 	if s.closed {
@@ -6649,6 +6701,7 @@ func (s *muxServer) createWindowWithStarter(
 		foregroundCommand:         filepath.Base(cmd.Path),
 		foregroundCommandPid:      proc.Pid(),
 		interactiveShell:          len(options.args) == 0 && strings.TrimSpace(options.command) == "",
+		directProcess:             len(options.args) > 0,
 		paneTitle:                 paneTitle,
 		pty:                       windowPty,
 		ptyWidth:                  cols,
@@ -6905,6 +6958,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		return
 	}
 	before := window.broadcastIdentityLocked()
+	window.programStatusSteps = window.programStatusSteps[:0]
+	window.programStatusStepping = true
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
@@ -6921,6 +6976,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	queryKeys := s.observeAgentIdentityMetadataLocked(window, chunk)
 	terminalBell, completedOscs := window.observeTerminalOutputStateLocked(chunk)
+	window.programStatusStepping = false
+	pushAlert := pushAlertOutputCategories(terminalBell, completedOscs)
 	if len(queryKeys) > 0 && len(s.themeHint) > 0 {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
@@ -6959,6 +7016,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	forwarded = window.stripLocallyAnsweredThemeQueriesLocked(chunk, themeHint)
+	programStatusReplies := window.takeProgramStatusRepliesLocked()
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -6990,6 +7048,15 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	after := window.broadcastIdentityLocked()
+	// A native agent window's turns and requests are pushed from its bridge.
+	var statusPushes []string
+	if !validAcpBridgeID(window.nativeAcpBridgeID) {
+		statusPushes = programStatusPushKinds(
+			before.programStatus,
+			window.programStatusSteps,
+			after.programStatus,
+		)
+	}
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
@@ -7061,7 +7128,12 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		}
 	}
 	// Queue the replies before forwarding this chunk, so they precede any
-	// answer the terminal sends for a later query in it.
+	// answer the terminal sends for a later query in it. Programs send OSC 7501
+	// feature detection ahead of a device-attributes query and treat that
+	// query's answer arriving first as "unsupported".
+	if len(programStatusReplies) > 0 {
+		s.queueWindowReply(window, programStatusReplies)
+	}
 	if len(themeHintData) > 0 {
 		s.queueWindowReply(window, themeHintData)
 	}
@@ -7073,6 +7145,12 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.queueWindowReply(window, capabilityHintData)
 	}
 	s.mu.Unlock()
+	if pushAlert != 0 {
+		s.notePushAlert(windowID, pushAlert)
+	}
+	for _, kind := range statusPushes {
+		s.notePushProgramStatus(windowID, kind)
+	}
 
 	if shouldWrite {
 		if len(forwarded) > 0 {
@@ -9284,6 +9362,8 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 	case "shutdown":
 		client.send(controlResponse{ID: request.ID, Type: "shutdown", Status: "ok"})
 		go s.close()
+	case "push_register", "push_unregister", "push_presence", "push_test":
+		s.handlePushControl(client, request)
 	default:
 		client.sendError(request, fmt.Errorf("unsupported command %q", request.Type))
 	}
@@ -9775,6 +9855,8 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		TerminalBracketedPaste:    window.privateModes["2004"],
 		PrivateModes:              copyPrivateModes(window.privateModes),
 		TerminalProgress:          copyTerminalProgressSnapshot(window.terminalProgress),
+		ProgramStatus:             window.programStatusSummaryLocked().snapshot(),
+		ProgramStatusReporter:     window.programStatusReporter != nil,
 	}
 }
 
@@ -13587,9 +13669,15 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi=")) ||
 			bytes.HasPrefix(payload, []byte("1337;"+monkeyMuxAgentIdentityOSCPrefix))
 		queryKeys := themeQueryKeysFromOscPayload(string(payload))
-		if !privatePiIdentity && !answerable(queryKeys) {
+		// MonkeyMux answers exactly the OSC 7501 queries it removes here, so
+		// none is answered twice.
+		programStatusQuery := isProgramStatusQueryPayload(payload)
+		if !privatePiIdentity && !programStatusQuery && !answerable(queryKeys) {
 			i = sequenceEnd
 			continue
+		}
+		if programStatusQuery {
+			w.programStatusQueries++
 		}
 		if output == nil {
 			output = make([]byte, 0, len(data)-(sequenceEnd-i))
@@ -15732,6 +15820,9 @@ func isTerminalResponseKitty(payload []byte) bool {
 }
 
 func isReplayUnsafeOscQuery(payload []byte) bool {
+	if isProgramStatusQueryPayload(payload) {
+		return true
+	}
 	code, value, ok := strings.Cut(string(payload), ";")
 	if !ok || !strings.Contains(value, "?") {
 		return false
@@ -15871,7 +15962,9 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 		agentSessionTitle:  w.agentSessionTitle,
 		panePid:            w.metadataProcessIDLocked(),
 		alert:              w.alert,
+		programStatus:      w.programStatusSummaryLocked(),
 	}
+	identity.programStatusReporter = w.programStatusReporter != nil
 	if progress := w.terminalProgress; progress != nil {
 		identity.progressActive = true
 		identity.progressState = progress.State
@@ -16709,6 +16802,12 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 				if data[index+1] == ']' {
 					sequenceStart = index
 					payloadStart = index + 2
+				} else if data[index+1] == 'c' {
+					// RIS removes every OSC 7501 record. Handled in this scan,
+					// not with the other modes, so it applies in byte order
+					// with the reports around it.
+					w.resetProgramStatusLocked()
+					w.noteProgramStatusStepLocked()
 				}
 			case 0x9d:
 				if index >= leadingUtf8Prefix &&
@@ -16730,11 +16829,16 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 			w.storePartialOscLocked(data[sequenceStart:])
 			return observedThemeQueries
 		}
+		payload := data[payloadStart : payloadStart+payloadEnd]
+		// MonkeyMux answers 7-bit OSC 7501 queries (C1 ones are left for the
+		// attached terminal), and the asker becomes the window's reporter.
+		// Noted here, in byte order with RIS and the reports around it.
+		if payloadStart-sequenceStart == 2 && isProgramStatusQueryPayload(payload) {
+			w.noteProgramStatusReporterLocked()
+		}
 		observedThemeQueries = appendThemeQueryKeys(
 			observedThemeQueries,
-			w.applyOscPayloadLocked(
-				string(data[payloadStart:payloadStart+payloadEnd]),
-			),
+			w.applyOscPayloadLocked(string(payload)),
 		)
 		data = data[payloadStart+payloadEnd+terminatorLength:]
 		leadingUtf8Prefix = 0
@@ -16888,6 +16992,16 @@ func (w *muxWindow) applyOscPayloadLocked(payload string) []string {
 		}
 	case "9":
 		w.applyTerminalProgressPayloadLocked(value)
+	case "133", "633":
+		// A prompt ends whatever ran before it. OSC 633 is VS Code's variant
+		// of the OSC 133 shell integration marks.
+		if value == "A" || strings.HasPrefix(value, "A;") {
+			w.dropRunningProgramStatusLocked(nil)
+			w.noteProgramStatusStepLocked()
+		}
+	case programStatusOscCode:
+		w.applyProgramStatusPayloadLocked(value)
+		w.noteProgramStatusStepLocked()
 	case "1337":
 		w.applyPiIdentityPayloadLocked(value)
 		w.applyAgentIdentityPayloadLocked(value)
@@ -17430,6 +17544,8 @@ func (s *muxServer) startSocketRepublisher() {
 	}()
 }
 
+// startAgentSessionTitleRefresher also ends the OSC 7501 records of programs
+// that have exited, which quiet windows would otherwise keep showing.
 func (s *muxServer) startAgentSessionTitleRefresher() {
 	go func() {
 		ticker := time.NewTicker(agentSessionTitleRefreshInterval)
@@ -17438,6 +17554,7 @@ func (s *muxServer) startAgentSessionTitleRefresher() {
 			if !s.refreshQuietAgentSessionTitles() {
 				return
 			}
+			s.dropExitedProgramStatus()
 		}
 	}()
 }
