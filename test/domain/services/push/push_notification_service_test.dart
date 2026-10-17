@@ -1538,12 +1538,8 @@ void main() {
     );
 
     test(
-      'a pending unregistration never undoes the one a new opt-in makes',
+      'an opt-in finishes a pending installation deletion before registering',
       () async {
-        await h.settings.setBool(
-          'push_notifications_token_delete_pending',
-          value: true,
-        );
         final gate = Completer<void>();
         final gateway = _GatedRegisterGateway(gate);
         final harness = _Harness(gateway: gateway);
@@ -1552,12 +1548,16 @@ void main() {
           'push_notifications_token_delete_pending',
           value: true,
         );
+        // The retry at start fails, so the deletion is still pending.
+        gateway.deleteError = Exception('offline');
         await harness.start();
-        gateway.calls.clear();
+        gateway
+          ..deleteError = null
+          ..calls.clear();
         final enabling = harness.controller.enable();
         await pumpEventQueue();
         expect(gateway.calls, contains('register'));
-        // A heartbeat during the opt-in.
+        // A heartbeat during the opt-in must not delete the new registration.
         harness.now = harness.now.add(pushRegistrationRetryMax);
         await harness.controller.syncNow();
         await pumpEventQueue();
@@ -1565,7 +1565,14 @@ void main() {
         await enabling;
         await harness.controller.syncNow();
         await pumpEventQueue();
-        expect(gateway.calls, isNot(contains('deleteInstallation')));
+        expect(
+          gateway.calls.where((call) => call == 'deleteInstallation'),
+          hasLength(1),
+        );
+        expect(
+          gateway.calls.indexOf('deleteInstallation'),
+          lessThan(gateway.calls.indexOf('registerInstallation')),
+        );
         expect(
           await harness.settings.getBool(
             'push_notifications_token_delete_pending',
@@ -1573,6 +1580,30 @@ void main() {
           isFalse,
         );
         expect(harness.state.enabled, isTrue);
+      },
+    );
+
+    test(
+      'an opt-in that cannot delete the old installation fails and keeps the '
+      'deletion pending',
+      () async {
+        await h.settings.setBool(
+          'push_notifications_token_delete_pending',
+          value: true,
+        );
+        h.gateway.deleteError = Exception('offline');
+        await h.start();
+        h.gateway.calls.clear();
+
+        expect(await h.controller.enable(), PushSetupFailure.tokenUnavailable);
+        // The old FID is never registered again under a new device key.
+        expect(h.gateway.calls, isNot(contains('registerInstallation')));
+        expect(h.gateway.registrations, isEmpty);
+        expect(h.state.enabled, isFalse);
+        expect(
+          await h.settings.getBool('push_notifications_token_delete_pending'),
+          isTrue,
+        );
       },
     );
 

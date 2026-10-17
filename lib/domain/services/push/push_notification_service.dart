@@ -622,17 +622,24 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   Future<PushSetupFailure?> enable() => _operations.run(() async {
     if (!state.available || state.enabled) return null;
     state = state.copyWith(busy: true, clearFailure: true);
-    // An unregistration left over from an earlier opt-out must not undo the
-    // registration this opt-in is about to make.
-    if (_unregisterPending || _autoInitDisablePending) {
-      _unregisterPending = false;
+    // This opt-in turns auto-init back on anyway.
+    if (_autoInitDisablePending) {
       _autoInitDisablePending = false;
-      await _settings.setBool(_unregisterPendingKey, value: false);
       await _settings.setBool(_autoInitDisablePendingKey, value: false);
     }
     // An opt-out finished at start; nothing left to resume.
     await _settings.setBool(_optOutPendingKey, value: false);
     try {
+      // An opt-out that could not delete the Firebase installation left its
+      // FID behind. Registering that FID again with a new device key would let
+      // hosts that missed the unregister deliver, through their old tickets,
+      // pushes this device can no longer open. Delete it first, or fail.
+      if (_unregisterPending) {
+        await _retireRegistration();
+        if (_unregisterPending) {
+          throw const PushSetupException(PushSetupFailure.tokenUnavailable);
+        }
+      }
       if (!await _gateway.requestPermission()) {
         throw const PushSetupException(PushSetupFailure.permissionDenied);
       }

@@ -650,8 +650,10 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   deleting the installation are retried separately from later syncs and across
   restarts until each succeeds, serialized with opt-in, and so is the check at
   every start and resume. A deletion is only scheduled once FCM has registered
-  the app (iOS cannot unregister before its first check-in), and a new opt-in
-  cancels pending retries.
+  the app (iOS cannot unregister before its first check-in). A new opt-in
+  cancels a pending auto-init change but finishes a pending deletion before it
+  registers, and fails (to be retried) if the deletion fails again, so the old
+  FID never comes back with a new device key.
 - **Per host:** turning a saved host off takes effect for a sync already
   running, waits for it, then sends `push_unregister` with that host's
   reference now, or on its next attach if it is not connected. Deleting a saved
