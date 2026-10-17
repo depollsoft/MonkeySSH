@@ -678,12 +678,20 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final previousTerminalModeSignature = activeTmuxWindowTerminalModeSignature(
       _windows,
     );
+    // A window has one notification slot. New bells wait until this
+    // snapshot's forwarded notifications are posted: a window that also has
+    // one shows that, since it says more, and gets one notification, not two.
+    final newAlerts =
+        <({TmuxWindow window, int notificationId, String? windowId})>[];
     final hasNewAlert = _alertTracker.applyWindows(
       windows,
       hostId: widget.session.hostId,
-      connectionId: widget.session.connectionId,
       tmuxSessionName: widget.tmuxSessionName,
-      onAlert: _sendAlertNotification,
+      onAlert: (window, _, notificationId, windowId) => newAlerts.add((
+        window: window,
+        notificationId: notificationId,
+        windowId: windowId,
+      )),
       onClear: (id) =>
           unawaited(_localNotifications.clearTerminalNotification(id)),
     );
@@ -692,7 +700,18 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         !(MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
       unawaited(_bounceController.forward(from: 0));
     }
-    _syncForwardedNotifications(windows);
+    final notifiedWindowKeys = _syncForwardedNotifications(windows);
+    for (final alert in newAlerts) {
+      if (notifiedWindowKeys.contains(_tmuxAlertWindowKey(alert.window))) {
+        continue;
+      }
+      _sendAlertNotification(
+        alert.window,
+        windows,
+        alert.notificationId,
+        alert.windowId,
+      );
+    }
 
     final nextPendingSelectedWindowIndex =
         resolveTmuxBarPendingSelectedWindowIndex(
@@ -933,16 +952,18 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   /// Buzzes and runs [show] only when this host's notification preferences
-  /// allow [kind]. It decides synchronously, so a show stays ahead of a close
-  /// for the same notification. Callers record the alert as seen either way,
-  /// so turning the kind back on does not replay it.
-  void _showIfHostAllows(
+  /// allow [kind], and returns whether it did. It decides synchronously, so a
+  /// show stays ahead of a close for the same notification. Callers record
+  /// the alert as seen either way, so turning the kind back on does not
+  /// replay it.
+  bool _showIfHostAllows(
     HostNotificationKind kind,
     Future<void> Function() show,
   ) {
-    if (!_hostPrefs.allows(kind)) return;
+    if (!_hostPrefs.allows(kind)) return false;
     unawaited(HapticFeedback.mediumImpact());
     unawaited(show());
+    return true;
   }
 
   void _clearSeenAlertNotifications() {
@@ -965,8 +986,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Shows server-forwarded background notifications unseen since the last
   /// window list, and cancels shown ones whose window went active, closed,
-  /// or dropped its pending entries (viewed on the server).
-  void _syncForwardedNotifications(List<TmuxWindow> windows) {
+  /// or dropped its pending entries (viewed on the server). Returns the keys
+  /// of the windows it posted a notification for.
+  Set<String> _syncForwardedNotifications(List<TmuxWindow> windows) {
     final keys = <String>{
       for (final window in windows) _tmuxAlertWindowKey(window),
     };
@@ -1009,39 +1031,32 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
     // Recorded above even when notifications are disabled so enabling them
     // later does not replay history.
-    if (!widget.ref.read(terminalNotificationsNotifierProvider)) return;
-    for (final show in shows) {
-      _showForwardedNotification(show.window, windows, show.notification);
+    if (!widget.ref.read(terminalNotificationsNotifierProvider)) {
+      return const <String>{};
     }
+    final notified = <String>{};
+    for (final show in shows) {
+      if (_showForwardedNotification(show.window, windows, show.notification)) {
+        notified.add(_tmuxAlertWindowKey(show.window));
+      }
+    }
+    return notified;
   }
 
-  int _forwardedNotificationId(
-    SshSession session,
-    String tmuxSessionName,
-    String windowKey,
-  ) =>
-      Object.hash(
-        session.hostId,
-        session.connectionId,
-        tmuxSessionName,
-        windowKey,
-        'mux-forwarded-notification',
-      ) &
-      0x7fffffff;
-
-  /// Shows one server-forwarded background notification with its own text.
+  /// Shows one server-forwarded background notification with its own text,
+  /// in the window's notification slot, and returns whether it posted one.
   ///
   /// The raw OSC payload feeds the shared Kitty parser so multipart,
   /// base64, timeout, and close semantics match live foreground
   /// notifications. Taps reuse tmux-alert routing to focus the window;
   /// Kitty activation reporting is not echoed, matching bell alerts.
-  void _showForwardedNotification(
+  bool _showForwardedNotification(
     TmuxWindow window,
     List<TmuxWindow> windows,
     MuxWindowNotification notification,
   ) {
     final separator = notification.payload.indexOf(';');
-    if (separator <= 0) return;
+    if (separator <= 0) return false;
     final windowKey = _tmuxAlertWindowKey(window);
     final request = _forwardedNotificationParsersByWindowKey
         .putIfAbsent(windowKey, TerminalNotificationParser.new)
@@ -1051,7 +1066,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               ? const <String>[]
               : notification.payload.substring(separator + 1).split(';'),
         );
-    if (request == null) return;
+    if (request == null) return false;
     if (request.action == TerminalNotificationAction.close) {
       // The window shows only its latest notification; closing an older
       // identifier must leave a newer one in place.
@@ -1059,7 +1074,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           request.identifier) {
         _clearForwardedNotification(windowKey);
       }
-      return;
+      return false;
     }
     final session = widget.session;
     final tmuxSessionName = widget.tmuxSessionName;
@@ -1067,8 +1082,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final stableWindowId = windowId != null && isValidTmuxWindowId(windowId)
         ? windowId
         : null;
-    final notificationId = _forwardedNotificationId(
-      session,
+    final notificationId = buildWindowNotificationId(
+      session.hostId,
       tmuxSessionName,
       windowKey,
     );
@@ -1083,7 +1098,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       title: request.title,
       body: request.body,
     );
-    _showIfHostAllows(
+    return _showIfHostAllows(
       HostNotificationKind.shellNotifications,
       () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,

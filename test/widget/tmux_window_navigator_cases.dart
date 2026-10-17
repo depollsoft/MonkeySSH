@@ -1030,9 +1030,11 @@ void registerTmuxWindowNavigatorTests() {
               await tester.pumpAndSettle();
               expect(started, isTrue);
               expect(cancelled, isEmpty);
-              final oldId =
-                  Object.hash(session.hostId, session.connectionId, 'main', 1) &
-                  0x7fffffff;
+              final oldId = buildWindowNotificationId(
+                session.hostId,
+                'main',
+                'index:1',
+              );
               switch (retirement) {
                 case 'activation':
                   events.add(
@@ -1067,15 +1069,7 @@ void registerTmuxWindowNavigatorTests() {
               expect(
                 delivered,
                 retirement == 'stable identity'
-                    ? {
-                        Object.hash(
-                              session.hostId,
-                              session.connectionId,
-                              'main',
-                              '@9',
-                            ) &
-                            0x7fffffff,
-                      }
+                    ? {buildWindowNotificationId(session.hostId, 'main', '@9')}
                     : isEmpty,
               );
               if (retirement == 'activation') {
@@ -1164,6 +1158,54 @@ void registerTmuxWindowNavigatorTests() {
           );
           await tester.pumpAndSettle();
         }
+
+        // A window that rang and posted a notification in one snapshot is one
+        // event: it gets one notification, in its slot, with the program's
+        // text rather than the generic bell.
+        TmuxWindow ringing(String id, List<String> payloads) => TmuxWindow(
+          index: int.parse(id.substring(1)),
+          id: id,
+          name: 'agent',
+          isActive: false,
+          flags: '!',
+          pendingNotifications: [
+            for (var i = 0; i < payloads.length; i++)
+              MuxWindowNotification(seq: i + 1, payload: payloads[i]),
+          ],
+        );
+
+        testWidgets('a bell and a notification from one window post once', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            ringing('@2', ['9;Claude needs your permission']),
+          ]);
+          final shown = notifications.shown.single;
+          expect(shown.body, 'Claude needs your permission');
+          expect(
+            shown.id,
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          );
+        });
+
+        testWidgets('the bell still notifies when notifications are off', (
+          tester,
+        ) async {
+          await pumpBar(
+            tester,
+            prefs: const HostNotificationPrefs(shellNotifications: false),
+          );
+          await show(tester, [
+            ringing('@2', ['9;Claude needs your permission']),
+          ]);
+          final shown = notifications.shown.single;
+          expect(shown.body, isNot('Claude needs your permission'));
+          expect(
+            shown.id,
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          );
+        });
 
         testWidgets('a host with shell notifications off forwards none', (
           tester,

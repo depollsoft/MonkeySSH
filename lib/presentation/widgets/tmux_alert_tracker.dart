@@ -1,4 +1,5 @@
 import '../../domain/models/tmux_state.dart';
+import '../../domain/services/local_notification_service.dart';
 
 /// Tracks which tmux alerts were emitted and clears only their notification IDs.
 class TmuxAlertTracker {
@@ -9,7 +10,6 @@ class TmuxAlertTracker {
   bool applyWindows(
     List<TmuxWindow> windows, {
     required int hostId,
-    required int connectionId,
     required String tmuxSessionName,
     required void Function(TmuxWindow, List<TmuxWindow>, int, String?) onAlert,
     required void Function(int) onClear,
@@ -36,44 +36,18 @@ class TmuxAlertTracker {
       final stableWindowId = windowId != null && isValidTmuxWindowId(windowId)
           ? windowId
           : null;
-      final windowIndex = window.index;
-      final notificationId = stableWindowId != null
-          ? _tmuxAlertNotificationId(
-              hostId,
-              connectionId,
-              tmuxSessionName,
-              stableWindowId,
-            )
-          : _legacyTmuxAlertNotificationId(
-              hostId,
-              connectionId,
-              tmuxSessionName,
-              windowIndex,
-            );
-      _alertNotificationIdsByWindowKey[_tmuxAlertWindowKey(window)] =
-          notificationId;
+      final windowKey = _tmuxAlertWindowKey(window);
+      // The window's one slot, whichever connection to the session sees it.
+      final notificationId = buildWindowNotificationId(
+        hostId,
+        tmuxSessionName,
+        windowKey,
+      );
+      _alertNotificationIdsByWindowKey[windowKey] = notificationId;
       onAlert(window, windows, notificationId, stableWindowId);
     }
     return hasNewAlert;
   }
-
-  int _tmuxAlertNotificationId(
-    int hostId,
-    int connectionId,
-    String tmuxSessionName,
-    String windowKey,
-  ) =>
-      Object.hash(hostId, connectionId, tmuxSessionName, windowKey) &
-      0x7fffffff;
-
-  int _legacyTmuxAlertNotificationId(
-    int hostId,
-    int connectionId,
-    String tmuxSessionName,
-    int windowIndex,
-  ) =>
-      Object.hash(hostId, connectionId, tmuxSessionName, windowIndex) &
-      0x7fffffff;
 
   String _tmuxAlertIndexWindowKey(int windowIndex) => 'index:$windowIndex';
 

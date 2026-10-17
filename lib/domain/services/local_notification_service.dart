@@ -413,6 +413,25 @@ class TerminalNotificationPayload {
 int buildTerminalNotificationId(int connectionId, {String? identifier}) =>
     Object.hash('terminal-notification', connectionId, identifier) & 0x3fffffff;
 
+/// The local notification slot for one multiplexer window: its bell alerts,
+/// the program notifications its server forwards, and its agent's status all
+/// share it, so a window shows one notification however many events or
+/// connections raise them. [windowKey] is the window's stable id (such as
+/// `@3`), else `index:<n>`. Stable across runs (FNV-1a), so a newer event
+/// replaces one an earlier run posted; namespaced away from agent chat ids.
+int buildWindowNotificationId(
+  int hostId,
+  String tmuxSessionName,
+  String windowKey,
+) {
+  final value = 'window|$hostId|$tmuxSessionName|$windowKey';
+  var hash = 0x811c9dc5;
+  for (final unit in utf8.encode(value)) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return 0x20000000 | (hash & 0x1fffffff);
+}
+
 /// Builds the terminal route location for a terminal notification tap.
 ///
 /// Carries the emitting multiplexer window when the payload captured one so
