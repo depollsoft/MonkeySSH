@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
@@ -12,9 +13,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/acp_authentication.dart';
 import '../models/acp_json.dart';
 import '../models/acp_provider.dart';
+import '../models/acp_writer_lease.dart';
 import '../models/command_names.dart';
 import '../models/monkeymux_acp_bridge.dart';
 import '../models/remote_multiplexer.dart';
+import 'acp_device_label.dart';
 import 'acp_transport.dart';
 import 'diagnostics_log_service.dart';
 import 'monkeymux_installer_service.dart';
@@ -126,6 +129,40 @@ String buildMonkeyMuxAcpProviderCommand(
   return command;
 }
 
+/// Explains why a custom agent's [label] and [argv] cannot launch exactly on
+/// a Windows host, or returns `null` when they can.
+///
+/// Besides the argument and label rules, the provider command must stay in
+/// the encoded form: a long one switches to a compact `-Command "…"` form
+/// whose double quotes Windows PowerShell 5.1 would split when it passes the
+/// command to the MonkeyMux helper.
+String? acpWindowsCustomLaunchProblem({
+  required String label,
+  required List<String> argv,
+  String? providerId,
+}) {
+  if (argv.isEmpty) return null;
+  final argumentProblem = acpWindowsLaunchArgumentProblem(
+    AcpLaunchCommand(executable: argv.first, arguments: argv.sublist(1)),
+  );
+  if (argumentProblem != null) return argumentProblem;
+  final labelProblem = acpWindowsLabelProblem(label);
+  if (labelProblem != null) return labelProblem;
+  try {
+    if (buildMonkeyMuxAcpProviderCommand(
+      argv,
+      isWindows: true,
+      providerId: providerId,
+    ).contains('"')) {
+      return 'This command is too long to launch on a Windows host. Shorten '
+          'the command or its arguments.';
+    }
+  } on MonkeyMuxAcpBridgeException {
+    return 'This command is too long to launch on a Windows host.';
+  }
+  return null;
+}
+
 /// Builds the interactive login command for an ACP `terminal` auth method.
 ///
 /// Reuses the exact bridge launch construction (profile/PATH prefix, literal
@@ -145,11 +182,116 @@ String buildAcpTerminalAuthCommand(
     workingDirectory: launch.workingDirectory,
   );
   if (isWindows) return providerCommand;
+  return buildMonkeyMuxAcpPosixShellCommand(
+    providerCommand,
+    scriptName: 'monkeyssh-sign-in',
+  );
+}
+
+/// Runs a POSIX [providerCommand] from [buildMonkeyMuxAcpProviderCommand]
+/// over an SSH exec channel under the same shell MonkeyMux uses for the
+/// provider: the user's `$SHELL` when it is a POSIX shell, otherwise
+/// `/bin/sh`. The command line is built with
+/// [buildMonkeyMuxLoginShellSafeCommand], so a login shell such as fish or
+/// tcsh never parses the provider command.
+String buildMonkeyMuxAcpPosixShellCommand(
+  String providerCommand, {
+  required String scriptName,
+}) {
   const dispatcher =
       r'case "${SHELL##*/}" in sh|bash|zsh|ksh|dash) exec "$SHELL" -c "$1";; '
       r'esac; exec /bin/sh -c "$1"';
-  return '/bin/sh -c ${shellEscapePosix(dispatcher)} monkeyssh-sign-in '
-      '${shellEscapePosix(providerCommand)}';
+  return buildMonkeyMuxLoginShellSafeCommand([
+    '/bin/sh',
+    '-c',
+    dispatcher,
+    scriptName,
+    providerCommand,
+  ]);
+}
+
+// Text every common login shell (POSIX sh, bash, zsh, fish, csh/tcsh, rc)
+// keeps unchanged inside single quotes.
+final _loginShellPlainArgument = RegExp(r'^[A-Za-z0-9 _@%+=:,./-]+$');
+
+// Decodes each argument marked with a leading `#` from octal escapes, then
+// runs the decoded argv. It holds no quote, backslash or `!`, so every login
+// shell passes it through unchanged inside single quotes.
+const _loginShellDecoderScript =
+    r'for a do shift; case $a in "#"*) a=$(printf "${a#?}."); a=${a%.};; '
+    r'esac; set -- "$@" "$a"; done; exec "$@"';
+
+/// Builds an SSH exec command line that runs [argv] exactly, whatever shell
+/// the user logs in with.
+///
+/// sshd hands an exec command to the login shell, and not every login shell
+/// follows POSIX quoting: fish treats `\'` and `\\` as escapes inside
+/// single quotes, and csh-family shells expand `!` even there. Plain
+/// arguments are passed single-quoted as before. Any other argument travels
+/// as `#` followed by octal escapes, and a fixed `/bin/sh` script decodes it,
+/// so the login shell only ever sees plain text, that script, and a
+/// backslash followed by a digit.
+String buildMonkeyMuxLoginShellSafeCommand(List<String> argv) {
+  if (argv.isEmpty || argv.any((value) => value.contains('\u0000'))) {
+    throw ArgumentError.value(argv, 'argv');
+  }
+  if (argv.every(_loginShellPlainArgument.hasMatch)) {
+    return argv.map(shellEscapePosix).join(' ');
+  }
+  final encoded = argv.map(
+    (value) => _loginShellPlainArgument.hasMatch(value)
+        ? value
+        : '#${utf8.encode(value).map((byte) => '\\${byte.toRadixString(8).padLeft(3, '0')}').join()}',
+  );
+  return "/bin/sh -c '$_loginShellDecoderScript' monkeyssh "
+      "${encoded.map((value) => "'$value'").join(' ')}";
+}
+
+/// Reverses [buildMonkeyMuxLoginShellSafeCommand] for tests.
+@visibleForTesting
+List<String> decodeMonkeyMuxLoginShellSafeCommand(String command) {
+  const prefix = "/bin/sh -c '$_loginShellDecoderScript' monkeyssh ";
+  final encoded = command.startsWith(prefix);
+  final body = encoded ? command.substring(prefix.length) : command;
+  final tokens = <String>[];
+  final current = StringBuffer();
+  var inQuote = false;
+  var started = false;
+  for (var index = 0; index < body.length; index++) {
+    final char = body[index];
+    if (inQuote) {
+      if (char == "'") {
+        inQuote = false;
+      } else {
+        current.write(char);
+      }
+    } else if (char == "'") {
+      inQuote = true;
+      started = true;
+    } else if (char == r'\' && index + 1 < body.length) {
+      current.write(body[++index]);
+      started = true;
+    } else if (char == ' ') {
+      if (started) tokens.add(current.toString());
+      current.clear();
+      started = false;
+    } else {
+      current.write(char);
+      started = true;
+    }
+  }
+  if (started) tokens.add(current.toString());
+  if (!encoded) return tokens;
+  return [
+    for (final token in tokens)
+      if (token.startsWith('#'))
+        utf8.decode([
+          for (final match in RegExp(r'\\([0-7]{3})').allMatches(token))
+            int.parse(match.group(1)!, radix: 8),
+        ])
+      else
+        token,
+  ];
 }
 
 // Shells started by MonkeyMux over SSH usually have no TERM_PROGRAM. Some
@@ -462,17 +604,30 @@ List<String> _validatedExecutableProbeNames(Iterable<String> executables) {
 /// Installs and controls persistent MonkeyMux ACP bridges over SSH.
 final class MonkeyMuxAcpBridgeService {
   /// Creates a bridge service.
+  ///
+  /// [deviceLabel] tells other clients which device holds a chat's input; it
+  /// defaults to [currentAcpDeviceLabel]. [clientToken] identifies this app
+  /// process to the bridge so a reconnect reclaims its own lease; it defaults
+  /// to a random value.
   MonkeyMuxAcpBridgeService({
     required MonkeyMuxInstallerService installer,
     MonkeyMuxService? monkeyMuxService,
     DiagnosticsLogger? diagnostics,
+    String? deviceLabel,
+    String? clientToken,
   }) : _installer = installer,
        _monkeyMuxService = monkeyMuxService,
-       _diagnostics = diagnostics ?? DiagnosticsLogService.instance;
+       _diagnostics = diagnostics ?? DiagnosticsLogService.instance,
+       _deviceLabel = deviceLabel,
+       _clientToken = clientToken ?? _newClientToken();
 
   final MonkeyMuxInstallerService _installer;
   final MonkeyMuxService? _monkeyMuxService;
   final DiagnosticsLogger _diagnostics;
+  String? _deviceLabel;
+  final String _clientToken;
+
+  String get _resolvedDeviceLabel => _deviceLabel ??= currentAcpDeviceLabel();
 
   /// Starts a persistent bridge using the exact approved [launchArgv].
   Future<MonkeyMuxAcpBridgeStartResult> start({
@@ -489,6 +644,21 @@ final class MonkeyMuxAcpBridgeService {
       priority: SshExecPriority.normal,
       confirmInstall: confirmInstall,
     );
+    // Custom agents carry an arbitrary label and argv, which Windows cannot
+    // always pass exactly. Built-in labels and argv are fixed and safe.
+    if (installation.isWindows &&
+        !providerId.startsWith(acpBuiltinProviderIdPrefix) &&
+        acpWindowsCustomLaunchProblem(
+              label: providerLabel,
+              argv: launchArgv,
+              providerId: providerId,
+            ) !=
+            null) {
+      throw const MonkeyMuxAcpBridgeException(
+        MonkeyMuxAcpBridgeErrorKind.invalidLaunch,
+        'These agent arguments cannot be passed exactly on Windows.',
+      );
+    }
     final providerCommand = buildMonkeyMuxAcpProviderCommand(
       launchArgv,
       isWindows: installation.isWindows,
@@ -601,19 +771,23 @@ final class MonkeyMuxAcpBridgeService {
   }
 
   /// Lists running bridges using only the helper's safe metadata schema.
+  ///
+  /// Background refreshes pass [SshExecPriority.low] so they queue behind
+  /// user-visible work on the connection.
   Future<List<MonkeyMuxAcpBridgeMetadata>> list(
     SshSession session, {
     MonkeyMuxInstallConfirmation? confirmInstall,
+    SshExecPriority priority = SshExecPriority.normal,
   }) async {
     final installation = await _installer.ensureInstalled(
       session,
-      priority: SshExecPriority.normal,
+      priority: priority,
       confirmInstall: confirmInstall,
     );
     final message = await _runHelper(session, installation, const [
       'acp',
       'list',
-    ]);
+    ], priority: priority);
     _requireType(message, 'list');
     final rawBridges = message['bridges'];
     if (rawBridges is! List || rawBridges.length > _maxBridgeListEntries) {
@@ -683,6 +857,10 @@ final class MonkeyMuxAcpBridgeService {
   }
 
   /// Creates a reconnecting ACP byte transport for an existing bridge.
+  ///
+  /// With [takeOver], the first attach takes the input lease from whichever
+  /// client holds it. Without it, a lease held by another live client leaves
+  /// the transport [MonkeyMuxAcpTransportStatus.heldElsewhere].
   MonkeyMuxAcpTransport connect({
     required Future<SshSession> Function() sessionProvider,
     required String bridgeId,
@@ -696,6 +874,9 @@ final class MonkeyMuxAcpBridgeService {
     ],
     Duration handshakeTimeout = const Duration(seconds: 10),
     int lastAcknowledgedSequence = 0,
+    bool takeOver = false,
+    Duration heartbeatInterval = const Duration(seconds: 30),
+    DateTime Function()? clock,
   }) {
     _validateBridgeId(bridgeId);
     if (lastAcknowledgedSequence < 0) {
@@ -714,14 +895,20 @@ final class MonkeyMuxAcpBridgeService {
       reconnectBackoff: reconnectBackoff,
       handshakeTimeout: handshakeTimeout,
       lastAcknowledgedSequence: lastAcknowledgedSequence,
+      deviceLabel: _resolvedDeviceLabel,
+      clientToken: _clientToken,
+      takeOver: takeOver,
+      heartbeatInterval: heartbeatInterval,
+      clock: clock ?? DateTime.now,
     );
   }
 
   Future<Map<String, Object?>> _runHelper(
     SshSession session,
     MonkeyMuxInstallation installation,
-    List<String> arguments,
-  ) => session.runQueuedExec(() async {
+    List<String> arguments, {
+    SshExecPriority priority = SshExecPriority.normal,
+  }) => session.runQueuedExec(priority: priority, () async {
     SSHSession? channel;
     StreamSubscription<Uint8List>? stderrSubscription;
     try {
@@ -775,6 +962,11 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     required List<Duration> reconnectBackoff,
     required Duration handshakeTimeout,
     required int lastAcknowledgedSequence,
+    required String deviceLabel,
+    required String clientToken,
+    required bool takeOver,
+    required Duration heartbeatInterval,
+    required DateTime Function() clock,
   }) : _installer = installer,
        _sessionProvider = sessionProvider,
        _bridgeId = bridgeId,
@@ -783,7 +975,14 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
        _reconnectBackoff = List.unmodifiable(reconnectBackoff),
        _handshakeTimeout = handshakeTimeout,
        _lastDeliveredSequence = lastAcknowledgedSequence,
-       _freshBaselineEstablished = lastAcknowledgedSequence > 0 {
+       _freshBaselineEstablished = lastAcknowledgedSequence > 0,
+       _deviceLabel = deviceLabel,
+       _clientToken = clientToken,
+       _takeOverRequested = takeOver,
+       // Resuming an earlier position means this chat held the lease before.
+       _heldWriterLease = lastAcknowledgedSequence > 0,
+       _heartbeatInterval = heartbeatInterval,
+       _clock = clock {
     scheduleMicrotask(() {
       _emitState(MonkeyMuxAcpTransportStatus.connecting);
       unawaited(_openChannel());
@@ -797,6 +996,16 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   final DiagnosticsLogger _diagnostics;
   final List<Duration> _reconnectBackoff;
   final Duration _handshakeTimeout;
+  final String _deviceLabel;
+  final String _clientToken;
+  final Duration _heartbeatInterval;
+  final DateTime Function() _clock;
+  // Only the first handshake written takes the lease over, whether or not
+  // its reply arrives. A later reconnect must not silently take back a lease
+  // another device deliberately took meanwhile.
+  bool _takeOverRequested;
+  bool _heldWriterLease;
+  Timer? _heartbeatTimer;
   // Both input views share one single-subscription buffer. Outputs received
   // before subscription must remain available to whichever view is chosen.
   final _incoming = StreamController<AcpDecodedFrame>(sync: true);
@@ -812,8 +1021,19 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   static const _maxPendingInputFrames = 32;
   static const _maxPendingInputBytes = monkeyMuxAcpBridgeMaxFrameBytes;
 
-  final _pendingInputFrames = Queue<Uint8List>();
+  final _pendingInputFrames = Queue<_InputFrame>();
   var _pendingInputBytes = 0;
+  // The newest prompt written per session, so a lost lease can tell whether
+  // the bridge accepted it. Each session has at most one prompt in flight.
+  final _sentPrompts = <String, _SentPrompt>{};
+  var _evictedSentPrompts = false;
+  var _lastWriterGeneration = 0;
+  // The bridge's id for the last writer connection whose hello arrived. The
+  // next hello names it, so the count the bridge reports is that
+  // connection's even if a reconnect in between never got its hello back.
+  String? _lastWriterClientId;
+  var _channelInputCount = 0;
+  Map<String, AcpInputDelivery>? _promptDeliveries;
   final _pendingReplayFrames = Queue<AcpDecodedFrame>();
 
   SSHSession? _channel;
@@ -880,8 +1100,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   @override
   Future<void> write(List<int> bytes) async {
     if (_closed || _terminalFailure) {
-      throw const MonkeyMuxAcpBridgeException(
-        MonkeyMuxAcpBridgeErrorKind.closed,
+      throw const AcpTransportClosedException(
         'The ACP bridge transport is closed.',
       );
     }
@@ -915,6 +1134,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   Future<void> _openChannel() async {
     if (_closed || _terminalFailure) return;
     final generation = ++_generation;
+    _channelInputCount = 0;
     SshSession? session;
     SSHSession? channel;
     try {
@@ -963,7 +1183,16 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         'bridgeId': _bridgeId,
         'lastAck': _lastDeliveredSequence,
         if (_pendingOnlyHandshakeRequested) 'replayMode': 'adaptive',
+        // Bridges without the writer lease ignore these fields.
+        'capabilities': const [monkeyMuxAcpWriterLeaseCapability],
+        'deviceLabel': _deviceLabel,
+        'clientToken': _clientToken,
+        if (_takeOverRequested) 'takeover': true,
+        'previousClientId': ?_lastWriterClientId,
       });
+      // The bridge may act on this hello even if its reply is lost, so a
+      // reconnect asks again only through a deliberate take over.
+      _takeOverRequested = false;
       _diagnostics.debug(
         'acp.transport',
         'attach_opened',
@@ -1200,6 +1429,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
           );
         case 'error':
           _handleBridgeError(message);
+        case 'lease':
+          _handleLease(message);
         default:
           _failTerminal(
             const MonkeyMuxAcpBridgeException(
@@ -1234,7 +1465,15 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       );
       return;
     }
+    final leaseAware = _advertisesWriterLease(message['capabilities']);
+    _settleDroppedChannel(
+      _readNonNegativeInt(message['previousAcceptedInputs']),
+    );
     if (message['canSend'] != true) {
+      if (leaseAware) {
+        _enterHeldElsewhere(message['writer'], leaseLost: _heldWriterLease);
+        return;
+      }
       _failTerminal(
         const MonkeyMuxAcpBridgeException(
           MonkeyMuxAcpBridgeErrorKind.nonWriter,
@@ -1247,6 +1486,14 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _handshakeTimer = null;
     _connected = true;
     _reconnectAttempt = 0;
+    _heldWriterLease = true;
+    _lastWriterGeneration = _generation;
+    final clientId = message['clientId'];
+    _lastWriterClientId =
+        clientId is String && isValidMonkeyMuxAcpBridgeId(clientId)
+        ? clientId
+        : null;
+    if (leaseAware) _startHeartbeat();
     if (metadata.nextSequence < _lastDeliveredSequence) {
       _failTerminal(
         const MonkeyMuxAcpBridgeException(
@@ -1436,9 +1683,19 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
       return;
     }
     _commitSequence(sequence);
+    _forgetAnsweredPrompt(data);
     _deliverOutput(output!);
     _sendAck(sequence);
     _finishDirectReplayIfComplete();
+  }
+
+  /// Drops the record of a prompt once its response arrives. A session's
+  /// next prompt then reads as not sent until it is written itself, so it
+  /// cannot inherit the delivery of the turn before it.
+  void _forgetAnsweredPrompt(Map<Object?, Object?> data) {
+    final id = data['id'];
+    if (id == null || data.containsKey('method')) return;
+    _sentPrompts.removeWhere((_, sent) => sent.requestId == id);
   }
 
   void _handlePending(Map<String, Object?> message, AcpDecodedFrame? output) {
@@ -1586,6 +1843,135 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     );
   }
 
+  void _handleLease(Map<String, Object?> message) {
+    if (!_matchesCurrentBridge(message)) return;
+    // A lease frame only ever reports a lost lease; a grant arrives as a hello.
+    if (message['canSend'] == true) return;
+    _enterHeldElsewhere(
+      message['writer'],
+      leaseLost: true,
+      // Missing only from a bridge built before the count existed.
+      acceptedInputs: _readNonNegativeInt(message['acceptedInputs']),
+    );
+  }
+
+  /// Whether the unanswered prompt for [sessionId] reached the agent, once
+  /// this transport is [MonkeyMuxAcpTransportStatus.heldElsewhere].
+  ///
+  /// A prompt the transport never received counts as not sent, including one
+  /// sent after an earlier prompt of the session was answered.
+  AcpInputDelivery promptDelivery(String sessionId) {
+    final deliveries = _promptDeliveries;
+    if (deliveries == null) return AcpInputDelivery.unknown;
+    return deliveries[sessionId] ??
+        (_evictedSentPrompts
+            ? AcpInputDelivery.unknown
+            : AcpInputDelivery.notSent);
+  }
+
+  /// Ends this transport without failure because another client holds the
+  /// input lease. Queued input is dropped unsent, and nothing more is written.
+  ///
+  /// [acceptedInputs], from a lease frame, counts the input frames the bridge
+  /// took on the current channel before the lease moved; later ones were
+  /// dropped.
+  void _enterHeldElsewhere(
+    Object? writer, {
+    required bool leaseLost,
+    int? acceptedInputs,
+  }) {
+    if (_closed || _terminalFailure) return;
+    _terminalFailure = true;
+    _connected = false;
+    _stopHeartbeat();
+    _promptDeliveries = _settlePromptDeliveries(acceptedInputs);
+    final remoteWriter = _parseRemoteWriter(writer, leaseLost: leaseLost);
+    _emitState(MonkeyMuxAcpTransportStatus.heldElsewhere, writer: remoteWriter);
+    _diagnostics.info(
+      'acp.transport',
+      'writer_held_elsewhere',
+      fields: {
+        'providerHash': _providerHash,
+        'bridgeId': _bridgeId,
+        'leaseLost': leaseLost,
+        'writerLabeled': remoteWriter.label != null,
+        'idleSeconds': _clock().difference(remoteWriter.lastActiveAt).inSeconds,
+      },
+    );
+    scheduleMicrotask(() => unawaited(_releaseResources()));
+  }
+
+  MonkeyMuxAcpRemoteWriter _parseRemoteWriter(
+    Object? value, {
+    required bool leaseLost,
+  }) {
+    final map = value is Map ? value : const <Object?, Object?>{};
+    final label = map['label'];
+    final idle = _readNonNegativeInt(map['idleSeconds']) ?? 0;
+    return MonkeyMuxAcpRemoteWriter(
+      label: label is String ? _boundedDeviceLabel(label) : null,
+      lastActiveAt: _clock().subtract(
+        Duration(seconds: math.min(idle, _maxReportedIdleSeconds)),
+      ),
+      leaseLost: leaseLost,
+    );
+  }
+
+  /// Settles prompts written on the last writer channel, which dropped, from
+  /// [acceptedInputs]: the bridge's count of input frames it took from that
+  /// connection, reported in the next hello.
+  void _settleDroppedChannel(int? acceptedInputs) {
+    if (acceptedInputs == null) return;
+    for (final sessionId in _sentPrompts.keys.toList(growable: false)) {
+      final sent = _sentPrompts[sessionId]!;
+      if (sent.generation != _lastWriterGeneration || sent.settled != null) {
+        continue;
+      }
+      _sentPrompts[sessionId] = (
+        generation: sent.generation,
+        index: sent.index,
+        requestId: sent.requestId,
+        settled: sent.index < acceptedInputs
+            ? AcpInputDelivery.delivered
+            : AcpInputDelivery.notSent,
+      );
+    }
+  }
+
+  Map<String, AcpInputDelivery> _settlePromptDeliveries(int? acceptedInputs) {
+    final deliveries = <String, AcpInputDelivery>{};
+    for (final MapEntry(key: sessionId, value: sent) in _sentPrompts.entries) {
+      deliveries[sessionId] =
+          sent.settled ??
+          (sent.generation == _generation && acceptedInputs != null
+              ? (sent.index < acceptedInputs
+                    ? AcpInputDelivery.delivered
+                    : AcpInputDelivery.notSent)
+              // Written to a channel that dropped before its fate was known.
+              : AcpInputDelivery.unknown);
+    }
+    for (final frame in _pendingInputFrames) {
+      if (frame.prompt case (:final sessionId, requestId: _)?) {
+        deliveries[sessionId] = AcpInputDelivery.notSent;
+      }
+    }
+    return deliveries;
+  }
+
+  void _startHeartbeat() {
+    _stopHeartbeat();
+    // The bridge counts a silent writer as gone and lets another device take
+    // its lease, so a live writer keeps proving it is here.
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      if (_connected && _channel != null) _sendAck(_lastDeliveredSequence);
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+  }
+
   void _handleBridgeError(Map<String, Object?> message) {
     final errorText = message['error'];
     if (errorText is! String || errorText.length > 256) {
@@ -1706,9 +2092,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     }
   }
 
-  void _enqueuePendingInput(Uint8List frame, {bool first = false}) {
+  void _enqueuePendingInput(_InputFrame frame, {bool first = false}) {
     if (_pendingInputFrames.length >= _maxPendingInputFrames ||
-        _pendingInputBytes + frame.length > _maxPendingInputBytes) {
+        _pendingInputBytes + frame.bytes.length > _maxPendingInputBytes) {
       throw const MonkeyMuxAcpBridgeException(
         MonkeyMuxAcpBridgeErrorKind.frameTooLarge,
         'Too much ACP input is waiting for the bridge.',
@@ -1719,12 +2105,12 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     } else {
       _pendingInputFrames.addLast(frame);
     }
-    _pendingInputBytes += frame.length;
+    _pendingInputBytes += frame.bytes.length;
   }
 
-  Uint8List _removePendingInput() {
+  _InputFrame _removePendingInput() {
     final frame = _pendingInputFrames.removeFirst();
-    _pendingInputBytes -= frame.length;
+    _pendingInputBytes -= frame.bytes.length;
     return frame;
   }
 
@@ -1739,12 +2125,27 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     while (_pendingInputFrames.isNotEmpty && _connected) {
       final frame = _removePendingInput();
       try {
-        _channel!.write(frame);
+        _channel!.write(frame.bytes);
       } on Object catch (error) {
         _enqueuePendingInput(frame, first: true);
         _handleChannelLoss(_generation, error);
         return;
       }
+      if (frame.prompt case (:final sessionId, :final requestId)?) {
+        _sentPrompts
+          ..remove(sessionId)
+          ..[sessionId] = (
+            generation: _generation,
+            index: _channelInputCount,
+            requestId: requestId,
+            settled: null,
+          );
+        if (_sentPrompts.length > _maxSentPromptSessions) {
+          _sentPrompts.remove(_sentPrompts.keys.first);
+          _evictedSentPrompts = true;
+        }
+      }
+      _channelInputCount += 1;
     }
   }
 
@@ -1762,6 +2163,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   void _handleChannelLoss(int generation, Object? error) {
     if (generation != _generation || _closed || _terminalFailure) return;
     _connected = false;
+    _stopHeartbeat();
     _discardWireInput();
     _handshakeHighWaterSequence = null;
     _replayWindowRetainedFrom = null;
@@ -1860,6 +2262,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
 
   Future<void> _doReleaseResources() async {
     _generation += 1;
+    _stopHeartbeat();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _handshakeTimer?.cancel();
@@ -1888,6 +2291,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     MonkeyMuxAcpProviderState? providerState,
     int? exitCode,
     int? retainedFrom,
+    MonkeyMuxAcpRemoteWriter? writer,
   }) {
     if (_states.isClosed) return;
     _states.add(
@@ -1899,6 +2303,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
         providerState: providerState,
         exitCode: exitCode,
         retainedFrom: retainedFrom,
+        writer: writer,
       ),
     );
   }
@@ -1909,10 +2314,10 @@ String _buildHelperCommand(
   List<String> arguments,
 ) {
   if (!installation.isWindows) {
-    return [
+    return buildMonkeyMuxLoginShellSafeCommand([
       installation.executablePath,
       ...arguments,
-    ].map(shellEscapePosix).join(' ');
+    ]);
   }
   const helperVariable = r'$__flAcpHelper';
   const argumentsVariable = r'$__flAcpArgs';
@@ -1928,6 +2333,26 @@ String _buildHelperCommand(
   ].join();
   return buildWindowsPowerShellCommand(script);
 }
+
+/// One input frame for the bridge, with the session and JSON-RPC request id
+/// of the prompt it carries, if any.
+typedef _InputFrame = ({
+  Uint8List bytes,
+  ({String sessionId, Object requestId})? prompt,
+});
+
+/// The newest unanswered prompt of a session, request [requestId] written as
+/// input frame [index] of channel [generation], and its fate once a later
+/// hello settled it.
+typedef _SentPrompt = ({
+  int generation,
+  int index,
+  Object requestId,
+  AcpInputDelivery? settled,
+});
+
+// One entry per session on this bridge attachment (the chat and its forks).
+const _maxSentPromptSessions = 256;
 
 typedef _PreparedWireFrame = ({
   Map<String, Object?> message,
@@ -2030,6 +2455,7 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
   final lastActivity = _readNonNegativeInt(map['lastActivityUnix']);
   final startedAt = _readNonNegativeInt(map['startedAtUnix']);
   final nextSequence = _readNonNegativeInt(map['nextSequence']);
+  final writer = map['writer'];
   if (provider is! String ||
       provider.length > 128 ||
       commandHash is! String ||
@@ -2047,11 +2473,28 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
       'The helper returned invalid bridge metadata.',
     );
   }
+  // The helper omits per-kind counts when they are zero, and a bridge started
+  // by an older helper never reports them, so they count only from a bridge
+  // that shows it tracks kinds: it reports one pending, or it has asked for a
+  // decision before without the combined count an earlier build reported.
+  final pendingPermissions =
+      _readNonNegativeInt(map['pendingPermissionCount']) ?? 0;
+  final pendingInputs = _readNonNegativeInt(map['pendingInputCount']) ?? 0;
+  final askedBefore =
+      (_readNonNegativeInt(map['permissionRequestCount']) ?? 0) > 0 ||
+      (_readNonNegativeInt(map['inputRequestCount']) ?? 0) > 0;
+  final legacyPending = _readNonNegativeInt(map['pendingAttentionCount']) ?? 0;
+  final reportsKinds =
+      pendingPermissions > 0 ||
+      pendingInputs > 0 ||
+      (askedBefore && legacyPending == 0);
   return MonkeyMuxAcpBridgeMetadata(
     id: id,
     providerId: providerId,
     sessionId: sessionId,
     cwd: cwd,
+    pendingPermissionCount: reportsKinds ? pendingPermissions : null,
+    pendingInputCount: reportsKinds ? pendingInputs : null,
     provider: provider,
     commandHash: commandHash,
     state: _parseProviderState(stateValue),
@@ -2067,6 +2510,19 @@ MonkeyMuxAcpBridgeMetadata _parseBridgeMetadata(Object? value) {
       isUtc: true,
     ),
     nextSequence: nextSequence,
+    writer: writer is Map ? _parseLeaseHolder(writer) : null,
+  );
+}
+
+MonkeyMuxAcpLeaseHolder _parseLeaseHolder(Map<Object?, Object?> writer) {
+  final label = writer['label'];
+  final idle = _readNonNegativeInt(writer['idleSeconds']) ?? 0;
+  return MonkeyMuxAcpLeaseHolder(
+    label: label is String ? _boundedDeviceLabel(label) : null,
+    lastActiveAt: DateTime.now().subtract(
+      Duration(seconds: math.min(idle, _maxReportedIdleSeconds)),
+    ),
+    stale: writer['stale'] == true,
   );
 }
 
@@ -2151,7 +2607,7 @@ void _requireType(Map<String, Object?> message, String expected) {
   }
 }
 
-Uint8List _prepareAcpInputFrame(List<int> frame) {
+_InputFrame _prepareAcpInputFrame(List<int> frame) {
   Object? decoded;
   try {
     decoded = jsonDecode(utf8.decode(frame, allowMalformed: false));
@@ -2167,11 +2623,22 @@ Uint8List _prepareAcpInputFrame(List<int> frame) {
       'ACP input must be a JSON object.',
     );
   }
-  return _encodeWire({
-    'version': monkeyMuxAcpBridgeProtocolVersion,
-    'type': 'input',
-    'data': decoded,
-  });
+  final params = decoded['params'];
+  final sessionId = params is Map ? params['sessionId'] : null;
+  final requestId = decoded['id'];
+  return (
+    bytes: _encodeWire({
+      'version': monkeyMuxAcpBridgeProtocolVersion,
+      'type': 'input',
+      'data': decoded,
+    }),
+    prompt:
+        decoded['method'] == 'session/prompt' &&
+            requestId != null &&
+            sessionId is String
+        ? (sessionId: sessionId, requestId: requestId)
+        : null,
+  );
 }
 
 Uint8List _encodeWire(Map<String, Object?> message) {
@@ -2183,6 +2650,33 @@ Uint8List _encodeWire(Map<String, Object?> message) {
     );
   }
   return bytes;
+}
+
+const _maxDeviceLabelLength = 48;
+// About a year; anything longer is not a meaningful "last active" time.
+const _maxReportedIdleSeconds = 366 * 24 * 60 * 60;
+
+bool _advertisesWriterLease(Object? capabilities) =>
+    capabilities is List &&
+    capabilities.contains(monkeyMuxAcpWriterLeaseCapability);
+
+/// Keeps a short single-line label from the bridge and drops anything else.
+String? _boundedDeviceLabel(String label) {
+  final trimmed = label.trim();
+  if (trimmed.isEmpty ||
+      trimmed.runes.length > _maxDeviceLabelLength ||
+      trimmed.runes.any((rune) => rune < 0x20 || rune == 0x7f)) {
+    return null;
+  }
+  return trimmed;
+}
+
+String _newClientToken() {
+  final random = math.Random.secure();
+  return List<String>.generate(
+    16,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
 }
 
 String _providerHash(String providerId) =>

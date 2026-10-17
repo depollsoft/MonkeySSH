@@ -6,11 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 
 import 'acp_notification_location_cases.dart';
 import 'acp_notification_target_cases.dart';
+import 'app_permission_service_cases.dart' show answerPermissionChannel;
 
 void main() {
   group('local_notification_service', () {
@@ -18,40 +20,115 @@ void main() {
     // Unit tests do not run the native plugin registrant.
     AndroidFlutterLocalNotificationsPlugin.registerWith();
 
-    test('terminal dispatch preserves sound, permission, and missing-plugin results', () async {
+    test(
+      'terminal dispatch preserves permission and missing-plugin results',
+      () async {
+        const channel = MethodChannel(
+          'dexterous.com/flutter/local_notifications',
+        );
+        const payload = TerminalNotificationPayload(
+          hostId: 7,
+          connectionId: 21,
+        );
+        final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+        FlutterLocalNotificationsPlatform.instance =
+            IOSFlutterLocalNotificationsPlugin();
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final service = LocalNotificationService();
+        final calls = <MethodCall>[];
+        var permission = AppPermissionStatus.granted;
+        var missingPlugin = false;
+        final permissionCalls = answerPermissionChannel(
+          (_) async => permission.name,
+        );
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              ..setMockMethodCallHandler(channel, (call) async {
+                calls.add(call);
+                if (call.method == 'getNotificationAppLaunchDetails') {
+                  return null;
+                }
+                if (call.method == 'show') {
+                  if (missingPlugin) throw MissingPluginException();
+                  expect(
+                    call.arguments,
+                    containsPair('payload', payload.encode()),
+                  );
+                  expect(call.arguments, containsPair('id', 42));
+                }
+                return true;
+              });
+        addTearDown(() {
+          service.dispose();
+          messenger.setMockMethodCallHandler(channel, null);
+          FlutterLocalNotificationsPlatform.instance = previousPlatform;
+          debugDefaultTargetPlatformOverride = null;
+        });
+        for (final sound in TerminalNotificationSound.values) {
+          for (final scenario in [
+            (AppPermissionStatus.granted, false),
+            (AppPermissionStatus.denied, false),
+            (AppPermissionStatus.permanentlyDenied, false),
+            (AppPermissionStatus.granted, true),
+          ]) {
+            (permission, missingPlugin) = scenario;
+            calls.clear();
+            permissionCalls.clear();
+            expect(
+              await service.showTerminalNotification(
+                notificationId: 42,
+                title: 'Ready',
+                body: 'Done',
+                payload: payload,
+                sound: sound,
+              ),
+              permission.isGranted && !missingPlugin,
+            );
+            // Permission comes from the app's channel, not the plugin.
+            expect(
+              permissionCalls.map((call) => (call.method, call.arguments)),
+              [('request', AppPermission.notifications.name)],
+            );
+            expect(
+              calls.where((call) => call.method == 'requestPermissions'),
+              isEmpty,
+            );
+            expect(
+              calls.where((call) => call.method == 'show'),
+              hasLength(permission.isGranted ? 1 : 0),
+            );
+          }
+        }
+        calls.clear();
+        await service.clearTerminalNotification(42);
+        await service.clearTerminalNotification(43);
+        expect(calls.map((call) => (call.method, call.arguments)), [
+          ('cancel', 42),
+          ('cancel', 43),
+        ]);
+      },
+    );
+
+    test('android asks the permissions channel, not the plugin', () async {
       const channel = MethodChannel(
         'dexterous.com/flutter/local_notifications',
       );
-      const payload = TerminalNotificationPayload(hostId: 7, connectionId: 21);
       final previousPlatform = FlutterLocalNotificationsPlatform.instance;
       FlutterLocalNotificationsPlatform.instance =
-          IOSFlutterLocalNotificationsPlugin();
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          AndroidFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
       final service = LocalNotificationService();
-      final calls = <MethodCall>[];
-      var permitted = true;
-      var missingPlugin = false;
-      var sound = TerminalNotificationSound.silent;
+      final pluginCalls = <String>[];
+      var permission = AppPermissionStatus.granted;
+      final permissionCalls = answerPermissionChannel(
+        (_) async => permission.name,
+      );
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             ..setMockMethodCallHandler(channel, (call) async {
-              calls.add(call);
+              pluginCalls.add(call.method);
               if (call.method == 'getNotificationAppLaunchDetails') return null;
-              if (call.method == 'requestPermissions') {
-                expect(
-                  (call.arguments as Map)['sound'],
-                  sound == TerminalNotificationSound.system,
-                );
-              }
-              if (call.method == 'show') {
-                if (missingPlugin) throw MissingPluginException();
-                expect(
-                  call.arguments,
-                  containsPair('payload', payload.encode()),
-                );
-                expect(call.arguments, containsPair('id', 42));
-              }
-              return permitted;
+              return true;
             });
       addTearDown(() {
         service.dispose();
@@ -59,37 +136,82 @@ void main() {
         FlutterLocalNotificationsPlatform.instance = previousPlatform;
         debugDefaultTargetPlatformOverride = null;
       });
-      for (sound in TerminalNotificationSound.values) {
-        for (final scenario in [(true, false), (false, false), (true, true)]) {
-          (permitted, missingPlugin) = scenario;
-          calls.clear();
+
+      for (final status in AppPermissionStatus.values) {
+        permission = status;
+        pluginCalls.clear();
+        permissionCalls.clear();
+        expect(
+          await service.showTerminalNotification(
+            notificationId: 42,
+            title: 'Ready',
+            body: 'Done',
+            payload: const TerminalNotificationPayload(
+              hostId: 7,
+              connectionId: 21,
+            ),
+          ),
+          status.isGranted,
+          reason: status.name,
+        );
+        expect(permissionCalls, hasLength(1));
+        expect(pluginCalls, isNot(contains('requestNotificationsPermission')));
+        expect(pluginCalls.contains('show'), status.isGranted);
+      }
+    });
+
+    test('macOS still asks the plugin and passes the sound choice', () async {
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+      FlutterLocalNotificationsPlatform.instance =
+          MacOSFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final service = LocalNotificationService();
+      final requests = <Object?>[];
+      var permitted = true;
+      final permissionCalls = answerPermissionChannel((_) async => 'granted');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'getNotificationAppLaunchDetails') return null;
+              if (call.method == 'requestPermissions') {
+                requests.add((call.arguments as Map)['sound']);
+                return permitted;
+              }
+              return true;
+            });
+      addTearDown(() {
+        service.dispose();
+        messenger.setMockMethodCallHandler(channel, null);
+        FlutterLocalNotificationsPlatform.instance = previousPlatform;
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      for (final sound in TerminalNotificationSound.values) {
+        for (final allowed in [true, false]) {
+          permitted = allowed;
           expect(
             await service.showTerminalNotification(
               notificationId: 42,
               title: 'Ready',
               body: 'Done',
-              payload: payload,
+              payload: const TerminalNotificationPayload(
+                hostId: 7,
+                connectionId: 21,
+              ),
               sound: sound,
             ),
-            permitted && !missingPlugin,
+            allowed,
           );
           expect(
-            calls.where((call) => call.method == 'requestPermissions'),
-            hasLength(1),
-          );
-          expect(
-            calls.where((call) => call.method == 'show'),
-            hasLength(permitted ? 1 : 0),
+            requests.removeLast(),
+            sound == TerminalNotificationSound.system,
           );
         }
       }
-      calls.clear();
-      await service.clearTerminalNotification(42);
-      await service.clearTerminalNotification(43);
-      expect(calls.map((call) => (call.method, call.arguments)), [
-        ('cancel', 42),
-        ('cancel', 43),
-      ]);
+      expect(permissionCalls, isEmpty);
     });
 
     test('a rejected permission request skips the notification', () async {
@@ -102,13 +224,12 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final service = LocalNotificationService();
       var shown = 0;
+      answerPermissionChannel(
+        (_) async => throw PlatformException(code: 'invalid_args'),
+      );
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             ..setMockMethodCallHandler(channel, (call) async {
-              if (call.method == 'requestPermissions') {
-                // Android's answer while another request's prompt is open.
-                throw PlatformException(code: 'permissionRequestInProgress');
-              }
               if (call.method == 'show') shown++;
               return null;
             });
@@ -134,9 +255,10 @@ void main() {
       expect(shown, 0);
     });
 
-    for (final delayedMethod in ['requestPermissions', 'show']) {
+    for (final delayPermission in [true, false]) {
+      final delayedStep = delayPermission ? 'permission request' : 'show';
       test(
-        'tmux cancellation waits for delayed $delayedMethod and retires its queue',
+        'tmux cancellation waits for delayed $delayedStep and retires its queue',
         () async {
           const channel = MethodChannel(
             'dexterous.com/flutter/local_notifications',
@@ -146,17 +268,26 @@ void main() {
               IOSFlutterLocalNotificationsPlugin();
           debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
           final service = LocalNotificationService();
-          final pending = Completer<bool>();
+          final pending = Completer<void>();
           final started = Completer<void>();
           final delivered = <int>{};
           final operations = <String>[];
+          answerPermissionChannel((_) async {
+            if (delayPermission && !started.isCompleted) {
+              started.complete();
+              await pending.future;
+            }
+            return 'granted';
+          });
           final messenger =
               TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
                 ..setMockMethodCallHandler(channel, (call) async {
                   if (call.method == 'getNotificationAppLaunchDetails') {
                     return null;
                   }
-                  if (call.method == delayedMethod && !started.isCompleted) {
+                  if (!delayPermission &&
+                      call.method == 'show' &&
+                      !started.isCompleted) {
                     started.complete();
                     await pending.future;
                   }
@@ -196,7 +327,7 @@ void main() {
           await show(43);
           expect(delivered, {43});
           expect(operations, ['show 43']);
-          pending.complete(true);
+          pending.complete();
           await Future.wait([showing, clearing]);
           expect(operations, ['show 43', 'show 42', 'cancel 42']);
           expect(delivered, {43});
@@ -222,6 +353,7 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final service = LocalNotificationService();
       final cancelled = <int>[];
+      answerPermissionChannel((_) async => 'granted');
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             ..setMockMethodCallHandler(channel, (call) async {

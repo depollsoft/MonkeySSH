@@ -453,6 +453,22 @@ const _terminalFocusTransitionDelay = Duration(milliseconds: 50);
 /// A terminal cell range rendered with text underline decoration.
 typedef TerminalTextUnderline = ({int row, int startColumn, int endColumn});
 
+/// Cells `[startColumn, endColumn)` of one buffer row painted as a search hit.
+/// [isCurrent] marks the hit the search is stepped to.
+typedef TerminalSearchHitSpan = ({
+  int startColumn,
+  int endColumn,
+  bool isCurrent,
+});
+
+/// Supplies the search hits to paint on each buffer row, and notifies its
+/// listeners when they change.
+abstract interface class TerminalSearchHitSource implements Listenable {
+  /// Hits on [row], or an empty list. Called for every visible row on every
+  /// frame, so it must be cheap.
+  List<TerminalSearchHitSpan> hitsForRow(BufferLine row);
+}
+
 /// Adapted xterm terminal view with a trackpad scroll fix for alt-buffer apps.
 class MonkeyTerminalView extends StatefulWidget {
   const MonkeyTerminalView(
@@ -495,6 +511,8 @@ class MonkeyTerminalView extends StatefulWidget {
     this.onPasteText,
     this.onUserInput,
     this.inlineUnderlines = const <TerminalTextUnderline>[],
+    this.searchHits,
+    this.bottomScrollClearance = 0,
   });
 
   /// The underlying terminal that this widget renders.
@@ -635,6 +653,20 @@ class MonkeyTerminalView extends StatefulWidget {
 
   /// Cell ranges that should be painted with inline text underlines.
   final List<TerminalTextUnderline> inlineUnderlines;
+
+  /// Search hits to highlight, if a search is open.
+  final TerminalSearchHitSource? searchHits;
+
+  /// Extra scroll room below the last row, in pixels, so the bottom rows can
+  /// be scrolled above something that overlays the terminal, such as the
+  /// find bar. It changes neither rows nor columns, so the PTY is not
+  /// resized.
+  ///
+  /// The alternate screen gets none: a full-screen program would be lifted
+  /// by the clearance with no way to scroll its top rows back, since its
+  /// scrolling belongs to the program. What overlays it covers its bottom
+  /// rows instead.
+  final double bottomScrollClearance;
 
   @override
   State<MonkeyTerminalView> createState() => MonkeyTerminalViewState();
@@ -1172,6 +1204,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
           textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
           theme: widget.theme,
           inlineUnderlines: widget.inlineUnderlines,
+          searchHits: widget.searchHits,
+          bottomScrollClearance: widget.bottomScrollClearance,
           focusNode: cursorFocusNode,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
@@ -1872,6 +1906,8 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.theme,
     required this.inlineUnderlines,
     required this.focusNode,
+    this.searchHits,
+    this.bottomScrollClearance = 0,
     this.onEditableRect,
     this.composingText,
     this.selectionRegistrar,
@@ -1903,6 +1939,10 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final List<TerminalTextUnderline> inlineUnderlines;
 
+  final TerminalSearchHitSource? searchHits;
+
+  final double bottomScrollClearance;
+
   final FocusNode focusNode;
 
   final EditableRectCallback? onEditableRect;
@@ -1927,6 +1967,8 @@ class _TerminalView extends LeafRenderObjectWidget {
       textScaler: textScaler,
       theme: theme,
       inlineUnderlines: inlineUnderlines,
+      searchHits: searchHits,
+      bottomScrollClearance: bottomScrollClearance,
       focusNode: focusNode,
       onEditableRect: onEditableRect,
       composingText: composingText,
@@ -1953,6 +1995,8 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..textScaler = textScaler
       ..theme = theme
       ..inlineUnderlines = inlineUnderlines
+      ..searchHits = searchHits
+      ..bottomScrollClearance = bottomScrollClearance
       ..focusNode = focusNode
       ..onEditableRect = onEditableRect
       ..composingText = composingText
@@ -2138,6 +2182,57 @@ class MonkeyTerminalPainter extends TerminalPainter {
       foreground: theme.foreground,
       cellBackground: cellBackground,
     );
+  }
+
+  /// Paints a search hit over cells `[startColumn, endColumn)` of [line]: an
+  /// opaque hit background with the glyphs redrawn in the hit foreground, so
+  /// the text stays readable whatever its own colours. The current hit also
+  /// gets an outline, so it differs from the others by shape as well as
+  /// colour.
+  void paintSearchHit(
+    Canvas canvas,
+    Offset offset,
+    BufferLine line,
+    int startColumn,
+    int endColumn, {
+    required bool isCurrent,
+  }) {
+    final cellWidth = cellSize.width;
+    final background = isCurrent
+        ? theme.searchHitBackgroundCurrent
+        : theme.searchHitBackground;
+    final rect = Rect.fromLTWH(
+      offset.dx + startColumn * cellWidth,
+      offset.dy,
+      (endColumn - startColumn) * cellWidth,
+      cellSize.height,
+    );
+    canvas.drawRect(rect, _rectPaint..color = background);
+
+    final cellData = _scratchCellData;
+    final foreground = _encodeRgbCellColor(theme.searchHitForeground);
+    final encodedBackground = _encodeRgbCellColor(background);
+    for (var i = startColumn; i < endColumn && i < line.length; i++) {
+      line.getCellData(i, cellData);
+      cellData
+        ..foreground = foreground
+        ..background = encodedBackground
+        ..flags = cellData.flags & ~CellFlags.inverse & ~CellFlags.faint;
+      paintCellForeground(canvas, offset.translate(i * cellWidth, 0), cellData);
+      if (cellData.content >> CellContent.widthShift == 2) {
+        i++;
+      }
+    }
+
+    if (isCurrent) {
+      canvas.drawRect(
+        rect.deflate(1),
+        Paint()
+          ..color = theme.searchHitForeground
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+    }
   }
 
   void paintLineInlineUnderlines(
@@ -2926,6 +3021,8 @@ class MonkeyRenderTerminal extends RenderBox
     required TerminalTheme theme,
     required List<TerminalTextUnderline> inlineUnderlines,
     required FocusNode focusNode,
+    TerminalSearchHitSource? searchHits,
+    double bottomScrollClearance = 0,
     EditableRectCallback? onEditableRect,
     String? composingText,
     SelectionRegistrar? selectionRegistrar,
@@ -2939,6 +3036,8 @@ class MonkeyRenderTerminal extends RenderBox
        _resizeBottomInset = resizeBottomInset,
        _liveOutputAutoScroll = liveOutputAutoScroll,
        _inlineUnderlines = inlineUnderlines,
+       _searchHits = searchHits,
+       _bottomScrollClearance = bottomScrollClearance,
        _focusNode = focusNode,
        _onEditableRect = onEditableRect,
        _composingText = composingText,
@@ -3068,6 +3167,24 @@ class MonkeyRenderTerminal extends RenderBox
     markNeedsPaint();
   }
 
+  TerminalSearchHitSource? _searchHits;
+  set searchHits(TerminalSearchHitSource? value) {
+    if (identical(value, _searchHits)) return;
+    if (attached) _searchHits?.removeListener(_onSearchHitsChanged);
+    _searchHits = value;
+    if (attached) _searchHits?.addListener(_onSearchHitsChanged);
+    markNeedsPaint();
+  }
+
+  void _onSearchHitsChanged() => markNeedsPaint();
+
+  double _bottomScrollClearance;
+  set bottomScrollClearance(double value) {
+    if (value == _bottomScrollClearance) return;
+    _bottomScrollClearance = value;
+    markNeedsLayout();
+  }
+
   FocusNode _focusNode;
   set focusNode(FocusNode value) {
     if (value == _focusNode) return;
@@ -3134,6 +3251,10 @@ class MonkeyRenderTerminal extends RenderBox
   final Set<VoidCallback> _selectionListeners = <VoidCallback>{};
 
   int _lastKnownLineCount = -1;
+  // Whether the last layout measured the alternate screen. The clearance
+  // applies on the main screen only, so a switch changes the scroll extent
+  // even when the row count stays the same.
+  bool? _laidOutOnAltBuffer;
   int _forceLayoutOnTerminalChangeCount = 0;
   final _cursorCellData = CellData.empty();
 
@@ -3163,7 +3284,9 @@ class MonkeyRenderTerminal extends RenderBox
       _forceLayoutOnTerminalChangeCount -= 1;
       _lastKnownLineCount = lineCount;
       markNeedsLayout();
-    } else if (lineCount != _lastKnownLineCount) {
+    } else if (lineCount != _lastKnownLineCount ||
+        (_bottomScrollClearance > 0 &&
+            _terminal.isUsingAltBuffer != _laidOutOnAltBuffer)) {
       _lastKnownLineCount = lineCount;
       markNeedsLayout();
     } else {
@@ -3223,6 +3346,7 @@ class MonkeyRenderTerminal extends RenderBox
     _terminal.addListener(_onTerminalChange);
     _controller.addListener(_onControllerUpdate);
     _focusNode.addListener(_onFocusChange);
+    _searchHits?.addListener(_onSearchHitsChanged);
   }
 
   @override
@@ -3233,6 +3357,7 @@ class MonkeyRenderTerminal extends RenderBox
     _terminal.removeListener(_onTerminalChange);
     _controller.removeListener(_onControllerUpdate);
     _focusNode.removeListener(_onFocusChange);
+    _searchHits?.removeListener(_onSearchHitsChanged);
   }
 
   @override
@@ -3281,11 +3406,17 @@ class MonkeyRenderTerminal extends RenderBox
       _painter.cellSize.width,
       _painter.cellSize.height,
     );
-    _updateScrollOffset();
-
-    if (_liveOutputAutoScroll && _stickToBottom) {
+    _offset.applyViewportDimension(_viewportHeight);
+    // Follow the output before applying the new extent, so the position is
+    // never out of range: on iOS and macOS an out-of-range position starts a
+    // spring back, which a later correction does not stop. Entering the
+    // alternate screen shrinks the extent to nothing, and the screen would
+    // otherwise spring down from the old scrollback offset.
+    if (_liveOutputAutoScroll && _stickToBottom && _offset.hasPixels) {
       _offset.correctBy(_maxScrollExtent - _scrollOffset);
     }
+    _offset.applyContentDimensions(0, _maxScrollExtent);
+    _laidOutOnAltBuffer = _terminal.isUsingAltBuffer;
     _updateSelectionGeometry(deferNotification: true);
   }
 
@@ -4199,11 +4330,6 @@ class MonkeyRenderTerminal extends RenderBox
     _pendingTerminalResize = null;
   }
 
-  void _updateScrollOffset() {
-    _offset.applyViewportDimension(_viewportHeight);
-    _offset.applyContentDimensions(0, _maxScrollExtent);
-  }
-
   bool get _isComposingText =>
       _composingText != null && _composingText!.isNotEmpty;
 
@@ -4215,8 +4341,13 @@ class MonkeyRenderTerminal extends RenderBox
   // landscape alignment moves the partial-cell slack there. Scrolling to the
   // bottom has to cover that offset too, or the last row (usually the prompt)
   // is pushed below the viewport by the slack.
-  double get _maxScrollExtent =>
-      math.max(_contentOrigin.dy + _terminalHeight - _viewportHeight, 0.0);
+  double get _maxScrollExtent => math.max(
+    _contentOrigin.dy +
+        _terminalHeight -
+        _viewportHeight +
+        (_terminal.isUsingAltBuffer ? 0 : _bottomScrollClearance),
+    0.0,
+  );
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
 
@@ -4376,6 +4507,8 @@ class MonkeyRenderTerminal extends RenderBox
       effectLastLine,
       physicalPlacements: visiblePhysicalPlacements,
     );
+
+    _paintSearchHits(canvas, offset, effectFirstLine, effectLastLine);
 
     if (_terminal.buffer.absoluteCursorY >= effectFirstLine &&
         _terminal.buffer.absoluteCursorY <= effectLastLine) {
@@ -4777,6 +4910,38 @@ class MonkeyRenderTerminal extends RenderBox
         lines[i],
         lineUnderlines,
       );
+    }
+  }
+
+  void _paintSearchHits(
+    Canvas canvas,
+    Offset offset,
+    int firstLine,
+    int lastLine,
+  ) {
+    final source = _searchHits;
+    final lines = _terminal.buffer.lines;
+    if (source == null || lines.length == 0) {
+      return;
+    }
+    final columnCount = _terminal.viewWidth;
+    for (var i = firstLine; i <= lastLine; i++) {
+      final line = lines[i];
+      for (final hit in source.hitsForRow(line)) {
+        final start = hit.startColumn.clamp(0, columnCount);
+        final end = hit.endColumn.clamp(start, columnCount);
+        if (end <= start) {
+          continue;
+        }
+        _painter.paintSearchHit(
+          canvas,
+          _linePaintOffset(offset, i),
+          line,
+          start,
+          end,
+          isCurrent: hit.isCurrent,
+        );
+      }
     }
   }
 

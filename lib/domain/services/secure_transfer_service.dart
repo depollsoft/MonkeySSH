@@ -12,14 +12,19 @@ import 'package:pointycastle/export.dart'
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/key_repository.dart';
+import '../../data/repositories/snippet_repository.dart';
+import '../models/acp_provider.dart';
 import '../models/auto_connect_command.dart';
 import '../models/host_cli_launch_preferences.dart';
+import '../models/port_forward_type.dart';
+import '../models/snippet_key_tokens.dart';
 import 'diagnostics_log_service.dart';
 import 'host_cli_launch_preferences_service.dart';
 import 'host_key_verification.dart';
 import 'key_service.dart';
 import 'monkeymux_offer_service.dart';
 import 'port_forward_browser_service.dart';
+import 'settings_json_list.dart';
 import 'settings_service.dart';
 import 'ssh_service.dart';
 import 'ssh_wire.dart';
@@ -227,12 +232,31 @@ class SecureTransferService {
   static const _schemaVersion = 1;
   static const _hostScopedSettingsKeys = {
     SettingKeys.agentLaunchPresets,
+    SettingKeys.agentWorktrees,
     SettingKeys.hostCliLaunchPreferences,
+    SettingKeys.hostSetupChecklist,
+    SettingKeys.sftpBrowserViews,
+    SettingKeys.sftpBrowserFilters,
   };
 
-  /// Settings that belong to this device's own onboarding and never travel:
-  /// their host ids would point at other hosts on another device.
-  static const _deviceLocalSettingsKeys = {monkeyMuxOfferPendingSettingKey};
+  /// Settings that stay on this device and never travel. The MonkeyMux offer
+  /// list belongs to this device's onboarding, and its host ids would point
+  /// at other hosts elsewhere. Agent forwarding hands a host this phone's
+  /// keys, so it is an opt-in made again on each device; an import never
+  /// turns it on. SOCKS browser store ids name website data stores that only
+  /// exist on this device.
+  static const _deviceLocalSettingsKeys = {
+    monkeyMuxOfferPendingSettingKey,
+    SettingKeys.hostAgentForwarding,
+    SettingKeys.socksBrowserStores,
+  };
+
+  /// Whether [key] is a setting that stays on this device: onboarding state
+  /// in [_deviceLocalSettingsKeys], and unsent chat drafts, which are user
+  /// content tied to this device's sessions and files.
+  static bool _isDeviceLocalSetting(String key) =>
+      _deviceLocalSettingsKeys.contains(key) ||
+      SettingKeys.isAcpComposerDraft(key);
 
   /// Where payloads from before per-host notification settings kept the
   /// hosts whose push was off, by host id. It now lives on each host row.
@@ -369,8 +393,7 @@ class SecureTransferService {
     final knownHosts = await _db.select(_db.knownHosts).get();
     final rawSettings = <String, String>{
       for (final setting in settings)
-        if (!_deviceLocalSettingsKeys.contains(setting.key))
-          setting.key: setting.value,
+        if (!_isDeviceLocalSetting(setting.key)) setting.key: setting.value,
     };
 
     return {
@@ -383,7 +406,7 @@ class SecureTransferService {
       ),
       'snippets': _sortedJsonRecords(snippets.map((item) => item.toJson())),
       'portForwards': _sortedJsonRecords(
-        portForwards.map((item) => item.toJson()),
+        portForwards.map(_exportedPortForwardJson),
       ),
       'knownHosts': _sortedJsonRecords(knownHosts.map((item) => item.toJson())),
     };
@@ -553,7 +576,15 @@ class SecureTransferService {
             await _db.customStatement('PRAGMA defer_foreign_keys = ON');
             deferForeignKeysEnabled = true;
             await _clearMigrationTables();
+          } else {
+            // Snippets already here must be upgraded before the flag below
+            // marks every stored snippet as written for key tokens.
+            await escapeLegacySnippetKeyTokensIn(_db);
           }
+          // A payload from a build without key tokens carries no flag: its
+          // `{key:...}` text was literal and must stay literal.
+          final payloadHasKeyTokens = _settingsFromData(data)
+              .containsKey(snippetKeyTokensEscapedSetting);
 
           final groupMapping = await _importGroups(
             _listFromData(data, 'groups'),
@@ -571,6 +602,7 @@ class SecureTransferService {
             _listFromData(data, 'snippets'),
             snippetFolderMapping: snippetFolderMapping,
             autoConnectSnippetIds: importedAutoConnectSnippetIds,
+            escapeLegacyKeyTokens: !payloadHasKeyTokens,
           );
           final hostMapping = await _importHosts(
             rawHosts,
@@ -595,6 +627,10 @@ class SecureTransferService {
             clearExisting: mode == MigrationImportMode.replace,
             hostMapping: hostMapping,
           );
+          // Every snippet is now written for key tokens, whatever the
+          // payload's settings held, so the startup upgrade never runs on
+          // them again.
+          await markSnippetKeyTokensEscaped(_db);
         } finally {
           if (deferForeignKeysEnabled) {
             await _db.customStatement('PRAGMA defer_foreign_keys = OFF');
@@ -946,6 +982,7 @@ class SecureTransferService {
     List<Map<String, dynamic>> rawSnippets, {
     required Map<int, int> snippetFolderMapping,
     required Set<int> autoConnectSnippetIds,
+    required bool escapeLegacyKeyTokens,
   }) async {
     final idMapping = <int, int>{};
     for (final item in rawSnippets) {
@@ -957,7 +994,10 @@ class SecureTransferService {
           'Invalid snippet folder reference in migration payload',
         );
       }
-      final command = _requiredString(item, 'command');
+      final rawCommand = _requiredString(item, 'command');
+      final command = escapeLegacyKeyTokens
+          ? escapeSnippetKeyTokens(rawCommand)
+          : rawCommand;
       if (oldId != null && autoConnectSnippetIds.contains(oldId)) {
         validateImportedAutoConnectCommandText(command);
       }
@@ -987,6 +1027,18 @@ class SecureTransferService {
     return idMapping;
   }
 
+  /// Exports [portForward], giving a SOCKS rule a placeholder destination.
+  ///
+  /// Versions without SOCKS forwards require a non-empty remote host and would
+  /// reject the whole import; with the placeholder they keep an inert rule.
+  Map<String, dynamic> _exportedPortForwardJson(PortForward portForward) {
+    final json = portForward.toJson();
+    if (isDynamicPortForwardType(portForward.forwardType)) {
+      json['remoteHost'] = dynamicPortForwardLegacyRemoteHost;
+    }
+    return json;
+  }
+
   Future<void> _importPortForwards(
     List<Map<String, dynamic>> rawPortForwards, {
     required Map<int, int> hostMapping,
@@ -1004,19 +1056,23 @@ class SecureTransferService {
         continue;
       }
 
+      final forwardType = _requiredString(item, 'forwardType');
+      final isDynamic = isDynamicPortForwardType(forwardType);
       await _db
           .into(_db.portForwards)
           .insert(
             PortForwardsCompanion.insert(
               name: _requiredString(item, 'name'),
               hostId: mappedHostId,
-              forwardType: _requiredString(item, 'forwardType'),
+              forwardType: forwardType,
               localHost: Value(
                 _optionalString(item['localHost']) ?? '127.0.0.1',
               ),
               localPort: _optionalInt(item['localPort']) ?? 0,
-              remoteHost: _requiredString(item, 'remoteHost'),
-              remotePort: _optionalInt(item['remotePort']) ?? 0,
+              // A SOCKS forward has no fixed destination, whatever an export
+              // carries in these fields.
+              remoteHost: isDynamic ? '' : _requiredString(item, 'remoteHost'),
+              remotePort: isDynamic ? 0 : _optionalInt(item['remotePort']) ?? 0,
               autoStart: Value((item['autoStart'] as bool?) ?? false),
               createdAt: Value(
                 _optionalDateTime(item['createdAt']) ?? DateTime.now(),
@@ -1123,12 +1179,22 @@ class SecureTransferService {
       _sortedStringMap(settings),
       hostMapping: hostMapping,
     );
+    // Read before a replace clears it: only this device's own approvals may
+    // carry over to imported custom agents.
+    final localCustomProviders = await _settingsService.getString(
+      SettingKeys.acpCustomProviders,
+    );
     if (clearExisting) {
       await _db.customStatement('DELETE FROM settings');
     }
     for (final entry in preparedSettings.entries) {
-      final value =
-          !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
+      final value = entry.key == SettingKeys.acpCustomProviders
+          ? _mergeImportedCustomProviders(
+              localCustomProviders,
+              entry.value,
+              keepUnmatchedLocal: !clearExisting,
+            )
+          : !clearExisting && _hostScopedSettingsKeys.contains(entry.key)
           ? await _mergeHostScopedSettingValue(entry.key, entry.value)
           : entry.value;
       await _db
@@ -1137,6 +1203,47 @@ class SecureTransferService {
             SettingsCompanion.insert(key: entry.key, value: value),
           );
     }
+  }
+
+  /// Imported custom agents run commands on remote hosts, so an approval
+  /// recorded elsewhere is never trusted: each arrives unapproved unless
+  /// this device already approved its exact fingerprint.
+  String _mergeImportedCustomProviders(
+    String? localValue,
+    String importedValue, {
+    required bool keepUnmatchedLocal,
+  }) {
+    final importedRaw = decodeJsonList(importedValue);
+    // Decode every agent on both sides, so an oversized result is rejected
+    // below rather than cut to the limit.
+    final decoded = decodeMigratedAcpCustomProviders(
+      local: decodeJsonList(localValue),
+      imported: importedRaw,
+    );
+    // Like port forwards, an agent this version cannot read (one written by
+    // a newer app, say) is skipped rather than failing the whole migration.
+    final skippedCount = importedRaw.length - decoded.imported.length;
+    if (skippedCount > 0) {
+      _diagnosticsLogger.warning(
+        'secure_transfer',
+        'migration_import_custom_agents_skipped',
+        fields: {'skippedCount': skippedCount},
+      );
+    }
+    final merged = mergeImportedAcpCustomProviders(
+      local: decoded.local,
+      imported: decoded.imported,
+      keepUnmatchedLocal: keepUnmatchedLocal,
+    );
+    if (merged.length > acpCustomProviderMaxCount) {
+      // Failing the transaction keeps every agent instead of dropping some.
+      throw const FormatException(
+        'This import would leave more than $acpCustomProviderMaxCount custom '
+        'agents. Delete some first, or replace existing data instead of '
+        'merging.',
+      );
+    }
+    return jsonEncode([for (final definition in merged) definition.toJson()]);
   }
 
   List<Map<String, dynamic>> _listFromData(
@@ -1189,7 +1296,9 @@ class SecureTransferService {
     }
     final result = <String, String>{};
     for (final entry in rawSettings.entries) {
-      if (entry.key is String && entry.value is String) {
+      if (entry.key is String &&
+          entry.value is String &&
+          !_deviceLocalSettingsKeys.contains(entry.key)) {
         result[entry.key as String] = entry.value as String;
       }
     }
@@ -1202,7 +1311,7 @@ class SecureTransferService {
   }) {
     final preparedSettings = <String, String>{};
     for (final entry in settings.entries) {
-      if (_deviceLocalSettingsKeys.contains(entry.key) ||
+      if (_isDeviceLocalSetting(entry.key) ||
           entry.key == _legacyPushDisabledHostsKey) {
         continue;
       }

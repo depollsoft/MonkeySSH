@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../domain/models/acp_session_keys.dart';
 import '../domain/models/monetization.dart';
+import '../domain/models/port_forward_type.dart';
 import '../domain/services/auth_service.dart';
 import '../domain/services/local_notification_service.dart';
 import '../domain/services/port_forward_browser_service.dart';
@@ -25,8 +26,10 @@ import '../presentation/screens/settings_screen.dart';
 import '../presentation/screens/sftp_screen.dart';
 import '../presentation/screens/snippet_edit_screen.dart';
 import '../presentation/screens/snippets_screen.dart';
+import '../presentation/screens/ssh_config_import_screen.dart';
 import '../presentation/screens/terminal_screen.dart';
 import '../presentation/screens/upgrade_screen.dart';
+import 'app_link_handler.dart';
 import 'keyboard_dismiss_route_observer.dart';
 import 'routes.dart';
 import 'telemetry_route_observer.dart';
@@ -51,6 +54,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       TelemetryRouteObserver(telemetryService: telemetryService),
       KeyboardDismissRouteObserver(),
     ],
+    // No onEnter guard: any onEnter makes every navigation finish
+    // asynchronously, so `go(home)` followed by `push(terminal)` stacks the
+    // terminal on the old routes instead of above Connections. Platform deep
+    // links never reach the router; AppLinkNavigationBridge takes them first.
     redirect: (context, state) => redirectForAuthState(
       authState: authState,
       matchedLocation: state.matchedLocation,
@@ -93,6 +100,9 @@ final routerProvider = Provider<GoRouter>((ref) {
               state.uri.queryParameters['showKeyboard'] == '1';
           final pasteDemoImage =
               state.uri.queryParameters['pasteDemoImage'] == '1';
+          final linkTap = state.uri.queryParameters[appLinkTapQueryKey];
+          final startPresetAgent =
+              state.uri.queryParameters[appLinkPresetRunQueryKey] == '1';
           if (hostId == null) {
             return _buildTerminalPage(
               state: state,
@@ -133,6 +143,8 @@ final routerProvider = Provider<GoRouter>((ref) {
                   initialTmuxWindowId,
                   initialNativeAcpSessionKey,
                   state.uri.queryParameters['notificationTap'],
+                  linkTap,
+                  startPresetAgent,
                   initiallyExpandTmuxWindows,
                   initiallyShowKeyboard,
                   pasteDemoImage,
@@ -145,7 +157,10 @@ final routerProvider = Provider<GoRouter>((ref) {
               initialTmuxWindowIndex: initialTmuxWindowIndex,
               initialTmuxWindowId: initialTmuxWindowId,
               initialTmuxWindowRequiresVisibleSession:
-                  state.uri.queryParameters['notificationTap'] != null,
+                  state.uri.queryParameters['notificationTap'] != null ||
+                  linkTap != null,
+              openedFromLink: linkTap != null,
+              startPresetAgent: startPresetAgent,
               initiallyExpandTmuxWindows: initiallyExpandTmuxWindows,
               initiallyShowKeyboard: initiallyShowKeyboard,
               pasteDemoImage: pasteDemoImage,
@@ -163,6 +178,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         name: Routes.hostAdd,
         builder: (context, state) =>
             HostEditScreen(initialSshUrl: state.uri.queryParameters['sshUrl']),
+      ),
+      GoRoute(
+        path: '/hosts/import-ssh-config',
+        name: Routes.hostImportSshConfig,
+        builder: (context, state) => const SshConfigImportScreen(),
       ),
       GoRoute(
         path: '/hosts/edit/:hostId',
@@ -315,6 +335,17 @@ final routerProvider = Provider<GoRouter>((ref) {
                 body: Center(
                   child: Text('In-app browser is not supported here.'),
                 ),
+              ),
+            );
+          }
+          final extra = state.extra;
+          if (extra is PortForwardBrowserSocksLaunch &&
+              isDynamicPortForwardType(extra.portForward.forwardType)) {
+            return _buildSlideUpPage<String>(
+              state: state,
+              child: PortForwardBrowserScreen.socks(
+                socksForward: extra.portForward,
+                socksHostLabel: extra.hostLabel,
               ),
             );
           }

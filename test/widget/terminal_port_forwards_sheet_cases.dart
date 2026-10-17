@@ -5,13 +5,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/app/routes.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
 import 'package:monkeyssh/domain/services/port_forward_browser_service.dart';
+import 'package:monkeyssh/domain/services/socks_browser_proxy_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
+import 'package:monkeyssh/presentation/screens/port_forward_browser_screen.dart';
 import 'package:monkeyssh/presentation/widgets/brand_list_skeleton.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_port_forwards_sheet.dart';
 
@@ -89,6 +93,25 @@ class _LiveTestSession extends SshSession {
   }
 
   @override
+  Future<bool> startDynamicForward({
+    required int portForwardId,
+    required int localPort,
+  }) async {
+    starts.add(portForwardId);
+    tunnels[portForwardId] = ActiveTunnelInfo(
+      portForwardId: portForwardId,
+      localHost: '127.0.0.1',
+      localPort: localPort == 0 ? 41080 : localPort,
+      remoteHost: '',
+      remotePort: 0,
+      isLocal: true,
+      isDynamic: true,
+    );
+    changes.add(null);
+    return true;
+  }
+
+  @override
   Future<void> stopForward(int portForwardId) async {
     stops.add(portForwardId);
     tunnels.remove(portForwardId);
@@ -105,6 +128,19 @@ class _TestActiveSessionsNotifier extends ActiveSessionsNotifier {
   final List<SshSession> sessions;
   final SshConnectionState connectionState;
   final List<int> reconfiguredHostIds = [];
+  final Set<int> heldAutomaticForwardHostIds = {};
+  final List<int> releasedHoldHostIds = [];
+
+  @override
+  bool isAutomaticForwardingHeld(int hostId) =>
+      heldAutomaticForwardHostIds.contains(hostId);
+
+  @override
+  Future<void> releaseAutomaticForwardingHold(int hostId) async {
+    heldAutomaticForwardHostIds.remove(hostId);
+    releasedHoldHostIds.add(hostId);
+    await reconfigureAutomaticPortForwardingForHost(hostId);
+  }
 
   @override
   Map<int, SshConnectionState> build() {
@@ -208,6 +244,62 @@ PortForward _portForward() => PortForward(
 
 void registerTerminalPortForwardsSheetTests() {
   group('terminal_port_forwards_sheet', () {
+    testWidgets('a link hold shows detection paused with a start action', (
+      tester,
+    ) async {
+      final portForwardRepository = _MockPortForwardRepository();
+      final hostRepository = MockHostRepository();
+      final session = _LiveTestSession(
+        connectionId: 7,
+        hostId: 10,
+        client: MockSshClient(),
+      );
+      addTearDown(session.changes.close);
+      final notifier = _TestActiveSessionsNotifier([session])
+        ..heldAutomaticForwardHostIds.add(10);
+      when(() => portForwardRepository.watchByHostId(session.hostId))
+          .thenAnswer((_) => Stream.value(const <PortForward>[]));
+
+      await tester.pumpWidget(
+        _buildSheetHost(
+          session: session,
+          notifier: notifier,
+          portForwardRepository: portForwardRepository,
+          hostRepository: hostRepository,
+          hostStream: Stream.value(_host(autoForwardPorts: true)),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+
+      // The setting is on, but nothing is being watched yet.
+      expect(
+        find.text('Watching this host for new remote listeners'),
+        findsNothing,
+      );
+      expect(find.textContaining('Paused'), findsOneWidget);
+      final start = find.byKey(const Key('terminal-auto-forward-ports-resume'));
+      expect(start, findsOneWidget);
+      expect(tester.getSize(start).height, greaterThanOrEqualTo(44));
+
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+
+      expect(notifier.releasedHoldHostIds, [10]);
+      expect(notifier.reconfiguredHostIds, [10]);
+      verifyNever(
+        () => hostRepository.setAutoForwardPorts(
+          any(),
+          enabled: any(named: 'enabled'),
+        ),
+      );
+      expect(start, findsNothing);
+      expect(
+        find.text('Watching this host for new remote listeners'),
+        findsOneWidget,
+      );
+    });
+
     setUpAll(() {
       registerFallbackValue(
         PortForwardsCompanion.insert(
@@ -709,6 +801,185 @@ void registerTerminalPortForwardsSheetTests() {
       await tester.pumpAndSettle();
 
       expect(notifier.reconfiguredHostIds, [10]);
+    });
+
+    testWidgets('SOCKS rule shows its listener and opens the routed browser', (
+      tester,
+    ) async {
+      final repository = _MockPortForwardRepository();
+      final session = _LiveTestSession(
+        connectionId: 7,
+        hostId: 10,
+        client: MockSshClient(),
+      );
+      addTearDown(session.changes.close);
+      final socksForward = PortForward(
+        id: 5,
+        name: 'Office',
+        hostId: 10,
+        forwardType: 'dynamic',
+        localHost: '127.0.0.1',
+        localPort: 0,
+        remoteHost: '',
+        remotePort: 0,
+        autoStart: false,
+        createdAt: DateTime(2026),
+      );
+      when(() => repository.watchByHostId(10))
+          .thenAnswer((_) => Stream.value([socksForward]));
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => Scaffold(
+              body: FilledButton(
+                onPressed: () => unawaited(
+                  showTerminalPortForwardsSheet(
+                    context: context,
+                    hostId: 10,
+                    connectionId: 7,
+                    session: session,
+                    onOpenInBrowser: (_) async {},
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/port-forwards/browser',
+            name: Routes.portForwardBrowser,
+            builder: (context, state) {
+              final launch = state.extra! as PortForwardBrowserSocksLaunch;
+              return Text(
+                'socks ${launch.portForward.name} via ${launch.hostLabel}',
+              );
+            },
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            portForwardRepositoryProvider.overrideWithValue(repository),
+            hostRepositoryProvider.overrideWithValue(MockHostRepository()),
+            hostByIdProvider(10).overrideWith((ref) => Stream.value(_host())),
+            activeSessionsProvider.overrideWith(
+              () => _TestActiveSessionsNotifier([session]),
+            ),
+            socksBrowserRoutingSupportProvider.overrideWithValue(
+              const AsyncData(SocksBrowserRoutingSupport.supported),
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.text('127.0.0.1:auto · SOCKS5 via host'), findsOneWidget);
+      expect(find.text('Stopped'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('port-forward-switch-5')));
+      await tester.pumpAndSettle();
+      expect(session.starts, [5]);
+      expect(find.text('127.0.0.1:41080 · SOCKS5 via host'), findsOneWidget);
+      expect(find.text('Active now'), findsOneWidget);
+
+      await tester.tap(find.text('Office'));
+      await tester.pumpAndSettle();
+      expect(find.text('socks Office via Dev box'), findsOneWidget);
+    });
+
+    testWidgets('a stopped SOCKS rule browses, leaving the start to it', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final repository = _MockPortForwardRepository();
+      final session = _LiveTestSession(
+        connectionId: 7,
+        hostId: 10,
+        client: MockSshClient(),
+      );
+      addTearDown(session.changes.close);
+      when(() => repository.watchByHostId(10)).thenAnswer(
+        (_) => Stream.value([
+          PortForward(
+            id: 5,
+            name: 'Office',
+            hostId: 10,
+            forwardType: 'dynamic',
+            localHost: '127.0.0.1',
+            localPort: 0,
+            remoteHost: '',
+            remotePort: 0,
+            autoStart: false,
+            createdAt: DateTime(2026),
+          ),
+        ]),
+      );
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => Scaffold(
+              body: FilledButton(
+                onPressed: () => unawaited(
+                  showTerminalPortForwardsSheet(
+                    context: context,
+                    hostId: 10,
+                    connectionId: 7,
+                    session: session,
+                    onOpenInBrowser: (_) async {},
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/port-forwards/browser',
+            name: Routes.portForwardBrowser,
+            builder: (context, state) {
+              final launch = state.extra! as PortForwardBrowserSocksLaunch;
+              return Text('socks ${launch.portForward.name}');
+            },
+          ),
+        ],
+      );
+      addTearDown(router.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            portForwardRepositoryProvider.overrideWithValue(repository),
+            hostRepositoryProvider.overrideWithValue(MockHostRepository()),
+            hostByIdProvider(10).overrideWith((ref) => Stream.value(_host())),
+            activeSessionsProvider.overrideWith(
+              () => _TestActiveSessionsNotifier([session]),
+            ),
+            socksBrowserRoutingSupportProvider.overrideWithValue(
+              const AsyncData(SocksBrowserRoutingSupport.supported),
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Stopped'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('^Browse through Office')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Office'));
+      await tester.pumpAndSettle();
+      expect(find.text('socks Office'), findsOneWidget);
+      // The browser starts the forward; the sheet does not.
+      expect(session.starts, isEmpty);
+      semantics.dispose();
     });
   });
 }

@@ -87,7 +87,6 @@ dependencies:
 
   # Network / connectivity
   network_info_plus: ^8.2.1
-  permission_handler: ^13.0.2
   wakelock_plus: ^1.8.0
   sqlite3: ^3.6.0
   firebase_core: ^4.15.0
@@ -96,21 +95,26 @@ dependencies:
   firebase_messaging: ^16.7.0
   firebase_app_check: ^0.4.8
   mime: ^2.1.0
+  qr: ^3.0.2
 
 dependency_overrides:
+  # A process on a host with SSH agent forwarding could stall the app and
+  # exhaust its memory through the forwarded agent channel, and OpenSSH's
+  # refusal of a repeated agent request failed later sessions. Patched copy of
+  # 4.1.0 until the fix ships upstream; see third_party/dartssh2/README.md.
+  dartssh2:
+    path: third_party/dartssh2
   # Play Billing can invoke one callback twice and crash Android while the app
   # is backgrounded. Use the vendored upstream single-reply guard until Flutter
   # packages releases it: https://github.com/flutter/packages/pull/12640
   in_app_purchase_android:
     path: third_party/in_app_purchase_android
-  # permission_handler_apple's Package.swift derives the PERMISSION_* macros by
-  # discovering the host Info.plist, walking up from the working directory and
-  # from #file. A pub.dev install puts #file in ~/.pub-cache, where the walk can
-  # never reach the app, so Xcode.app builds (working directory "/") silently
-  # compile out camera, microphone and location. Vendoring puts #file inside the
-  # repo so every build path agrees. Tracking removal in #790.
-  permission_handler_apple:
-    path: third_party/permission_handler_apple
+  # The SOCKS browser keeps each host's website data in its own iOS 17
+  # WKWebsiteDataStore, which must be set on the web view's configuration
+  # before the plugin creates the WKWebView. 3.26.1 plus two accessors for
+  # that configuration; see third_party/webview_flutter_wkwebview/UPSTREAM.md.
+  webview_flutter_wkwebview:
+    path: third_party/webview_flutter_wkwebview
 
 dev_dependencies:
   flutter_test:

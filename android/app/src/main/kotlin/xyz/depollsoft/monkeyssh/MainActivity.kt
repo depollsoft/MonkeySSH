@@ -24,7 +24,6 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterFragmentActivity() {
     companion object {
         private val transferExecutor = Executors.newSingleThreadExecutor()
-        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
         private const val MAX_CLIPBOARD_CONTENT_URI_BYTES = 512 * 1024
         private const val MONKEYSSH_TRANSFER_MIME_TYPE = "application/x-monkeyssh-transfer"
         private const val MONKEYSSH_TRANSFER_EXTENSION = ".monkeysshx"
@@ -32,6 +31,8 @@ class MainActivity : FlutterFragmentActivity() {
             "xyz.depollsoft.monkeyssh/terminal_ime_keys"
         private const val KEYBOARD_VISIBILITY_CHANNEL =
             "xyz.depollsoft.monkeyssh/keyboard_visibility"
+        private const val APP_LINK_CHANNEL = "xyz.depollsoft.monkeyssh/app_links"
+        private val APP_LINK_SCHEMES = setOf("monkeyssh", "ssh")
     }
 
     private val clipboardChannel = "xyz.depollsoft.monkeyssh/clipboard_content"
@@ -41,6 +42,10 @@ class MainActivity : FlutterFragmentActivity() {
     private var transferMethodChannel: MethodChannel? = null
     private var terminalImeKeyMethodChannel: MethodChannel? = null
     private var keyboardVisibilityMethodChannel: MethodChannel? = null
+    private var appLinkMethodChannel: MethodChannel? = null
+
+    // Newest monkeyssh:// or ssh:// link not yet pulled by Dart.
+    private var pendingAppLink: String? = null
     private var terminalImeKeyInterceptionEnabled = false
     private var pendingTransferPayload: String? = null
     private var transferGeneration = 0
@@ -52,6 +57,11 @@ class MainActivity : FlutterFragmentActivity() {
         SshServiceChannelHandler.attachActivity(this)
         installKeyboardVisibilityListener()
         handleTransferIntent(intent)
+        // A recreated activity replays the intent it was launched with; only
+        // a fresh launch carries a new link.
+        if (savedInstanceState == null) {
+            captureAppLink(intent)
+        }
     }
 
     override fun getCachedEngineId(): String {
@@ -189,7 +199,24 @@ class MainActivity : FlutterFragmentActivity() {
             },
         )
 
+        appLinkMethodChannel =
+            MethodChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                APP_LINK_CHANNEL,
+            )
+        appLinkMethodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "consumePendingLink" -> {
+                    result.success(pendingAppLink)
+                    pendingAppLink = null
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
         notifyIncomingTransferPayload()
+        notifyAppLinkAvailable()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -274,6 +301,7 @@ class MainActivity : FlutterFragmentActivity() {
         setIntent(intent)
         super.onNewIntent(intent)
         handleTransferIntent(intent)
+        captureAppLink(intent)
     }
 
     override fun onDestroy() {
@@ -289,6 +317,8 @@ class MainActivity : FlutterFragmentActivity() {
         terminalImeKeyMethodChannel = null
         keyboardVisibilityMethodChannel?.setMethodCallHandler(null)
         keyboardVisibilityMethodChannel = null
+        appLinkMethodChannel?.setMethodCallHandler(null)
+        appLinkMethodChannel = null
         super.onDestroy()
     }
 
@@ -303,20 +333,6 @@ class MainActivity : FlutterFragmentActivity() {
     private fun isVirtualKeyboardEvent(event: KeyEvent): Boolean =
         event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
             event.device?.isVirtual == true
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (
-            requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE &&
-            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-        ) {
-            SshConnectionService.refresh(this)
-        }
-    }
 
     fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
@@ -333,11 +349,21 @@ class MainActivity : FlutterFragmentActivity() {
         if (hasRequestedNotificationPermission) {
             return
         }
+        // The permissions plugin queues this behind any prompt Dart already
+        // has up and records a denial the way Dart's own requests do.
+        val permissions =
+            MonkeySshApplication.from(this)
+                .ensureSharedFlutterEngine()
+                .plugins
+                .get(AppPermissionsPlugin::class.java) as? AppPermissionsPlugin
+                ?: return
         hasRequestedNotificationPermission = true
-        requestPermissions(
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            NOTIFICATION_PERMISSION_REQUEST_CODE,
-        )
+        val appContext = applicationContext
+        permissions.requestNotifications { granted ->
+            if (granted) {
+                SshConnectionService.refresh(appContext)
+            }
+        }
     }
 
     private fun handleTransferIntent(intent: Intent?) {
@@ -426,6 +452,37 @@ class MainActivity : FlutterFragmentActivity() {
     private fun notifyIncomingTransferPayload() {
         val payload = pendingTransferPayload ?: return
         transferMethodChannel?.invokeMethod("onIncomingTransferPayload", payload)
+    }
+
+    /**
+     * Holds a monkeyssh:// or ssh:// link for Dart and signals that one is
+     * waiting. Dart pulls it with consumePendingLink, which also runs at app
+     * startup, so a link is delivered once even before Dart is listening.
+     */
+    private fun captureAppLink(intent: Intent?) {
+        val linkIntent = intent ?: return
+        if (linkIntent.action != Intent.ACTION_VIEW) {
+            return
+        }
+        // Reopening the task from Recents replays the intent that first
+        // launched it; that link was already handled.
+        if ((linkIntent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+            return
+        }
+        val link = linkIntent.data ?: return
+        val scheme = link.scheme?.lowercase(Locale.ROOT) ?: return
+        if (scheme !in APP_LINK_SCHEMES) {
+            return
+        }
+        pendingAppLink = link.toString()
+        notifyAppLinkAvailable()
+    }
+
+    private fun notifyAppLinkAvailable() {
+        if (pendingAppLink == null) {
+            return
+        }
+        appLinkMethodChannel?.invokeMethod("linkAvailable", null)
     }
 
     private fun isTransferIntent(intent: Intent?): Boolean {

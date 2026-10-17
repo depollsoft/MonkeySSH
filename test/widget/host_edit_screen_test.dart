@@ -1,19 +1,28 @@
 // ignore_for_file: public_member_api_docs
 
-import 'package:drift/drift.dart' show InvalidDataException;
+import 'dart:async';
+
+import 'package:drift/drift.dart' show InvalidDataException, Value;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/models/agent_launch_preset.dart';
+import 'package:monkeyssh/domain/models/agent_worktree.dart';
 import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/port_proxy_name.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
+import 'package:monkeyssh/domain/services/app_permission_service.dart';
+import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
+import 'package:monkeyssh/domain/services/telemetry_service.dart';
+import 'package:monkeyssh/domain/services/wifi_network_service.dart';
+import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/screens/host_edit_screen.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 
@@ -99,6 +108,59 @@ MonetizationService _buildProMonetizationService() {
   // ignore: unnecessary_lambdas
   when(() => service.initialize()).thenAnswer((_) => Future<void>.value());
   return service;
+}
+
+class _FixedWifiNetworkService extends WifiNetworkService {
+  _FixedWifiNetworkService(this.permission, {this.reply});
+
+  final WifiPermissionStatus permission;
+
+  /// When set, requestPermission returns this instead of [permission].
+  final Future<WifiPermissionStatus>? reply;
+
+  @override
+  Future<WifiPermissionStatus> requestPermission() async => reply ?? permission;
+
+  @override
+  Future<String?> getCurrentSsid() async => null;
+}
+
+/// The permissions channel was never registered (a build bug).
+class _MissingChannelWifiNetworkService extends WifiNetworkService {
+  @override
+  Future<WifiPermissionStatus> requestPermission() async =>
+      throw MissingPluginException('No implementation found');
+}
+
+class _RecordingTelemetryService extends TelemetryService {
+  _RecordingTelemetryService()
+    : super(
+        status: TelemetryServiceStatus.disabledByBuild,
+        collectionEnabled: false,
+        diagnosticsLogger: const NoopDiagnosticsLogger(),
+      );
+
+  final nonFatalErrors = <Object>[];
+
+  @override
+  Future<void> recordError(
+    Object error,
+    StackTrace stackTrace, {
+    required bool fatal,
+    bool absorbed = false,
+  }) async {
+    if (!fatal) nonFatalErrors.add(error);
+  }
+}
+
+class _RecordingAppPermissionService extends AppPermissionService {
+  int openAppSettingsCalls = 0;
+
+  @override
+  Future<bool> openAppSettings() async {
+    openAppSettingsCalls++;
+    return true;
+  }
 }
 
 class _RejectingHostRepository extends FakeHostRepository {
@@ -930,6 +992,40 @@ void main() {
       expect(harness.hostRepository.insertedHost, isNull);
     });
 
+    for (final keys in [false, true]) {
+      testWidgets('warns that auto-connect types key tokens, keys=$keys', (
+        tester,
+      ) async {
+        final fixture = HostEditFixture(
+          host: _testHost(
+            id: 1,
+            label: 'Agent Host',
+            autoConnectSnippetId: 7,
+            autoConnectRequiresConfirmation: false,
+          ),
+        );
+        await fixture.setSurfaceSize(tester);
+        await fixture.pump(
+          tester,
+          snippets: [
+            _testSnippet(
+              id: 7,
+              name: 'Start agent',
+              command: keys ? 'claude{key:enter}' : r'echo \{key:enter}',
+            ),
+          ],
+        );
+
+        expect(
+          find.byKey(
+            const ValueKey('auto-connect-key-snippet-warning'),
+            skipOffstage: false,
+          ),
+          keys ? findsOneWidget : findsNothing,
+        );
+      });
+    }
+
     testWidgets(
       'preserves imported auto-connect review when saving unrelated edits',
       (tester) async {
@@ -1327,6 +1423,241 @@ void main() {
       },
     );
 
+    testWidgets(
+      'saves worktree settings and the initial prompt on the preset',
+      (tester) async {
+        final fixture = HostEditFixture(
+          host: _testHost(
+            id: 1,
+            label: 'Agent Host',
+            autoConnectRequiresConfirmation: false,
+          ),
+        );
+        await fixture.setSurfaceSize(tester);
+
+        final presetService = _MockAgentLaunchPresetService();
+        const preset = AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          initialPrompt: 'Summarise the open tasks.',
+        );
+        when(() => presetService.getPresetForHost(1))
+            .thenAnswer((_) async => preset);
+        when(() => presetService.setPresetForHost(1, any()))
+            .thenAnswer((_) async {});
+        when(() => presetService.deletePresetForHost(1))
+            .thenAnswer((_) async {});
+
+        await fixture.pump(
+          tester,
+          overrides: [
+            monetizationStateProvider.overrideWith(
+              (ref) => Stream.value(_proMonetizationState),
+            ),
+            agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+          ],
+        );
+
+        expect(
+          _fieldText(tester, const Key('host-agent-initial-prompt-field')),
+          'Summarise the open tasks.',
+        );
+        final toggle = find.byKey(const Key('host-agent-worktree-switch'));
+        await tester.ensureVisible(toggle);
+        await tester.tap(toggle);
+        await tester.pump();
+        await tester.enterText(
+          find.byKey(const Key('host-agent-worktree-base-field')),
+          'origin/main',
+        );
+        await tester.pump();
+
+        await _tapBottomSave(
+          tester,
+          duration: const Duration(milliseconds: 350),
+        );
+
+        final saved =
+            verify(() => presetService.setPresetForHost(1, captureAny()))
+                    .captured
+                    .single
+                as AgentLaunchPreset;
+        expect(
+          saved.worktree,
+          const AgentWorktreeLaunchOptions(baseRef: 'origin/main'),
+        );
+        expect(saved.initialPrompt, 'Summarise the open tasks.');
+        expect(saved.workingDirectory, '~/src/app');
+      },
+    );
+
+    testWidgets('refuses to save a worktree branch template git rejects', (
+      tester,
+    ) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      final branchField = find.byKey(
+        const Key('host-agent-worktree-branch-field'),
+      );
+      await tester.ensureVisible(branchField);
+      await tester.enterText(branchField, 'agent..{id}');
+      await tester.pump();
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(
+          tester,
+          const Key('host-agent-worktree-branch-field'),
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('focuses the worktree field that needs fixing', (tester) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          tmuxSessionName: 'agents',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      final baseField = find.byKey(const Key('host-agent-worktree-base-field'));
+      await tester.ensureVisible(baseField);
+      await tester.enterText(baseField, '--upload-pack=x');
+      await tester.pump();
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-worktree-base-field')),
+        isTrue,
+      );
+    });
+
+    testWidgets('requires a session before saving a worktree preset', (
+      tester,
+    ) async {
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Agent Host',
+          autoConnectRequiresConfirmation: false,
+        ),
+      );
+      await fixture.setSurfaceSize(tester);
+
+      final presetService = _MockAgentLaunchPresetService();
+      when(() => presetService.getPresetForHost(1)).thenAnswer(
+        (_) async => const AgentLaunchPreset(
+          tool: AgentLaunchTool.codex,
+          workingDirectory: '~/src/app',
+          worktree: AgentWorktreeLaunchOptions(),
+        ),
+      );
+      when(() => presetService.setPresetForHost(1, any()))
+          .thenAnswer((_) async {});
+      when(() => presetService.deletePresetForHost(1)).thenAnswer((_) async {});
+
+      await fixture.pump(
+        tester,
+        overrides: [
+          monetizationStateProvider.overrideWith(
+            (ref) => Stream.value(_proMonetizationState),
+          ),
+          agentLaunchPresetServiceProvider.overrideWithValue(presetService),
+        ],
+      );
+
+      // The session reads as required, above the worktree switch that
+      // needs it, before any save attempt.
+      expect(find.text('MonkeyMux session'), findsOneWidget);
+      expect(find.text('MonkeyMux session (optional)'), findsNothing);
+      expect(
+        find.text(
+          'Required for worktree launches, so reconnecting returns to the '
+          'same worktree.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getTopLeft(find.byKey(const Key('host-agent-tmux-session-field')))
+            .dy,
+        lessThan(
+          tester
+              .getTopLeft(find.byKey(const Key('host-agent-worktree-switch')))
+              .dy,
+        ),
+      );
+
+      await _tapBottomSave(tester, duration: const Duration(milliseconds: 350));
+
+      verifyNever(() => presetService.setPresetForHost(1, any()));
+      expect(
+        _textFieldHasFocus(tester, const Key('host-agent-tmux-session-field')),
+        isTrue,
+      );
+    });
+
     testWidgets('validates agent tmux flags before saving', (tester) async {
       final fixture = HostEditFixture(
         host: _testHost(
@@ -1687,5 +2018,182 @@ void main() {
         expect(hostRepository.updatedHost!.terminalFontFamily, isNull);
       },
     );
+
+    Future<HostEditFixture> pumpBehindJumpHost(
+      WidgetTester tester, {
+      required WifiNetworkService wifi,
+      AppPermissionService? permissions,
+      TelemetryService? telemetry,
+    }) async {
+      final jumpHost = _testHost(
+        id: 2,
+        label: 'Bastion',
+        autoConnectRequiresConfirmation: false,
+      );
+      final fixture = HostEditFixture(
+        host: _testHost(
+          id: 1,
+          label: 'Behind Bastion',
+          autoConnectRequiresConfirmation: false,
+        ).copyWith(jumpHostId: const Value(2)),
+      );
+      await fixture.setSurfaceSize(tester);
+      await fixture.pump(
+        tester,
+        overrides: [
+          allHostsProvider.overrideWith(
+            (ref) => Stream.value([fixture.host, jumpHost]),
+          ),
+          wifiNetworkServiceProvider.overrideWithValue(wifi),
+          if (permissions != null)
+            appPermissionServiceProvider.overrideWithValue(permissions),
+          if (telemetry != null)
+            telemetryServiceProvider.overrideWithValue(telemetry),
+        ],
+      );
+      return fixture;
+    }
+
+    Future<Finder> tapAddCurrentWifi(WidgetTester tester) async {
+      final addCurrent = find.byKey(const Key('skip-jump-add-current-ssid'));
+      await tester.scrollUntilVisible(
+        addCurrent,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(addCurrent);
+      await tester.pump();
+      return addCurrent;
+    }
+
+    final notice = find.byKey(const Key('skip-jump-wifi-notice'));
+    final openSettings = find.byKey(const Key('skip-jump-open-settings'));
+
+    for (final (permission, message, offersSettings) in [
+      (
+        WifiPermissionStatus.permanentlyDenied,
+        'Location permission is off',
+        true,
+      ),
+      (WifiPermissionStatus.denied, 'Location permission is needed', false),
+      (WifiPermissionStatus.approximate, 'Precise location is off', true),
+    ]) {
+      testWidgets(
+        '${offersSettings ? 'offers' : 'omits'} app settings when Wi-Fi '
+        'location access is ${permission.name}',
+        (tester) async {
+          final permissions = _RecordingAppPermissionService();
+          await pumpBehindJumpHost(
+            tester,
+            wifi: _FixedWifiNetworkService(permission),
+            permissions: permissions,
+          );
+
+          await tapAddCurrentWifi(tester);
+          await tester.pump();
+
+          expect(
+            find.descendant(of: notice, matching: find.textContaining(message)),
+            findsOneWidget,
+          );
+          // Inline under the button, not a snackbar over Save Changes.
+          expect(find.byType(SnackBar), findsNothing);
+          if (!offersSettings) {
+            expect(openSettings, findsNothing);
+            return;
+          }
+          await tester.ensureVisible(openSettings);
+          await tester.tap(openSettings);
+          await tester.pump();
+
+          expect(permissions.openAppSettingsCalls, 1);
+          // Still there for a user who comes back without changing anything.
+          expect(notice, findsOneWidget);
+        },
+      );
+    }
+
+    testWidgets('stops waiting on a location prompt that never answers', (
+      tester,
+    ) async {
+      await pumpBehindJumpHost(
+        tester,
+        wifi: _FixedWifiNetworkService(
+          WifiPermissionStatus.granted,
+          reply: Completer<WifiPermissionStatus>().future,
+        ),
+      );
+
+      final addCurrent = await tapAddCurrentWifi(tester);
+      expect(tester.widget<OutlinedButton>(addCurrent).onPressed, isNull);
+
+      await tester.pump(const Duration(seconds: 61));
+
+      // No decision was made, so this is not the permission message.
+      expect(
+        find.textContaining('No answer from the location prompt'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Location permission'), findsNothing);
+      expect(tester.widget<OutlinedButton>(addCurrent).onPressed, isNotNull);
+    });
+
+    testWidgets('reports a missing permissions channel instead of failing '
+        'silently', (tester) async {
+      final telemetry = _RecordingTelemetryService();
+      await pumpBehindJumpHost(
+        tester,
+        wifi: _MissingChannelWifiNetworkService(),
+        telemetry: telemetry,
+      );
+
+      final addCurrent = await tapAddCurrentWifi(tester);
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.descendant(
+          of: notice,
+          matching: find.textContaining('not available in this build'),
+        ),
+        findsOneWidget,
+      );
+      expect(telemetry.nonFatalErrors, [isA<MissingPluginException>()]);
+      expect(tester.widget<OutlinedButton>(addCurrent).onPressed, isNotNull);
+    });
+
+    testWidgets('clears the Wi-Fi notice once a network is added', (
+      tester,
+    ) async {
+      await pumpBehindJumpHost(
+        tester,
+        wifi: _FixedWifiNetworkService(WifiPermissionStatus.granted),
+      );
+
+      await tapAddCurrentWifi(tester);
+      await tester.pump();
+      expect(
+        find.textContaining('Could not detect the current Wi-Fi network'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('skip-jump-add-manual-ssid')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      final dialog = find.byType(AlertDialog);
+      await tester.enterText(
+        find.descendant(of: dialog, matching: find.byType(TextField)),
+        'Office',
+      );
+      await tester.tap(find.descendant(of: dialog, matching: find.text('Add')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        find.byKey(const ValueKey('skip-jump-ssid-Office')),
+        findsOneWidget,
+      );
+      expect(notice, findsNothing);
+    });
   });
 }

@@ -21,6 +21,7 @@ import UserNotifications
   private var transferChannel: FlutterMethodChannel?
   private var appleDatabaseChannel: FlutterMethodChannel?
   private var keyboardVisibilityChannel: FlutterMethodChannel?
+  private var socksBrowserProxyChannel: SocksBrowserProxyChannel?
   private var pushNotificationContextChannel: FlutterMethodChannel?
   /// Serial, so a delete and a later write reach the keychain in call order.
   private let pushNotificationContextQueue = DispatchQueue(
@@ -39,11 +40,13 @@ import UserNotifications
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    AppPermissionsPlugin.register(in: self)
     if let registrar = self.registrar(forPlugin: "AppDelegateBridge") {
       setupBackgroundSshChannel(with: registrar)
       setupTransferChannel(with: registrar)
       setupAppleDatabaseChannel(with: registrar)
       setupKeyboardVisibilityChannel(with: registrar)
+      socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
       setupPushNotificationContextChannel(with: registrar)
     } else {
       NSLog("Failed to configure AppDelegate method channels.")

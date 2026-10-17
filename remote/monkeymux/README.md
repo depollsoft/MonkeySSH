@@ -111,6 +111,49 @@ writer disconnects. Provider-originated JSON-RPC requests, including permission
 requests, remain pending while no client is attached. MonkeyMux never creates a
 permission response.
 
+The bridge hello advertises `"capabilities":["writer_lease"]`. A client that
+lists the same capability in its own hello may also send a short `deviceLabel`
+(for example `iPad`; never a hostname or user name) and an opaque per-process
+`clientToken`. When such a client cannot write, the bridge answers with a hello
+carrying `canSend:false` and `writer:{"label":...,"idleSeconds":N}`, where
+`idleSeconds` counts from the writer's last input, and then sends nothing else;
+the client closes the connection. `list` and `status` report the same `writer`
+for an attached writer, with `stale:true` once it has gone quiet. Attaching
+with `"takeover":true` moves the lease to the new client. The lease also moves
+without asking when the attaching client presents the writer's own
+`clientToken` (the same app process reconnecting while its old connection is
+half-open), or when a lease-aware writer has sent no frame for 90 seconds;
+those writers send an `ack` heartbeat well inside that bound. An older client
+sends nothing while its user reads, so it keeps the lease until another client
+takes it over explicitly. A lease-aware client resuming from a `lastAck` after
+a different client held the lease gets the same `canSend:false` answer even if
+the lease is free, because the replay from that position may contain requests
+the other client already answered; it continues with a fresh attach.
+
+The displaced writer stops receiving output at once. A lease-aware one is sent
+`{"type":"lease","writer":{"label":...},"acceptedInputs":N}` ahead of any
+queued output, where `acceptedInputs` counts the input frames the bridge took
+from that connection before the lease moved (later ones were dropped; zero is
+written out), and is disconnected 10 seconds later even if it never reads it.
+If the provider fails to take an input frame, that frame is not counted and
+the connection's later input is refused with the provider error, so the count
+is always the exact prefix the provider received. The bridge also remembers
+each lease-aware connection's count when it ends. A client names, as
+`previousClientId`, the `clientId` of its last connection whose hello it read,
+and the next hello reports that connection's count as
+`previousAcceptedInputs` (only for the same `clientToken`), so a client that
+reconnects knows which of its prompts the old connection delivered, even if a
+reconnect in between never got its hello back. Any other client is
+disconnected so it reattaches as a reader. Pending provider requests and
+in-flight turns belong to the bridge, so they carry over to the new writer,
+which receives them through the normal attach replay. Only one answer to a
+provider request reaches the provider; a second answer from another client is
+dropped without touching the request, so it can still be replayed if the
+first answer cannot be written. If the provider cancels the request while
+that answer is being written and the write then fails, the bridge answers it
+as cancelled instead of replaying it. A resuming client without a token is always
+sent to a fresh attach, since the bridge cannot tell it wrote last.
+
 The replay buffer is memory-only. Bridge metadata exposed by `list` and
 `status` contains bounded provider/session IDs, working directory, state,
 counts, timing, and a command hash so clients can rediscover native windows; it
@@ -198,6 +241,15 @@ environment and add terminal defaults such as `TERM=xterm-256color` and
 usable terminal hints. They also advertise `FORCE_HYPERLINK=1` (unless already
 set) so OSC 8 capable CLIs such as Copilot and `gh` emit clickable hyperlinks,
 which MonkeySSH renders and opens.
+
+SSH agent forwarding outlives reconnects through a stable path. sshd gives
+each forwarding connection its own agent socket and deletes it when the
+connection closes, while windows outlive connections. On POSIX hosts every
+`attach`, `new-session`, `control` and `acp` command whose `SSH_AUTH_SOCK` is a
+live socket points `agent.sock` in the MonkeyMux runtime directory at it, and
+windows and ACP agents started after that get `SSH_AUTH_SOCK` set to the link,
+so `git push` in a window opened before a reconnect uses the agent the client
+is forwarding now. Hosts that never forward keep their own `SSH_AUTH_SOCK`.
 
 Window switching and reconnect repaint from raw byte history for the selected
 window. Main-screen shell history is capped for responsive switching; active

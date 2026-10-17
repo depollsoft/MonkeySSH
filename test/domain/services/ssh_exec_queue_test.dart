@@ -163,6 +163,30 @@ void main() {
       },
     );
 
+    test('a queued job runs in the zone it was submitted from', () async {
+      const tag = #submitter;
+      final release = Completer<void>();
+      final seen = <String, Object?>{};
+      Future<void> submit(String name, {Future<void>? hold}) => runZoned(
+        () => runQueuedSshExec(9, () async {
+          seen[name] = Zone.current[tag];
+          await hold;
+        }),
+        zoneValues: {tag: name},
+      );
+
+      // Two jobs fill the connection; the third waits and is started by
+      // whichever of them finishes, which must not lend it its own zone.
+      final quiet = submit('quiet', hold: release.future);
+      final other = submit('other', hold: release.future);
+      final queued = submit('queued');
+      expect(pendingQueuedSshExecCountForTesting(9), 1);
+      release.complete();
+      await Future.wait([quiet, other, queued]);
+
+      expect(seen, {'quiet': 'quiet', 'other': 'other', 'queued': 'queued'});
+    });
+
     test('propagates operation errors to the caller', () async {
       await expectLater(
         runQueuedSshExec<void>(3, () => throw StateError('boom')),

@@ -43,6 +43,16 @@ void registerTerminalScreenLayoutTests() {
         expect(resolveTerminalScreenCanPop(isTmuxBarExpanded: true), isFalse);
       });
 
+      test('an open find bar takes Back before the screen', () {
+        expect(
+          resolveTerminalScreenCanPop(
+            isTmuxBarExpanded: false,
+            isFindBarOpen: true,
+          ),
+          isFalse,
+        );
+      });
+
       test('native mode hides only terminal-viewport menu actions', () {
         expect(
           resolveShowTerminalViewportMenuActions(nativeAgentActive: false),
