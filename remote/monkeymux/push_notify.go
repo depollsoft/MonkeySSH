@@ -54,7 +54,17 @@ const (
 	pushBridgePollInterval = 2 * time.Second
 	pushResponseBodyLimit  = 4096
 	pushEventQueueSize     = 64
+	// An agent that needs the user or finishes its turn often rings the bell
+	// or posts a desktop notification too. A window alert within this long
+	// after the window's status push is the same event and is not pushed:
+	// the window has one notification, and the status push says more.
+	pushStatusAlertGrace = 15 * time.Second
 )
+
+// pushAlertHold is how long a window alert waits before it is pushed, so a
+// status change the same output reports (often in the next read) wins. Tests
+// shorten it.
+var pushAlertHold = 1500 * time.Millisecond
 
 // Event categories a registration can ask for (push_register's events).
 // Permission and input requests are "attention"; a window alert is "bell"
@@ -150,6 +160,13 @@ type pushAlertEvent struct {
 	kind       string
 }
 
+// pushHeldAlert is a window alert waiting out pushAlertHold.
+type pushHeldAlert struct {
+	windowID   string
+	categories pushAlertCategories
+	at         time.Time
+}
+
 // Results reported by push_test and push_register.
 const (
 	pushResultSent          = "sent"
@@ -222,6 +239,9 @@ type pushControlRequest struct {
 	Alerts  bool     `json:"alerts,omitempty"`
 	Notices *bool    `json:"notices,omitempty"`
 	Bridges []string `json:"bridges,omitempty"`
+	// Status says it raises the approvals, questions and finished turns
+	// terminal programs report (OSC 7501) for this connection itself.
+	Status bool `json:"status,omitempty"`
 }
 
 // pushControlResult carries push fields on a control response.
@@ -231,6 +251,10 @@ type pushControlResult struct {
 	// will receive. Helpers before 0.1.233 ignore the request's events and
 	// echo nothing, which tells the app they cannot filter.
 	Events *[]string `json:"events,omitempty"`
+	// Status, on push_presence_ack, says this helper honors the presence's
+	// status claim. Earlier helpers ack without it and push program status
+	// regardless, so the app must not raise it as well.
+	Status bool `json:"status,omitempty"`
 }
 
 // pushPresence is what one device last told this server about itself.
@@ -244,7 +268,10 @@ type pushPresence struct {
 	localNotices bool
 	// localBridges are the bridges the backgrounded app raises events for.
 	localBridges map[string]bool
-	reportedAt   time.Time
+	// localStatus says the backgrounded app raises terminal programs' status
+	// events (approvals, questions, finished turns) itself.
+	localStatus bool
+	reportedAt  time.Time
 	// viewed records when a report last saw the device viewing each window.
 	viewed map[string]time.Time
 }
@@ -296,6 +323,9 @@ type pushServerView struct {
 	// encrypted payload.
 	agents map[string]string
 	titles map[string]string
+	// blocked holds the windows whose program reports it is waiting on the
+	// user (OSC 7501 blocked).
+	blocked map[string]bool
 }
 
 // pushJob is one event addressed to one device.
@@ -330,6 +360,12 @@ type pushNotifier struct {
 	// device has been sent. A pending request below it is re-raised later.
 	delivered map[pushAttentionKey]uint64
 	deferred  []pushDeferred
+	// held are window alerts waiting out pushAlertHold.
+	held []pushHeldAlert
+	// statusAt records, per window, when its last status push (an approval,
+	// question or finished turn) was raised, so an alert for the same event
+	// is not pushed as well.
+	statusAt map[string]time.Time
 	// inflight tracks posts so tests can wait for them.
 	inflight sync.WaitGroup
 }
@@ -352,6 +388,7 @@ func newPushNotifier() *pushNotifier {
 		backoffUntil: map[pushBudgetKey]time.Time{},
 		bridges:      map[string]pushBridgeBaseline{},
 		delivered:    map[pushAttentionKey]uint64{},
+		statusAt:     map[string]time.Time{},
 	}
 	notifier.store.now = func() time.Time { return notifier.now() }
 	return notifier
@@ -437,7 +474,12 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 		clientID := strings.TrimSpace(request.ClientID)
 		view := s.pushView([]string{clientID})
 		notifier.recordPresence(deviceID, clientID, push, view)
-		return controlResponse{ID: request.ID, Type: "push_presence_ack", Status: "ok"}
+		return controlResponse{
+			ID:     request.ID,
+			Type:   "push_presence_ack",
+			Status: "ok",
+			Push:   &pushControlResult{Status: true},
+		}
 	case "push_test":
 		if !pushDeviceIDPattern.MatchString(deviceID) {
 			return fail(errPushInvalidDeviceID)
@@ -566,8 +608,12 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 		attached: map[string]bool{},
 		agents:   map[string]string{},
 		titles:   map[string]string{},
+		blocked:  map[string]bool{},
 	}
 	for _, window := range s.windows {
+		if window.programStatusSummaryLocked().state == "blocked" {
+			view.blocked[window.id] = true
+		}
 		// The resolved tool, as the window bar shows it: the live command, else
 		// what the window retains (its recorded tool, title or name).
 		agent := pushAgentName(window.agentToolLocked())
@@ -623,6 +669,7 @@ func (n *pushNotifier) recordPresence(
 		notices = *report.Notices
 	}
 	presence.localNotices = presence.local && notices
+	presence.localStatus = presence.local && report.Status
 	presence.localBridges = map[string]bool{}
 	if presence.local {
 		for _, bridgeID := range report.Bridges {
@@ -659,8 +706,9 @@ func (n *pushNotifier) attendingLocked(
 
 // coveredLocallyLocked reports whether the app on that device is alive in the
 // background with this attach and says it raises this event itself: window
-// alerts while its window bar is mounted, and native agent events from a
-// bridge it is attached to. For an alert, alerts are the categories the
+// alerts while its window bar is mounted, terminal programs' status events
+// when it claims them, and native agent events from a bridge it is attached
+// to. For an alert, alerts are the categories the
 // device would be told about, and the app must cover each of them. The claim
 // lapses after pushLocalTTL.
 func (n *pushNotifier) coveredLocallyLocked(
@@ -685,7 +733,14 @@ func (n *pushNotifier) coveredLocallyLocked(
 		}
 		return true
 	}
-	return bridgeID != "" && presence.localBridges[bridgeID]
+	if bridgeID != "" {
+		return presence.localBridges[bridgeID]
+	}
+	switch kind {
+	case pushKindPermission, pushKindInput, pushKindFinished:
+		return presence.localStatus
+	}
+	return false
 }
 
 // admitLocked applies backoff, coalescing and the hourly cap of the event's
@@ -775,13 +830,86 @@ func (s *muxServer) notePushProgramStatus(windowID string, kind string) {
 	}
 }
 
-// deliverPushAlertEvent raises the push for an event the PTY reader queued.
+// deliverPushAlertEvent raises the push for an event the PTY reader queued. A
+// status change is pushed at once; an alert waits out pushAlertHold (see
+// releaseHeldPushAlerts) so a status change right after it wins.
 func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
+	notifier := s.pushNotifier()
 	if event.kind != "" {
 		s.raisePush(event.windowID, event.kind, "", 0)
 		return
 	}
-	s.raisePushAlert(event.windowID, event.categories)
+	if event.categories == 0 {
+		return
+	}
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	for index, held := range notifier.held {
+		if held.windowID == event.windowID {
+			notifier.held[index].categories |= event.categories
+			return
+		}
+	}
+	if len(notifier.held) >= pushEventQueueSize {
+		notifier.held = notifier.held[1:]
+	}
+	notifier.held = append(notifier.held, pushHeldAlert{
+		windowID:   event.windowID,
+		categories: event.categories,
+		at:         notifier.now(),
+	})
+}
+
+// releaseHeldPushAlerts pushes the held alerts whose hold has passed, and
+// returns how long until the next one is due, or 0 when none is held.
+func (s *muxServer) releaseHeldPushAlerts() time.Duration {
+	notifier := s.pushNotifier()
+	now := notifier.now()
+	notifier.mu.Lock()
+	due := make([]pushHeldAlert, 0, len(notifier.held))
+	kept := notifier.held[:0]
+	var next time.Duration
+	for _, held := range notifier.held {
+		wait := pushAlertHold - now.Sub(held.at)
+		if wait <= 0 {
+			due = append(due, held)
+			continue
+		}
+		kept = append(kept, held)
+		if next == 0 || wait < next {
+			next = wait
+		}
+	}
+	notifier.held = kept
+	notifier.mu.Unlock()
+	for _, held := range due {
+		s.raisePushAlert(held.windowID, held.categories)
+	}
+	return next
+}
+
+// noteStatusLocked records a status push for windowID. An alert held for the
+// window is released after it and dropped then (see alertRedundantLocked).
+func (n *pushNotifier) noteStatusLocked(windowID string) {
+	now := n.now()
+	for candidate, at := range n.statusAt {
+		if now.Sub(at) >= pushStatusAlertGrace {
+			delete(n.statusAt, candidate)
+		}
+	}
+	n.statusAt[windowID] = now
+}
+
+// alertRedundantLocked reports whether a window alert would only repeat the
+// window's status: its program is waiting on the user, so the approval or
+// question push covers it, or its status was pushed a moment ago. Pushing it
+// would replace that better notification, which shares the window's slot.
+func (n *pushNotifier) alertRedundantLocked(windowID string, view pushServerView, now time.Time) bool {
+	if view.blocked[windowID] {
+		return true
+	}
+	at, ok := n.statusAt[windowID]
+	return ok && now.Sub(at) < pushStatusAlertGrace
 }
 
 // programStatusPushKind is the push a terminal program's OSC 7501 status
@@ -858,6 +986,12 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 	now := notifier.now()
 
 	notifier.mu.Lock()
+	if kind != pushKindAlert {
+		notifier.noteStatusLocked(windowID)
+	} else if notifier.alertRedundantLocked(windowID, view, now) {
+		notifier.mu.Unlock()
+		return
+	}
 	if kind == pushKindAlert {
 		for deviceID := range notifier.presence {
 			if notifier.attendingLocked(deviceID, windowID, view, now) {
@@ -931,6 +1065,7 @@ func (s *muxServer) raisePushAttention(
 		previous uint64
 	}
 	notifier.mu.Lock()
+	notifier.noteStatusLocked(windowID)
 	admitted := make([]admittedDevice, 0, len(devices))
 	for _, device := range pushRecipients(devices, kind, 0) {
 		key := pushAttentionKey{deviceID: device.DeviceID, bridgeID: bridgeID, kind: kind}
@@ -1338,10 +1473,20 @@ func (s *muxServer) startPushLoop() {
 	go func() {
 		ticker := time.NewTicker(pushBridgePollInterval)
 		defer ticker.Stop()
+		// hold fires when the earliest held alert is due; nil while none is.
+		var hold <-chan time.Time
 		for {
 			select {
 			case alert := <-notifier.alerts:
 				s.deliverPushAlertEvent(alert)
+				if hold == nil && alert.kind == "" {
+					hold = time.After(pushAlertHold)
+				}
+			case <-hold:
+				hold = nil
+				if next := s.releaseHeldPushAlerts(); next > 0 {
+					hold = time.After(next)
+				}
 			case <-ticker.C:
 				if s.isClosed() {
 					return
@@ -1489,12 +1634,24 @@ func (s *muxServer) flushPushDeferred() {
 		due = append(due, event)
 	}
 	notifier.deferred = kept
+	// A window whose status goes out in this flush gets no alert with it:
+	// both would land in the window's one notification slot.
+	statusDue := map[string]bool{}
+	for _, event := range due {
+		if event.kind != pushKindAlert {
+			statusDue[event.windowID] = true
+		}
+	}
 	type admittedEvent struct {
 		event  pushDeferred
 		record pushDeviceRecord
 	}
 	admitted := make([]admittedEvent, 0, len(due))
 	for _, event := range due {
+		if event.kind == pushKindAlert &&
+			(statusDue[event.windowID] || notifier.alertRedundantLocked(event.windowID, view, now)) {
+			continue
+		}
 		record, ok := recipient(event)
 		if !ok || notifier.attendingLocked(event.deviceID, event.windowID, view, now) {
 			continue
