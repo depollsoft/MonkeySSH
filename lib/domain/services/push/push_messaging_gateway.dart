@@ -149,6 +149,10 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
   Future<void> setAutoInitEnabled({required bool enabled}) =>
       _messaging.setAutoInitEnabled(enabled);
 
+  // firebase_messaging 17 deprecates the FCM token API in favor of register(),
+  // which yields a Firebase Installation ID instead. The push function sends
+  // to FCM tokens sealed into tickets, so moving to FIDs has to change the
+  // function and the ticket format together.
   @override
   Future<String?> getToken() async {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -159,13 +163,16 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
         await Future<void>.delayed(_apnsTokenPollInterval);
       }
     }
+    // ignore: deprecated_member_use
     return _messaging.getToken();
   }
 
   @override
+  // ignore: deprecated_member_use
   Future<void> deleteToken() => _messaging.deleteToken();
 
   @override
+  // ignore: deprecated_member_use
   Stream<String> get onTokenRefresh => _messaging.onTokenRefresh;
 
   @override

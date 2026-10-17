@@ -72,8 +72,8 @@ wsl --install Ubuntu-26.04 --no-launch   # WSL2 kernel ships with Windows; a cle
 Then, once the distro is available (after a reboot if Windows prompts for one), install Go (the module needs the toolchain in `go.mod`, not the older apt package) and clone into the **Linux** filesystem:
 
 ```bash
-curl -sSLO https://go.dev/dl/go1.26.5.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.26.5.linux-amd64.tar.gz
+curl -sSLO https://go.dev/dl/go1.26.9.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.26.9.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 sudo apt-get install -y build-essential   # cgo, needed for `go test -race`
 
