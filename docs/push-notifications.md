@@ -611,7 +611,10 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   with FCM (`register()` reports the FID through `onRegistered`), create the
   X25519 key pair and the host reference key in secure
   storage, call `registerPushDevice` with a limited-use App Check token, and
-  store the device id, the ticket and when it was issued. If a step fails, the
+  store the device id, the ticket and when it was issued. If push is still on
+  from a run whose keys the app could not read at start (a keychain error, say),
+  hosts may hold tickets for that FID, so the opt-in first deletes the Firebase
+  installation as an opt-out would. If a step fails, the
   app turns auto-init off, unregisters from FCM and deletes the new keys. It
   keeps the Firebase installation, which the other Firebase SDKs share, because
   no host has a ticket for that FID yet. An unregister that fails is retried as

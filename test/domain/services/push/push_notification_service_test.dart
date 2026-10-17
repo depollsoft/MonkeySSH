@@ -1638,6 +1638,37 @@ void main() {
     );
 
     test(
+      'an opt-in after the keys were lost deletes the old installation first',
+      () async {
+        await h.start();
+        await h.controller.enable();
+        // The keys are gone at the next start, but hosts may still hold
+        // tickets for the FID.
+        h.secrets.values.clear();
+        await h.restart();
+        expect(h.state.enabled, isFalse);
+        h.gateway
+          ..registerError = const PushSetupException(
+            PushSetupFailure.appCheckFailed,
+          )
+          ..calls.clear();
+
+        expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
+        expect(
+          h.gateway.calls,
+          containsAllInOrder(['deleteInstallation', 'registerInstallation']),
+        );
+
+        // The retired FID needs no second deletion.
+        h.gateway
+          ..registerError = null
+          ..calls.clear();
+        expect(await h.controller.enable(), isNull);
+        expect(h.gateway.calls, isNot(contains('deleteInstallation')));
+      },
+    );
+
+    test(
       'a dead FID is not sealed again when FCM cannot unregister it',
       () async {
         final link = _FakeLink(connectionId: 10, hostId: 1)

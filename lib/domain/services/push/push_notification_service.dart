@@ -630,6 +630,14 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     // An opt-out finished at start; nothing left to resume.
     await _settings.setBool(_optOutPendingKey, value: false);
     try {
+      // Push is still on from an earlier run whose keys this run could not
+      // read (a keychain error at start, say), so hosts may hold tickets for
+      // its FID. Retire it like an opt-out that could not finish.
+      if (await _settings.getBool(_enabledSettingKey)) {
+        _unregisterPending = true;
+        await _settings.setBool(_unregisterPendingKey, value: true);
+        await _settings.setBool(_enabledSettingKey, value: false);
+      }
       // An opt-out that could not delete the Firebase installation left its
       // FID behind. Registering that FID again with a new device key would let
       // hosts that missed the unregister deliver, through their old tickets,
