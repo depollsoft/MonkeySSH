@@ -70,12 +70,12 @@ jobs:
     steps:
       # The workflow commit supplies the version action and its helpers; the PR
       # head supplies the version being built.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
@@ -88,7 +88,7 @@ jobs:
 
       - name: Compute version
         id: version
-        uses: ./.github/actions/compute-version
+        uses: $/.github/actions/compute-version
         with:
           source: source
           build-number: pull-request
@@ -131,7 +131,7 @@ jobs:
     steps:
       - name: Resolve iOS status
         id: ios-status
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const result = '${{ needs.build-ios.result }}';
@@ -146,7 +146,7 @@ jobs:
             core.setOutput('run-url', runUrl);
 
       - name: Comment iOS status on PR
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        uses: marocchino/sticky-pull-request-comment@v3.0.5
         with:
           header: preview-build-ios
           number: ${{ github.event.pull_request.number }}

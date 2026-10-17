@@ -56,7 +56,7 @@ dependencies:
 
   # UI
   flutter_svg: ^2.3.0
-  google_fonts: ^8.2.1
+  google_fonts: ^9.0.0
   # Markdown rendering for ACP assistant messages. flutter_markdown_plus is the
   # maintained continuation of the discontinued official flutter_markdown; the
   # markdown parser is a direct dependency because custom code-block builders
@@ -89,13 +89,15 @@ dependencies:
   network_info_plus: ^8.2.1
   wakelock_plus: ^1.8.0
   sqlite3: ^3.6.0
-  firebase_core: ^4.15.0
-  firebase_analytics: ^12.6.0
-  firebase_crashlytics: ^5.4.0
-  firebase_messaging: ^16.7.0
-  firebase_app_check: ^0.4.8
+  firebase_core: ^5.0.0
+  firebase_analytics: ^13.0.0
+  firebase_crashlytics: ^6.0.0
+  firebase_messaging: ^17.0.0
+  firebase_app_check: ^0.5.0
+  # Deleting the installation on opt-out retires the FID that push sends to.
+  firebase_app_installations: ^0.5.0
   mime: ^2.1.0
-  qr: ^3.0.2
+  qr: ^4.0.0
 
 dependency_overrides:
   # A process on a host with SSH agent forwarding could stall the app and

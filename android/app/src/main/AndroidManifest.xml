@@ -41,6 +41,11 @@
         <meta-data
             android:name="firebase_messaging_auto_init_enabled"
             android:value="false" />
+        <!-- FCM registers the Firebase Installation ID (FID) instead of issuing
+             a registration token; the push function sends to the FID. -->
+        <meta-data
+            android:name="firebase_messaging_installation_id_enabled"
+            android:value="true" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="agent-attention" />

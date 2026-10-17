@@ -32,9 +32,7 @@ class PublicKeyQrCode extends StatelessWidget {
   Widget build(BuildContext context) {
     QrImage? image;
     try {
-      image = QrImage(
-        QrCode.fromData(data: data, errorCorrectLevel: QrErrorCorrectLevel.M),
-      );
+      image = QrImage(QrCode(payload: QrPayload.fromString(data)));
     } on Exception {
       image = null;
     }

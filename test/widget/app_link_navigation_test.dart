@@ -89,17 +89,20 @@ class _PushGateway implements PushMessagingGateway {
   Future<PushRemoteMessage?> getInitialMessage() async => null;
 
   @override
-  Stream<String> get onTokenRefresh => const Stream<String>.empty();
+  Stream<String> get onRegistered => const Stream<String>.empty();
 
   @override
-  Future<void> deleteToken() async {}
+  Future<void> unregisterInstallation() async {}
 
   @override
-  Future<String?> getToken() async => null;
+  Future<void> deleteInstallation() async {}
+
+  @override
+  Future<String?> registerInstallation() async => null;
 
   @override
   Future<PushRegistration> register({
-    required String token,
+    required String fid,
     required String platform,
     String? deviceId,
     bool appNotifications = false,

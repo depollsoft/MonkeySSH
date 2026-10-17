@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_app_installations/firebase_app_installations.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -49,7 +50,7 @@ enum PushSetupFailure {
   /// The user declined notification permission.
   permissionDenied,
 
-  /// FCM or APNs did not issue a token.
+  /// FCM or APNs did not register this app instance.
   tokenUnavailable,
 
   /// App Check could not attest this app.
@@ -76,17 +77,26 @@ abstract interface class PushMessagingGateway {
   /// Asks the user for notification permission.
   Future<bool> requestPermission();
 
-  /// Turns FCM auto-init on or off. Off means no token until asked for.
+  /// Turns FCM auto-init on or off. Off means no registration until asked
+  /// for.
   Future<void> setAutoInitEnabled({required bool enabled});
 
-  /// Returns the FCM token, contacting FCM.
-  Future<String?> getToken();
+  /// Registers this app instance with FCM and returns its Firebase
+  /// Installation ID (FID), which the function sends to. Contacts FCM.
+  Future<String?> registerInstallation();
 
-  /// Deletes the FCM token.
-  Future<void> deleteToken();
+  /// Unregisters this app instance from FCM, so sends to its FID fail until
+  /// it registers again.
+  Future<void> unregisterInstallation();
 
-  /// Emits refreshed FCM tokens.
-  Stream<String> get onTokenRefresh;
+  /// Unregisters from FCM and deletes the Firebase installation, so the next
+  /// registration gets a new FID and tickets that seal the old one never
+  /// deliver again.
+  Future<void> deleteInstallation();
+
+  /// Emits the FID each time FCM registers this app instance, including
+  /// after the FID rotates.
+  Stream<String> get onRegistered;
 
   /// Emits messages received while the app is in the foreground.
   Stream<PushRemoteMessage> get onMessage;
@@ -101,7 +111,7 @@ abstract interface class PushMessagingGateway {
   /// [appNotifications] the ticket says this app posts its own notifications
   /// from data-only messages, which builds before that could not show.
   Future<PushRegistration> register({
-    required String token,
+    required String fid,
     required String platform,
     String? deviceId,
     bool appNotifications = false,
@@ -126,6 +136,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
 
   static const _apnsTokenAttempts = 20;
   static const _apnsTokenPollInterval = Duration(milliseconds: 500);
+  static const _registrationTimeout = Duration(seconds: 30);
 
   FirebaseMessaging get _messaging => FirebaseMessaging.instance;
 
@@ -150,7 +161,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
       _messaging.setAutoInitEnabled(enabled);
 
   @override
-  Future<String?> getToken() async {
+  Future<String?> registerInstallation() async {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       // FCM needs the APNs token first, which arrives asynchronously after
       // remote notification registration.
@@ -159,14 +170,34 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
         await Future<void>.delayed(_apnsTokenPollInterval);
       }
     }
-    return _messaging.getToken();
+    return registerForFid(
+      _messaging.onRegistered,
+      _messaging.register,
+      timeout: _registrationTimeout,
+    );
   }
 
   @override
-  Future<void> deleteToken() => _messaging.deleteToken();
+  Future<void> unregisterInstallation() => _messaging.unregister();
 
   @override
-  Stream<String> get onTokenRefresh => _messaging.onTokenRefresh;
+  Future<void> deleteInstallation() async {
+    // Deleting the installation is what retires the FID; unregistering first
+    // only stops FCM sooner, and fails harmlessly when nothing is registered.
+    try {
+      await _messaging.unregister();
+    } on Object catch (error) {
+      _log.debug(
+        'push',
+        'fcm_unregister_skipped',
+        fields: {'errorType': error.runtimeType},
+      );
+    }
+    await FirebaseInstallations.instance.delete();
+  }
+
+  @override
+  Stream<String> get onRegistered => _messaging.onRegistered;
 
   @override
   Stream<PushRemoteMessage> get onMessage =>
@@ -219,7 +250,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
 
   @override
   Future<PushRegistration> register({
-    required String token,
+    required String fid,
     required String platform,
     String? deviceId,
     bool appNotifications = false,
@@ -241,7 +272,7 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
             },
             body: jsonEncode(<String, Object?>{
               'data': <String, Object?>{
-                'token': token,
+                pushRegistrationField(fid): fid,
                 'platform': platform,
                 'deviceId': ?deviceId,
                 if (appNotifications) 'appNotifications': true,
@@ -253,6 +284,38 @@ class FirebasePushMessagingGateway implements PushMessagingGateway {
       throw const PushSetupException(PushSetupFailure.registrationFailed);
     }
     return parsePushRegistrationResponse(response.statusCode, response.body);
+  }
+}
+
+/// The `registerPushDevice` field that carries [registration].
+///
+/// With FID registration on, Android devices whose Google Play services
+/// predate it (before 26.12) still get a legacy registration token through
+/// onRegistered. FCM tokens contain ":" and FIDs never do.
+@visibleForTesting
+String pushRegistrationField(String registration) =>
+    registration.contains(':') ? 'token' : 'fid';
+
+/// Calls [register] and returns the first FID [onRegistered] emits.
+///
+/// FCM hands the FID only to onRegistered, which it fires on every register()
+/// call. The event can arrive before or after register() completes, so this
+/// listens before asking and waits up to [timeout] afterwards.
+@visibleForTesting
+Future<String> registerForFid(
+  Stream<String> onRegistered,
+  Future<void> Function() register, {
+  required Duration timeout,
+}) async {
+  final fid = Completer<String>();
+  final subscription = onRegistered.listen((value) {
+    if (!fid.isCompleted) fid.complete(value);
+  });
+  try {
+    await register();
+    return await fid.future.timeout(timeout);
+  } finally {
+    await subscription.cancel();
   }
 }
 

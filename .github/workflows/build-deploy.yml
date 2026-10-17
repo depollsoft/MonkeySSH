@@ -293,7 +293,7 @@ jobs:
       android-source-sha: ${{ inputs.android-reuse-source-sha || steps.source-sha.outputs.value }}
       ios-source-sha: ${{ inputs.ios-reuse-source-sha || steps.source-sha.outputs.value }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -316,13 +316,13 @@ jobs:
 
       - name: Checkout resolved source SHA
         if: env.BUILD_FROM_SOURCE == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ steps.source-sha.outputs.value }}
           fetch-depth: 1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@v7.0.0
         if: env.BUILD_FROM_SOURCE == 'true'
         with:
           go-version-file: remote/monkeymux/go.mod
@@ -341,7 +341,7 @@ jobs:
       # cache scope. CI's trusted push-to-main job is the sole payload writer.
       - name: Restore MonkeyMux assets
         if: steps.monkeymux-fingerprint.outputs.value != ''
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: assets/monkeymux/
           key: monkeymux-assets-v1-${{ runner.os }}-${{ steps.monkeymux-fingerprint.outputs.value }}
@@ -352,7 +352,7 @@ jobs:
 
       - name: Upload assets
         if: env.BUILD_FROM_SOURCE == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ inputs.monkeymux-assets-artifact-name }}
           path: assets/monkeymux/
@@ -385,7 +385,7 @@ jobs:
       apk-artifact-id: ${{ steps.upload-apk.outputs.artifact-id }}
       source-sha: ${{ needs.monkeymux-assets.outputs.android-source-sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -396,7 +396,7 @@ jobs:
 
       - name: Checkout resolved source SHA for Android build
         if: inputs.android-reuse-aab-artifact-name == ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ env.SOURCE_SHA }}
@@ -407,18 +407,18 @@ jobs:
 
       - name: Download MonkeyMux assets
         if: inputs.android-reuse-aab-artifact-name == ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ${{ inputs.monkeymux-assets-artifact-name }}
           path: assets/monkeymux/
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@v6.1.0
         if: inputs.android-reuse-aab-artifact-name == '' || (inputs.deploy-android-to != 'none' && inputs.android-reuse-aab-is-unsigned)
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - uses: gradle/actions/setup-gradle@v6.4.0
         if: inputs.android-reuse-aab-artifact-name == ''
         with:
           cache-cleanup: always
@@ -434,7 +434,7 @@ jobs:
             echo 'org.gradle.vfs.watch=false'
           } >> ~/.gradle/gradle.properties
 
-      - uses: ./.github/actions/flutter-setup
+      - uses: $/.github/actions/flutter-setup
         if: inputs.android-reuse-aab-artifact-name == ''
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -442,7 +442,7 @@ jobs:
 
       - name: Configure Firebase for Android
         if: inputs.android-reuse-aab-artifact-name == '' || inputs.deploy-android-to == 'firebase'
-        uses: ./.github/actions/firebase-config
+        uses: $/.github/actions/firebase-config
         with:
           platform: android
           flavor: ${{ inputs.flavor }}
@@ -461,7 +461,7 @@ jobs:
           fi
           echo "path=$ANDROID_SDK" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         if: inputs.android-reuse-aab-artifact-name == ''
         with:
           path: ${{ steps.android-sdk.outputs.path }}/cmake/3.22.1
@@ -613,7 +613,7 @@ jobs:
 
       - name: Download reusable AAB artifact
         if: inputs.android-reuse-aab-artifact-name != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.android-reuse-run-id }}
@@ -622,7 +622,7 @@ jobs:
 
       - name: Download reusable APK artifact
         if: inputs.android-reuse-apk-artifact-name != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.android-reuse-run-id }}
@@ -655,7 +655,7 @@ jobs:
 
       - name: Upload signed AAB artifact
         if: inputs.deploy-android-to != 'none' && inputs.deploy-android-to != 'firebase' && inputs.android-reuse-aab-artifact-name == ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           compression-level: 0
           name: android-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}
@@ -664,7 +664,7 @@ jobs:
           retention-days: 7
       - name: Upload unsigned AAB artifact
         if: inputs.build-android-unsigned-aab && inputs.android-reuse-aab-artifact-name == '' && inputs.deploy-android-to == 'none'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           compression-level: 0
           name: android-unsigned-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}${{ inputs.android-target-platform != '' && format('-{0}', inputs.android-target-platform) || '' }}
@@ -674,7 +674,7 @@ jobs:
       - name: Upload APK artifact
         id: upload-apk
         if: inputs.build-android-apk && inputs.deploy-android-to == 'none'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           path: build/app/outputs/flutter-apk/android-apk-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}.apk
           archive: false
@@ -692,7 +692,7 @@ jobs:
         id: start-android-deployment
         if: inputs.deploy-android-to != 'none' && inputs.run-android-deploy
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: start
           environment: Android ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-android-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-android-to == 'production' && 'Play Production' || 'Play Internal' }}
@@ -724,7 +724,7 @@ jobs:
 
       - name: Setup Ruby for Play deployment
         if: inputs.deploy-android-to != 'none' && inputs.run-android-deploy
-        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+        uses: ruby/setup-ruby@v1.329.0
         with:
           ruby-version: '3.3'
           bundler-cache: true
@@ -789,7 +789,7 @@ jobs:
       - name: Finish Android GitHub deployment
         if: always() && inputs.deploy-android-to != 'none' && inputs.run-android-deploy && steps.start-android-deployment.outputs['deployment-id'] != ''
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: finish
           environment: Android ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-android-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-android-to == 'production' && 'Play Production' || 'Play Internal' }}
@@ -830,7 +830,7 @@ jobs:
       store-uploaded: ${{ inputs.run-ios-deploy && (inputs.deploy-ios-to == 'testflight' || inputs.deploy-ios-to == 'appstore') && steps.ios-deploy.outcome == 'success' }}
       source-sha: ${{ needs.monkeymux-assets.outputs.ios-source-sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -841,7 +841,7 @@ jobs:
 
       - name: Checkout resolved source SHA for iOS build
         if: inputs.ios-reuse-ipa-artifact-name == ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ env.SOURCE_SHA }}
@@ -852,32 +852,32 @@ jobs:
 
       - name: Download MonkeyMux assets
         if: inputs.ios-reuse-ipa-artifact-name == ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ${{ inputs.monkeymux-assets-artifact-name }}
           path: assets/monkeymux/
 
       - name: Restore SwiftPM cache
         id: spm-cache
-        uses: ./.github/actions/apple-cache-restore
+        uses: $/.github/actions/apple-cache-restore
         with:
           phase: swiftpm
           restore-swiftpm: ${{ inputs.ios-reuse-ipa-artifact-name == '' }}
 
-      - uses: ./.github/actions/flutter-setup
+      - uses: $/.github/actions/flutter-setup
         if: inputs.ios-reuse-ipa-artifact-name == ''
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           sqlite-targets: ios-arm64
 
-      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+      - uses: ruby/setup-ruby@v1.329.0
         with:
           ruby-version: '3.3'
           bundler-cache: true
 
       - name: Configure Firebase for iOS
         if: inputs.ios-reuse-ipa-artifact-name == '' || inputs.deploy-ios-to == 'firebase'
-        uses: ./.github/actions/firebase-config
+        uses: $/.github/actions/firebase-config
         with:
           platform: ios
           flavor: ${{ inputs.flavor }}
@@ -887,7 +887,7 @@ jobs:
       - name: Restore Apple build caches
         id: apple-cache
         if: inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'
-        uses: ./.github/actions/apple-cache-restore
+        uses: $/.github/actions/apple-cache-restore
         with:
           phase: build
           platform: ios
@@ -930,7 +930,7 @@ jobs:
 
       - name: Save Apple build caches
         if: steps.apple-cache.outcome == 'success'
-        uses: ./.github/actions/apple-cache-save
+        uses: $/.github/actions/apple-cache-save
         with:
           phase: build
           platform: ios
@@ -943,7 +943,7 @@ jobs:
 
       - name: Upload iOS build diagnostics
         if: always() && steps.apple-cache.outcome == 'success' && steps.ios-build.outcome != 'skipped'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ios-build-log-${{ inputs.flavor }}-${{ inputs.monkeymux-assets-artifact-name }}
           path: ${{ runner.temp }}/ios-build.log
@@ -1011,7 +1011,7 @@ jobs:
 
       - name: Download reusable IPA artifact
         if: inputs.ios-reuse-ipa-artifact-name != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.ios-reuse-run-id }}
@@ -1040,7 +1040,7 @@ jobs:
         id: start-ios-deployment
         if: inputs.deploy-ios-to != 'none' && inputs.run-ios-deploy
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: start
           environment: iOS ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-ios-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-ios-to == 'appstore' && 'App Store' || 'TestFlight' }}
@@ -1153,7 +1153,7 @@ jobs:
 
       - name: Upload TestFlight follow-up metadata
         if: inputs.deploy-ios-to == 'testflight' && inputs.run-ios-deploy
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           compression-level: 0
           name: testflight-followup-${{ inputs.flavor }}-${{ inputs.build-number }}
@@ -1164,7 +1164,7 @@ jobs:
       - name: Finish iOS GitHub deployment
         if: always() && inputs.deploy-ios-to != 'none' && inputs.run-ios-deploy && steps.start-ios-deployment.outputs['deployment-id'] != ''
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: finish
           environment: iOS ${{ inputs.flavor == 'private' && 'Private' || 'Production' }} / ${{ inputs.deploy-ios-to == 'firebase' && 'Firebase App Distribution' || inputs.deploy-ios-to == 'appstore' && 'App Store' || 'TestFlight' }}
@@ -1200,7 +1200,7 @@ jobs:
 
       - name: Upload signed IPA artifact
         if: inputs.deploy-ios-to != 'none' && inputs.deploy-ios-to != 'firebase' && inputs.ios-reuse-ipa-artifact-name == ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           path: ${{ steps.signed-ipa-artifact.outputs.path }}
           archive: false
@@ -1208,7 +1208,7 @@ jobs:
           retention-days: 7
       - name: Upload unsigned IPA artifact
         if: inputs.build-ios-unsigned-ipa && inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           path: build/ios/ipa/ios-unsigned-${{ inputs.flavor }}-${{ inputs.build-name }}-${{ inputs.build-number }}-${{ env.SOURCE_SHA }}.ipa
           archive: false
@@ -1221,15 +1221,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: testflight-followup-${{ inputs.flavor }}-${{ inputs.build-number }}
           path: build/testflight-followup
-      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+      - uses: ruby/setup-ruby@v1.329.0
         with:
           ruby-version: '3.3'
           bundler-cache: true
@@ -1250,7 +1250,7 @@ jobs:
       - name: Finish TestFlight GitHub deployment
         if: always() && needs.build-ios.outputs.deployment-id != ''
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: finish
           deployment-id: ${{ needs.build-ios.outputs.deployment-id }}
@@ -1356,7 +1356,7 @@ jobs:
           printf '%s\n' "$BUILD_NUMBER" > build/private-deploy-marker/build-number.txt
 
       - name: Upload private deploy build marker
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           compression-level: 0
           name: private-deploy-build-number-${{ inputs.build-number }}-${{ needs.build-android.outputs.store-uploaded == 'true' && 'android' || 'ios' }}

@@ -79,7 +79,7 @@ class PreviewVersionTest(unittest.TestCase):
                      'release.yml']:
             with self.subTest(workflow=name):
                 text = (ROOT / '.github/workflows' / name).read_text()
-                self.assertIn('uses: ./.github/actions/compute-version', text)
+                self.assertIn('uses: $/.github/actions/compute-version', text)
                 self.assertNotIn('version_codename.py "', text)
 
 
@@ -185,7 +185,7 @@ class DeploymentContractsTest(unittest.TestCase):
                     self.assertNotIn('if', step)
                     self.assertIn('"$RUNNER_TEMP/workflow-tooling.tar"', step['run'])
                 self.assertIn('$WORKFLOW_TOOLING', steps[preserve]['run'])
-                local = [i for i, s in enumerate(steps) if s.get('uses', '').startswith('./.github/actions/')]
+                local = [i for i, s in enumerate(steps) if s.get('uses', '').startswith('$/.github/actions/')]
                 self.assertGreater(min(local), restore)
                 self.assertEqual(steps[0]['with']['ref'], '${{ github.sha }}')
 
@@ -249,7 +249,7 @@ class DeploymentContractsTest(unittest.TestCase):
             job = workflow['jobs']['compute-version']
             self.assertIn('head.repo.full_name == github.repository', job['if'])
             version_step = next(s for s in job['steps'] if s.get('id') == 'version')
-            self.assertEqual(version_step['uses'], './.github/actions/compute-version')
+            self.assertEqual(version_step['uses'], '$/.github/actions/compute-version')
             self.assertEqual(version_step['with'], {'source': 'source', 'build-number': 'pull-request'})
             checkouts = [step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@')]
             self.assertEqual([step['with']['ref'] for step in checkouts],
@@ -308,7 +308,7 @@ class DeploymentContractsTest(unittest.TestCase):
                 if platform == 'ios':
                     media += " || needs.changes.outputs.ios_app_previews == 'true'"
                 self.assertEqual(sync['env']['SKIP_MEDIA'], "${{ (" + media + ") && 'false' || 'true' }}")
-                deployments = [s for s in steps if s.get('uses') == './.github/actions/deployment-status']
+                deployments = [s for s in steps if s.get('uses') == '$/.github/actions/deployment-status']
                 self.assertEqual([s['with']['action'] for s in deployments], ['start', 'finish'])
                 start, finish = deployments
                 self.assertEqual(start['id'], 'start-metadata-deployment')

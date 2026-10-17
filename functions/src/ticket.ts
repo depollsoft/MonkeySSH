@@ -13,9 +13,15 @@ export interface TicketKeys {
 /** Platforms a ticket may name. */
 export type TicketPlatform = "ios" | "android";
 
+/**
+ * Where FCM delivers a ticket's messages: the app's Firebase Installation ID,
+ * or the registration token that app builds before FID registration sent.
+ */
+export type PushTarget = { readonly fid: string } | { readonly token: string };
+
 /** The sealed contents of a ticket. */
 export interface TicketContents {
-  readonly token: string;
+  readonly target: PushTarget;
   readonly deviceId: string;
   readonly issuedAt: number;
   readonly platform?: TicketPlatform;
@@ -100,7 +106,9 @@ export function sealTicket(
   }
   const plaintext = Buffer.from(
     JSON.stringify({
-      t: contents.token,
+      ...("fid" in contents.target
+        ? { f: contents.target.fid }
+        : { t: contents.target.token }),
       d: contents.deviceId,
       i: contents.issuedAt,
       ...(contents.platform === undefined ? {} : { p: contents.platform }),
@@ -172,10 +180,16 @@ export function openTicket(
   if (typeof decoded !== "object" || decoded === null) {
     return null;
   }
-  const { t, d, i, p, a } = decoded as Record<string, unknown>;
+  const { t, f, d, i, p, a } = decoded as Record<string, unknown>;
+  let target: PushTarget;
+  if (typeof f === "string" && f.length > 0 && t === undefined) {
+    target = { fid: f };
+  } else if (typeof t === "string" && t.length > 0 && f === undefined) {
+    target = { token: t };
+  } else {
+    return null;
+  }
   if (
-    typeof t !== "string" ||
-    t.length === 0 ||
     typeof d !== "string" ||
     !deviceIdPattern.test(d) ||
     typeof i !== "number" ||
@@ -192,7 +206,7 @@ export function openTicket(
   }
   const platform = p === "ios" || p === "android" ? p : undefined;
   return {
-    token: t,
+    target,
     deviceId: d,
     issuedAt: i,
     platform,

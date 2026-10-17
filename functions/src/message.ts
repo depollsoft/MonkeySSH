@@ -1,6 +1,9 @@
-import type { TokenMessage } from "firebase-admin/messaging";
+import type { FidMessage, TokenMessage } from "firebase-admin/messaging";
 
-import type { TicketPlatform } from "./ticket";
+import type { PushTarget, TicketPlatform } from "./ticket";
+
+/** An FCM message to one app instance, by FID or by legacy token. */
+export type TargetedMessage = FidMessage | TokenMessage;
 
 /** Coarse event kinds; the only event detail visible outside the device. */
 export const pushKinds = [
@@ -85,7 +88,7 @@ const timeToLiveSeconds = 3600;
 
 /** Inputs for [buildFcmMessage]. */
 export interface FcmMessageInput {
-  readonly token: string;
+  readonly target: PushTarget;
   readonly kind: PushKind;
   readonly collapse: string;
   readonly payload: string;
@@ -109,11 +112,11 @@ export interface FcmMessageInput {
  * messages), and a ticket without a platform get an alert, which the iOS
  * notification service extension rewrites.
  */
-export function buildFcmMessage(input: FcmMessageInput): TokenMessage {
+export function buildFcmMessage(input: FcmMessageInput): TargetedMessage {
   const presentation = presentations[input.kind];
   if (input.platform === "android" && input.appNotifications === true) {
     return {
-      token: input.token,
+      ...input.target,
       data: { v: "1", p: input.payload, k: input.kind, c: input.collapse },
       android: {
         priority: "high",
@@ -123,7 +126,7 @@ export function buildFcmMessage(input: FcmMessageInput): TokenMessage {
     };
   }
   return {
-    token: input.token,
+    ...input.target,
     notification: { title: presentation.title, body: presentation.body },
     data: { v: "1", p: input.payload },
     android: {
