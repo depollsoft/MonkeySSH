@@ -541,7 +541,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Compiles into its own temp dir with only Xcode's swiftc, so it runs
+      # under the setup below instead of before it.
       - name: Test notification text (Swift)
+        id: ios-notification-text-test
+        background: true
         run: scripts/test_ios_push_notification_content.sh
 
       - name: Download MonkeyMux assets
@@ -577,8 +581,8 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           sqlite-targets: ios-arm64
 
-      - name: Wait for caches and MonkeyMux assets
-        wait: [monkeymux-download, spm-cache, apple-cache]
+      - name: Wait for caches, MonkeyMux assets and the Swift test
+        wait: [ios-notification-text-test, monkeymux-download, spm-cache, apple-cache]
 
       - name: Configure Firebase for iOS
         uses: ./.github/actions/firebase-config
