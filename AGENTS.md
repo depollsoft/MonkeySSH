@@ -37,6 +37,19 @@ which runs `functions-test` only. `deploy-functions.yml` deploys them from `main
 through keyless Workload Identity Federation (`scripts/setup_functions_iam.sh`);
 never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 
+## Workflow lockfile
+
+Every workflow is onboarded to `.github/workflows/actions.lock`
+([workflow dependency lockfiles](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles)),
+so `uses:` names a full release tag and the lockfile holds the commit that runs.
+After adding a workflow or adding, removing or retagging a `uses:` reference, run
+`gh actions-lock` (extension `github/gh-actions-lock`) and commit both the lockfile and the
+workflow rewrites. It writes same-repository actions as `uses: $/.github/actions/...`,
+which actionlint 1.7.12 rejects, so `.github/actionlint.yaml` ignores that one message.
+The `tooling` job fails when a workflow is missing from the lockfile. Dependabot updates
+lockfile entries for workflows that are already onboarded, but it never onboards new ones.
+Never edit the lockfile by hand.
+
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.

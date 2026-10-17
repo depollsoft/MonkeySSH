@@ -413,7 +413,7 @@ class WorkflowContractsTest(unittest.TestCase):
                 self.assertEqual(caches[0]['if'], "inputs.ios-reuse-ipa-artifact-name == '' && inputs.deploy-ios-to == 'none'")
                 self.assertEqual(caches[1]['if'], "steps.apple-cache.outcome == 'success'")
                 self.assertFalse(any(step.get('with', {}).get('phase') == 'swiftpm' and
-                                     step.get('uses') == './.github/actions/apple-cache-save' for step in steps))
+                                     step.get('uses') == '$/.github/actions/apple-cache-save' for step in steps))
 
     def test_mobile_triggers_share_all_compile_and_packaging_inputs(self):
         for file, event in [('preview.yml', 'pull_request'), ('deploy-private.yml', 'push'),
@@ -558,8 +558,13 @@ class WorkflowContractsTest(unittest.TestCase):
             ['ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))',
              str(ROOT / '.github/actions/flutter-setup/action.yml')], text=True))
         steps = action['runs']['steps']
-        self.assertEqual(steps[0]['uses'],
-                         'subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2')
+        # The workflow names a release tag; actions.lock pins it to a commit.
+        flutter_action = steps[0]['uses']
+        self.assertRegex(flutter_action, r'^subosito/flutter-action@v\d+\.\d+\.\d+$')
+        lock = json.loads(subprocess.check_output(
+            ['ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))',
+             str(ROOT / '.github/workflows/actions.lock')], text=True))
+        self.assertRegex(lock['dependencies'][flutter_action]['commit'], r'^sha1-[0-9a-f]{40}$')
         self.assertEqual(steps[1]['run'], 'flutter pub get')
         self.assertEqual(steps[2]['if'], "inputs.sqlite-targets != ''")
         self.assertEqual(action['inputs']['cache']['default'], 'true')
@@ -570,7 +575,7 @@ class WorkflowContractsTest(unittest.TestCase):
                 ('build-deploy.yml', {'build-android', 'build-ios'})]:
             jobs = self.workflows[workflow]['jobs']
             users = {name for name, job in jobs.items() for step in job.get('steps', [])
-                     if step.get('uses') == './.github/actions/flutter-setup'}
+                     if step.get('uses') == '$/.github/actions/flutter-setup'}
             self.assertEqual(users, expected)
             for name, job in jobs.items():
                 for step in job.get('steps', []):
@@ -580,7 +585,7 @@ class WorkflowContractsTest(unittest.TestCase):
                         self.assertEqual((workflow, name), ('ci.yml', 'terminal-test'))
         jobs = self.workflows['ci.yml']['jobs']
         windows = next(s for s in jobs['build-windows']['steps']
-                       if s.get('uses') == './.github/actions/flutter-setup')
+                       if s.get('uses') == '$/.github/actions/flutter-setup')
         # The 2.1 GB SDK archive is what cancelled jobs; the 32 MB pub cache is safe.
         self.assertEqual(windows['with']['cache'], 'false')
         self.assertEqual(windows['with']['pub-cache'], 'true')

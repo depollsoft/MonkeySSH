@@ -57,11 +57,11 @@ jobs:
       release-ios: ${{ steps.release.outputs.release-ios }}
       release-android: ${{ steps.release.outputs.release-android }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
+      - uses: ruby/setup-ruby@v1.329.0
         if: github.event_name == 'release' || (inputs.channel == 'production' && inputs.ios)
         with:
           ruby-version: '3.3'
@@ -135,7 +135,7 @@ jobs:
 
       - name: Compute version
         id: version
-        uses: ./.github/actions/compute-version
+        uses: $/.github/actions/compute-version
         with:
           build-name: ${{ steps.release.outputs.build-name }}
 
@@ -206,13 +206,13 @@ jobs:
       contents: write
     steps:
       - name: Download Android artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: android-production-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}
           path: artifacts/android
 
       - name: Download iOS artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ios-production-${{ needs.compute-version.outputs.build-name }}-${{ needs.compute-version.outputs.build-number }}.ipa
           path: artifacts/ios
@@ -222,7 +222,7 @@ jobs:
         run: shasum -a 256 android/*.aab ios/*.ipa > SHA256SUMS.txt
 
       - name: Upload to release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@v3.0.3
         with:
           files: |
             artifacts/android/*.aab

@@ -1,3 +1,9 @@
 self-hosted-runner:
   labels:
     - ubicloud-standard-4
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      # actionlint 1.7.12 predates the `$/` same-repository references that
+      # `gh actions-lock` writes for local actions (see actions.lock).
+      - 'specifying action "\$/[^"]+" in invalid format'
