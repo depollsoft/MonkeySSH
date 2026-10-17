@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { TokenMessage } from "firebase-admin/messaging";
-
 import { encodeBase64Url } from "../base64url";
+import type { TargetedMessage } from "../message";
 import { handlePushNotify, type NotifyDeps, type NotifyLogEntry } from "../notify";
 import { TokenBucketLimiter } from "../rateLimit";
 import {
   maxTicketAgeSeconds,
   parseTicketKeys,
   sealTicket,
+  type PushTarget,
   type TicketKeys,
 } from "../ticket";
 
@@ -19,9 +19,10 @@ const keys: TicketKeys = parseTicketKeys(
     keys: { k1: encodeBase64Url(Buffer.alloc(32, 7)) },
   }),
 );
+const fid = "cR1oNotARealFid_123456";
 const token = "fcm-test-token:APA91bNotARealTokenButLongEnough";
 const ticket = sealTicket(keys, {
-  token,
+  target: { fid },
   deviceId: "dev_test_device_00001",
   issuedAt: 1760000000,
   platform: "android",
@@ -32,14 +33,14 @@ const collapse = "0123456789abcdef0123456789abcdef";
 
 interface Harness {
   deps: NotifyDeps;
-  sent: TokenMessage[];
+  sent: TargetedMessage[];
   logs: NotifyLogEntry[];
 }
 
 function harness(
   options: { sendError?: unknown; limiter?: TokenBucketLimiter } = {},
 ): Harness {
-  const sent: TokenMessage[] = [];
+  const sent: TargetedMessage[] = [];
   const logs: NotifyLogEntry[] = [];
   return {
     sent,
@@ -61,6 +62,10 @@ function harness(
   };
 }
 
+function targetOf(message: TargetedMessage): PushTarget {
+  return "fid" in message ? { fid: message.fid } : { token: message.token };
+}
+
 function post(body: unknown) {
   const raw = Buffer.from(JSON.stringify(body));
   return { method: "POST", rawBody: raw, body };
@@ -70,13 +75,13 @@ const valid = { ticket, kind: "permission", collapse, payload };
 
 function assertLogsClean(logs: NotifyLogEntry[]) {
   const text = JSON.stringify(logs);
-  for (const secret of [ticket, token, payload, collapse, "dev_test_device_00001"]) {
+  for (const secret of [ticket, fid, token, payload, collapse, "dev_test_device_00001"]) {
     assert.ok(!text.includes(secret), "log leaked a secret");
   }
 }
 
 const iosTicket = sealTicket(keys, {
-  token,
+  target: { fid },
   deviceId: "dev_test_device_00001",
   issuedAt: 1760000000,
   platform: "ios",
@@ -88,10 +93,25 @@ test("a valid event is sent and answered with 202", async () => {
   assert.equal(response.status, 202);
   assert.deepEqual(response.body, { status: "sent" });
   assert.equal(h.sent.length, 1);
-  assert.equal(h.sent[0].token, token);
+  assert.deepEqual(targetOf(h.sent[0]), { fid });
   assert.deepEqual(h.logs, [
     { outcome: "sent", kind: "permission", platform: "android" },
   ]);
+  assertLogsClean(h.logs);
+});
+
+test("a ticket from before FID registration still sends to its token", async () => {
+  const legacy = sealTicket(keys, {
+    target: { token },
+    deviceId: "dev_test_device_00001",
+    issuedAt: 1760000000,
+    platform: "android",
+    appNotifications: true,
+  });
+  const h = harness();
+  const response = await handlePushNotify(post({ ...valid, ticket: legacy }), h.deps);
+  assert.equal(response.status, 202);
+  assert.deepEqual(targetOf(h.sent[0]), { token });
   assertLogsClean(h.logs);
 });
 
@@ -112,7 +132,7 @@ test("Android gets data only, at high priority, for the app to show", async () =
 
 test("an Android build from before app notifications keeps the alert", async () => {
   const older = sealTicket(keys, {
-    token,
+    target: { fid },
     deviceId: "dev_test_device_00001",
     issuedAt: 1760000000,
     platform: "android",
@@ -199,7 +219,7 @@ test("a forged or altered ticket is answered with 401", async () => {
     JSON.stringify({ current: "k1", keys: { k1: encodeBase64Url(Buffer.alloc(32, 9)) } }),
   );
   const forged = sealTicket(otherKeys, {
-    token,
+    target: { fid },
     deviceId: "dev_test_device_00001",
     issuedAt: 1,
   });
@@ -213,13 +233,13 @@ test("a forged or altered ticket is answered with 401", async () => {
   }
 });
 
-test("an unregistered FCM token is answered with 410", async () => {
+test("an unregistered FID or token is answered with 410", async () => {
   for (const code of [
     "messaging/registration-token-not-registered",
     "messaging/invalid-registration-token",
     "messaging/installation-id-not-registered",
   ]) {
-    const h = harness({ sendError: { code, message: `token ${token}` } });
+    const h = harness({ sendError: { code, message: `fid ${fid}` } });
     const response = await handlePushNotify(post(valid), h.deps);
     assert.equal(response.status, 410, code);
     assert.deepEqual(response.body, { error: "unregistered" });
@@ -304,10 +324,10 @@ test("non-canonical spellings of a ticket share one bucket", async () => {
     now: () => now,
   });
   const h = harness({ limiter });
-  // The same token sealed again (as after a re-registration) is a new
-  // ticket string but the same device.
+  // The same FID sealed again (as after a re-registration) is a new ticket
+  // string but the same device.
   const resealed = sealTicket(keys, {
-    token,
+    target: { fid },
     deviceId: "dev_test_device_00001",
     issuedAt: 1760000001,
     platform: "android",
@@ -355,11 +375,11 @@ test("routine events cannot use up the approval budget", async () => {
 
 test("a send that FCM could not take does not cost the ticket", async () => {
   let failures = 3;
-  const sent: TokenMessage[] = [];
+  const sent: TargetedMessage[] = [];
   const h = harness();
   const deps = {
     ...h.deps,
-    send: async (message: TokenMessage) => {
+    send: async (message: TargetedMessage) => {
       if (failures > 0) {
         failures--;
         throw { code: "messaging/server-unavailable" };
@@ -380,7 +400,7 @@ test("a send that FCM could not take does not cost the ticket", async () => {
 test("expired and future-dated tickets are refused", async () => {
   for (const issuedAt of [1760000000 - maxTicketAgeSeconds - 1, 1760000000 + 2 * 86400]) {
     const stale = sealTicket(keys, {
-      token,
+      target: { fid },
       deviceId: "dev_test_device_00001",
       issuedAt,
     });

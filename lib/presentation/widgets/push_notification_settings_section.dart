@@ -205,7 +205,8 @@ String pushSetupFailureMessage(PushSetupFailure failure) => switch (failure) {
     'Notifications are not allowed for MonkeySSH. Allow them in system '
         'settings, then try again.',
   PushSetupFailure.tokenUnavailable =>
-    'This device did not get a push token. Check the network and try again.',
+    'This device could not register for push notifications. Check the '
+        'network and try again.',
   PushSetupFailure.appCheckFailed => switch (defaultTargetPlatform) {
     // Play Integrity failed. Production accepts only installs Google Play
     // recognizes; the beta app also accepts its preview builds (see

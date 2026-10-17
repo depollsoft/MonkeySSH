@@ -24,7 +24,7 @@ file, and intermediate secrets are checked by their SHA-256 digests.
 | Party | Sees |
 | --- | --- |
 | MonkeyMux host | Device id, sealed ticket, device public key, host reference, and whether the app is watching, alive in the background, or neither |
-| Function, Google, Apple | Sealed ticket and the FCM token inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
+| Function, Google, Apple | Sealed ticket and the Firebase Installation ID (or, from older app builds, FCM token) inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
 | App (device key holder) | Everything in the payload |
 
 Besides opaque ids, the payload names the session and, when known, the
@@ -49,7 +49,7 @@ vectors include a non-canonical ticket that every implementation must refuse.
 
 - **Device id.** 16 random bytes, base64url (22 characters). The function
   assigns it on the first registration. The app sends it back on later
-  registrations so it stays stable across token refreshes. Accepted pattern:
+  registrations so it stays stable when the FID changes. Accepted pattern:
   `^[A-Za-z0-9_-]{16,64}$`.
 - **Host reference.** Opaque to the host and the function. The app derives it as
   the first 16 characters of `base64url(HMAC-SHA256(hostRefKey, "host:" + hostId))`,
@@ -73,7 +73,7 @@ vectors include a non-canonical ticket that every implementation must refuse.
 ## Ticket
 
 The function issues a ticket so the host can address a device without ever
-seeing its FCM token, and so the function needs no database.
+seeing its FCM registration, and so the function needs no database.
 
 ```
 ticket    = "v1." keyId "." base64url(nonce || ciphertext || tag)
@@ -81,8 +81,13 @@ keyId     = 1*32( ALPHA / DIGIT / "_" / "-" )
 nonce     = 12 random bytes
 aad       = "v1." keyId            ; ASCII
 key       = 32 bytes from the PUSH_TICKET_KEYS secret, selected by keyId
-plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
+plaintext = JSON {"f": fid, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
 ```
+
+`f` is the app's Firebase Installation ID (FID), which FCM sends to directly.
+App builds before FID registration sent an FCM registration token, sealed as
+`t` in place of `f`; the function still opens and sends to those tickets until
+they expire. A ticket with both, or neither, does not open.
 
 AES-256-GCM with a 16-byte tag. Binding the key id into the AAD means a ticket
 cannot be replayed under a different key id. `p` is optional and only used for
@@ -175,8 +180,15 @@ Firebase Auth user is required.
 Request data:
 
 ```json
-{"token": "<FCM registration token>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
+{"fid": "<Firebase Installation ID>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
 ```
+
+App builds before FID registration send `"token": "<FCM registration token>"`
+instead of `fid`, and so does the current app on Android devices whose Google
+Play services predate FID registration (before 26.12): FCM reports a legacy
+token through `onRegistered` there, which the app recognizes by its `:`. The function accepts exactly one of the two and logs which
+(`target: "fid" | "token"`), so the remaining token registrations can be
+watched as they age out.
 
 The Android app sends `appNotifications: true`: it posts its own notifications
 from data-only messages, which Android builds before that could not show. Any
@@ -230,7 +242,7 @@ is capped at 3072 characters.
 | 400 | `{"error":"malformed"}` | Bad JSON, kind, collapse key or payload | drop the event |
 | 401 | `{"error":"bad_ticket"}` | Ticket does not open: forged, altered, revoked key, or expired | delete the registration and remember the ticket as refused |
 | 405 | `{"error":"method"}` | Not a POST | drop the event |
-| 410 | `{"error":"unregistered"}` | FCM says the token is gone (`registration-token-not-registered`, `invalid-registration-token`, `installation-id-not-registered`) | delete the registration and remember the ticket as refused |
+| 410 | `{"error":"unregistered"}` | FCM says the FID or token is not registered (`installation-id-not-registered`, `registration-token-not-registered`, `invalid-registration-token`) | delete the registration and remember the ticket as refused |
 | 413 | `{"error":"too_large"}` | Body over 4096 bytes | drop the event |
 | 415 | `{"error":"encoding"}` | A `Content-Encoding` other than `identity` | drop the event |
 | 429 | `{"error":"rate_limited"}` | Over the rate limit; `Retry-After` in seconds | back off that device's budget |
@@ -254,7 +266,7 @@ header before reading the body, would close it.
 
 ### Rate limits and cost
 
-- In-memory token buckets keyed by a hash of the FCM token and split three
+- In-memory token buckets keyed by a hash of the ticket's FID (or token) and split three
   ways: `permission` and `input`; `finished` and `alert`; and `test`. Each is
   burst 5, refilled at 30 per hour. Routine events and test taps can never use
   up the allowance approval requests need. A send that FCM could not take
@@ -274,7 +286,7 @@ kinds go at high priority to wake the app:
 
 ```json
 {
-  "token": "<from the ticket>",
+  "fid": "<from the ticket>",
   "data": {"v": "1", "p": "<payload>", "k": "finished", "c": "<collapse>"},
   "android": {"priority": "high", "collapseKey": "<collapse>", "ttl": "3600s"}
 }
@@ -286,7 +298,7 @@ notification service extension rewrites on the phone:
 
 ```json
 {
-  "token": "<from the ticket>",
+  "fid": "<from the ticket>",
   "notification": {"title": "Approval needed", "body": "An agent is waiting for your approval."},
   "data": {"v": "1", "p": "<payload>"},
   "android": {
@@ -302,6 +314,8 @@ notification service extension rewrites on the phone:
 }
 ```
 
+A ticket that seals a token (`t`) is sent with `"token"` in place of `"fid"`.
+
 In the alert form, normal-priority kinds use `"priority": "normal"`,
 `apns-priority: 5`, no sound on iOS, and the Android channel
 `agent-updates-v2` (on Android 8 and later the channel, not the message
@@ -311,10 +325,11 @@ notification service extension replace the text with decrypted details (see
 
 ### Logging
 
-Structured outcome codes only: `outcome`, `kind`, `platform`, and for FCM
-failures `fcmCode`, a fixed enum such as `third-party-auth-error` (anything
-outside `[a-z0-9-]` is logged as `unknown`). Tickets, tokens, device ids,
-collapse keys and payloads are never logged.
+Structured outcome codes only: `outcome`, `kind`, `platform`, for a
+registration `target` (`fid` or `token`), and for FCM failures `fcmCode`, a
+fixed enum such as `third-party-auth-error` (anything outside `[a-z0-9-]` is
+logged as `unknown`). Tickets, FIDs, tokens, device ids, collapse keys and
+payloads are never logged.
 
 Cloud Run request logs record the caller's IP address. They are not stored:
 the `_Default` sink has the exclusion `push-request-logs` (applied 2026-10-10,
@@ -377,7 +392,8 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   "registered"}}`. If the function already refused that exact ticket, it answers
   `push_register_rejected` with result `stale_ticket` (after a 401) or
   `token_unregistered` (after a 410) and stores nothing. The app then fetches a
-  new ticket, and for `token_unregistered` a new FCM token first.
+  new ticket, and for `token_unregistered` a new FCM registration first. The
+  result keeps its name from when tickets sealed FCM tokens.
 - `events` on `push_register` lists the event categories this saved host
   wants pushed. Without it (an app from before the list) the
   registration wants all of them; an empty list wants none; unknown entries
@@ -583,13 +599,17 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   runs on iOS or Android. Elsewhere the settings section is hidden.
 - FCM auto-init is off in `Info.plist` and `AndroidManifest.xml`, and App Check
   token auto-refresh is off in `Info.plist` (`FirebaseAppCheckTokenAutoRefreshEnabled`),
-  because the App Check plugin installs its provider at launch. The app asks for
-  an FCM token only after the user opts in, then turns auto-init on so the
-  token refreshes; opting out turns it off again. A user who never opts in
-  never contacts FCM or App Check. `test/app/push_native_config_test.dart` pins
-  these keys.
-- **Opt in:** request notification permission, activate App Check, get the FCM
-  token, create the X25519 key pair and the host reference key in secure
+  because the App Check plugin installs its provider at launch. The app
+  registers with FCM only after the user opts in, then turns auto-init on so
+  FCM keeps the registration current; opting out turns it off again. A user who
+  never opts in never contacts FCM or App Check. FID registration is on
+  (`FirebaseMessagingInstallationIdEnabled` in `Info.plist`,
+  `firebase_messaging_installation_id_enabled` in `AndroidManifest.xml`), so
+  FCM registers the Firebase Installation ID and the token APIs are disabled.
+  `test/app/push_native_config_test.dart` pins these keys.
+- **Opt in:** request notification permission, activate App Check, register
+  with FCM (`register()` reports the FID through `onRegistered`), create the
+  X25519 key pair and the host reference key in secure
   storage, call `registerPushDevice` with a limited-use App Check token, and
   store the device id, the ticket and when it was issued.
 - **Attach:** for each saved host with push enabled, send `push_register`
@@ -601,27 +621,37 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   matches no live connection (the terminal reconnected) or is absent, a host
   with a single MonkeyMux connection is unambiguous and two are treated as not
   viewed.
-- **Renewal:** at every start and resume the app compares the current FCM token
-  with the one its ticket seals (Android does not redeliver a token that
-  rotated while the app was not running) and renews the ticket when it changed,
-  when it is a week old, or when a host reports it refused. Each renewal spends
+- **Renewal:** at every start and resume the app registers with FCM and
+  compares the FID with the one its ticket seals (an FID that rotated while the
+  app was not running is never redelivered) and renews the ticket when it
+  changed, when it is a week old, or when a host reports it refused. A ticket
+  from a build before FID registration sealed a token, which never matches, so
+  it is renewed at the first start after the update. Each renewal spends
   an App Check attestation, so a failed renewal is retried from later syncs
   after 1 minute, then 2, 4 and so on up to an hour. A ticket a host refused is
-  not offered again. After `token_unregistered` the app must delete the dead
-  token before fetching another; until that succeeds it keeps retrying rather
-  than sealing the dead token again.
+  not offered again. After `token_unregistered` the app must unregister from
+  FCM before registering again, because `register()` otherwise reports the
+  cached registration; until that succeeds it keeps retrying rather than
+  sealing the dead FID again.
 - **Opt out:** wait for any sync in flight, send `push_unregister` to reachable
   hosts and remember the rest for their next attach (deleted saved hosts are
-  dropped from that list), turn auto-init off, delete the FCM token, and delete
-  the device key, the host reference key, the device id and the ticket.
+  dropped from that list), turn auto-init off, unregister from FCM and delete
+  the Firebase installation, and delete the device key, the host reference
+  key, the device id and the ticket.
   Payloads from hosts that could not be reached can no longer be decrypted.
   The opt-out is saved before any of this starts, so an app killed half-way
   finishes it at its next start (hosts that held the registration are
-  unregistered on their next attach). Turning auto-init off and deleting the
-  token are retried separately from later syncs and across restarts until
-  each succeeds, serialized with opt-in. A token deletion is only scheduled
-  once FCM has issued a token (iOS cannot delete one before its first
-  check-in), and a new opt-in cancels pending retries.
+  unregistered on their next attach). An FID outlives `unregister()`, so
+  deleting the installation is what makes a later opt-in register a new FID:
+  a host that missed the unregister then gets 410 for the old one instead of
+  delivering pushes the new device key cannot open. Whether the deletion also
+  retires an FCM token issued before the update is not documented; a ticket
+  sealing one expires within 90 days either way. Turning auto-init off and
+  deleting the installation are retried separately from later syncs and across
+  restarts until each succeeds, serialized with opt-in, and so is the check at
+  every start and resume. A deletion is only scheduled once FCM has registered
+  the app (iOS cannot unregister before its first check-in), and a new opt-in
+  cancels pending retries.
 - **Per host:** turning a saved host off takes effect for a sync already
   running, waits for it, then sends `push_unregister` with that host's
   reference now, or on its next attach if it is not connected. Deleting a saved

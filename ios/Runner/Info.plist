@@ -44,6 +44,8 @@
 	<false/>
 	<key>FirebaseMessagingAutoInitEnabled</key>
 	<false/>
+	<key>FirebaseMessagingInstallationIdEnabled</key>
+	<true/>
 	<key>FirebaseAppCheckTokenAutoRefreshEnabled</key>
 	<false/>
 	<key>MonkeySSHPushKeychainGroup</key>

@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 
-import type { TokenMessage } from "firebase-admin/messaging";
-
 import { decodeBase64Url } from "./base64url";
-import { budgetFor, buildFcmMessage, isPushKind, type PushKind } from "./message";
+import {
+  budgetFor,
+  buildFcmMessage,
+  isPushKind,
+  type PushKind,
+  type TargetedMessage,
+} from "./message";
 import type { TokenBucketLimiter } from "./rateLimit";
 import { maxTicketLength, openTicket, type TicketKeys } from "./ticket";
 
@@ -30,7 +34,7 @@ export interface NotifyLogEntry {
 export interface NotifyDeps {
   readonly keys: () => TicketKeys;
   readonly limiter: TokenBucketLimiter;
-  readonly send: (message: TokenMessage) => Promise<unknown>;
+  readonly send: (message: TargetedMessage) => Promise<unknown>;
   readonly log: (entry: NotifyLogEntry) => void;
   readonly nowSeconds: () => number;
 }
@@ -51,7 +55,8 @@ export interface NotifyResponse {
   readonly headers?: Record<string, string>;
 }
 
-// Only errors about the token itself make hosts delete the registration.
+// Only errors about the FID or token itself make hosts delete the
+// registration.
 const unregisteredCodes = new Set([
   "registration-token-not-registered",
   "invalid-registration-token",
@@ -105,7 +110,8 @@ function respond(
 
 /**
  * Validates a host's event, opens its ticket, applies the rate limit and
- * forwards it to FCM. Never logs the ticket, token, collapse key or payload.
+ * forwards it to FCM. Never logs the ticket, FID, token, collapse key or
+ * payload.
  */
 export async function handlePushNotify(
   request: NotifyRequest,
@@ -174,10 +180,12 @@ export async function handlePushNotify(
     );
   }
   const platform = contents.platform ?? "unknown";
-  // Keyed on the FCM token (not the ticket text, which has many spellings
+  // Keyed on the FID or token (not the ticket text, which has many spellings
   // across re-registrations) and split by urgency, so routine events can
   // never use up the allowance approval requests need.
-  const bucket = `${createHash("sha256").update(contents.token).digest("hex")}:${budgetFor(kind)}`;
+  const target =
+    "fid" in contents.target ? `f:${contents.target.fid}` : `t:${contents.target.token}`;
+  const bucket = `${createHash("sha256").update(target).digest("hex")}:${budgetFor(kind)}`;
   const decision = deps.limiter.take(bucket);
   if (!decision.allowed) {
     return respond(
@@ -189,7 +197,7 @@ export async function handlePushNotify(
     );
   }
   const message = buildFcmMessage({
-    token: contents.token,
+    target: contents.target,
     kind,
     collapse,
     payload,

@@ -51,8 +51,8 @@ const pushPresenceHeartbeatInterval = Duration(seconds: 20);
 /// tickets older than 90 days.
 const pushTicketRefreshAge = Duration(days: 7);
 
-/// First retry delay for a failed ticket renewal or token deletion; it doubles
-/// on each failure up to [pushRegistrationRetryMax].
+/// First retry delay for a failed ticket renewal or FCM unregistration; it
+/// doubles on each failure up to [pushRegistrationRetryMax].
 const pushRegistrationRetryInterval = Duration(minutes: 1);
 
 /// Longest delay between retries of a failed ticket renewal. Each renewal
@@ -66,7 +66,8 @@ const pushUnsupportedRetryInterval = Duration(minutes: 10);
 const _enabledSettingKey = 'push_notifications_enabled';
 const _registeredHostsSettingKey = 'push_notifications_registered_hosts';
 const _pendingUnregisterSettingKey = 'push_notifications_pending_unregister';
-const _tokenDeletePendingKey = 'push_notifications_token_delete_pending';
+// Named for the FCM token deletion it replaced, so a pending one carries over.
+const _unregisterPendingKey = 'push_notifications_token_delete_pending';
 const _optOutPendingKey = 'push_notifications_opt_out_pending';
 const _autoInitDisablePendingKey =
     'push_notifications_auto_init_disable_pending';
@@ -433,21 +434,22 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   int? _viewedHostId;
   int? _viewedConnectionId;
   Timer? _heartbeat;
-  StreamSubscription<String>? _tokenRefresh;
+  StreamSubscription<String>? _registrations;
   bool _disposed = false;
   bool _refreshNeeded = false;
   // A ticket a host reported as refused; it is not offered again.
   String? _refusedTicket;
-  bool _refreshNeedsNewToken = false;
+  bool _refreshNeedsReregistration = false;
   bool _refreshRunning = false;
   DateTime? _lastRefreshAttempt;
   int _refreshFailures = 0;
-  bool _tokenDeletePending = false;
+  bool _unregisterPending = false;
   bool _autoInitDisablePending = false;
-  DateTime? _lastTokenDeleteAttempt;
-  // Whether FCM issued a token this run or a previous one; a deletion only
-  // makes sense then (iOS cannot delete before its first check-in).
-  bool _tokenIssued = false;
+  DateTime? _lastUnregisterAttempt;
+  // Whether FCM registered this app instance this run or a previous one; an
+  // unregistration only makes sense then (iOS cannot unregister before its
+  // first check-in).
+  bool _fcmRegistered = false;
 
   @override
   PushNotificationState build() {
@@ -475,7 +477,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     ref.onDispose(() {
       _disposed = true;
       _heartbeat?.cancel();
-      unawaited(_tokenRefresh?.cancel());
+      unawaited(_registrations?.cancel());
       unawaited(_hostChanges?.cancel());
     });
     if (available) {
@@ -521,7 +523,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _pendingUnregister = _decodePending(
       await _settings.getString(_pendingUnregisterSettingKey),
     );
-    _tokenDeletePending = await _settings.getBool(_tokenDeletePendingKey);
+    _unregisterPending = await _settings.getBool(_unregisterPendingKey);
     _autoInitDisablePending = await _settings.getBool(
       _autoInitDisablePendingKey,
     );
@@ -534,8 +536,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       _secrets = await _loadSecrets();
       registered = _secrets?.isRegistered ?? false;
       if (registered) {
-        _tokenIssued = true;
-        _listenForTokenRefresh();
+        _fcmRegistered = true;
+        _listenForRegistrations();
         // Recreates the channel if the user cleared it in system settings.
         unawaited(_installChannel());
       }
@@ -574,8 +576,9 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       registeredHostIds: Set.unmodifiable(_registeredHostIds),
     );
     if (registered) {
-      // A token that rotated while the app was not running never reaches
-      // onTokenRefresh, so compare the current token at every start.
+      // An FID that rotated while the app was not running never reaches
+      // onRegistered, so compare the current one at every start. This is also
+      // how a ticket sealing an FCM token from an older build moves to the FID.
       unawaited(_reconcileRegistration());
     }
     _restartHeartbeat();
@@ -584,7 +587,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
 
   /// Completes an opt-out the app was killed in the middle of: every host
   /// that held the registration is unregistered on its next attach, the
-  /// token is retired and the device key deleted.
+  /// FCM registration is retired and the device key deleted.
   Future<void> _finishInterruptedOptOut() async {
     final deviceId = (await _loadSecrets())?.deviceId;
     if (deviceId != null) {
@@ -594,9 +597,9 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
     _registeredHostIds = <int>{};
     await _persistHostBookkeeping();
-    // The interrupted opt-out had a registered token.
-    _tokenIssued = true;
-    await _retireToken();
+    // The interrupted opt-out had an FCM registration.
+    _fcmRegistered = true;
+    await _retireRegistration();
     try {
       await _store.clear();
     } on Object catch (error) {
@@ -614,17 +617,17 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     );
   }
 
-  /// Turns closed-app notifications on: permission, FCM token, device key,
-  /// registration with the function, then registration with live hosts.
+  /// Turns closed-app notifications on: permission, FCM registration, device
+  /// key, registration with the function, then registration with live hosts.
   Future<PushSetupFailure?> enable() => _operations.run(() async {
     if (!state.available || state.enabled) return null;
     state = state.copyWith(busy: true, clearFailure: true);
-    // A deletion left over from an earlier opt-out must not remove the token
-    // this opt-in is about to register.
-    if (_tokenDeletePending || _autoInitDisablePending) {
-      _tokenDeletePending = false;
+    // An unregistration left over from an earlier opt-out must not undo the
+    // registration this opt-in is about to make.
+    if (_unregisterPending || _autoInitDisablePending) {
+      _unregisterPending = false;
       _autoInitDisablePending = false;
-      await _settings.setBool(_tokenDeletePendingKey, value: false);
+      await _settings.setBool(_unregisterPendingKey, value: false);
       await _settings.setBool(_autoInitDisablePendingKey, value: false);
     }
     // An opt-out finished at start; nothing left to resume.
@@ -634,11 +637,10 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         throw const PushSetupException(PushSetupFailure.permissionDenied);
       }
       await _gateway.setAutoInitEnabled(enabled: true);
-      final token = await _currentToken();
-      await _registerToken(token);
+      await _registerFid(await _currentFid());
       await _installChannel();
       await _settings.setBool(_enabledSettingKey, value: true);
-      _listenForTokenRefresh();
+      _listenForRegistrations();
       state = state.copyWith(enabled: true, busy: false);
       _log.info(_diagnosticsCategory, 'opt_in');
       unawaited(_telemetry.logPushNotificationsToggled(enabled: true));
@@ -669,21 +671,21 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
   });
 
-  Future<String> _currentToken() async {
-    final String? token;
+  Future<String> _currentFid() async {
+    final String? fid;
     try {
-      token = await _gateway.getToken();
+      fid = await _gateway.registerInstallation();
     } on PushSetupException {
       rethrow;
     } on Object {
       // APNs registration failures surface here on iOS.
       throw const PushSetupException(PushSetupFailure.tokenUnavailable);
     }
-    if (token == null || token.isEmpty) {
+    if (fid == null || fid.isEmpty) {
       throw const PushSetupException(PushSetupFailure.tokenUnavailable);
     }
-    _tokenIssued = true;
-    return token;
+    _fcmRegistered = true;
+    return fid;
   }
 
   /// Whether this app posts push notifications itself from data-only
@@ -691,11 +693,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   bool get _postsOwnNotifications =>
       defaultTargetPlatform == TargetPlatform.android;
 
-  Future<void> _registerToken(String token) async {
+  Future<void> _registerFid(String fid) async {
     final secrets = await _store.loadOrCreate();
     final appNotifications = _postsOwnNotifications;
     final registration = await _gateway.register(
-      token: token,
+      fid: fid,
       platform: defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android',
       deviceId: secrets.deviceId,
       appNotifications: appNotifications,
@@ -703,7 +705,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     final next = secrets.withRegistration(
       deviceId: registration.deviceId,
       ticket: registration.ticket,
-      tokenFingerprint: _fingerprint(token),
+      tokenFingerprint: _fingerprint(fid),
       ticketIssuedAt: _now(),
       appNotifications: appNotifications,
     );
@@ -711,13 +713,12 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _secrets = next;
   }
 
-  /// Turns FCM auto-init off and deletes the token. Each step runs on its
-  /// own; a deletion that fails (offline, say) is retried later.
-  /// Turns FCM auto-init off and deletes the token. Each step that fails is
-  /// persisted and retried on its own, because auto-init left on would mint
-  /// a replacement token.
-  Future<void> _retireToken() async {
-    _lastTokenDeleteAttempt = _now();
+  /// Turns FCM auto-init off and deletes the Firebase installation, so a later
+  /// opt-in registers a new FID and hosts that missed the unregister get 410
+  /// for the old one. Each step that fails (offline, say) is persisted and
+  /// retried on its own, because auto-init left on would register again.
+  Future<void> _retireRegistration() async {
+    _lastUnregisterAttempt = _now();
     var autoInitOff = true;
     try {
       await _gateway.setAutoInitEnabled(enabled: false);
@@ -729,19 +730,19 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         fields: {'errorType': error.runtimeType},
       );
     }
-    // Without a token there is nothing to delete, and on iOS the call fails
-    // until FCM has checked in, so it would be retried forever. A pending
-    // deletion means a token existed when it was scheduled.
-    var tokenGone = true;
-    if (_tokenIssued || _tokenDeletePending) {
+    // Without a registration there is nothing to undo, and on iOS the call
+    // fails until FCM has checked in, so it would be retried forever. A
+    // pending unregistration means one existed when it was scheduled.
+    var unregistered = true;
+    if (_fcmRegistered || _unregisterPending) {
       try {
-        await _gateway.deleteToken();
-        _tokenIssued = false;
+        await _gateway.deleteInstallation();
+        _fcmRegistered = false;
       } on Object catch (error) {
-        tokenGone = false;
+        unregistered = false;
         _log.warning(
           _diagnosticsCategory,
-          'token_delete_failed',
+          'fcm_unregister_failed',
           fields: {'errorType': error.runtimeType},
         );
       }
@@ -753,17 +754,14 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         value: _autoInitDisablePending,
       );
     }
-    if (_tokenDeletePending == tokenGone) {
-      _tokenDeletePending = !tokenGone;
-      await _settings.setBool(
-        _tokenDeletePendingKey,
-        value: _tokenDeletePending,
-      );
+    if (_unregisterPending == unregistered) {
+      _unregisterPending = !unregistered;
+      await _settings.setBool(_unregisterPendingKey, value: _unregisterPending);
     }
   }
 
   Future<void> _discardLocalRegistration() async {
-    await _retireToken();
+    await _retireRegistration();
     await _clearNotificationContext();
     try {
       await _store.clear();
@@ -786,7 +784,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   }
 
   /// Turns closed-app notifications off: unregisters from reachable hosts,
-  /// deletes the FCM token and deletes the device key.
+  /// unregisters from FCM and deletes the device key.
   Future<void> disable() => _operations.run(() async {
     if (!state.enabled) return;
     state = state.copyWith(busy: true);
@@ -801,8 +799,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       final deviceId = _secrets?.deviceId;
       _heartbeat?.cancel();
       _heartbeat = null;
-      await _tokenRefresh?.cancel();
-      _tokenRefresh = null;
+      await _registrations?.cancel();
+      _registrations = null;
       if (deviceId != null) {
         // Every saved host's registration for this device goes.
         final reached = await _unregisterFromLiveHosts(
@@ -819,7 +817,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       _registered.clear();
       _lastPresence.clear();
       await _persistHostBookkeeping();
-      await _retireToken();
+      await _retireRegistration();
       await _clearNotificationContext();
       try {
         await _store.clear();
@@ -838,7 +836,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         'opt_out',
         fields: {
           'pendingHosts': _pendingUnregister.length,
-          'tokenDeletePending': _tokenDeletePending,
+          'unregisterPending': _unregisterPending,
         },
       );
       unawaited(_telemetry.logPushNotificationsToggled(enabled: false));
@@ -1034,7 +1032,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (outcome == PushTestOutcome.registrationRejected) {
         // The host dropped the ticket; fetch a new one and register again.
         _registered.remove(_keyOf(link));
-        _requestRefresh(newToken: result.result == 'unregistered');
+        _requestRefresh(reregister: result.result == 'unregistered');
       }
       return outcome;
     } on Object catch (error) {
@@ -1090,7 +1088,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     final needed =
         state.enabled ||
         _pendingUnregister.isNotEmpty ||
-        _tokenDeletePending ||
+        _unregisterPending ||
         _autoInitDisablePending;
     if (!needed) return;
     // Runs in the background too: a backgrounded app that keeps its
@@ -1102,16 +1100,16 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     );
   }
 
-  void _listenForTokenRefresh() {
-    unawaited(_tokenRefresh?.cancel());
-    _tokenRefresh = _gateway.onTokenRefresh.listen((token) {
-      if (_secrets?.tokenFingerprint == _fingerprint(token)) return;
+  void _listenForRegistrations() {
+    unawaited(_registrations?.cancel());
+    _registrations = _gateway.onRegistered.listen((fid) {
+      if (_secrets?.tokenFingerprint == _fingerprint(fid)) return;
       _requestRefresh();
     });
   }
 
-  /// Fetches the current token and re-registers when it changed or the
-  /// ticket is due for renewal.
+  /// Registers with FCM and re-registers with the function when the FID
+  /// changed or the ticket is due for renewal.
   Future<void> _reconcileRegistration() async {
     final secrets = _secrets;
     if (!state.enabled || secrets == null || !secrets.isRegistered) return;
@@ -1125,16 +1123,21 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       return;
     }
     try {
-      final token = await _gateway.getToken();
-      if (token != null &&
-          token.isNotEmpty &&
-          _fingerprint(token) != secrets.tokenFingerprint) {
-        _requestRefresh();
-      }
+      // Serialized with disable(), so a resume can never register with FCM
+      // again after an opt-out has deleted the installation.
+      await _operations.run(() async {
+        if (!state.enabled || _optingOut) return;
+        final fid = await _gateway.registerInstallation();
+        if (fid != null &&
+            fid.isNotEmpty &&
+            _fingerprint(fid) != _secrets?.tokenFingerprint) {
+          _requestRefresh();
+        }
+      });
     } on Object catch (error) {
       _log.debug(
         _diagnosticsCategory,
-        'token_check_failed',
+        'fcm_check_failed',
         fields: {'errorType': error.runtimeType},
       );
     }
@@ -1142,9 +1145,9 @@ class PushNotificationController extends Notifier<PushNotificationState> {
 
   /// Marks the registration for renewal and tries now. A failure is retried
   /// from later syncs, at most once per [pushRegistrationRetryInterval].
-  void _requestRefresh({bool newToken = false}) {
+  void _requestRefresh({bool reregister = false}) {
     _refreshNeeded = true;
-    _refreshNeedsNewToken |= newToken;
+    _refreshNeedsReregistration |= reregister;
     unawaited(_maybeRefresh(force: true));
   }
 
@@ -1159,20 +1162,21 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     try {
       await _operations.run(() async {
         if (!state.enabled || _optingOut) return;
-        final newToken = _refreshNeedsNewToken;
-        if (newToken) {
-          // FCM says the token is gone; make it issue another. If that fails,
-          // getToken would hand back the dead token, so retry later instead.
-          await _gateway.deleteToken();
+        final reregister = _refreshNeedsReregistration;
+        if (reregister) {
+          // FCM says the FID is not registered. Unregister first so register()
+          // contacts FCM instead of reporting the cached registration; if that
+          // fails, retry later rather than seal the dead FID again.
+          await _gateway.unregisterInstallation();
         }
-        await _registerToken(await _currentToken());
+        await _registerFid(await _currentFid());
         _refreshNeeded = false;
-        _refreshNeedsNewToken = false;
+        _refreshNeedsReregistration = false;
         _refreshFailures = 0;
         _log.info(
           _diagnosticsCategory,
           'ticket_refreshed',
-          fields: {'newToken': newToken},
+          fields: {'reregistered': reregister},
         );
       });
       if (!_refreshNeeded) scheduleSync();
@@ -1251,19 +1255,19 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     );
     var bookkeepingChanged = false;
 
-    if ((_tokenDeletePending || _autoInitDisablePending) &&
+    if ((_unregisterPending || _autoInitDisablePending) &&
         !state.enabled &&
         !state.busy) {
-      final last = _lastTokenDeleteAttempt;
+      final last = _lastUnregisterAttempt;
       if (last == null ||
           now.difference(last) >= pushRegistrationRetryInterval) {
-        // Serialized with enable(), so it can never delete a token that an
-        // opt-in in progress is registering.
+        // Serialized with enable(), so it can never undo the registration an
+        // opt-in in progress is making.
         unawaited(
           _operations.run(() async {
-            if ((_tokenDeletePending || _autoInitDisablePending) &&
+            if ((_unregisterPending || _autoInitDisablePending) &&
                 !state.enabled) {
-              await _retireToken();
+              await _retireRegistration();
             }
           }),
         );
@@ -1361,7 +1365,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     if (state.enabled && !_optingOut) await _refreshNotificationContext();
     if (_pendingUnregister.isEmpty &&
         !state.enabled &&
-        !_tokenDeletePending &&
+        !_unregisterPending &&
         !_autoInitDisablePending) {
       _heartbeat?.cancel();
       _heartbeat = null;
@@ -1512,7 +1516,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       if (stale) {
         // The host remembers that the function refused this ticket.
         _refusedTicket = secrets.ticket;
-        _requestRefresh(newToken: result.result == 'token_unregistered');
+        _requestRefresh(reregister: result.result == 'token_unregistered');
         return false;
       }
       final deviceId = secrets.deviceId;
@@ -1742,8 +1746,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   _LinkKey _keyOf(PushHostLink link) =>
       (connectionId: link.connectionId, sessionName: link.sessionName);
 
-  static String _fingerprint(String token) =>
-      crypto.sha256.convert(utf8.encode(token)).toString();
+  static String _fingerprint(String fid) =>
+      crypto.sha256.convert(utf8.encode(fid)).toString();
 
   static Set<int> _decodeIds(String? raw) {
     if (raw == null || raw.isEmpty) return <int>{};
