@@ -323,9 +323,9 @@ type pushServerView struct {
 	// encrypted payload.
 	agents map[string]string
 	titles map[string]string
-	// blocked holds the windows whose program reports it is waiting on the
-	// user (OSC 7501 blocked).
-	blocked map[string]bool
+	// blocked holds, for each window whose program reports it is waiting on
+	// the user (OSC 7501 blocked), the push kind of that request.
+	blocked map[string]string
 }
 
 // pushJob is one event addressed to one device.
@@ -362,10 +362,10 @@ type pushNotifier struct {
 	deferred  []pushDeferred
 	// held are window alerts waiting out pushAlertHold.
 	held []pushHeldAlert
-	// statusAt records, per window, when its last status push (an approval,
-	// question or finished turn) was raised, so an alert for the same event
-	// is not pushed as well.
-	statusAt map[string]time.Time
+	// statusAt records, per window and status kind, when its last status push
+	// (an approval, question or finished turn) was raised, so an alert for the
+	// same event is not pushed as well.
+	statusAt map[pushStatusMark]time.Time
 	// inflight tracks posts so tests can wait for them.
 	inflight sync.WaitGroup
 }
@@ -388,7 +388,7 @@ func newPushNotifier() *pushNotifier {
 		backoffUntil: map[pushBudgetKey]time.Time{},
 		bridges:      map[string]pushBridgeBaseline{},
 		delivered:    map[pushAttentionKey]uint64{},
-		statusAt:     map[string]time.Time{},
+		statusAt:     map[pushStatusMark]time.Time{},
 	}
 	notifier.store.now = func() time.Time { return notifier.now() }
 	return notifier
@@ -608,11 +608,11 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 		attached: map[string]bool{},
 		agents:   map[string]string{},
 		titles:   map[string]string{},
-		blocked:  map[string]bool{},
+		blocked:  map[string]string{},
 	}
 	for _, window := range s.windows {
-		if window.programStatusSummaryLocked().state == "blocked" {
-			view.blocked[window.id] = true
+		if summary := window.programStatusSummaryLocked(); summary.state == "blocked" {
+			view.blocked[window.id] = programStatusPushKind(programStatusSummary{}, summary)
 		}
 		// The resolved tool, as the window bar shows it: the live command, else
 		// what the window retains (its recorded tool, title or name).
@@ -888,28 +888,50 @@ func (s *muxServer) releaseHeldPushAlerts() time.Duration {
 	return next
 }
 
-// noteStatusLocked records a status push for windowID. An alert held for the
-// window is released after it and dropped then (see alertRedundantLocked).
-func (n *pushNotifier) noteStatusLocked(windowID string) {
+// pushStatusMark names a status push raised for a window.
+type pushStatusMark struct {
+	windowID string
+	kind     string
+}
+
+// pushStatusKinds are the status push kinds, which a window alert yields to.
+var pushStatusKinds = [...]string{pushKindPermission, pushKindInput, pushKindFinished}
+
+// noteStatusLocked records a status push of kind for windowID. An alert held
+// for the window is released after it and dropped then (see
+// alertRedundantLocked).
+func (n *pushNotifier) noteStatusLocked(windowID string, kind string) {
 	now := n.now()
 	for candidate, at := range n.statusAt {
 		if now.Sub(at) >= pushStatusAlertGrace {
 			delete(n.statusAt, candidate)
 		}
 	}
-	n.statusAt[windowID] = now
+	n.statusAt[pushStatusMark{windowID: windowID, kind: kind}] = now
 }
 
 // alertRedundantLocked reports whether a window alert would only repeat the
-// window's status: its program is waiting on the user, so the approval or
-// question push covers it, or its status was pushed a moment ago. Pushing it
-// would replace that better notification, which shares the window's slot.
-func (n *pushNotifier) alertRedundantLocked(windowID string, view pushServerView, now time.Time) bool {
-	if view.blocked[windowID] {
+// window's status on device: its program is waiting on the user, so the
+// approval or question push covers it, or its status was pushed a moment ago.
+// Pushing it would replace that better notification, which shares the
+// window's slot. A device that turned that status off is still sent the
+// alert, which is then all it hears of the event.
+func (n *pushNotifier) alertRedundantLocked(
+	device pushDeviceRecord,
+	windowID string,
+	view pushServerView,
+	now time.Time,
+) bool {
+	if kind := view.blocked[windowID]; kind != "" && device.wantsEvent(kind, 0) {
 		return true
 	}
-	at, ok := n.statusAt[windowID]
-	return ok && now.Sub(at) < pushStatusAlertGrace
+	for _, kind := range pushStatusKinds {
+		at, ok := n.statusAt[pushStatusMark{windowID: windowID, kind: kind}]
+		if ok && now.Sub(at) < pushStatusAlertGrace && device.wantsEvent(kind, 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // programStatusPushKind is the push a terminal program's OSC 7501 status
@@ -987,10 +1009,7 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 
 	notifier.mu.Lock()
 	if kind != pushKindAlert {
-		notifier.noteStatusLocked(windowID)
-	} else if notifier.alertRedundantLocked(windowID, view, now) {
-		notifier.mu.Unlock()
-		return
+		notifier.noteStatusLocked(windowID, kind)
 	}
 	if kind == pushKindAlert {
 		for deviceID := range notifier.presence {
@@ -1006,7 +1025,8 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 	}
 	admitted := make([]admittedDevice, 0, len(devices))
 	for _, device := range pushRecipients(devices, kind, alerts) {
-		if notifier.attendingLocked(device.DeviceID, windowID, view, now) {
+		if notifier.attendingLocked(device.DeviceID, windowID, view, now) ||
+			(kind == pushKindAlert && notifier.alertRedundantLocked(device, windowID, view, now)) {
 			continue
 		}
 		wanted := device.wantedAlerts(alerts)
@@ -1065,7 +1085,7 @@ func (s *muxServer) raisePushAttention(
 		previous uint64
 	}
 	notifier.mu.Lock()
-	notifier.noteStatusLocked(windowID)
+	notifier.noteStatusLocked(windowID, kind)
 	admitted := make([]admittedDevice, 0, len(devices))
 	for _, device := range pushRecipients(devices, kind, 0) {
 		key := pushAttentionKey{deviceID: device.DeviceID, bridgeID: bridgeID, kind: kind}
@@ -1634,12 +1654,13 @@ func (s *muxServer) flushPushDeferred() {
 		due = append(due, event)
 	}
 	notifier.deferred = kept
-	// A window whose status goes out in this flush gets no alert with it:
-	// both would land in the window's one notification slot.
-	statusDue := map[string]bool{}
+	// A device whose status for a window goes out in this flush gets no alert
+	// for that window with it: both would land in the window's one slot.
+	type deviceWindow struct{ deviceID, windowID string }
+	statusDue := map[deviceWindow]bool{}
 	for _, event := range due {
-		if event.kind != pushKindAlert {
-			statusDue[event.windowID] = true
+		if _, ok := recipient(event); ok && event.kind != pushKindAlert {
+			statusDue[deviceWindow{event.deviceID, event.windowID}] = true
 		}
 	}
 	type admittedEvent struct {
@@ -1648,12 +1669,13 @@ func (s *muxServer) flushPushDeferred() {
 	}
 	admitted := make([]admittedEvent, 0, len(due))
 	for _, event := range due {
-		if event.kind == pushKindAlert &&
-			(statusDue[event.windowID] || notifier.alertRedundantLocked(event.windowID, view, now)) {
-			continue
-		}
 		record, ok := recipient(event)
 		if !ok || notifier.attendingLocked(event.deviceID, event.windowID, view, now) {
+			continue
+		}
+		if event.kind == pushKindAlert &&
+			(statusDue[deviceWindow{event.deviceID, event.windowID}] ||
+				notifier.alertRedundantLocked(record, event.windowID, view, now)) {
 			continue
 		}
 		key := pushCoalesceKey{deviceID: event.deviceID, windowID: event.windowID, kind: event.kind}

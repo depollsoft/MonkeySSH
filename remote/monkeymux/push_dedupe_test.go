@@ -184,3 +184,33 @@ func TestPushDeferredFlushSendsAWindowsStatusWithoutItsAlert(t *testing.T) {
 		t.Fatalf("pushes = %q, want the finished turn alone", got)
 	}
 }
+
+// A device that turned a status off is not sent it, so the alert for the same
+// event is all it hears of it and still goes out; a device that takes the
+// status gets that alone.
+func TestPushAlertGivesWayOnlyToAStatusTheDeviceTakes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status string
+		after  time.Duration
+		want   string
+	}{
+		{"finished", "state=done:app=claude-code", 5 * time.Second, "alert,finished"},
+		{"blocked", "state=blocked:app=claude-code:kind=permission", pushStatusAlertGrace + time.Minute, "alert,permission"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newPushTestHarness(t)
+			h.registerEvents(t, newPushTestDevice(t, 1), nil)
+			h.registerEvents(t, newPushTestDevice(t, 2), pushTestEvents(pushEventBell, pushEventNotice))
+			h.addPushStatusWindow("@2", "")
+			h.writeStatus("@2", "state=working:app=claude-code")
+			h.writeStatus("@2", test.status)
+			h.clock.now = h.clock.now.Add(test.after)
+			h.raise("@2", pushKindAlert)
+			// Device 1 takes the status alone; device 2 turned it off.
+			if got, tickets := h.sortedKinds(), h.ticketsSent(); got != test.want || tickets != "1,2" {
+				t.Fatalf("pushes = %q to %q, want %q to 1,2", got, tickets, test.want)
+			}
+		})
+	}
+}
