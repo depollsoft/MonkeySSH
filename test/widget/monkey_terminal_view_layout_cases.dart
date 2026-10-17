@@ -288,9 +288,11 @@ void registerMonkeyTerminalViewLayoutTests() {
               '\x1b[${row + 1};1H\x1b[48;2;255;0;0m${' ' * columns}\x1b[0m',
             );
           }
-          // Text on row 0 that must not show in the strip.
+          // Text on row 0 that must not show in the strip, and on row 1 clear
+          // of the sampled column.
           terminal.write(
-            '\x1b[1;1H\x1b[38;2;0;255;0;48;2;255;0;0m${'X' * columns}\x1b[0m',
+            '\x1b[1;1H\x1b[38;2;0;255;0;48;2;255;0;0m${'X' * columns}'
+            '\x1b[2;15Hrow1\x1b[0m',
           );
           await tester.pumpWidget(
             buildTerminal(
@@ -357,6 +359,17 @@ void registerMonkeyTerminalViewLayoutTests() {
             const Offset(2, 1),
           );
           expect(output.join(), '\x1b[<0;1;2M');
+
+          // So does a native selection started in the strip.
+          render.dispatchSelectionEvent(
+            SelectParagraphSelectionEvent(
+              globalPosition: render.localToGlobal(const Offset(2, 1)),
+            ),
+          );
+          await tester.pump();
+          final selected = render.getSelectedContent()?.plainText;
+          expect(selected, contains('row1'));
+          expect(selected, isNot(contains('X')));
         },
       );
 

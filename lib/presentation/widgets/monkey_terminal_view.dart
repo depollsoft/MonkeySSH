@@ -3449,16 +3449,17 @@ class MonkeyRenderTerminal extends RenderBox
     final y = offset.dy - origin.dy + _scrollOffset;
     final row = y ~/ _painter.cellSize.height;
     final col = x ~/ _painter.cellSize.width;
-    // The strip of a hidden top row belongs to the first row shown, so a tap
-    // there cannot open a link or click a control nobody can see.
-    final hiddenTopRow = _hiddenTopRow();
     return CellOffset(
       col.clamp(0, _terminal.viewWidth - 1),
-      row.clamp(
-        hiddenTopRow == null ? 0 : hiddenTopRow + 1,
-        _terminal.buffer.lines.length - 1,
-      ),
+      row.clamp(_firstPointerRow(), _terminal.buffer.lines.length - 1),
     );
+  }
+
+  // The strip of a hidden top row belongs to the first row shown, so a tap or
+  // selection there cannot reach text, links or controls nobody can see.
+  int _firstPointerRow() {
+    final hiddenTopRow = _hiddenTopRow();
+    return hiddenTopRow == null ? 0 : hiddenTopRow + 1;
   }
 
   // A full-screen app's grid has no history above it. When a shared grid is
@@ -3599,7 +3600,7 @@ class MonkeyRenderTerminal extends RenderBox
     final col = x ~/ _painter.cellSize.width;
     return CellOffset(
       col.clamp(0, _terminal.viewWidth),
-      row.clamp(0, _terminal.buffer.lines.length - 1),
+      row.clamp(_firstPointerRow(), _terminal.buffer.lines.length - 1),
     );
   }
 
