@@ -490,10 +490,38 @@ void main() {
 
       expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
 
-      expect(h.gateway.calls, containsAllInOrder(['autoInit:false']));
-      expect(h.gateway.calls, contains('deleteInstallation'));
+      expect(
+        h.gateway.calls,
+        containsAllInOrder(['autoInit:false', 'unregisterInstallation']),
+      );
+      // No host got a ticket, so the installation other SDKs share is kept.
+      expect(h.gateway.calls, isNot(contains('deleteInstallation')));
       expect(h.secrets.values, isEmpty);
       expect(h.state.enabled, isFalse);
+    },
+  );
+
+  test(
+    'a failed opt-in that cannot unregister deletes the installation later',
+    () async {
+      h.gateway
+        ..registerError = const PushSetupException(
+          PushSetupFailure.appCheckFailed,
+        )
+        ..unregisterError = Exception('offline');
+      await h.start();
+
+      expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
+      expect(
+        await h.settings.getBool('push_notifications_token_delete_pending'),
+        isTrue,
+      );
+
+      h.gateway.calls.clear();
+      h.now = h.now.add(pushRegistrationRetryInterval);
+      await h.controller.syncNow();
+      await pumpEventQueue();
+      expect(h.gateway.calls, ['autoInit:false', 'deleteInstallation']);
     },
   );
 
@@ -1120,7 +1148,7 @@ void main() {
           await h.controller.enable(),
           PushSetupFailure.registrationFailed,
         );
-        expect(h.gateway.calls, contains('deleteInstallation'));
+        expect(h.gateway.calls, contains('unregisterInstallation'));
         expect(h.gateway.calls, contains('autoInit:false'));
       },
     );
@@ -1596,8 +1624,10 @@ void main() {
         h.gateway.calls.clear();
 
         expect(await h.controller.enable(), PushSetupFailure.tokenUnavailable);
-        // The old FID is never registered again under a new device key.
+        // The old FID is never registered again under a new device key, and
+        // the failed opt-in keeps trying to delete it rather than unregister.
         expect(h.gateway.calls, isNot(contains('registerInstallation')));
+        expect(h.gateway.calls, isNot(contains('unregisterInstallation')));
         expect(h.gateway.registrations, isEmpty);
         expect(h.state.enabled, isFalse);
         expect(

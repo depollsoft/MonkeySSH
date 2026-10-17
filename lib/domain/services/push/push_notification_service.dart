@@ -724,7 +724,10 @@ class PushNotificationController extends Notifier<PushNotificationState> {
   /// opt-in registers a new FID and hosts that missed the unregister get 410
   /// for the old one. Each step that fails (offline, say) is persisted and
   /// retried on its own, because auto-init left on would register again.
-  Future<void> _retireRegistration() async {
+  ///
+  /// With [deleteInstallation] false it only unregisters from FCM, unless a
+  /// deletion is already pending.
+  Future<void> _retireRegistration({bool deleteInstallation = true}) async {
     _lastUnregisterAttempt = _now();
     var autoInitOff = true;
     try {
@@ -743,7 +746,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     var unregistered = true;
     if (_fcmRegistered || _unregisterPending) {
       try {
-        await _gateway.deleteInstallation();
+        if (deleteInstallation || _unregisterPending) {
+          await _gateway.deleteInstallation();
+        } else {
+          await _gateway.unregisterInstallation();
+        }
         _fcmRegistered = false;
       } on Object catch (error) {
         unregistered = false;
@@ -767,8 +774,12 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     }
   }
 
+  /// Undoes a failed opt-in. Its ticket never left this device and the
+  /// function keeps no state, so no host can send to the FID and unregistering
+  /// is enough. Deleting the installation would also reset the ID that the
+  /// other Firebase SDKs share.
   Future<void> _discardLocalRegistration() async {
-    await _retireRegistration();
+    await _retireRegistration(deleteInstallation: false);
     await _clearNotificationContext();
     try {
       await _store.clear();

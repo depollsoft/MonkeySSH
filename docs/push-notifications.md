@@ -611,7 +611,11 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   with FCM (`register()` reports the FID through `onRegistered`), create the
   X25519 key pair and the host reference key in secure
   storage, call `registerPushDevice` with a limited-use App Check token, and
-  store the device id, the ticket and when it was issued.
+  store the device id, the ticket and when it was issued. If a step fails, the
+  app turns auto-init off, unregisters from FCM and deletes the new keys. It
+  keeps the Firebase installation, which the other Firebase SDKs share, because
+  no host has a ticket for that FID yet. An unregister that fails is retried as
+  a pending deletion (see Opt out).
 - **Attach:** for each saved host with push enabled, send `push_register`
   through one of its live MonkeyMux connections (see Storage for which), once
   per connection, then presence for every connection (see Attendance). The
