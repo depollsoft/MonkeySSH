@@ -26,3 +26,31 @@ class PushLocalAlertListeners {
 
 /// The app-wide registry the window bar reports to.
 final pushLocalAlertListeners = PushLocalAlertListeners();
+
+/// Connections whose host keeps terminal programs' status pushes (approvals,
+/// questions, finished turns) back because this backgrounded app said it
+/// raises them itself and the host acknowledged the claim.
+///
+/// The window bar raises them only for these connections: anywhere else the
+/// host pushes them, and raising them too would show each one twice.
+class PushLocalStatusCoverage {
+  final _covered = <int>{};
+
+  /// Records whether the host of [connectionId] honors the claim.
+  void set(int connectionId, {required bool covered}) {
+    if (covered) {
+      _covered.add(connectionId);
+    } else {
+      _covered.remove(connectionId);
+    }
+  }
+
+  /// Whether the window bar of [connectionId] raises program status itself.
+  bool covers(int connectionId) => _covered.contains(connectionId);
+
+  /// Forgets every connection.
+  void clear() => _covered.clear();
+}
+
+/// The app-wide registry the push service writes and the window bar reads.
+final pushLocalStatusCoverage = PushLocalStatusCoverage();

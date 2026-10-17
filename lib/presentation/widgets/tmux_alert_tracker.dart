@@ -1,3 +1,4 @@
+import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/local_notification_service.dart';
 
@@ -69,3 +70,80 @@ class TmuxAlertTracker {
     }
   }
 }
+
+/// A terminal program's status change that calls for a notification.
+enum TmuxProgramStatusEvent {
+  /// It newly waits for approval.
+  permission,
+
+  /// It newly waits for an answer (a question, or signing in).
+  input,
+
+  /// It stopped working: its turn finished.
+  finished,
+}
+
+/// The notification a program's status change from [before] to [after] calls
+/// for, or null. The same rules decide MonkeyMux's pushes
+/// (`programStatusPushKind`), so a local notification stands in for exactly
+/// the push it keeps back.
+TmuxProgramStatusEvent? tmuxProgramStatusEvent(
+  TerminalProgramStatus? before,
+  TerminalProgramStatus? after,
+) {
+  if (after == null) return null;
+  if (after.state == TerminalProgramState.blocked) {
+    if (before?.state == TerminalProgramState.blocked &&
+        before?.kind == after.kind) {
+      return null;
+    }
+    return after.kind == TerminalProgramBlockedKind.permission
+        ? TmuxProgramStatusEvent.permission
+        : TmuxProgramStatusEvent.input;
+  }
+  if (before?.state == TerminalProgramState.working &&
+      (after.state == TerminalProgramState.done ||
+          after.state == TerminalProgramState.idle)) {
+    return TmuxProgramStatusEvent.finished;
+  }
+  return null;
+}
+
+/// Follows each window's reported program status and yields the changes that
+/// call for a notification. A window seen for the first time only sets its
+/// baseline, so connecting never replays a status from before.
+class TmuxProgramStatusTracker {
+  final _statusByWindowKey = <String, TerminalProgramStatus?>{};
+
+  /// Applies a snapshot and returns its windows' status events, in order.
+  List<({TmuxWindow window, TmuxProgramStatusEvent event})> applyWindows(
+    List<TmuxWindow> windows,
+  ) {
+    final events = <({TmuxWindow window, TmuxProgramStatusEvent event})>[];
+    final keys = <String>{};
+    for (final window in windows) {
+      final key = tmuxWindowNotificationKey(window);
+      keys.add(key);
+      final status = window.programStatus;
+      if (!_statusByWindowKey.containsKey(key)) {
+        _statusByWindowKey[key] = status;
+        continue;
+      }
+      final event = tmuxProgramStatusEvent(_statusByWindowKey[key], status);
+      _statusByWindowKey[key] = status;
+      if (event != null) events.add((window: window, event: event));
+    }
+    _statusByWindowKey.removeWhere((key, _) => !keys.contains(key));
+    return events;
+  }
+
+  /// Forgets every window, as for a new session.
+  void clear() => _statusByWindowKey.clear();
+}
+
+/// The key a window's notification slot is named by: its stable id, else its
+/// index.
+String tmuxWindowNotificationKey(TmuxWindow window) =>
+    window.id != null && isValidTmuxWindowId(window.id!)
+    ? window.id!
+    : 'index:${window.index}';

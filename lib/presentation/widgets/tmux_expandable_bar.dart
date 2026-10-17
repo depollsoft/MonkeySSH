@@ -229,6 +229,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   List<TmuxWindow>? _windows;
   AgentLaunchTool? _preferredLaunchTool;
   final _alertTracker = TmuxAlertTracker();
+  final _statusTracker = TmuxProgramStatusTracker();
+  // Windows whose approval or question this bar raised and that still wait:
+  // their bells and program notifications stay quiet so as not to replace it.
+  final _attentionWindowKeys = <String>{};
   HostNotificationPrefs _hostPrefs = const HostNotificationPrefs();
   ProviderSubscription<AsyncValue<HostNotificationPrefs>>?
   _hostPrefsSubscription;
@@ -681,6 +685,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     // A window has one notification slot. New bells wait until this
     // snapshot's forwarded notifications are posted: a window that also has
     // one shows that, since it says more, and gets one notification, not two.
+    final quietWindowKeys = _syncStatusNotifications(
+      windows,
+      _statusTracker.applyWindows(windows),
+    );
     final newAlerts =
         <({TmuxWindow window, int notificationId, String? windowId})>[];
     final hasNewAlert = _alertTracker.applyWindows(
@@ -700,9 +708,13 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         !(MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
       unawaited(_bounceController.forward(from: 0));
     }
-    final notifiedWindowKeys = _syncForwardedNotifications(windows);
+    final notifiedWindowKeys = _syncForwardedNotifications(
+      windows,
+      quietWindowKeys: quietWindowKeys,
+    );
     for (final alert in newAlerts) {
-      if (notifiedWindowKeys.contains(_tmuxAlertWindowKey(alert.window))) {
+      final key = _tmuxAlertWindowKey(alert.window);
+      if (quietWindowKeys.contains(key) || notifiedWindowKeys.contains(key)) {
         continue;
       }
       _sendAlertNotification(
@@ -967,6 +979,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _clearSeenAlertNotifications() {
+    _statusTracker.clear();
+    _attentionWindowKeys.clear();
     _alertTracker.clear(
       (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
     );
@@ -984,11 +998,93 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       ? window.id!
       : _tmuxAlertIndexWindowKey(window.index);
 
+  /// Raises the approvals, questions and finished turns terminal agents report
+  /// while the host keeps those pushes back for this backgrounded app (see
+  /// [PushLocalStatusCoverage]), each in its window's notification slot.
+  /// Returns the keys of windows whose bells and program notifications stay
+  /// quiet: one it just notified, whose alert is the same event, and one
+  /// still waiting on an approval or answer it raised.
+  Set<String> _syncStatusNotifications(
+    List<TmuxWindow> windows,
+    List<({TmuxWindow window, TmuxProgramStatusEvent event})> events,
+  ) {
+    _attentionWindowKeys.removeWhere(
+      (key) => !windows.any(
+        (window) =>
+            _tmuxAlertWindowKey(window) == key &&
+            window.programStatus?.state == TerminalProgramState.blocked,
+      ),
+    );
+    final quiet = <String>{};
+    if (pushLocalStatusCoverage.covers(widget.session.connectionId)) {
+      for (final (:window, :event) in events) {
+        if (_sendStatusNotification(window, event)) {
+          final key = _tmuxAlertWindowKey(window);
+          quiet.add(key);
+          if (event != TmuxProgramStatusEvent.finished) {
+            _attentionWindowKeys.add(key);
+          }
+        }
+      }
+    }
+    return quiet..addAll(_attentionWindowKeys);
+  }
+
+  bool _sendStatusNotification(
+    TmuxWindow window,
+    TmuxProgramStatusEvent event,
+  ) {
+    final kind = switch (event) {
+      TmuxProgramStatusEvent.permission => PushEventKind.permission,
+      TmuxProgramStatusEvent.input => PushEventKind.input,
+      TmuxProgramStatusEvent.finished => PushEventKind.finished,
+    };
+    final content = resolveTmuxAlertNotificationContent(
+      tmuxSessionName: widget.tmuxSessionName,
+      window: window,
+      hostLabel: widget.hostLabel,
+    );
+    final session = widget.session;
+    final windowId = window.id;
+    return _showIfHostAllows(
+      event == TmuxProgramStatusEvent.finished
+          ? HostNotificationKind.agentFinished
+          : HostNotificationKind.agentAttention,
+      () => _localNotifications.showAgentStatus(
+        notificationId: buildWindowNotificationId(
+          session.hostId,
+          widget.tmuxSessionName,
+          _tmuxAlertWindowKey(window),
+        ),
+        title: agentStatusNotificationTitle(
+          kind,
+          agentLabel: window.agentTool?.label,
+        ),
+        subtitle: content.subtitle,
+        // The window, never the program's own message or title.
+        body: content.title,
+        payload: TmuxAlertNotificationPayload(
+          hostId: session.hostId,
+          connectionId: session.connectionId,
+          tmuxSessionName: widget.tmuxSessionName,
+          windowIndex: window.index,
+          windowId: windowId != null && isValidTmuxWindowId(windowId)
+              ? windowId
+              : null,
+        ),
+      ),
+    );
+  }
+
   /// Shows server-forwarded background notifications unseen since the last
   /// window list, and cancels shown ones whose window went active, closed,
   /// or dropped its pending entries (viewed on the server). Returns the keys
-  /// of the windows it posted a notification for.
-  Set<String> _syncForwardedNotifications(List<TmuxWindow> windows) {
+  /// of the windows it posted a notification for. Windows in
+  /// [quietWindowKeys] have theirs recorded as seen but not posted.
+  Set<String> _syncForwardedNotifications(
+    List<TmuxWindow> windows, {
+    Set<String> quietWindowKeys = const <String>{},
+  }) {
     final keys = <String>{
       for (final window in windows) _tmuxAlertWindowKey(window),
     };
@@ -1036,6 +1132,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
     final notified = <String>{};
     for (final show in shows) {
+      if (quietWindowKeys.contains(_tmuxAlertWindowKey(show.window))) {
+        continue;
+      }
       if (_showForwardedNotification(show.window, windows, show.notification)) {
         notified.add(_tmuxAlertWindowKey(show.window));
       }

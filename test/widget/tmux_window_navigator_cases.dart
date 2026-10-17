@@ -31,6 +31,7 @@ import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
+import 'package:monkeyssh/domain/services/push/push_local_alerts.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
@@ -1205,6 +1206,137 @@ void registerTmuxWindowNavigatorTests() {
             shown.id,
             buildWindowNotificationId(session.hostId, 'main', '@2'),
           );
+        });
+
+        TmuxWindow agentWithStatus(
+          TerminalProgramStatus status, {
+          List<String> payloads = const [],
+          bool rang = false,
+        }) => TmuxWindow(
+          index: 2,
+          id: '@2',
+          name: 'claude',
+          isActive: false,
+          flags: rang ? '!' : '',
+          agentTool: AgentLaunchTool.claudeCode,
+          programStatus: status,
+          pendingNotifications: [
+            for (var i = 0; i < payloads.length; i++)
+              MuxWindowNotification(seq: i + 1, payload: payloads[i]),
+          ],
+        );
+        const working = TerminalProgramStatus(
+          state: TerminalProgramState.working,
+        );
+        const approval = TerminalProgramStatus(
+          state: TerminalProgramState.blocked,
+          kind: TerminalProgramBlockedKind.permission,
+        );
+        const done = TerminalProgramStatus(state: TerminalProgramState.done);
+
+        group('while the host keeps status pushes back', () {
+          setUp(
+            () => pushLocalStatusCoverage.set(
+              session.connectionId,
+              covered: true,
+            ),
+          );
+          tearDown(pushLocalStatusCoverage.clear);
+
+          testWidgets('an approval and its bell are one notification', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [agentWithStatus(working)]);
+            await show(tester, [
+              agentWithStatus(
+                approval,
+                rang: true,
+                payloads: ['9;Claude needs your permission'],
+              ),
+            ]);
+            final slot = buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+            );
+            final shown = notifications.shown.single;
+            expect(shown.title, 'Claude Code needs approval');
+            expect(shown.id, slot);
+
+            // Ringing again while it waits does not replace the approval.
+            await show(tester, [
+              agentWithStatus(
+                approval,
+                rang: true,
+                payloads: ['9;Claude needs your permission', '9;Still waiting'],
+              ),
+            ]);
+            expect(notifications.shown, hasLength(1));
+
+            // The finished turn takes the window's slot.
+            await show(tester, [agentWithStatus(working)]);
+            await show(tester, [agentWithStatus(done)]);
+            expect(notifications.shown.map((n) => (n.title, n.id)), [
+              ('Claude Code needs approval', slot),
+              ('Claude Code finished', slot),
+            ]);
+          });
+
+          testWidgets('a finished turn and its notice are one notification', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [agentWithStatus(working)]);
+            await show(tester, [
+              agentWithStatus(
+                done,
+                rang: true,
+                payloads: ['9;Claude is waiting for your input'],
+              ),
+            ]);
+            expect(notifications.shown.single.title, 'Claude Code finished');
+          });
+
+          testWidgets('a status from before the bar opened is not replayed', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [agentWithStatus(approval)]);
+            expect(notifications.shown, isEmpty);
+          });
+
+          testWidgets('approvals stay with the host when the kind is off', (
+            tester,
+          ) async {
+            await pumpBar(
+              tester,
+              prefs: const HostNotificationPrefs(agentAttention: false),
+            );
+            await show(tester, [agentWithStatus(working)]);
+            await show(tester, [
+              agentWithStatus(
+                approval,
+                rang: true,
+                payloads: ['9;Claude needs your permission'],
+              ),
+            ]);
+            // Not raised as a status, so its own notification still shows.
+            expect(
+              notifications.shown.single.body,
+              'Claude needs your permission',
+            );
+          });
+        });
+
+        testWidgets('without the claim the host pushes the status', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [agentWithStatus(working)]);
+          await show(tester, [agentWithStatus(approval)]);
+          await show(tester, [agentWithStatus(done)]);
+          expect(notifications.shown, isEmpty);
         });
 
         testWidgets('a host with shell notifications off forwards none', (
@@ -2642,6 +2774,20 @@ class _RecordingNotifications extends LocalNotificationService {
     TerminalNotificationUrgency? urgency,
     TerminalNotificationSound? sound,
     Duration? timeout,
+  }) async => shown.add((
+    id: notificationId,
+    title: title,
+    body: body,
+    windowId: payload.windowId,
+  ));
+
+  @override
+  Future<void> showAgentStatus({
+    required int notificationId,
+    required String title,
+    required String body,
+    required TmuxAlertNotificationPayload payload,
+    String? subtitle,
   }) async => shown.add((
     id: notificationId,
     title: title,

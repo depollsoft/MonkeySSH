@@ -86,6 +86,7 @@ class MonkeyMuxPushControlResult {
     this.unsupported = false,
     this.result,
     this.events,
+    this.statusClaimHonored = false,
   });
 
   /// Whether the helper accepted the operation.
@@ -100,6 +101,11 @@ class MonkeyMuxPushControlResult {
   /// On `push_registered`, the event categories the helper will send. Null
   /// from a helper that ignores them (before 0.1.233) and sends everything.
   final List<String>? events;
+
+  /// On `push_presence_ack`, whether the helper honors the presence's status
+  /// claim and keeps terminal programs' status pushes back for it (0.1.243
+  /// on). An earlier helper pushes them regardless.
+  final bool statusClaimHonored;
 }
 
 /// Version metadata for an already-running MonkeyMux server.
@@ -1061,6 +1067,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       ok: true,
       result: response.pushResult,
       events: response.pushEvents,
+      statusClaimHonored: response.pushStatus,
     );
   }
 
@@ -2355,6 +2362,7 @@ class _MonkeyMuxControlResponse {
     this.focusChanged = false,
     this.pushResult,
     this.pushEvents,
+    this.pushStatus = false,
   });
 
   factory _MonkeyMuxControlResponse.fromJson(Map<String, Object?> json) =>
@@ -2400,6 +2408,10 @@ class _MonkeyMuxControlResponse {
             events.whereType<String>().toList(growable: false),
           _ => null,
         },
+        pushStatus: switch (json['push']) {
+          {'status': true} => true,
+          _ => false,
+        },
       );
 
   static _MonkeyMuxControlResponse? tryParse(String line) {
@@ -2432,6 +2444,7 @@ class _MonkeyMuxControlResponse {
   final bool focusChanged;
   final String? pushResult;
   final List<String>? pushEvents;
+  final bool pushStatus;
 
   bool get isError => status == 'error' || type == 'error';
 }

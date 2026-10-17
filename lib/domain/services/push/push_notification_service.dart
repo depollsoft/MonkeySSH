@@ -476,6 +476,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _disposed = false;
     ref.onDispose(() {
       _disposed = true;
+      pushLocalStatusCoverage.clear();
       _heartbeat?.cancel();
       unawaited(_registrations?.cancel());
       unawaited(_hostChanges?.cancel());
@@ -1620,11 +1621,23 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         windowBar &&
         prefs.shellNotifications &&
         _terminalNotificationsEnabled();
+    // The bar also raises the approvals, questions and finished turns
+    // terminal agents report, in the window's one notification slot beside
+    // its bells, so the host need not push them as a second notification.
+    final localStatus =
+        windowBar && (prefs.agentAttention || prefs.agentFinished);
     final presence = _foreground
         ? (_isViewed(link, links) ? _Presence.viewing : _Presence.idle)
-        : (localAlerts || localNotices || localBridges.isNotEmpty)
+        : (localAlerts ||
+              localNotices ||
+              localStatus ||
+              localBridges.isNotEmpty)
         ? _Presence.local
         : _Presence.idle;
+    if (presence != _Presence.local) {
+      // Raised by the host from now on.
+      pushLocalStatusCoverage.set(link.connectionId, covered: false);
+    }
     if (presence == _Presence.idle && _lastPresence[key] == _Presence.idle) {
       return;
     }
@@ -1639,11 +1652,25 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           if (presence == _Presence.local) 'alerts': localAlerts,
           if (presence == _Presence.local) 'notices': localNotices,
           if (presence == _Presence.local) 'bridges': localBridges,
+          if (presence == _Presence.local) 'status': localStatus,
         },
       }, lowPriority: true);
       if (result.ok) _lastPresence[key] = presence;
+      // Only a helper that acknowledged the claim keeps the pushes back; an
+      // older one pushes them anyway, so the bar must not raise them too.
+      pushLocalStatusCoverage.set(
+        link.connectionId,
+        covered:
+            result.ok &&
+            presence == _Presence.local &&
+            localStatus &&
+            result.statusClaimHonored,
+      );
     } on Object {
-      // Presence is advisory; the next heartbeat retries.
+      // Presence is advisory; the next heartbeat retries. Until then the
+      // host keeps any claim it acknowledged for a short while, and sends
+      // what that claim kept back if it lapses.
+      pushLocalStatusCoverage.set(link.connectionId, covered: false);
     }
   }
 

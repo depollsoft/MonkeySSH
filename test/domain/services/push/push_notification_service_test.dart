@@ -11,6 +11,7 @@ import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_device_store.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
+import 'package:monkeyssh/domain/services/push/push_local_alerts.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_context.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
@@ -202,6 +203,9 @@ class _FakeLink implements PushHostLink {
   /// Whether push_unregister fails, as when the connection drops mid-way.
   bool failUnregister = false;
 
+  /// Whether the helper honors the presence's status claim (0.1.243+).
+  bool honorsStatusClaim = true;
+
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
 
@@ -240,6 +244,8 @@ class _FakeLink implements PushHostLink {
       result: command['type'] == 'push_test'
           ? (testResults.isEmpty ? testResult : testResults.removeAt(0))
           : null,
+      statusClaimHonored:
+          command['type'] == 'push_presence' && honorsStatusClaim,
     );
   }
 }
@@ -960,14 +966,74 @@ void main() {
       expect(lastOf(link, 'push_presence'), containsPair('alerts', true));
       expect(lastOf(link, 'push_presence'), containsPair('notices', true));
 
+      expect(lastOf(link, 'push_presence'), containsPair('status', true));
+
       // The app shows no program notifications while the app-wide switch is
-      // off, so the host keeps pushing them.
+      // off, so the host keeps pushing them; agents' status it still raises.
       h.terminalNotifications = false;
       await h.editHost(1, const HostNotificationPrefs(windowAlerts: false));
       await h.controller.syncNow();
-      final presence = lastOf(link, 'push_presence');
+      var presence = lastOf(link, 'push_presence');
+      expect(presence['local'], isTrue);
+      expect(presence, containsPair('alerts', false));
+      expect(presence, containsPair('notices', false));
+      expect(presence, containsPair('status', true));
+
+      // With the agent kinds off too, it raises nothing locally.
+      await h.editHost(
+        1,
+        const HostNotificationPrefs(
+          windowAlerts: false,
+          agentAttention: false,
+          agentFinished: false,
+        ),
+      );
+      await h.controller.syncNow();
+      presence = lastOf(link, 'push_presence');
       expect(presence['local'], isFalse);
       expect(presence, isNot(contains('alerts')));
+      expect(presence, isNot(contains('status')));
+    });
+
+    group('the status claim', () {
+      tearDown(pushLocalStatusCoverage.clear);
+
+      Future<_FakeLink> background({bool honored = true}) async {
+        final link = _FakeLink(connectionId: 10, hostId: 1)
+          ..honorsStatusClaim = honored;
+        h.links.add(link);
+        h.alertListeners.add(10);
+        await h.start();
+        await h.controller.enable();
+        h.controller.reportVisibility(foreground: false);
+        await pumpEventQueue();
+        await h.controller.syncNow();
+        return link;
+      }
+
+      test('covers the connection once its helper acknowledges it', () async {
+        await background();
+        expect(pushLocalStatusCoverage.covers(10), isTrue);
+      });
+
+      test(
+        'an older helper that pushes status anyway is never covered',
+        () async {
+          await background(honored: false);
+          expect(pushLocalStatusCoverage.covers(10), isFalse);
+        },
+      );
+
+      test(
+        'returning to the foreground hands status back to the host',
+        () async {
+          await background();
+          h.controller.reportVisibility(foreground: true);
+          await pumpEventQueue();
+          await h.controller.syncNow();
+          expect(pushLocalStatusCoverage.covers(10), isFalse);
+        },
+      );
     });
   });
 
