@@ -760,10 +760,14 @@ jobs:
           name: monkeymux-assets
           path: assets/monkeymux/
 
-      - uses: awalsh128/cache-apt-pkgs-action@v1.6.3
-        with:
-          packages: clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev
-          version: 1.0
+      # Not awalsh128/cache-apt-pkgs-action: it pins actions/cache by the
+      # commit our own steps reach through a tag, and gh-actions-lock 0.2.0
+      # records both under the tag, so the runner's lookup by commit fails.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev
 
       - uses: $/.github/actions/flutter-setup
         with:
