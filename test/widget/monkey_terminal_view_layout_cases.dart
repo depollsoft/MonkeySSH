@@ -288,6 +288,10 @@ void registerMonkeyTerminalViewLayoutTests() {
               '\x1b[${row + 1};1H\x1b[48;2;255;0;0m${' ' * columns}\x1b[0m',
             );
           }
+          // Text on row 0 that must not show in the strip.
+          terminal.write(
+            '\x1b[1;1H\x1b[38;2;0;255;0;48;2;255;0;0m${'X' * columns}\x1b[0m',
+          );
           await tester.pumpWidget(
             buildTerminal(
               terminal: terminal,
@@ -329,11 +333,28 @@ void registerMonkeyTerminalViewLayoutTests() {
           // The last row sits on the bottom edge.
           final rowColor = sample(size.height - cellHeight / 2);
           expect(rowColor, isNot(theme.background));
-          // Row 0 straddles the top edge: its visible half stays blank.
-          expect(sample(1), theme.background);
-          expect(sample(cellHeight / 2 - 2), theme.background);
+          // Row 0 straddles the top edge: its visible half keeps the row's
+          // colour but not its text.
+          expect(sample(1), rowColor);
+          expect(sample(cellHeight / 2 - 2), rowColor);
           // Row 1 is whole and painted.
           expect(sample(cellHeight / 2 + 1), rowColor);
+
+          // A click in the blank strip goes to row 1, not the hidden row.
+          final render = viewKey.currentState!.renderTerminal;
+          expect(render.getCellOffset(const Offset(2, 1)).y, 1);
+          expect(render.getCellOffset(Offset(2, cellHeight / 2 + 1)).y, 1);
+          expect(render.getCellOffset(Offset(2, size.height - 1)).y, rows - 1);
+          final output = <String>[];
+          terminal
+            ..onOutput = output.add
+            ..write('\x1b[?1000h\x1b[?1006h');
+          render.mouseEvent(
+            TerminalMouseButton.left,
+            TerminalMouseButtonState.down,
+            const Offset(2, 1),
+          );
+          expect(output.join(), '\x1b[<0;1;2M');
         },
       );
 

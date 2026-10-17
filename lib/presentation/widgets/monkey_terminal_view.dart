@@ -3449,10 +3449,41 @@ class MonkeyRenderTerminal extends RenderBox
     final y = offset.dy - origin.dy + _scrollOffset;
     final row = y ~/ _painter.cellSize.height;
     final col = x ~/ _painter.cellSize.width;
+    // The blank strip of a hidden top row belongs to the first row shown, so
+    // a tap there cannot open a link or click a control nobody can see.
+    final hiddenTopRow = _hiddenTopRow();
     return CellOffset(
       col.clamp(0, _terminal.viewWidth - 1),
-      row.clamp(0, _terminal.buffer.lines.length - 1),
+      row.clamp(
+        hiddenTopRow == null ? 0 : hiddenTopRow + 1,
+        _terminal.buffer.lines.length - 1,
+      ),
     );
+  }
+
+  // A full-screen app's grid has no history above it. When a shared grid is
+  // taller than the viewport it stays bottom-aligned so the app's prompt
+  // remains visible, which cuts off the top of the first visible row. The
+  // rest of that row reads as a stray line above the app (such as above
+  // Claude Code's pinned header), so [_paint] draws only its cell colours:
+  // no glyphs, descenders, images, cursor or highlights. Returns that row, or
+  // null when the first visible row is whole or is the only one.
+  int? _hiddenTopRow() {
+    if (!_terminal.isUsingAltBuffer || !hasSize) {
+      return null;
+    }
+    final lastIndex = _terminal.buffer.lines.length - 1;
+    final charHeight = _painter.cellSize.height;
+    final firstLineOffset = _scrollOffset - _contentOrigin.dy;
+    final firstLine = (firstLineOffset ~/ charHeight).clamp(0, lastIndex);
+    final lastLine = ((firstLineOffset + size.height) ~/ charHeight).clamp(
+      0,
+      lastIndex,
+    );
+    // Rounded as in [_linePaintOffset], so hit-testing matches the paint.
+    final firstLineTop = (firstLine * charHeight - firstLineOffset)
+        .truncateToDouble();
+    return firstLine < lastLine && firstLineTop < 0 ? firstLine : null;
   }
 
   void selectWord(Offset from, [Offset? to]) {
@@ -4425,24 +4456,35 @@ class MonkeyRenderTerminal extends RenderBox
     final lastLine = lastLineOffset ~/ charHeight;
     var effectFirstLine = firstLine.clamp(0, lines.length - 1);
     final effectLastLine = lastLine.clamp(0, lines.length - 1);
-    // A full-screen app's grid has no history above it. When a shared grid is
-    // taller than the viewport it stays bottom-aligned so the app's prompt
-    // remains visible, which cuts off the top of the first visible row. The
-    // rest of that row reads as a stray line above the app (such as above
-    // Claude Code's pinned header), so skip it and blank its strip, glyph
-    // descenders and images included.
-    final hidesPartialTopRow =
-        _terminal.isUsingAltBuffer &&
-        effectFirstLine < effectLastLine &&
-        _linePaintOffset(offset, effectFirstLine).dy < offset.dy;
+    final hiddenTopRow = _hiddenTopRow();
+    final hidesPartialTopRow = hiddenTopRow != null;
     if (hidesPartialTopRow) {
-      effectFirstLine++;
+      effectFirstLine = hiddenTopRow + 1;
+      final stripBottom = _linePaintOffset(offset, effectFirstLine).dy;
+      // The strip keeps the hidden row's cell colours, so an app that paints
+      // its own background (vim, btop) carries on above its first whole row.
       canvas
         ..save()
         ..clipRect(
           Rect.fromLTRB(
             offset.dx,
-            _linePaintOffset(offset, effectFirstLine).dy,
+            offset.dy,
+            offset.dx + size.width,
+            stripBottom,
+          ),
+        );
+      _painter.paintLineBackgrounds(
+        canvas,
+        _linePaintOffset(offset, hiddenTopRow),
+        lines[hiddenTopRow],
+      );
+      canvas
+        ..restore()
+        ..save()
+        ..clipRect(
+          Rect.fromLTRB(
+            offset.dx,
+            stripBottom,
             offset.dx + size.width,
             offset.dy + size.height,
           ),
