@@ -1302,6 +1302,24 @@ void main() {
       expect(h.gateway.registrations, hasLength(registrations + 1));
     });
 
+    test('a renewal keeps the keys when the store lost them', () async {
+      await h.start();
+      await h.controller.enable();
+      String seed() =>
+          (jsonDecode(h.secrets.values.values.single) as Map)['seed']!
+              as String;
+      final original = seed();
+      // Hosts still hold tickets sealed to these keys for this FID.
+      h.secrets.values.clear();
+      final registrations = h.gateway.registrations.length;
+      h.controller.reportVisibility(foreground: false);
+      h.now = h.now.add(pushTicketRefreshAge);
+      h.controller.reportVisibility(foreground: true);
+      await pumpEventQueue();
+      expect(h.gateway.registrations, hasLength(registrations + 1));
+      expect(seed(), original);
+    });
+
     test('a ticket from a build that could not show data-only pushes is '
         'renewed', () async {
       await h.start();

@@ -709,7 +709,10 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       defaultTargetPlatform == TargetPlatform.android;
 
   Future<void> _registerFid(String fid) async {
-    final secrets = await _store.loadOrCreate();
+    // A renewal keeps the keys hosts' tickets are sealed to, even if the store
+    // lost them meanwhile. Only an opt-in creates keys, after retiring any FID
+    // hosts may hold.
+    final secrets = _secrets ?? await _store.loadOrCreate();
     final appNotifications = _postsOwnNotifications;
     final registration = await _gateway.register(
       fid: fid,
