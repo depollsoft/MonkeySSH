@@ -3451,8 +3451,59 @@ class MonkeyRenderTerminal extends RenderBox
     final col = x ~/ _painter.cellSize.width;
     return CellOffset(
       col.clamp(0, _terminal.viewWidth - 1),
-      row.clamp(0, _terminal.buffer.lines.length - 1),
+      row.clamp(_firstPointerRow(), _terminal.buffer.lines.length - 1),
     );
+  }
+
+  // The strip of a hidden top row belongs to the first row shown, so a tap or
+  // selection there cannot reach text, links or controls nobody can see.
+  int _firstPointerRow() {
+    final hiddenTopRow = _hiddenTopRow();
+    return hiddenTopRow == null ? 0 : hiddenTopRow + 1;
+  }
+
+  // A full-screen app's grid has no history above it. When a shared grid is
+  // taller than the viewport it stays bottom-aligned so the app's prompt
+  // remains visible, which cuts off the top of the first visible row. The
+  // rest of that row reads as a stray line above the app (such as above
+  // Claude Code's pinned header), so [_paint] draws only its cell colours:
+  // no glyphs, descenders, images, cursor or highlights. Returns that row, or
+  // null when the first visible row is whole or no other row shows.
+  int? _hiddenTopRow() {
+    if (!_terminal.isUsingAltBuffer || !hasSize) {
+      return null;
+    }
+    final lineCount = _terminal.buffer.lines.length;
+    final charHeight = _painter.cellSize.height;
+    final firstLineOffset = _scrollOffset - _contentOrigin.dy;
+    final firstLine = (firstLineOffset ~/ charHeight).clamp(0, lineCount - 1);
+    // Rounded as in [_linePaintOffset], so hit-testing matches the paint.
+    final isCut =
+        (firstLine * charHeight - firstLineOffset).truncateToDouble() < 0;
+    final nextRowShows =
+        firstLine + 1 < lineCount &&
+        (firstLine + 1) * charHeight - firstLineOffset < size.height;
+    return isCut && nextRowShows ? firstLine : null;
+  }
+
+  /// The rows on screen: every row with some part in view, except a
+  /// full-screen app's cut-off top row, which is never painted. Taps and link
+  /// targets stay within these rows. Null before layout.
+  ({int first, int last})? get shownRows {
+    final lineCount = _terminal.buffer.lines.length;
+    final charHeight = _painter.cellSize.height;
+    if (!hasSize || lineCount == 0 || charHeight <= 0) {
+      return null;
+    }
+    final firstLineOffset = _scrollOffset - _contentOrigin.dy;
+    final hiddenTopRow = _hiddenTopRow();
+    final first = hiddenTopRow != null
+        ? hiddenTopRow + 1
+        : (firstLineOffset ~/ charHeight).clamp(0, lineCount - 1);
+    // The viewport can end part way through a row; that row still shows.
+    final last = (((firstLineOffset + size.height) / charHeight).ceil() - 1)
+        .clamp(first, lineCount - 1);
+    return (first: first, last: last);
   }
 
   void selectWord(Offset from, [Offset? to]) {
@@ -3549,7 +3600,7 @@ class MonkeyRenderTerminal extends RenderBox
     final col = x ~/ _painter.cellSize.width;
     return CellOffset(
       col.clamp(0, _terminal.viewWidth),
-      row.clamp(0, _terminal.buffer.lines.length - 1),
+      row.clamp(_firstPointerRow(), _terminal.buffer.lines.length - 1),
     );
   }
 
@@ -4337,8 +4388,13 @@ class MonkeyRenderTerminal extends RenderBox
 
   double get _viewportHeight => size.height;
 
+  // The grid starts at the content origin, which sits below the top edge when
+  // landscape alignment moves the partial-cell slack there. Scrolling to the
+  // bottom has to cover that offset too, or the last row (usually the prompt)
+  // is pushed below the viewport by the slack.
   double get _maxScrollExtent => math.max(
-    _terminalHeight -
+    _contentOrigin.dy +
+        _terminalHeight -
         _viewportHeight +
         (_terminal.isUsingAltBuffer ? 0 : _bottomScrollClearance),
     0.0,
@@ -4418,8 +4474,42 @@ class MonkeyRenderTerminal extends RenderBox
     final lastLineOffset = _scrollOffset - origin.dy + size.height;
     final firstLine = firstLineOffset ~/ charHeight;
     final lastLine = lastLineOffset ~/ charHeight;
-    final effectFirstLine = firstLine.clamp(0, lines.length - 1);
+    var effectFirstLine = firstLine.clamp(0, lines.length - 1);
     final effectLastLine = lastLine.clamp(0, lines.length - 1);
+    final hiddenTopRow = _hiddenTopRow();
+    final hidesPartialTopRow = hiddenTopRow != null;
+    if (hidesPartialTopRow) {
+      effectFirstLine = hiddenTopRow + 1;
+      final stripBottom = _linePaintOffset(offset, effectFirstLine).dy;
+      // The strip keeps the hidden row's cell colours, so an app that paints
+      // its own background (vim, btop) carries on above its first whole row.
+      canvas
+        ..save()
+        ..clipRect(
+          Rect.fromLTRB(
+            offset.dx,
+            offset.dy,
+            offset.dx + size.width,
+            stripBottom,
+          ),
+        );
+      _painter.paintLineBackgrounds(
+        canvas,
+        _linePaintOffset(offset, hiddenTopRow),
+        lines[hiddenTopRow],
+      );
+      canvas
+        ..restore()
+        ..save()
+        ..clipRect(
+          Rect.fromLTRB(
+            offset.dx,
+            stripBottom,
+            offset.dx + size.width,
+            offset.dy + size.height,
+          ),
+        );
+    }
     final visiblePhysicalPlacements = _terminal.graphics.placementsInRows(
       lines,
       effectFirstLine,
@@ -4501,6 +4591,10 @@ class MonkeyRenderTerminal extends RenderBox
     // Keep link affordances visible over opaque selection fills while
     // preserving each cell's own underline styling.
     _paintInlineUnderlines(canvas, offset, effectFirstLine, effectLastLine);
+
+    if (hidesPartialTopRow) {
+      canvas.restore();
+    }
 
     _paintSelectionHandleLayers(context, offset);
   }
