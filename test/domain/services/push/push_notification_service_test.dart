@@ -30,6 +30,7 @@ class _FakeGateway implements PushMessagingGateway {
   Exception? deleteError;
   Completer<void>? registrationGate;
   Exception? autoInitError;
+  Exception? autoInitOffError;
   final calls = <String>[];
   final registrations = <Map<String, Object?>>[];
   final appNotificationFlags = <bool>[];
@@ -54,6 +55,9 @@ class _FakeGateway implements PushMessagingGateway {
   Future<void> setAutoInitEnabled({required bool enabled}) async {
     calls.add('autoInit:$enabled');
     if (autoInitError case final Exception error) throw error;
+    if (!enabled) {
+      if (autoInitOffError case final Exception error) throw error;
+    }
   }
 
   @override
@@ -1140,16 +1144,30 @@ void main() {
     test(
       'a failed opt-in still unregisters from FCM when auto-init fails',
       () async {
-        h.gateway.registerError = const PushSetupException(
-          PushSetupFailure.registrationFailed,
-        );
+        h.gateway
+          ..registerError = const PushSetupException(
+            PushSetupFailure.registrationFailed,
+          )
+          ..autoInitOffError = Exception('plugin');
         await h.start();
         expect(
           await h.controller.enable(),
           PushSetupFailure.registrationFailed,
         );
-        expect(h.gateway.calls, contains('unregisterInstallation'));
-        expect(h.gateway.calls, contains('autoInit:false'));
+        expect(
+          h.gateway.calls,
+          containsAllInOrder(['autoInit:false', 'unregisterInstallation']),
+        );
+        expect(
+          await h.settings.getBool(
+            'push_notifications_auto_init_disable_pending',
+          ),
+          isTrue,
+        );
+        expect(
+          await h.settings.getBool('push_notifications_token_delete_pending'),
+          isFalse,
+        );
       },
     );
 
