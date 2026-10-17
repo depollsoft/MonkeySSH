@@ -340,8 +340,10 @@ void registerMonkeyTerminalViewLayoutTests() {
           // Row 1 is whole and painted.
           expect(sample(cellHeight / 2 + 1), rowColor);
 
-          // A click in the blank strip goes to row 1, not the hidden row.
+          // A click in the strip goes to row 1, not the hidden row, and link
+          // targets leave the hidden row out.
           final render = viewKey.currentState!.renderTerminal;
+          expect(render.shownRows, (first: 1, last: rows - 1));
           expect(render.getCellOffset(const Offset(2, 1)).y, 1);
           expect(render.getCellOffset(Offset(2, cellHeight / 2 + 1)).y, 1);
           expect(render.getCellOffset(Offset(2, size.height - 1)).y, rows - 1);
@@ -391,6 +393,12 @@ void registerMonkeyTerminalViewLayoutTests() {
               .getOffset(CellOffset(0, lastRow - terminal.viewHeight + 1))
               .dy;
           expect(screenTop, closeTo(cellHeight / 2, 0.01));
+          // A shell keeps its partial scrollback row in the slack, so that
+          // row counts as shown.
+          expect(render.shownRows, (
+            first: lastRow - terminal.viewHeight,
+            last: lastRow,
+          ));
         },
       );
     });

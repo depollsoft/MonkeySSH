@@ -3449,8 +3449,8 @@ class MonkeyRenderTerminal extends RenderBox
     final y = offset.dy - origin.dy + _scrollOffset;
     final row = y ~/ _painter.cellSize.height;
     final col = x ~/ _painter.cellSize.width;
-    // The blank strip of a hidden top row belongs to the first row shown, so
-    // a tap there cannot open a link or click a control nobody can see.
+    // The strip of a hidden top row belongs to the first row shown, so a tap
+    // there cannot open a link or click a control nobody can see.
     final hiddenTopRow = _hiddenTopRow();
     return CellOffset(
       col.clamp(0, _terminal.viewWidth - 1),
@@ -3467,23 +3467,42 @@ class MonkeyRenderTerminal extends RenderBox
   // rest of that row reads as a stray line above the app (such as above
   // Claude Code's pinned header), so [_paint] draws only its cell colours:
   // no glyphs, descenders, images, cursor or highlights. Returns that row, or
-  // null when the first visible row is whole or is the only one.
+  // null when the first visible row is whole or no other row shows.
   int? _hiddenTopRow() {
     if (!_terminal.isUsingAltBuffer || !hasSize) {
       return null;
     }
-    final lastIndex = _terminal.buffer.lines.length - 1;
+    final lineCount = _terminal.buffer.lines.length;
     final charHeight = _painter.cellSize.height;
     final firstLineOffset = _scrollOffset - _contentOrigin.dy;
-    final firstLine = (firstLineOffset ~/ charHeight).clamp(0, lastIndex);
-    final lastLine = ((firstLineOffset + size.height) ~/ charHeight).clamp(
-      0,
-      lastIndex,
-    );
+    final firstLine = (firstLineOffset ~/ charHeight).clamp(0, lineCount - 1);
     // Rounded as in [_linePaintOffset], so hit-testing matches the paint.
-    final firstLineTop = (firstLine * charHeight - firstLineOffset)
-        .truncateToDouble();
-    return firstLine < lastLine && firstLineTop < 0 ? firstLine : null;
+    final isCut =
+        (firstLine * charHeight - firstLineOffset).truncateToDouble() < 0;
+    final nextRowShows =
+        firstLine + 1 < lineCount &&
+        (firstLine + 1) * charHeight - firstLineOffset < size.height;
+    return isCut && nextRowShows ? firstLine : null;
+  }
+
+  /// The rows on screen: every row with some part in view, except a
+  /// full-screen app's cut-off top row, which is never painted. Taps and link
+  /// targets stay within these rows. Null before layout.
+  ({int first, int last})? get shownRows {
+    final lineCount = _terminal.buffer.lines.length;
+    final charHeight = _painter.cellSize.height;
+    if (!hasSize || lineCount == 0 || charHeight <= 0) {
+      return null;
+    }
+    final firstLineOffset = _scrollOffset - _contentOrigin.dy;
+    final hiddenTopRow = _hiddenTopRow();
+    final first = hiddenTopRow != null
+        ? hiddenTopRow + 1
+        : (firstLineOffset ~/ charHeight).clamp(0, lineCount - 1);
+    // The viewport can end part way through a row; that row still shows.
+    final last = (((firstLineOffset + size.height) / charHeight).ceil() - 1)
+        .clamp(first, lineCount - 1);
+    return (first: first, last: last);
   }
 
   void selectWord(Offset from, [Offset? to]) {

@@ -1874,12 +1874,22 @@ List<String> resolveTerminalFilePathExistenceCandidates(String path) {
 }
 
 /// Candidate terminal cells to probe for a touch-friendly path hit test.
-List<CellOffset> resolveForgivingTerminalTapOffsets(CellOffset offset) {
+///
+/// When [shownRows] is given, rows outside it are skipped, so a tap cannot
+/// open a link the user cannot see.
+List<CellOffset> resolveForgivingTerminalTapOffsets(
+  CellOffset offset, {
+  ({int first, int last})? shownRows,
+}) {
   final offsets = <CellOffset>[];
   final seen = <String>{};
 
   void addOffset(int dx, int dy) {
     final candidate = CellOffset(offset.x + dx, offset.y + dy);
+    if (shownRows != null &&
+        (candidate.y < shownRows.first || candidate.y > shownRows.last)) {
+      return;
+    }
     final key = '${candidate.x}:${candidate.y}';
     if (seen.add(key)) {
       offsets.add(candidate);
@@ -1900,27 +1910,6 @@ List<CellOffset> resolveForgivingTerminalTapOffsets(CellOffset offset) {
   }
 
   return offsets;
-}
-
-/// Visible terminal rows for the current scroll offset and rendered viewport.
-({int topRow, int bottomRow})? resolveVisibleTerminalRowRange({
-  required double scrollOffset,
-  required double lineHeight,
-  required double viewportHeight,
-  required int bufferHeight,
-}) {
-  if (lineHeight <= 0 || viewportHeight <= 0 || bufferHeight <= 0) {
-    return null;
-  }
-
-  final maxRow = bufferHeight - 1;
-  final topRow = (scrollOffset / lineHeight).floor().clamp(0, maxRow);
-  // The scroll offset is a live pixel value, so the viewport can end part way
-  // through a row; that row is still on screen and still needs its links.
-  final lastVisibleRow =
-      ((scrollOffset + viewportHeight) / lineHeight).ceil() - 1;
-  final bottomRow = max(topRow, lastVisibleRow).clamp(0, maxRow);
-  return (topRow: topRow, bottomRow: bottomRow);
 }
 
 /// Builds a terminal cell range for inline path underline painting.

@@ -14345,7 +14345,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final candidateOffsets = forgiving
-        ? resolveForgivingTerminalTapOffsets(offset)
+        ? resolveForgivingTerminalTapOffsets(
+            offset,
+            shownRows: _terminalViewKey.currentState?.renderTerminal.shownRows,
+          )
         : <CellOffset>[offset];
     for (final candidateOffset in candidateOffsets) {
       final trackedHyperlink = _terminalHyperlinkTracker?.resolveLinkAt(
@@ -14429,7 +14432,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     bool forgiving = false,
   }) {
     final candidateOffsets = forgiving
-        ? resolveForgivingTerminalTapOffsets(offset)
+        ? resolveForgivingTerminalTapOffsets(
+            offset,
+            shownRows: _terminalViewKey.currentState?.renderTerminal.shownRows,
+          )
         : <CellOffset>[offset];
     for (final candidateOffset in candidateOffsets) {
       final detectedPath = _detectTerminalFilePathAtCell(candidateOffset);
@@ -15083,15 +15089,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final renderTerminal = terminalViewState.renderTerminal;
-    final rowRange = resolveVisibleTerminalRowRange(
-      scrollOffset: _terminalScrollController.hasClients
-          ? _terminalScrollController.offset
-          : 0,
-      lineHeight: renderTerminal.lineHeight,
-      viewportHeight: renderTerminal.size.height,
-      bufferHeight: _terminal.buffer.height,
-    );
+    final rowRange = terminalViewState.renderTerminal.shownRows;
     if (rowRange == null) {
       return;
     }
@@ -15099,8 +15097,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final underlines =
         <({String path, TerminalTextUnderline underline, Rect touchRect})>[];
     final buffer = _terminal.buffer;
-    var row = rowRange.topRow;
-    while (row <= rowRange.bottomRow) {
+    var row = rowRange.first;
+    while (row <= rowRange.last) {
       // Skip single, non-wrapped rows that contain no path-like characters.
       // This avoids the expensive snapshot-building step for the majority of
       // output lines that can never match a file path.
@@ -15120,7 +15118,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final snapshotAnalysis = _analyzeTerminalPathSnapshot(pathSnapshot);
       final snapshotEndRow =
           pathSnapshot.startRow + pathSnapshot.columnOffsets.length - 1;
-      final visibleSnapshotBottom = min(rowRange.bottomRow, snapshotEndRow);
+      final visibleSnapshotBottom = min(rowRange.last, snapshotEndRow);
       for (
         var snapshotRow = max(row, pathSnapshot.startRow);
         snapshotRow <= visibleSnapshotBottom;
