@@ -679,9 +679,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       _windows,
     );
     // A request slot a closed bar left showing goes once its window's program
-    // no longer waits on the request.
+    // no longer waits on the request, or once the window is viewed.
     for (final window in windows) {
-      if (window.programStatus?.state == TerminalProgramState.blocked) continue;
+      if (!window.isActive &&
+          window.programStatus?.state == TerminalProgramState.blocked) {
+        continue;
+      }
       final id = buildWindowNotificationId(
         widget.session.hostId,
         widget.tmuxSessionName,

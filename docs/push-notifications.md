@@ -775,7 +775,9 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   never showed, or a bell's flag clearing does not remove what shows, and the
   app never removes a push from a slot. Viewing the window clears what the
   app showed for it; closing or reconnecting the bar clears it too, except in
-  a request slot, where it may stand in for the request's push it replaced.
+  a request slot, where it may stand in for the request's push it replaced;
+  a later bar clears that once the request is resolved or the window is
+  viewed.
   Known limits: iOS notifications from pushes and from the app have
   different identifiers, so in the seconds before iOS suspends a
   backgrounded app, a bell can show beside the push for a window the app was

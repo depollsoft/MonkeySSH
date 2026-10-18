@@ -1315,6 +1315,59 @@ void registerTmuxWindowNavigatorTests() {
           ]);
         });
 
+        testWidgets('viewing a still-waiting window clears its kept bell', (
+          tester,
+        ) async {
+          const waiting = TerminalProgramStatus(
+            state: TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.permission,
+          );
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: waiting,
+            ),
+          ]);
+          await tester.pumpWidget(const SizedBox());
+          expect(notifications.cleared, isEmpty);
+
+          // Reopened, the window still waits; once it is the one on screen,
+          // its kept bell goes.
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              programStatus: waiting,
+            ),
+          ]);
+          expect(notifications.cleared, isEmpty);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: true,
+              programStatus: waiting,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
+          ]);
+        });
+
         // A window's slot has one owner: the newest notification in it. An
         // older or unshown one going away must not clear it.
         testWidgets('a bell keeps its slot when an older notification closes', (
