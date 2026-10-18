@@ -519,6 +519,7 @@ class _FakeConnector implements AcpBridgeConnector {
   int _bridgeCounter = 0;
   int bridgeStatusInFlightTurnCount = 0;
   bool skippedHistoricalReplay = false;
+  Future<void> Function(_FakeAcpServer server)? waitForReplay;
   final Map<String, int> lastDeliveredSequences = <String, int>{};
   final Map<String, List<int>> connectionAcknowledgements =
       <String, List<int>>{};
@@ -638,6 +639,7 @@ class _FakeConnector implements AcpBridgeConnector {
       transportErrors: errors.stream,
       skippedHistoricalReplay: () => skippedHistoricalReplay,
       lastDeliveredSequence: () => lastDeliveredSequences[bridgeId] ?? 0,
+      waitForReplay: () async => waitForReplay?.call(server),
       onClose: () async {
         await client.close();
         await states.close();
@@ -3059,6 +3061,127 @@ void main() {
   });
 
   group('history replay on load', () {
+    test(
+      'cached initialization waits for delayed bridge replay before loading',
+      () async {
+        final handshake = Completer<void>();
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayUpdatesOnLoad: const [
+              {
+                'sessionUpdate': 'user_message_chunk',
+                'content': {'type': 'text', 'text': 'Old prompt'},
+              },
+              {
+                'sessionUpdate': 'agent_message_chunk',
+                'content': {'type': 'text', 'text': 'Completed while detached'},
+              },
+            ],
+          ),
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        replayConnector.waitForReplay = (server) async {
+          await handshake.future;
+          for (final update in server.replayUpdatesOnLoad) {
+            server.pushUpdate(key.acpSessionId, update);
+          }
+        };
+        final reconnect = replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.methods, isNot(contains('initialize')));
+        expect(server.methods, isNot(contains('session/load')));
+        handshake.complete();
+        expect(await reconnect, isA<AcpSessionLaunchStarted>());
+        expect(server.methods, contains('session/load'));
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Old prompt', 'Completed while detached'],
+        );
+      },
+    );
+
+    test(
+      'idle reconnect holds mid-load prompts until history is replaced',
+      () async {
+        final loadGate = Completer<void>();
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayTextOnLoad: 'Old reply',
+            loadResponseGate: loadGate.future,
+          )..holdPrompts = true,
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        final reconnect = replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.methods, contains('session/load'));
+        final prompt = replayManager.prompt(key, const [
+          AcpTextContent('Mid-load prompt'),
+        ]);
+        await _pump();
+        expect(server.methods, isNot(contains('session/prompt')));
+        loadGate.complete();
+        expect(await reconnect, isA<AcpSessionLaunchStarted>());
+        await _pump();
+        expect(server.heldPromptCount, 1);
+        server.completeNextPrompt();
+        await prompt;
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Old reply', 'Mid-load prompt'],
+        );
+      },
+    );
+
     test(
       'idle detached prompt survives reload and its provider echo',
       () async {

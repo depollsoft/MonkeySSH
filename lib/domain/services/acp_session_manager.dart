@@ -1876,6 +1876,7 @@ class _BridgeAttachment {
   AcpInitializeResult? get initialization => _initialization;
   bool get skippedHistoricalReplay => _session.skippedHistoricalReplay;
   int get lastDeliveredSequence => _session.lastDeliveredSequence;
+  Future<void> waitForReplay() => _session.waitForReplay();
   AcpInputDelivery promptDelivery(String sessionId) =>
       _session.promptDelivery(sessionId);
 
@@ -2707,13 +2708,16 @@ class _SessionController {
     // session/load replays the whole conversation, including messages already
     // retained locally or delivered by the bridge. Pi's chunks have no message
     // IDs, so appending this replay duplicates old turns at the transcript tail.
-    _applyReceivedSessionUpdates();
     final wasPublicationHeld = _historyReplayPublicationHeld;
     _historyReplayPublicationHeld = true;
     final loadingTimeline = AcpTimelineBuilder();
-    _loadingTimelineBuilder = loadingTimeline;
     var loaded = false;
     try {
+      // Cached initialization can finish before the SSH handshake. Its replay
+      // must reach the existing timeline before session/load starts a new one.
+      await attachment.waitForReplay();
+      _applyReceivedSessionUpdates();
+      _loadingTimelineBuilder = loadingTimeline;
       final result = await attachment.client.loadSession(
         sessionId: sessionId,
         cwd: _cwd,
@@ -3258,7 +3262,11 @@ class _SessionController {
   }
 
   Future<void> _drainPromptQueue() async {
-    if (_promptActive || _detachedTurnInFlight || _disposed) {
+    if (_promptActive ||
+        _detachedTurnInFlight ||
+        _disposed ||
+        _historyReplayPublicationHeld ||
+        _state.status != AcpConnectionStatus.ready) {
       return;
     }
     _promptActive = true;
@@ -3266,6 +3274,8 @@ class _SessionController {
       while (_promptQueue.isNotEmpty &&
           !_disposed &&
           !_detachedTurnInFlight &&
+          !_historyReplayPublicationHeld &&
+          _state.status == AcpConnectionStatus.ready &&
           _holdsAttachment &&
           _state.attached) {
         final queued = _promptQueue.removeFirst();
