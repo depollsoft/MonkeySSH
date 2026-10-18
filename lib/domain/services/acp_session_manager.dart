@@ -3926,8 +3926,11 @@ class _SessionController {
         // it only releases this controller's own lease, and the shared
         // attachment only closes once every session leasing it has done so.
         unawaited(_cleanUpAfterTerminalTransport());
-      case MonkeyMuxAcpTransportStatus.connecting:
       case MonkeyMuxAcpTransportStatus.connected:
+        // Automatic SSH recovery does not call reconnect(). Retry input held
+        // by the readiness guard; active-turn and history guards still apply.
+        unawaited(_drainPromptQueue());
+      case MonkeyMuxAcpTransportStatus.connecting:
       case MonkeyMuxAcpTransportStatus.reconnecting:
         break;
     }

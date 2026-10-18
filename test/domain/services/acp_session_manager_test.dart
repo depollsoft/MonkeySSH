@@ -1788,6 +1788,52 @@ void main() {
       },
     );
 
+    test(
+      'automatic SSH recovery dispatches a prompt accepted while reconnecting',
+      () async {
+        final key = await startCopilot();
+        final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+        connector
+            .statesFor(key.bridgeId)
+            .add(
+              MonkeyMuxAcpTransportState(
+                status: MonkeyMuxAcpTransportStatus.reconnecting,
+                bridgeId: key.bridgeId,
+                lastDeliveredSequence: 0,
+              ),
+            );
+        await _pump();
+        final prompt = manager.prompt(key, const [
+          AcpTextContent('During recovery'),
+        ]);
+        await _pump();
+        expect(server.heldPromptCount, 0);
+        for (var event = 0; event < 2; event++) {
+          connector
+              .statesFor(key.bridgeId)
+              .add(
+                MonkeyMuxAcpTransportState(
+                  status: MonkeyMuxAcpTransportStatus.connected,
+                  bridgeId: key.bridgeId,
+                  lastDeliveredSequence: 0,
+                ),
+              );
+        }
+        await _pump();
+        expect(
+          manager.state.byKeyValue(key.value)!.status,
+          AcpConnectionStatus.ready,
+        );
+        expect(server.heldPromptCount, 1);
+        server.completeNextPrompt();
+        await prompt;
+        expect(
+          server.methods.where((method) => method == 'session/prompt'),
+          hasLength(1),
+        );
+      },
+    );
+
     test('cancel notifies the agent', () async {
       final key = await startCopilot();
       await manager.cancelPrompt(key);
