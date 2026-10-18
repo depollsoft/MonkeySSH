@@ -17286,8 +17286,9 @@ func (s *muxServer) close() {
 	}
 	teardown := s.beginShutdownLocked(false)
 	s.mu.Unlock()
-	s.drainPush()
+	drained := s.startPushDrain()
 	teardown()
+	<-drained
 }
 
 // closeIfIdle ends a session whose last window went away. The decision is
@@ -17299,8 +17300,9 @@ func (s *muxServer) closeIfIdle() {
 	teardown := s.beginIdleShutdownLocked()
 	s.mu.Unlock()
 	if teardown != nil {
-		s.drainPush()
+		drained := s.startPushDrain()
 		teardown()
+		<-drained
 	}
 }
 

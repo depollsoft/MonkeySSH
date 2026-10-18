@@ -108,6 +108,19 @@ void registerTmuxAlertTrackerTests() {
       expect(ids.toSet(), {buildWindowNotificationId(3, 'work', '@2')});
     });
 
+    // Two connections' bars share a window's slot; one whose notification was
+    // replaced by the other's must not clear it.
+    test('only the poster still showing in a slot clears it', () {
+      final first = Object();
+      final second = Object();
+      final slots = WindowNotificationSlots()
+        ..claim(5, first)
+        ..claim(5, second);
+      expect(slots.release(5, first), isFalse);
+      expect(slots.release(5, second), isTrue);
+      expect(slots.release(5, second), isFalse);
+    });
+
     test(
       'window slots are stable and distinct per host, session and window',
       () {

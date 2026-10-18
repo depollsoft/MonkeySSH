@@ -532,23 +532,32 @@ From 0.1.243:
 
 - An alert from a window's output is held for 1.5 seconds before it is raised,
   since the program's status report often comes in the next chunk.
-- A device is not sent a window's alert when it was sent the window's
-  current status event (each status change is numbered per window; one
-  coalesced into a push a moment earlier counts as sent) and that status
-  still holds: the program still waits on that approval or question, or that
-  turn finished under 15 seconds ago and the program still reports `done` or
+- A device is not sent a window's alert when the window's current status
+  event reached it (each status change is numbered per window; a status
+  counts once the function accepted it, and one coalesced into a delivered
+  push of its kind still showing counts too) and that status still holds:
+  the program still waits on that approval or question, or that turn
+  finished under 15 seconds ago and the program still reports `done` or
   `idle`. Anything else is a new event or one the device did not hear of (it
-  turned that status off, or its urgent budget was backing off), and the
-  alert is pushed.
+  turned that status off, or the function refused or never got the status),
+  and the alert is pushed. An alert decided while its status is still on
+  its way waits behind it and checks again before it goes.
+- A device's pushes for one window go one at a time and in order, since they
+  replace each other there: a newer status replaces any push still waiting
+  and stops an older one still retrying; an alert replaces only an older
+  alert and waits behind a status.
 - When kept-back events go out together after a local claim lapses, a device
   gets a window's status without its alert.
-- A closing server sends the alerts still held and waits up to 5 seconds for
-  pushes in flight, so a session that ends right after an alert still
-  delivers it.
+- A closing server sends the window events still queued or held and, beside
+  its teardown, waits up to 2 seconds for pushes in flight, so a session
+  that ends right after an alert still delivers it within the time an
+  upgrade gives the outgoing helper.
 
 ### Coalescing, caps and retries
 
-- One event per device, window and kind in any 30-second window.
+- One event per device, window and kind in any 30-second window, while it is
+  still the newest in the window's slot: one of another kind posted since
+  replaced it on the device, so the next of this kind is sent.
 - Three budgets per device, each at most 20 events an hour: urgent
   (`permission`, `input`), routine (`finished`, `alert`) and `test`. They are
   kept by each MonkeyMux server, and every session has its own server, so a
@@ -762,12 +771,17 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   that arrives with a desktop notification for the same window is not posted
   on its own. On Android the host's push of an agent's approval or finished
   turn lands in the slot of the bell the app raised for it, so the window
-  shows one notification, whichever came last. A slot has one owner: a later
-  bell or notification takes it, so an older notification's close, one that
-  never showed, or a bell's flag clearing does not remove what shows. Known
-  limit: iOS notifications from pushes and from the app have different
+  shows one notification, whichever came last. A slot has one owner, across
+  every connection's window bar: a later bell or notification takes it, so
+  an older notification's close, one that never showed, or a bell's flag
+  clearing (the window viewed, the bar closed or reconnected) does not
+  remove what shows, and the app never removes a push from a slot. Known
+  limits: iOS notifications from pushes and from the app have different
   identifiers, so in the seconds before iOS suspends a backgrounded app, a
-  bell can show beside the push for a window the app was not viewing.
+  bell can show beside the push for a window the app was not viewing; the
+  active window's own desktop notifications (from the live terminal stream)
+  and native chat notifications keep their own ids; and two saved hosts for
+  one machine and session have separate slots.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

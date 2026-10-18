@@ -692,8 +692,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         notificationId: notificationId,
         windowId: windowId,
       )),
-      onClear: (id) =>
-          unawaited(_localNotifications.clearTerminalNotification(id)),
+      onClear: _clearBellNotification,
     );
     if (hasNewAlert &&
         mounted &&
@@ -704,9 +703,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     for (final alert in newAlerts) {
       final key = _tmuxAlertWindowKey(alert.window);
       if (notifiedWindowKeys.contains(key)) continue;
-      // The bell takes the slot; an older program notification's close must
-      // not clear it.
-      _forwardedNotificationsByWindowKey.remove(key);
       _sendAlertNotification(
         alert.window,
         windows,
@@ -941,7 +937,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       windowIndex: windowIndex,
       windowId: stableWindowId,
     );
-    _showIfHostAllows(
+    if (_showIfHostAllows(
       HostNotificationKind.windowAlerts,
       () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
@@ -950,7 +946,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         body: content.body,
         payload: payload,
       ),
-    );
+    )) {
+      windowNotificationSlots.claim(notificationId, _alertTracker);
+    }
   }
 
   /// Buzzes and runs [show] only when this host's notification preferences
@@ -969,9 +967,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _clearSeenAlertNotifications() {
-    _alertTracker.clear(
-      (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
-    );
+    _alertTracker.clear(_clearBellNotification);
     _lastSeenForwardedNotificationsByWindowKey.clear();
     _forwardedNotificationParsersByWindowKey.clear();
     for (final key in _forwardedNotificationsByWindowKey.keys.toList()) {
@@ -1039,10 +1035,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final notified = <String>{};
     for (final show in shows) {
       if (_showForwardedNotification(show.window, windows, show.notification)) {
-        final key = _tmuxAlertWindowKey(show.window);
-        notified.add(key);
-        // The notification takes the slot from an earlier bell.
-        _alertTracker.release(key);
+        notified.add(_tmuxAlertWindowKey(show.window));
       }
     }
     return notified;
@@ -1125,14 +1118,24 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         id: notificationId,
         identifier: request.identifier,
       );
+      windowNotificationSlots.claim(notificationId, this);
     }
     return shown;
   }
 
   void _clearForwardedNotification(String windowKey) {
     final shown = _forwardedNotificationsByWindowKey.remove(windowKey);
-    if (shown != null) {
-      unawaited(_localNotifications.clearTerminalNotification(shown.id));
+    // Only while it is still the one in the window's slot.
+    if (shown != null && windowNotificationSlots.release(shown.id, this)) {
+      unawaited(_localNotifications.clearWindowNotification(shown.id));
+    }
+  }
+
+  /// Clears a bell this bar posted, while it is still the one in the window's
+  /// slot.
+  void _clearBellNotification(int notificationId) {
+    if (windowNotificationSlots.release(notificationId, _alertTracker)) {
+      unawaited(_localNotifications.clearWindowNotification(notificationId));
     }
   }
 

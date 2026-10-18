@@ -9,6 +9,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/tmux_state.dart';
 import 'app_permission_service.dart';
 import 'diagnostics_log_service.dart';
+import 'push/push_notification_service.dart'
+    show pushAgentAttentionChannelId, pushAgentUpdatesChannelId;
 import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
 
@@ -413,12 +415,19 @@ class TerminalNotificationPayload {
 int buildTerminalNotificationId(int connectionId, {String? identifier}) =>
     Object.hash('terminal-notification', connectionId, identifier) & 0x3fffffff;
 
-/// The local notification slot for one multiplexer window: its bell alerts,
-/// the program notifications its server forwards, and its agent's status all
-/// share it, so a window shows one notification however many events or
-/// connections raise them. [windowKey] is the window's stable id (such as
-/// `@3`), else `index:<n>`. Stable across runs (FNV-1a), so a newer event
-/// replaces one an earlier run posted; namespaced away from agent chat ids.
+/// The channels pushes are posted on (see `showPushNotificationFromData`).
+const _pushChannelIds = {
+  pushAgentAttentionChannelId,
+  pushAgentUpdatesChannelId,
+};
+
+/// The notification slot for one multiplexer window: its bell alerts, the
+/// program notifications its server forwards, and (on Android) the pushes for
+/// it all share it, so a window shows one notification however many events
+/// or connections raise them. [windowKey] is the window's stable id (such as
+/// `@3`), else `index:<n>`. Stable across runs and isolates (FNV-1a), so a
+/// newer event replaces one an earlier run posted; namespaced away from agent
+/// chat ids.
 int buildWindowNotificationId(
   int hostId,
   String tmuxSessionName,
@@ -431,6 +440,32 @@ int buildWindowNotificationId(
   }
   return 0x20000000 | (hash & 0x1fffffff);
 }
+
+/// Who posted the notification showing in each window slot (see
+/// [buildWindowNotificationId]), so only that poster clears it. A window's
+/// slot is shared by its bells and program notifications on every connection
+/// to the session, and a poster whose notification was replaced must not
+/// clear the one that replaced it.
+class WindowNotificationSlots {
+  final _owners = <int, Object>{};
+
+  /// Records [owner] as the poster of the notification in slot [id].
+  void claim(int id, Object owner) => _owners[id] = owner;
+
+  /// Forgets slot [id] if [owner] still owns it, and returns whether it did.
+  bool release(int id, Object owner) {
+    if (!identical(_owners[id], owner)) return false;
+    _owners.remove(id);
+    return true;
+  }
+
+  /// Forgets every slot.
+  @visibleForTesting
+  void clear() => _owners.clear();
+}
+
+/// The app-wide owners of window notification slots.
+final windowNotificationSlots = WindowNotificationSlots();
 
 /// Builds the terminal route location for a terminal notification tap.
 ///
@@ -894,6 +929,30 @@ class LocalNotificationService {
   /// Clears a terminal desktop notification by its local identifier.
   Future<void> clearTerminalNotification(int notificationId) =>
       _clearNotification(notificationId);
+
+  /// Clears what the app showed in a window's notification slot (see
+  /// [buildWindowNotificationId]). On Android a push for the window lands in
+  /// the same slot, and the app leaves one there: what its terminal shows
+  /// says nothing about whether the user has seen the push.
+  Future<void> clearWindowNotification(int notificationId) =>
+      _enqueueNotification(notificationId, () async {
+        if (!await initialize()) return;
+        try {
+          if (defaultTargetPlatform == TargetPlatform.android) {
+            final active = await _plugin.getActiveNotifications();
+            if (active.any(
+              (notification) =>
+                  notification.id == notificationId &&
+                  _pushChannelIds.contains(notification.channelId),
+            )) {
+              return;
+            }
+          }
+          await _plugin.cancel(id: notificationId);
+        } on MissingPluginException {
+          // Widget and unit tests don't register platform notification plugins.
+        }
+      });
 
   final _notificationOperations = <int, Future<void>>{};
 

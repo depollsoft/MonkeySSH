@@ -160,6 +160,48 @@ void main() {
       }
     });
 
+    // A push for a window lands in the slot the app's own notifications for
+    // it use; the app clears what it showed there, never the push.
+    test('android leaves a push in a window slot', () async {
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+      FlutterLocalNotificationsPlatform.instance =
+          AndroidFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final service = LocalNotificationService();
+      final cancelled = <Object?>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..setMockMethodCallHandler(channel, (call) async {
+              switch (call.method) {
+                case 'getNotificationAppLaunchDetails':
+                  return null;
+                case 'getActiveNotifications':
+                  return [
+                    {'id': 7, 'channelId': 'agent-attention'},
+                    {'id': 8, 'channelId': 'agent-updates-v2'},
+                    {'id': 9, 'channelId': 'tmux-alerts'},
+                  ];
+                case 'cancel':
+                  cancelled.add((call.arguments as Map)['id']);
+              }
+              return true;
+            });
+      addTearDown(() {
+        service.dispose();
+        messenger.setMockMethodCallHandler(channel, null);
+        FlutterLocalNotificationsPlatform.instance = previousPlatform;
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      for (final id in [7, 8, 9, 10]) {
+        await service.clearWindowNotification(id);
+      }
+      expect(cancelled, [9, 10]);
+    });
+
     test('macOS still asks the plugin and passes the sound choice', () async {
       const channel = MethodChannel(
         'dexterous.com/flutter/local_notifications',

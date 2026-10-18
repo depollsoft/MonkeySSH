@@ -61,12 +61,6 @@ class TmuxAlertTracker {
     if (notificationId != null) onClear(notificationId);
   }
 
-  /// Forgets the notification it emitted for [windowKey] without clearing it:
-  /// another notification took the window's slot (or none was posted), so
-  /// clearing that id would remove what is showing now.
-  void release(String windowKey) =>
-      _alertNotificationIdsByWindowKey.remove(windowKey);
-
   /// Forgets the old session and clears all notifications that it emitted.
   void clear(void Function(int) onClear) {
     _seenAlertWindowKeys.clear();

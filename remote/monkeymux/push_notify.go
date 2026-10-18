@@ -50,7 +50,7 @@ const (
 	pushRequestTimeout = 10 * time.Second
 	// pushDrainTimeout bounds how long a closing server waits for its pushes
 	// in flight.
-	pushDrainTimeout       = 5 * time.Second
+	pushDrainTimeout       = 2 * time.Second
 	pushDefaultBackoff     = 60 * time.Second
 	pushMaxBackoff         = time.Hour
 	pushMaxConcurrentPosts = 4
@@ -179,6 +179,9 @@ const (
 	pushResultRateLimited   = "rate_limited"
 	pushResultCapped        = "capped"
 	pushResultFailed        = "failed"
+	// A newer push for the same window reached the device first; sending this
+	// one would replace it in the window's slot.
+	pushResultSuperseded = "superseded"
 	// The function refused the event itself (400, 413, 415, other 4xx);
 	// sending it again cannot help.
 	pushResultRejected   = "rejected"
@@ -335,6 +338,13 @@ type pushJob struct {
 	kind     string
 	collapse string
 	payload  string
+	// windowID names the window's slot on the device (see post); seq is the
+	// window's status event a status push is for (see statusSent).
+	windowID string
+	seq      uint64
+	// still, when set, says just before each attempt whether the push is
+	// still wanted: an alert gives way to a status delivered meanwhile.
+	still func() bool
 }
 
 // pushNotifier holds a server's push state. Its mutex is never held while the
@@ -366,6 +376,9 @@ type pushNotifier struct {
 	// push posted to that device, so the event's own alert is not pushed as
 	// well.
 	statusSent map[pushDeviceWindow]pushStatusSent
+	// slotQueues serializes the pushes for each device's window slot (see
+	// post).
+	slotQueues map[pushDeviceWindow]*pushSlotQueue
 	// inflight tracks posts so tests can wait for them.
 	inflight sync.WaitGroup
 }
@@ -389,6 +402,7 @@ func newPushNotifier() *pushNotifier {
 		bridges:      map[string]pushBridgeBaseline{},
 		delivered:    map[pushAttentionKey]uint64{},
 		statusSent:   map[pushDeviceWindow]pushStatusSent{},
+		slotQueues:   map[pushDeviceWindow]*pushSlotQueue{},
 	}
 	notifier.store.now = func() time.Time { return notifier.now() }
 	return notifier
@@ -744,11 +758,24 @@ func (n *pushNotifier) coveredLocallyLocked(
 	return false
 }
 
-// sentWithinCoalesceLocked reports whether an event of key was posted within
-// the coalescing window, so the device still shows it.
-func (n *pushNotifier) sentWithinCoalesceLocked(key pushCoalesceKey, now time.Time) bool {
+// pushSlotKinds are the kinds that share a window's notification slot.
+var pushSlotKinds = [...]string{pushKindPermission, pushKindInput, pushKindFinished, pushKindAlert}
+
+// showingLocked reports whether an event of key was posted within the
+// coalescing window and is still the newest in its window's slot, so the
+// device still shows it. One of another kind posted since replaced it.
+func (n *pushNotifier) showingLocked(key pushCoalesceKey, now time.Time) bool {
 	last, ok := n.lastSent[key]
-	return ok && now.Sub(last) < pushCoalesceWindow
+	if !ok || now.Sub(last) >= pushCoalesceWindow {
+		return false
+	}
+	for _, kind := range pushSlotKinds {
+		other := pushCoalesceKey{deviceID: key.deviceID, windowID: key.windowID, kind: kind}
+		if at, ok := n.lastSent[other]; ok && kind != key.kind && at.After(last) {
+			return false
+		}
+	}
+	return true
 }
 
 // admitLocked applies backoff, coalescing and the hourly cap of the event's
@@ -761,10 +788,8 @@ func (n *pushNotifier) admitLocked(key pushCoalesceKey, now time.Time, coalesce 
 		}
 		delete(n.backoffUntil, budget)
 	}
-	if coalesce {
-		if last, ok := n.lastSent[key]; ok && now.Sub(last) < pushCoalesceWindow {
-			return pushResultCapped
-		}
+	if coalesce && n.showingLocked(key, now) {
+		return pushResultCapped
 	}
 	recent := n.sentTimes[budget][:0]
 	for _, at := range n.sentTimes[budget] {
@@ -868,22 +893,37 @@ func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
 	})
 }
 
-// drainPush sends the alerts still held, which were taken in before the
-// server closed, and waits up to pushDrainTimeout for the posts in flight, so
-// a session that ends right after an alert still delivers it before the
-// process exits.
-func (s *muxServer) drainPush() {
+// startPushDrain sends the window events still queued or held, which were
+// taken in before the server closed, and returns a channel closed once the
+// posts in flight finish or pushDrainTimeout passes, so a session that ends
+// right after an alert still delivers it before the process exits. It runs
+// beside the server's teardown, inside the time an upgrade gives the
+// outgoing helper.
+func (s *muxServer) startPushDrain() <-chan struct{} {
 	notifier := s.pushNotifier()
-	s.releaseHeldPushAlertsAt(true)
-	done := make(chan struct{})
+	drained := make(chan struct{})
 	go func() {
-		notifier.inflight.Wait()
-		close(done)
+		defer close(drained)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			for queued := true; queued; {
+				select {
+				case event := <-notifier.alerts:
+					s.deliverPushAlertEvent(event)
+				default:
+					queued = false
+				}
+			}
+			s.releaseHeldPushAlertsAt(true)
+			notifier.inflight.Wait()
+		}()
+		select {
+		case <-finished:
+		case <-time.After(pushDrainTimeout):
+		}
 	}()
-	select {
-	case <-done:
-	case <-time.After(pushDrainTimeout):
-	}
+	return drained
 }
 
 // releaseHeldPushAlerts pushes the held alerts whose hold has passed, and
@@ -913,9 +953,12 @@ func (s *muxServer) releaseHeldPushAlertsAt(all bool) time.Duration {
 		}
 	}
 	notifier.held = kept
+	// Counted in flight until raised, so a drain waits for them.
+	notifier.inflight.Add(len(due))
 	notifier.mu.Unlock()
 	for _, held := range due {
 		s.raisePushAlert(held.windowID, held.categories)
+		notifier.inflight.Done()
 	}
 	return next
 }
@@ -938,12 +981,12 @@ type pushStatusSent struct {
 const maxPushStatusSent = 256
 
 // noteStatusSentLocked records that a status push of kind for the window's
-// current status event was posted to deviceID.
+// status event seq reached deviceID.
 func (n *pushNotifier) noteStatusSentLocked(
 	deviceID string,
 	windowID string,
 	kind string,
-	view pushServerView,
+	seq uint64,
 	now time.Time,
 ) {
 	key := pushDeviceWindow{deviceID: deviceID, windowID: windowID}
@@ -957,7 +1000,7 @@ func (n *pushNotifier) noteStatusSentLocked(
 		}
 		delete(n.statusSent, oldest)
 	}
-	n.statusSent[key] = pushStatusSent{kind: kind, seq: view.statusSeq[windowID], at: now}
+	n.statusSent[key] = pushStatusSent{kind: kind, seq: seq, at: now}
 }
 
 // alertRedundantLocked reports whether a window alert would only repeat the
@@ -1091,13 +1134,15 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 			continue
 		}
 		key := pushCoalesceKey{deviceID: device.DeviceID, windowID: windowID, kind: kind}
-		// A status coalesced into the one posted a moment ago is showing.
-		showing := notifier.sentWithinCoalesceLocked(key, now)
-		admitted := notifier.admitLocked(key, now, true) == ""
-		if kind != pushKindAlert && (admitted || showing) {
-			notifier.noteStatusSentLocked(device.DeviceID, windowID, kind, view, now)
-		}
-		if !admitted {
+		if notifier.admitLocked(key, now, true) != "" {
+			// A status coalesced into the delivered one of its kind still
+			// showing stands for this event too.
+			sentKey := pushDeviceWindow{deviceID: device.DeviceID, windowID: windowID}
+			if sent, ok := notifier.statusSent[sentKey]; ok && sent.kind == kind &&
+				notifier.showingLocked(key, now) {
+				sent.seq = view.statusSeq[windowID]
+				notifier.statusSent[sentKey] = sent
+			}
 			continue
 		}
 		recipients = append(recipients, admittedDevice{device, wanted})
@@ -1108,6 +1153,16 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, entry.alerts, now)
 		if err != nil {
 			continue
+		}
+		job.seq = view.statusSeq[windowID]
+		if kind == pushKindAlert {
+			device := entry.record
+			job.still = func() bool {
+				view := s.pushView(nil)
+				notifier.mu.Lock()
+				defer notifier.mu.Unlock()
+				return !notifier.alertRedundantLocked(device, windowID, view, notifier.now())
+			}
 		}
 		notifier.post(job, nil)
 	}
@@ -1172,9 +1227,10 @@ func (s *muxServer) raisePushAttention(
 		_ = pushRecordBridgeDelivered(bridgeID, key.deviceID, kind, generation)
 		notifier.post(job, func(result string) {
 			switch result {
-			case pushResultSent, pushResultRejected:
-				// Delivered, or the function refused the event itself:
-				// sending it again cannot help.
+			case pushResultSent, pushResultRejected, pushResultSuperseded:
+				// Delivered, the function refused the event itself, or a
+				// newer push for the window is showing: sending it again
+				// cannot help.
 				return
 			}
 			// Not delivered: throttled, failed, or the registration was
@@ -1206,9 +1262,39 @@ func (n *pushNotifier) presenceClientIDs() []string {
 	return clientIDs
 }
 
-// post delivers job in the background and reports the result to done.
+// post delivers job in the background and reports the result to done. The
+// pushes for one device's window share its notification slot there, so they
+// go one at a time, in order (see pushSlotQueue).
 func (n *pushNotifier) post(job pushJob, done func(string)) {
 	n.inflight.Add(1)
+	if job.windowID != "" {
+		slot := pushDeviceWindow{deviceID: job.deviceID, windowID: job.windowID}
+		n.mu.Lock()
+		if queue, running := n.slotQueues[slot]; running {
+			var replaced []pushSlotEntry
+			kept := queue.pending[:0:0]
+			for _, waiting := range queue.pending {
+				if job.kind != pushKindAlert || waiting.job.kind == pushKindAlert {
+					replaced = append(replaced, waiting)
+				} else {
+					kept = append(kept, waiting)
+				}
+			}
+			queue.pending = append(kept, pushSlotEntry{job: job, done: done})
+			n.mu.Unlock()
+			for _, waiting := range replaced {
+				if waiting.done != nil {
+					waiting.done(pushResultSuperseded)
+				}
+				n.inflight.Done()
+			}
+			return
+		}
+		n.slotQueues[slot] = &pushSlotQueue{}
+		n.mu.Unlock()
+		go n.runSlot(slot, pushSlotEntry{job: job, done: done})
+		return
+	}
 	go func() {
 		defer n.inflight.Done()
 		n.posts <- struct{}{}
@@ -1423,6 +1509,7 @@ func buildPushJob(
 		kind:     kind,
 		collapse: pushCollapseKey(salt, device.DeviceID, session, windowID, kind),
 		payload:  payload,
+		windowID: windowID,
 	}, nil
 }
 
@@ -1442,9 +1529,17 @@ func (n *pushNotifier) deliverWithRetries(job pushJob, retryDelays []time.Durati
 		return pushResultFailed
 	}
 	for attempt := 0; ; attempt++ {
+		if n.superseded(job) || (job.still != nil && !job.still()) {
+			return pushResultSuperseded
+		}
 		status, retryAfter, err := n.postOnce(body)
 		switch {
 		case err == nil && status == http.StatusAccepted:
+			if job.kind != pushKindAlert && job.windowID != "" {
+				n.mu.Lock()
+				n.noteStatusSentLocked(job.deviceID, job.windowID, job.kind, job.seq, n.now())
+				n.mu.Unlock()
+			}
 			return pushResultSent
 		case err == nil && status == http.StatusUnauthorized:
 			n.rejectTicket(job.deviceID, job.ticket, pushRejectedBadTicket)
@@ -1463,6 +1558,64 @@ func (n *pushNotifier) deliverWithRetries(job pushJob, retryDelays []time.Durati
 		}
 		n.sleep(retryDelays[attempt])
 	}
+}
+
+// pushSlotQueue serializes the pushes for one device's window slot: one is
+// delivered at a time, so an older one can never land after a newer one and
+// replace it. A newer status replaces everything still waiting, and stops an
+// older push still retrying; an alert replaces only an older alert and waits
+// behind a status, then gives way to it if it was delivered.
+type pushSlotQueue struct {
+	pending []pushSlotEntry
+}
+
+// pushSlotEntry is a push waiting for its slot and what to tell when it ends.
+type pushSlotEntry struct {
+	job  pushJob
+	done func(string)
+}
+
+// runSlot delivers entry and then each push that came for slot meanwhile.
+func (n *pushNotifier) runSlot(slot pushDeviceWindow, entry pushSlotEntry) {
+	for {
+		n.posts <- struct{}{}
+		result := n.deliver(entry.job)
+		<-n.posts
+		if entry.done != nil {
+			entry.done(result)
+		}
+		n.inflight.Done()
+		n.mu.Lock()
+		queue := n.slotQueues[slot]
+		if len(queue.pending) == 0 {
+			delete(n.slotQueues, slot)
+			n.mu.Unlock()
+			return
+		}
+		entry = queue.pending[0]
+		queue.pending = queue.pending[1:]
+		n.mu.Unlock()
+	}
+}
+
+// superseded reports whether a newer status for job's slot is waiting, so
+// job's next attempt would only be replaced on the device.
+func (n *pushNotifier) superseded(job pushJob) bool {
+	if job.windowID == "" {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	queue, ok := n.slotQueues[pushDeviceWindow{deviceID: job.deviceID, windowID: job.windowID}]
+	if !ok {
+		return false
+	}
+	for _, waiting := range queue.pending {
+		if waiting.job.kind != pushKindAlert {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *pushNotifier) postOnce(body []byte) (int, time.Duration, error) {
@@ -1737,9 +1890,6 @@ func (s *muxServer) flushPushDeferred() {
 		if notifier.admitLocked(key, now, true) != "" {
 			continue
 		}
-		if event.kind != pushKindAlert {
-			notifier.noteStatusSentLocked(event.deviceID, event.windowID, event.kind, view, now)
-		}
 		admitted = append(admitted, admittedEvent{event, record})
 	}
 	notifier.mu.Unlock()
@@ -1759,6 +1909,7 @@ func (s *muxServer) flushPushDeferred() {
 		if err != nil {
 			continue
 		}
+		job.seq = view.statusSeq[entry.event.windowID]
 		notifier.post(job, nil)
 	}
 }

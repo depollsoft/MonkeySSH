@@ -727,6 +727,11 @@ class _RecordingLocalNotificationService extends LocalNotificationService {
   Future<void> clearTerminalNotification(int notificationId) async {
     clearedNotificationIds.add(notificationId);
   }
+
+  @override
+  Future<void> clearWindowNotification(int notificationId) async {
+    clearedNotificationIds.add(notificationId);
+  }
 }
 
 class _TestShellCompletionService extends ShellCompletionService {

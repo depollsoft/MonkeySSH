@@ -1,6 +1,10 @@
 package main
 
 import (
+	"maps"
+	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -261,5 +265,119 @@ func TestPushAlertGivesWayOnlyToAStatusTheDeviceTakes(t *testing.T) {
 				t.Fatalf("pushes = %q to %q, want %q to 1,2", got, tickets, test.want)
 			}
 		})
+	}
+}
+
+// A window's pushes share one slot on the device, so they go one at a time:
+// an older push still retrying gives way to a newer status waiting, which
+// replaces any older push still waiting.
+func TestPushesForOneWindowGoInOrder(t *testing.T) {
+	h := newPushTestHarness(t)
+	n := h.notifier
+	job := func(kind string) pushJob {
+		return pushJob{deviceID: "device-1", ticket: "t", kind: kind, collapse: "c", payload: kind, windowID: "@2"}
+	}
+	results := map[string]string{}
+	var mu sync.Mutex
+	record := func(kind string) func(string) {
+		return func(result string) {
+			mu.Lock()
+			defer mu.Unlock()
+			results[kind] = result
+		}
+	}
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusInternalServerError}
+	h.endpoint.mu.Unlock()
+	queued := false
+	n.sleep = func(time.Duration) {
+		// The finished turn failed once; while it waits to retry, an alert
+		// and then an approval come for the same window.
+		if !queued {
+			queued = true
+			n.post(job(pushKindAlert), record(pushKindAlert))
+			n.post(job(pushKindPermission), record(pushKindPermission))
+		}
+	}
+	n.post(job(pushKindFinished), record(pushKindFinished))
+	n.inflight.Wait()
+	payloads := []string{}
+	for _, request := range h.endpoint.received() {
+		payloads = append(payloads, request.Payload)
+	}
+	if got := strings.Join(payloads, ","); got != "finished,permission" {
+		t.Fatalf("requests = %q, want the failed finished turn then the approval", got)
+	}
+	want := map[string]string{
+		pushKindFinished:   pushResultSuperseded,
+		pushKindAlert:      pushResultSuperseded,
+		pushKindPermission: pushResultSent,
+	}
+	if !maps.Equal(results, want) {
+		t.Fatalf("results = %v, want %v", results, want)
+	}
+}
+
+// An alert that comes while the window's approval is still retrying waits
+// behind it instead of taking its place, and gives way once it lands.
+func TestPushAlertWaitsBehindItsApprovalStillRetrying(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusInternalServerError}
+	h.endpoint.mu.Unlock()
+	rang := false
+	h.notifier.sleep = func(time.Duration) {
+		if !rang {
+			rang = true
+			h.server.raisePushEvent("@2", pushKindAlert, "")
+		}
+	}
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.notifier.inflight.Wait()
+	if got := h.kinds(); got != "permission,permission" {
+		t.Fatalf("requests = %q, want the approval and its retry alone", got)
+	}
+}
+
+// An approval the function did not take (429) never reached the device, so
+// its bell still goes out through the routine budget.
+func TestPushAlertAfterAStatusThatFailedIsPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusTooManyRequests}
+	h.endpoint.mu.Unlock()
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission,alert" {
+		t.Fatalf("requests = %q, want the refused approval and then its bell", got)
+	}
+}
+
+// Coalescing looks at what the window's slot shows: an approval right after a
+// finished turn replaced the earlier approval is pushed, not coalesced away.
+func TestPushApprovalAfterAFinishedTurnIsNotCoalesced(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	for _, report := range []string{
+		"state=working:app=claude-code",
+		"state=blocked:app=claude-code:kind=permission",
+		"state=working:app=claude-code",
+		"state=done:app=claude-code",
+		"state=working:app=claude-code",
+		"state=blocked:app=claude-code:kind=permission",
+	} {
+		h.writeStatus("@2", report)
+		h.clock.now = h.clock.now.Add(time.Second)
+	}
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission,finished,permission" {
+		t.Fatalf("pushes = %q, want both approvals and the turn between them", got)
 	}
 }
