@@ -2864,6 +2864,46 @@ void main() {
       });
 
       test(
+        'sign-in resumes follow-ups queued behind an authentication failure',
+        () async {
+          final custom = authConnector(authenticated: true);
+          final authManager = buildManagerWith(custom);
+          final started = await authManager.startNewSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.copilotCli,
+            cwd: '/repo',
+          );
+          final key = (started as AcpSessionLaunchStarted).key;
+          final server = custom.servers[key.bridgeId]!..holdPrompts = true;
+          final first = authManager.prompt(key, const [
+            AcpTextContent('first'),
+          ]);
+          await _pump();
+          final followUp = authManager.prompt(key, const [
+            AcpTextContent('follow-up'),
+          ]);
+          final failure = expectLater(
+            first,
+            throwsA(isA<AcpRemoteException>()),
+          );
+          server.failNextPrompt('Authentication required');
+          await failure;
+          await _pump();
+          expect(server.heldPromptCount, 0);
+          final state = authManager.state.byKeyValue(key.value)!;
+          expect(state.status, AcpConnectionStatus.authenticationRequired);
+          final method = state.authMethods.singleWhere(
+            (method) => method.id == 'agent-login',
+          );
+          expect(await authManager.authenticateSession(key, method), isNull);
+          await _pump();
+          expect(server.heldPromptCount, 1);
+          server.completeNextPrompt();
+          await followUp;
+        },
+      );
+
+      test(
         'a detached reconnect carries the chosen terminal login back',
         () async {
           var serverCount = 0;
@@ -3107,6 +3147,155 @@ void main() {
   });
 
   group('history replay on load', () {
+    test(
+      'app-restart load dispatches input accepted by its provisional session',
+      () async {
+        final loadGate = Completer<void>();
+        final custom = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            loadResponseGate: loadGate.future,
+            replayTextOnLoad: 'Old reply',
+          )..holdPrompts = true,
+        );
+        custom.availableBridges.add('live-pi');
+        final restored = buildManagerWith(custom);
+        final reconnect = restored.reconnectSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          bridgeId: 'live-pi',
+          acpSessionId: 'restored-session',
+          cwd: '/repo',
+        );
+        await _pump();
+        final provisional = restored.state.sessions.single;
+        final prompt = restored.prompt(provisional.key, const [
+          AcpTextContent('While opening'),
+        ]);
+        final server = custom.servers['live-pi']!;
+        expect(server.methods, contains('session/load'));
+        expect(server.heldPromptCount, 0);
+        loadGate.complete();
+        expect(await reconnect, isA<AcpSessionLaunchStarted>());
+        await _pump();
+        expect(server.heldPromptCount, 1);
+        server.completeNextPrompt();
+        await prompt;
+        expect(
+          restored.state.sessions.single.timeline.entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((c) => c.text)
+                    .join(),
+              ),
+          ['Old reply', 'While opening'],
+        );
+      },
+    );
+
+    for (final replay in ['absent', 'status', 'content', 'empty']) {
+      test('reload preserves pending permission details with $replay replay', () async {
+        final custom = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayUpdatesOnLoad: [
+              if (replay != 'absent')
+                {
+                  'sessionUpdate': 'tool_call_update',
+                  'toolCallId': 'edit-1',
+                  'status': 'in_progress',
+                  if (replay == 'content')
+                    'content': [
+                      {
+                        'type': 'diff',
+                        'path': '/repo/main.dart',
+                        'newText': 'newer',
+                      },
+                    ],
+                  if (replay == 'empty') 'content': <Object?>[],
+                },
+            ],
+          ),
+        );
+        final restored = buildManagerWith(custom);
+        final started = await restored.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        custom.servers[key.bridgeId]!.pushServerRequest(
+          'session/request_permission',
+          {
+            'sessionId': key.acpSessionId,
+            'toolCall': {
+              'toolCallId': 'edit-1',
+              'title': 'Edit file',
+              'status': 'pending',
+              'content': [
+                {
+                  'type': 'diff',
+                  'path': '/repo/main.dart',
+                  'newText': 'original',
+                },
+              ],
+              'locations': [
+                {'path': '/repo/main.dart', 'line': 3},
+              ],
+            },
+            'options': [
+              {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+            ],
+          },
+        );
+        await _pump();
+        await restored.detachSession(key);
+        expect(
+          await restored.reconnectSession(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: key.acpSessionId,
+            cwd: '/repo',
+          ),
+          isA<AcpSessionLaunchStarted>(),
+        );
+        expect(
+          restored.state.byKeyValue(key.value)!.pendingPermissions,
+          hasLength(1),
+        );
+        // Another registry update must not reapply old permission details over
+        // the newer status or duplicate a restored diff.
+        custom.servers[key.bridgeId]!.requestPermission(
+          key.acpSessionId,
+          'other-tool',
+        );
+        await _pump();
+        final tool = restored.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpToolCallEntry>()
+            .singleWhere((entry) => entry.toolCallId == 'edit-1');
+        expect(
+          tool.status,
+          replay == 'absent' ? AcpToolStatus.pending : AcpToolStatus.inProgress,
+        );
+        expect(tool.locations.single.line, 3);
+        expect(
+          tool.content.whereType<AcpToolDiff>().map((diff) => diff.newText),
+          [
+            if (replay == 'content')
+              'newer'
+            else if (replay != 'empty')
+              'original',
+          ],
+        );
+      });
+    }
+
     test(
       'cached initialization waits for delayed bridge replay before loading',
       () async {

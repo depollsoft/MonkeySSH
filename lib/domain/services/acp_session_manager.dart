@@ -2710,13 +2710,32 @@ class _SessionController {
     // IDs, so appending this replay duplicates old turns at the transcript tail.
     final wasPublicationHeld = _historyReplayPublicationHeld;
     _historyReplayPublicationHeld = true;
-    final loadingTimeline = AcpTimelineBuilder();
+    AcpTimelineBuilder? loadingTimeline;
     var loaded = false;
     try {
       // Cached initialization can finish before the SSH handshake. Its replay
       // must reach the existing timeline before session/load starts a new one.
       await attachment.waitForReplay();
       _applyReceivedSessionUpdates();
+      final previousTools = {
+        for (final entry
+            in _timelineBuilder
+                .snapshot()
+                .entries
+                .whereType<AcpToolCallEntry>())
+          entry.toolCallId: entry,
+      };
+      loadingTimeline = AcpTimelineBuilder(
+        toolCallDefaults: {
+          for (final request in _pendingPermissionRequests)
+            request.permission.toolCall.toolCallId:
+                previousTools[request.permission.toolCall.toolCallId] ??
+                AcpToolCallEntry(
+                  toolCallId: request.permission.toolCall.toolCallId,
+                  order: 0,
+                ).merge(request.permission.toolCall),
+        },
+      );
       _loadingTimelineBuilder = loadingTimeline;
       final result = await attachment.client.loadSession(
         sessionId: sessionId,
@@ -2738,6 +2757,10 @@ class _SessionController {
     } finally {
       await _drainHistoryReplayNotifications();
       if (loaded) {
+        loadingTimeline!.retainPendingToolCalls({
+          for (final request in _pendingPermissionRequests)
+            request.permission.toolCall.toolCallId,
+        });
         // Local prompts continue to use the original builder while loading,
         // so input queued during the replay also keeps its ID and dispatches.
         // The first prompt accepted while detached can be pending without
@@ -2766,6 +2789,12 @@ class _SessionController {
       _update((state) => state.copyWith(clearWarning: true));
     }
   }
+
+  Iterable<cap.AcpPendingPermission> get _pendingPermissionRequests =>
+      (attachment.capabilityService?.registry.requests ??
+              const <cap.AcpPendingClientRequest>[])
+          .whereType<cap.AcpPendingPermission>()
+          .where((request) => request.sessionId == _key.acpSessionId);
 
   void _applyHistoryUnavailableWarningIfNeeded() {
     if (!_historyRestoreUnavailable ||
@@ -3926,11 +3955,8 @@ class _SessionController {
         // it only releases this controller's own lease, and the shared
         // attachment only closes once every session leasing it has done so.
         unawaited(_cleanUpAfterTerminalTransport());
-      case MonkeyMuxAcpTransportStatus.connected:
-        // Automatic SSH recovery does not call reconnect(). Retry input held
-        // by the readiness guard; active-turn and history guards still apply.
-        unawaited(_drainPromptQueue());
       case MonkeyMuxAcpTransportStatus.connecting:
+      case MonkeyMuxAcpTransportStatus.connected:
       case MonkeyMuxAcpTransportStatus.reconnecting:
         break;
     }
@@ -4085,6 +4111,7 @@ class _SessionController {
     AcpSessionKey? key,
     bool notifyManager = true,
   }) {
+    final previousStatus = _state.status;
     _state = transform(_state);
     // Rebuild under a new identity through the single copyWith path so no
     // field can ever be silently dropped when the key changes.
@@ -4099,6 +4126,13 @@ class _SessionController {
         _managerNotificationPending = false;
         _manager._onControllerChanged(this);
       }
+    }
+    if (previousStatus != AcpConnectionStatus.ready &&
+        _state.status == AcpConnectionStatus.ready) {
+      // All readiness transitions resume held input, including app-restart
+      // loads, authentication, and automatic SSH recovery. Defer until the
+      // caller finishes binding subscriptions and publishing the session.
+      scheduleMicrotask(() => unawaited(_drainPromptQueue()));
     }
   }
 
