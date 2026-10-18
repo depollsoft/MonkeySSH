@@ -33,6 +33,12 @@
     "aad": "v1.k1",
     "plaintext": "{\"t\":\"fcm-vector-token:APA91bExampleTokenForTestVectorsOnly\",\"d\":\"pX7cQe2LrV0sNw4yJk9aTg\",\"i\":1760000000,\"p\":\"ios\"}",
     "ticket": "v1.k1.48ZmHjXl3WB85npqIAa8_-6obH03YrLCqAcuySD-l6tctY6nHKJiDvXHA3x8XSEk8dMz9A5iWtbnHklRyrdunqS3AgntAydk0HdkAUbmQtPGfzZukcDN1arwETYpwVOxUqWEurRU7RBgu4HRO8rt0SS68ZxEithx-y9y9CRgAoC4G0DnR7cRIeA2lvGuy40",
+    "fid": {
+      "description": "A ticket from an app that registers its Firebase Installation ID: f replaces t. The token ticket above is what earlier builds hold.",
+      "nonceLabel": "monkeyssh push vector fid ticket nonce",
+      "plaintext": "{\"f\":\"cVectorFidForTests_001\",\"d\":\"pX7cQe2LrV0sNw4yJk9aTg\",\"i\":1760000000,\"p\":\"android\",\"a\":1}",
+      "ticket": "v1.k1.puDKP0N2nGIoT3TbFPvBG3e8th_lnrM9vqeEaE-fAjwuS3mTsjK-Nf9Vg-LbZftFADu2L_k76EV6MS1eYE50adjC0kVsH0CfGM9E3L4pDTOJWKe3kYRfvNWe9L3a5C8Aht8VCz8p8YLmGOap1wImMb0kt79FG0U6TdU"
+    },
     "rejected": [
       {
         "reason": "sealed byte 20 flipped",
@@ -54,6 +60,10 @@
       {
         "reason": "missing sealed part",
         "ticket": "v1.k1."
+      },
+      {
+        "reason": "names both an FID and a token",
+        "ticket": "v1.k1.N1NnkNej-pqOU4RrjgQc-UIm6EFXp9P_s-Mb1DXn0h1gaut1XyCvqkWaU34Ux-uREAtAT4OL4TKWq7etcLxF3L3XIO1zLHWDmssH0RGBBZaEyD77Us-XSFbH2tzOGrQoTHX7sdJvfNMpoH04qxeGJfYVcNYyhPxzHNpyLLwgMG3w7HqUe2iSx6YUDh-IsW16wB2tOgMg9THpytFJrFvKBBbvhe7_Thj9-pPeBw"
       },
       {
         "reason": "non-canonical base64url: unused trailing bits set on the last character",

@@ -72,7 +72,7 @@ jobs:
     steps:
       - name: Validate PR is safe to deploy
         id: validate
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         env:
           INPUT_PR_NUMBER: ${{ inputs.pr-number }}
           INPUT_SOURCE_SHA: ${{ inputs.source-sha }}
@@ -141,11 +141,11 @@ jobs:
     steps:
       # The workflow commit supplies the version action; the deploy source
       # supplies the version being built.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate-pr.outputs.deploy-sha }}
@@ -159,7 +159,7 @@ jobs:
       # A requested preview version is reused only when both halves are given.
       - name: Compute version
         id: version
-        uses: ./.github/actions/compute-version
+        uses: $/.github/actions/compute-version
         with:
           source: source
           build-name: ${{ inputs.preview-build-number != '' && inputs.preview-build-name || '' }}
@@ -186,7 +186,7 @@ jobs:
     steps:
       - name: Keep deploy build number monotonic
         id: finalize
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         env:
           INPUT_BUILD_NAME: ${{ needs.compute-version.outputs.build-name }}
           INPUT_BUILD_CODENAME: ${{ needs.compute-version.outputs.build-codename }}
@@ -335,14 +335,14 @@ jobs:
       ios-artifact-name: ${{ steps.resolve.outputs.ios-artifact-name }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
 
       - name: Resolve completed or active matching preview
         id: resolve
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         env:
           DEPLOY_SHA: ${{ needs.validate-pr.outputs.deploy-sha }}
           BUILD_NAME: ${{ needs.finalize-version.outputs.build-name }}
@@ -375,7 +375,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout comment tooling from the workflow commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
@@ -383,7 +383,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Mark deploy as running
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const owner = context.repo.owner;
@@ -522,7 +522,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout comment tooling from the workflow commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
@@ -530,7 +530,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Mark deploy as complete
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const owner = context.repo.owner;

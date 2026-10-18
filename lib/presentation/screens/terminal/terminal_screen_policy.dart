@@ -15,6 +15,7 @@ import '../../../data/database/database.dart';
 import '../../../domain/models/agent_launch_preset.dart';
 import '../../../domain/models/command_names.dart';
 import '../../../domain/models/remote_multiplexer.dart';
+import '../../../domain/models/terminal_program_status.dart';
 import '../../../domain/models/tmux_state.dart';
 import '../../../domain/services/local_notification_service.dart';
 import '../../../domain/services/remote_file_service.dart';
@@ -118,11 +119,17 @@ resolveTmuxAlertNotificationContent({
     windowTitle,
     window.secondaryTitle,
   ], title: resolvedTitle);
+  // A bell while the program waits on the user says what for, as the push
+  // for that request (whose notification slot it shares) does.
+  final status = window.programStatus;
+  final need = status?.state == TerminalProgramState.blocked
+      ? status!.semanticsLabel
+      : 'needs attention';
   final resolvedBody = forwardedBody.isNotEmpty
       ? forwardedBody
       : windowTitle.isNotEmpty
-      ? 'Window #${window.index} needs attention'
-      : 'Needs attention';
+      ? 'Window #${window.index} $need'
+      : '${need[0].toUpperCase()}${need.substring(1)}';
   return (title: resolvedTitle, subtitle: subtitle, body: resolvedBody);
 }
 
@@ -699,9 +706,12 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
 /// Whether Back should leave the connection screen.
 ///
 /// Native ACP focus replaces the terminal viewport but does not create a new
-/// navigation level. Only expanded mux chrome consumes the first Back action.
-bool resolveTerminalScreenCanPop({required bool isTmuxBarExpanded}) =>
-    !isTmuxBarExpanded;
+/// navigation level. An open find bar and expanded mux chrome each consume a
+/// Back action first, the find bar before the mux chrome.
+bool resolveTerminalScreenCanPop({
+  required bool isTmuxBarExpanded,
+  bool isFindBarOpen = false,
+}) => !isTmuxBarExpanded && !isFindBarOpen;
 
 /// Whether the terminal shell should resize for the system keyboard.
 ///
@@ -1871,12 +1881,22 @@ List<String> resolveTerminalFilePathExistenceCandidates(String path) {
 }
 
 /// Candidate terminal cells to probe for a touch-friendly path hit test.
-List<CellOffset> resolveForgivingTerminalTapOffsets(CellOffset offset) {
+///
+/// When [shownRows] is given, rows outside it are skipped, so a tap cannot
+/// open a link the user cannot see.
+List<CellOffset> resolveForgivingTerminalTapOffsets(
+  CellOffset offset, {
+  ({int first, int last})? shownRows,
+}) {
   final offsets = <CellOffset>[];
   final seen = <String>{};
 
   void addOffset(int dx, int dy) {
     final candidate = CellOffset(offset.x + dx, offset.y + dy);
+    if (shownRows != null &&
+        (candidate.y < shownRows.first || candidate.y > shownRows.last)) {
+      return;
+    }
     final key = '${candidate.x}:${candidate.y}';
     if (seen.add(key)) {
       offsets.add(candidate);
@@ -1897,27 +1917,6 @@ List<CellOffset> resolveForgivingTerminalTapOffsets(CellOffset offset) {
   }
 
   return offsets;
-}
-
-/// Visible terminal rows for the current scroll offset and rendered viewport.
-({int topRow, int bottomRow})? resolveVisibleTerminalRowRange({
-  required double scrollOffset,
-  required double lineHeight,
-  required double viewportHeight,
-  required int bufferHeight,
-}) {
-  if (lineHeight <= 0 || viewportHeight <= 0 || bufferHeight <= 0) {
-    return null;
-  }
-
-  final maxRow = bufferHeight - 1;
-  final topRow = (scrollOffset / lineHeight).floor().clamp(0, maxRow);
-  // The scroll offset is a live pixel value, so the viewport can end part way
-  // through a row; that row is still on screen and still needs its links.
-  final lastVisibleRow =
-      ((scrollOffset + viewportHeight) / lineHeight).ceil() - 1;
-  final bottomRow = max(topRow, lastVisibleRow).clamp(0, maxRow);
-  return (topRow: topRow, bottomRow: bottomRow);
 }
 
 /// Builds a terminal cell range for inline path underline painting.

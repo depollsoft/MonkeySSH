@@ -7,8 +7,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/theme.dart';
 import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
+import '../../domain/models/port_forward_type.dart';
+import '../../domain/services/socks_browser_proxy_service.dart';
 import '../../domain/services/ssh_service.dart';
 import '../providers/entity_list_providers.dart';
+import '../screens/port_forward_browser_screen.dart';
 import 'brand_empty_state.dart';
 import 'brand_error_state.dart';
 import 'brand_list_skeleton.dart';
@@ -16,12 +19,16 @@ import 'host_port_forward_editor_sheet.dart';
 import 'terminal_overlay_focus.dart';
 
 /// Opens live port-forward controls for the current terminal connection.
+///
+/// [onLinkHoldEnded] runs when the user ends the forwarding hold a link
+/// placed on the host, by starting detection or switching it here.
 Future<void> showTerminalPortForwardsSheet({
   required BuildContext context,
   required int hostId,
   required int connectionId,
   required SshSession session,
   required Future<void> Function(ActiveTunnelInfo tunnel) onOpenInBrowser,
+  VoidCallback? onLinkHoldEnded,
 }) => showModalBottomSheet<void>(
   context: context,
   isScrollControlled: true,
@@ -38,6 +45,7 @@ Future<void> showTerminalPortForwardsSheet({
       connectionId: connectionId,
       session: session,
       onOpenInBrowser: onOpenInBrowser,
+      onLinkHoldEnded: onLinkHoldEnded,
       scrollController: scrollController,
     ),
   ),
@@ -50,12 +58,14 @@ class _TerminalPortForwardsSheet extends ConsumerStatefulWidget {
     required this.session,
     required this.onOpenInBrowser,
     required this.scrollController,
+    this.onLinkHoldEnded,
   });
 
   final int hostId;
   final int connectionId;
   final SshSession session;
   final Future<void> Function(ActiveTunnelInfo tunnel) onOpenInBrowser;
+  final VoidCallback? onLinkHoldEnded;
   final ScrollController scrollController;
 
   @override
@@ -173,6 +183,11 @@ class _TerminalPortForwardsSheetState
           autoForwardPorts: autoForwardPorts,
           hasAutomaticTunnels: automaticGroups.isNotEmpty,
           isConnected: isConnected,
+          // A link-opened connection keeps detection off until the user
+          // starts it, even though the host setting is on.
+          isHeld:
+              (autoForwardPorts ?? false) &&
+              sessions.isAutomaticForwardingHeld(widget.hostId),
         ),
         const Divider(height: 1),
         Expanded(
@@ -223,10 +238,11 @@ class _TerminalPortForwardsSheetState
     required bool? autoForwardPorts,
     required bool hasAutomaticTunnels,
     required bool isConnected,
+    required bool isHeld,
   }) {
     final theme = Theme.of(context);
     final isEnabled = autoForwardPorts ?? false;
-    return SwitchListTile.adaptive(
+    final toggle = SwitchListTile.adaptive(
       key: const Key('terminal-auto-forward-ports-switch'),
       dense: true,
       secondary: _isUpdatingAutoForwardPorts
@@ -235,25 +251,87 @@ class _TerminalPortForwardsSheetState
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : Icon(
-              Icons.radar_rounded,
-              color: isEnabled
+              isHeld ? Icons.pause_circle_outline : Icons.radar_rounded,
+              color: isEnabled && !isHeld
                   ? theme.colorScheme.primary
                   : theme.colorScheme.onSurfaceVariant,
             ),
       title: const Text('Detect open ports'),
-      subtitle: Text(switch ((isEnabled, isConnected, hasAutomaticTunnels)) {
-        (false, _, _) =>
-          'Automatically proxy new remote listeners on this host',
-        (true, false, _) =>
-          'Will watch for new remote listeners once connected',
-        (true, true, true) => 'Proxying new remote listeners while connected',
-        (true, true, false) => 'Watching this host for new remote listeners',
-      }, style: theme.textTheme.bodySmall),
+      subtitle: Text(
+        isHeld
+            ? 'Paused because a link opened this host'
+            : switch ((isEnabled, isConnected, hasAutomaticTunnels)) {
+                (false, _, _) =>
+                  'Automatically proxy new remote listeners on this host',
+                (true, false, _) =>
+                  'Will watch for new remote listeners once connected',
+                (true, true, true) =>
+                  'Proxying new remote listeners while connected',
+                (true, true, false) =>
+                  'Watching this host for new remote listeners',
+              },
+        style: theme.textTheme.bodySmall,
+      ),
       value: isEnabled,
       onChanged: autoForwardPorts == null || _isUpdatingAutoForwardPorts
           ? null
           : (enabled) => unawaited(_setAutoForwardPorts(enabled: enabled)),
     );
+    if (!isHeld) return toggle;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        toggle,
+        Padding(
+          padding: const EdgeInsets.only(
+            right: FluttyTheme.spacingSm,
+            bottom: FluttyTheme.spacingXs,
+          ),
+          child: TextButton.icon(
+            key: const Key('terminal-auto-forward-ports-resume'),
+            style: TextButton.styleFrom(minimumSize: const Size(64, 44)),
+            onPressed: _isUpdatingAutoForwardPorts
+                ? null
+                : () => unawaited(_resumeAutoForwardPorts()),
+            icon: const Icon(Icons.play_arrow_rounded, size: 18),
+            label: const Text('Start detection'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Ends a link-opened connection's hold so detection runs as configured.
+  Future<void> _resumeAutoForwardPorts() async {
+    final sessions = ref.read(activeSessionsProvider.notifier);
+    final onLinkHoldEnded = widget.onLinkHoldEnded;
+    setState(() => _isUpdatingAutoForwardPorts = true);
+    try {
+      await sessions.releaseAutomaticForwardingHold(widget.hostId);
+      onLinkHoldEnded?.call();
+      if (mounted) {
+        _showMessage('Detecting open ports on this host.');
+      }
+    } on Object catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'port forwards',
+          context: ErrorDescription(
+            'while starting held automatic port forwarding for a host',
+          ),
+        ),
+      );
+      if (mounted) {
+        _showMessage('Could not start automatic port detection.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isUpdatingAutoForwardPorts = false);
+      }
+    }
   }
 
   Future<void> _setAutoForwardPorts({required bool enabled}) async {
@@ -264,6 +342,7 @@ class _TerminalPortForwardsSheetState
     // applies the change to live sessions.
     final hostRepository = ref.read(hostRepositoryProvider);
     final sessions = ref.read(activeSessionsProvider.notifier);
+    final onLinkHoldEnded = widget.onLinkHoldEnded;
     setState(() => _isUpdatingAutoForwardPorts = true);
     try {
       final updated = await hostRepository.setAutoForwardPorts(
@@ -276,7 +355,10 @@ class _TerminalPortForwardsSheetState
         }
         return;
       }
-      await sessions.reconfigureAutomaticPortForwardingForHost(widget.hostId);
+      // Toggling here is an explicit choice, so it also ends any hold a
+      // link-opened connection placed on automatic forwarding.
+      await sessions.releaseAutomaticForwardingHold(widget.hostId);
+      onLinkHoldEnded?.call();
       if (mounted) {
         _showMessage(
           enabled
@@ -449,24 +531,41 @@ class _TerminalPortForwardsSheetState
     final isActive = activeTunnel != null;
     final isPending = _pendingPortForwardIds.contains(portForward.id);
     final isLocal = portForward.forwardType == 'local';
-    final canOpenInBrowser =
-        isLocal &&
-        activeTunnel?.browserHost != null &&
-        activeTunnel?.browserPort != null;
-    final endpoint = isLocal
+    final isDynamic = isDynamicPortForwardType(portForward.forwardType);
+    final socksSupport = isDynamic
+        ? ref.watch(socksBrowserRoutingSupportProvider).asData?.value
+        : null;
+    // A stopped SOCKS rule browses too: the browser starts the forward and
+    // stops it again on close, as from the Port Forwards list.
+    final canOpenInBrowser = isDynamic
+        ? socksSupport?.isSupported ?? false
+        : isLocal &&
+              activeTunnel?.browserHost != null &&
+              activeTunnel?.browserPort != null;
+    final endpoint = isDynamic
+        ? '${dynamicPortForwardListenerLabel(activeTunnel?.localPort ?? portForward.localPort)}'
+              ' · SOCKS5 via host'
+        : isLocal
         ? '${portForward.localHost}:${portForward.localPort} → '
               '${portForward.remoteHost}:${portForward.remotePort}'
         : '${portForward.remoteHost}:${portForward.remotePort} → '
               '${portForward.localHost}:${portForward.localPort}';
+    final socksNote = socksSupport?.forwardRowNote;
 
     return Semantics(
       button: canOpenInBrowser,
       label: canOpenInBrowser
-          ? 'Open ${portForward.name} in the in-app browser'
+          ? (isDynamic
+                ? 'Browse through ${portForward.name} in the in-app browser'
+                : 'Open ${portForward.name} in the in-app browser')
           : null,
       child: InkWell(
         onTap: canOpenInBrowser
-            ? () => unawaited(widget.onOpenInBrowser(activeTunnel!))
+            ? () => unawaited(
+                isDynamic
+                    ? _openSocksBrowser(portForward)
+                    : widget.onOpenInBrowser(activeTunnel!),
+              )
             : null,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
@@ -478,7 +577,9 @@ class _TerminalPortForwardsSheetState
           child: Row(
             children: [
               Icon(
-                isLocal
+                isDynamic
+                    ? Icons.hub_outlined
+                    : isLocal
                     ? Icons.arrow_forward_rounded
                     : Icons.arrow_back_rounded,
                 color: isActive
@@ -519,6 +620,15 @@ class _TerminalPortForwardsSheetState
                         fontWeight: isActive ? FontWeight.w600 : null,
                       ),
                     ),
+                    if (socksNote != null) ...[
+                      const SizedBox(height: FluttyTheme.spacingXs),
+                      Text(
+                        socksNote,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -599,6 +709,17 @@ class _TerminalPortForwardsSheetState
       }
     }
   }
+
+  Future<void> _openSocksBrowser(PortForward portForward) =>
+      openSocksForwardBrowser(
+        context,
+        portForward: portForward,
+        hostLabel: ref
+            .read(hostByIdProvider(widget.hostId))
+            .asData
+            ?.value
+            ?.label,
+      );
 
   Future<void> _openEditor({PortForward? existing}) async {
     final result = await showHostPortForwardEditorSheet(

@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.237"
+	monkeyMuxVersion                  = "0.1.243"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -1149,10 +1149,14 @@ type attachClient struct {
 
 func main() {
 	if len(os.Args) < 2 {
+		linkForwardedAgent()
 		attachCommand(nil)
 		return
 	}
 
+	if commandRepointsForwardedAgent(os.Args[1]) {
+		linkForwardedAgent()
+	}
 	switch os.Args[1] {
 	case "attach":
 		attachCommand(os.Args[2:])
@@ -1190,6 +1194,19 @@ func main() {
 		printUsage(os.Stdout)
 	default:
 		usageAndExit()
+	}
+}
+
+// commandRepointsForwardedAgent reports whether command runs as a client of a
+// connection, whose SSH_AUTH_SOCK is that connection's forwarded agent. The
+// server and the helpers that run inside windows are left out: their
+// environment is a window's or the server's, not a live connection's.
+func commandRepointsForwardedAgent(command string) bool {
+	switch command {
+	case "attach", "attach-session", "a", "at", "new-session", "new", "control", "acp":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -6257,12 +6274,12 @@ func (s *muxServer) restoreOrCreateInitialWindow(
 	var pendingRedraw []string
 	restored := 0
 	for _, state := range restore.Windows {
-		window, err := s.createWindow(
-			createWindowOptionsForRestore(state, restore.StartInYoloMode),
-		)
+		options := createWindowOptionsForRestore(state, restore.StartInYoloMode)
+		window, err := s.createWindow(options)
 		if err != nil {
 			continue
 		}
+		s.watchRestoredCodexResume(window, options)
 		if firstID == "" {
 			firstID = window.id
 		}
@@ -6609,7 +6626,7 @@ func (s *muxServer) createWindowWithStarter(
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.Env = terminalEnvironment(os.Environ())
+	cmd.Env = withForwardedAgentSocket(terminalEnvironment(os.Environ()))
 
 	s.mu.Lock()
 	if s.closed {
@@ -17304,6 +17321,9 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 	s.closed = true
 	s.closeDone = make(chan struct{})
 	closeDone := s.closeDone
+	// Pushes still on their way go out beside the teardown, and a later
+	// close() waits for them through closeDone.
+	drained := s.startPushDrain()
 	listener := s.listener
 	socket := s.socketPath
 	identity := s.socketIdentity
@@ -17337,7 +17357,10 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		window.clearKittyGraphicsPendingLocked()
 	}
 	return func() {
-		defer close(closeDone)
+		defer func() {
+			<-drained
+			close(closeDone)
+		}()
 		if listener != nil {
 			_ = listener.Close()
 		}

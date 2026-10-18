@@ -2201,57 +2201,14 @@ void registerTerminalScreenSelectionTests() {
           ],
         );
       });
-    });
 
-    group('resolveVisibleTerminalRowRange', () {
-      test('uses rendered viewport height to cover all visible rows', () {
-        expect(
-          resolveVisibleTerminalRowRange(
-            scrollOffset: 24,
-            lineHeight: 12,
-            viewportHeight: 72,
-            bufferHeight: 200,
-          ),
-          (topRow: 2, bottomRow: 7),
+      test('skips rows that are not on screen', () {
+        final offsets = resolveForgivingTerminalTapOffsets(
+          const CellOffset(10, 5),
+          shownRows: (first: 5, last: 9),
         );
-      });
-
-      test(
-        'includes the partially visible bottom row at a fractional offset',
-        () {
-          // Rows 2..8 are on screen: row 8 spans y 96..108 and the viewport
-          // ends at y 102.
-          expect(
-            resolveVisibleTerminalRowRange(
-              scrollOffset: 30,
-              lineHeight: 12,
-              viewportHeight: 72,
-              bufferHeight: 200,
-            ),
-            (topRow: 2, bottomRow: 8),
-          );
-        },
-      );
-
-      test('returns null when layout metrics are not ready', () {
-        expect(
-          resolveVisibleTerminalRowRange(
-            scrollOffset: 0,
-            lineHeight: 0,
-            viewportHeight: 72,
-            bufferHeight: 200,
-          ),
-          isNull,
-        );
-        expect(
-          resolveVisibleTerminalRowRange(
-            scrollOffset: 0,
-            lineHeight: 12,
-            viewportHeight: 0,
-            bufferHeight: 200,
-          ),
-          isNull,
-        );
+        expect(offsets.first, const CellOffset(10, 5));
+        expect(offsets.map((offset) => offset.y).toSet(), {5, 6});
       });
     });
 

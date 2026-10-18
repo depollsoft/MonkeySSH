@@ -5,11 +5,27 @@ abstract interface class AcpTransport {
   /// Bytes received from the remote ACP peer.
   Stream<List<int>> get incoming;
 
-  /// Writes a complete sequence of bytes to the remote peer.
+  /// Writes a complete sequence of bytes to the remote peer. Throws
+  /// [AcpTransportClosedException] without writing anything once closed.
   Future<void> write(List<int> bytes);
 
   /// Closes the transport and releases all resources.
   Future<void> close();
+}
+
+/// Thrown by [AcpTransport.write] when the transport has already closed, so
+/// none of the frame was written.
+final class AcpTransportClosedException implements Exception {
+  /// Creates a closed-transport error.
+  const AcpTransportClosedException([
+    this.message = 'The ACP transport is closed.',
+  ]);
+
+  /// What closed.
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 /// Optional decoded input for transports that already parse a JSON envelope.

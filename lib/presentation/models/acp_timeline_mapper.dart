@@ -164,6 +164,13 @@ String? buildAcpConversationPreview(
   return _bound(lines.reversed.join('\n'), maxChars);
 }
 
+/// The [AcpTimelineEntry.id] the mapper gives the presentation entry for
+/// domain [entry], so callers can relate rendered rows to domain entries.
+String acpPresentationEntryId(d.AcpTimelineEntry entry) => switch (entry) {
+  d.AcpMessageEntry(:final order) => 'msg-$order',
+  d.AcpToolCallEntry(:final toolCallId) => 'tool-$toolCallId',
+};
+
 /// Maps [state] into an ordered list of presentation timeline entries.
 ///
 /// The returned list is ordered as: the conversation timeline (user prompts,
@@ -329,13 +336,13 @@ AcpTimelineEntry? _mapMessage(
         return null;
       }
       return AcpUserPromptEntry(
-        id: 'msg-${entry.order}',
+        id: acpPresentationEntryId(entry),
         parts: parts,
         queued: entry.queued,
       );
     case d.AcpMessageRole.agent:
       return AcpAssistantMessageEntry(
-        id: 'msg-${entry.order}',
+        id: acpPresentationEntryId(entry),
         markdown: _markdownFromContent(entry.content),
         parentToolCallId: entry.parentToolCallId,
         status: status,
@@ -343,7 +350,7 @@ AcpTimelineEntry? _mapMessage(
       );
     case d.AcpMessageRole.thought:
       return AcpThoughtEntry(
-        id: 'msg-${entry.order}',
+        id: acpPresentationEntryId(entry),
         markdown: _markdownFromContent(entry.content),
         parentToolCallId: entry.parentToolCallId,
         status: status,
@@ -605,7 +612,7 @@ AcpToolCallEntry _mapToolCall(d.AcpToolCallEntry entry) {
   final rawOutput = textualDiff == null ? selectedRawOutput : null;
 
   return AcpToolCallEntry(
-    id: 'tool-${entry.toolCallId}',
+    id: acpPresentationEntryId(entry),
     parentToolCallId: entry.parentToolCallId,
     isSubagent: entry.isSubagent,
     toolCall: AcpToolCall(
@@ -1441,7 +1448,17 @@ List<AcpStatusEntry> _mapStatuses(d.AcpSessionState state) {
     );
   }
 
-  final connectionStatus = _connectionStatusMessage(state.status);
+  // A chat another device controls is explained by the banner above the
+  // composer; "detached" would contradict it. Only an empty transcript gets
+  // a line, saying where its history is.
+  final connectionStatus = state.remoteWriter != null
+      ? (state.timeline.entries.isEmpty
+            ? (
+                'Earlier messages load when you take over.',
+                AcpStatusSeverity.info,
+              )
+            : null)
+      : _connectionStatusMessage(state.status);
   if (connectionStatus != null) {
     statuses.add(
       AcpStatusEntry(

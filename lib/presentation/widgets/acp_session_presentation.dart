@@ -202,7 +202,15 @@ AcpStatusDisplay acpStatusDisplay(AcpConnectionStatus status) =>
 /// terminal-like activity descriptor. User decisions take priority over active
 /// work so a background native session cannot silently wait for attention.
 AcpStatusDisplay acpSessionActivityDisplay(AcpSessionState session) =>
-    acpActivitySnapshotDisplay(AcpActivitySnapshot.fromSession(session));
+    session.remoteWriter != null
+    ? _readOnlyStatusDisplay
+    : acpActivitySnapshotDisplay(AcpActivitySnapshot.fromSession(session));
+
+const _readOnlyStatusDisplay = AcpStatusDisplay(
+  label: 'read-only',
+  icon: Icons.devices_other,
+  tone: AcpStatusTone.neutral,
+);
 
 /// Resolves a coarse activity snapshot without reading transcript content.
 AcpStatusDisplay acpActivitySnapshotDisplay(AcpActivitySnapshot snapshot) {
@@ -259,11 +267,14 @@ AcpStatusDisplay _muxStatusSnapshotDisplay(AcpActivitySnapshot snapshot) {
   if (snapshot.status != AcpConnectionStatus.ready) {
     return acpStatusDisplay(snapshot.status);
   }
+  // Red like a terminal program that reports it is blocked on the user, and
+  // like the Connections tab; amber stays for a session waiting for its next
+  // prompt.
   if (snapshot.needsInput) {
     return const AcpStatusDisplay(
       label: 'waiting',
       icon: Icons.pending_actions,
-      tone: AcpStatusTone.warning,
+      tone: AcpStatusTone.error,
       needsInput: true,
     );
   }

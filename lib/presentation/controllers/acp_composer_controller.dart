@@ -8,14 +8,20 @@ import 'package:flutter/foundation.dart';
 import 'package:mime/mime.dart';
 
 import '../../domain/models/acp_attachment.dart';
+import '../../domain/models/acp_composer_draft.dart';
 import '../../domain/models/acp_content.dart';
 import '../../domain/models/acp_protocol.dart';
 import '../../domain/models/acp_session_keys.dart';
 import '../../domain/models/acp_session_state.dart';
 import '../../domain/models/acp_updates.dart';
+import '../../domain/models/acp_writer_lease.dart';
 import '../../domain/services/acp_attachment_service.dart';
 import '../../domain/services/acp_session_manager.dart';
 import '../models/acp_slash_command.dart';
+import 'acp_turn_recovery.dart';
+
+export '../../domain/models/acp_composer_draft.dart'
+    show AcpRestoredDraftNotice;
 
 /// Minimum insertion size promoted to a compact pasted-text chip.
 const int kAcpLargePasteThresholdChars = 2000;
@@ -178,6 +184,9 @@ class AcpComposerAttachment {
 /// them with [AcpSessionManager.prompt]. Once queued, the submitted draft clears
 /// immediately so the user can type steering or follow-up text while the active
 /// turn continues. Failed submissions are restored without dropping newer text.
+/// A prompt whose answer was lost, or whose turn the user stopped, is offered
+/// back through [turnRecovery] instead, since the agent may already have run
+/// it.
 class AcpComposerController extends ChangeNotifier {
   /// Creates a composer controller for [sessionKey].
   AcpComposerController({
@@ -219,11 +228,20 @@ class AcpComposerController extends ChangeNotifier {
   // that send's clear cannot wipe the restored text and attachments.
   /// Rejected drafts waiting for the in-flight send to clear the field,
   /// oldest first; every one of them is merged back once it does.
-  final List<({String text, List<AcpComposerAttachment> attachments})>
+  final List<
+    ({AcpSubmittedDraft draft, AcpComposerError? error, bool retryable})
+  >
   _pendingRestores = [];
 
   AcpSlashQuery? _slashQuery;
   List<AcpAvailableCommand> _slashCommands = const <AcpAvailableCommand>[];
+
+  var _submissions = 0;
+  var _retryableFailure = false;
+  var _maybeSentRestored = false;
+  AcpTurnRecovery? _turnRecovery;
+
+  AcpRestoredDraftNotice? _restoredDraftNotice;
 
   var _disposed = false;
 
@@ -239,6 +257,37 @@ class AcpComposerController extends ChangeNotifier {
 
   /// The latest content-free error, if any.
   AcpComposerError? get error => _error;
+
+  /// Prompts that can be put back in the draft after the agent's answer was
+  /// lost or the user stopped the last turn.
+  AcpTurnRecovery? get turnRecovery => _turnRecovery;
+
+  /// Whether the draft restored after a confirmed send failure can be sent
+  /// again as is. A lost answer never qualifies: the agent may have run it,
+  /// and neither do several restored prompts with too many attachments to
+  /// send together.
+  bool get canRetryFailedPrompt =>
+      _retryableFailure &&
+      _error?.kind == AcpComposerErrorKind.send &&
+      canSend &&
+      _attachments.length <= limits.maxCount;
+
+  /// Set while a draft that came back from storage has not yet been sent,
+  /// emptied, or dismissed.
+  AcpRestoredDraftNotice? get restoredDraftNotice => _restoredDraftNotice;
+
+  /// The current text and attachments, for saving the draft.
+  AcpComposerDraftSnapshot get draftSnapshot => AcpComposerDraftSnapshot(
+    text: _text,
+    caret: _caret,
+    attachments: [
+      for (final attachment in _attachments)
+        AcpAttachmentDraft(
+          candidate: attachment.candidate,
+          fallback: attachment.fallback,
+        ),
+    ],
+  );
 
   /// The ranked slash-command matches for the active query.
   List<AcpAvailableCommand> get slashCommands => _slashCommands;
@@ -305,8 +354,76 @@ class AcpComposerController extends ChangeNotifier {
     }
     _text = value;
     _caret = nextCaret;
+    _clearRestoredNoticeWhenEmpty();
     _recomputeSlash();
     notifyListeners();
+  }
+
+  /// Puts a saved draft back in the composer. It is never sent: the user
+  /// still has to send it.
+  ///
+  /// Saved text goes before anything typed in the meantime, and saved
+  /// attachments before current ones, up to the attachment limit. With a
+  /// [notice], the composer shows that the draft was restored; attachments
+  /// over the limit are added to its unavailable attachments, and the notice
+  /// records whether anything of [draft] came back at all.
+  ///
+  /// Returns `false`, changing nothing, while a send is being prepared.
+  bool restoreDraft(
+    AcpComposerDraftSnapshot draft, {
+    AcpRestoredDraftNotice? notice,
+  }) {
+    if (!isEditable) {
+      return false;
+    }
+    if (draft.text.trim().isNotEmpty) {
+      final hadText = _text.trim().isNotEmpty;
+      _text = hadText ? '${draft.text}\n\n$_text' : draft.text;
+      _caret = hadText ? _text.length : draft.caret.clamp(0, _text.length);
+    }
+    final room = (limits.maxCount - _attachments.length).clamp(
+      0,
+      draft.attachments.length,
+    );
+    _attachments.insertAll(0, <AcpComposerAttachment>[
+      for (final attachment in draft.attachments.take(room))
+        AcpComposerAttachment(
+          id: 'att-${_nextAttachmentId++}',
+          candidate: attachment.candidate,
+          fallback: attachment.fallback,
+        ),
+    ]);
+    if (notice != null) {
+      final dropped = draft.attachments.skip(room);
+      _restoredDraftNotice = AcpRestoredDraftNotice(
+        unavailableAttachmentCount:
+            notice.unavailableAttachmentCount + dropped.length,
+        unavailableAttachmentNames: [
+          ...notice.unavailableAttachmentNames,
+          for (final attachment in dropped) attachment.candidate.name,
+        ],
+        fromEarlierRun: notice.fromEarlierRun,
+        draftRestored: draft.text.trim().isNotEmpty || room > 0,
+      );
+    }
+    _recomputeSlash();
+    notifyListeners();
+    return true;
+  }
+
+  /// Hides the restored-draft notice, keeping the draft.
+  void dismissRestoredDraftNotice() {
+    if (_restoredDraftNotice == null) {
+      return;
+    }
+    _restoredDraftNotice = null;
+    notifyListeners();
+  }
+
+  void _clearRestoredNoticeWhenEmpty() {
+    if (!hasContent) {
+      _restoredDraftNotice = null;
+    }
   }
 
   /// Applies the latest session snapshot, refreshing derived state.
@@ -336,7 +453,15 @@ class AcpComposerController extends ChangeNotifier {
     }
     final previousPrompt = previous?.capabilities.prompt;
     final prompt = session?.capabilities.prompt;
-    return commandsChanged ||
+    final recovery = _turnRecovery?.afterSessionUpdate(
+      previous: previous,
+      session: session,
+      latestSubmission: _submissions,
+    );
+    final recoveryChanged = !identical(recovery, _turnRecovery);
+    _turnRecovery = recovery;
+    return recoveryChanged ||
+        commandsChanged ||
         previous?.status != session?.status ||
         previous?.promptStatus != session?.promptStatus ||
         previousPrompt?.image != prompt?.image ||
@@ -433,6 +558,11 @@ class AcpComposerController extends ChangeNotifier {
     final before = _attachments.length;
     _attachments.removeWhere((attachment) => attachment.id == id);
     if (_attachments.length != before) {
+      if (_error == _restoreOverLimitError &&
+          _attachments.length <= limits.maxCount) {
+        _error = _sendFailedError;
+      }
+      _clearRestoredNoticeWhenEmpty();
       notifyListeners();
     }
   }
@@ -528,6 +658,8 @@ class AcpComposerController extends ChangeNotifier {
     final cancellation = AcpAttachmentCancellationToken();
     _cancellation = cancellation;
     _error = null;
+    _retryableFailure = false;
+    _maybeSentRestored = false;
     _sendState = _SendState.preparing;
     _markAttachments(AcpComposerAttachmentStatus.ready, clearError: true);
     notifyListeners();
@@ -594,11 +726,18 @@ class AcpComposerController extends ChangeNotifier {
     _caret = 0;
     _attachments.clear();
     _error = null;
+    if (_turnRecovery?.withdrawnBySend ?? false) _turnRecovery = null;
+    _restoredDraftNotice = null;
     _applyPendingRestore();
     _recomputeSlash();
     notifyListeners();
     unawaited(
-      _observePromptResult(promptFuture, snapshotText, snapshotAttachments),
+      _observePromptResult(
+        promptFuture,
+        snapshotText,
+        snapshotAttachments,
+        ++_submissions,
+      ),
     );
     return true;
   }
@@ -607,37 +746,256 @@ class AcpComposerController extends ChangeNotifier {
     Future<AcpPromptResult> promptFuture,
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
+    int submission,
   ) async {
     try {
-      await promptFuture;
-    } on Object {
-      if (_disposed) {
+      final result = await promptFuture;
+      if (!_disposed &&
+          result.stopReason == AcpStopReason.cancelled &&
+          submission == _submissions) {
+        // An earlier lost or failed prompt still on offer keeps its more
+        // cautious wording, with the stopped prompt added after it.
+        final previous = _turnRecovery;
+        final keepPrevious = previous != null && !previous.withdrawnBySend;
+        _turnRecovery = AcpTurnRecovery(
+          kind: keepPrevious ? previous.kind : AcpTurnRecoveryKind.cancelled,
+          drafts: _inSendOrder([
+            if (keepPrevious) ...previous.drafts,
+            (
+              text: snapshotText,
+              attachments: snapshotAttachments,
+              submission: submission,
+            ),
+          ]),
+          submission: _submissions,
+        );
+        notifyListeners();
+      }
+    } on Object catch (error) {
+      // A prompt that reached the agent keeps running after another device
+      // takes the chat; restoring it would invite sending it twice.
+      if (_disposed ||
+          (error is AcpInputHeldElsewhereException && error.delivered)) {
         return;
+      }
+      // Another device took the chat: the prompt goes back in the draft with
+      // the reason. Only one that never left this device can be retried as
+      // is; one written to a connection that dropped may have run.
+      final AcpComposerError? reason;
+      final bool retryable;
+      if (error is AcpInputHeldElsewhereException) {
+        final maybeSent = error.delivery == AcpInputDelivery.unknown;
+        reason = maybeSent ? _maybeSentElsewhereError : _heldElsewhereError;
+        retryable = !maybeSent;
+      } else {
+        final failure = classifyAcpPromptFailure(error);
+        if (failure != AcpPromptFailure.refused) {
+          // The agent may have acted on it: keep the prompt out of the draft so
+          // it is not resent by reflex, and offer it back explicitly, together
+          // with any earlier prompt still waiting there.
+          final previous = _turnRecovery;
+          _turnRecovery = AcpTurnRecovery(
+            kind: failure == AcpPromptFailure.lost
+                ? AcpTurnRecoveryKind.unconfirmed
+                : AcpTurnRecoveryKind.failedMidTurn,
+            drafts: _inSendOrder([
+              if (previous != null && !previous.withdrawnBySend)
+                ...previous.drafts,
+              (
+                text: snapshotText,
+                attachments: snapshotAttachments,
+                submission: submission,
+              ),
+            ]),
+            submission: _submissions,
+          );
+          notifyListeners();
+          return;
+        }
+        reason = null;
+        retryable = true;
       }
       if (_sendState != _SendState.idle) {
         // A newer send is still preparing and will clear the draft when it
         // finishes; restore after that so the rejected draft survives.
         _pendingRestores.add((
-          text: snapshotText,
-          attachments: snapshotAttachments,
+          draft: (
+            text: snapshotText,
+            attachments: snapshotAttachments,
+            submission: submission,
+          ),
+          error: reason,
+          retryable: retryable,
         ));
         return;
       }
-      _error = null;
-      _restoreSnapshot(snapshotText, snapshotAttachments);
+      _error = reason;
+      _noteRestoreRetryable(retryable);
+      _restoreInSendOrder(snapshotText, snapshotAttachments, submission);
       _recomputeSlash();
       notifyListeners();
     }
   }
+
+  /// [drafts] oldest first, whatever order their turns ended in.
+  static List<AcpSubmittedDraft> _inSendOrder(List<AcpSubmittedDraft> drafts) =>
+      drafts..sort((a, b) => a.submission.compareTo(b.submission));
+
+  /// Records whether the draft can be resent as is once a returned prompt is
+  /// merged into it. A prompt that may have run keeps the draft from being
+  /// resent by reflex until the next send, whatever comes back after it.
+  void _noteRestoreRetryable(bool retryable) {
+    if (!retryable) _maybeSentRestored = true;
+    _retryableFailure = !_maybeSentRestored;
+  }
+
+  static const _heldElsewhereError = AcpComposerError(
+    AcpComposerErrorKind.send,
+    'Another device took this chat before your message was sent.',
+  );
+
+  static const _maybeSentElsewhereError = AcpComposerError(
+    AcpComposerErrorKind.send,
+    'Another device took this chat. Your message may not have been sent.',
+  );
+
+  static const _restoreLimitError = AcpComposerError(
+    AcpComposerErrorKind.attachment,
+    'Remove some attachments to restore the rest of the prompt.',
+  );
 
   static const _sendFailedError = AcpComposerError(
     AcpComposerErrorKind.send,
     'Your message could not be sent. Try again.',
   );
 
-  /// Merges a rejected prompt back into the draft. A failure the current send
-  /// already reported stays visible; otherwise the send error is shown.
-  void _restoreSnapshot(
+  static const _restoreOverLimitError = AcpComposerError(
+    AcpComposerErrorKind.attachment,
+    'Your messages could not be sent, and together they have too many '
+    'attachments. Remove some to send again.',
+  );
+
+  /// Shows why a restored draft could not be sent: the send error, unless
+  /// several restored prompts together carry too many attachments to resend.
+  void _reportRestore() {
+    _error = _attachments.length > limits.maxCount
+        ? _restoreOverLimitError
+        : (_error ?? _sendFailedError);
+  }
+
+  /// Resends the draft restored after a confirmed failure.
+  Future<bool> retryFailedPrompt() async =>
+      canRetryFailedPrompt && await send();
+
+  /// Puts the prompts offered by [turnRecovery] back into the draft, ahead of
+  /// anything typed since. Prompts whose attachments would exceed the
+  /// attachment limit stay offered.
+  void editLastPrompt() {
+    final recovery = _turnRecovery;
+    if (recovery == null || !isEditable) {
+      return;
+    }
+    var room = limits.maxCount - _attachments.length;
+    final restored = <AcpSubmittedDraft>[];
+    final kept = <AcpSubmittedDraft>[];
+    for (final draft in recovery.drafts) {
+      if (kept.isEmpty && draft.attachments.length <= room) {
+        restored.add(draft);
+        room -= draft.attachments.length;
+      } else {
+        kept.add(draft);
+      }
+    }
+    _turnRecovery = kept.isEmpty
+        ? null
+        : AcpTurnRecovery(
+            kind: recovery.kind,
+            drafts: kept,
+            submission: recovery.submission,
+            resumedSubmission:
+                kept.any(
+                  (draft) => draft.submission == recovery.resumedSubmission,
+                )
+                ? recovery.resumedSubmission
+                : null,
+          );
+    if (kept.isNotEmpty) {
+      _error = _restoreLimitError;
+    } else if (_error == _restoreLimitError) {
+      _error = null;
+    }
+    for (final draft in restored.reversed) {
+      _mergeDraft(draft.text, draft.attachments);
+    }
+    _recomputeSlash();
+    notifyListeners();
+  }
+
+  /// Dismisses the offer to restore [turnRecovery].
+  void dismissTurnRecovery() {
+    if (_turnRecovery == null) {
+      return;
+    }
+    _turnRecovery = null;
+    notifyListeners();
+  }
+
+  /// The refused prompts restored since the draft was last edited, in send
+  /// order, with the draft they produced and the text typed before the first
+  /// of them.
+  ({String text, String typed, List<_RestoredPrompt> prompts})? _lastRestore;
+
+  /// Merges a refused prompt back into the draft. While the draft is
+  /// unchanged since the last restore, the refused prompts are kept in the
+  /// order they were sent, whatever order their failures arrive in: a queued
+  /// prompt refused at once can come back before an earlier prompt that
+  /// fails later. A failure the current send already reported stays
+  /// visible; otherwise the send error is shown.
+  void _restoreInSendOrder(
+    String snapshotText,
+    List<AcpComposerAttachment> snapshotAttachments,
+    int submission,
+  ) {
+    final last = _lastRestore;
+    final continuing = last != null && last.text == _text;
+    final prompts = continuing ? [...last.prompts] : <_RestoredPrompt>[];
+    final typed = continuing ? last.typed : _text;
+    final currentIds = _attachments.map((attachment) => attachment.id).toSet();
+    final added = [
+      for (final attachment in snapshotAttachments)
+        if (!currentIds.contains(attachment.id)) attachment,
+    ];
+    var position = prompts.indexWhere((p) => p.submission > submission);
+    if (position < 0) position = prompts.length;
+    // After the earlier prompts' attachments still attached, located by id:
+    // attachments may have been removed since, so an index could be stale.
+    final earlierIds = {
+      for (final prompt in prompts.take(position)) ...prompt.attachmentIds,
+    };
+    final insertAt =
+        _attachments.lastIndexWhere(
+          (attachment) => earlierIds.contains(attachment.id),
+        ) +
+        1;
+    _attachments.insertAll(insertAt, added);
+    prompts.insert(position, (
+      submission: submission,
+      text: snapshotText,
+      attachmentIds: {for (final attachment in added) attachment.id},
+    ));
+    final texts = [
+      for (final prompt in prompts)
+        if (prompt.text.isNotEmpty) prompt.text,
+    ];
+    if (texts.isNotEmpty) {
+      _text = [...texts, if (typed.trim().isNotEmpty) typed].join('\n\n');
+      _caret = _text.length;
+    }
+    _reportRestore();
+    _lastRestore = (text: _text, typed: typed, prompts: prompts);
+  }
+
+  void _mergeDraft(
     String snapshotText,
     List<AcpComposerAttachment> snapshotAttachments,
   ) {
@@ -652,19 +1010,29 @@ class AcpComposerController extends ChangeNotifier {
         (attachment) => !currentIds.contains(attachment.id),
       ),
     );
-    _error ??= _sendFailedError;
   }
 
   void _applyPendingRestore() {
     if (_pendingRestores.isEmpty) {
       return;
     }
-    // _restoreSnapshot prepends, so merging newest first keeps the drafts in
-    // the order they were sent.
-    final restores = _pendingRestores.reversed.toList();
+    // Through the same bookkeeping as a refusal handled while idle, so a
+    // prompt refused after these still comes back after them.
+    final restores = List.of(_pendingRestores);
     _pendingRestores.clear();
     for (final restore in restores) {
-      _restoreSnapshot(restore.text, restore.attachments);
+      // A newer send's own failure stays; the generic send error gives way
+      // to the reason another device took the chat.
+      if (restore.error case final reason?
+          when _error == null || _error == _sendFailedError) {
+        _error = reason;
+      }
+      _noteRestoreRetryable(restore.retryable);
+      _restoreInSendOrder(
+        restore.draft.text,
+        restore.draft.attachments,
+        restore.draft.submission,
+      );
     }
   }
 
@@ -761,3 +1129,11 @@ class AcpComposerController extends ChangeNotifier {
 }
 
 enum _SendState { idle, preparing }
+
+/// A refused prompt restored into the draft: its send number, its text and
+/// the attachments it added back.
+typedef _RestoredPrompt = ({
+  int submission,
+  String text,
+  Set<String> attachmentIds,
+});

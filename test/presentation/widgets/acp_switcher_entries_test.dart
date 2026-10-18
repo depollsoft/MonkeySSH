@@ -2,6 +2,10 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/domain/models/acp_recent_session.dart';
+import 'package:monkeyssh/domain/models/acp_session_state.dart';
+import 'package:monkeyssh/domain/models/connection_attention.dart';
+import 'package:monkeyssh/domain/models/monkeymux_acp_bridge.dart';
+import 'package:monkeyssh/presentation/providers/connection_attention_provider.dart';
 import 'package:monkeyssh/presentation/widgets/acp_session_switcher.dart';
 
 import '../../support/fake_acp_session_manager.dart';
@@ -83,25 +87,70 @@ void main() {
       expect(entries.first.keyValue, newer.key.value);
       expect(entries.last.keyValue, older.key.value);
     });
-  });
 
-  group('buildAcpMuxWindowEntries', () {
-    test('ignores activity changes when assigning native window order', () {
-      final first = fakeAcpSession(
-        key: fakeAcpKey(acpSessionId: 'a'),
+    test('puts sessions waiting on the user first, like Connections', () {
+      final newerIdle = fakeAcpSession(
+        key: fakeAcpKey(acpSessionId: 'idle'),
+        lastActivityAt: DateTime(2026, 2),
+      );
+      final olderAsking = fakeAcpSession(
+        key: fakeAcpKey(acpSessionId: 'asking'),
         lastActivityAt: DateTime(2025),
+        pendingPermissions: [
+          AcpPendingPermission(
+            requestKey: 'r',
+            sessionId: 'asking',
+            toolCallId: 't',
+            options: const [],
+            requestedAt: DateTime(2025),
+          ),
+        ],
       );
-      final recentlyActive = fakeAcpSession(
-        key: fakeAcpKey(acpSessionId: 'b'),
-        lastActivityAt: DateTime(2027),
+      final recentWithRequest = AcpRecentSessionRef(
+        hostId: 1,
+        providerId: 'builtin:copilot-cli',
+        bridgeId: 'parked',
+        acpSessionId: 'parked-session',
+        createdAt: DateTime(2024),
+        lastActivityAt: DateTime(2024),
+      );
+      final bridges = HostBridgeMetadata(const {}).withHost(
+        1,
+        HostBridges(
+          connectionId: 7,
+          bridges: [
+            MonkeyMuxAcpBridgeMetadata(
+              id: 'parked',
+              sessionId: 'parked-session',
+              provider: 'Copilot CLI',
+              commandHash: 'hash',
+              state: MonkeyMuxAcpProviderState.running,
+              clientCount: 0,
+              pendingRequestCount: 1,
+              inFlightTurnCount: 0,
+              lastActivity: DateTime(2024),
+              startedAt: DateTime(2024),
+              nextSequence: 1,
+            ),
+          ],
+        ),
       );
 
-      final entries = buildAcpMuxWindowEntries([recentlyActive, first]);
+      final entries = buildAcpSwitcherEntries(
+        sessions: [newerIdle, olderAsking],
+        recents: [recentWithRequest],
+        bridges: bridges,
+      );
 
       expect(entries.map((entry) => entry.keyValue), [
-        first.key.value,
-        recentlyActive.key.value,
+        olderAsking.key.value,
+        recentWithRequest.key.value,
+        newerIdle.key.value,
       ]);
+      expect(
+        acpSwitcherEntryWaitingReason(entries[1], bridges: bridges),
+        AttentionReason.hostRequest,
+      );
     });
   });
 }

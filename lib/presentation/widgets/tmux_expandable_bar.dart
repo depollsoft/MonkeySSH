@@ -241,7 +241,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Native notification shown per window and the Kitty identifier it shows.
   final _forwardedNotificationsByWindowKey =
-      <String, ({int id, String? identifier})>{};
+      <String, ({int id, String? identifier, bool request})>{};
   final Set<String> _closingWindowKeys = <String>{};
   late bool _expanded;
   bool _isLoading = true;
@@ -261,6 +261,15 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   bool _windowReloadRecoveryRequested = false;
   bool _sessionEndedNotified = false;
   late LocalNotificationService _localNotifications;
+
+  final _keyboardListKey = GlobalKey<KeyboardListNavigationState>();
+  bool _showingNewWindowPicker = false;
+
+  /// Whether a keyboard window switch is on its way to the server, and the
+  /// newest server window the keyboard asked for since. Held next or
+  /// previous window repeats then send only the window they end on.
+  bool _keyboardSwitchInFlight = false;
+  TmuxWindow? _queuedKeyboardWindow;
 
   late final _windowLoader = TmuxWindowLoader(
     fetch: () => _mux.listWindows(
@@ -375,6 +384,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
     if (oldWidget.session.hostId != widget.session.hostId) {
       _watchHostNotificationPrefs();
+    }
+    if (oldWidget.activeNativeAcpSessionKey !=
+        widget.activeNativeAcpSessionKey) {
+      _dropPendingSelectionReplacedByNativeSession();
     }
     final sessionChanged =
         oldWidget.session.connectionId != widget.session.connectionId ||
@@ -665,21 +678,55 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final previousTerminalModeSignature = activeTmuxWindowTerminalModeSignature(
       _windows,
     );
+    // A request slot a closed bar left showing goes once its window's program
+    // no longer waits on the request, or once the window is viewed.
+    for (final window in windows) {
+      if (!window.isActive &&
+          window.programStatus?.state == TerminalProgramState.blocked) {
+        continue;
+      }
+      final id = buildWindowNotificationId(
+        widget.session.hostId,
+        widget.tmuxSessionName,
+        _tmuxAlertWindowKey(window),
+        request: true,
+      );
+      if (windowNotificationSlots.takeKept(id)) {
+        unawaited(_localNotifications.clearWindowNotification(id));
+      }
+    }
+    // New bells wait until this snapshot's forwarded notifications are
+    // posted: a window that also has one shows that, since it says more, and
+    // gets one notification, not two.
+    final newAlerts =
+        <({TmuxWindow window, int notificationId, String? windowId})>[];
     final hasNewAlert = _alertTracker.applyWindows(
       windows,
       hostId: widget.session.hostId,
-      connectionId: widget.session.connectionId,
       tmuxSessionName: widget.tmuxSessionName,
-      onAlert: _sendAlertNotification,
-      onClear: (id) =>
-          unawaited(_localNotifications.clearTerminalNotification(id)),
+      onAlert: (window, _, notificationId, windowId) => newAlerts.add((
+        window: window,
+        notificationId: notificationId,
+        windowId: windowId,
+      )),
+      onClear: _clearBellNotification,
     );
     if (hasNewAlert &&
         mounted &&
         !(MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
       unawaited(_bounceController.forward(from: 0));
     }
-    _syncForwardedNotifications(windows);
+    final notifiedWindowKeys = _syncForwardedNotifications(windows);
+    for (final alert in newAlerts) {
+      final key = _tmuxAlertWindowKey(alert.window);
+      if (notifiedWindowKeys.contains(key)) continue;
+      _sendAlertNotification(
+        alert.window,
+        windows,
+        alert.notificationId,
+        alert.windowId,
+      );
+    }
 
     final nextPendingSelectedWindowIndex =
         resolveTmuxBarPendingSelectedWindowIndex(
@@ -833,6 +880,20 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       .initializedValue();
 
   Future<void> _showNewWindowPicker({BuildContext? anchorContext}) async {
+    if (_showingNewWindowPicker) {
+      return;
+    }
+    _showingNewWindowPicker = true;
+    try {
+      await _showNewWindowPickerUnguarded(anchorContext: anchorContext);
+    } finally {
+      _showingNewWindowPicker = false;
+    }
+  }
+
+  Future<void> _showNewWindowPickerUnguarded({
+    BuildContext? anchorContext,
+  }) async {
     final installedToolsFuture = widget.ref
         .read(tmuxServiceProvider)
         .detectInstalledAgentTools(widget.session);
@@ -893,7 +954,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       windowIndex: windowIndex,
       windowId: stableWindowId,
     );
-    _showIfHostAllows(
+    if (_showIfHostAllows(
       HostNotificationKind.windowAlerts,
       () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
@@ -902,30 +963,39 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         body: content.body,
         payload: payload,
       ),
-    );
+    )) {
+      windowNotificationSlots.claim(notificationId, _alertTracker);
+    }
   }
 
   /// Buzzes and runs [show] only when this host's notification preferences
-  /// allow [kind]. It decides synchronously, so a show stays ahead of a close
-  /// for the same notification. Callers record the alert as seen either way,
-  /// so turning the kind back on does not replay it.
-  void _showIfHostAllows(
+  /// allow [kind], and returns whether it did. It decides synchronously, so a
+  /// show stays ahead of a close for the same notification. Callers record
+  /// the alert as seen either way, so turning the kind back on does not
+  /// replay it.
+  bool _showIfHostAllows(
     HostNotificationKind kind,
     Future<void> Function() show,
   ) {
-    if (!_hostPrefs.allows(kind)) return;
+    if (!_hostPrefs.allows(kind)) return false;
     unawaited(HapticFeedback.mediumImpact());
     unawaited(show());
+    return true;
   }
 
+  /// Forgets this session's notifications as the bar closes or changes
+  /// session, clearing what it showed. One in a window's request slot stays
+  /// (only released): unless the window was viewed, it may be standing in for
+  /// the pending request's push it replaced there.
   void _clearSeenAlertNotifications() {
     _alertTracker.clear(
-      (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
+      _clearBellNotification,
+      onKeep: (id) => windowNotificationSlots.keep(id, _alertTracker),
     );
     _lastSeenForwardedNotificationsByWindowKey.clear();
     _forwardedNotificationParsersByWindowKey.clear();
     for (final key in _forwardedNotificationsByWindowKey.keys.toList()) {
-      _clearForwardedNotification(key);
+      _clearForwardedNotification(key, keepRequest: true);
     }
   }
 
@@ -938,8 +1008,9 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Shows server-forwarded background notifications unseen since the last
   /// window list, and cancels shown ones whose window went active, closed,
-  /// or dropped its pending entries (viewed on the server).
-  void _syncForwardedNotifications(List<TmuxWindow> windows) {
+  /// or dropped its pending entries (viewed on the server). Returns the keys
+  /// of the windows it posted a notification for.
+  Set<String> _syncForwardedNotifications(List<TmuxWindow> windows) {
     final keys = <String>{
       for (final window in windows) _tmuxAlertWindowKey(window),
     };
@@ -982,41 +1053,34 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
     // Recorded above even when notifications are disabled so enabling them
     // later does not replay history.
-    if (!widget.ref.read(terminalNotificationsNotifierProvider)) return;
-    for (final show in shows) {
-      _showForwardedNotification(show.window, windows, show.notification);
+    if (!widget.ref.read(terminalNotificationsNotifierProvider)) {
+      return const <String>{};
     }
+    final notified = <String>{};
+    for (final show in shows) {
+      if (_showForwardedNotification(show.window, windows, show.notification)) {
+        notified.add(_tmuxAlertWindowKey(show.window));
+      }
+    }
+    return notified;
   }
 
-  int _forwardedNotificationId(
-    SshSession session,
-    String tmuxSessionName,
-    String windowKey,
-  ) =>
-      Object.hash(
-        session.hostId,
-        session.connectionId,
-        tmuxSessionName,
-        windowKey,
-        'mux-forwarded-notification',
-      ) &
-      0x7fffffff;
-
-  /// Shows one server-forwarded background notification with its own text.
+  /// Shows one server-forwarded background notification with its own text,
+  /// in the window's notification slot, and returns whether it posted one.
   ///
   /// The raw OSC payload feeds the shared Kitty parser so multipart,
   /// base64, timeout, and close semantics match live foreground
   /// notifications. Taps reuse tmux-alert routing to focus the window;
   /// Kitty activation reporting is not echoed, matching bell alerts.
-  void _showForwardedNotification(
+  bool _showForwardedNotification(
     TmuxWindow window,
     List<TmuxWindow> windows,
     MuxWindowNotification notification,
   ) {
     final separator = notification.payload.indexOf(';');
-    if (separator <= 0) return;
+    if (separator <= 0) return false;
     final windowKey = _tmuxAlertWindowKey(window);
-    final request = _forwardedNotificationParsersByWindowKey
+    final notice = _forwardedNotificationParsersByWindowKey
         .putIfAbsent(windowKey, TerminalNotificationParser.new)
         .handleOsc(
           notification.payload.substring(0, separator),
@@ -1024,15 +1088,15 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               ? const <String>[]
               : notification.payload.substring(separator + 1).split(';'),
         );
-    if (request == null) return;
-    if (request.action == TerminalNotificationAction.close) {
+    if (notice == null) return false;
+    if (notice.action == TerminalNotificationAction.close) {
       // The window shows only its latest notification; closing an older
       // identifier must leave a newer one in place.
       if (_forwardedNotificationsByWindowKey[windowKey]?.identifier ==
-          request.identifier) {
+          notice.identifier) {
         _clearForwardedNotification(windowKey);
       }
-      return;
+      return false;
     }
     final session = widget.session;
     final tmuxSessionName = widget.tmuxSessionName;
@@ -1040,23 +1104,21 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final stableWindowId = windowId != null && isValidTmuxWindowId(windowId)
         ? windowId
         : null;
-    final notificationId = _forwardedNotificationId(
-      session,
+    final request = window.programStatus?.state == TerminalProgramState.blocked;
+    final notificationId = buildWindowNotificationId(
+      session.hostId,
       tmuxSessionName,
       windowKey,
-    );
-    _forwardedNotificationsByWindowKey[windowKey] = (
-      id: notificationId,
-      identifier: request.identifier,
+      request: request,
     );
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: tmuxSessionName,
       window: window,
       hostLabel: widget.hostLabel,
-      title: request.title,
-      body: request.body,
+      title: notice.title,
+      body: notice.body,
     );
-    _showIfHostAllows(
+    final shown = _showIfHostAllows(
       HostNotificationKind.shellNotifications,
       () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
@@ -1070,17 +1132,48 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           windowIndex: window.index,
           windowId: stableWindowId,
         ),
-        urgency: request.urgency,
-        sound: request.sound,
-        timeout: request.timeout,
+        urgency: notice.urgency,
+        sound: notice.sound,
+        timeout: notice.timeout,
       ),
     );
+    // Only a notification that showed owns the slot; closing one that never
+    // showed must not clear what does.
+    if (shown) {
+      // One from before the program blocked (or after) is in the window's
+      // other slot; this newer one replaces it.
+      if (_forwardedNotificationsByWindowKey[windowKey]?.id != notificationId) {
+        _clearForwardedNotification(windowKey);
+      }
+      _forwardedNotificationsByWindowKey[windowKey] = (
+        id: notificationId,
+        identifier: notice.identifier,
+        request: request,
+      );
+      windowNotificationSlots.claim(notificationId, this);
+    }
+    return shown;
   }
 
-  void _clearForwardedNotification(String windowKey) {
+  void _clearForwardedNotification(
+    String windowKey, {
+    bool keepRequest = false,
+  }) {
     final shown = _forwardedNotificationsByWindowKey.remove(windowKey);
-    if (shown != null) {
-      unawaited(_localNotifications.clearTerminalNotification(shown.id));
+    if (shown == null) return;
+    if (keepRequest && shown.request) {
+      windowNotificationSlots.keep(shown.id, this);
+    } else if (windowNotificationSlots.release(shown.id, this)) {
+      // Only while it is still the one in the window's slot.
+      unawaited(_localNotifications.clearWindowNotification(shown.id));
+    }
+  }
+
+  /// Clears a bell this bar posted, while it is still the one in the window's
+  /// slot.
+  void _clearBellNotification(int notificationId) {
+    if (windowNotificationSlots.release(notificationId, _alertTracker)) {
+      unawaited(_localNotifications.clearWindowNotification(notificationId));
     }
   }
 
@@ -1232,6 +1325,195 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     _isSidebarDragActive = false;
   }
 
+  // -- Hardware keyboard shortcuts (#931) --
+
+  /// Switcher rows in display order: server windows, then native sessions
+  /// that have no server window.
+  List<({TmuxWindow? window, AcpSessionState? session})> get _keyboardTargets =>
+      [
+        for (final window in _displayedWindows ?? const <TmuxWindow>[])
+          (window: window, session: null),
+        for (final session in _nativeAcpEntries)
+          (window: null, session: session),
+      ];
+
+  bool _isKeyboardTargetActive(
+    ({TmuxWindow? window, AcpSessionState? session}) target,
+  ) {
+    final window = target.window;
+    final activeNativeKey = widget.activeNativeAcpSessionKey;
+    if (window == null) {
+      return target.session?.key == activeNativeKey;
+    }
+    final pending = _pendingSelectedWindowIndex;
+    if (pending != null) {
+      return window.index == pending;
+    }
+    return window.isNativeAcp
+        ? activeNativeKey?.bridgeId == window.nativeAcpBridgeId
+        : window.isActive && activeNativeKey == null;
+  }
+
+  ({TmuxWindow? window, AcpSessionState? session})? get _activeKeyboardTarget =>
+      _keyboardTargets.where(_isKeyboardTargetActive).firstOrNull;
+
+  /// A native session that now fills the viewport, opened from anywhere (a
+  /// row, the navigator, a notification), replaces a pending switch to a
+  /// server window other than its own. The pending window would otherwise
+  /// still count as active, and ⌘W would close it instead of the chat on
+  /// screen.
+  void _dropPendingSelectionReplacedByNativeSession() {
+    final key = widget.activeNativeAcpSessionKey;
+    final pending = _pendingSelectedWindowIndex;
+    if (key == null || pending == null) {
+      return;
+    }
+    final window = _windows
+        ?.where((candidate) => candidate.index == pending)
+        .firstOrNull;
+    if (window != null &&
+        window.isNativeAcp &&
+        window.nativeAcpBridgeId == key.bridgeId) {
+      return;
+    }
+    _queuedKeyboardWindow = null;
+    _clearPendingSelectedWindow(notify: false);
+  }
+
+  Future<void> _activateKeyboardTarget(
+    ({TmuxWindow? window, AcpSessionState? session}) target,
+  ) async {
+    if (_isKeyboardTargetActive(target)) {
+      return;
+    }
+    final window = target.window;
+    if (window == null) {
+      // A pending server selection would otherwise still count as active,
+      // and ⌘W would close that window instead of the session shown now.
+      _queuedKeyboardWindow = null;
+      _clearPendingSelectedWindow(notify: true);
+      await widget.onAction(TmuxOpenAcpSessionAction(target.session!.key));
+      return;
+    }
+    setState(() => _pendingSelectedWindowIndex = window.index);
+    _startPendingSelectionTimer(window.index);
+    if (_keyboardSwitchInFlight) {
+      // The badge already moved; the server only needs the last window.
+      _queuedKeyboardWindow = window;
+      return;
+    }
+    _keyboardSwitchInFlight = true;
+    try {
+      TmuxWindow? next = window;
+      while (next != null) {
+        _queuedKeyboardWindow = null;
+        await widget.onAction(
+          next.isNativeAcp
+              ? _openNativeWindowAction(next)
+              : TmuxSwitchWindowAction(next.index, windowId: next.id),
+        );
+        if (!mounted) {
+          return;
+        }
+        next = _queuedKeyboardWindow;
+        // A touch on another row since then wins.
+        final pending = _pendingSelectedWindowIndex;
+        if (next != null && pending != null && pending != next.index) {
+          next = null;
+        }
+      }
+    } finally {
+      _keyboardSwitchInFlight = false;
+      _queuedKeyboardWindow = null;
+    }
+  }
+
+  /// Switches [delta] rows from the active window, wrapping at the ends.
+  /// Returns null when there is no window to switch to.
+  Future<void>? selectAdjacentWindowFromKeyboard(int delta) {
+    final targets = _keyboardTargets;
+    final active = targets.indexWhere(_isKeyboardTargetActive);
+    final index = resolveAppShortcutAdjacentWindow(
+      activeIndex: active < 0 ? null : active,
+      delta: delta,
+      count: targets.length,
+    );
+    if (index == null) {
+      return null;
+    }
+    return _activateKeyboardTarget(targets[index]);
+  }
+
+  /// Switches to the window whose badge shows [number]: its tmux or
+  /// MonkeyMux index, or a native session's synthetic number. Returns null
+  /// when no row has that number.
+  Future<void>? selectWindowNumberFromKeyboard(int number) {
+    final targets = _keyboardTargets;
+    final index = resolveAppShortcutWindowNumber(number, [
+      for (final target in targets)
+        target.window?.index ?? _nativeAcpWindowIndex(target.session!),
+    ]);
+    if (index == null) {
+      return null;
+    }
+    return _activateKeyboardTarget(targets[index]);
+  }
+
+  /// Opens the new-window picker, as the list's "New window" row does.
+  Future<void> showNewWindowPickerFromKeyboard() {
+    collapseIfExpanded();
+    return _showNewWindowPicker();
+  }
+
+  /// Closes the active window after the confirm-before-close prompt, when
+  /// that setting is on.
+  Future<void> closeActiveWindowFromKeyboard() async {
+    final target = _activeKeyboardTarget;
+    if (target == null) {
+      return;
+    }
+    final window = target.window;
+    if (window != null) {
+      await _confirmCloseWindow(window);
+      return;
+    }
+    final session = target.session!;
+    await _confirmCloseNativeAcpSession(
+      session.key,
+      acpSessionDisplayTitle(session),
+    );
+  }
+
+  /// Opens the switcher with keyboard focus on the active row, or closes it.
+  void toggleFromKeyboard() {
+    if (collapseIfExpanded()) {
+      return;
+    }
+    _toggleExpanded();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_expanded) {
+        return;
+      }
+      final list = _keyboardListKey.currentState;
+      if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
+        list.focusFirstRow();
+      }
+    });
+  }
+
+  static bool _isActiveRowNode(FocusNode node) =>
+      node.context
+          ?.findAncestorWidgetOfExactType<MuxWindowRow>()
+          ?.presentation
+          .isActive ??
+      false;
+
+  Widget _withKeyboardNavigation(Widget list) => KeyboardListNavigation(
+    key: _keyboardListKey,
+    onEscape: collapseIfExpanded,
+    child: list,
+  );
+
   @override
   Widget build(BuildContext context) {
     _projection = MuxWindowProjection(
@@ -1299,7 +1581,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                   child: ClipRect(
                     child: Offstage(
                       offstage: contentHeight <= 0,
-                      child: _buildWindowList(theme),
+                      child: _withKeyboardNavigation(_buildWindowList(theme)),
                     ),
                   ),
                 ),
@@ -1337,7 +1619,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
                 // An IndexedStack also lays out hidden rows at the rail's
                 // collapsed width, which is too narrow for expanded ListTiles.
                 child: _showsExpandedSidebarContent
-                    ? _buildWindowList(theme)
+                    ? _withKeyboardNavigation(_buildWindowList(theme))
                     : _buildCollapsedSidebarWindowRail(theme),
               ),
             ],

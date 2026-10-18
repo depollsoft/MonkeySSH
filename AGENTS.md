@@ -37,6 +37,33 @@ which runs `functions-test` only. `deploy-functions.yml` deploys them from `main
 through keyless Workload Identity Federation (`scripts/setup_functions_iam.sh`);
 never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 
+## Workflow lockfile
+
+Every workflow is onboarded to `.github/workflows/actions.lock`
+([workflow dependency lockfiles](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles)),
+so `uses:` names a full release tag and the lockfile holds the commit that runs.
+After adding a workflow or adding, removing or retagging a `uses:` reference, run
+`gh actions-lock` (extension `github/gh-actions-lock`) and commit both the lockfile and the
+workflow rewrites. It writes same-repository actions as `uses: $/.github/actions/...`,
+which jactionlint accepts (upstream actionlint 1.7.12 does not).
+The `tooling` job fails when a workflow is missing from the lockfile. Dependabot updates
+lockfile entries for workflows that are already onboarded, but it never onboards new ones.
+Never edit the lockfile by hand.
+
+## Background steps in ci.yml
+
+Setup steps that touch disjoint paths (the payload download, Apple cache restores,
+`setup-gradle`, the apt install, the Windows Node test) run with `background: true`
+and are joined by a named `wait:` before the first step that needs them. Keep
+`flutter-setup` in the foreground: it is the longest setup step, so the wait is
+short, and its `GITHUB_PATH` edit applies immediately. A composite action can be a
+background step but cannot declare one. Give every background step an `id`, never
+an `if:` (the runner does not document what `wait:` does for a skipped step, which
+is also why `build-deploy.yml` stays sequential), and keep each background step and
+its wait at the top level of `steps` so the workflow-structure tests still see
+them. `ci_changes_test.py` enforces the pairing. The `tooling` job lints with
+`jdx/jactionlint`; upstream `rhysd/actionlint` 1.7.12 rejects these keys.
+
 ## iOS provisioning profiles after capability changes
 
 After enabling a new App ID capability in the Apple Developer portal (e.g. Access WiFi Information, Push Notifications, App Groups), the existing provisioning profiles in the match git repo are stale — they don't include the new entitlement, so signing with the new entitlements file in `ios/Runner/Runner.entitlements` will fail.
@@ -72,8 +99,8 @@ wsl --install Ubuntu-26.04 --no-launch   # WSL2 kernel ships with Windows; a cle
 Then, once the distro is available (after a reboot if Windows prompts for one), install Go (the module needs the toolchain in `go.mod`, not the older apt package) and clone into the **Linux** filesystem:
 
 ```bash
-curl -sSLO https://go.dev/dl/go1.26.5.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.26.5.linux-amd64.tar.gz
+curl -sSLO https://go.dev/dl/go1.26.9.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.26.9.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 sudo apt-get install -y build-essential   # cgo, needed for `go test -race`
 

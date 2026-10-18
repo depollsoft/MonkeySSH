@@ -8,11 +8,13 @@ import '../../data/database/database.dart';
 import '../../domain/services/hardware_key_service.dart';
 import '../../domain/services/key_service.dart';
 import '../providers/entity_list_providers.dart';
+import '../widgets/adaptive_button_row.dart';
 import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/hardware_key_widgets.dart';
+import '../widgets/public_key_share_sheet.dart';
 
 /// Screen displaying list of SSH keys.
 class KeysScreen extends ConsumerWidget {
@@ -273,10 +275,19 @@ class _KeyDetailsSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: () => _copyToClipboard(context, sshKey.publicKey),
-            icon: const Icon(Icons.copy),
-            label: const Text('Copy Public Key'),
+          AdaptiveButtonRow(
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => _copyToClipboard(context, sshKey.publicKey),
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy Public Key'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => showPublicKeyShareSheet(context, sshKey),
+                icon: const Icon(Icons.qr_code_2),
+                label: const Text('QR & Share'),
+              ),
+            ],
           ),
           if (sshKey.isHardwareBacked) ...[
             const SizedBox(height: 24),

@@ -68,7 +68,7 @@ func (h *pushTestHarness) deliverQueued() {
 	for {
 		select {
 		case event := <-h.notifier.alerts:
-			h.server.deliverPushAlertEvent(event)
+			h.server.consumePushAlertEvent(event)
 		default:
 			h.notifier.inflight.Wait()
 			return

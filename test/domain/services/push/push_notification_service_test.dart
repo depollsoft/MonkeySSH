@@ -18,26 +18,29 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 
 import '../../../helpers/recording_diagnostics_logger.dart';
 
-const _token = 'fcm-token:APA91bTestTokenThatMustNeverBeLogged';
+const _fid = 'cTestFidThatMustNeverBeLogged';
 const _ticket = 'v1.k1.sealed-ticket-that-must-never-be-logged';
 const _deviceId = 'pX7cQe2LrV0sNw4yJk9aTg';
 
 class _FakeGateway implements PushMessagingGateway {
   bool permission = true;
-  String? token = _token;
+  String? fid = _fid;
   Exception? registerError;
-  Exception? deleteTokenError;
+  Exception? unregisterError;
+  Exception? deleteError;
+  Completer<void>? registrationGate;
   Exception? autoInitError;
+  Exception? autoInitOffError;
   final calls = <String>[];
   final registrations = <Map<String, Object?>>[];
   final appNotificationFlags = <bool>[];
-  final tokenRefresh = StreamController<String>.broadcast();
+  final registered = StreamController<String>.broadcast();
   final messages = StreamController<PushRemoteMessage>.broadcast();
   final opened = StreamController<PushRemoteMessage>.broadcast();
   int ticketGeneration = 0;
 
   Future<void> close() async {
-    await tokenRefresh.close();
+    await registered.close();
     await messages.close();
     await opened.close();
   }
@@ -52,22 +55,32 @@ class _FakeGateway implements PushMessagingGateway {
   Future<void> setAutoInitEnabled({required bool enabled}) async {
     calls.add('autoInit:$enabled');
     if (autoInitError case final Exception error) throw error;
+    if (!enabled) {
+      if (autoInitOffError case final Exception error) throw error;
+    }
   }
 
   @override
-  Future<String?> getToken() async {
-    calls.add('getToken');
-    return token;
+  Future<String?> registerInstallation() async {
+    calls.add('registerInstallation');
+    await registrationGate?.future;
+    return fid;
   }
 
   @override
-  Future<void> deleteToken() async {
-    calls.add('deleteToken');
-    if (deleteTokenError case final Exception error) throw error;
+  Future<void> unregisterInstallation() async {
+    calls.add('unregisterInstallation');
+    if (unregisterError case final Exception error) throw error;
   }
 
   @override
-  Stream<String> get onTokenRefresh => tokenRefresh.stream;
+  Future<void> deleteInstallation() async {
+    calls.add('deleteInstallation');
+    if (deleteError case final Exception error) throw error;
+  }
+
+  @override
+  Stream<String> get onRegistered => registered.stream;
 
   @override
   Stream<PushRemoteMessage> get onMessage => messages.stream;
@@ -80,18 +93,14 @@ class _FakeGateway implements PushMessagingGateway {
 
   @override
   Future<PushRegistration> register({
-    required String token,
+    required String fid,
     required String platform,
     String? deviceId,
     bool appNotifications = false,
   }) async {
     calls.add('register');
     appNotificationFlags.add(appNotifications);
-    registrations.add({
-      'token': token,
-      'platform': platform,
-      'deviceId': deviceId,
-    });
+    registrations.add({'fid': fid, 'platform': platform, 'deviceId': deviceId});
     if (registerError case final Exception error) throw error;
     ticketGeneration++;
     return PushRegistration(
@@ -121,7 +130,7 @@ class _GatedRegisterGateway extends _FakeGateway {
 
   @override
   Future<PushRegistration> register({
-    required String token,
+    required String fid,
     required String platform,
     String? deviceId,
     bool appNotifications = false,
@@ -130,7 +139,7 @@ class _GatedRegisterGateway extends _FakeGateway {
     await gate.future;
     return super
         .register(
-          token: token,
+          fid: fid,
           platform: platform,
           deviceId: deviceId,
           appNotifications: appNotifications,
@@ -374,7 +383,7 @@ class _Harness {
 
   void expectLogsClean() {
     for (final event in logger.events) {
-      expect(event.searchableText, isNot(contains(_token)));
+      expect(event.searchableText, isNot(contains(_fid)));
       expect(event.searchableText, isNot(contains(_ticket)));
       expect(event.searchableText, isNot(contains(_deviceId)));
     }
@@ -416,10 +425,10 @@ void main() {
       expect(h.gateway.calls, [
         'requestPermission',
         'autoInit:true',
-        'getToken',
+        'registerInstallation',
         'register',
       ]);
-      expect(h.gateway.registrations.single['token'], _token);
+      expect(h.gateway.registrations.single['fid'], _fid);
       final stored = await PushDeviceStore(secrets: h.secrets).load();
       expect(stored!.deviceId, _deviceId);
       expect(stored.ticket, _ticket);
@@ -436,7 +445,7 @@ void main() {
         push['hostRef'],
         await derivePushHostRef(hostRefKey: stored.hostRefKey, hostId: 2),
       );
-      expect(push.toString(), isNot(contains(_token)));
+      expect(push.toString(), isNot(contains(_fid)));
       final presence = link.commands.lastWhere(
         (command) => command['type'] == 'push_presence',
       );
@@ -459,35 +468,69 @@ void main() {
     },
   );
 
-  test('declined permission leaves no token, key or registration', () async {
-    h.gateway.permission = false;
-    await h.start();
+  test(
+    'declined permission leaves no FCM registration, key or ticket',
+    () async {
+      h.gateway.permission = false;
+      await h.start();
 
-    expect(await h.controller.enable(), PushSetupFailure.permissionDenied);
+      expect(await h.controller.enable(), PushSetupFailure.permissionDenied);
 
-    expect(h.state.enabled, isFalse);
-    expect(h.state.failure, PushSetupFailure.permissionDenied);
-    expect(h.gateway.calls, isNot(contains('getToken')));
-    expect(h.secrets.values, isEmpty);
-    expect(await h.settings.getBool('push_notifications_enabled'), isFalse);
-  });
+      expect(h.state.enabled, isFalse);
+      expect(h.state.failure, PushSetupFailure.permissionDenied);
+      expect(h.gateway.calls, isNot(contains('registerInstallation')));
+      expect(h.secrets.values, isEmpty);
+      expect(await h.settings.getBool('push_notifications_enabled'), isFalse);
+    },
+  );
 
-  test('a failed registration deletes the token and the new key', () async {
-    h.gateway.registerError = const PushSetupException(
-      PushSetupFailure.appCheckFailed,
-    );
-    await h.start();
+  test(
+    'a failed registration unregisters from FCM and deletes the new key',
+    () async {
+      h.gateway.registerError = const PushSetupException(
+        PushSetupFailure.appCheckFailed,
+      );
+      await h.start();
 
-    expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
+      expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
 
-    expect(h.gateway.calls, containsAllInOrder(['autoInit:false']));
-    expect(h.gateway.calls, contains('deleteToken'));
-    expect(h.secrets.values, isEmpty);
-    expect(h.state.enabled, isFalse);
-  });
+      expect(
+        h.gateway.calls,
+        containsAllInOrder(['autoInit:false', 'unregisterInstallation']),
+      );
+      // No host got a ticket, so the installation other SDKs share is kept.
+      expect(h.gateway.calls, isNot(contains('deleteInstallation')));
+      expect(h.secrets.values, isEmpty);
+      expect(h.state.enabled, isFalse);
+    },
+  );
 
-  test('a missing token is reported and cleaned up', () async {
-    h.gateway.token = null;
+  test(
+    'a failed opt-in that cannot unregister deletes the installation later',
+    () async {
+      h.gateway
+        ..registerError = const PushSetupException(
+          PushSetupFailure.appCheckFailed,
+        )
+        ..unregisterError = Exception('offline');
+      await h.start();
+
+      expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
+      expect(
+        await h.settings.getBool('push_notifications_token_delete_pending'),
+        isTrue,
+      );
+
+      h.gateway.calls.clear();
+      h.now = h.now.add(pushRegistrationRetryInterval);
+      await h.controller.syncNow();
+      await pumpEventQueue();
+      expect(h.gateway.calls, ['autoInit:false', 'deleteInstallation']);
+    },
+  );
+
+  test('a missing FID is reported and cleaned up', () async {
+    h.gateway.fid = null;
     await h.start();
 
     expect(await h.controller.enable(), PushSetupFailure.tokenUnavailable);
@@ -513,6 +556,9 @@ void main() {
     );
     expect(context.hosts[buildBox], 'build-box');
     expect(context.hosts, hasLength(3));
+    // A push for the host lands in the app's own slot for its window.
+    expect(context.hostIds[buildBox], 2);
+    expect(context.hostIds, hasLength(3));
 
     // Unchanged hosts are not written again on every sync.
     final writes = h.context.writes;
@@ -579,7 +625,7 @@ void main() {
     expect((online.commands.last['push']! as Map)['deviceId'], _deviceId);
     expect(
       h.gateway.calls,
-      containsAllInOrder(['autoInit:false', 'deleteToken']),
+      containsAllInOrder(['autoInit:false', 'deleteInstallation']),
     );
     expect(h.secrets.values, isEmpty);
     expect(await h.settings.getBool('push_notifications_enabled'), isFalse);
@@ -657,30 +703,27 @@ void main() {
     expect(older.commands, isEmpty);
   });
 
-  test(
-    'a refreshed FCM token is registered again and resent to hosts',
-    () async {
-      final link = _FakeLink(connectionId: 10, hostId: 1);
-      h.links.add(link);
-      await h.start();
-      await h.controller.enable();
-      await h.controller.syncNow();
-      link.commands.clear();
+  test('a new FID is registered again and resent to hosts', () async {
+    final link = _FakeLink(connectionId: 10, hostId: 1);
+    h.links.add(link);
+    await h.start();
+    await h.controller.enable();
+    await h.controller.syncNow();
+    link.commands.clear();
 
-      h.gateway
-        ..token = 'fcm-token:refreshed'
-        ..tokenRefresh.add('fcm-token:refreshed');
-      await pumpEventQueue();
-      await h.controller.syncNow();
+    h.gateway
+      ..fid = 'fid-refreshed'
+      ..registered.add('fid-refreshed');
+    await pumpEventQueue();
+    await h.controller.syncNow();
 
-      expect(h.gateway.registrations.last['token'], 'fcm-token:refreshed');
-      expect(h.gateway.registrations.last['deviceId'], _deviceId);
-      final register = link.commands.firstWhere(
-        (command) => command['type'] == 'push_register',
-      );
-      expect((register['push']! as Map)['ticket'], '$_ticket-2');
-    },
-  );
+    expect(h.gateway.registrations.last['fid'], 'fid-refreshed');
+    expect(h.gateway.registrations.last['deviceId'], _deviceId);
+    final register = link.commands.firstWhere(
+      (command) => command['type'] == 'push_register',
+    );
+    expect((register['push']! as Map)['ticket'], '$_ticket-2');
+  });
 
   test('a helper without push support is not asked again', () async {
     final link = _FakeLink(connectionId: 10, hostId: 1)..unsupported = true;
@@ -1052,38 +1095,38 @@ void main() {
 
   group('review round 1', () {
     test('an offline opt-out still turns auto-init off and retries the '
-        'token deletion', () async {
+        'FCM unregistration', () async {
       final link = _FakeLink(connectionId: 10, hostId: 1);
       h.links.add(link);
       await h.start();
       await h.controller.enable();
-      h.gateway.deleteTokenError = Exception('offline');
+      h.gateway.deleteError = Exception('offline');
       h.gateway.calls.clear();
 
       await h.controller.disable();
 
-      expect(h.gateway.calls, ['autoInit:false', 'deleteToken']);
+      expect(h.gateway.calls, ['autoInit:false', 'deleteInstallation']);
       expect(
         await h.settings.getBool('push_notifications_token_delete_pending'),
         isTrue,
       );
       expect(h.secrets.values, isEmpty);
 
-      // Later, with the network back, a sync deletes the token.
+      // Later, with the network back, a sync unregisters from FCM.
       h.gateway
-        ..deleteTokenError = null
+        ..deleteError = null
         ..calls.clear();
       h.now = h.now.add(pushRegistrationRetryInterval);
       await h.controller.syncNow();
       await pumpEventQueue();
-      expect(h.gateway.calls, ['autoInit:false', 'deleteToken']);
+      expect(h.gateway.calls, ['autoInit:false', 'deleteInstallation']);
       expect(
         await h.settings.getBool('push_notifications_token_delete_pending'),
         isFalse,
       );
 
       // The pending deletion survives a restart.
-      h.gateway.deleteTokenError = Exception('offline');
+      h.gateway.deleteError = Exception('offline');
       await h.settings.setBool(
         'push_notifications_token_delete_pending',
         value: true,
@@ -1091,29 +1134,43 @@ void main() {
       await h.restart();
       await pumpEventQueue();
       // The first attempt at start fails (still offline); a later one works.
-      expect(h.gateway.calls, contains('deleteToken'));
+      expect(h.gateway.calls, contains('deleteInstallation'));
       h.gateway
-        ..deleteTokenError = null
+        ..deleteError = null
         ..calls.clear();
       h.now = h.now.add(pushRegistrationRetryInterval);
       await h.controller.syncNow();
       await pumpEventQueue();
-      expect(h.gateway.calls, ['autoInit:false', 'deleteToken']);
+      expect(h.gateway.calls, ['autoInit:false', 'deleteInstallation']);
     });
 
     test(
-      'a failed opt-in still deletes the token when auto-init fails',
+      'a failed opt-in still unregisters from FCM when auto-init fails',
       () async {
-        h.gateway.registerError = const PushSetupException(
-          PushSetupFailure.registrationFailed,
-        );
+        h.gateway
+          ..registerError = const PushSetupException(
+            PushSetupFailure.registrationFailed,
+          )
+          ..autoInitOffError = Exception('plugin');
         await h.start();
         expect(
           await h.controller.enable(),
           PushSetupFailure.registrationFailed,
         );
-        expect(h.gateway.calls, contains('deleteToken'));
-        expect(h.gateway.calls, contains('autoInit:false'));
+        expect(
+          h.gateway.calls,
+          containsAllInOrder(['autoInit:false', 'unregisterInstallation']),
+        );
+        expect(
+          await h.settings.getBool(
+            'push_notifications_auto_init_disable_pending',
+          ),
+          isTrue,
+        );
+        expect(
+          await h.settings.getBool('push_notifications_token_delete_pending'),
+          isFalse,
+        );
       },
     );
 
@@ -1128,8 +1185,8 @@ void main() {
         ..commands.clear()
         ..registerGate = Completer<void>();
       h.gateway
-        ..token = 'fcm-token:rotated'
-        ..tokenRefresh.add('fcm-token:rotated');
+        ..fid = 'fid-rotated'
+        ..registered.add('fid-rotated');
       await pumpEventQueue();
       expect(link.types, ['push_register']);
       final sync = h.controller.syncNow();
@@ -1149,7 +1206,7 @@ void main() {
       expect(link.commands, isEmpty);
     });
 
-    test('a token that rotated while the app was closed is registered at '
+    test('an FID that rotated while the app was closed is registered at '
         'start', () async {
       final link = _FakeLink(connectionId: 10, hostId: 1);
       h.links.add(link);
@@ -1157,20 +1214,48 @@ void main() {
       await h.controller.enable();
       await h.controller.syncNow();
 
-      h.gateway.token = 'fcm-token:rotated-while-closed';
+      h.gateway.fid = 'fid-rotated-while-closed';
       await h.restart();
       await pumpEventQueue();
       await h.controller.syncNow();
 
-      expect(
-        h.gateway.registrations.last['token'],
-        'fcm-token:rotated-while-closed',
-      );
+      expect(h.gateway.registrations.last['fid'], 'fid-rotated-while-closed');
       final registers = link.commands.where(
         (command) => command['type'] == 'push_register',
       );
       expect((registers.last['push']! as Map)['ticket'], '$_ticket-2');
     });
+
+    test(
+      'a resume during an opt-out cannot register with FCM after it',
+      () async {
+        await h.start();
+        await h.controller.enable();
+        h.controller.reportVisibility(foreground: false);
+        await pumpEventQueue();
+        final gate = Completer<void>();
+        h.gateway
+          ..registrationGate = gate
+          ..calls.clear();
+
+        h.controller.reportVisibility(foreground: true);
+        await pumpEventQueue();
+        expect(h.gateway.calls, ['registerInstallation']);
+        final disabling = h.controller.disable();
+        await pumpEventQueue();
+        // The opt-out waits for the registration in flight instead of deleting
+        // the installation underneath it.
+        expect(h.gateway.calls, isNot(contains('deleteInstallation')));
+
+        gate.complete();
+        await disabling;
+        expect(h.gateway.calls.last, 'deleteInstallation');
+        expect(
+          h.gateway.calls.where((call) => call == 'registerInstallation'),
+          hasLength(1),
+        );
+      },
+    );
 
     test('a failed re-registration is retried', () async {
       final link = _FakeLink(connectionId: 10, hostId: 1);
@@ -1183,10 +1268,10 @@ void main() {
         ..registerError = const PushSetupException(
           PushSetupFailure.appCheckFailed,
         )
-        ..token = 'fcm-token:rotated'
-        ..tokenRefresh.add('fcm-token:rotated');
+        ..fid = 'fid-rotated'
+        ..registered.add('fid-rotated');
       await pumpEventQueue();
-      expect(h.gateway.registrations.last['token'], 'fcm-token:rotated');
+      expect(h.gateway.registrations.last['fid'], 'fid-rotated');
       final failures = h.gateway.registrations.length;
 
       // Too soon: not retried yet.
@@ -1220,6 +1305,24 @@ void main() {
       expect(h.gateway.registrations, hasLength(registrations + 1));
     });
 
+    test('a renewal keeps the keys when the store lost them', () async {
+      await h.start();
+      await h.controller.enable();
+      String seed() =>
+          (jsonDecode(h.secrets.values.values.single) as Map)['seed']!
+              as String;
+      final original = seed();
+      // Hosts still hold tickets sealed to these keys for this FID.
+      h.secrets.values.clear();
+      final registrations = h.gateway.registrations.length;
+      h.controller.reportVisibility(foreground: false);
+      h.now = h.now.add(pushTicketRefreshAge);
+      h.controller.reportVisibility(foreground: true);
+      await pumpEventQueue();
+      expect(h.gateway.registrations, hasLength(registrations + 1));
+      expect(seed(), original);
+    });
+
     test('a ticket from a build that could not show data-only pushes is '
         'renewed', () async {
       await h.start();
@@ -1247,7 +1350,7 @@ void main() {
     });
 
     test('a host that refused the ticket gets a new one', () async {
-      for (final (result, deletesToken) in [
+      for (final (result, unregisters) in [
         ('stale_ticket', false),
         ('token_unregistered', true),
       ]) {
@@ -1265,8 +1368,8 @@ void main() {
 
         expect(harness.gateway.calls, contains('register'), reason: result);
         expect(
-          harness.gateway.calls.contains('deleteToken'),
-          deletesToken,
+          harness.gateway.calls.contains('unregisterInstallation'),
+          unregisters,
           reason: result,
         );
         final registers = link.commands
@@ -1479,18 +1582,18 @@ void main() {
     });
 
     test(
-      'an opt-in that never got a token does not schedule a deletion',
+      'an opt-in that never got an FID does not schedule an unregistration',
       () async {
         for (final setup in <void Function(_FakeGateway)>[
           (gateway) => gateway.permission = false,
-          (gateway) => gateway.token = null,
+          (gateway) => gateway.fid = null,
         ]) {
           final harness = _Harness();
           addTearDown(harness.dispose);
           setup(harness.gateway);
           await harness.start();
           await harness.controller.enable();
-          expect(harness.gateway.calls, isNot(contains('deleteToken')));
+          expect(harness.gateway.calls, isNot(contains('deleteInstallation')));
           expect(
             await harness.settings.getBool(
               'push_notifications_token_delete_pending',
@@ -1502,12 +1605,8 @@ void main() {
     );
 
     test(
-      'a pending deletion never removes the token a new opt-in registers',
+      'an opt-in finishes a pending installation deletion before registering',
       () async {
-        await h.settings.setBool(
-          'push_notifications_token_delete_pending',
-          value: true,
-        );
         final gate = Completer<void>();
         final gateway = _GatedRegisterGateway(gate);
         final harness = _Harness(gateway: gateway);
@@ -1516,12 +1615,16 @@ void main() {
           'push_notifications_token_delete_pending',
           value: true,
         );
+        // The retry at start fails, so the deletion is still pending.
+        gateway.deleteError = Exception('offline');
         await harness.start();
-        gateway.calls.clear();
+        gateway
+          ..deleteError = null
+          ..calls.clear();
         final enabling = harness.controller.enable();
         await pumpEventQueue();
         expect(gateway.calls, contains('register'));
-        // A heartbeat during the opt-in.
+        // A heartbeat during the opt-in must not delete the new registration.
         harness.now = harness.now.add(pushRegistrationRetryMax);
         await harness.controller.syncNow();
         await pumpEventQueue();
@@ -1529,7 +1632,14 @@ void main() {
         await enabling;
         await harness.controller.syncNow();
         await pumpEventQueue();
-        expect(gateway.calls, isNot(contains('deleteToken')));
+        expect(
+          gateway.calls.where((call) => call == 'deleteInstallation'),
+          hasLength(1),
+        );
+        expect(
+          gateway.calls.indexOf('deleteInstallation'),
+          lessThan(gateway.calls.indexOf('registerInstallation')),
+        );
         expect(
           await harness.settings.getBool(
             'push_notifications_token_delete_pending',
@@ -1541,13 +1651,70 @@ void main() {
     );
 
     test(
-      'a dead token is not re-registered when it cannot be deleted',
+      'an opt-in that cannot delete the old installation fails and keeps the '
+      'deletion pending',
+      () async {
+        await h.settings.setBool(
+          'push_notifications_token_delete_pending',
+          value: true,
+        );
+        h.gateway.deleteError = Exception('offline');
+        await h.start();
+        h.gateway.calls.clear();
+
+        expect(await h.controller.enable(), PushSetupFailure.tokenUnavailable);
+        // The old FID is never registered again under a new device key, and
+        // the failed opt-in keeps trying to delete it rather than unregister.
+        expect(h.gateway.calls, isNot(contains('registerInstallation')));
+        expect(h.gateway.calls, isNot(contains('unregisterInstallation')));
+        expect(h.gateway.registrations, isEmpty);
+        expect(h.state.enabled, isFalse);
+        expect(
+          await h.settings.getBool('push_notifications_token_delete_pending'),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'an opt-in after the keys were lost deletes the old installation first',
+      () async {
+        await h.start();
+        await h.controller.enable();
+        // The keys are gone at the next start, but hosts may still hold
+        // tickets for the FID.
+        h.secrets.values.clear();
+        await h.restart();
+        expect(h.state.enabled, isFalse);
+        h.gateway
+          ..registerError = const PushSetupException(
+            PushSetupFailure.appCheckFailed,
+          )
+          ..calls.clear();
+
+        expect(await h.controller.enable(), PushSetupFailure.appCheckFailed);
+        expect(
+          h.gateway.calls,
+          containsAllInOrder(['deleteInstallation', 'registerInstallation']),
+        );
+
+        // The retired FID needs no second deletion.
+        h.gateway
+          ..registerError = null
+          ..calls.clear();
+        expect(await h.controller.enable(), isNull);
+        expect(h.gateway.calls, isNot(contains('deleteInstallation')));
+      },
+    );
+
+    test(
+      'a dead FID is not sealed again when FCM cannot unregister it',
       () async {
         final link = _FakeLink(connectionId: 10, hostId: 1)
           ..registerResult = 'token_unregistered';
         h.links.add(link);
         await h.start();
-        h.gateway.deleteTokenError = Exception('offline');
+        h.gateway.unregisterError = Exception('offline');
         await h.controller.enable();
         final registrations = h.gateway.registrations.length;
         await h.controller.syncNow();
@@ -1565,11 +1732,11 @@ void main() {
         ..registerError = const PushSetupException(
           PushSetupFailure.appCheckFailed,
         )
-        ..token = 'fcm-token:rotated'
-        ..tokenRefresh.add('fcm-token:rotated');
+        ..fid = 'fid-rotated'
+        ..registered.add('fid-rotated');
       await pumpEventQueue();
       int attempts() => h.gateway.registrations
-          .where((entry) => entry['token'] == 'fcm-token:rotated')
+          .where((entry) => entry['fid'] == 'fid-rotated')
           .length;
       expect(attempts(), 1);
       Future<void> after(Duration delay) async {
@@ -1689,7 +1856,7 @@ void main() {
         expect(h.context.stored, isNull);
         expect(
           h.gateway.calls,
-          containsAllInOrder(['autoInit:false', 'deleteToken']),
+          containsAllInOrder(['autoInit:false', 'deleteInstallation']),
         );
         expect(
           await h.settings.getBool('push_notifications_opt_out_pending'),

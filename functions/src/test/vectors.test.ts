@@ -35,6 +35,7 @@ interface Vectors {
     aad: string;
     plaintext: string;
     ticket: string;
+    fid: { nonceLabel: string; plaintext: string; ticket: string };
     rejected: { reason: string; ticket: string; extraKeyId?: string }[];
   };
 }
@@ -105,7 +106,12 @@ test("ticket vector seals to the pinned ticket", () => {
   };
   const sealed = sealTicket(
     keys,
-    { token: expected.t, deviceId: expected.d, issuedAt: expected.i, platform: expected.p },
+    {
+      target: { token: expected.t },
+      deviceId: expected.d,
+      issuedAt: expected.i,
+      platform: expected.p,
+    },
     fromLabel(ticket.nonceLabel, 12),
   );
   assert.equal(sealed, ticket.ticket);
@@ -115,11 +121,32 @@ test("ticket vector opens to its contents", () => {
   const { ticket } = vectors;
   const keys = parseTicketKeys(vectorKeysSecret());
   assert.deepEqual(openTicket(keys, ticket.ticket), {
-    token: "fcm-vector-token:APA91bExampleTokenForTestVectorsOnly",
+    target: { token: "fcm-vector-token:APA91bExampleTokenForTestVectorsOnly" },
     deviceId: "pX7cQe2LrV0sNw4yJk9aTg",
     issuedAt: 1760000000,
     platform: "ios",
   });
+});
+
+test("FID ticket vector seals to the pinned ticket and opens to its contents", () => {
+  const { fid } = vectors.ticket;
+  const keys = parseTicketKeys(vectorKeysSecret());
+  const expected = JSON.parse(fid.plaintext) as {
+    f: string;
+    d: string;
+    i: number;
+    p: "ios" | "android";
+    a: 1;
+  };
+  const contents = {
+    target: { fid: expected.f },
+    deviceId: expected.d,
+    issuedAt: expected.i,
+    platform: expected.p,
+    appNotifications: expected.a === 1,
+  };
+  assert.equal(sealTicket(keys, contents, fromLabel(fid.nonceLabel, 12)), fid.ticket);
+  assert.deepEqual(openTicket(keys, fid.ticket), contents);
 });
 
 test("rejected ticket vectors do not open", () => {

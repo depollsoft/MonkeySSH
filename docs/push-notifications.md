@@ -24,7 +24,7 @@ file, and intermediate secrets are checked by their SHA-256 digests.
 | Party | Sees |
 | --- | --- |
 | MonkeyMux host | Device id, sealed ticket, device public key, host reference, and whether the app is watching, alive in the background, or neither |
-| Function, Google, Apple | Sealed ticket and the FCM token inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
+| Function, Google, Apple | Sealed ticket and the Firebase Installation ID (or, from older app builds, FCM token) inside it, host IP address, timing, coarse event kind, collapse key, encrypted payload |
 | App (device key holder) | Everything in the payload |
 
 Besides opaque ids, the payload names the session and, when known, the
@@ -49,7 +49,7 @@ vectors include a non-canonical ticket that every implementation must refuse.
 
 - **Device id.** 16 random bytes, base64url (22 characters). The function
   assigns it on the first registration. The app sends it back on later
-  registrations so it stays stable across token refreshes. Accepted pattern:
+  registrations so it stays stable when the FID changes. Accepted pattern:
   `^[A-Za-z0-9_-]{16,64}$`.
 - **Host reference.** Opaque to the host and the function. The app derives it as
   the first 16 characters of `base64url(HMAC-SHA256(hostRefKey, "host:" + hostId))`,
@@ -73,7 +73,7 @@ vectors include a non-canonical ticket that every implementation must refuse.
 ## Ticket
 
 The function issues a ticket so the host can address a device without ever
-seeing its FCM token, and so the function needs no database.
+seeing its FCM registration, and so the function needs no database.
 
 ```
 ticket    = "v1." keyId "." base64url(nonce || ciphertext || tag)
@@ -81,8 +81,13 @@ keyId     = 1*32( ALPHA / DIGIT / "_" / "-" )
 nonce     = 12 random bytes
 aad       = "v1." keyId            ; ASCII
 key       = 32 bytes from the PUSH_TICKET_KEYS secret, selected by keyId
-plaintext = JSON {"t": fcmToken, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
+plaintext = JSON {"f": fid, "d": deviceId, "i": issuedAtSeconds, "p": "ios" | "android", "a": 1}
 ```
+
+`f` is the app's Firebase Installation ID (FID), which FCM sends to directly.
+App builds before FID registration sent an FCM registration token, sealed as
+`t` in place of `f`; the function still opens and sends to those tickets until
+they expire. A ticket with both, or neither, does not open.
 
 AES-256-GCM with a 16-byte tag. Binding the key id into the AAD means a ticket
 cannot be replayed under a different key id. `p` is optional and only used for
@@ -143,6 +148,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
 | `title` | Since 0.1.237, when the window has one worth showing: its title, the first of the agent's session title, the title the program set (without a leading spinner or status glyph), the window name and the working folder's name that is not generic (a shell's name, the agent's own name, a host name, a path, `user@host`, a bare status word such as `working`, or the home folder). Control characters and runs of space become one space; at most 64 characters, cut with `…` |
 | `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
+| `request` | For an `alert` only, since 0.1.243: `true` when the window's program was waiting on the user, so the phone shows it in the window's request slot, where it put its own bell for that window (see "One notification per window") |
 | `ts` | Event time, Unix seconds |
 
 Decoders ignore unknown fields. The app trusts the decrypted `kind` over the
@@ -175,8 +181,15 @@ Firebase Auth user is required.
 Request data:
 
 ```json
-{"token": "<FCM registration token>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
+{"fid": "<Firebase Installation ID>", "platform": "android", "deviceId": "<optional existing id>", "appNotifications": true}
 ```
+
+App builds before FID registration send `"token": "<FCM registration token>"`
+instead of `fid`, and so does the current app on Android devices whose Google
+Play services predate FID registration (before 26.12): FCM reports a legacy
+token through `onRegistered` there, which the app recognizes by its `:`. The function accepts exactly one of the two and logs which
+(`target: "fid" | "token"`), so the remaining token registrations can be
+watched as they age out.
 
 The Android app sends `appNotifications: true`: it posts its own notifications
 from data-only messages, which Android builds before that could not show. Any
@@ -230,7 +243,7 @@ is capped at 3072 characters.
 | 400 | `{"error":"malformed"}` | Bad JSON, kind, collapse key or payload | drop the event |
 | 401 | `{"error":"bad_ticket"}` | Ticket does not open: forged, altered, revoked key, or expired | delete the registration and remember the ticket as refused |
 | 405 | `{"error":"method"}` | Not a POST | drop the event |
-| 410 | `{"error":"unregistered"}` | FCM says the token is gone (`registration-token-not-registered`, `invalid-registration-token`, `installation-id-not-registered`) | delete the registration and remember the ticket as refused |
+| 410 | `{"error":"unregistered"}` | FCM says the FID or token is not registered (`installation-id-not-registered`, `registration-token-not-registered`, `invalid-registration-token`) | delete the registration and remember the ticket as refused |
 | 413 | `{"error":"too_large"}` | Body over 4096 bytes | drop the event |
 | 415 | `{"error":"encoding"}` | A `Content-Encoding` other than `identity` | drop the event |
 | 429 | `{"error":"rate_limited"}` | Over the rate limit; `Retry-After` in seconds | back off that device's budget |
@@ -254,7 +267,7 @@ header before reading the body, would close it.
 
 ### Rate limits and cost
 
-- In-memory token buckets keyed by a hash of the FCM token and split three
+- In-memory token buckets keyed by a hash of the ticket's FID (or token) and split three
   ways: `permission` and `input`; `finished` and `alert`; and `test`. Each is
   burst 5, refilled at 30 per hour. Routine events and test taps can never use
   up the allowance approval requests need. A send that FCM could not take
@@ -267,14 +280,15 @@ header before reading the body, would close it.
 ### FCM message
 
 An Android ticket with `a` (see "Ticket") gets a data-only message. The app
-decrypts `p` and posts the notification itself (see "Notification text" under App); `k` and `c` let it
+decrypts `p` and posts the notification itself (see "Notification text" under
+App), in the slot its own notifications for that window use; `k` and `c` let it
 post the generic text for the kind, tagged with the collapse key, when the
 payload does not open. Every such push ends in a visible notification, so all
 kinds go at high priority to wake the app:
 
 ```json
 {
-  "token": "<from the ticket>",
+  "fid": "<from the ticket>",
   "data": {"v": "1", "p": "<payload>", "k": "finished", "c": "<collapse>"},
   "android": {"priority": "high", "collapseKey": "<collapse>", "ttl": "3600s"}
 }
@@ -286,7 +300,7 @@ notification service extension rewrites on the phone:
 
 ```json
 {
-  "token": "<from the ticket>",
+  "fid": "<from the ticket>",
   "notification": {"title": "Approval needed", "body": "An agent is waiting for your approval."},
   "data": {"v": "1", "p": "<payload>"},
   "android": {
@@ -302,6 +316,8 @@ notification service extension rewrites on the phone:
 }
 ```
 
+A ticket that seals a token (`t`) is sent with `"token"` in place of `"fid"`.
+
 In the alert form, normal-priority kinds use `"priority": "normal"`,
 `apns-priority: 5`, no sound on iOS, and the Android channel
 `agent-updates-v2` (on Android 8 and later the channel, not the message
@@ -311,10 +327,11 @@ notification service extension replace the text with decrypted details (see
 
 ### Logging
 
-Structured outcome codes only: `outcome`, `kind`, `platform`, and for FCM
-failures `fcmCode`, a fixed enum such as `third-party-auth-error` (anything
-outside `[a-z0-9-]` is logged as `unknown`). Tickets, tokens, device ids,
-collapse keys and payloads are never logged.
+Structured outcome codes only: `outcome`, `kind`, `platform`, for a
+registration `target` (`fid` or `token`), and for FCM failures `fcmCode`, a
+fixed enum such as `third-party-auth-error` (anything outside `[a-z0-9-]` is
+logged as `unknown`). Tickets, FIDs, tokens, device ids, collapse keys and
+payloads are never logged.
 
 Cloud Run request logs record the caller's IP address. They are not stored:
 the `_Default` sink has the exclusion `push-request-logs` (applied 2026-10-10,
@@ -377,7 +394,8 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
   "registered"}}`. If the function already refused that exact ticket, it answers
   `push_register_rejected` with result `stale_ticket` (after a 401) or
   `token_unregistered` (after a 410) and stores nothing. The app then fetches a
-  new ticket, and for `token_unregistered` a new FCM token first.
+  new ticket, and for `token_unregistered` a new FCM registration first. The
+  result keeps its name from when tickets sealed FCM tokens.
 - `events` on `push_register` lists the event categories this saved host
   wants pushed. Without it (an app from before the list) the
   registration wants all of them; an empty list wants none; unknown entries
@@ -479,8 +497,9 @@ connection's attach client id, and one of three states.
   raises its bell alerts; `notices` says it raises desktop notifications
   itself. Without `notices` (an app from before the field), `alerts`
   covers desktop notifications too. `bridges` lists the native agent bridges
-  whose events it is receiving. Repeated every 20 seconds. iOS suspends a
-  backgrounded app, so iOS reports idle instead.
+  whose events it is receiving.
+  Repeated every 20 seconds. iOS suspends a backgrounded app, so iOS reports
+  idle instead.
 - **Idle**: neither. Sent once.
 
 A report counts while it is under 45 seconds old and the attach client is still
@@ -489,7 +508,9 @@ window, or when a report in the last 30 seconds saw it viewing W. A device is
 **covered locally** for an alert when its last local report covered every
 category of that alert the device wants (`alerts` for a bell, `notices` for a
 desktop notification), and for a native agent event when that report listed
-the event's bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
+the event's bridge. A terminal program's status (OSC 7501) is never covered
+locally: the host pushes it, and on Android it takes the window's slot from
+the bell the app raised. A local claim lapses 25 seconds after it was made (one heartbeat plus
 slack), so a suspended or killed app stops covering anything within that time.
 A one-off event (`finished`, `alert`) skipped only because of local coverage
 is kept for 2 minutes and sent if the coverage lapses first; a deferred alert
@@ -502,9 +523,33 @@ remembers its categories, so it is sent when the claim for any of them lapses.
 - A desktop `monkeymux attach` never reports presence, so it never suppresses a
   phone.
 
+### One notification per window and event
+
+An agent that needs the user or finishes its turn usually also rings the bell
+or posts a desktop notification. Pushed as well, that alert would arrive as a
+second notification beside the status one. From 0.1.243:
+
+- An alert from a window's output is held for 1.5 seconds before it is raised,
+  since the program's status report often comes in the next chunk, and up to
+  5 seconds more while a status push for that window is still on its way.
+- A device is not sent a window's alert when a status that reached it (the
+  function accepted it) still holds: the window's program waits on a request
+  of the kind the device was last sent for that window, or it finished a turn
+  that reached the device under 15 seconds ago and still reports `done` or
+  `idle`. A status of that kind the device then does not get (refused by its
+  budget, rejected or failed) clears that mark; one coalesced into the
+  earlier push keeps it, since that notification still shows. Anything else
+  is a new event or one the device did not hear of, and the alert is pushed.
+- A closing server raises the window events still queued, lets status pushes
+  still on their way land (up to a second), then raises the held alerts and,
+  beside its teardown, waits up to 2 seconds in all for pushes in flight, so
+  a session that ends right after an alert still delivers it within the time
+  an upgrade gives the outgoing helper.
+
 ### Coalescing, caps and retries
 
-- One event per device, window and kind in any 30-second window.
+- One event per device, window and kind in any 30-second window. A push that
+  never arrived (refused or failed) does not hold the next one back.
 - Three budgets per device, each at most 20 events an hour: urgent
   (`permission`, `input`), routine (`finished`, `alert`) and `test`. They are
   kept by each MonkeyMux server, and every session has its own server, so a
@@ -583,15 +628,26 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   runs on iOS or Android. Elsewhere the settings section is hidden.
 - FCM auto-init is off in `Info.plist` and `AndroidManifest.xml`, and App Check
   token auto-refresh is off in `Info.plist` (`FirebaseAppCheckTokenAutoRefreshEnabled`),
-  because the App Check plugin installs its provider at launch. The app asks for
-  an FCM token only after the user opts in, then turns auto-init on so the
-  token refreshes; opting out turns it off again. A user who never opts in
-  never contacts FCM or App Check. `test/app/push_native_config_test.dart` pins
-  these keys.
-- **Opt in:** request notification permission, activate App Check, get the FCM
-  token, create the X25519 key pair and the host reference key in secure
+  because the App Check plugin installs its provider at launch. The app
+  registers with FCM only after the user opts in, then turns auto-init on so
+  FCM keeps the registration current; opting out turns it off again. A user who
+  never opts in never contacts FCM or App Check. FID registration is on
+  (`FirebaseMessagingInstallationIdEnabled` in `Info.plist`,
+  `firebase_messaging_installation_id_enabled` in `AndroidManifest.xml`), so
+  FCM registers the Firebase Installation ID and the token APIs are disabled.
+  `test/app/push_native_config_test.dart` pins these keys.
+- **Opt in:** request notification permission, activate App Check, register
+  with FCM (`register()` reports the FID through `onRegistered`), create the
+  X25519 key pair and the host reference key in secure
   storage, call `registerPushDevice` with a limited-use App Check token, and
-  store the device id, the ticket and when it was issued.
+  store the device id, the ticket and when it was issued. If push is still on
+  from a run whose keys the app could not read at start (a keychain error, say),
+  hosts may hold tickets for that FID, so the opt-in first deletes the Firebase
+  installation as an opt-out would. If a step fails, the
+  app turns auto-init off, unregisters from FCM and deletes the new keys. It
+  keeps the Firebase installation, which the other Firebase SDKs share, because
+  no host has a ticket for that FID yet. An unregister that fails is retried as
+  a pending deletion (see Opt out).
 - **Attach:** for each saved host with push enabled, send `push_register`
   through one of its live MonkeyMux connections (see Storage for which), once
   per connection, then presence for every connection (see Attendance). The
@@ -601,27 +657,39 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   matches no live connection (the terminal reconnected) or is absent, a host
   with a single MonkeyMux connection is unambiguous and two are treated as not
   viewed.
-- **Renewal:** at every start and resume the app compares the current FCM token
-  with the one its ticket seals (Android does not redeliver a token that
-  rotated while the app was not running) and renews the ticket when it changed,
-  when it is a week old, or when a host reports it refused. Each renewal spends
+- **Renewal:** at every start and resume the app registers with FCM and
+  compares the FID with the one its ticket seals (an FID that rotated while the
+  app was not running is never redelivered) and renews the ticket when it
+  changed, when it is a week old, or when a host reports it refused. A ticket
+  from a build before FID registration sealed a token, which never matches, so
+  it is renewed at the first start after the update. Each renewal spends
   an App Check attestation, so a failed renewal is retried from later syncs
   after 1 minute, then 2, 4 and so on up to an hour. A ticket a host refused is
-  not offered again. After `token_unregistered` the app must delete the dead
-  token before fetching another; until that succeeds it keeps retrying rather
-  than sealing the dead token again.
+  not offered again. After `token_unregistered` the app must unregister from
+  FCM before registering again, because `register()` otherwise reports the
+  cached registration; until that succeeds it keeps retrying rather than
+  sealing the dead FID again.
 - **Opt out:** wait for any sync in flight, send `push_unregister` to reachable
   hosts and remember the rest for their next attach (deleted saved hosts are
-  dropped from that list), turn auto-init off, delete the FCM token, and delete
-  the device key, the host reference key, the device id and the ticket.
+  dropped from that list), turn auto-init off, unregister from FCM and delete
+  the Firebase installation, and delete the device key, the host reference
+  key, the device id and the ticket.
   Payloads from hosts that could not be reached can no longer be decrypted.
   The opt-out is saved before any of this starts, so an app killed half-way
   finishes it at its next start (hosts that held the registration are
-  unregistered on their next attach). Turning auto-init off and deleting the
-  token are retried separately from later syncs and across restarts until
-  each succeeds, serialized with opt-in. A token deletion is only scheduled
-  once FCM has issued a token (iOS cannot delete one before its first
-  check-in), and a new opt-in cancels pending retries.
+  unregistered on their next attach). An FID outlives `unregister()`, so
+  deleting the installation is what makes a later opt-in register a new FID:
+  a host that missed the unregister then gets 410 for the old one instead of
+  delivering pushes the new device key cannot open. Whether the deletion also
+  retires an FCM token issued before the update is not documented; a ticket
+  sealing one expires within 90 days either way. Turning auto-init off and
+  deleting the installation are retried separately from later syncs and across
+  restarts until each succeeds, serialized with opt-in, and so is the check at
+  every start and resume. A deletion is only scheduled once FCM has registered
+  the app (iOS cannot unregister before its first check-in). A new opt-in
+  cancels a pending auto-init change but finishes a pending deletion before it
+  registers, and fails (to be retried) if the deletion fails again, so the old
+  FID never comes back with a new device key.
 - **Per host:** turning a saved host off takes effect for a sync already
   running, waits for it, then sends `push_unregister` with that host's
   reference now, or on its next attach if it is not connected. Deleting a saved
@@ -660,9 +728,9 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   `lib/domain/services/push/push_notification_text.dart` and the iOS
   extension build the same strings.
 - **Notification context:** to show that text while MonkeySSH is not running,
-  the app stores the device's private key, every saved host's label by host
-  reference, and the categories each host may push now
-  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
+  the app stores the device's private key, every saved host's label and local
+  id by host reference, and the categories each host may push now
+  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"ids":{"<hostRef>":3},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
   the host's kinds, without `notice` when Desktop notifications are off in
   Settings, and none when the host's push is off). It is written after opt-in
   and whenever a sync follows a change to the saved hosts or that switch, and
@@ -675,9 +743,12 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   leaves the phone.
 - **Android:** pushes arrive as data only (for a ticket with `a`). A
   FlutterFire background handler, registered at startup, opens the payload and
-  posts the notification on the channel for the kind, with an id derived from
-  the collapse key so a newer push for the same window and kind group replaces
-  the older one. It drops a push the context's `allow` says the host no longer
+  posts the notification on the channel for the kind, in the window's
+  notification slot for its kind (see "One notification per window"), so a
+  newer push for the window replaces the older one and a push sent after a
+  lapsed local claim replaces what the app already raised. Without the host's
+  id in the context (one written by an older build) the id comes from the
+  collapse key. It drops a push the context's `allow` says the host no longer
   raises: a host's registration changes only when the host is reached, so a
   kind turned off meanwhile still arrives (iOS cannot drop a push this way and
   shows it). When the payload does not open (no context yet, or a key from an
@@ -685,6 +756,37 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   the local notification plugin carrying the encrypted payload and opens like
   an FCM tap, also when it starts a new activity on the running engine (the
   bridge reads the activity's launch intent again when the app resumes).
+- **One notification per window:** a MonkeyMux or tmux window has two local
+  notification slots, as its pushes have two collapse groups: one for a
+  request its program waits on and one for everything else
+  (`buildWindowNotificationId`). The app's bells and the desktop
+  notifications the helper forwards share them across every connection to
+  the session, and a bell that arrives with a desktop notification for the
+  same window is not posted on its own. While the window's program waits on
+  the user, its bells and notifications go to the request slot and say what
+  it waits for, so on Android they and the host's push for that request are
+  one notification, whichever came last. Android pushes use the slot for
+  their kind (see Android), and a request push also clears the window's
+  other slot when it holds a bell or notification the app rang before the
+  program reported the request (never a push there, which may be newer). A
+  newer notification for the window in the other slot replaces the older
+  one. A slot has one owner across every connection's window bar: a later
+  bell or notification takes it, so an older notification's close, one that
+  never showed, or a bell's flag clearing does not remove what shows, and the
+  app never removes a push from a slot. Viewing the window clears what the
+  app showed for it; closing or reconnecting the bar clears it too, except in
+  a request slot, where it may stand in for the request's push it replaced;
+  a later bar clears that once the request is resolved or the window is
+  viewed.
+  Known limits: iOS notifications from pushes and from the app have
+  different identifiers, so in the seconds before iOS suspends a
+  backgrounded app, a bell can show beside the push for a window the app was
+  not viewing, and an answered request stays beside the finished turn that
+  followed it (as before 0.1.243); on Android a push that lands between the
+  app checking a slot and clearing it can be cleared; the active window's own desktop
+  notifications (from the live terminal stream) and native chat
+  notifications keep their own ids; and two saved hosts for one machine and
+  session have separate slots.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

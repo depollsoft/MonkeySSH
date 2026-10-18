@@ -76,7 +76,9 @@ class PushDeviceSecrets {
   /// Sealed ticket for hosts, once registered.
   final String? ticket;
 
-  /// Hash of the FCM token the ticket seals, to notice refreshes.
+  /// Hash of the FID the ticket seals, to notice a new one. Builds before FID
+  /// registration stored a hash of their FCM token here, which never matches
+  /// an FID, so their tickets are renewed.
   final String? tokenFingerprint;
 
   /// When the function issued [ticket]; tickets are renewed weekly.

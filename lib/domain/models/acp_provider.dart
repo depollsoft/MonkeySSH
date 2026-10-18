@@ -1,7 +1,12 @@
+import 'dart:convert';
+
 import 'package:collection/collection.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'agent_launch_preset.dart';
+
+part 'acp_custom_provider.dart';
 
 /// ID prefix shared by every built-in ACP provider.
 const acpBuiltinProviderIdPrefix = 'builtin:';
@@ -378,6 +383,9 @@ class AcpBuiltinProvider implements AcpProvider {
   /// Optional check, run before a native launch, that the installed CLI
   /// includes its ACP server.
   final AcpSupportCheck? supportCheck;
+
+  @override
+  bool get isCustom => false;
 
   @override
   bool operator ==(Object other) =>
@@ -763,7 +771,8 @@ final acpBuiltinProviders = List<AcpBuiltinProvider>.unmodifiable([
   acpMuseCodeProvider,
 ]);
 
-/// An ACP provider available to launch.
+/// An ACP provider available to launch: one bundled with the app or one the
+/// user defined.
 sealed class AcpProvider {
   /// Stable identifier for this provider.
   String get id;
@@ -773,4 +782,7 @@ sealed class AcpProvider {
 
   /// The launch command that would be used to start this provider.
   AcpLaunchCommand get launchCommand;
+
+  /// Whether the user defined this provider rather than the app bundling it.
+  bool get isCustom;
 }

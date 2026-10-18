@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Resolve preview artifacts
         id: preview
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const owner = context.repo.owner;
@@ -93,19 +93,19 @@ jobs:
             core.setOutput('apk-artifact-id', apkArtifact ? String(apkArtifact.id) : '');
             core.setOutput('preview-run-id', String(workflowRun.id));
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         if: steps.preview.outputs.should-upload == 'true'
         with:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@v6.1.0
         if: steps.preview.outputs.should-upload == 'true'
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1.324.0
+      - uses: ruby/setup-ruby@v1.329.0
         if: steps.preview.outputs.should-upload == 'true'
         with:
           ruby-version: '3.3'
@@ -113,7 +113,7 @@ jobs:
 
       - name: Download preview AAB artifact
         if: steps.preview.outputs.should-upload == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ steps.preview.outputs.preview-run-id }}
@@ -141,7 +141,7 @@ jobs:
         id: start-internal-app-sharing-deployment
         if: steps.preview.outputs.should-upload == 'true'
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: start
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -186,7 +186,7 @@ jobs:
       - name: Finish Internal App Sharing GitHub deployment
         if: always() && steps.preview.outputs.should-upload == 'true' && steps.start-internal-app-sharing-deployment.outputs['deployment-id'] != ''
         continue-on-error: true
-        uses: ./.github/actions/deployment-status
+        uses: $/.github/actions/deployment-status
         with:
           action: finish
           deployment-id: ${{ steps.start-internal-app-sharing-deployment.outputs['deployment-id'] }}
@@ -198,7 +198,7 @@ jobs:
 
       - name: Add Internal App Sharing link to PR comment
         if: steps.preview.outputs.should-upload == 'true' && steps.upload-internal-app-sharing.outputs.url != ''
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         env:
           INTERNAL_APP_SHARING_URL: ${{ steps.upload-internal-app-sharing.outputs.url }}
           PREVIEW_RUN_ID: ${{ steps.preview.outputs.preview-run-id }}

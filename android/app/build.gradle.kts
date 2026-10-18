@@ -160,4 +160,7 @@ dependencies {
     implementation("eu.simonbinder:sqlite3-native-library:3.52.0")
     // BiometricPrompt for per-use hardware SSH key confirmation.
     implementation("androidx.biometric:biometric:1.1.0")
+    // SOCKS routing for the in-app browser; same version webview_flutter_android uses.
+    implementation("androidx.webkit:webkit:1.15.0")
+    testImplementation("junit:junit:4.13.2")
 }

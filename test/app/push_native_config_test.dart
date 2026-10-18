@@ -10,6 +10,9 @@ void main() {
   bool plistFalse(String plist, String key) =>
       RegExp('<key>${RegExp.escape(key)}</key>\\s*<false/>').hasMatch(plist);
 
+  bool plistTrue(String plist, String key) =>
+      RegExp('<key>${RegExp.escape(key)}</key>\\s*<true/>').hasMatch(plist);
+
   test('iOS keeps FCM and App Check idle until opt-in', () {
     final plist = read('ios/Runner/Info.plist');
     expect(plistFalse(plist, 'FirebaseMessagingAutoInitEnabled'), isTrue);
@@ -17,6 +20,25 @@ void main() {
     // this key App Check would fetch a token at every start.
     expect(
       plistFalse(plist, 'FirebaseAppCheckTokenAutoRefreshEnabled'),
+      isTrue,
+    );
+  });
+
+  // The push function sends to the Firebase Installation ID. Without these
+  // flags FCM rejects register() and the app could not opt in.
+  test('FCM registers the Firebase Installation ID on both platforms', () {
+    expect(
+      plistTrue(
+        read('ios/Runner/Info.plist'),
+        'FirebaseMessagingInstallationIdEnabled',
+      ),
+      isTrue,
+    );
+    expect(
+      RegExp(
+        r'android:name="firebase_messaging_installation_id_enabled"\s*'
+        'android:value="true"',
+      ).hasMatch(read('android/app/src/main/AndroidManifest.xml')),
       isTrue,
     );
   });

@@ -77,6 +77,9 @@ enum AcpSessionErrorKind {
   /// A requested ACP capability is not advertised by the agent.
   unsupportedCapability,
 
+  /// A custom agent's current command has not been approved for launch.
+  commandNotApproved,
+
   /// The SSH transport failed or could not reconnect.
   transport,
 
@@ -445,6 +448,14 @@ final class AcpSessionState {
         AcpConnectionStatus.failed ||
         AcpConnectionStatus.closed => false,
       };
+
+  /// The device holding this session's input while this view is read-only,
+  /// or null when this device can send.
+  MonkeyMuxAcpRemoteWriter? get remoteWriter =>
+      !attached &&
+          transportState?.status == MonkeyMuxAcpTransportStatus.heldElsewhere
+      ? transportState?.writer
+      : null;
 
   /// Whether this tracked session still represents an open persistent mux
   /// window, even when its local ACP transport is parked.
