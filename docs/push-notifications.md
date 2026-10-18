@@ -148,6 +148,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
 | `title` | Since 0.1.237, when the window has one worth showing: its title, the first of the agent's session title, the title the program set (without a leading spinner or status glyph), the window name and the working folder's name that is not generic (a shell's name, the agent's own name, a host name, a path, `user@host`, a bare status word such as `working`, or the home folder). Control characters and runs of space become one space; at most 64 characters, cut with `…` |
 | `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
+| `request` | For an `alert` only, since 0.1.243: `true` when the window's program was waiting on the user, so the phone shows it in the window's request slot, where it put its own bell for that window (see "One notification per window") |
 | `ts` | Event time, Unix seconds |
 
 Decoders ignore unknown fields. The app trusts the decrypted `kind` over the

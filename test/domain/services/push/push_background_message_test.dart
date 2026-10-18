@@ -83,7 +83,10 @@ void main() {
   });
 
   test('a push lands in the window slot the app notifies in', () async {
-    Future<Map<String, String>> data(String kind) async => {
+    Future<Map<String, String>> data(
+      String kind, {
+      bool request = false,
+    }) async => {
       'v': '1',
       'p': await seal({
         'v': 1,
@@ -91,6 +94,7 @@ void main() {
         'window': '@3',
         'sessionId': 'MonkeySSH',
         'kind': kind,
+        if (request) 'request': true,
         'ts': 1760000000,
       }),
       'k': kind,
@@ -124,6 +128,18 @@ void main() {
     )).single;
     expect(finished.id, otherSlot);
     expect(finished.replaces, isEmpty);
+    // A bell from a window waiting on the user goes where the app put its own
+    // bell then, and leaves the other slot alone.
+    final bell = (await show(
+      await data('alert', request: true),
+      context: withId,
+    )).single;
+    expect(bell.id, requestSlot);
+    expect(bell.replaces, isEmpty);
+    expect(
+      (await show(await data('alert'), context: withId)).single.id,
+      otherSlot,
+    );
     // A context written before host ids keeps the collapse slot.
     expect(
       (await show(

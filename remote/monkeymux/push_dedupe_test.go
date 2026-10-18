@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"maps"
 	"net/http"
 	"testing"
 	"time"
@@ -439,5 +441,34 @@ func TestPushDrainLetsAStatusOnItsWayLandBeforeItsAlert(t *testing.T) {
 	h.notifier.inflight.Wait()
 	if got := h.kinds(); got != "permission,permission" {
 		t.Fatalf("requests = %q, want the approval and its retry alone", got)
+	}
+}
+
+// A bell from a window waiting on the user says so in the payload, so the
+// phone puts it in the window's request slot, where it put its own bell for
+// it; a device that turned approvals off gets it there rather than beside it.
+func TestPushAlertFromABlockedWindowIsMarkedForTheRequestSlot(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, pushTestEvents(pushEventBell))
+	h.addPushStatusWindow("@2", "")
+	h.addPushStatusWindow("@3", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	h.raise("@3", pushKindAlert)
+	marked := map[string]bool{}
+	for _, request := range h.endpoint.received() {
+		var payload struct {
+			Window  string `json:"window"`
+			Request bool   `json:"request"`
+		}
+		if err := json.Unmarshal(openPushPayloadForTest(t, device.private, request.Payload), &payload); err != nil {
+			t.Fatal(err)
+		}
+		marked[payload.Window] = payload.Request
+	}
+	if want := map[string]bool{"@2": true, "@3": false}; !maps.Equal(marked, want) {
+		t.Fatalf("request marks = %v, want %v", marked, want)
 	}
 }

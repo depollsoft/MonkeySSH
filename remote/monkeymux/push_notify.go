@@ -1196,7 +1196,8 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, entry.alerts, now)
+		request := kind == pushKindAlert && view.blocked[windowID] != ""
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, entry.alerts, request, now)
 		if err != nil {
 			continue
 		}
@@ -1254,7 +1255,7 @@ func (s *muxServer) raisePushAttention(
 	notifier.mu.Unlock()
 
 	for _, entry := range admitted {
-		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, 0, now)
+		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, 0, false, now)
 		if err != nil {
 			continue
 		}
@@ -1357,7 +1358,7 @@ func (n *pushNotifier) sendTest(deviceID string, session string) string {
 		return refused
 	}
 	// A test opens the host, not a window, so the payload names neither.
-	job, err := buildPushJob(*device, salt, "", "", "", "", pushKindTest, 0, now)
+	job, err := buildPushJob(*device, salt, "", "", "", "", pushKindTest, 0, false, now)
 	if err != nil {
 		return pushResultFailed
 	}
@@ -1500,6 +1501,7 @@ func buildPushJob(
 	title string,
 	kind string,
 	alerts pushAlertCategories,
+	request bool,
 	now time.Time,
 ) (pushJob, error) {
 	publicKey, err := parsePushPublicKey(device.PublicKey)
@@ -1524,8 +1526,11 @@ func buildPushJob(
 		Agent     string   `json:"agent,omitempty"`
 		Title     string   `json:"title,omitempty"`
 		Alert     []string `json:"alert,omitempty"`
-		TS        int64    `json:"ts"`
-	}{1, device.HostRef, windowID, session, kind, agent, title, alertNames, now.Unix()})
+		// Request marks an alert raised while the window's program waits on
+		// the user, which the app shows in the window's request slot.
+		Request bool  `json:"request,omitempty"`
+		TS      int64 `json:"ts"`
+	}{1, device.HostRef, windowID, session, kind, agent, title, alertNames, request, now.Unix()})
 	if err != nil {
 		return pushJob{}, err
 	}
@@ -1876,6 +1881,7 @@ func (s *muxServer) flushPushDeferred() {
 			view.titles[entry.event.windowID],
 			entry.event.kind,
 			entry.event.alerts,
+			entry.event.kind == pushKindAlert && view.blocked[entry.event.windowID] != "",
 			entry.event.at,
 		)
 		if err != nil {

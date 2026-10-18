@@ -111,7 +111,14 @@ Future<void> showPushNotificationFromData(
     if (hostId != null && session != null && window != null) {
       final request =
           kind == PushEventKind.permission || kind == PushEventKind.input;
-      id = buildWindowNotificationId(hostId, session, window, request: request);
+      // An alert from a window waiting on the user goes where the app puts
+      // its own bell then.
+      id = buildWindowNotificationId(
+        hostId,
+        session,
+        window,
+        request: request || event.event.request,
+      );
       // The bell the app raised for this request, before the program
       // reported it, is in the other slot.
       if (request) {

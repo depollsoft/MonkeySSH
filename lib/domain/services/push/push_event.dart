@@ -43,6 +43,7 @@ class PushEvent {
     this.alertCategories,
     this.agent,
     this.windowTitle,
+    this.request = false,
   });
 
   /// The host reference this device registered on the host.
@@ -71,6 +72,10 @@ class PushEvent {
   /// The window's title as the window bar shows it, from 0.1.237 on when it
   /// has one worth showing.
   final String? windowTitle;
+
+  /// For an `alert`, whether the window's program was waiting on the user,
+  /// so it belongs in the window's request slot (from 0.1.243 on).
+  final bool request;
 
   /// Parses decrypted payload bytes, returning null for anything malformed.
   static PushEvent? tryParse(List<int> plaintext) {
@@ -123,6 +128,7 @@ class PushEvent {
           : null,
       agent: agent is String && _agentPattern.hasMatch(agent) ? agent : null,
       windowTitle: title is String ? _cleanWindowTitle(title) : null,
+      request: decoded['request'] == true,
     );
   }
 }
