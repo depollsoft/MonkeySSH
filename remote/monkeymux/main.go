@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.243"
+	monkeyMuxVersion                  = "0.1.244"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -6967,6 +6967,11 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	// PTY output may contain real work even during a resize redraw pause.
 	// Replaying retained bytes bypasses this path and must not count as activity.
 	window.lastActivity = now
+	// Found before the chunk moves the output parser state they depend on.
+	var cursorQueries [][2]int
+	if window.terminalOutputForwarding {
+		cursorQueries = window.redrawHeldCursorQueriesLocked(chunk)
+	}
 	// Modes are observed before metadata so a `CSI ? 9001 h` arriving in the
 	// same chunk as a colour query is already reflected when the query is
 	// answered below (and when the answer is encoded in writeWindow).
@@ -6982,7 +6987,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
 	}
-	window.appendHistoryLocked(chunk)
+	cursorReports := window.appendHistoryReportingCursorLocked(chunk, cursorQueries)
 	window.outputGeneration++
 	outputGeneration = window.outputGeneration
 	if window.observeKittyGraphicsLocked(chunk) {
@@ -7015,7 +7020,10 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			}
 		}
 	}
-	forwarded = window.stripLocallyAnsweredThemeQueriesLocked(chunk, themeHint)
+	forwarded = window.stripLocallyAnsweredThemeQueriesLocked(
+		withoutByteRanges(chunk, cursorQueries),
+		themeHint,
+	)
 	programStatusReplies := window.takeProgramStatusRepliesLocked()
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
@@ -7130,7 +7138,11 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	// Queue the replies before forwarding this chunk, so they precede any
 	// answer the terminal sends for a later query in it. Programs send OSC 7501
 	// feature detection ahead of a device-attributes query and treat that
-	// query's answer arriving first as "unsupported".
+	// query's answer arriving first as "unsupported". The cursor reports go
+	// first: they answer the chunk's leading queries.
+	if len(cursorReports) > 0 {
+		s.queueWindowReply(window, cursorReports)
+	}
 	if len(programStatusReplies) > 0 {
 		s.queueWindowReply(window, programStatusReplies)
 	}
@@ -12896,11 +12908,28 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 }
 
 func (w *muxWindow) appendHistoryLocked(chunk []byte) {
+	w.appendHistoryReportingCursorLocked(chunk, nil)
+}
+
+// appendHistoryReportingCursorLocked records chunk like appendHistoryLocked and
+// returns the screen model's answers to the cursor position queries at
+// cursorQueries (ascending byte ranges of chunk), each as of its own position.
+func (w *muxWindow) appendHistoryReportingCursorLocked(
+	chunk []byte,
+	cursorQueries [][2]int,
+) []byte {
 	if len(chunk) == 0 {
-		return
+		return nil
 	}
 	screen := w.screenLocked()
-	screen.Write(chunk)
+	var reports []byte
+	written := 0
+	for _, query := range cursorQueries {
+		screen.Write(chunk[written:query[1]])
+		written = query[1]
+		reports = append(reports, screen.CursorPositionReport()...)
+	}
+	screen.Write(chunk[written:])
 	if screen.TakeRedrewInPlace() {
 		// Ask for the foreground group now: the cached one lags a program
 		// that just started by up to the metadata refresh interval.
@@ -12922,7 +12951,7 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 			w.history[:0],
 			chunk[len(chunk)-limit:]...,
 		)
-		return
+		return reports
 	}
 	// Grow the underlying buffer to 2x the limit so trims are amortized:
 	// each byte gets shifted at most once before falling out of history.
@@ -12939,6 +12968,7 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 		n := copy(w.history, w.history[start:])
 		w.history = w.history[:n]
 	}
+	return reports
 }
 
 func (w *muxWindow) historyTailWithParserLocked() (
@@ -13899,6 +13929,77 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 		return count
 	}
 	return 1
+}
+
+// cursorPositionQuery asks the terminal where the cursor is (DSR 6). Programs
+// that lay out relative to the cursor, Codex for one, send it after every
+// resize and draw nothing until the answer arrives.
+const cursorPositionQuery = "\x1b[6n"
+
+// redrawHeldCursorQueriesLocked returns the byte ranges of the cursor position
+// queries in chunk that MonkeyMux answers itself from the screen model, because
+// a redraw pause is holding this window's output from the attached terminal.
+//
+// Held, such a query reaches the terminal only when the pause ends, so the
+// program cannot draw the temporary size until then and its frame arrives
+// after the transaction that was meant to hide it, then its real frame one
+// round trip later: the picture visibly shifts and shifts back. The terminal's
+// own answer would be stale besides, since it has not seen the held bytes,
+// while the screen model has absorbed every one of them.
+//
+// Only queries ahead of every other query qualify, and only while the window
+// holds or queues no other query for the terminal, so a local answer does not
+// overtake the terminal's answer to an earlier one. Callers check that the
+// window is active and attached and call this before the chunk is observed.
+func (w *muxWindow) redrawHeldCursorQueriesLocked(chunk []byte) [][2]int {
+	if !w.redrawForwardingPaused ||
+		len(w.redrawForwardingQueryBuffer) > 0 ||
+		len(w.secondaryQueryCarry) > 0 ||
+		len(w.attachOscBuffer) > 0 ||
+		len(w.pendingTerminalQueryCarry) > 0 ||
+		len(w.pendingTerminalQueries) > 0 ||
+		len(w.pendingTerminalQueriesInFlight) > 0 ||
+		!w.terminalOutputIsGroundLocked() {
+		return nil
+	}
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(
+		chunk,
+		w.queryUtf8Remaining,
+	)
+	var queries [][2]int
+	for i := 0; i < len(chunk); {
+		end, isQuery, incomplete, recognized :=
+			terminalQuerySequenceAtWithUtf8Prefix(chunk, i, leadingUtf8Prefix)
+		if incomplete {
+			break
+		}
+		if !recognized {
+			i++
+			continue
+		}
+		if isQuery {
+			if string(chunk[i:end]) != cursorPositionQuery {
+				break
+			}
+			queries = append(queries, [2]int{i, end})
+		}
+		i = end
+	}
+	return queries
+}
+
+// withoutByteRanges returns data with the ascending, disjoint ranges removed.
+func withoutByteRanges(data []byte, ranges [][2]int) []byte {
+	if len(ranges) == 0 {
+		return data
+	}
+	output := make([]byte, 0, len(data))
+	start := 0
+	for _, r := range ranges {
+		output = append(output, data[start:r[0]]...)
+		start = r[1]
+	}
+	return append(output, data[start:]...)
 }
 
 func (w *muxWindow) secondaryAttachOutputLocked(chunk []byte) []byte {

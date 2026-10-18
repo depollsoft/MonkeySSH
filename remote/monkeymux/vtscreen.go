@@ -373,6 +373,21 @@ func (s *terminalScreen) CursorPosition() (int, int) {
 	return g.cursorRow, g.cursorCol
 }
 
+// CursorPositionReport is a terminal's answer to a cursor position query
+// (CSI 6 n): the 1-based row and column of the cursor on the active grid, with
+// the row counted from the top margin in origin mode, as xterm reports it.
+func (s *terminalScreen) CursorPositionReport() []byte {
+	row, col := s.CursorPosition()
+	if s.originMode {
+		row -= s.top
+	}
+	out := append([]byte(nil), "\x1b["...)
+	out = strconv.AppendInt(out, int64(row+1), 10)
+	out = append(out, ';')
+	out = strconv.AppendInt(out, int64(col+1), 10)
+	return append(out, 'R')
+}
+
 // Clone returns an independent deep copy.
 func (s *terminalScreen) Clone() *terminalScreen {
 	if s == nil {
