@@ -124,6 +124,8 @@ func TestPushLegacyBridgeStatusStillRaisesPendingRequests(t *testing.T) {
 		`"pendingRequestCount":1,"inFlightTurnCount":0,"lastActivityUnix":0,` +
 		`"startedAtUnix":5,"nextSequence":3,"permissionRequestCount":1,"pendingAttentionCount":1}`)
 	h.server.pollPushBridges()
+	h.clock.Advance(pushAttentionHold)
+	h.server.pollPushBridges()
 	h.notifier.inflight.Wait()
 	if got := h.kinds(); got != "permission" {
 		t.Fatalf("legacy bridge pending request = %q", got)
