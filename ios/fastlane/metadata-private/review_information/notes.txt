@@ -23,4 +23,6 @@ Native agent windows normally connect through SSH and MonkeyMux to a supported c
 
 Agent Management (Pro) is opened from the terminal menu on a connected host. It runs npm, pipx, Homebrew, or the agent's own update command on the user's server over SSH to install, repair, or update coding agents. The offline demo does not install or update anything.
 
+Push notifications are optional and off by default. Users turn them on in Settings with Notify me when the app is closed. When a coding agent on the user's own MonkeyMux server finishes a turn or needs input, that server sends an event encrypted to the device through a MonkeySSH Firebase Function and APNs. The offline demo has no server, so it sends no push notifications.
+
 The offline demo requires no username or password.
