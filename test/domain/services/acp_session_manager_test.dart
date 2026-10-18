@@ -2863,45 +2863,78 @@ void main() {
         );
       });
 
-      test(
-        'sign-in resumes follow-ups queued behind an authentication failure',
-        () async {
-          final custom = authConnector(authenticated: true);
-          final authManager = buildManagerWith(custom);
-          final started = await authManager.startNewSession(
-            hostId: 1,
-            providerId: AcpBuiltinProviderIds.copilotCli,
-            cwd: '/repo',
-          );
-          final key = (started as AcpSessionLaunchStarted).key;
-          final server = custom.servers[key.bridgeId]!..holdPrompts = true;
-          final first = authManager.prompt(key, const [
-            AcpTextContent('first'),
-          ]);
-          await _pump();
-          final followUp = authManager.prompt(key, const [
-            AcpTextContent('follow-up'),
-          ]);
-          final failure = expectLater(
-            first,
-            throwsA(isA<AcpRemoteException>()),
-          );
-          server.failNextPrompt('Authentication required');
-          await failure;
-          await _pump();
-          expect(server.heldPromptCount, 0);
-          final state = authManager.state.byKeyValue(key.value)!;
-          expect(state.status, AcpConnectionStatus.authenticationRequired);
-          final method = state.authMethods.singleWhere(
-            (method) => method.id == 'agent-login',
-          );
-          expect(await authManager.authenticateSession(key, method), isNull);
-          await _pump();
-          expect(server.heldPromptCount, 1);
-          server.completeNextPrompt();
-          await followUp;
-        },
-      );
+      for (final recoverTransport in [false, true]) {
+        test(
+          'sign-in resumes follow-ups after authentication failure (SSH recovery: $recoverTransport)',
+          () async {
+            final custom = authConnector(authenticated: true);
+            final authManager = buildManagerWith(custom);
+            final started = await authManager.startNewSession(
+              hostId: 1,
+              providerId: AcpBuiltinProviderIds.copilotCli,
+              cwd: '/repo',
+            );
+            final key = (started as AcpSessionLaunchStarted).key;
+            final server = custom.servers[key.bridgeId]!..holdPrompts = true;
+            final first = authManager.prompt(key, const [
+              AcpTextContent('first'),
+            ]);
+            await _pump();
+            final followUp = authManager.prompt(key, const [
+              AcpTextContent('follow-up'),
+            ]);
+            final failure = expectLater(
+              first,
+              throwsA(isA<AcpRemoteException>()),
+            );
+            server.failNextPrompt('Authentication required');
+            await failure;
+            await _pump();
+            expect(server.heldPromptCount, 0);
+            if (recoverTransport) {
+              for (final status in [
+                MonkeyMuxAcpTransportStatus.reconnecting,
+                MonkeyMuxAcpTransportStatus.connected,
+              ]) {
+                custom
+                    .statesFor(key.bridgeId)
+                    .add(
+                      MonkeyMuxAcpTransportState(
+                        status: status,
+                        bridgeId: key.bridgeId,
+                        lastDeliveredSequence: 0,
+                      ),
+                    );
+                await _pump();
+                expect(server.heldPromptCount, 0);
+              }
+            }
+            final state = authManager.state.byKeyValue(key.value)!;
+            expect(state.pendingAuthentication, isTrue);
+            expect(
+              state.timeline.entries.whereType<AcpMessageEntry>(),
+              hasLength(1),
+            );
+            expect(state.status, AcpConnectionStatus.authenticationRequired);
+            final method = state.authMethods.singleWhere(
+              (method) => method.id == 'agent-login',
+            );
+            expect(await authManager.authenticateSession(key, method), isNull);
+            await _pump();
+            expect(server.heldPromptCount, 1);
+            server.completeNextPrompt();
+            await followUp;
+            expect(
+              authManager.state.byKeyValue(key.value)!.pendingAuthentication,
+              isFalse,
+            );
+            expect(
+              server.methods.where((method) => method == 'session/prompt'),
+              hasLength(2),
+            );
+          },
+        );
+      }
 
       test(
         'a detached reconnect carries the chosen terminal login back',

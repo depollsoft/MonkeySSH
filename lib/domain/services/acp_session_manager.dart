@@ -3897,7 +3897,13 @@ class _SessionController {
           break;
         case MonkeyMuxAcpTransportStatus.connected:
           if (s.status == AcpConnectionStatus.reconnecting) {
-            next = next.copyWith(status: AcpConnectionStatus.ready);
+            // Transport recovery does not authenticate the agent. Preserve
+            // the sign-in requirement before retrying any queued input.
+            next = next.copyWith(
+              status: s.pendingAuthentication
+                  ? AcpConnectionStatus.authenticationRequired
+                  : AcpConnectionStatus.ready,
+            );
           }
         case MonkeyMuxAcpTransportStatus.reconnecting:
           if (s.attached) {
