@@ -421,6 +421,27 @@ const _pushChannelIds = {
   pushAgentUpdatesChannelId,
 };
 
+/// Whether [notification] was posted for a push (by its channel, or by its
+/// tap payload on Android before 8, which has no channels) rather than raised
+/// by the app itself.
+bool isPushNotification(ActiveNotification notification) =>
+    _pushChannelIds.contains(notification.channelId) ||
+    decodePushTapPayload(notification.payload) != null;
+
+/// Of [slots], the ones holding a notification the app raised itself, which
+/// a push may clear; a push in one stays (see `PushNotificationPost`).
+List<int> localNotificationSlots(
+  Iterable<ActiveNotification> active,
+  Iterable<int> slots,
+) => [
+  for (final slot in slots)
+    if (active.any(
+      (notification) =>
+          notification.id == slot && !isPushNotification(notification),
+    ))
+      slot,
+];
+
 /// A notification slot for one multiplexer window. A window has two, as its
 /// pushes do (see MonkeyMux's collapse key): one for a request its program
 /// waits on ([request], an approval or a question) and one for everything
@@ -947,11 +968,9 @@ class LocalNotificationService {
           if (defaultTargetPlatform == TargetPlatform.android) {
             final active = await _plugin.getActiveNotifications();
             if (active.any(
-              // Android before 8 has no channels; the tap payload tells too.
               (notification) =>
                   notification.id == notificationId &&
-                  (_pushChannelIds.contains(notification.channelId) ||
-                      decodePushTapPayload(notification.payload) != null),
+                  isPushNotification(notification),
             )) {
               return;
             }

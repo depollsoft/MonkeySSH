@@ -30,6 +30,11 @@ func (h *pushTestHarness) releaseHeld() time.Duration {
 	return next
 }
 
+// releaseHeldNoWait releases the held alerts that are due, from inside a post.
+func (h *pushTestHarness) releaseHeldNoWait() {
+	h.server.releaseHeldPushAlerts()
+}
+
 func TestPushAlertWhileBlockedIsNotPushed(t *testing.T) {
 	h := newPushTestHarness(t)
 	h.registerEvents(t, newPushTestDevice(t, 1), nil)
@@ -184,9 +189,9 @@ func TestPushStatusIsPushedToAnAppCoveringAlerts(t *testing.T) {
 }
 
 // A native agent's finished turn and an alert both kept back for a covering
-// app go out together once its claim lapses; the window gets the finished
-// turn only, since both would land in its one slot in either order.
-func TestPushDeferredFlushSendsAWindowsStatusWithoutItsAlert(t *testing.T) {
+// app both go out once its claim lapses: they share the window's update slot
+// on the device, and the alert is all it hears if the turn's push fails.
+func TestPushDeferredFlushSendsAWindowsStatusAndAlert(t *testing.T) {
 	h := newPushTestHarness(t)
 	phone := newPushTestDevice(t, 1)
 	h.registerEvents(t, phone, nil)
@@ -206,8 +211,8 @@ func TestPushDeferredFlushSendsAWindowsStatusWithoutItsAlert(t *testing.T) {
 	h.clock.now = h.clock.now.Add(pushLocalTTL + time.Second)
 	h.server.flushPushDeferred()
 	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "finished" {
-		t.Fatalf("pushes = %q, want the finished turn alone", got)
+	if got := h.sortedKinds(); got != "alert,finished" {
+		t.Fatalf("pushes = %q, want the finished turn and the alert", got)
 	}
 }
 
@@ -325,5 +330,114 @@ func TestPushApprovalAfterOneThatNeverArrivedIsSent(t *testing.T) {
 	}
 	if got := h.kinds(); got != "permission,permission" {
 		t.Fatalf("requests = %q, want the refused approval and the next one", got)
+	}
+}
+
+// An earlier approval that reached the device does not stand for a later one
+// whose push never arrived (refused, here by a 429): the later one's bell is
+// all the device hears of it, as before.
+func TestPushBellOfAnApprovalThatNeverArrivedIsPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.clock.now = h.clock.now.Add(10 * time.Minute)
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusTooManyRequests}
+	h.endpoint.mu.Unlock()
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission,permission,alert" {
+		t.Fatalf("requests = %q, want both approvals and the refused one's bell", got)
+	}
+}
+
+// So is one its budget refused before posting it.
+func TestPushBellOfAnApprovalItsBudgetRefusedIsPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.clock.now = h.clock.now.Add(10 * time.Minute)
+	h.notifier.mu.Lock()
+	h.notifier.backoffUntil[pushBudgetKey{deviceID: device.id, budget: pushBudgetUrgent}] =
+		h.clock.now.Add(time.Hour)
+	h.notifier.mu.Unlock()
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission,alert" {
+		t.Fatalf("requests = %q, want the first approval and the second one's bell", got)
+	}
+}
+
+// A bell held while its window's approval is still on its way (here waiting
+// to retry) waits for it, and gives way once it lands.
+func TestPushHeldAlertGivesWayToAStatusStillOnItsWay(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.holdAlert("@2", pushAlertBell)
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusInternalServerError}
+	h.endpoint.mu.Unlock()
+	h.notifier.sleep = func(time.Duration) {
+		// The bell's hold passes while the approval waits to retry.
+		h.clock.now = h.clock.now.Add(pushAlertHold)
+		h.releaseHeldNoWait()
+	}
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.clock.now = h.clock.now.Add(time.Second)
+	h.releaseHeld()
+	if got := h.kinds(); got != "permission,permission" {
+		t.Fatalf("requests = %q, want the approval and its retry alone", got)
+	}
+}
+
+// A bell queued just before the server closes goes out before close returns.
+func TestPushQueuedAlertIsSentBeforeTheServerCloses(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.server.notePushAlert("@4", pushAlertBell)
+	h.server.close()
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("pushes when close returned = %q, want the queued alert", got)
+	}
+}
+
+// A closing server lets a status still on its way land before it releases
+// the held alerts, so a bell that would only repeat it is not pushed beside
+// it.
+func TestPushDrainLetsAStatusOnItsWayLandBeforeItsAlert(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.holdAlert("@2", pushAlertBell)
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusInternalServerError}
+	h.endpoint.mu.Unlock()
+	retrying := make(chan struct{})
+	h.notifier.sleep = func(time.Duration) {
+		close(retrying)
+		// The close below starts while the approval waits to retry.
+		time.Sleep(200 * time.Millisecond)
+	}
+	go h.server.handleWindowOutput("@2", []byte(programStatusOsc("state=blocked:app=claude-code:kind=permission")))
+	go func() {
+		for event := range h.notifier.alerts {
+			h.server.consumePushAlertEvent(event)
+		}
+	}()
+	<-retrying
+	h.server.close()
+	h.notifier.inflight.Wait()
+	if got := h.kinds(); got != "permission,permission" {
+		t.Fatalf("requests = %q, want the approval and its retry alone", got)
 	}
 }

@@ -205,6 +205,15 @@ void main() {
       expect(cancelled, [9, 10]);
     });
 
+    test('a push clears only what the app raised in a slot', () {
+      final active = [
+        const ActiveNotification(id: 1, channelId: 'agent-updates-v2'),
+        const ActiveNotification(id: 2, channelId: 'tmux-alerts'),
+        ActiveNotification(id: 3, payload: pushTapPayload('sealed')),
+      ];
+      expect(localNotificationSlots(active, [1, 2, 3, 4]), [2]);
+    });
+
     test('macOS still asks the plugin and passes the sound choice', () async {
       const channel = MethodChannel(
         'dexterous.com/flutter/local_notifications',

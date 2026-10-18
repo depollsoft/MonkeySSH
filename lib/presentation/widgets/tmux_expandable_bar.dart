@@ -241,7 +241,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Native notification shown per window and the Kitty identifier it shows.
   final _forwardedNotificationsByWindowKey =
-      <String, ({int id, String? identifier})>{};
+      <String, ({int id, String? identifier, bool request})>{};
   final Set<String> _closingWindowKeys = <String>{};
   late bool _expanded;
   bool _isLoading = true;
@@ -966,12 +966,19 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     return true;
   }
 
+  /// Forgets this session's notifications as the bar closes or changes
+  /// session, clearing what it showed. One in a window's request slot stays
+  /// (only released): unless the window was viewed, it may be standing in for
+  /// the pending request's push it replaced there.
   void _clearSeenAlertNotifications() {
-    _alertTracker.clear(_clearBellNotification);
+    _alertTracker.clear(
+      _clearBellNotification,
+      onKeep: (id) => windowNotificationSlots.release(id, _alertTracker),
+    );
     _lastSeenForwardedNotificationsByWindowKey.clear();
     _forwardedNotificationParsersByWindowKey.clear();
     for (final key in _forwardedNotificationsByWindowKey.keys.toList()) {
-      _clearForwardedNotification(key);
+      _clearForwardedNotification(key, keepRequest: true);
     }
   }
 
@@ -1056,7 +1063,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final separator = notification.payload.indexOf(';');
     if (separator <= 0) return false;
     final windowKey = _tmuxAlertWindowKey(window);
-    final request = _forwardedNotificationParsersByWindowKey
+    final notice = _forwardedNotificationParsersByWindowKey
         .putIfAbsent(windowKey, TerminalNotificationParser.new)
         .handleOsc(
           notification.payload.substring(0, separator),
@@ -1064,12 +1071,12 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
               ? const <String>[]
               : notification.payload.substring(separator + 1).split(';'),
         );
-    if (request == null) return false;
-    if (request.action == TerminalNotificationAction.close) {
+    if (notice == null) return false;
+    if (notice.action == TerminalNotificationAction.close) {
       // The window shows only its latest notification; closing an older
       // identifier must leave a newer one in place.
       if (_forwardedNotificationsByWindowKey[windowKey]?.identifier ==
-          request.identifier) {
+          notice.identifier) {
         _clearForwardedNotification(windowKey);
       }
       return false;
@@ -1080,18 +1087,19 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final stableWindowId = windowId != null && isValidTmuxWindowId(windowId)
         ? windowId
         : null;
+    final request = window.programStatus?.state == TerminalProgramState.blocked;
     final notificationId = buildWindowNotificationId(
       session.hostId,
       tmuxSessionName,
       windowKey,
-      request: window.programStatus?.state == TerminalProgramState.blocked,
+      request: request,
     );
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: tmuxSessionName,
       window: window,
       hostLabel: widget.hostLabel,
-      title: request.title,
-      body: request.body,
+      title: notice.title,
+      body: notice.body,
     );
     final shown = _showIfHostAllows(
       HostNotificationKind.shellNotifications,
@@ -1107,27 +1115,38 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           windowIndex: window.index,
           windowId: stableWindowId,
         ),
-        urgency: request.urgency,
-        sound: request.sound,
-        timeout: request.timeout,
+        urgency: notice.urgency,
+        sound: notice.sound,
+        timeout: notice.timeout,
       ),
     );
     // Only a notification that showed owns the slot; closing one that never
     // showed must not clear what does.
     if (shown) {
+      // One from before the program blocked (or after) is in the window's
+      // other slot; this newer one replaces it.
+      if (_forwardedNotificationsByWindowKey[windowKey]?.id != notificationId) {
+        _clearForwardedNotification(windowKey);
+      }
       _forwardedNotificationsByWindowKey[windowKey] = (
         id: notificationId,
-        identifier: request.identifier,
+        identifier: notice.identifier,
+        request: request,
       );
       windowNotificationSlots.claim(notificationId, this);
     }
     return shown;
   }
 
-  void _clearForwardedNotification(String windowKey) {
+  void _clearForwardedNotification(
+    String windowKey, {
+    bool keepRequest = false,
+  }) {
     final shown = _forwardedNotificationsByWindowKey.remove(windowKey);
     // Only while it is still the one in the window's slot.
-    if (shown != null && windowNotificationSlots.release(shown.id, this)) {
+    if (shown != null &&
+        windowNotificationSlots.release(shown.id, this) &&
+        !(keepRequest && shown.request)) {
       unawaited(_localNotifications.clearWindowNotification(shown.id));
     }
   }

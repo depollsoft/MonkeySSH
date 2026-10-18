@@ -535,15 +535,15 @@ second notification beside the status one. From 0.1.243:
   function accepted it) still holds: the window's program waits on a request
   of the kind the device was last sent for that window, or it finished a turn
   that reached the device under 15 seconds ago and still reports `done` or
-  `idle`. Anything else is a new event or one the device did not hear of (it
-  turned that status off, or the push was refused or failed), and the alert
-  is pushed.
-- When kept-back events go out together after a local claim lapses, a device
-  gets a window's status without its alert.
-- A closing server raises the window events still queued or held and, beside
-  its teardown, waits up to 2 seconds for pushes in flight, so a session that
-  ends right after an alert still delivers it within the time an upgrade
-  gives the outgoing helper.
+  `idle`. A status of that kind the device then does not get (refused by its
+  budget, rejected or failed) clears that mark; one coalesced into the
+  earlier push keeps it, since that notification still shows. Anything else
+  is a new event or one the device did not hear of, and the alert is pushed.
+- A closing server raises the window events still queued, lets status pushes
+  still on their way land (up to a second), then raises the held alerts and,
+  beside its teardown, waits up to 2 seconds in all for pushes in flight, so
+  a session that ends right after an alert still delivers it within the time
+  an upgrade gives the outgoing helper.
 
 ### Coalescing, caps and retries
 
@@ -766,16 +766,21 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   it waits for, so on Android they and the host's push for that request are
   one notification, whichever came last. Android pushes use the slot for
   their kind (see Android), and a request push also clears the window's
-  other slot, where the app put a bell it rang before the program reported
-  the request. A slot has one owner across every connection's window bar: a
-  later bell or notification takes it, so an older notification's close, one
-  that never showed, or a bell's flag clearing (the window viewed, the bar
-  closed or reconnected) does not remove what shows, and the app never
-  removes a push from a slot. Known limits: iOS notifications from pushes and
-  from the app have different identifiers, so in the seconds before iOS
-  suspends a backgrounded app, a bell can show beside the push for a window
-  the app was not viewing, and an answered request stays beside the finished
-  turn that followed it (as before 0.1.243); the active window's own desktop
+  other slot when it holds a bell or notification the app rang before the
+  program reported the request (never a push there, which may be newer). A
+  newer notification for the window in the other slot replaces the older
+  one. A slot has one owner across every connection's window bar: a later
+  bell or notification takes it, so an older notification's close, one that
+  never showed, or a bell's flag clearing does not remove what shows, and the
+  app never removes a push from a slot. Viewing the window clears what the
+  app showed for it; closing or reconnecting the bar clears it too, except in
+  a request slot, where it may stand in for the request's push it replaced.
+  Known limits: iOS notifications from pushes and from the app have
+  different identifiers, so in the seconds before iOS suspends a
+  backgrounded app, a bell can show beside the push for a window the app was
+  not viewing, and an answered request stays beside the finished turn that
+  followed it (as before 0.1.243); on Android a push that lands between the
+  app checking a slot and clearing it can be cleared; the active window's own desktop
   notifications (from the live terminal stream) and native chat
   notifications keep their own ids; and two saved hosts for one machine and
   session have separate slots.

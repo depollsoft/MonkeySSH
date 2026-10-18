@@ -1228,6 +1228,73 @@ void registerTmuxWindowNavigatorTests() {
           ]);
         });
 
+        // Closing the bar clears what it showed, except in a request slot:
+        // there it may stand in for the approval push it replaced, which the
+        // user has not seen.
+        testWidgets('closing the bar leaves a bell in a request slot', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+            ),
+            ringing('@3', []),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          await tester.pumpWidget(const SizedBox());
+          expect(notifications.cleared, [
+            buildWindowNotificationId(session.hostId, 'main', '@3'),
+          ]);
+        });
+
+        // A notification posted once the window's program blocked goes to the
+        // request slot and replaces the window's earlier one in the other.
+        testWidgets('a newer notification in the other slot replaces one', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['9;Working on it']),
+          ]);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+              pendingNotifications: [
+                MuxWindowNotification(seq: 1, payload: '9;Working on it'),
+                MuxWindowNotification(seq: 2, payload: '9;Needs approval'),
+              ],
+            ),
+          ]);
+          expect(notifications.shown.map((n) => n.id), [
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          ]);
+        });
+
         // A window's slot has one owner: the newest notification in it. An
         // older or unshown one going away must not clear it.
         testWidgets('a bell keeps its slot when an older notification closes', (

@@ -6,6 +6,7 @@ import '../../domain/services/local_notification_service.dart';
 class TmuxAlertTracker {
   final _seenAlertWindowKeys = <String>{};
   final Map<String, int> _alertNotificationIdsByWindowKey = {};
+  final Set<int> _requestNotificationIds = {};
 
   /// Applies a snapshot, clearing old notifications before emitting new alerts.
   bool applyWindows(
@@ -47,6 +48,9 @@ class TmuxAlertTracker {
         request: window.programStatus?.state == TerminalProgramState.blocked,
       );
       _alertNotificationIdsByWindowKey[windowKey] = notificationId;
+      if (window.programStatus?.state == TerminalProgramState.blocked) {
+        _requestNotificationIds.add(notificationId);
+      }
       onAlert(window, windows, notificationId, stableWindowId);
     }
     return hasNewAlert;
@@ -61,14 +65,26 @@ class TmuxAlertTracker {
 
   void _clearAlertNotification(String windowKey, void Function(int) onClear) {
     final notificationId = _alertNotificationIdsByWindowKey.remove(windowKey);
-    if (notificationId != null) onClear(notificationId);
+    if (notificationId == null) return;
+    _requestNotificationIds.remove(notificationId);
+    onClear(notificationId);
   }
 
   /// Forgets the old session and clears all notifications that it emitted.
-  void clear(void Function(int) onClear) {
+  ///
+  /// With [onKeep], a notification in a window's request slot is handed to
+  /// it instead: unless the window was viewed, it may be standing in for the
+  /// pending request's push it replaced there.
+  void clear(void Function(int) onClear, {void Function(int)? onKeep}) {
     _seenAlertWindowKeys.clear();
     for (final key in _alertNotificationIdsByWindowKey.keys.toList()) {
-      _clearAlertNotification(key, onClear);
+      final id = _alertNotificationIdsByWindowKey[key]!;
+      _clearAlertNotification(
+        key,
+        onKeep != null && _requestNotificationIds.contains(id)
+            ? onKeep
+            : onClear,
+      );
     }
   }
 }

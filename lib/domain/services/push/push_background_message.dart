@@ -51,8 +51,10 @@ class PushNotificationPost {
   /// stable per collapse key instead.
   final int id;
 
-  /// Slots cleared before posting: a request push clears the window's other
-  /// slot, whose bell or notice it outranks.
+  /// Slots cleared before posting when they hold a notification the app
+  /// raised: a request push clears the bell or notice the app put in the
+  /// window's other slot before the program reported the request, but never
+  /// a push there (which may be newer).
   final List<int> replaces;
 
   /// What happened; picks the channel.
@@ -169,8 +171,15 @@ Future<void> _postWithPlugin(PushNotificationPost post) async {
         android: AndroidInitializationSettings('ic_notification_monkey'),
       ),
     );
-    for (final id in post.replaces) {
-      await plugin.cancel(id: id);
+    if (post.replaces.isNotEmpty) {
+      try {
+        final active = await plugin.getActiveNotifications();
+        for (final id in localNotificationSlots(active, post.replaces)) {
+          await plugin.cancel(id: id);
+        }
+      } on PlatformException {
+        // Without the list, leave the other slot as it is.
+      }
     }
     final attention = switch (post.kind) {
       PushEventKind.permission ||
