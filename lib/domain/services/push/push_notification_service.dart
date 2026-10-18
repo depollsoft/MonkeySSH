@@ -1423,6 +1423,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         _contextDirty = true;
       }
       final hosts = <String, String>{};
+      final hostIds = <String, int>{};
       final allowed = <String, Set<String>>{};
       for (final MapEntry(key: hostId, value: label) in labels.entries) {
         final hostRef = await derivePushHostRef(
@@ -1430,6 +1431,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           hostId: hostId,
         );
         hosts[hostRef] = label;
+        hostIds[hostRef] = hostId;
         // What the host's registration would ask for now; without a good
         // read of the settings the host is not filtered.
         if (settings?[hostId] case (:final prefs, sessionName: _)) {
@@ -1442,6 +1444,7 @@ class PushNotificationController extends Notifier<PushNotificationState> {
       final encoded = PushNotificationContext(
         seed: secrets.keyPair.seed,
         hosts: hosts,
+        hostIds: hostIds,
         allowed: allowed,
       ).encode();
       if (encoded != _lastContext) {

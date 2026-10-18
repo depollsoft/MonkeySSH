@@ -1030,9 +1030,11 @@ void registerTmuxWindowNavigatorTests() {
               await tester.pumpAndSettle();
               expect(started, isTrue);
               expect(cancelled, isEmpty);
-              final oldId =
-                  Object.hash(session.hostId, session.connectionId, 'main', 1) &
-                  0x7fffffff;
+              final oldId = buildWindowNotificationId(
+                session.hostId,
+                'main',
+                'index:1',
+              );
               switch (retirement) {
                 case 'activation':
                   events.add(
@@ -1067,15 +1069,7 @@ void registerTmuxWindowNavigatorTests() {
               expect(
                 delivered,
                 retirement == 'stable identity'
-                    ? {
-                        Object.hash(
-                              session.hostId,
-                              session.connectionId,
-                              'main',
-                              '@9',
-                            ) &
-                            0x7fffffff,
-                      }
+                    ? {buildWindowNotificationId(session.hostId, 'main', '@9')}
                     : isEmpty,
               );
               if (retirement == 'activation') {
@@ -1125,6 +1119,7 @@ void registerTmuxWindowNavigatorTests() {
           WidgetTester tester, {
           HostNotificationPrefs prefs = const HostNotificationPrefs(),
         }) async {
+          addTearDown(windowNotificationSlots.clear);
           notifications = _RecordingNotifications();
           events = StreamController<TmuxWindowChangeEvent>();
           addTearDown(events.close);
@@ -1164,6 +1159,285 @@ void registerTmuxWindowNavigatorTests() {
           );
           await tester.pumpAndSettle();
         }
+
+        // A window that rang and posted a notification in one snapshot is one
+        // event: it gets one notification, in its slot, with the program's
+        // text rather than the generic bell.
+        TmuxWindow ringing(String id, List<String> payloads) => TmuxWindow(
+          index: int.parse(id.substring(1)),
+          id: id,
+          name: 'agent',
+          isActive: false,
+          flags: '!',
+          pendingNotifications: [
+            for (var i = 0; i < payloads.length; i++)
+              MuxWindowNotification(seq: i + 1, payload: payloads[i]),
+          ],
+        );
+
+        testWidgets('a bell and a notification from one window post once', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            ringing('@2', ['9;Claude needs your permission']),
+          ]);
+          final shown = notifications.shown.single;
+          expect(shown.body, 'Claude needs your permission');
+          expect(
+            shown.id,
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          );
+        });
+
+        // While its program waits on the user, a window's bell goes to the
+        // slot the push for that request uses (one notification on Android)
+        // and says what it waits for; otherwise it stays out of that slot so
+        // it never replaces a request.
+        testWidgets('a bell while the program waits shares the request slot', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+            ),
+            ringing('@3', []),
+          ]);
+          expect(notifications.shown.map((n) => (n.id, n.body)), [
+            (
+              buildWindowNotificationId(
+                session.hostId,
+                'main',
+                '@2',
+                request: true,
+              ),
+              'Window #2 needs approval',
+            ),
+            (
+              buildWindowNotificationId(session.hostId, 'main', '@3'),
+              'Window #3 needs attention',
+            ),
+          ]);
+        });
+
+        // Closing the bar clears what it showed, except in a request slot:
+        // there it may stand in for the approval push it replaced, which the
+        // user has not seen.
+        testWidgets('closing the bar leaves a bell in a request slot', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+            ),
+            ringing('@3', []),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          await tester.pumpWidget(const SizedBox());
+          expect(notifications.cleared, [
+            buildWindowNotificationId(session.hostId, 'main', '@3'),
+          ]);
+
+          // The next bar clears it once the request is resolved.
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
+          ]);
+        });
+
+        // A notification posted once the window's program blocked goes to the
+        // request slot and replaces the window's earlier one in the other.
+        testWidgets('a newer notification in the other slot replaces one', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['9;Working on it']),
+          ]);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+              pendingNotifications: [
+                MuxWindowNotification(seq: 1, payload: '9;Working on it'),
+                MuxWindowNotification(seq: 2, payload: '9;Needs approval'),
+              ],
+            ),
+          ]);
+          expect(notifications.shown.map((n) => n.id), [
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          ]);
+        });
+
+        testWidgets('viewing a still-waiting window clears its kept bell', (
+          tester,
+        ) async {
+          const waiting = TerminalProgramStatus(
+            state: TerminalProgramState.blocked,
+            kind: TerminalProgramBlockedKind.permission,
+          );
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: waiting,
+            ),
+          ]);
+          await tester.pumpWidget(const SizedBox());
+          expect(notifications.cleared, isEmpty);
+
+          // Reopened, the window still waits; once it is the one on screen,
+          // its kept bell goes.
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              programStatus: waiting,
+            ),
+          ]);
+          expect(notifications.cleared, isEmpty);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: true,
+              programStatus: waiting,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
+          ]);
+        });
+
+        // A window's slot has one owner: the newest notification in it. An
+        // older or unshown one going away must not clear it.
+        testWidgets('a bell keeps its slot when an older notification closes', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['99;i=old;Building']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=old;Building']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=old;Building', '99;i=old:p=close;']),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          expect(notifications.cleared, isEmpty);
+        });
+
+        testWidgets('a notification that never showed cannot clear a bell', (
+          tester,
+        ) async {
+          await pumpBar(
+            tester,
+            prefs: const HostNotificationPrefs(shellNotifications: false),
+          );
+          await show(tester, [ringing('@2', [])]);
+          await show(tester, [
+            ringing('@2', ['99;i=off;Not shown']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=off;Not shown', '99;i=off:p=close;']),
+          ]);
+          expect(notifications.shown, hasLength(1));
+          expect(notifications.cleared, isEmpty);
+        });
+
+        testWidgets('a notification keeps its slot when the bell clears', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [ringing('@2', [])]);
+          await show(tester, [
+            ringing('@2', ['9;Build finished']),
+          ]);
+          // The bell's flag clears; the notification after it stays.
+          await show(tester, [
+            agent('@2', ['9;Build finished']),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          expect(notifications.cleared, isEmpty);
+        });
+
+        testWidgets('the bell still notifies when notifications are off', (
+          tester,
+        ) async {
+          await pumpBar(
+            tester,
+            prefs: const HostNotificationPrefs(shellNotifications: false),
+          );
+          await show(tester, [
+            ringing('@2', ['9;Claude needs your permission']),
+          ]);
+          final shown = notifications.shown.single;
+          expect(shown.body, isNot('Claude needs your permission'));
+          expect(
+            shown.id,
+            buildWindowNotificationId(session.hostId, 'main', '@2'),
+          );
+        });
 
         testWidgets('a host with shell notifications off forwards none', (
           tester,
@@ -2609,5 +2883,9 @@ class _RecordingNotifications extends LocalNotificationService {
 
   @override
   Future<void> clearTerminalNotification(int notificationId) async =>
+      cleared.add(notificationId);
+
+  @override
+  Future<void> clearWindowNotification(int notificationId) async =>
       cleared.add(notificationId);
 }

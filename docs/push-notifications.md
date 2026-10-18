@@ -148,6 +148,7 @@ AES-256-GCM with empty AAD and a 16-byte tag. The plaintext is UTF-8 JSON:
 | `agent` | Since 0.1.236, when known: the agent the window runs, as the short command name MonkeyMux detects (`claude`, `codex`, `copilot`, `opencode`, `antigravity`, `cursor-agent`, `pi`, `hermes`, `openclaw`, `grok`, `muse`). Only lowercase letters, digits and `-`, at most 32 bytes. The phone names the agent in the notification it shows |
 | `title` | Since 0.1.237, when the window has one worth showing: its title, the first of the agent's session title, the title the program set (without a leading spinner or status glyph), the window name and the working folder's name that is not generic (a shell's name, the agent's own name, a host name, a path, `user@host`, a bare status word such as `working`, or the home folder). Control characters and runs of space become one space; at most 64 characters, cut with `…` |
 | `alert` | For an `alert` only, since 0.1.233: `["bell"]`, `["notice"]` or both, the categories this registration wanted. The app honours each of the host's switches with it (for example in the foreground snackbar); an alert without it needs both on |
+| `request` | For an `alert` only, since 0.1.243: `true` when the window's program was waiting on the user, so the phone shows it in the window's request slot, where it put its own bell for that window (see "One notification per window") |
 | `ts` | Event time, Unix seconds |
 
 Decoders ignore unknown fields. The app trusts the decrypted `kind` over the
@@ -279,7 +280,8 @@ header before reading the body, would close it.
 ### FCM message
 
 An Android ticket with `a` (see "Ticket") gets a data-only message. The app
-decrypts `p` and posts the notification itself (see "Notification text" under App); `k` and `c` let it
+decrypts `p` and posts the notification itself (see "Notification text" under
+App), in the slot its own notifications for that window use; `k` and `c` let it
 post the generic text for the kind, tagged with the collapse key, when the
 payload does not open. Every such push ends in a visible notification, so all
 kinds go at high priority to wake the app:
@@ -495,8 +497,9 @@ connection's attach client id, and one of three states.
   raises its bell alerts; `notices` says it raises desktop notifications
   itself. Without `notices` (an app from before the field), `alerts`
   covers desktop notifications too. `bridges` lists the native agent bridges
-  whose events it is receiving. Repeated every 20 seconds. iOS suspends a
-  backgrounded app, so iOS reports idle instead.
+  whose events it is receiving.
+  Repeated every 20 seconds. iOS suspends a backgrounded app, so iOS reports
+  idle instead.
 - **Idle**: neither. Sent once.
 
 A report counts while it is under 45 seconds old and the attach client is still
@@ -505,7 +508,9 @@ window, or when a report in the last 30 seconds saw it viewing W. A device is
 **covered locally** for an alert when its last local report covered every
 category of that alert the device wants (`alerts` for a bell, `notices` for a
 desktop notification), and for a native agent event when that report listed
-the event's bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
+the event's bridge. A terminal program's status (OSC 7501) is never covered
+locally: the host pushes it, and on Android it takes the window's slot from
+the bell the app raised. A local claim lapses 25 seconds after it was made (one heartbeat plus
 slack), so a suspended or killed app stops covering anything within that time.
 A one-off event (`finished`, `alert`) skipped only because of local coverage
 is kept for 2 minutes and sent if the coverage lapses first; a deferred alert
@@ -518,9 +523,33 @@ remembers its categories, so it is sent when the claim for any of them lapses.
 - A desktop `monkeymux attach` never reports presence, so it never suppresses a
   phone.
 
+### One notification per window and event
+
+An agent that needs the user or finishes its turn usually also rings the bell
+or posts a desktop notification. Pushed as well, that alert would arrive as a
+second notification beside the status one. From 0.1.243:
+
+- An alert from a window's output is held for 1.5 seconds before it is raised,
+  since the program's status report often comes in the next chunk, and up to
+  5 seconds more while a status push for that window is still on its way.
+- A device is not sent a window's alert when a status that reached it (the
+  function accepted it) still holds: the window's program waits on a request
+  of the kind the device was last sent for that window, or it finished a turn
+  that reached the device under 15 seconds ago and still reports `done` or
+  `idle`. A status of that kind the device then does not get (refused by its
+  budget, rejected or failed) clears that mark; one coalesced into the
+  earlier push keeps it, since that notification still shows. Anything else
+  is a new event or one the device did not hear of, and the alert is pushed.
+- A closing server raises the window events still queued, lets status pushes
+  still on their way land (up to a second), then raises the held alerts and,
+  beside its teardown, waits up to 2 seconds in all for pushes in flight, so
+  a session that ends right after an alert still delivers it within the time
+  an upgrade gives the outgoing helper.
+
 ### Coalescing, caps and retries
 
-- One event per device, window and kind in any 30-second window.
+- One event per device, window and kind in any 30-second window. A push that
+  never arrived (refused or failed) does not hold the next one back.
 - Three budgets per device, each at most 20 events an hour: urgent
   (`permission`, `input`), routine (`finished`, `alert`) and `test`. They are
   kept by each MonkeyMux server, and every session has its own server, so a
@@ -699,9 +728,9 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   `lib/domain/services/push/push_notification_text.dart` and the iOS
   extension build the same strings.
 - **Notification context:** to show that text while MonkeySSH is not running,
-  the app stores the device's private key, every saved host's label by host
-  reference, and the categories each host may push now
-  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
+  the app stores the device's private key, every saved host's label and local
+  id by host reference, and the categories each host may push now
+  (`{"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"ids":{"<hostRef>":3},"allow":{"<hostRef>":["attention","finished","bell","notice"]}}`:
   the host's kinds, without `notice` when Desktop notifications are off in
   Settings, and none when the host's push is off). It is written after opt-in
   and whenever a sync follows a change to the saved hosts or that switch, and
@@ -714,9 +743,12 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   leaves the phone.
 - **Android:** pushes arrive as data only (for a ticket with `a`). A
   FlutterFire background handler, registered at startup, opens the payload and
-  posts the notification on the channel for the kind, with an id derived from
-  the collapse key so a newer push for the same window and kind group replaces
-  the older one. It drops a push the context's `allow` says the host no longer
+  posts the notification on the channel for the kind, in the window's
+  notification slot for its kind (see "One notification per window"), so a
+  newer push for the window replaces the older one and a push sent after a
+  lapsed local claim replaces what the app already raised. Without the host's
+  id in the context (one written by an older build) the id comes from the
+  collapse key. It drops a push the context's `allow` says the host no longer
   raises: a host's registration changes only when the host is reached, so a
   kind turned off meanwhile still arrives (iOS cannot drop a push this way and
   shows it). When the payload does not open (no context yet, or a key from an
@@ -724,6 +756,37 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   the local notification plugin carrying the encrypted payload and opens like
   an FCM tap, also when it starts a new activity on the running engine (the
   bridge reads the activity's launch intent again when the app resumes).
+- **One notification per window:** a MonkeyMux or tmux window has two local
+  notification slots, as its pushes have two collapse groups: one for a
+  request its program waits on and one for everything else
+  (`buildWindowNotificationId`). The app's bells and the desktop
+  notifications the helper forwards share them across every connection to
+  the session, and a bell that arrives with a desktop notification for the
+  same window is not posted on its own. While the window's program waits on
+  the user, its bells and notifications go to the request slot and say what
+  it waits for, so on Android they and the host's push for that request are
+  one notification, whichever came last. Android pushes use the slot for
+  their kind (see Android), and a request push also clears the window's
+  other slot when it holds a bell or notification the app rang before the
+  program reported the request (never a push there, which may be newer). A
+  newer notification for the window in the other slot replaces the older
+  one. A slot has one owner across every connection's window bar: a later
+  bell or notification takes it, so an older notification's close, one that
+  never showed, or a bell's flag clearing does not remove what shows, and the
+  app never removes a push from a slot. Viewing the window clears what the
+  app showed for it; closing or reconnecting the bar clears it too, except in
+  a request slot, where it may stand in for the request's push it replaced;
+  a later bar clears that once the request is resolved or the window is
+  viewed.
+  Known limits: iOS notifications from pushes and from the app have
+  different identifiers, so in the seconds before iOS suspends a
+  backgrounded app, a bell can show beside the push for a window the app was
+  not viewing, and an answered request stays beside the finished turn that
+  followed it (as before 0.1.243); on Android a push that lands between the
+  app checking a slot and clearing it can be cleared; the active window's own desktop
+  notifications (from the live terminal stream) and native chat
+  notifications keep their own ids; and two saved hosts for one machine and
+  session have separate slots.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

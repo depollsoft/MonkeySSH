@@ -15,6 +15,7 @@ import '../../../data/database/database.dart';
 import '../../../domain/models/agent_launch_preset.dart';
 import '../../../domain/models/command_names.dart';
 import '../../../domain/models/remote_multiplexer.dart';
+import '../../../domain/models/terminal_program_status.dart';
 import '../../../domain/models/tmux_state.dart';
 import '../../../domain/services/local_notification_service.dart';
 import '../../../domain/services/remote_file_service.dart';
@@ -118,11 +119,17 @@ resolveTmuxAlertNotificationContent({
     windowTitle,
     window.secondaryTitle,
   ], title: resolvedTitle);
+  // A bell while the program waits on the user says what for, as the push
+  // for that request (whose notification slot it shares) does.
+  final status = window.programStatus;
+  final need = status?.state == TerminalProgramState.blocked
+      ? status!.semanticsLabel
+      : 'needs attention';
   final resolvedBody = forwardedBody.isNotEmpty
       ? forwardedBody
       : windowTitle.isNotEmpty
-      ? 'Window #${window.index} needs attention'
-      : 'Needs attention';
+      ? 'Window #${window.index} $need'
+      : '${need[0].toUpperCase()}${need.substring(1)}';
   return (title: resolvedTitle, subtitle: subtitle, body: resolvedBody);
 }
 

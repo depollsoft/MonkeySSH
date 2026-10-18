@@ -9,6 +9,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/tmux_state.dart';
 import 'app_permission_service.dart';
 import 'diagnostics_log_service.dart';
+import 'push/push_notification_service.dart'
+    show pushAgentAttentionChannelId, pushAgentUpdatesChannelId;
 import 'push/push_tap_payload.dart';
 import 'terminal_notification.dart';
 
@@ -412,6 +414,100 @@ class TerminalNotificationPayload {
 /// same local notification without exposing that user-controlled string.
 int buildTerminalNotificationId(int connectionId, {String? identifier}) =>
     Object.hash('terminal-notification', connectionId, identifier) & 0x3fffffff;
+
+/// The channels pushes are posted on (see `showPushNotificationFromData`).
+const _pushChannelIds = {
+  pushAgentAttentionChannelId,
+  pushAgentUpdatesChannelId,
+};
+
+/// Whether [notification] was posted for a push (by its channel, or by its
+/// tap payload on Android before 8, which has no channels) rather than raised
+/// by the app itself.
+bool isPushNotification(ActiveNotification notification) =>
+    _pushChannelIds.contains(notification.channelId) ||
+    decodePushTapPayload(notification.payload) != null;
+
+/// Of [slots], the ones holding a notification the app raised itself, which
+/// a push may clear; a push in one stays (see `PushNotificationPost`).
+List<int> localNotificationSlots(
+  Iterable<ActiveNotification> active,
+  Iterable<int> slots,
+) => [
+  for (final slot in slots)
+    if (active.any(
+      (notification) =>
+          notification.id == slot && !isPushNotification(notification),
+    ))
+      slot,
+];
+
+/// A notification slot for one multiplexer window. A window has two, as its
+/// pushes do (see MonkeyMux's collapse key): one for a request its program
+/// waits on ([request], an approval or a question) and one for everything
+/// else, so a routine event never replaces a request. Its bell alerts, the
+/// program notifications its server forwards and (on Android) its pushes
+/// share them, so a window shows one notification per slot however many
+/// events or connections raise them; a bell while the program waits goes to
+/// the request slot. [windowKey] is the window's stable id (such as `@3`),
+/// else `index:<n>`. Stable across runs and isolates (FNV-1a), so a newer
+/// event replaces one an earlier run posted; namespaced away from agent chat
+/// ids.
+int buildWindowNotificationId(
+  int hostId,
+  String tmuxSessionName,
+  String windowKey, {
+  bool request = false,
+}) {
+  final value =
+      'window|$hostId|$tmuxSessionName|$windowKey${request ? '|request' : ''}';
+  var hash = 0x811c9dc5;
+  for (final unit in utf8.encode(value)) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return 0x20000000 | (hash & 0x1fffffff);
+}
+
+/// Who posted the notification showing in each window slot (see
+/// [buildWindowNotificationId]), so only that poster clears it. A window's
+/// slot is shared by its bells and program notifications on every connection
+/// to the session, and a poster whose notification was replaced must not
+/// clear the one that replaced it.
+class WindowNotificationSlots {
+  final _owners = <int, Object>{};
+  final _kept = <int>{};
+
+  /// Records [owner] as the poster of the notification in slot [id].
+  void claim(int id, Object owner) => _owners[id] = owner;
+
+  /// Forgets slot [id] if [owner] still owns it, and returns whether it did.
+  bool release(int id, Object owner) {
+    if (!identical(_owners[id], owner)) return false;
+    _owners.remove(id);
+    return true;
+  }
+
+  /// Releases slot [id] from [owner] but remembers it: a window bar closing
+  /// leaves a notification in a request slot (it may stand in for the
+  /// request's push), for a later bar to clear once the request is resolved
+  /// (see [takeKept]).
+  void keep(int id, Object owner) {
+    if (release(id, owner)) _kept.add(id);
+  }
+
+  /// Forgets kept slot [id] and returns whether it was kept.
+  bool takeKept(int id) => _kept.remove(id);
+
+  /// Forgets every slot.
+  @visibleForTesting
+  void clear() {
+    _owners.clear();
+    _kept.clear();
+  }
+}
+
+/// The app-wide owners of window notification slots.
+final windowNotificationSlots = WindowNotificationSlots();
 
 /// Builds the terminal route location for a terminal notification tap.
 ///
@@ -875,6 +971,33 @@ class LocalNotificationService {
   /// Clears a terminal desktop notification by its local identifier.
   Future<void> clearTerminalNotification(int notificationId) =>
       _clearNotification(notificationId);
+
+  /// Clears what the app showed in a window's notification slot (see
+  /// [buildWindowNotificationId]). On Android a push for the window lands in
+  /// the same slot, and the app leaves one there: what its terminal shows
+  /// says nothing about whether the user has seen the push.
+  Future<void> clearWindowNotification(int notificationId) =>
+      _enqueueNotification(notificationId, () async {
+        if (!await initialize()) return;
+        try {
+          if (defaultTargetPlatform == TargetPlatform.android) {
+            final active = await _plugin.getActiveNotifications();
+            if (active.any(
+              (notification) =>
+                  notification.id == notificationId &&
+                  isPushNotification(notification),
+            )) {
+              return;
+            }
+          }
+          await _plugin.cancel(id: notificationId);
+        } on MissingPluginException {
+          // Widget and unit tests don't register platform notification plugins.
+        } on PlatformException {
+          // Without the list a push may be in the slot; a stale bell is the
+          // smaller harm than a removed approval.
+        }
+      });
 
   final _notificationOperations = <int, Future<void>>{};
 

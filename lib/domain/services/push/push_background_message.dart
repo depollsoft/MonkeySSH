@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../local_notification_service.dart';
 import 'push_crypto.dart';
 import 'push_event.dart';
 import 'push_notification_context.dart';
@@ -40,11 +41,21 @@ class PushNotificationPost {
     required this.body,
     required this.tapPayload,
     this.timestamp,
+    this.replaces = const [],
   });
 
-  /// Stable per collapse key, so a newer push for the same window and kind
-  /// group (requests, or everything else) replaces the older one.
+  /// The window's notification slot for the kind (its request slot for an
+  /// approval or question, else the other), shared with the app's own
+  /// notifications for that window, so a push replaces what the app raised
+  /// there and a newer push replaces an older one. Without the host's id,
+  /// stable per collapse key instead.
   final int id;
+
+  /// Slots cleared before posting when they hold a notification the app
+  /// raised: a request push clears the bell or notice the app put in the
+  /// window's other slot before the program reported the request, but never
+  /// a push there (which may be newer).
+  final List<int> replaces;
 
   /// What happened; picks the channel.
   final PushEventKind kind;
@@ -83,6 +94,8 @@ Future<void> showPushNotificationFromData(
 
   var kind = clearKind;
   var text = genericPushNotificationText(clearKind);
+  var id = pushNotificationIdFor(collapse);
+  var replaces = const <int>[];
   DateTime? timestamp;
   final event = await _openPayload(store, payload);
   if (event != null) {
@@ -92,23 +105,42 @@ Future<void> showPushNotificationFromData(
     kind = event.event.kind;
     text = pushNotificationText(event.event, hostLabel: event.hostLabel);
     timestamp = event.event.timestamp;
+    final hostId = event.hostId;
+    final session = event.event.sessionName;
+    final window = event.event.windowId;
+    if (hostId != null && session != null && window != null) {
+      final request =
+          kind == PushEventKind.permission || kind == PushEventKind.input;
+      // An alert from a window waiting on the user goes where the app puts
+      // its own bell then.
+      id = buildWindowNotificationId(
+        hostId,
+        session,
+        window,
+        request: request || event.event.request,
+      );
+      // The bell the app raised for this request, before the program
+      // reported it, is in the other slot.
+      if (request) {
+        replaces = [buildWindowNotificationId(hostId, session, window)];
+      }
+    }
   }
   await (post ?? _postWithPlugin)(
     PushNotificationPost(
-      id: pushNotificationIdFor(collapse),
+      id: id,
       kind: kind,
       title: text.title,
       body: text.body,
       tapPayload: pushTapPayload(payload),
       timestamp: timestamp,
+      replaces: replaces,
     ),
   );
 }
 
-Future<({PushEvent event, String? hostLabel, bool allowed})?> _openPayload(
-  PushNotificationContextStore store,
-  String payload,
-) async {
+Future<({PushEvent event, String? hostLabel, int? hostId, bool allowed})?>
+_openPayload(PushNotificationContextStore store, String payload) async {
   try {
     final context = PushNotificationContext.decode(await store.read());
     if (context == null) return null;
@@ -119,6 +151,7 @@ Future<({PushEvent event, String? hostLabel, bool allowed})?> _openPayload(
     return (
       event: event,
       hostLabel: context.hosts[event.hostRef],
+      hostId: context.hostIds[event.hostRef],
       allowed: context.allows(event),
     );
   } on Object {
@@ -145,6 +178,16 @@ Future<void> _postWithPlugin(PushNotificationPost post) async {
         android: AndroidInitializationSettings('ic_notification_monkey'),
       ),
     );
+    if (post.replaces.isNotEmpty) {
+      try {
+        final active = await plugin.getActiveNotifications();
+        for (final id in localNotificationSlots(active, post.replaces)) {
+          await plugin.cancel(id: id);
+        }
+      } on PlatformException {
+        // Without the list, leave the other slot as it is.
+      }
+    }
     final attention = switch (post.kind) {
       PushEventKind.permission ||
       PushEventKind.input ||

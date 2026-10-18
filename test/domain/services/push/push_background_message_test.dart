@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/push/push_background_message.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
@@ -79,6 +80,74 @@ void main() {
     expect(post.id, pushNotificationIdFor('collapse-1'));
     expect(decodePushTapPayload(post.tapPayload), payload);
     expect(post.timestamp!.millisecondsSinceEpoch, 1760000000 * 1000);
+  });
+
+  test('a push lands in the window slot the app notifies in', () async {
+    Future<Map<String, String>> data(
+      String kind, {
+      bool request = false,
+    }) async => {
+      'v': '1',
+      'p': await seal({
+        'v': 1,
+        'hostRef': 'ref-build-box',
+        'window': '@3',
+        'sessionId': 'MonkeySSH',
+        'kind': kind,
+        if (request) 'request': true,
+        'ts': 1760000000,
+      }),
+      'k': kind,
+      'c': 'c-$kind',
+    };
+    final withId = PushNotificationContext(
+      seed: device.seed,
+      hosts: const {'ref-build-box': 'build-box'},
+      hostIds: const {'ref-build-box': 7},
+    ).encode();
+    final requestSlot = buildWindowNotificationId(
+      7,
+      'MonkeySSH',
+      '@3',
+      request: true,
+    );
+    final otherSlot = buildWindowNotificationId(7, 'MonkeySSH', '@3');
+    // The app's own notifications for the window use these ids, so a push
+    // replaces them rather than sitting beside them. An approval goes to the
+    // request slot and clears the other, where the app put the bell it rang
+    // before the program reported the request.
+    final approval = (await show(
+      await data('permission'),
+      context: withId,
+    )).single;
+    expect(approval.id, requestSlot);
+    expect(approval.replaces, [otherSlot]);
+    final finished = (await show(
+      await data('finished'),
+      context: withId,
+    )).single;
+    expect(finished.id, otherSlot);
+    expect(finished.replaces, isEmpty);
+    // A bell from a window waiting on the user goes where the app put its own
+    // bell then, and leaves the other slot alone.
+    final bell = (await show(
+      await data('alert', request: true),
+      context: withId,
+    )).single;
+    expect(bell.id, requestSlot);
+    expect(bell.replaces, isEmpty);
+    expect(
+      (await show(await data('alert'), context: withId)).single.id,
+      otherSlot,
+    );
+    // A context written before host ids keeps the collapse slot.
+    expect(
+      (await show(
+        await data('permission'),
+        context: context({'ref-build-box': 'build-box'}),
+      )).single.id,
+      pushNotificationIdFor('c-permission'),
+    );
   });
 
   test(
@@ -355,7 +424,18 @@ void main() {
     final decoded = PushNotificationContext.decode(encoded)!;
     expect(decoded.seed, device.seed);
     expect(decoded.hosts, {'ref': 'build-box'});
+    expect(decoded.hostIds, isEmpty);
     expect(decoded.allowed, isEmpty);
+    expect(
+      PushNotificationContext.decode(
+        PushNotificationContext(
+          seed: device.seed,
+          hosts: const {'ref': 'build-box'},
+          hostIds: const {'ref': 3},
+        ).encode(),
+      )!.hostIds,
+      {'ref': 3},
+    );
     expect(
       PushNotificationContext.decode(
         PushNotificationContext(

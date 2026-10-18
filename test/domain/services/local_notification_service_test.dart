@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
+import 'package:monkeyssh/domain/services/push/push_tap_payload.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 
 import 'acp_notification_location_cases.dart';
@@ -158,6 +159,59 @@ void main() {
         expect(pluginCalls, isNot(contains('requestNotificationsPermission')));
         expect(pluginCalls.contains('show'), status.isGranted);
       }
+    });
+
+    // A push for a window lands in the slot the app's own notifications for
+    // it use; the app clears what it showed there, never the push.
+    test('android leaves a push in a window slot', () async {
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      final previousPlatform = FlutterLocalNotificationsPlatform.instance;
+      FlutterLocalNotificationsPlatform.instance =
+          AndroidFlutterLocalNotificationsPlugin();
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final service = LocalNotificationService();
+      final cancelled = <Object?>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            ..setMockMethodCallHandler(channel, (call) async {
+              switch (call.method) {
+                case 'getNotificationAppLaunchDetails':
+                  return null;
+                case 'getActiveNotifications':
+                  return [
+                    {'id': 7, 'channelId': 'agent-attention'},
+                    {'id': 8, 'channelId': 'agent-updates-v2'},
+                    {'id': 9, 'channelId': 'tmux-alerts'},
+                    // Android before 8: no channel, but a push's tap payload.
+                    {'id': 11, 'payload': pushTapPayload('sealed')},
+                  ];
+                case 'cancel':
+                  cancelled.add((call.arguments as Map)['id']);
+              }
+              return true;
+            });
+      addTearDown(() {
+        service.dispose();
+        messenger.setMockMethodCallHandler(channel, null);
+        FlutterLocalNotificationsPlatform.instance = previousPlatform;
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      for (final id in [7, 8, 9, 10, 11]) {
+        await service.clearWindowNotification(id);
+      }
+      expect(cancelled, [9, 10]);
+    });
+
+    test('a push clears only what the app raised in a slot', () {
+      final active = [
+        const ActiveNotification(id: 1, channelId: 'agent-updates-v2'),
+        const ActiveNotification(id: 2, channelId: 'tmux-alerts'),
+        ActiveNotification(id: 3, payload: pushTapPayload('sealed')),
+      ];
+      expect(localNotificationSlots(active, [1, 2, 3, 4]), [2]);
     });
 
     test('macOS still asks the plugin and passes the sound choice', () async {

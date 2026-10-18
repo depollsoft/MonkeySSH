@@ -12,15 +12,16 @@ import 'push_crypto.dart';
 import 'push_event.dart';
 
 /// What the phone needs to show a push while MonkeySSH is not running: the
-/// device's private key, to open the payload, each saved host's label by the
-/// reference its payloads carry, and what each host may push now. It never
-/// leaves the device.
+/// device's private key, to open the payload, each saved host's label and id
+/// by the reference its payloads carry, and what each host may push now. It
+/// never leaves the device.
 @immutable
 class PushNotificationContext {
   /// Creates a context.
   const PushNotificationContext({
     required this.seed,
     required this.hosts,
+    this.hostIds = const {},
     this.allowed = const {},
   });
 
@@ -29,6 +30,10 @@ class PushNotificationContext {
 
   /// Saved host labels by host reference.
   final Map<String, String> hosts;
+
+  /// Saved host ids by host reference, so a push lands in the notification
+  /// slot the app's own notifications for that window use.
+  final Map<String, int> hostIds;
 
   /// The push categories (`attention`, `finished`, `bell`, `notice`) each
   /// host may raise now, by host reference. A host's registration lags a
@@ -56,12 +61,13 @@ class PushNotificationContext {
   /// which reads only the seed and labels:
   ///
   /// ```json
-  /// {"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"allow":{"<hostRef>":["attention"]}}
+  /// {"v":1,"seed":"<base64url>","hosts":{"<hostRef>":"<label>"},"ids":{"<hostRef>":3},"allow":{"<hostRef>":["attention"]}}
   /// ```
   String encode() => jsonEncode({
     'v': 1,
     'seed': encodePushBase64(seed),
     'hosts': hosts,
+    if (hostIds.isNotEmpty) 'ids': hostIds,
     if (allowed.isNotEmpty)
       'allow': {
         for (final MapEntry(:key, :value) in allowed.entries)
@@ -77,6 +83,7 @@ class PushNotificationContext {
       if (decoded is! Map<String, Object?> || decoded['v'] != 1) return null;
       final seed = decodePushBase64(decoded['seed'] as String? ?? '');
       final hosts = decoded['hosts'];
+      final ids = decoded['ids'];
       final allow = decoded['allow'];
       if (seed == null || seed.length != 32 || hosts is! Map) return null;
       return PushNotificationContext(
@@ -84,6 +91,11 @@ class PushNotificationContext {
         hosts: {
           for (final MapEntry(:key, :value) in hosts.entries)
             if (key is String && value is String) key: value,
+        },
+        hostIds: {
+          if (ids is Map)
+            for (final MapEntry(:key, :value) in ids.entries)
+              if (key is String && value is int) key: value,
         },
         allowed: {
           if (allow is Map)

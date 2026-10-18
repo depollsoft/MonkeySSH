@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.242"
+	monkeyMuxVersion                  = "0.1.243"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -17321,6 +17321,9 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 	s.closed = true
 	s.closeDone = make(chan struct{})
 	closeDone := s.closeDone
+	// Pushes still on their way go out beside the teardown, and a later
+	// close() waits for them through closeDone.
+	drained := s.startPushDrain()
 	listener := s.listener
 	socket := s.socketPath
 	identity := s.socketIdentity
@@ -17354,7 +17357,10 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		window.clearKittyGraphicsPendingLocked()
 	}
 	return func() {
-		defer close(closeDone)
+		defer func() {
+			<-drained
+			close(closeDone)
+		}()
 		if listener != nil {
 			_ = listener.Close()
 		}
