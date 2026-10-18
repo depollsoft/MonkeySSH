@@ -572,14 +572,23 @@ second notification beside the status one. From 0.1.243:
 
 The ACP bridge reports monotonic counters of permission requests, input
 requests and completed prompt turns, plus how many permission and input
-requests are pending right now. While at least one device is registered for
+requests are pending right now. From 0.1.245 it also reports the generation of
+the oldest pending request of each kind (`oldestPendingPermission`,
+`oldestPendingInput`). While at least one device is registered for
 its session, each server polls the bridges behind its native agent windows
 every 2 seconds.
 
 - `finished` is raised when the completed-turn counter grows.
 - `permission` and `input` are raised while a request of that kind is pending,
   to each device that has not yet been sent that request (the counter value is
-  the request's generation). A device that was watching, covered locally,
+  the request's generation). From 0.1.245 the bridge's oldest pending request
+  must first stay pending for 3 seconds, measured from the first poll that saw
+  it: an attached app in YOLO mode approves requests within a round trip, and
+  a poll that caught one on its way pushed "needs approval" for a window that
+  was not waiting. Newer requests that come and go beside it do not restart
+  the wait. A bridge started before 0.1.245 reports no oldest request, so the
+  wait is on its kind's counter, and any newer request of the kind restarts
+  it. A device that was watching, covered locally,
   backed off, capped or coalesced is not marked, so a still-pending request is
   raised as soon as that stops being true: after the 30-second grace when the
   user locks the phone, after a backoff ends, or when the app's background

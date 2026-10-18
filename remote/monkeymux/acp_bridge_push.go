@@ -26,8 +26,9 @@ type acpBridgePushSignals struct {
 	inputRequests      uint64
 	completedTurns     uint64
 	// attention maps pending provider requests that wait on the user to their
-	// kind. Entries whose request is no longer pending are pruned when counted.
-	attention map[string]string
+	// kind and generation. Entries whose request is no longer pending are
+	// pruned when counted.
+	attention map[string]acpAttentionRequest
 	// prompts holds in-flight client session/prompt request ids.
 	prompts map[string]struct{}
 	// delivered is the server-reported push delivery record; see
@@ -49,19 +50,37 @@ func (p *acpBridgePushSignals) forgetClientRequestLocked(id string) {
 	delete(p.prompts, id)
 }
 
+// acpAttentionRequest is a provider request that waits on the user.
+type acpAttentionRequest struct {
+	method string
+	// generation is the request's number among requests of its kind: the
+	// kind's counter just after the request.
+	generation uint64
+}
+
+// acpPendingAttention counts the pending requests of each kind and names the
+// oldest of each by its generation, 0 when none is pending.
+type acpPendingAttention struct {
+	permission, input             int
+	oldestPermission, oldestInput uint64
+}
+
 func (p *acpBridgePushSignals) observeProviderRequestLocked(method string, id string) {
+	var generation uint64
 	switch method {
 	case acpPermissionRequestMethod:
 		p.permissionRequests++
+		generation = p.permissionRequests
 	case acpElicitationMethod:
 		p.inputRequests++
+		generation = p.inputRequests
 	default:
 		return
 	}
 	if p.attention == nil {
-		p.attention = map[string]string{}
+		p.attention = map[string]acpAttentionRequest{}
 	}
-	p.attention[id] = method
+	p.attention[id] = acpAttentionRequest{method: method, generation: generation}
 }
 
 func (p *acpBridgePushSignals) observeProviderResponseLocked(id string) {
@@ -74,19 +93,28 @@ func (p *acpBridgePushSignals) observeProviderResponseLocked(id string) {
 
 // pendingAttentionLocked counts permission and input requests that are still
 // pending and forgets the ones that were answered or cancelled.
-func (p *acpBridgePushSignals) pendingAttentionLocked(pending map[string]struct{}) (permission int, input int) {
-	for id, method := range p.attention {
+func (p *acpBridgePushSignals) pendingAttentionLocked(pending map[string]struct{}) acpPendingAttention {
+	var counts acpPendingAttention
+	oldest := func(current uint64, generation uint64) uint64 {
+		if current == 0 || generation < current {
+			return generation
+		}
+		return current
+	}
+	for id, request := range p.attention {
 		if _, ok := pending[id]; !ok {
 			delete(p.attention, id)
 			continue
 		}
-		if method == acpPermissionRequestMethod {
-			permission++
+		if request.method == acpPermissionRequestMethod {
+			counts.permission++
+			counts.oldestPermission = oldest(counts.oldestPermission, request.generation)
 		} else {
-			input++
+			counts.input++
+			counts.oldestInput = oldest(counts.oldestInput, request.generation)
 		}
 	}
-	return permission, input
+	return counts
 }
 
 // acpPushDeliveredCommand records which pending request a server pushed to a

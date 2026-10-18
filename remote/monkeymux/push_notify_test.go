@@ -703,6 +703,8 @@ func TestPushBridgeCountersRaiseEvents(t *testing.T) {
 	poll() // baseline
 	setStatus(func(s *acpBridgeInfo) { s.PermissionRequests = 1; s.PendingPermission = 1 })
 	poll()
+	h.clock.Advance(pushAttentionHold)
+	poll()
 	// Still pending on the next poll: already sent, not sent again.
 	h.clock.Advance(pushCoalesceWindow)
 	poll()
@@ -718,6 +720,8 @@ func TestPushBridgeCountersRaiseEvents(t *testing.T) {
 	setStatus(func(s *acpBridgeInfo) {
 		*s = acpBridgeInfo{ID: bridgeID, StartedAt: 200, PermissionRequests: 1, PendingPermission: 1}
 	})
+	poll()
+	h.clock.Advance(pushAttentionHold)
 	poll()
 
 	requests := h.endpoint.received()
@@ -737,6 +741,62 @@ func TestPushBridgeCountersRaiseEvents(t *testing.T) {
 	}
 }
 
+func TestPushBridgeRequestsAnsweredWithinTheHoldAreNotPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.register(t, newPushTestDevice(t, 1))
+	h.server.mu.Lock()
+	h.server.windows = append(h.server.windows, &muxWindow{id: "@7", nativeAcpBridgeID: pushTestBridgeID})
+	h.server.mu.Unlock()
+	bridge := newTestAcpBridge()
+	previous := pushBridgeStatus
+	pushBridgeStatus = func(string) (acpBridgeInfo, error) { return bridge.snapshot(), nil }
+	t.Cleanup(func() { pushBridgeStatus = previous })
+	ask := func(id string, method string) {
+		bridge.publish("output", json.RawMessage(`{"jsonrpc":"2.0","id":"`+id+`","method":"`+method+`","params":{}}`), "", nil)
+	}
+	answer := func(id string) {
+		bridge.observeClientMessage(parseAcpEnvelope(json.RawMessage(`{"jsonrpc":"2.0","id":"` + id + `","result":{}}`)))
+	}
+	poll := func() {
+		h.server.pollPushBridges()
+		h.notifier.inflight.Wait()
+		h.clock.Advance(pushBridgePollInterval)
+	}
+
+	// An attached app in YOLO mode answers each request a moment after the
+	// agent asks, so some polls land while one is on its way.
+	for index := range 4 {
+		id := fmt.Sprintf("p%d", index)
+		ask(id, acpPermissionRequestMethod)
+		poll()
+		answer(id)
+	}
+	ask("e0", acpElicitationMethod)
+	poll()
+	answer("e0")
+	poll()
+	if got := h.kinds(); got != "" {
+		t.Fatalf("requests answered within the hold were pushed: %q", got)
+	}
+
+	// A request the app leaves for the user is pushed once it outlasts the
+	// hold, even while newer ones come and go beside it.
+	ask("stuck", acpPermissionRequestMethod)
+	for index := 0; time.Duration(index)*pushBridgePollInterval < pushAttentionHold; index++ {
+		id := fmt.Sprintf("q%d", index)
+		ask(id, acpPermissionRequestMethod)
+		poll()
+		answer(id)
+	}
+	if got := h.kinds(); got != "" {
+		t.Fatalf("pushed before the hold ended: %q", got)
+	}
+	poll()
+	if got := h.kinds(); got != "permission" {
+		t.Fatalf("request that outlasted the hold = %q", got)
+	}
+}
+
 func TestAcpBridgeCountsPushSignals(t *testing.T) {
 	bridge := newTestAcpBridge()
 	prompt := parseAcpEnvelope(json.RawMessage(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{}}`))
@@ -753,10 +813,20 @@ func TestAcpBridgeCountsPushSignals(t *testing.T) {
 		t.Fatalf("after requests: %+v", info)
 	}
 
-	// The app answers the permission request.
+	if info.OldestPendingPermission != 1 || info.OldestPendingInput != 1 {
+		t.Fatalf("oldest pending after requests: %+v", info)
+	}
+
+	// A second permission request leaves the first one the oldest until the
+	// app answers it.
+	bridge.publish("output", json.RawMessage(`{"jsonrpc":"2.0","id":"p2","method":"session/request_permission","params":{}}`), "", nil)
+	if info := bridge.snapshot(); info.PendingPermission != 2 || info.OldestPendingPermission != 1 {
+		t.Fatalf("pending with two requests: %+v", info)
+	}
 	bridge.observeClientMessage(parseAcpEnvelope(json.RawMessage(`{"jsonrpc":"2.0","id":"p1","result":{}}`)))
-	if info := bridge.snapshot(); info.PendingPermission != 0 || info.PendingInput != 1 {
-		t.Fatalf("pending after an answer = %d permission, %d input", info.PendingPermission, info.PendingInput)
+	if info := bridge.snapshot(); info.PendingPermission != 1 || info.OldestPendingPermission != 2 ||
+		info.PendingInput != 1 || info.OldestPendingInput != 1 {
+		t.Fatalf("pending after an answer: %+v", info)
 	}
 
 	// The prompt turn ends; a response to another request does not count.

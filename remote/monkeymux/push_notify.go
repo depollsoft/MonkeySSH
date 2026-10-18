@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,6 +71,13 @@ const (
 // agent that needs the user or finishes often rings first and reports its
 // status in the next chunk, and that status is the better notification.
 var pushAlertHold = 1500 * time.Millisecond
+
+// pushAttentionHold is how long a native agent's permission or input request
+// must stay pending before it is pushed.
+// An attached app answers a request it approves on its own (YOLO) within a
+// round trip, so a poll that catches one on its way is not the agent waiting
+// on the user.
+const pushAttentionHold = 3 * time.Second
 
 // Event categories a registration can ask for (push_register's events).
 // Permission and input requests are "attention"; a window alert is "bell"
@@ -285,6 +293,19 @@ type pushAttentionKey struct {
 	kind     string
 }
 
+// pushPendingKey names one kind of pending request on one bridge.
+type pushPendingKey struct {
+	bridgeID string
+	kind     string
+}
+
+// pushPendingSighting is when a poll first saw the pending request that
+// pushPendingRequests names by generation.
+type pushPendingSighting struct {
+	generation uint64
+	since      time.Time
+}
+
 type pushBridgeBaseline struct {
 	startedAt int64
 	turns     uint64
@@ -363,7 +384,11 @@ type pushNotifier struct {
 	// delivered holds, per device, the newest pending-request generation that
 	// device has been sent. A pending request below it is re-raised later.
 	delivered map[pushAttentionKey]uint64
-	deferred  []pushDeferred
+	// pending holds, per bridge and kind, when the request a poll waits on was
+	// first seen pending, so it is pushed only once it outlasts
+	// pushAttentionHold.
+	pending  map[pushPendingKey]pushPendingSighting
+	deferred []pushDeferred
 	// held are window alerts waiting out pushAlertHold.
 	held []pushHeldAlert
 	// statusSent records, per device and window, the last program status
@@ -400,6 +425,7 @@ func newPushNotifier() *pushNotifier {
 		backoffUntil:  map[pushBudgetKey]time.Time{},
 		bridges:       map[string]pushBridgeBaseline{},
 		delivered:     map[pushAttentionKey]uint64{},
+		pending:       map[pushPendingKey]pushPendingSighting{},
 		statusSent:    map[pushDeviceWindow]pushStatusSent{},
 		statusPosting: map[string]int{},
 	}
@@ -1719,6 +1745,7 @@ func (s *muxServer) pollPushBridges() {
 		notifier.mu.Lock()
 		clear(notifier.bridges)
 		clear(notifier.delivered)
+		clear(notifier.pending)
 		notifier.deferred = nil
 		notifier.mu.Unlock()
 		return
@@ -1745,11 +1772,11 @@ func (s *muxServer) pollPushBridges() {
 		if notifier.observeBridge(target.bridgeID, info) {
 			s.raisePushEvent(target.windowID, pushKindFinished, target.bridgeID)
 		}
-		pendingPermission, pendingInput := pushPendingCounts(info)
-		if pendingPermission {
+		pendingPermission, pendingInput := pushPendingRequests(info)
+		if notifier.pendingHeld(target.bridgeID, pushKindPermission, pendingPermission) {
 			s.raisePushAttention(target.windowID, target.bridgeID, pushKindPermission, info.PermissionRequests, info.PushDelivered)
 		}
-		if pendingInput {
+		if notifier.pendingHeld(target.bridgeID, pushKindInput, pendingInput) {
 			s.raisePushAttention(target.windowID, target.bridgeID, pushKindInput, info.InputRequests, info.PushDelivered)
 		}
 	}
@@ -1764,7 +1791,34 @@ func (s *muxServer) pollPushBridges() {
 			delete(notifier.delivered, key)
 		}
 	}
+	for key := range notifier.pending {
+		if !live[key.bridgeID] {
+			delete(notifier.pending, key)
+		}
+	}
 	notifier.mu.Unlock()
+}
+
+// pendingHeld reports whether request, the pending request of kind on
+// bridgeID that pushPendingRequests names (0 when none is pending), has been
+// seen pending for pushAttentionHold. Another request starts the wait again,
+// so a stream of requests an attached app approves on its own is never taken
+// for one the user has to answer.
+func (n *pushNotifier) pendingHeld(bridgeID string, kind string, request uint64) bool {
+	key := pushPendingKey{bridgeID: bridgeID, kind: kind}
+	now := n.now()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if request == 0 {
+		delete(n.pending, key)
+		return false
+	}
+	sighting, seen := n.pending[key]
+	if !seen || sighting.generation != request {
+		n.pending[key] = pushPendingSighting{generation: request, since: now}
+		return false
+	}
+	return now.Sub(sighting.since) >= pushAttentionHold
 }
 
 // observeBridge compares a bridge's completed-turn counter with the last poll
@@ -1782,20 +1836,35 @@ func (n *pushNotifier) observeBridge(bridgeID string, info acpBridgeInfo) bool {
 				delete(n.delivered, key)
 			}
 		}
+		for key := range n.pending {
+			if key.bridgeID == bridgeID {
+				delete(n.pending, key)
+			}
+		}
 		return false
 	}
 	return known && next.turns > previous.turns
 }
 
-// pushPendingCounts reports which kinds of request a bridge has pending. A
-// bridge preserved across an upgrade from an earlier build of this branch
-// reports only a combined count; then any kind it has ever asked for is
-// treated as possibly pending.
-func pushPendingCounts(info acpBridgeInfo) (permission bool, input bool) {
-	if info.PendingPermission > 0 || info.PendingInput > 0 || info.LegacyPendingAttention == 0 {
-		return info.PendingPermission > 0, info.PendingInput > 0
+// pushPendingRequests names, per kind, the pending request a poll waits on
+// before pushing it, by generation, or 0 when none of that kind is pending.
+// That is the bridge's oldest pending request. A bridge before 0.1.245 does
+// not report it, so its kind's counter stands in, and a newer request of the
+// kind restarts the wait. A bridge preserved across an upgrade from an earlier
+// build of this branch reports only a combined count; then any kind it has
+// ever asked for is treated as possibly pending.
+func pushPendingRequests(info acpBridgeInfo) (permission uint64, input uint64) {
+	pendingPermission, pendingInput := info.PendingPermission > 0, info.PendingInput > 0
+	if !pendingPermission && !pendingInput && info.LegacyPendingAttention > 0 {
+		pendingPermission, pendingInput = info.PermissionRequests > 0, info.InputRequests > 0
 	}
-	return info.PermissionRequests > 0, info.InputRequests > 0
+	if pendingPermission {
+		permission = cmp.Or(info.OldestPendingPermission, info.PermissionRequests)
+	}
+	if pendingInput {
+		input = cmp.Or(info.OldestPendingInput, info.InputRequests)
+	}
+	return permission, input
 }
 
 func (n *pushNotifier) deferLocked(event pushDeferred) {
