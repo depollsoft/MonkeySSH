@@ -1774,10 +1774,10 @@ func (s *muxServer) pollPushBridges() {
 		}
 		pendingPermission, pendingInput := pushPendingRequests(info)
 		if notifier.pendingHeld(target.bridgeID, pushKindPermission, pendingPermission) {
-			s.raisePushAttention(target.windowID, target.bridgeID, pushKindPermission, info.PermissionRequests, info.PushDelivered)
+			s.raisePushAttention(target.windowID, target.bridgeID, pushKindPermission, pendingPermission, info.PushDelivered)
 		}
 		if notifier.pendingHeld(target.bridgeID, pushKindInput, pendingInput) {
-			s.raisePushAttention(target.windowID, target.bridgeID, pushKindInput, info.InputRequests, info.PushDelivered)
+			s.raisePushAttention(target.windowID, target.bridgeID, pushKindInput, pendingInput, info.PushDelivered)
 		}
 	}
 	notifier.mu.Lock()
@@ -1847,8 +1847,9 @@ func (n *pushNotifier) observeBridge(bridgeID string, info acpBridgeInfo) bool {
 }
 
 // pushPendingRequests names, per kind, the pending request a poll waits on
-// before pushing it, by generation, or 0 when none of that kind is pending.
-// That is the bridge's oldest pending request. A bridge before 0.1.245 does
+// and then pushes, by generation, or 0 when none of that kind is pending.
+// That is the bridge's oldest pending request, so newer ones answered beside
+// it neither restart the wait nor push it again. A bridge before 0.1.245 does
 // not report it, so its kind's counter stands in, and a newer request of the
 // kind restarts the wait. A bridge preserved across an upgrade from an earlier
 // build of this branch reports only a combined count; then any kind it has

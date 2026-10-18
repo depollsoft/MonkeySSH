@@ -580,15 +580,16 @@ every 2 seconds.
 
 - `finished` is raised when the completed-turn counter grows.
 - `permission` and `input` are raised while a request of that kind is pending,
-  to each device that has not yet been sent that request (the counter value is
-  the request's generation). From 0.1.245 the bridge's oldest pending request
-  must first stay pending for 3 seconds, measured from the first poll that saw
-  it: an attached app in YOLO mode approves requests within a round trip, and
-  a poll that caught one on its way pushed "needs approval" for a window that
-  was not waiting. Newer requests that come and go beside it do not restart
-  the wait. A bridge started before 0.1.245 reports no oldest request, so the
-  wait is on its kind's counter, and any newer request of the kind restarts
-  it. A device that was watching, covered locally,
+  to each device that has not yet been sent that request (the counter value
+  just after a request is its generation). From 0.1.245 the bridge's oldest
+  pending request must first stay pending for 3 seconds, measured from the
+  first poll that saw it: an attached app in YOLO mode approves requests within
+  a round trip, and a poll that caught one on its way pushed "needs approval"
+  for a window that was not waiting. The push carries that request's
+  generation, so newer requests that come and go beside it neither restart the
+  wait nor push it again. A bridge started before 0.1.245 reports no oldest
+  request, so its kind's counter stands in, and any newer request of the kind
+  restarts the wait. A device that was watching, covered locally,
   backed off, capped or coalesced is not marked, so a still-pending request is
   raised as soon as that stops being true: after the 30-second grace when the
   user locks the phone, after a backoff ends, or when the app's background

@@ -795,6 +795,30 @@ func TestPushBridgeRequestsAnsweredWithinTheHoldAreNotPushed(t *testing.T) {
 	if got := h.kinds(); got != "permission" {
 		t.Fatalf("request that outlasted the hold = %q", got)
 	}
+
+	// Newer requests answered beside it do not push it again, even once the
+	// coalescing window has passed.
+	ask("r0", acpPermissionRequestMethod)
+	poll()
+	answer("r0")
+	h.clock.Advance(pushCoalesceWindow)
+	ask("r1", acpPermissionRequestMethod)
+	answer("r1")
+	poll()
+	poll()
+	if got := h.kinds(); got != "permission" {
+		t.Fatalf("stuck request pushed again: %q", got)
+	}
+
+	// Once it is answered, the next request left for the user is pushed.
+	answer("stuck")
+	ask("next", acpPermissionRequestMethod)
+	poll()
+	h.clock.Advance(pushAttentionHold)
+	poll()
+	if got := h.kinds(); got != "permission,permission" {
+		t.Fatalf("request after the stuck one = %q", got)
+	}
 }
 
 func TestAcpBridgeCountsPushSignals(t *testing.T) {
