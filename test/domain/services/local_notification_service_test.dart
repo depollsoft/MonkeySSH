@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
+import 'package:monkeyssh/domain/services/push/push_tap_payload.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 
 import 'acp_notification_location_cases.dart';
@@ -183,6 +184,8 @@ void main() {
                     {'id': 7, 'channelId': 'agent-attention'},
                     {'id': 8, 'channelId': 'agent-updates-v2'},
                     {'id': 9, 'channelId': 'tmux-alerts'},
+                    // Android before 8: no channel, but a push's tap payload.
+                    {'id': 11, 'payload': pushTapPayload('sealed')},
                   ];
                 case 'cancel':
                   cancelled.add((call.arguments as Map)['id']);
@@ -196,7 +199,7 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       });
 
-      for (final id in [7, 8, 9, 10]) {
+      for (final id in [7, 8, 9, 10, 11]) {
         await service.clearWindowNotification(id);
       }
       expect(cancelled, [9, 10]);

@@ -83,33 +83,54 @@ void main() {
   });
 
   test('a push lands in the window slot the app notifies in', () async {
-    final payload = await seal({
-      'v': 1,
-      'hostRef': 'ref-build-box',
-      'window': '@3',
-      'sessionId': 'MonkeySSH',
-      'kind': 'permission',
-      'ts': 1760000000,
-    });
-    final data = {'v': '1', 'p': payload, 'k': 'permission', 'c': 'c-1'};
+    Future<Map<String, String>> data(String kind) async => {
+      'v': '1',
+      'p': await seal({
+        'v': 1,
+        'hostRef': 'ref-build-box',
+        'window': '@3',
+        'sessionId': 'MonkeySSH',
+        'kind': kind,
+        'ts': 1760000000,
+      }),
+      'k': kind,
+      'c': 'c-$kind',
+    };
     final withId = PushNotificationContext(
       seed: device.seed,
       hosts: const {'ref-build-box': 'build-box'},
       hostIds: const {'ref-build-box': 7},
     ).encode();
-    // The app's own notification for the window has this id, so the push
-    // replaces it rather than sitting beside it.
-    expect(
-      (await show(data, context: withId)).single.id,
-      buildWindowNotificationId(7, 'MonkeySSH', '@3'),
+    final requestSlot = buildWindowNotificationId(
+      7,
+      'MonkeySSH',
+      '@3',
+      request: true,
     );
+    final otherSlot = buildWindowNotificationId(7, 'MonkeySSH', '@3');
+    // The app's own notifications for the window use these ids, so a push
+    // replaces them rather than sitting beside them. An approval goes to the
+    // request slot and clears the other, where the app put the bell it rang
+    // before the program reported the request.
+    final approval = (await show(
+      await data('permission'),
+      context: withId,
+    )).single;
+    expect(approval.id, requestSlot);
+    expect(approval.replaces, [otherSlot]);
+    final finished = (await show(
+      await data('finished'),
+      context: withId,
+    )).single;
+    expect(finished.id, otherSlot);
+    expect(finished.replaces, isEmpty);
     // A context written before host ids keeps the collapse slot.
     expect(
       (await show(
-        data,
+        await data('permission'),
         context: context({'ref-build-box': 'build-box'}),
       )).single.id,
-      pushNotificationIdFor('c-1'),
+      pushNotificationIdFor('c-permission'),
     );
   });
 

@@ -1084,6 +1084,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       session.hostId,
       tmuxSessionName,
       windowKey,
+      request: window.programStatus?.state == TerminalProgramState.blocked,
     );
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: tmuxSessionName,

@@ -56,15 +56,14 @@ vectors include a non-canonical ticket that every implementation must refuse.
   where `hostRefKey` is 32 random bytes kept in secure storage. Opting out deletes
   the key, so references issued before cannot be resolved again. Accepted
   pattern: `^[A-Za-z0-9_-]{1,64}$`.
-- **Collapse key.** Chosen by the host so events for one window replace each
-  other on the device: the first 32 hex characters of
-  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window + "\n" + "window")`,
-  where `hostSalt` is 32 random bytes kept in the host's registration file.
-  From 0.1.243 every kind shares the window's one slot, so a window never
-  shows two notifications; an alert does not replace a request still waiting
-  on the user because it yields to it (see "One notification per window and
-  event"). 0.1.237 to 0.1.242 kept `permission` and `input` in a slot of
-  their own. Accepted pattern: `^[A-Za-z0-9_-]{1,64}$`.
+- **Collapse key.** Chosen by the host so repeated events for one window replace
+  each other on the device: the first 32 hex characters of
+  `HMAC-SHA256(hostSalt, deviceId + "\n" + session + "\n" + window + "\n" + group)`,
+  where `group` is `attention` for `permission` and `input` and `update` for
+  every other kind (since 0.1.237), so a routine event never replaces a request
+  still waiting on the user, and `hostSalt` is 32 random bytes kept in the
+  host's registration file. Accepted
+  pattern: `^[A-Za-z0-9_-]{1,64}$`.
 - **Session key.** Names a MonkeyMux session in the host's registration file
   without writing the name there: the first 32 hex characters of
   `HMAC-SHA256(hostSalt, "session\n" + session)`. The server that receives
@@ -527,37 +526,29 @@ remembers its categories, so it is sent when the claim for any of them lapses.
 
 An agent that needs the user or finishes its turn usually also rings the bell
 or posts a desktop notification. Pushed as well, that alert would arrive as a
-second notification or, sharing the window's slot, replace the status one.
-From 0.1.243:
+second notification beside the status one. From 0.1.243:
 
 - An alert from a window's output is held for 1.5 seconds before it is raised,
-  since the program's status report often comes in the next chunk.
-- A device is not sent a window's alert when the window's current status
-  event reached it (each status change is numbered per window; a status
-  counts once the function accepted it, and one coalesced into a delivered
-  push of its kind still showing counts too) and that status still holds:
-  the program still waits on that approval or question, or that turn
-  finished under 15 seconds ago and the program still reports `done` or
+  since the program's status report often comes in the next chunk, and up to
+  5 seconds more while a status push for that window is still on its way.
+- A device is not sent a window's alert when a status that reached it (the
+  function accepted it) still holds: the window's program waits on a request
+  of the kind the device was last sent for that window, or it finished a turn
+  that reached the device under 15 seconds ago and still reports `done` or
   `idle`. Anything else is a new event or one the device did not hear of (it
-  turned that status off, or the function refused or never got the status),
-  and the alert is pushed. An alert decided while its status is still on
-  its way waits behind it and checks again before it goes.
-- A device's pushes for one window go one at a time and in order, since they
-  replace each other there: a newer status replaces any push still waiting
-  and stops an older one still retrying; an alert replaces only an older
-  alert and waits behind a status.
+  turned that status off, or the push was refused or failed), and the alert
+  is pushed.
 - When kept-back events go out together after a local claim lapses, a device
   gets a window's status without its alert.
-- A closing server sends the window events still queued or held and, beside
-  its teardown, waits up to 2 seconds for pushes in flight, so a session
-  that ends right after an alert still delivers it within the time an
-  upgrade gives the outgoing helper.
+- A closing server raises the window events still queued or held and, beside
+  its teardown, waits up to 2 seconds for pushes in flight, so a session that
+  ends right after an alert still delivers it within the time an upgrade
+  gives the outgoing helper.
 
 ### Coalescing, caps and retries
 
-- One event per device, window and kind in any 30-second window, while it is
-  still the newest in the window's slot: one of another kind posted since
-  replaced it on the device, so the next of this kind is sent.
+- One event per device, window and kind in any 30-second window. A push that
+  never arrived (refused or failed) does not hold the next one back.
 - Three budgets per device, each at most 20 events an hour: urgent
   (`permission`, `input`), routine (`finished`, `alert`) and `test`. They are
   kept by each MonkeyMux server, and every session has its own server, so a
@@ -752,10 +743,11 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
 - **Android:** pushes arrive as data only (for a ticket with `a`). A
   FlutterFire background handler, registered at startup, opens the payload and
   posts the notification on the channel for the kind, in the window's
-  notification slot (see "One notification per window"), so a newer push for
-  the window replaces the older one and a push sent after a lapsed local claim
-  replaces what the app already raised. Without the host's id in the context
-  (one written by an older build) the id comes from the collapse key. It drops a push the context's `allow` says the host no longer
+  notification slot for its kind (see "One notification per window"), so a
+  newer push for the window replaces the older one and a push sent after a
+  lapsed local claim replaces what the app already raised. Without the host's
+  id in the context (one written by an older build) the id comes from the
+  collapse key. It drops a push the context's `allow` says the host no longer
   raises: a host's registration changes only when the host is reached, so a
   kind turned off meanwhile still arrives (iOS cannot drop a push this way and
   shows it). When the payload does not open (no context yet, or a key from an
@@ -763,25 +755,30 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   the local notification plugin carrying the encrypted payload and opens like
   an FCM tap, also when it starts a new activity on the running engine (the
   bridge reads the activity's launch intent again when the app resumes).
-- **One notification per window:** the app's own notifications for a
-  MonkeyMux or tmux window (bells and the desktop notifications the helper
-  forwards) share one slot named by the saved host, session and window
-  (`buildWindowNotificationId`), and so do Android pushes (see Android), so
-  each replaces the last and two connections to one session post once. A bell
-  that arrives with a desktop notification for the same window is not posted
-  on its own. On Android the host's push of an agent's approval or finished
-  turn lands in the slot of the bell the app raised for it, so the window
-  shows one notification, whichever came last. A slot has one owner, across
-  every connection's window bar: a later bell or notification takes it, so
-  an older notification's close, one that never showed, or a bell's flag
-  clearing (the window viewed, the bar closed or reconnected) does not
-  remove what shows, and the app never removes a push from a slot. Known
-  limits: iOS notifications from pushes and from the app have different
-  identifiers, so in the seconds before iOS suspends a backgrounded app, a
-  bell can show beside the push for a window the app was not viewing; the
-  active window's own desktop notifications (from the live terminal stream)
-  and native chat notifications keep their own ids; and two saved hosts for
-  one machine and session have separate slots.
+- **One notification per window:** a MonkeyMux or tmux window has two local
+  notification slots, as its pushes have two collapse groups: one for a
+  request its program waits on and one for everything else
+  (`buildWindowNotificationId`). The app's bells and the desktop
+  notifications the helper forwards share them across every connection to
+  the session, and a bell that arrives with a desktop notification for the
+  same window is not posted on its own. While the window's program waits on
+  the user, its bells and notifications go to the request slot and say what
+  it waits for, so on Android they and the host's push for that request are
+  one notification, whichever came last. Android pushes use the slot for
+  their kind (see Android), and a request push also clears the window's
+  other slot, where the app put a bell it rang before the program reported
+  the request. A slot has one owner across every connection's window bar: a
+  later bell or notification takes it, so an older notification's close, one
+  that never showed, or a bell's flag clearing (the window viewed, the bar
+  closed or reconnected) does not remove what shows, and the app never
+  removes a push from a slot. Known limits: iOS notifications from pushes and
+  from the app have different identifiers, so in the seconds before iOS
+  suspends a backgrounded app, a bell can show beside the push for a window
+  the app was not viewing, and an answered request stays beside the finished
+  turn that followed it (as before 0.1.243); the active window's own desktop
+  notifications (from the live terminal stream) and native chat
+  notifications keep their own ids; and two saved hosts for one machine and
+  session have separate slots.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

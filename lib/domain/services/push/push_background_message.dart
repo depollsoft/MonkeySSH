@@ -41,13 +41,19 @@ class PushNotificationPost {
     required this.body,
     required this.tapPayload,
     this.timestamp,
+    this.replaces = const [],
   });
 
-  /// The window's notification slot, shared with the app's own notifications
-  /// for that window, so a push replaces what the app raised for the window
-  /// and a newer push replaces an older one. Without the host's id, stable per
-  /// collapse key instead.
+  /// The window's notification slot for the kind (its request slot for an
+  /// approval or question, else the other), shared with the app's own
+  /// notifications for that window, so a push replaces what the app raised
+  /// there and a newer push replaces an older one. Without the host's id,
+  /// stable per collapse key instead.
   final int id;
+
+  /// Slots cleared before posting: a request push clears the window's other
+  /// slot, whose bell or notice it outranks.
+  final List<int> replaces;
 
   /// What happened; picks the channel.
   final PushEventKind kind;
@@ -87,6 +93,7 @@ Future<void> showPushNotificationFromData(
   var kind = clearKind;
   var text = genericPushNotificationText(clearKind);
   var id = pushNotificationIdFor(collapse);
+  var replaces = const <int>[];
   DateTime? timestamp;
   final event = await _openPayload(store, payload);
   if (event != null) {
@@ -100,7 +107,14 @@ Future<void> showPushNotificationFromData(
     final session = event.event.sessionName;
     final window = event.event.windowId;
     if (hostId != null && session != null && window != null) {
-      id = buildWindowNotificationId(hostId, session, window);
+      final request =
+          kind == PushEventKind.permission || kind == PushEventKind.input;
+      id = buildWindowNotificationId(hostId, session, window, request: request);
+      // The bell the app raised for this request, before the program
+      // reported it, is in the other slot.
+      if (request) {
+        replaces = [buildWindowNotificationId(hostId, session, window)];
+      }
     }
   }
   await (post ?? _postWithPlugin)(
@@ -111,6 +125,7 @@ Future<void> showPushNotificationFromData(
       body: text.body,
       tapPayload: pushTapPayload(payload),
       timestamp: timestamp,
+      replaces: replaces,
     ),
   );
 }
@@ -154,6 +169,9 @@ Future<void> _postWithPlugin(PushNotificationPost post) async {
         android: AndroidInitializationSettings('ic_notification_monkey'),
       ),
     );
+    for (final id in post.replaces) {
+      await plugin.cancel(id: id);
+    }
     final attention = switch (post.kind) {
       PushEventKind.permission ||
       PushEventKind.input ||

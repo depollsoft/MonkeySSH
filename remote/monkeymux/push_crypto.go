@@ -105,14 +105,15 @@ func pushSessionKey(salt []byte, session string) string {
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 
-// pushCollapseKey derives the opaque collapse key for a device and window: a
-// window has one notification slot, so a newer push for it replaces the older
-// one instead of stacking. A routine push never replaces a request still
-// waiting on the user: a finished turn only follows an answered one, and a
-// window alert is not pushed while the window is blocked (see
-// alertRedundantLocked). kind is kept for callers; it no longer splits slots.
+// pushCollapseKey derives the opaque collapse key for a device, window and
+// kind group: approvals and questions are one group and everything else the
+// other, so a newer push replaces an older one of its group but a routine
+// one never replaces a request still waiting on the user.
 func pushCollapseKey(salt []byte, deviceID string, session string, windowID string, kind string) string {
-	_ = kind
+	group := "update"
+	if kind == pushKindPermission || kind == pushKindInput {
+		group = "attention"
+	}
 	mac := hmac.New(sha256.New, salt)
 	mac.Write([]byte(deviceID))
 	mac.Write([]byte{'\n'})
@@ -120,6 +121,6 @@ func pushCollapseKey(salt []byte, deviceID string, session string, windowID stri
 	mac.Write([]byte{'\n'})
 	mac.Write([]byte(windowID))
 	mac.Write([]byte{'\n'})
-	mac.Write([]byte("window"))
+	mac.Write([]byte(group))
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }

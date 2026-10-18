@@ -131,6 +131,7 @@ void registerTmuxAlertTrackerTests() {
           buildWindowNotificationId(3, 'play', '@2'),
           buildWindowNotificationId(3, 'work', '@3'),
           buildWindowNotificationId(3, 'work', 'index:2'),
+          buildWindowNotificationId(3, 'work', '@2', request: true),
         ]) {
           expect(other, isNot(slot));
         }

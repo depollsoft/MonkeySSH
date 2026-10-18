@@ -842,11 +842,7 @@ type muxWindow struct {
 	notificationOscSeq uint64
 	// notificationOscs holds unacknowledged background desktop
 	// notifications, oldest first. Bounded; selecting the window clears it.
-	notificationOscs []pendingWindowOscNotification
-	// statusEventSeq counts the program status changes that call for a push
-	// (see programStatusPushKinds), so the push notifier can tell the
-	// window's current status event from an earlier one.
-	statusEventSeq             uint64
+	notificationOscs           []pendingWindowOscNotification
 	historyStartTerminalOutput terminalOutputParserSnapshot
 	terminalOutputForwarding   bool
 	lastActivity               time.Time
@@ -7061,7 +7057,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			after.programStatus,
 		)
 	}
-	window.statusEventSeq += uint64(len(statusPushes))
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
@@ -17286,9 +17281,7 @@ func (s *muxServer) close() {
 	}
 	teardown := s.beginShutdownLocked(false)
 	s.mu.Unlock()
-	drained := s.startPushDrain()
 	teardown()
-	<-drained
 }
 
 // closeIfIdle ends a session whose last window went away. The decision is
@@ -17300,9 +17293,7 @@ func (s *muxServer) closeIfIdle() {
 	teardown := s.beginIdleShutdownLocked()
 	s.mu.Unlock()
 	if teardown != nil {
-		drained := s.startPushDrain()
 		teardown()
-		<-drained
 	}
 }
 
@@ -17330,6 +17321,9 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 	s.closed = true
 	s.closeDone = make(chan struct{})
 	closeDone := s.closeDone
+	// Pushes still on their way go out beside the teardown, and a later
+	// close() waits for them through closeDone.
+	drained := s.startPushDrain()
 	listener := s.listener
 	socket := s.socketPath
 	identity := s.socketIdentity
@@ -17363,7 +17357,10 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		window.clearKittyGraphicsPendingLocked()
 	}
 	return func() {
-		defer close(closeDone)
+		defer func() {
+			<-drained
+			close(closeDone)
+		}()
 		if listener != nil {
 			_ = listener.Close()
 		}

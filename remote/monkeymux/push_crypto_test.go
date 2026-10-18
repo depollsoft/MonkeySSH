@@ -230,17 +230,21 @@ func TestPushCollapseKeyIsStableAndOpaque(t *testing.T) {
 	if len(first) != 32 {
 		t.Fatalf("collapse key length = %d", len(first))
 	}
-	// A window has one notification slot: every kind replaces the last.
-	for _, kind := range []string{pushKindInput, pushKindFinished, pushKindAlert} {
-		if pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", kind) != first {
-			t.Fatalf("a %s push does not share the window's slot", kind)
-		}
+	// A question shares the approval's group, and an alert a finished turn's.
+	if pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindInput) != first {
+		t.Fatal("a question does not replace the window's approval")
+	}
+	if pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindAlert) !=
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindFinished) {
+		t.Fatal("routine pushes for a window do not share a collapse key")
 	}
 	for _, other := range []string{
 		pushCollapseKey(salt, "device-bbbbbbbbbbbbbbbb", "main", "@3", pushKindPermission),
 		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@4", pushKindPermission),
 		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "mai", "n@3", pushKindPermission),
 		pushCollapseKey([]byte("other"), "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindPermission),
+		// A routine push does not replace a request waiting on the user.
+		pushCollapseKey(salt, "device-aaaaaaaaaaaaaaaa", "main", "@3", pushKindFinished),
 	} {
 		if other == first {
 			t.Fatal("collapse keys collided")

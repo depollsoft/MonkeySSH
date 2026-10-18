@@ -1,3 +1,4 @@
+import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/local_notification_service.dart';
 
@@ -42,6 +43,8 @@ class TmuxAlertTracker {
         hostId,
         tmuxSessionName,
         windowKey,
+        // Beside the request its program waits on, not in the other slot.
+        request: window.programStatus?.state == TerminalProgramState.blocked,
       );
       _alertNotificationIdsByWindowKey[windowKey] = notificationId;
       onAlert(window, windows, notificationId, stableWindowId);

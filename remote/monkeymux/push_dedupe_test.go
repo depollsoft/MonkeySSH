@@ -1,10 +1,7 @@
 package main
 
 import (
-	"maps"
 	"net/http"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -99,30 +96,6 @@ func TestPushHeldAlertIsPushedOnceItsHoldPasses(t *testing.T) {
 	requests := h.endpoint.received()
 	if len(requests) != 1 || requests[0].Kind != pushKindAlert {
 		t.Fatalf("pushes = %q, want one alert for both categories", h.kinds())
-	}
-}
-
-// A device whose newer approval was not posted (its urgent budget is backing
-// off) still gets that approval's bell, which its routine budget allows: an
-// alert yields only to the status event the device was sent, not an earlier
-// one of the same kind.
-func TestPushAlertForAStatusThatWasNotSentIsPushed(t *testing.T) {
-	h := newPushTestHarness(t)
-	device := newPushTestDevice(t, 1)
-	h.registerEvents(t, device, nil)
-	h.addPushStatusWindow("@2", "")
-	h.writeStatus("@2", "state=working:app=claude-code")
-	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
-	h.writeStatus("@2", "state=working:app=claude-code")
-	h.clock.now = h.clock.now.Add(pushCoalesceWindow)
-	h.notifier.mu.Lock()
-	h.notifier.backoffUntil[pushBudgetKey{deviceID: device.id, budget: pushBudgetUrgent}] =
-		h.clock.now.Add(time.Hour)
-	h.notifier.mu.Unlock()
-	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
-	h.raise("@2", pushKindAlert)
-	if got := h.kinds(); got != "permission,alert" {
-		t.Fatalf("pushes = %q, want the first approval and the second one's bell", got)
 	}
 }
 
@@ -268,80 +241,6 @@ func TestPushAlertGivesWayOnlyToAStatusTheDeviceTakes(t *testing.T) {
 	}
 }
 
-// A window's pushes share one slot on the device, so they go one at a time:
-// an older push still retrying gives way to a newer status waiting, which
-// replaces any older push still waiting.
-func TestPushesForOneWindowGoInOrder(t *testing.T) {
-	h := newPushTestHarness(t)
-	n := h.notifier
-	job := func(kind string) pushJob {
-		return pushJob{deviceID: "device-1", ticket: "t", kind: kind, collapse: "c", payload: kind, windowID: "@2"}
-	}
-	results := map[string]string{}
-	var mu sync.Mutex
-	record := func(kind string) func(string) {
-		return func(result string) {
-			mu.Lock()
-			defer mu.Unlock()
-			results[kind] = result
-		}
-	}
-	h.endpoint.mu.Lock()
-	h.endpoint.statuses = []int{http.StatusInternalServerError}
-	h.endpoint.mu.Unlock()
-	queued := false
-	n.sleep = func(time.Duration) {
-		// The finished turn failed once; while it waits to retry, an alert
-		// and then an approval come for the same window.
-		if !queued {
-			queued = true
-			n.post(job(pushKindAlert), record(pushKindAlert))
-			n.post(job(pushKindPermission), record(pushKindPermission))
-		}
-	}
-	n.post(job(pushKindFinished), record(pushKindFinished))
-	n.inflight.Wait()
-	payloads := []string{}
-	for _, request := range h.endpoint.received() {
-		payloads = append(payloads, request.Payload)
-	}
-	if got := strings.Join(payloads, ","); got != "finished,permission" {
-		t.Fatalf("requests = %q, want the failed finished turn then the approval", got)
-	}
-	want := map[string]string{
-		pushKindFinished:   pushResultSuperseded,
-		pushKindAlert:      pushResultSuperseded,
-		pushKindPermission: pushResultSent,
-	}
-	if !maps.Equal(results, want) {
-		t.Fatalf("results = %v, want %v", results, want)
-	}
-}
-
-// An alert that comes while the window's approval is still retrying waits
-// behind it instead of taking its place, and gives way once it lands.
-func TestPushAlertWaitsBehindItsApprovalStillRetrying(t *testing.T) {
-	h := newPushTestHarness(t)
-	h.registerEvents(t, newPushTestDevice(t, 1), nil)
-	h.addPushStatusWindow("@2", "")
-	h.writeStatus("@2", "state=working:app=claude-code")
-	h.endpoint.mu.Lock()
-	h.endpoint.statuses = []int{http.StatusInternalServerError}
-	h.endpoint.mu.Unlock()
-	rang := false
-	h.notifier.sleep = func(time.Duration) {
-		if !rang {
-			rang = true
-			h.server.raisePushEvent("@2", pushKindAlert, "")
-		}
-	}
-	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
-	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "permission,permission" {
-		t.Fatalf("requests = %q, want the approval and its retry alone", got)
-	}
-}
-
 // An approval the function did not take (429) never reached the device, so
 // its bell still goes out through the routine budget.
 func TestPushAlertAfterAStatusThatFailedIsPushed(t *testing.T) {
@@ -359,9 +258,10 @@ func TestPushAlertAfterAStatusThatFailedIsPushed(t *testing.T) {
 	}
 }
 
-// Coalescing looks at what the window's slot shows: an approval right after a
-// finished turn replaced the earlier approval is pushed, not coalesced away.
-func TestPushApprovalAfterAFinishedTurnIsNotCoalesced(t *testing.T) {
+// An approval moments after a finished turn is coalesced into the earlier
+// approval still showing in the window's request slot, and its bell is not
+// pushed beside it.
+func TestPushBellOfACoalescedApprovalAfterAFinishedTurnIsNotPushed(t *testing.T) {
 	h := newPushTestHarness(t)
 	h.registerEvents(t, newPushTestDevice(t, 1), nil)
 	h.addPushStatusWindow("@2", "")
@@ -377,7 +277,53 @@ func TestPushApprovalAfterAFinishedTurnIsNotCoalesced(t *testing.T) {
 		h.clock.now = h.clock.now.Add(time.Second)
 	}
 	h.raise("@2", pushKindAlert)
-	if got := h.kinds(); got != "permission,finished,permission" {
-		t.Fatalf("pushes = %q, want both approvals and the turn between them", got)
+	if got := h.kinds(); got != "permission,finished" {
+		t.Fatalf("pushes = %q, want the approval and the turn alone", got)
+	}
+}
+
+// A bell whose window still has a status push on its way waits for it, so it
+// can give way to it, but not for long.
+func TestPushHeldAlertWaitsForAStatusOnItsWay(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.holdAlert("@2", pushAlertBell)
+	h.notifier.mu.Lock()
+	h.notifier.statusPosting["@2"] = 1
+	h.notifier.mu.Unlock()
+	h.clock.now = h.clock.now.Add(pushAlertHold)
+	if next := h.releaseHeld(); next <= 0 {
+		t.Fatalf("released the alert while its window's status was on its way")
+	}
+	if got := h.kinds(); got != "" {
+		t.Fatalf("pushed %q while waiting", got)
+	}
+	h.clock.now = h.clock.now.Add(pushStatusWait)
+	h.releaseHeld()
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("pushes = %q, want the alert once the wait ran out", got)
+	}
+}
+
+// A push that never arrived does not hold the next of its kind back: the
+// next approval within the coalescing window is sent.
+func TestPushApprovalAfterOneThatNeverArrivedIsSent(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.endpoint.mu.Lock()
+	h.endpoint.statuses = []int{http.StatusBadRequest}
+	h.endpoint.mu.Unlock()
+	for _, report := range []string{
+		"state=working:app=claude-code",
+		"state=blocked:app=claude-code:kind=permission",
+		"state=working:app=claude-code",
+		"state=blocked:app=claude-code:kind=permission",
+	} {
+		h.writeStatus("@2", report)
+		h.clock.now = h.clock.now.Add(time.Second)
+	}
+	if got := h.kinds(); got != "permission,permission" {
+		t.Fatalf("requests = %q, want the refused approval and the next one", got)
 	}
 }

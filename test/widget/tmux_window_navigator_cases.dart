@@ -1189,6 +1189,45 @@ void registerTmuxWindowNavigatorTests() {
           );
         });
 
+        // While its program waits on the user, a window's bell goes to the
+        // slot the push for that request uses (one notification on Android)
+        // and says what it waits for; otherwise it stays out of that slot so
+        // it never replaces a request.
+        testWidgets('a bell while the program waits shares the request slot', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+              flags: '!',
+              programStatus: TerminalProgramStatus(
+                state: TerminalProgramState.blocked,
+                kind: TerminalProgramBlockedKind.permission,
+              ),
+            ),
+            ringing('@3', []),
+          ]);
+          expect(notifications.shown.map((n) => (n.id, n.body)), [
+            (
+              buildWindowNotificationId(
+                session.hostId,
+                'main',
+                '@2',
+                request: true,
+              ),
+              'Window #2 needs approval',
+            ),
+            (
+              buildWindowNotificationId(session.hostId, 'main', '@3'),
+              'Window #3 needs attention',
+            ),
+          ]);
+        });
+
         // A window's slot has one owner: the newest notification in it. An
         // older or unshown one going away must not clear it.
         testWidgets('a bell keeps its slot when an older notification closes', (

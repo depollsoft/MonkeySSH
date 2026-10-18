@@ -421,19 +421,25 @@ const _pushChannelIds = {
   pushAgentUpdatesChannelId,
 };
 
-/// The notification slot for one multiplexer window: its bell alerts, the
-/// program notifications its server forwards, and (on Android) the pushes for
-/// it all share it, so a window shows one notification however many events
-/// or connections raise them. [windowKey] is the window's stable id (such as
-/// `@3`), else `index:<n>`. Stable across runs and isolates (FNV-1a), so a
-/// newer event replaces one an earlier run posted; namespaced away from agent
-/// chat ids.
+/// A notification slot for one multiplexer window. A window has two, as its
+/// pushes do (see MonkeyMux's collapse key): one for a request its program
+/// waits on ([request], an approval or a question) and one for everything
+/// else, so a routine event never replaces a request. Its bell alerts, the
+/// program notifications its server forwards and (on Android) its pushes
+/// share them, so a window shows one notification per slot however many
+/// events or connections raise them; a bell while the program waits goes to
+/// the request slot. [windowKey] is the window's stable id (such as `@3`),
+/// else `index:<n>`. Stable across runs and isolates (FNV-1a), so a newer
+/// event replaces one an earlier run posted; namespaced away from agent chat
+/// ids.
 int buildWindowNotificationId(
   int hostId,
   String tmuxSessionName,
-  String windowKey,
-) {
-  final value = 'window|$hostId|$tmuxSessionName|$windowKey';
+  String windowKey, {
+  bool request = false,
+}) {
+  final value =
+      'window|$hostId|$tmuxSessionName|$windowKey${request ? '|request' : ''}';
   var hash = 0x811c9dc5;
   for (final unit in utf8.encode(value)) {
     hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
@@ -941,9 +947,11 @@ class LocalNotificationService {
           if (defaultTargetPlatform == TargetPlatform.android) {
             final active = await _plugin.getActiveNotifications();
             if (active.any(
+              // Android before 8 has no channels; the tap payload tells too.
               (notification) =>
                   notification.id == notificationId &&
-                  _pushChannelIds.contains(notification.channelId),
+                  (_pushChannelIds.contains(notification.channelId) ||
+                      decodePushTapPayload(notification.payload) != null),
             )) {
               return;
             }
@@ -951,6 +959,9 @@ class LocalNotificationService {
           await _plugin.cancel(id: notificationId);
         } on MissingPluginException {
           // Widget and unit tests don't register platform notification plugins.
+        } on PlatformException {
+          // Without the list a push may be in the slot; a stale bell is the
+          // smaller harm than a removed approval.
         }
       });
 

@@ -43,30 +43,32 @@ const (
 	pushLocalTTL = 25 * time.Second
 	// One-off events skipped because the app claimed to alert locally are kept
 	// this long and sent if that claim lapses first.
-	pushDeferWindow    = 2 * time.Minute
-	pushViewGrace      = 30 * time.Second
-	pushCoalesceWindow = 30 * time.Second
-	pushHourlyCap      = 20
-	pushRequestTimeout = 10 * time.Second
-	// pushDrainTimeout bounds how long a closing server waits for its pushes
-	// in flight.
-	pushDrainTimeout       = 2 * time.Second
+	pushDeferWindow        = 2 * time.Minute
+	pushViewGrace          = 30 * time.Second
+	pushCoalesceWindow     = 30 * time.Second
+	pushHourlyCap          = 20
+	pushRequestTimeout     = 10 * time.Second
 	pushDefaultBackoff     = 60 * time.Second
 	pushMaxBackoff         = time.Hour
 	pushMaxConcurrentPosts = 4
 	pushBridgePollInterval = 2 * time.Second
 	pushResponseBodyLimit  = 4096
 	pushEventQueueSize     = 64
-	// An agent that needs the user or finishes its turn often rings the bell
-	// or posts a desktop notification too. A window alert within this long
-	// after the window's status push is the same event and is not pushed:
-	// the window has one notification, and the status push says more.
+	// pushStatusAlertGrace is how long after a finished turn reached a
+	// device a bell or desktop notification from that window is taken for
+	// the turn's own (see alertRedundantLocked).
 	pushStatusAlertGrace = 15 * time.Second
+	// pushStatusWait bounds how much longer a window alert is held while a
+	// status push for its window is still on its way.
+	pushStatusWait = 5 * time.Second
+	// pushDrainTimeout bounds how long a closing server waits for its pushes
+	// in flight.
+	pushDrainTimeout = 2 * time.Second
 )
 
-// pushAlertHold is how long a window alert waits before it is pushed, so a
-// status change the same output reports (often in the next read) wins. Tests
-// shorten it.
+// pushAlertHold is how long a window alert waits before it is pushed: an
+// agent that needs the user or finishes often rings first and reports its
+// status in the next chunk, and that status is the better notification.
 var pushAlertHold = 1500 * time.Millisecond
 
 // Event categories a registration can ask for (push_register's events).
@@ -163,13 +165,6 @@ type pushAlertEvent struct {
 	kind       string
 }
 
-// pushHeldAlert is a window alert waiting out pushAlertHold.
-type pushHeldAlert struct {
-	windowID   string
-	categories pushAlertCategories
-	at         time.Time
-}
-
 // Results reported by push_test and push_register.
 const (
 	pushResultSent          = "sent"
@@ -179,9 +174,6 @@ const (
 	pushResultRateLimited   = "rate_limited"
 	pushResultCapped        = "capped"
 	pushResultFailed        = "failed"
-	// A newer push for the same window reached the device first; sending this
-	// one would replace it in the window's slot.
-	pushResultSuperseded = "superseded"
 	// The function refused the event itself (400, 413, 415, other 4xx);
 	// sending it again cannot help.
 	pushResultRejected   = "rejected"
@@ -320,15 +312,10 @@ type pushServerView struct {
 	agents map[string]string
 	titles map[string]string
 	// blocked holds, for each window whose program reports it is waiting on
-	// the user (OSC 7501 blocked), the push kind of that request.
-	blocked map[string]string
-	// finished holds the windows whose program reports it finished (done or
-	// idle); a program that works again, waits on the user or exited no
-	// longer does.
+	// the user (OSC 7501 blocked), the push kind of that request; finished
+	// holds the windows whose program reports done or idle.
+	blocked  map[string]string
 	finished map[string]bool
-	// statusSeq holds each window's statusEventSeq: which status event is its
-	// current one.
-	statusSeq map[string]uint64
 }
 
 // pushJob is one event addressed to one device.
@@ -338,13 +325,18 @@ type pushJob struct {
 	kind     string
 	collapse string
 	payload  string
-	// windowID names the window's slot on the device (see post); seq is the
-	// window's status event a status push is for (see statusSent).
+	// windowID is the window the push is for.
 	windowID string
-	seq      uint64
-	// still, when set, says just before each attempt whether the push is
-	// still wanted: an alert gives way to a status delivered meanwhile.
-	still func() bool
+	// admittedAt is when coalescing admitted the push (see admitLocked), or
+	// zero; a push that never arrives does not hold the next one back.
+	admittedAt time.Time
+}
+
+// pushHeldAlert is a window alert waiting out pushAlertHold.
+type pushHeldAlert struct {
+	windowID   string
+	categories pushAlertCategories
+	at         time.Time
 }
 
 // pushNotifier holds a server's push state. Its mutex is never held while the
@@ -373,14 +365,15 @@ type pushNotifier struct {
 	// held are window alerts waiting out pushAlertHold.
 	held []pushHeldAlert
 	// statusSent records, per device and window, the last program status
-	// push posted to that device, so the event's own alert is not pushed as
-	// well.
-	statusSent map[pushDeviceWindow]pushStatusSent
-	// slotQueues serializes the pushes for each device's window slot (see
-	// post).
-	slotQueues map[pushDeviceWindow]*pushSlotQueue
-	// inflight tracks posts so tests can wait for them.
+	// push that reached the device, so the event's own alert is not pushed
+	// as well; statusPosting counts the status pushes per window still on
+	// their way.
+	statusSent    map[pushDeviceWindow]pushStatusSent
+	statusPosting map[string]int
+	// inflight tracks posts so tests can wait for them, and queued the window
+	// events taken in but not yet raised or held.
 	inflight sync.WaitGroup
+	queued   sync.WaitGroup
 }
 
 func newPushNotifier() *pushNotifier {
@@ -389,20 +382,20 @@ func newPushNotifier() *pushNotifier {
 		endpoint = defaultPushEndpoint
 	}
 	notifier := &pushNotifier{
-		endpoint:     endpoint,
-		client:       &http.Client{Timeout: pushRequestTimeout},
-		now:          time.Now,
-		sleep:        time.Sleep,
-		posts:        make(chan struct{}, pushMaxConcurrentPosts),
-		alerts:       make(chan pushAlertEvent, pushEventQueueSize),
-		presence:     map[string]*pushPresence{},
-		lastSent:     map[pushCoalesceKey]time.Time{},
-		sentTimes:    map[pushBudgetKey][]time.Time{},
-		backoffUntil: map[pushBudgetKey]time.Time{},
-		bridges:      map[string]pushBridgeBaseline{},
-		delivered:    map[pushAttentionKey]uint64{},
-		statusSent:   map[pushDeviceWindow]pushStatusSent{},
-		slotQueues:   map[pushDeviceWindow]*pushSlotQueue{},
+		endpoint:      endpoint,
+		client:        &http.Client{Timeout: pushRequestTimeout},
+		now:           time.Now,
+		sleep:         time.Sleep,
+		posts:         make(chan struct{}, pushMaxConcurrentPosts),
+		alerts:        make(chan pushAlertEvent, pushEventQueueSize),
+		presence:      map[string]*pushPresence{},
+		lastSent:      map[pushCoalesceKey]time.Time{},
+		sentTimes:     map[pushBudgetKey][]time.Time{},
+		backoffUntil:  map[pushBudgetKey]time.Time{},
+		bridges:       map[string]pushBridgeBaseline{},
+		delivered:     map[pushAttentionKey]uint64{},
+		statusSent:    map[pushDeviceWindow]pushStatusSent{},
+		statusPosting: map[string]int{},
 	}
 	notifier.store.now = func() time.Time { return notifier.now() }
 	return notifier
@@ -488,11 +481,7 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 		clientID := strings.TrimSpace(request.ClientID)
 		view := s.pushView([]string{clientID})
 		notifier.recordPresence(deviceID, clientID, push, view)
-		return controlResponse{
-			ID:     request.ID,
-			Type:   "push_presence_ack",
-			Status: "ok",
-		}
+		return controlResponse{ID: request.ID, Type: "push_presence_ack", Status: "ok"}
 	case "push_test":
 		if !pushDeviceIDPattern.MatchString(deviceID) {
 			return fail(errPushInvalidDeviceID)
@@ -616,23 +605,20 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	view := pushServerView{
-		session:   s.session,
-		activeID:  s.activeID,
-		attached:  map[string]bool{},
-		agents:    map[string]string{},
-		titles:    map[string]string{},
-		blocked:   map[string]string{},
-		finished:  map[string]bool{},
-		statusSeq: map[string]uint64{},
+		session:  s.session,
+		activeID: s.activeID,
+		attached: map[string]bool{},
+		agents:   map[string]string{},
+		titles:   map[string]string{},
+		blocked:  map[string]string{},
+		finished: map[string]bool{},
 	}
 	for _, window := range s.windows {
-		summary := window.programStatusSummaryLocked()
-		if summary.state == "done" || summary.state == "idle" {
-			view.finished[window.id] = true
-		}
-		view.statusSeq[window.id] = window.statusEventSeq
-		if summary.state == "blocked" {
+		switch summary := window.programStatusSummaryLocked(); summary.state {
+		case "blocked":
 			view.blocked[window.id] = programStatusPushKind(programStatusSummary{}, summary)
+		case "done", "idle":
+			view.finished[window.id] = true
 		}
 		// The resolved tool, as the window bar shows it: the live command, else
 		// what the window retains (its recorded tool, title or name).
@@ -725,9 +711,8 @@ func (n *pushNotifier) attendingLocked(
 
 // coveredLocallyLocked reports whether the app on that device is alive in the
 // background with this attach and says it raises this event itself: window
-// alerts while its window bar is mounted, terminal programs' status events
-// when it claims them, and native agent events from a bridge it is attached
-// to. For an alert, alerts are the categories the
+// alerts while its window bar is mounted, and native agent events from a
+// bridge it is attached to. For an alert, alerts are the categories the
 // device would be told about, and the app must cover each of them. The claim
 // lapses after pushLocalTTL.
 func (n *pushNotifier) coveredLocallyLocked(
@@ -752,30 +737,7 @@ func (n *pushNotifier) coveredLocallyLocked(
 		}
 		return true
 	}
-	if bridgeID != "" {
-		return presence.localBridges[bridgeID]
-	}
-	return false
-}
-
-// pushSlotKinds are the kinds that share a window's notification slot.
-var pushSlotKinds = [...]string{pushKindPermission, pushKindInput, pushKindFinished, pushKindAlert}
-
-// showingLocked reports whether an event of key was posted within the
-// coalescing window and is still the newest in its window's slot, so the
-// device still shows it. One of another kind posted since replaced it.
-func (n *pushNotifier) showingLocked(key pushCoalesceKey, now time.Time) bool {
-	last, ok := n.lastSent[key]
-	if !ok || now.Sub(last) >= pushCoalesceWindow {
-		return false
-	}
-	for _, kind := range pushSlotKinds {
-		other := pushCoalesceKey{deviceID: key.deviceID, windowID: key.windowID, kind: kind}
-		if at, ok := n.lastSent[other]; ok && kind != key.kind && at.After(last) {
-			return false
-		}
-	}
-	return true
+	return bridgeID != "" && presence.localBridges[bridgeID]
 }
 
 // admitLocked applies backoff, coalescing and the hourly cap of the event's
@@ -788,8 +750,10 @@ func (n *pushNotifier) admitLocked(key pushCoalesceKey, now time.Time, coalesce 
 		}
 		delete(n.backoffUntil, budget)
 	}
-	if coalesce && n.showingLocked(key, now) {
-		return pushResultCapped
+	if coalesce {
+		if last, ok := n.lastSent[key]; ok && now.Sub(last) < pushCoalesceWindow {
+			return pushResultCapped
+		}
 	}
 	recent := n.sentTimes[budget][:0]
 	for _, at := range n.sentTimes[budget] {
@@ -844,10 +808,26 @@ func (s *muxServer) notePushAlert(windowID string, categories pushAlertCategorie
 	if categories == 0 || !notifier.store.mayHaveDevices() {
 		return
 	}
+	notifier.enqueue(pushAlertEvent{windowID: windowID, categories: categories})
+}
+
+// enqueue queues event for the push loop, counted in queued until it is
+// raised or held (see consumePushAlertEvent), so a closing server's drain
+// waits for one the loop already took.
+func (n *pushNotifier) enqueue(event pushAlertEvent) {
+	n.queued.Add(1)
 	select {
-	case notifier.alerts <- pushAlertEvent{windowID: windowID, categories: categories}:
+	case n.alerts <- event:
 	default:
+		n.queued.Done()
 	}
+}
+
+// consumePushAlertEvent delivers an event taken from the queue and ends its
+// count in queued.
+func (s *muxServer) consumePushAlertEvent(event pushAlertEvent) {
+	defer s.pushNotifier().queued.Done()
+	s.deliverPushAlertEvent(event)
 }
 
 // notePushProgramStatus queues the push a window's program status change calls
@@ -857,17 +837,13 @@ func (s *muxServer) notePushProgramStatus(windowID string, kind string) {
 	if kind == "" || !notifier.store.mayHaveDevices() {
 		return
 	}
-	select {
-	case notifier.alerts <- pushAlertEvent{windowID: windowID, kind: kind}:
-	default:
-	}
+	notifier.enqueue(pushAlertEvent{windowID: windowID, kind: kind})
 }
 
 // deliverPushAlertEvent raises the push for an event the PTY reader queued. A
 // status change is pushed at once; an alert waits out pushAlertHold (see
 // releaseHeldPushAlerts) so a status change right after it wins.
 func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
-	notifier := s.pushNotifier()
 	if event.kind != "" {
 		s.raisePush(event.windowID, event.kind, "", 0)
 		return
@@ -875,6 +851,12 @@ func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
 	if event.categories == 0 {
 		return
 	}
+	if s.isClosed() {
+		// Nothing releases a hold any more.
+		s.raisePushAlert(event.windowID, event.categories)
+		return
+	}
+	notifier := s.pushNotifier()
 	notifier.mu.Lock()
 	defer notifier.mu.Unlock()
 	for index, held := range notifier.held {
@@ -893,41 +875,10 @@ func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
 	})
 }
 
-// startPushDrain sends the window events still queued or held, which were
-// taken in before the server closed, and returns a channel closed once the
-// posts in flight finish or pushDrainTimeout passes, so a session that ends
-// right after an alert still delivers it before the process exits. It runs
-// beside the server's teardown, inside the time an upgrade gives the
-// outgoing helper.
-func (s *muxServer) startPushDrain() <-chan struct{} {
-	notifier := s.pushNotifier()
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		finished := make(chan struct{})
-		go func() {
-			defer close(finished)
-			for queued := true; queued; {
-				select {
-				case event := <-notifier.alerts:
-					s.deliverPushAlertEvent(event)
-				default:
-					queued = false
-				}
-			}
-			s.releaseHeldPushAlertsAt(true)
-			notifier.inflight.Wait()
-		}()
-		select {
-		case <-finished:
-		case <-time.After(pushDrainTimeout):
-		}
-	}()
-	return drained
-}
-
 // releaseHeldPushAlerts pushes the held alerts whose hold has passed, and
-// returns how long until the next one is due, or 0 when none is held.
+// returns how long until the next one is due, or 0 when none is held. An
+// alert whose window still has a status push on its way waits for it (up to
+// pushStatusWait more), so it can give way to that status.
 func (s *muxServer) releaseHeldPushAlerts() time.Duration {
 	return s.releaseHeldPushAlertsAt(false)
 }
@@ -943,6 +894,9 @@ func (s *muxServer) releaseHeldPushAlertsAt(all bool) time.Duration {
 	var next time.Duration
 	for _, held := range notifier.held {
 		wait := pushAlertHold - now.Sub(held.at)
+		if wait <= 0 && notifier.statusPosting[held.windowID] > 0 {
+			wait = min(pushAlertHold+pushStatusWait-now.Sub(held.at), 250*time.Millisecond)
+		}
 		if all || wait <= 0 {
 			due = append(due, held)
 			continue
@@ -963,32 +917,62 @@ func (s *muxServer) releaseHeldPushAlertsAt(all bool) time.Duration {
 	return next
 }
 
+// startPushDrain raises the window events still queued or held, which were
+// taken in before the server closed, and returns a channel closed once the
+// posts in flight finish or pushDrainTimeout passes, so a session that ends
+// right after an alert still delivers it before the process exits. It runs
+// beside the server's teardown, inside the time an upgrade gives the
+// outgoing helper.
+func (s *muxServer) startPushDrain() <-chan struct{} {
+	notifier := s.pushNotifier()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			for queued := true; queued; {
+				select {
+				case event := <-notifier.alerts:
+					s.consumePushAlertEvent(event)
+				default:
+					queued = false
+				}
+			}
+			// One the loop took is raised (not held) once it sees the close.
+			notifier.queued.Wait()
+			s.releaseHeldPushAlertsAt(true)
+			notifier.inflight.Wait()
+		}()
+		select {
+		case <-finished:
+		case <-time.After(pushDrainTimeout):
+		}
+	}()
+	return drained
+}
+
 // pushDeviceWindow names one device's view of one window.
 type pushDeviceWindow struct {
 	deviceID string
 	windowID string
 }
 
-// pushStatusSent is a program status push posted to a device: its kind, the
-// window's status event it was for (statusEventSeq), and when.
+// pushStatusSent is what a device's two notification slots for a window last
+// got from program status: the request (attention) kind, and when a
+// finished turn arrived.
 type pushStatusSent struct {
-	kind string
-	seq  uint64
-	at   time.Time
+	attention  string
+	finishedAt time.Time
+	at         time.Time
 }
 
 // maxPushStatusSent bounds statusSent; the oldest record goes first.
 const maxPushStatusSent = 256
 
-// noteStatusSentLocked records that a status push of kind for the window's
-// status event seq reached deviceID.
-func (n *pushNotifier) noteStatusSentLocked(
-	deviceID string,
-	windowID string,
-	kind string,
-	seq uint64,
-	now time.Time,
-) {
+// noteStatusSentLocked records that a status push of kind for windowID
+// reached deviceID.
+func (n *pushNotifier) noteStatusSentLocked(deviceID string, windowID string, kind string, now time.Time) {
 	key := pushDeviceWindow{deviceID: deviceID, windowID: windowID}
 	if _, ok := n.statusSent[key]; !ok && len(n.statusSent) >= maxPushStatusSent {
 		var oldest pushDeviceWindow
@@ -1000,16 +984,23 @@ func (n *pushNotifier) noteStatusSentLocked(
 		}
 		delete(n.statusSent, oldest)
 	}
-	n.statusSent[key] = pushStatusSent{kind: kind, seq: seq, at: now}
+	sent := n.statusSent[key]
+	if kind == pushKindFinished {
+		sent.finishedAt = now
+	} else {
+		sent.attention = kind
+	}
+	sent.at = now
+	n.statusSent[key] = sent
 }
 
-// alertRedundantLocked reports whether a window alert would only repeat the
-// status device was sent for the window's current status event: the program
-// still waits on that approval or question, or that turn finished a moment
-// ago and the program still reports so. Pushing the alert would replace that
-// better notification, which shares the window's slot. Anything else (a
-// status the device turned off or was never sent, a newer event, a program
-// that works again or exited) leaves the alert as all the device hears.
+// alertRedundantLocked reports whether a window alert would only repeat a
+// status that reached device for the window and still holds: the program
+// waits on a request of the kind the device's request slot shows, or a turn
+// finished under pushStatusAlertGrace ago and the program still reports done
+// or idle. Anything else (a status the device turned off or never got, a
+// program that works again or exited) leaves the alert as all the device
+// hears.
 func (n *pushNotifier) alertRedundantLocked(
 	device pushDeviceRecord,
 	windowID string,
@@ -1017,16 +1008,14 @@ func (n *pushNotifier) alertRedundantLocked(
 	now time.Time,
 ) bool {
 	sent, ok := n.statusSent[pushDeviceWindow{deviceID: device.DeviceID, windowID: windowID}]
-	if !ok || sent.seq != view.statusSeq[windowID] {
+	if !ok {
 		return false
 	}
-	switch sent.kind {
-	case pushKindPermission, pushKindInput:
-		return view.blocked[windowID] == sent.kind
-	case pushKindFinished:
-		return view.finished[windowID] && now.Sub(sent.at) < pushStatusAlertGrace
+	if kind := view.blocked[windowID]; kind != "" {
+		return sent.attention == kind
 	}
-	return false
+	return view.finished[windowID] && !sent.finishedAt.IsZero() &&
+		now.Sub(sent.finishedAt) < pushStatusAlertGrace
 }
 
 // programStatusPushKind is the push a terminal program's OSC 7501 status
@@ -1115,7 +1104,7 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 		record pushDeviceRecord
 		alerts pushAlertCategories
 	}
-	recipients := make([]admittedDevice, 0, len(devices))
+	admitted := make([]admittedDevice, 0, len(devices))
 	for _, device := range pushRecipients(devices, kind, alerts) {
 		if notifier.attendingLocked(device.DeviceID, windowID, view, now) ||
 			(kind == pushKindAlert && notifier.alertRedundantLocked(device, windowID, view, now)) {
@@ -1135,35 +1124,18 @@ func (s *muxServer) raisePush(windowID string, kind string, bridgeID string, ale
 		}
 		key := pushCoalesceKey{deviceID: device.DeviceID, windowID: windowID, kind: kind}
 		if notifier.admitLocked(key, now, true) != "" {
-			// A status coalesced into the delivered one of its kind still
-			// showing stands for this event too.
-			sentKey := pushDeviceWindow{deviceID: device.DeviceID, windowID: windowID}
-			if sent, ok := notifier.statusSent[sentKey]; ok && sent.kind == kind &&
-				notifier.showingLocked(key, now) {
-				sent.seq = view.statusSeq[windowID]
-				notifier.statusSent[sentKey] = sent
-			}
 			continue
 		}
-		recipients = append(recipients, admittedDevice{device, wanted})
+		admitted = append(admitted, admittedDevice{device, wanted})
 	}
 	notifier.mu.Unlock()
 
-	for _, entry := range recipients {
+	for _, entry := range admitted {
 		job, err := buildPushJob(entry.record, salt, view.session, windowID, view.agents[windowID], view.titles[windowID], kind, entry.alerts, now)
 		if err != nil {
 			continue
 		}
-		job.seq = view.statusSeq[windowID]
-		if kind == pushKindAlert {
-			device := entry.record
-			job.still = func() bool {
-				view := s.pushView(nil)
-				notifier.mu.Lock()
-				defer notifier.mu.Unlock()
-				return !notifier.alertRedundantLocked(device, windowID, view, notifier.now())
-			}
-		}
+		job.admittedAt = now
 		notifier.post(job, nil)
 	}
 }
@@ -1227,10 +1199,9 @@ func (s *muxServer) raisePushAttention(
 		_ = pushRecordBridgeDelivered(bridgeID, key.deviceID, kind, generation)
 		notifier.post(job, func(result string) {
 			switch result {
-			case pushResultSent, pushResultRejected, pushResultSuperseded:
-				// Delivered, the function refused the event itself, or a
-				// newer push for the window is showing: sending it again
-				// cannot help.
+			case pushResultSent, pushResultRejected:
+				// Delivered, or the function refused the event itself:
+				// sending it again cannot help.
 				return
 			}
 			// Not delivered: throttled, failed, or the registration was
@@ -1262,41 +1233,26 @@ func (n *pushNotifier) presenceClientIDs() []string {
 	return clientIDs
 }
 
-// post delivers job in the background and reports the result to done. The
-// pushes for one device's window share its notification slot there, so they
-// go one at a time, in order (see pushSlotQueue).
+// post delivers job in the background and reports the result to done.
 func (n *pushNotifier) post(job pushJob, done func(string)) {
-	n.inflight.Add(1)
-	if job.windowID != "" {
-		slot := pushDeviceWindow{deviceID: job.deviceID, windowID: job.windowID}
+	status := job.windowID != "" && job.kind != pushKindAlert && job.kind != pushKindTest
+	if status {
 		n.mu.Lock()
-		if queue, running := n.slotQueues[slot]; running {
-			var replaced []pushSlotEntry
-			kept := queue.pending[:0:0]
-			for _, waiting := range queue.pending {
-				if job.kind != pushKindAlert || waiting.job.kind == pushKindAlert {
-					replaced = append(replaced, waiting)
-				} else {
-					kept = append(kept, waiting)
-				}
-			}
-			queue.pending = append(kept, pushSlotEntry{job: job, done: done})
-			n.mu.Unlock()
-			for _, waiting := range replaced {
-				if waiting.done != nil {
-					waiting.done(pushResultSuperseded)
-				}
-				n.inflight.Done()
-			}
-			return
-		}
-		n.slotQueues[slot] = &pushSlotQueue{}
+		n.statusPosting[job.windowID]++
 		n.mu.Unlock()
-		go n.runSlot(slot, pushSlotEntry{job: job, done: done})
-		return
 	}
+	n.inflight.Add(1)
 	go func() {
 		defer n.inflight.Done()
+		if status {
+			defer func() {
+				n.mu.Lock()
+				if n.statusPosting[job.windowID]--; n.statusPosting[job.windowID] <= 0 {
+					delete(n.statusPosting, job.windowID)
+				}
+				n.mu.Unlock()
+			}()
+		}
 		n.posts <- struct{}{}
 		defer func() { <-n.posts }()
 		result := n.deliver(job)
@@ -1515,7 +1471,18 @@ func buildPushJob(
 
 // deliver posts a job with retries and applies the function's answer.
 func (n *pushNotifier) deliver(job pushJob) string {
-	return n.deliverWithRetries(job, pushRetryDelays)
+	result := n.deliverWithRetries(job, pushRetryDelays)
+	if result != pushResultSent && !job.admittedAt.IsZero() {
+		// It never arrived, so the next event of its kind is not coalesced
+		// into it.
+		key := pushCoalesceKey{deviceID: job.deviceID, windowID: job.windowID, kind: job.kind}
+		n.mu.Lock()
+		if last, ok := n.lastSent[key]; ok && last.Equal(job.admittedAt) {
+			delete(n.lastSent, key)
+		}
+		n.mu.Unlock()
+	}
+	return result
 }
 
 func (n *pushNotifier) deliverWithRetries(job pushJob, retryDelays []time.Duration) string {
@@ -1529,16 +1496,16 @@ func (n *pushNotifier) deliverWithRetries(job pushJob, retryDelays []time.Durati
 		return pushResultFailed
 	}
 	for attempt := 0; ; attempt++ {
-		if n.superseded(job) || (job.still != nil && !job.still()) {
-			return pushResultSuperseded
-		}
 		status, retryAfter, err := n.postOnce(body)
 		switch {
 		case err == nil && status == http.StatusAccepted:
-			if job.kind != pushKindAlert && job.windowID != "" {
-				n.mu.Lock()
-				n.noteStatusSentLocked(job.deviceID, job.windowID, job.kind, job.seq, n.now())
-				n.mu.Unlock()
+			switch job.kind {
+			case pushKindPermission, pushKindInput, pushKindFinished:
+				if job.windowID != "" {
+					n.mu.Lock()
+					n.noteStatusSentLocked(job.deviceID, job.windowID, job.kind, n.now())
+					n.mu.Unlock()
+				}
 			}
 			return pushResultSent
 		case err == nil && status == http.StatusUnauthorized:
@@ -1558,64 +1525,6 @@ func (n *pushNotifier) deliverWithRetries(job pushJob, retryDelays []time.Durati
 		}
 		n.sleep(retryDelays[attempt])
 	}
-}
-
-// pushSlotQueue serializes the pushes for one device's window slot: one is
-// delivered at a time, so an older one can never land after a newer one and
-// replace it. A newer status replaces everything still waiting, and stops an
-// older push still retrying; an alert replaces only an older alert and waits
-// behind a status, then gives way to it if it was delivered.
-type pushSlotQueue struct {
-	pending []pushSlotEntry
-}
-
-// pushSlotEntry is a push waiting for its slot and what to tell when it ends.
-type pushSlotEntry struct {
-	job  pushJob
-	done func(string)
-}
-
-// runSlot delivers entry and then each push that came for slot meanwhile.
-func (n *pushNotifier) runSlot(slot pushDeviceWindow, entry pushSlotEntry) {
-	for {
-		n.posts <- struct{}{}
-		result := n.deliver(entry.job)
-		<-n.posts
-		if entry.done != nil {
-			entry.done(result)
-		}
-		n.inflight.Done()
-		n.mu.Lock()
-		queue := n.slotQueues[slot]
-		if len(queue.pending) == 0 {
-			delete(n.slotQueues, slot)
-			n.mu.Unlock()
-			return
-		}
-		entry = queue.pending[0]
-		queue.pending = queue.pending[1:]
-		n.mu.Unlock()
-	}
-}
-
-// superseded reports whether a newer status for job's slot is waiting, so
-// job's next attempt would only be replaced on the device.
-func (n *pushNotifier) superseded(job pushJob) bool {
-	if job.windowID == "" {
-		return false
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	queue, ok := n.slotQueues[pushDeviceWindow{deviceID: job.deviceID, windowID: job.windowID}]
-	if !ok {
-		return false
-	}
-	for _, waiting := range queue.pending {
-		if waiting.job.kind != pushKindAlert {
-			return true
-		}
-	}
-	return false
 }
 
 func (n *pushNotifier) postOnce(body []byte) (int, time.Duration, error) {
@@ -1705,7 +1614,7 @@ func (s *muxServer) startPushLoop() {
 		for {
 			select {
 			case alert := <-notifier.alerts:
-				s.deliverPushAlertEvent(alert)
+				s.consumePushAlertEvent(alert)
 				if hold == nil && alert.kind == "" {
 					hold = time.After(pushAlertHold)
 				}
@@ -1716,7 +1625,6 @@ func (s *muxServer) startPushLoop() {
 				}
 			case <-ticker.C:
 				if s.isClosed() {
-					// close drained what was held.
 					return
 				}
 				s.pollPushBridges()
@@ -1863,12 +1771,11 @@ func (s *muxServer) flushPushDeferred() {
 	}
 	notifier.deferred = kept
 	// A device whose status for a window goes out in this flush gets no alert
-	// for that window with it: both would land in the window's one slot.
-	type deviceWindow struct{ deviceID, windowID string }
-	statusDue := map[deviceWindow]bool{}
+	// for that window with it: the alert would replace the status there.
+	statusDue := map[pushDeviceWindow]bool{}
 	for _, event := range due {
 		if _, ok := recipient(event); ok && event.kind != pushKindAlert {
-			statusDue[deviceWindow{event.deviceID, event.windowID}] = true
+			statusDue[pushDeviceWindow{event.deviceID, event.windowID}] = true
 		}
 	}
 	type admittedEvent struct {
@@ -1882,7 +1789,7 @@ func (s *muxServer) flushPushDeferred() {
 			continue
 		}
 		if event.kind == pushKindAlert &&
-			(statusDue[deviceWindow{event.deviceID, event.windowID}] ||
+			(statusDue[pushDeviceWindow{event.deviceID, event.windowID}] ||
 				notifier.alertRedundantLocked(record, event.windowID, view, now)) {
 			continue
 		}
@@ -1909,7 +1816,7 @@ func (s *muxServer) flushPushDeferred() {
 		if err != nil {
 			continue
 		}
-		job.seq = view.statusSeq[entry.event.windowID]
+		job.admittedAt = now
 		notifier.post(job, nil)
 	}
 }
