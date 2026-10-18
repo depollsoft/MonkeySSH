@@ -1119,6 +1119,7 @@ void registerTmuxWindowNavigatorTests() {
           WidgetTester tester, {
           HostNotificationPrefs prefs = const HostNotificationPrefs(),
         }) async {
+          addTearDown(windowNotificationSlots.clear);
           notifications = _RecordingNotifications();
           events = StreamController<TmuxWindowChangeEvent>();
           addTearDown(events.close);
@@ -1253,6 +1254,25 @@ void registerTmuxWindowNavigatorTests() {
           await tester.pumpWidget(const SizedBox());
           expect(notifications.cleared, [
             buildWindowNotificationId(session.hostId, 'main', '@3'),
+          ]);
+
+          // The next bar clears it once the request is resolved.
+          await pumpBar(tester);
+          await show(tester, [
+            const TmuxWindow(
+              index: 2,
+              id: '@2',
+              name: 'claude',
+              isActive: false,
+            ),
+          ]);
+          expect(notifications.cleared, [
+            buildWindowNotificationId(
+              session.hostId,
+              'main',
+              '@2',
+              request: true,
+            ),
           ]);
         });
 

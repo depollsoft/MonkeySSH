@@ -475,6 +475,7 @@ int buildWindowNotificationId(
 /// clear the one that replaced it.
 class WindowNotificationSlots {
   final _owners = <int, Object>{};
+  final _kept = <int>{};
 
   /// Records [owner] as the poster of the notification in slot [id].
   void claim(int id, Object owner) => _owners[id] = owner;
@@ -486,9 +487,23 @@ class WindowNotificationSlots {
     return true;
   }
 
+  /// Releases slot [id] from [owner] but remembers it: a window bar closing
+  /// leaves a notification in a request slot (it may stand in for the
+  /// request's push), for a later bar to clear once the request is resolved
+  /// (see [takeKept]).
+  void keep(int id, Object owner) {
+    if (release(id, owner)) _kept.add(id);
+  }
+
+  /// Forgets kept slot [id] and returns whether it was kept.
+  bool takeKept(int id) => _kept.remove(id);
+
   /// Forgets every slot.
   @visibleForTesting
-  void clear() => _owners.clear();
+  void clear() {
+    _owners.clear();
+    _kept.clear();
+  }
 }
 
 /// The app-wide owners of window notification slots.

@@ -960,9 +960,12 @@ func (s *muxServer) startPushDrain() <-chan struct{} {
 			// so let those land first.
 			for deadline := time.Now().Add(pushDrainTimeout / 2); time.Now().Before(deadline); {
 				notifier.mu.Lock()
-				posting := len(notifier.statusPosting)
+				posting := false
+				for _, held := range notifier.held {
+					posting = posting || notifier.statusPosting[held.windowID] > 0
+				}
 				notifier.mu.Unlock()
-				if posting == 0 {
+				if !posting {
 					break
 				}
 				time.Sleep(20 * time.Millisecond)

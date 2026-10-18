@@ -678,9 +678,23 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     final previousTerminalModeSignature = activeTmuxWindowTerminalModeSignature(
       _windows,
     );
-    // A window has one notification slot. New bells wait until this
-    // snapshot's forwarded notifications are posted: a window that also has
-    // one shows that, since it says more, and gets one notification, not two.
+    // A request slot a closed bar left showing goes once its window's program
+    // no longer waits on the request.
+    for (final window in windows) {
+      if (window.programStatus?.state == TerminalProgramState.blocked) continue;
+      final id = buildWindowNotificationId(
+        widget.session.hostId,
+        widget.tmuxSessionName,
+        _tmuxAlertWindowKey(window),
+        request: true,
+      );
+      if (windowNotificationSlots.takeKept(id)) {
+        unawaited(_localNotifications.clearWindowNotification(id));
+      }
+    }
+    // New bells wait until this snapshot's forwarded notifications are
+    // posted: a window that also has one shows that, since it says more, and
+    // gets one notification, not two.
     final newAlerts =
         <({TmuxWindow window, int notificationId, String? windowId})>[];
     final hasNewAlert = _alertTracker.applyWindows(
@@ -973,7 +987,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   void _clearSeenAlertNotifications() {
     _alertTracker.clear(
       _clearBellNotification,
-      onKeep: (id) => windowNotificationSlots.release(id, _alertTracker),
+      onKeep: (id) => windowNotificationSlots.keep(id, _alertTracker),
     );
     _lastSeenForwardedNotificationsByWindowKey.clear();
     _forwardedNotificationParsersByWindowKey.clear();
@@ -1143,10 +1157,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     bool keepRequest = false,
   }) {
     final shown = _forwardedNotificationsByWindowKey.remove(windowKey);
-    // Only while it is still the one in the window's slot.
-    if (shown != null &&
-        windowNotificationSlots.release(shown.id, this) &&
-        !(keepRequest && shown.request)) {
+    if (shown == null) return;
+    if (keepRequest && shown.request) {
+      windowNotificationSlots.keep(shown.id, this);
+    } else if (windowNotificationSlots.release(shown.id, this)) {
+      // Only while it is still the one in the window's slot.
       unawaited(_localNotifications.clearWindowNotification(shown.id));
     }
   }
