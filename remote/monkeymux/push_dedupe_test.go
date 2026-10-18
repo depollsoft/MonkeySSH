@@ -1,6 +1,8 @@
 package main
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,17 +100,71 @@ func TestPushHeldAlertIsPushedOnceItsHoldPasses(t *testing.T) {
 	}
 }
 
-func TestPushPresenceAckSaysStatusClaimsAreHonored(t *testing.T) {
+// A turn that finishes and starts again within one read leaves the window's
+// status as it was, so nothing else in the snapshot changes; its status event
+// still reaches the clients, numbered, so a backgrounded app that claimed the
+// window's status raises it.
+func TestWindowStatusEventsReachClientsBetweenSnapshots(t *testing.T) {
+	server := newMuxServer("test")
+	control := newControlRecorder(server)
+	client := newControlClient(control)
+	window := &muxWindow{id: "@2", index: 1, name: "agent", lastActivity: time.Now()}
+	server.windows = []*muxWindow{{id: "@1", index: 0, lastActivity: time.Now()}, window}
+	server.activeID = "@1"
+	server.controls[client] = struct{}{}
+
+	server.handleWindowOutput("@2", []byte(programStatusOsc("state=working:app=claude-code")))
+	broadcasts := strings.Count(control.String(), `"type":"window_updated"`)
+	server.handleWindowOutput("@2", []byte(
+		programStatusOsc("state=done:app=claude-code")+programStatusOsc("state=working:app=claude-code"),
+	))
+	if got := strings.Count(control.String(), `"type":"window_updated"`) - broadcasts; got != 1 {
+		t.Fatalf("broadcasts for the finished turn = %d, want 1", got)
+	}
+	want := []windowStatusEvent{{Seq: 1, Kind: pushKindFinished}}
+	if got := server.snapshotLocked(window).StatusEvents; !slices.Equal(got, want) {
+		t.Fatalf("status events = %+v, want %+v", got, want)
+	}
+
+	// Only the latest few are kept, oldest first.
+	for range maxWindowStatusEvents + 1 {
+		server.handleWindowOutput("@2", []byte(
+			programStatusOsc("state=blocked:app=claude-code:kind=permission")+
+				programStatusOsc("state=working:app=claude-code"),
+		))
+	}
+	got := server.snapshotLocked(window).StatusEvents
+	if len(got) != maxWindowStatusEvents || got[0].Seq != 3 || got[len(got)-1].Kind != pushKindPermission {
+		t.Fatalf("status events = %+v, want the latest %d", got, maxWindowStatusEvents)
+	}
+}
+
+// Once the program that finished has gone, a bell in its window is someone
+// else's and is pushed.
+func TestPushAlertAfterTheProgramLeftIsPushed(t *testing.T) {
 	h := newPushTestHarness(t)
-	device := newPushTestDevice(t, 1)
-	h.register(t, device)
-	response := h.control(t, controlMessage{
-		Type:     "push_presence",
-		ClientID: "phone-client",
-		Push:     &pushControlRequest{DeviceID: device.id, Local: true, Status: true},
-	})
-	if response.Push == nil || !response.Push.Status {
-		t.Fatalf("presence ack = %+v, want the status claim acknowledged", response)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@3", "")
+	h.writeStatus("@3", "state=working:app=claude-code")
+	h.writeStatus("@3", "state=done:app=claude-code")
+	h.writeStatus("@3", "state=clear:app=claude-code")
+	h.clock.now = h.clock.now.Add(5 * time.Second)
+	h.raise("@3", pushKindAlert)
+	if got := h.kinds(); got != "finished,alert" {
+		t.Fatalf("pushes = %q, want the finished turn and the later alert", got)
+	}
+}
+
+// Alerts still held when the server closes were taken in before its end and
+// are sent, not dropped.
+func TestPushHeldAlertsAreSentWhenTheServerCloses(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.holdAlert("@4", pushAlertBell)
+	h.server.releaseHeldPushAlertsAt(true)
+	h.notifier.inflight.Wait()
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("pushes = %q, want the held alert", got)
 	}
 }
 

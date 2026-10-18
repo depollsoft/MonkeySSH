@@ -1190,6 +1190,23 @@ void registerTmuxWindowNavigatorTests() {
           );
         });
 
+        testWidgets('a bell keeps its slot when an older notification closes', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [
+            agent('@2', ['99;i=old;Building']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=old;Building']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=old;Building', '99;i=old:p=close;']),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          expect(notifications.cleared, isEmpty);
+        });
+
         testWidgets('the bell still notifies when notifications are off', (
           tester,
         ) async {
@@ -1208,8 +1225,11 @@ void registerTmuxWindowNavigatorTests() {
           );
         });
 
+        // The status MonkeyMux reports for an agent window, with the numbered
+        // status events it has raised so far (it keeps the latest few).
         TmuxWindow agentWithStatus(
           TerminalProgramStatus status, {
+          List<MuxWindowStatusKind> events = const [],
           List<String> payloads = const [],
           bool rang = false,
         }) => TmuxWindow(
@@ -1220,6 +1240,10 @@ void registerTmuxWindowNavigatorTests() {
           flags: rang ? '!' : '',
           agentTool: AgentLaunchTool.claudeCode,
           programStatus: status,
+          statusEvents: [
+            for (var i = 0; i < events.length; i++)
+              MuxWindowStatusEvent(seq: i + 1, kind: events[i]),
+          ],
           pendingNotifications: [
             for (var i = 0; i < payloads.length; i++)
               MuxWindowNotification(seq: i + 1, payload: payloads[i]),
@@ -1233,6 +1257,8 @@ void registerTmuxWindowNavigatorTests() {
           kind: TerminalProgramBlockedKind.permission,
         );
         const done = TerminalProgramStatus(state: TerminalProgramState.done);
+        const asked = MuxWindowStatusKind.permission;
+        const finished = MuxWindowStatusKind.finished;
 
         group('while the host keeps status pushes back', () {
           setUp(
@@ -1251,6 +1277,7 @@ void registerTmuxWindowNavigatorTests() {
             await show(tester, [
               agentWithStatus(
                 approval,
+                events: [asked],
                 rang: true,
                 payloads: ['9;Claude needs your permission'],
               ),
@@ -1268,6 +1295,7 @@ void registerTmuxWindowNavigatorTests() {
             await show(tester, [
               agentWithStatus(
                 approval,
+                events: [asked],
                 rang: true,
                 payloads: ['9;Claude needs your permission', '9;Still waiting'],
               ),
@@ -1275,12 +1303,18 @@ void registerTmuxWindowNavigatorTests() {
             expect(notifications.shown, hasLength(1));
 
             // The finished turn takes the window's slot.
-            await show(tester, [agentWithStatus(working)]);
-            await show(tester, [agentWithStatus(done)]);
+            await show(tester, [
+              agentWithStatus(working, events: [asked]),
+            ]);
+            await show(tester, [
+              agentWithStatus(done, events: [asked, finished]),
+            ]);
             expect(notifications.shown.map((n) => (n.title, n.id)), [
               ('Claude Code needs approval', slot),
               ('Claude Code finished', slot),
             ]);
+            // Nothing cleared the status the bell's slot now holds.
+            expect(notifications.cleared, isEmpty);
           });
 
           testWidgets('a finished turn and its notice are one notification', (
@@ -1289,20 +1323,96 @@ void registerTmuxWindowNavigatorTests() {
             await pumpBar(tester);
             await show(tester, [agentWithStatus(working)]);
             await show(tester, [
+              agentWithStatus(done, events: [finished]),
+            ]);
+            // The turn's notice comes a snapshot later.
+            await show(tester, [
               agentWithStatus(
                 done,
+                events: [finished],
                 rang: true,
                 payloads: ['9;Claude is waiting for your input'],
               ),
             ]);
             expect(notifications.shown.single.title, 'Claude Code finished');
+
+            // Once it works again, a notice is a new event.
+            await show(tester, [
+              agentWithStatus(
+                working,
+                events: [finished],
+                payloads: ['9;Claude is waiting for your input', '9;Tests ran'],
+              ),
+            ]);
+            expect(notifications.shown.last.body, 'Tests ran');
+          });
+
+          testWidgets('a turn that finished between snapshots is raised', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [agentWithStatus(working)]);
+            // It finished and started again before the next snapshot.
+            await show(tester, [
+              agentWithStatus(working, events: [finished]),
+            ]);
+            expect(notifications.shown.single.title, 'Claude Code finished');
+          });
+
+          testWidgets('an older notification closing leaves the status', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [
+              agentWithStatus(working, payloads: ['99;i=old;Building']),
+            ]);
+            expect(notifications.shown.single.body, 'Building');
+            await show(tester, [
+              agentWithStatus(
+                done,
+                events: [finished],
+                payloads: ['99;i=old;Building'],
+              ),
+            ]);
+            // It works again, and closes the older notification.
+            await show(tester, [
+              agentWithStatus(
+                working,
+                events: [finished],
+                payloads: ['99;i=old;Building', '99;i=old:p=close;'],
+              ),
+            ]);
+            expect(notifications.shown.last.title, 'Claude Code finished');
+            expect(notifications.cleared, isEmpty);
+          });
+
+          testWidgets('a status takes the slot from an earlier bell', (
+            tester,
+          ) async {
+            await pumpBar(tester);
+            await show(tester, [agentWithStatus(working)]);
+            await show(tester, [agentWithStatus(working, rang: true)]);
+            await show(tester, [
+              agentWithStatus(approval, events: [asked], rang: true),
+            ]);
+            expect(
+              notifications.shown.last.title,
+              'Claude Code needs approval',
+            );
+            // The bell's flag clearing does not clear the approval in its slot.
+            await show(tester, [
+              agentWithStatus(approval, events: [asked]),
+            ]);
+            expect(notifications.cleared, isEmpty);
           });
 
           testWidgets('a status from before the bar opened is not replayed', (
             tester,
           ) async {
             await pumpBar(tester);
-            await show(tester, [agentWithStatus(approval)]);
+            await show(tester, [
+              agentWithStatus(approval, events: [asked]),
+            ]);
             expect(notifications.shown, isEmpty);
           });
 
@@ -1317,6 +1427,7 @@ void registerTmuxWindowNavigatorTests() {
             await show(tester, [
               agentWithStatus(
                 approval,
+                events: [asked],
                 rang: true,
                 payloads: ['9;Claude needs your permission'],
               ),
@@ -1334,8 +1445,12 @@ void registerTmuxWindowNavigatorTests() {
         ) async {
           await pumpBar(tester);
           await show(tester, [agentWithStatus(working)]);
-          await show(tester, [agentWithStatus(approval)]);
-          await show(tester, [agentWithStatus(done)]);
+          await show(tester, [
+            agentWithStatus(approval, events: [asked]),
+          ]);
+          await show(tester, [
+            agentWithStatus(done, events: [asked, finished]),
+          ]);
           expect(notifications.shown, isEmpty);
         });
 

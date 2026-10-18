@@ -421,10 +421,7 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
 - `push_unregister` with a `hostRef` removes that one saved host's
   registration; without one it removes every registration of the device. It
   answers `push_unregistered`.
-- `push_presence` answers `push_presence_ack`, from 0.1.243 with
-  `{"push": {"status": true}}`: the helper honors the `status` claim (see
-  Attendance). An older helper's ack has no `push`, and the app then leaves
-  program status to the host.
+- `push_presence` answers `push_presence_ack`.
 - `push_test` answers `push_test_result` with `{"push": {"result":
   "<result>"}}`: `sent`, `not_registered`, `bad_ticket`, `unregistered`,
   `rate_limited`, `capped` or `failed`. A test is sent once, without retries,
@@ -503,7 +500,10 @@ connection's attach client id, and one of three states.
   programs' status events (`permission`, `input` and `finished` from OSC 7501,
   see Terminal agent signals) itself: the app sends it while the window bar is
   mounted and the host has agent needs-you or agent finished on, and raises
-  those events only after the ack says the helper honors the claim.
+  them from the windows' numbered `statusEvents`. It counts itself covering
+  before the report goes out, so nothing the host keeps back from the moment
+  it reads the claim goes unraised. A helper before 0.1.243 ignores the claim
+  and numbers no events, so it keeps pushing them and the app raises none.
   `bridges` lists the native agent bridges whose events it is receiving.
   Repeated every 20 seconds. iOS suspends a backgrounded app, so iOS reports
   idle instead.
@@ -541,11 +541,13 @@ From 0.1.243:
   since the program's status report often comes in the next chunk.
 - A device that takes a window's status (its `events` include that kind) is
   not sent the window's alert while the program there is `blocked`, or within
-  15 seconds after a status push for the window was raised. A device that
-  turned that status off is still sent the alert, which is then all it hears
-  of the event.
+  15 seconds after a status push for the window was raised while the program
+  that reported it still reports a status (once it exits, a bell is someone
+  else's). A device that turned that status off is still sent the alert,
+  which is then all it hears of the event.
 - When kept-back events go out together after a local claim lapses, a device
   gets a window's status without its alert.
+- Alerts still held when the server closes are sent, not dropped.
 
 ### Coalescing, caps and retries
 
@@ -612,6 +614,13 @@ published status before and after each chunk:
   blocked kind to another raises again; the same block reported twice does not.
 - A rejected prompt (`blocked` to `idle`), an `error`, and a status that ends
   because the program exited raise nothing.
+
+From 0.1.243 each of these events is also numbered in the window's snapshot,
+`"statusEvents": [{"seq": 7, "kind": "finished"}]` (the latest 4, oldest
+first, numbered per window from 1 on each server), and a new one sends the
+snapshot again. A turn that finishes and starts again within one chunk leaves
+the window's status as it was, so the number is how a covering app learns of
+it.
 
 The push carries only its kind and window, never the report's `msg`, `title` or
 `app`. Unlike a native request, a terminal one is raised once, when the status
@@ -761,12 +770,18 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   window (`buildWindowNotificationId`), so each replaces the last and two
   connections to one session post once. A bell that arrives with a desktop
   notification or an agent status for the same window is not posted on its
-  own, and neither is a bell while that window's approval or question is
-  showing. The app raises agent status itself only while Android has it
-  covering the window locally with an acknowledged `status` claim; otherwise
-  the host pushes it. Known limit: iOS cannot claim local coverage, so in the
-  seconds before it suspends a backgrounded app, a bell can show both from the
-  app and as a push for a window the app was not viewing.
+  own, and while the window's program still reports the status the app raised
+  (still waiting, or still done), its bells and notifications are not posted
+  either. The app
+  raises agent status itself only for a connection whose presence claims
+  `status` (Android, backgrounded, with the window bar mounted), from the
+  numbered `statusEvents`: each once, the newest per window the host allows,
+  never one from before the bar opened. Otherwise the host pushes it. A slot
+  has one owner: a later bell, notification or status takes it, so an older
+  notification's close or a bell's flag clearing does not remove what shows.
+  Known limit: iOS cannot claim local coverage, so in the seconds before it
+  suspends a backgrounded app, a bell can show both from the app and as a
+  push for a window the app was not viewing.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

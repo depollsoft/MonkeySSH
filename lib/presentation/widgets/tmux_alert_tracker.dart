@@ -1,4 +1,3 @@
-import '../../domain/models/terminal_program_status.dart';
 import '../../domain/models/tmux_state.dart';
 import '../../domain/services/local_notification_service.dart';
 
@@ -62,6 +61,12 @@ class TmuxAlertTracker {
     if (notificationId != null) onClear(notificationId);
   }
 
+  /// Forgets the notification it emitted for [windowKey] without clearing it:
+  /// another notification took the window's slot (or none was posted), so
+  /// clearing that id would remove what is showing now.
+  void release(String windowKey) =>
+      _alertNotificationIdsByWindowKey.remove(windowKey);
+
   /// Forgets the old session and clears all notifications that it emitted.
   void clear(void Function(int) onClear) {
     _seenAlertWindowKeys.clear();
@@ -71,74 +76,37 @@ class TmuxAlertTracker {
   }
 }
 
-/// A terminal program's status change that calls for a notification.
-enum TmuxProgramStatusEvent {
-  /// It newly waits for approval.
-  permission,
-
-  /// It newly waits for an answer (a question, or signing in).
-  input,
-
-  /// It stopped working: its turn finished.
-  finished,
-}
-
-/// The notification a program's status change from [before] to [after] calls
-/// for, or null. The same rules decide MonkeyMux's pushes
-/// (`programStatusPushKind`), so a local notification stands in for exactly
-/// the push it keeps back.
-TmuxProgramStatusEvent? tmuxProgramStatusEvent(
-  TerminalProgramStatus? before,
-  TerminalProgramStatus? after,
-) {
-  if (after == null) return null;
-  if (after.state == TerminalProgramState.blocked) {
-    if (before?.state == TerminalProgramState.blocked &&
-        before?.kind == after.kind) {
-      return null;
-    }
-    return after.kind == TerminalProgramBlockedKind.permission
-        ? TmuxProgramStatusEvent.permission
-        : TmuxProgramStatusEvent.input;
-  }
-  if (before?.state == TerminalProgramState.working &&
-      (after.state == TerminalProgramState.done ||
-          after.state == TerminalProgramState.idle)) {
-    return TmuxProgramStatusEvent.finished;
-  }
-  return null;
-}
-
-/// Follows each window's reported program status and yields the changes that
-/// call for a notification. A window seen for the first time only sets its
-/// baseline, so connecting never replays a status from before.
+/// Follows each window's numbered status events (MonkeyMux's
+/// `statusEvents`) and yields the ones not seen before, oldest first. A window
+/// seen for the first time only sets its baseline, so connecting never replays
+/// an event from before; numbers below the last seen one come from a
+/// replacement server whose counter restarted, and set the baseline again.
 class TmuxProgramStatusTracker {
-  final _statusByWindowKey = <String, TerminalProgramStatus?>{};
+  final _lastSeqByWindowKey = <String, int>{};
 
-  /// Applies a snapshot and returns its windows' status events, in order.
-  List<({TmuxWindow window, TmuxProgramStatusEvent event})> applyWindows(
+  /// Applies a snapshot and returns its windows' unseen events, in order.
+  List<({TmuxWindow window, MuxWindowStatusKind kind})> applyWindows(
     List<TmuxWindow> windows,
   ) {
-    final events = <({TmuxWindow window, TmuxProgramStatusEvent event})>[];
+    final events = <({TmuxWindow window, MuxWindowStatusKind kind})>[];
     final keys = <String>{};
     for (final window in windows) {
       final key = tmuxWindowNotificationKey(window);
       keys.add(key);
-      final status = window.programStatus;
-      if (!_statusByWindowKey.containsKey(key)) {
-        _statusByWindowKey[key] = status;
-        continue;
+      final latest = window.statusEvents.lastOrNull?.seq ?? 0;
+      final seen = _lastSeqByWindowKey[key];
+      _lastSeqByWindowKey[key] = latest;
+      if (seen == null || latest <= seen) continue;
+      for (final event in window.statusEvents) {
+        if (event.seq > seen) events.add((window: window, kind: event.kind));
       }
-      final event = tmuxProgramStatusEvent(_statusByWindowKey[key], status);
-      _statusByWindowKey[key] = status;
-      if (event != null) events.add((window: window, event: event));
     }
-    _statusByWindowKey.removeWhere((key, _) => !keys.contains(key));
+    _lastSeqByWindowKey.removeWhere((key, _) => !keys.contains(key));
     return events;
   }
 
   /// Forgets every window, as for a new session.
-  void clear() => _statusByWindowKey.clear();
+  void clear() => _lastSeqByWindowKey.clear();
 }
 
 /// The key a window's notification slot is named by: its stable id, else its

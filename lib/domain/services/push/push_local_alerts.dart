@@ -27,16 +27,17 @@ class PushLocalAlertListeners {
 /// The app-wide registry the window bar reports to.
 final pushLocalAlertListeners = PushLocalAlertListeners();
 
-/// Connections whose host keeps terminal programs' status pushes (approvals,
-/// questions, finished turns) back because this backgrounded app said it
-/// raises them itself and the host acknowledged the claim.
+/// Connections whose latest presence tells the host this backgrounded app
+/// raises terminal programs' status events (approvals, questions, finished
+/// turns) itself, so the host keeps those pushes back.
 ///
-/// The window bar raises them only for these connections: anywhere else the
-/// host pushes them, and raising them too would show each one twice.
+/// The window bar raises them only for these connections, from the numbered
+/// events MonkeyMux 0.1.243 and later report: anywhere else the host pushes
+/// them, and raising them too would show each one twice.
 class PushLocalStatusCoverage {
   final _covered = <int>{};
 
-  /// Records whether the host of [connectionId] honors the claim.
+  /// Records whether the latest presence of [connectionId] makes the claim.
   void set(int connectionId, {required bool covered}) {
     if (covered) {
       _covered.add(connectionId);

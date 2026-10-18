@@ -240,7 +240,8 @@ type pushControlRequest struct {
 	Notices *bool    `json:"notices,omitempty"`
 	Bridges []string `json:"bridges,omitempty"`
 	// Status says it raises the approvals, questions and finished turns
-	// terminal programs report (OSC 7501) for this connection itself.
+	// terminal programs report (OSC 7501) for this connection itself, from
+	// the windows' statusEvents.
 	Status bool `json:"status,omitempty"`
 }
 
@@ -251,10 +252,6 @@ type pushControlResult struct {
 	// will receive. Helpers before 0.1.233 ignore the request's events and
 	// echo nothing, which tells the app they cannot filter.
 	Events *[]string `json:"events,omitempty"`
-	// Status, on push_presence_ack, says this helper honors the presence's
-	// status claim. Earlier helpers ack without it and push program status
-	// regardless, so the app must not raise it as well.
-	Status bool `json:"status,omitempty"`
 }
 
 // pushPresence is what one device last told this server about itself.
@@ -326,6 +323,9 @@ type pushServerView struct {
 	// blocked holds, for each window whose program reports it is waiting on
 	// the user (OSC 7501 blocked), the push kind of that request.
 	blocked map[string]string
+	// reporting holds the windows whose program reports a status at all; a
+	// program that exited no longer does.
+	reporting map[string]bool
 }
 
 // pushJob is one event addressed to one device.
@@ -478,7 +478,6 @@ func (s *muxServer) pushControlResponse(request controlMessage) controlResponse 
 			ID:     request.ID,
 			Type:   "push_presence_ack",
 			Status: "ok",
-			Push:   &pushControlResult{Status: true},
 		}
 	case "push_test":
 		if !pushDeviceIDPattern.MatchString(deviceID) {
@@ -603,15 +602,20 @@ func (s *muxServer) pushView(clientIDs []string) pushServerView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	view := pushServerView{
-		session:  s.session,
-		activeID: s.activeID,
-		attached: map[string]bool{},
-		agents:   map[string]string{},
-		titles:   map[string]string{},
-		blocked:  map[string]string{},
+		session:   s.session,
+		activeID:  s.activeID,
+		attached:  map[string]bool{},
+		agents:    map[string]string{},
+		titles:    map[string]string{},
+		blocked:   map[string]string{},
+		reporting: map[string]bool{},
 	}
 	for _, window := range s.windows {
-		if summary := window.programStatusSummaryLocked(); summary.state == "blocked" {
+		summary := window.programStatusSummaryLocked()
+		if summary.state != "" {
+			view.reporting[window.id] = true
+		}
+		if summary.state == "blocked" {
 			view.blocked[window.id] = programStatusPushKind(programStatusSummary{}, summary)
 		}
 		// The resolved tool, as the window bar shows it: the live command, else
@@ -863,6 +867,12 @@ func (s *muxServer) deliverPushAlertEvent(event pushAlertEvent) {
 // releaseHeldPushAlerts pushes the held alerts whose hold has passed, and
 // returns how long until the next one is due, or 0 when none is held.
 func (s *muxServer) releaseHeldPushAlerts() time.Duration {
+	return s.releaseHeldPushAlertsAt(false)
+}
+
+// releaseHeldPushAlertsAt is releaseHeldPushAlerts; all releases every held
+// alert whether or not its hold has passed.
+func (s *muxServer) releaseHeldPushAlertsAt(all bool) time.Duration {
 	notifier := s.pushNotifier()
 	now := notifier.now()
 	notifier.mu.Lock()
@@ -871,7 +881,7 @@ func (s *muxServer) releaseHeldPushAlerts() time.Duration {
 	var next time.Duration
 	for _, held := range notifier.held {
 		wait := pushAlertHold - now.Sub(held.at)
-		if wait <= 0 {
+		if all || wait <= 0 {
 			due = append(due, held)
 			continue
 		}
@@ -912,10 +922,11 @@ func (n *pushNotifier) noteStatusLocked(windowID string, kind string) {
 
 // alertRedundantLocked reports whether a window alert would only repeat the
 // window's status on device: its program is waiting on the user, so the
-// approval or question push covers it, or its status was pushed a moment ago.
-// Pushing it would replace that better notification, which shares the
-// window's slot. A device that turned that status off is still sent the
-// alert, which is then all it hears of the event.
+// approval or question push covers it, or its status was pushed a moment ago
+// and the program that reported it is still there (once it exits, a bell is
+// someone else's). Pushing it would replace that better notification, which
+// shares the window's slot. A device that turned that status off is still
+// sent the alert, which is then all it hears of the event.
 func (n *pushNotifier) alertRedundantLocked(
 	device pushDeviceRecord,
 	windowID string,
@@ -924,6 +935,9 @@ func (n *pushNotifier) alertRedundantLocked(
 ) bool {
 	if kind := view.blocked[windowID]; kind != "" && device.wantsEvent(kind, 0) {
 		return true
+	}
+	if !view.reporting[windowID] {
+		return false
 	}
 	for _, kind := range pushStatusKinds {
 		at, ok := n.statusAt[pushStatusMark{windowID: windowID, kind: kind}]
@@ -1509,6 +1523,9 @@ func (s *muxServer) startPushLoop() {
 				}
 			case <-ticker.C:
 				if s.isClosed() {
+					// Alerts still held were taken in before the end; send them
+					// rather than drop them.
+					s.releaseHeldPushAlertsAt(true)
 					return
 				}
 				s.pollPushBridges()

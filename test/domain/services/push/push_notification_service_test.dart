@@ -203,8 +203,9 @@ class _FakeLink implements PushHostLink {
   /// Whether push_unregister fails, as when the connection drops mid-way.
   bool failUnregister = false;
 
-  /// Whether the helper honors the presence's status claim (0.1.243+).
-  bool honorsStatusClaim = true;
+  /// Whether the status claim covered this connection as each presence went
+  /// out.
+  final coveredAtPresence = <bool>[];
 
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
@@ -215,6 +216,9 @@ class _FakeLink implements PushHostLink {
     bool lowPriority = false,
   }) async {
     commands.add(command);
+    if (command['type'] == 'push_presence') {
+      coveredAtPresence.add(pushLocalStatusCoverage.covers(connectionId));
+    }
     if (unsupported) {
       // As runPushControl: an unregister an older helper refused only fails.
       return MonkeyMuxPushControlResult(
@@ -244,8 +248,6 @@ class _FakeLink implements PushHostLink {
       result: command['type'] == 'push_test'
           ? (testResults.isEmpty ? testResult : testResults.removeAt(0))
           : null,
-      statusClaimHonored:
-          command['type'] == 'push_presence' && honorsStatusClaim,
     );
   }
 }
@@ -1001,11 +1003,10 @@ void main() {
     group('the status claim', () {
       tearDown(pushLocalStatusCoverage.clear);
 
-      Future<_FakeLink> background({bool honored = true}) async {
-        final link = _FakeLink(connectionId: 10, hostId: 1)
-          ..honorsStatusClaim = honored;
+      Future<_FakeLink> background({bool windowBar = true}) async {
+        final link = _FakeLink(connectionId: 10, hostId: 1);
         h.links.add(link);
-        h.alertListeners.add(10);
+        if (windowBar) h.alertListeners.add(10);
         await h.start();
         await h.controller.enable();
         h.controller.reportVisibility(foreground: false);
@@ -1014,18 +1015,20 @@ void main() {
         return link;
       }
 
-      test('covers the connection once its helper acknowledges it', () async {
-        await background();
+      // The host keeps status pushes back from the moment it reads the
+      // claim, so the bar must already raise what comes after it.
+      test('covers the connection before the claim goes out', () async {
+        final link = await background();
+        expect(lastOf(link, 'push_presence')['status'], isTrue);
+        expect(link.coveredAtPresence.last, isTrue);
         expect(pushLocalStatusCoverage.covers(10), isTrue);
       });
 
-      test(
-        'an older helper that pushes status anyway is never covered',
-        () async {
-          await background(honored: false);
-          expect(pushLocalStatusCoverage.covers(10), isFalse);
-        },
-      );
+      test('a connection without a window bar makes no claim', () async {
+        final link = await background(windowBar: false);
+        expect(lastOf(link, 'push_presence'), isNot(contains('status')));
+        expect(pushLocalStatusCoverage.covers(10), isFalse);
+      });
 
       test(
         'returning to the foreground hands status back to the host',

@@ -1637,10 +1637,16 @@ class PushNotificationController extends Notifier<PushNotificationState> {
               localBridges.isNotEmpty)
         ? _Presence.local
         : _Presence.idle;
-    if (presence != _Presence.local) {
-      // Raised by the host from now on.
-      pushLocalStatusCoverage.set(link.connectionId, covered: false);
-    }
+    // Set before the report goes out: the host keeps status pushes back from
+    // the moment it reads the claim, so the bar raises what comes after. A
+    // helper before 0.1.243 ignores the claim but also numbers no status
+    // events, so the bar raises nothing there and the host pushes as before.
+    // While a dropped claim is still in force on the host, it sends what the
+    // claim kept back once it reads the new report.
+    pushLocalStatusCoverage.set(
+      link.connectionId,
+      covered: presence == _Presence.local && localStatus,
+    );
     if (presence == _Presence.idle && _lastPresence[key] == _Presence.idle) {
       return;
     }
@@ -1659,21 +1665,8 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         },
       }, lowPriority: true);
       if (result.ok) _lastPresence[key] = presence;
-      // Only a helper that acknowledged the claim keeps the pushes back; an
-      // older one pushes them anyway, so the bar must not raise them too.
-      pushLocalStatusCoverage.set(
-        link.connectionId,
-        covered:
-            result.ok &&
-            presence == _Presence.local &&
-            localStatus &&
-            result.statusClaimHonored,
-      );
     } on Object {
-      // Presence is advisory; the next heartbeat retries. Until then the
-      // host keeps any claim it acknowledged for a short while, and sends
-      // what that claim kept back if it lapses.
-      pushLocalStatusCoverage.set(link.connectionId, covered: false);
+      // Presence is advisory; the next heartbeat retries.
     }
   }
 

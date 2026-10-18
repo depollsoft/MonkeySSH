@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:monkeyssh/domain/models/terminal_program_status.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/presentation/widgets/tmux_alert_tracker.dart';
@@ -110,70 +109,105 @@ void registerTmuxAlertTrackerTests() {
     });
 
     group('program status events', () {
-      const working = TerminalProgramStatus(
-        state: TerminalProgramState.working,
+      TmuxWindow agent(List<MuxWindowStatusEvent> events, {String id = '@2'}) =>
+          TmuxWindow(
+            index: 1,
+            id: id,
+            name: 'agent',
+            isActive: false,
+            statusEvents: events,
+          );
+      const approval = MuxWindowStatusEvent(
+        seq: 1,
+        kind: MuxWindowStatusKind.permission,
       );
-      const idle = TerminalProgramStatus(state: TerminalProgramState.idle);
-      const done = TerminalProgramStatus(state: TerminalProgramState.done);
-      const approval = TerminalProgramStatus(
-        state: TerminalProgramState.blocked,
-        kind: TerminalProgramBlockedKind.permission,
+      const finished = MuxWindowStatusEvent(
+        seq: 2,
+        kind: MuxWindowStatusKind.finished,
       );
-      const question = TerminalProgramStatus(
-        state: TerminalProgramState.blocked,
-        kind: TerminalProgramBlockedKind.question,
+      const question = MuxWindowStatusEvent(
+        seq: 3,
+        kind: MuxWindowStatusKind.input,
       );
-
-      // The rules MonkeyMux pushes by (programStatusPushKind), so a local
-      // notification stands in for exactly the push it keeps back.
-      test('match the host push rules', () {
-        expect(
-          tmuxProgramStatusEvent(working, done),
-          TmuxProgramStatusEvent.finished,
-        );
-        expect(
-          tmuxProgramStatusEvent(working, idle),
-          TmuxProgramStatusEvent.finished,
-        );
-        expect(tmuxProgramStatusEvent(idle, done), isNull);
-        expect(
-          tmuxProgramStatusEvent(working, approval),
-          TmuxProgramStatusEvent.permission,
-        );
-        expect(
-          tmuxProgramStatusEvent(working, question),
-          TmuxProgramStatusEvent.input,
-        );
-        expect(tmuxProgramStatusEvent(approval, approval), isNull);
-        expect(
-          tmuxProgramStatusEvent(approval, question),
-          TmuxProgramStatusEvent.input,
-        );
-        expect(
-          tmuxProgramStatusEvent(null, approval),
-          TmuxProgramStatusEvent.permission,
-        );
-        expect(tmuxProgramStatusEvent(working, null), isNull);
-      });
 
       test('the first snapshot of a window only sets its baseline', () {
-        TmuxWindow agent(TerminalProgramStatus status) => TmuxWindow(
-          index: 1,
-          id: '@2',
-          name: 'agent',
-          isActive: false,
-          programStatus: status,
-        );
         final tracker = TmuxProgramStatusTracker();
-        expect(tracker.applyWindows([agent(approval)]), isEmpty);
-        expect(tracker.applyWindows([agent(working)]), isEmpty);
         expect(
-          tracker.applyWindows([agent(done)]).single.event,
-          TmuxProgramStatusEvent.finished,
+          tracker.applyWindows([
+            agent(const [approval]),
+          ]),
+          isEmpty,
         );
+        expect(
+          tracker.applyWindows([
+            agent(const [approval]),
+          ]),
+          isEmpty,
+        );
+        final next = tracker.applyWindows([
+          agent(const [approval, finished]),
+        ]);
+        expect(next.single.kind, MuxWindowStatusKind.finished);
         // A window that closed and came back starts over.
         expect(tracker.applyWindows(const []), isEmpty);
-        expect(tracker.applyWindows([agent(approval)]), isEmpty);
+        expect(
+          tracker.applyWindows([
+            agent(const [approval, finished]),
+          ]),
+          isEmpty,
+        );
+      });
+
+      // Each numbered event is raised once, also when several arrive in one
+      // snapshot because the window's status changed and changed back.
+      test('every unseen event is yielded once, oldest first', () {
+        final tracker = TmuxProgramStatusTracker()
+          ..applyWindows([agent(const [])]);
+        expect(
+          tracker
+              .applyWindows([
+                agent(const [approval, finished]),
+              ])
+              .map((event) => event.kind),
+          [MuxWindowStatusKind.permission, MuxWindowStatusKind.finished],
+        );
+        expect(
+          tracker.applyWindows([
+            agent(const [approval, finished]),
+          ]),
+          isEmpty,
+        );
+        expect(
+          tracker
+              .applyWindows([
+                agent(const [approval, finished, question]),
+              ])
+              .single
+              .kind,
+          MuxWindowStatusKind.input,
+        );
+      });
+
+      test('a restarted server sets the baseline again', () {
+        final tracker = TmuxProgramStatusTracker()
+          ..applyWindows([
+            agent(const [approval, finished, question]),
+          ]);
+        expect(
+          tracker.applyWindows([
+            agent(const [approval]),
+          ]),
+          isEmpty,
+        );
+        expect(
+          tracker
+              .applyWindows([
+                agent(const [approval, finished]),
+              ])
+              .single
+              .kind,
+          MuxWindowStatusKind.finished,
+        );
       });
     });
 
