@@ -562,6 +562,9 @@ void main() {
     );
     expect(context.hosts[buildBox], 'build-box');
     expect(context.hosts, hasLength(3));
+    // A push for the host lands in the app's own slot for its window.
+    expect(context.hostIds[buildBox], 2);
+    expect(context.hostIds, hasLength(3));
 
     // Unchanged hosts are not written again on every sync.
     final writes = h.context.writes;

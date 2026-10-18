@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/push/push_background_message.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
@@ -79,6 +80,37 @@ void main() {
     expect(post.id, pushNotificationIdFor('collapse-1'));
     expect(decodePushTapPayload(post.tapPayload), payload);
     expect(post.timestamp!.millisecondsSinceEpoch, 1760000000 * 1000);
+  });
+
+  test('a push lands in the window slot the app notifies in', () async {
+    final payload = await seal({
+      'v': 1,
+      'hostRef': 'ref-build-box',
+      'window': '@3',
+      'sessionId': 'MonkeySSH',
+      'kind': 'permission',
+      'ts': 1760000000,
+    });
+    final data = {'v': '1', 'p': payload, 'k': 'permission', 'c': 'c-1'};
+    final withId = PushNotificationContext(
+      seed: device.seed,
+      hosts: const {'ref-build-box': 'build-box'},
+      hostIds: const {'ref-build-box': 7},
+    ).encode();
+    // The app's own notification for the window has this id, so the push
+    // replaces it rather than sitting beside it.
+    expect(
+      (await show(data, context: withId)).single.id,
+      buildWindowNotificationId(7, 'MonkeySSH', '@3'),
+    );
+    // A context written before host ids keeps the collapse slot.
+    expect(
+      (await show(
+        data,
+        context: context({'ref-build-box': 'build-box'}),
+      )).single.id,
+      pushNotificationIdFor('c-1'),
+    );
   });
 
   test(
@@ -355,7 +387,18 @@ void main() {
     final decoded = PushNotificationContext.decode(encoded)!;
     expect(decoded.seed, device.seed);
     expect(decoded.hosts, {'ref': 'build-box'});
+    expect(decoded.hostIds, isEmpty);
     expect(decoded.allowed, isEmpty);
+    expect(
+      PushNotificationContext.decode(
+        PushNotificationContext(
+          seed: device.seed,
+          hosts: const {'ref': 'build-box'},
+          hostIds: const {'ref': 3},
+        ).encode(),
+      )!.hostIds,
+      {'ref': 3},
+    );
     expect(
       PushNotificationContext.decode(
         PushNotificationContext(

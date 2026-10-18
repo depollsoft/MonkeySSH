@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../local_notification_service.dart';
 import 'push_crypto.dart';
 import 'push_event.dart';
 import 'push_notification_context.dart';
@@ -42,8 +43,10 @@ class PushNotificationPost {
     this.timestamp,
   });
 
-  /// Stable per collapse key, so a newer push for the same window and kind
-  /// group (requests, or everything else) replaces the older one.
+  /// The window's notification slot, shared with the app's own notifications
+  /// for that window, so a push replaces what the app raised for the window
+  /// and a newer push replaces an older one. Without the host's id, stable per
+  /// collapse key instead.
   final int id;
 
   /// What happened; picks the channel.
@@ -83,6 +86,7 @@ Future<void> showPushNotificationFromData(
 
   var kind = clearKind;
   var text = genericPushNotificationText(clearKind);
+  var id = pushNotificationIdFor(collapse);
   DateTime? timestamp;
   final event = await _openPayload(store, payload);
   if (event != null) {
@@ -92,10 +96,16 @@ Future<void> showPushNotificationFromData(
     kind = event.event.kind;
     text = pushNotificationText(event.event, hostLabel: event.hostLabel);
     timestamp = event.event.timestamp;
+    final hostId = event.hostId;
+    final session = event.event.sessionName;
+    final window = event.event.windowId;
+    if (hostId != null && session != null && window != null) {
+      id = buildWindowNotificationId(hostId, session, window);
+    }
   }
   await (post ?? _postWithPlugin)(
     PushNotificationPost(
-      id: pushNotificationIdFor(collapse),
+      id: id,
       kind: kind,
       title: text.title,
       body: text.body,
@@ -105,10 +115,8 @@ Future<void> showPushNotificationFromData(
   );
 }
 
-Future<({PushEvent event, String? hostLabel, bool allowed})?> _openPayload(
-  PushNotificationContextStore store,
-  String payload,
-) async {
+Future<({PushEvent event, String? hostLabel, int? hostId, bool allowed})?>
+_openPayload(PushNotificationContextStore store, String payload) async {
   try {
     final context = PushNotificationContext.decode(await store.read());
     if (context == null) return null;
@@ -119,6 +127,7 @@ Future<({PushEvent event, String? hostLabel, bool allowed})?> _openPayload(
     return (
       event: event,
       hostLabel: context.hosts[event.hostRef],
+      hostId: context.hostIds[event.hostRef],
       allowed: context.allows(event),
     );
   } on Object {
