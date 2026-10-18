@@ -679,6 +679,30 @@ class AcpTimelineBuilder {
   AcpTimeline snapshot() =>
       AcpTimeline(entries: _entries, overflowed: _overflowed, source: _source);
 
+  /// Carries unsent local prompts into a replacement history after a reload.
+  /// Their identifiers remain valid for dispatch and failed-send rollback.
+  void retainQueuedPromptsFrom(AcpTimelineBuilder previous) {
+    _nextLocalUserMessageId = math.max(
+      _nextLocalUserMessageId,
+      previous._nextLocalUserMessageId,
+    );
+    for (final entry in previous._entries.whereType<AcpMessageEntry>()) {
+      if (entry.role != AcpMessageRole.user || !entry.queued) continue;
+      final queued = AcpMessageEntry(
+        role: entry.role,
+        order: _nextOrder++,
+        messageId: entry.messageId,
+        queued: true,
+        droppedSize: entry.droppedSize,
+        content: entry.content,
+      );
+      _entries.add(queued);
+      _totalBytes += approximateTimelineEntryBytes(queued);
+    }
+    _openMessageIndex = null;
+    _enforceLimits();
+  }
+
   void _applyContentChunk(AcpContentChunkUpdate update) {
     final role = _roleFor(update.kind);
     if (role == null) return;

@@ -2055,7 +2055,8 @@ class _SessionController {
   bool _freshBridge;
   final Duration _detachedTurnPollInterval;
 
-  final AcpTimelineBuilder _timelineBuilder = AcpTimelineBuilder();
+  AcpTimelineBuilder _timelineBuilder = AcpTimelineBuilder();
+  AcpTimelineBuilder? _loadingTimelineBuilder;
   final Queue<AcpSessionNotification> _pendingSessionUpdates =
       Queue<AcpSessionNotification>();
   Future<void>? _sessionUpdatePumpFuture;
@@ -2703,13 +2704,24 @@ class _SessionController {
     String sessionId,
     AcpSessionWorkspaceSetup workspace,
   ) async {
+    // session/load replays the whole conversation, including messages already
+    // retained locally or delivered by the bridge. Pi's chunks have no message
+    // IDs, so appending this replay duplicates old turns at the transcript tail.
+    _applyReceivedSessionUpdates();
+    final wasPublicationHeld = _historyReplayPublicationHeld;
+    _historyReplayPublicationHeld = true;
+    final loadingTimeline = AcpTimelineBuilder();
+    _loadingTimelineBuilder = loadingTimeline;
+    var loaded = false;
     try {
-      return await attachment.client.loadSession(
+      final result = await attachment.client.loadSession(
         sessionId: sessionId,
         cwd: _cwd,
         mcpServers: workspace.mcpServers,
         additionalDirectories: workspace.additionalDirectories,
       );
+      loaded = true;
+      return result;
     } on AcpRemoteException catch (error) {
       if (!_isAcpSessionAlreadyLoadedError(error, sessionId)) rethrow;
       _diagnostics.info(
@@ -2719,6 +2731,22 @@ class _SessionController {
       );
       _historyRestoreUnavailable = true;
       return null;
+    } finally {
+      await _drainHistoryReplayNotifications();
+      if (loaded) {
+        // Local prompts continue to use the original builder while loading,
+        // so input queued during the replay also keeps its ID and dispatches.
+        loadingTimeline.retainQueuedPromptsFrom(_timelineBuilder);
+        _timelineBuilder = loadingTimeline;
+      }
+      // Failed loads discard the partial replay and retain the original.
+      _loadingTimelineBuilder = null;
+      if (!wasPublicationHeld) {
+        _finishHistoryReplayPublication();
+        _update(
+          (state) => state.copyWith(timeline: _timelineBuilder.snapshot()),
+        );
+      }
     }
   }
 
@@ -2913,7 +2941,10 @@ class _SessionController {
 
   void _applySessionUpdate(AcpSessionNotification notification) {
     final update = notification.update;
-    _timelineBuilder.apply(update, createSnapshot: false);
+    (_loadingTimelineBuilder ?? _timelineBuilder).apply(
+      update,
+      createSnapshot: false,
+    );
     _update((s) {
       var next = s.copyWith(lastActivityAt: _clock());
       switch (update) {

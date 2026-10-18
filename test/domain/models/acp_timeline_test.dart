@@ -172,6 +172,36 @@ void main() {
   });
 
   group('AcpTimelineBuilder local user prompts', () {
+    test('history replacement retains queued prompt IDs and dispatch', () {
+      final previous = AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('sent')]);
+      final queuedId = previous.appendLocalUserPrompt(const [
+        AcpTextContent('queued'),
+      ], queued: true);
+      final replacement = AcpTimelineBuilder()
+        ..apply(_chunk('user_message_chunk', 'sent'))
+        ..apply(_chunk('agent_message_chunk', 'reply'))
+        ..retainQueuedPromptsFrom(previous);
+      final entries = replacement.snapshot().entries.cast<AcpMessageEntry>();
+      expect(
+        entries.map((entry) => (entry.content.single as AcpTextContent).text),
+        ['sent', 'reply', 'queued'],
+      );
+      expect(entries.last.messageId, queuedId);
+      expect(entries.last.queued, isTrue);
+      replacement
+        ..markLocalUserPromptDispatched(queuedId)
+        ..apply(_chunk('user_message_chunk', 'queued'))
+        ..apply(_chunk('agent_message_chunk', 'next reply'));
+      expect(replacement.snapshot().entries, hasLength(4));
+      final nextId = replacement.appendLocalUserPrompt(const [
+        AcpTextContent('next'),
+      ]);
+      expect(nextId, isNot(queuedId));
+      replacement.removeLocalUserPrompt(nextId);
+      expect(replacement.snapshot().entries, hasLength(4));
+    });
+
     test('shows a local prompt and suppresses the provider echo', () {
       final builder = AcpTimelineBuilder()
         ..appendLocalUserPrompt(const [AcpTextContent('hello')])
