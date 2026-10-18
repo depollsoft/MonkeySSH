@@ -3059,6 +3059,90 @@ void main() {
   });
 
   group('history replay on load', () {
+    test(
+      'idle detached prompt survives reload and its provider echo',
+      () async {
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayTextOnLoad: 'Previous reply',
+          )..holdPrompts = true,
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        final prompt = replayManager.prompt(key, const [
+          AcpTextContent('Sent while detached'),
+        ]);
+        final pending = replayManager.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpMessageEntry>()
+            .single;
+        // The first prompt has no preceding turn, so this display flag is false
+        // even though the unattached session cannot dispatch it yet.
+        expect(pending.queued, isFalse);
+        expect(
+          replayConnector.servers[key.bridgeId]!.methods,
+          isNot(contains('session/prompt')),
+        );
+
+        final result = await replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        expect(result, isA<AcpSessionLaunchStarted>());
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.heldPromptCount, 1);
+        final dispatched = replayManager.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpMessageEntry>()
+            .where((entry) => entry.role == AcpMessageRole.user);
+        expect(dispatched, hasLength(1));
+        expect(dispatched.single.messageId, pending.messageId);
+        expect(dispatched.single.queued, isFalse);
+
+        server
+          ..pushUpdate(key.acpSessionId, {
+            'sessionUpdate': 'user_message_chunk',
+            'content': {'type': 'text', 'text': 'Sent while detached'},
+          })
+          ..pushUpdate(key.acpSessionId, {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': 'New reply'},
+          })
+          ..completeNextPrompt();
+        await prompt;
+        await _pump();
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Previous reply', 'Sent while detached', 'New reply'],
+        );
+      },
+    );
+
     for (final activeTurn in [false, true]) {
       test(
         activeTurn

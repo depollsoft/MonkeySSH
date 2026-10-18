@@ -2736,7 +2736,14 @@ class _SessionController {
       if (loaded) {
         // Local prompts continue to use the original builder while loading,
         // so input queued during the replay also keeps its ID and dispatches.
-        loadingTimeline.retainQueuedPromptsFrom(_timelineBuilder);
+        // The first prompt accepted while detached can be pending without
+        // the queued display flag. The queue owns delivery state, not the row.
+        loadingTimeline.retainPendingPromptsFrom(
+          _timelineBuilder,
+          pendingMessageIds: {
+            for (final prompt in _promptQueue) prompt.localMessageId,
+          },
+        );
         _timelineBuilder = loadingTimeline;
       }
       // Failed loads discard the partial replay and retain the original.
