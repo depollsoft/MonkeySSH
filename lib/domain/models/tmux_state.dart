@@ -69,41 +69,6 @@ class MuxWindowNotification {
   int get hashCode => Object.hash(seq, payload);
 }
 
-/// What a program status change MonkeyMux numbered for a notification calls
-/// for.
-enum MuxWindowStatusKind {
-  /// It asks for approval.
-  permission,
-
-  /// It needs an answer or some other input.
-  input,
-
-  /// Its turn finished.
-  finished,
-}
-
-/// A program status change MonkeyMux numbered for a notification, the same
-/// change it pushes (see `programStatusPushKinds`).
-@immutable
-class MuxWindowStatusEvent {
-  /// Creates a new [MuxWindowStatusEvent].
-  const MuxWindowStatusEvent({required this.seq, required this.kind});
-
-  /// Grows by one per event on one server, from 1.
-  final int seq;
-
-  /// What it calls for.
-  final MuxWindowStatusKind kind;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is MuxWindowStatusEvent && seq == other.seq && kind == other.kind;
-
-  @override
-  int get hashCode => Object.hash(seq, kind);
-}
-
 /// Returns the active window of [windows], if any.
 TmuxWindow? activeTmuxWindow(Iterable<TmuxWindow> windows) {
   for (final window in windows) {
@@ -144,7 +109,6 @@ class TmuxWindow {
     int? idleSeconds,
     this.lastActivityEpochSeconds,
     this.pendingNotifications = const [],
-    this.statusEvents = const [],
   }) : _snapshotIdleSeconds = idleSeconds;
 
   /// Parses a [TmuxWindow] from a tmux format string.
@@ -308,12 +272,6 @@ class TmuxWindow {
   /// Only MonkeyMux reports these; plain tmux snapshots leave this empty.
   final List<MuxWindowNotification> pendingNotifications;
 
-  /// The latest program status changes that call for a notification, oldest
-  /// first, numbered so none is missed or raised twice between snapshots.
-  ///
-  /// Only MonkeyMux 0.1.243 and later report these.
-  final List<MuxWindowStatusEvent> statusEvents;
-
   final int? _snapshotIdleSeconds;
 
   /// Seconds since last output activity in this window, if available.
@@ -397,7 +355,6 @@ class TmuxWindow {
         ? null
         : lastActivityEpochSeconds ?? this.lastActivityEpochSeconds,
     pendingNotifications: pendingNotifications,
-    statusEvents: statusEvents,
   );
 
   /// A best-effort coding-agent session identifier found in tmux metadata.
@@ -705,8 +662,7 @@ class TmuxWindow {
           programStatusReporter == other.programStatusReporter &&
           lastActivityEpochSeconds == other.lastActivityEpochSeconds &&
           _snapshotIdleSeconds == other._snapshotIdleSeconds &&
-          listEquals(pendingNotifications, other.pendingNotifications) &&
-          listEquals(statusEvents, other.statusEvents);
+          listEquals(pendingNotifications, other.pendingNotifications);
 
   @override
   int get hashCode => Object.hashAll([
@@ -737,7 +693,6 @@ class TmuxWindow {
     lastActivityEpochSeconds,
     _snapshotIdleSeconds,
     Object.hashAll(pendingNotifications),
-    Object.hashAll(statusEvents),
   ]);
 }
 

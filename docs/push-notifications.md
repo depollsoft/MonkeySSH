@@ -386,7 +386,7 @@ The helper advertises the `push-v1` capability. Push fields travel in a nested
 ```json
 {"id": "1", "type": "push_register",   "push": {"deviceId": "...", "ticket": "v1....", "publicKey": "<32 bytes>", "hostRef": "...", "events": ["attention", "finished", "bell", "notice"]}}
 {"id": "2", "type": "push_unregister", "push": {"deviceId": "...", "hostRef": "<optional>"}}
-{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "notices": true, "status": true, "bridges": ["<bridge id>"]}}
+{"id": "3", "type": "push_presence",   "clientId": "<attach client id>", "push": {"deviceId": "...", "foreground": false, "local": true, "alerts": true, "notices": true, "bridges": ["<bridge id>"]}}
 {"id": "4", "type": "push_test",       "push": {"deviceId": "..."}}
 ```
 
@@ -496,15 +496,8 @@ connection's attach client id, and one of three states.
   itself. `alerts` says this connection's window bar is mounted, so the app
   raises its bell alerts; `notices` says it raises desktop notifications
   itself. Without `notices` (an app from before the field), `alerts`
-  covers desktop notifications too. `status` says it raises terminal
-  programs' status events (`permission`, `input` and `finished` from OSC 7501,
-  see Terminal agent signals) itself: the app sends it while the window bar is
-  mounted and the host has agent needs-you or agent finished on, and raises
-  them from the windows' numbered `statusEvents`. It counts itself covering
-  before the report goes out, so nothing the host keeps back from the moment
-  it reads the claim goes unraised. A helper before 0.1.243 ignores the claim
-  and numbers no events, so it keeps pushing them and the app raises none.
-  `bridges` lists the native agent bridges whose events it is receiving.
+  covers desktop notifications too. `bridges` lists the native agent bridges
+  whose events it is receiving.
   Repeated every 20 seconds. iOS suspends a backgrounded app, so iOS reports
   idle instead.
 - **Idle**: neither. Sent once.
@@ -514,14 +507,14 @@ attached. A device **attends** window W when it is viewing and W is the active
 window, or when a report in the last 30 seconds saw it viewing W. A device is
 **covered locally** for an alert when its last local report covered every
 category of that alert the device wants (`alerts` for a bell, `notices` for a
-desktop notification), for a terminal program's status event when that report
-claimed `status`, and for a native agent event when that report listed the
-event's bridge. A local claim lapses 25 seconds after it was made (one heartbeat plus
+desktop notification), and for a native agent event when that report listed
+the event's bridge. A terminal program's status (OSC 7501) is never covered
+locally: the host pushes it, and on Android it takes the window's slot from
+the bell the app raised. A local claim lapses 25 seconds after it was made (one heartbeat plus
 slack), so a suspended or killed app stops covering anything within that time.
-An event raised once (`finished`, `alert`, and a terminal program's
-`permission` or `input`) skipped only because of local coverage is kept for 2
-minutes and sent if the coverage lapses first; a deferred alert remembers its
-categories, so it is sent when the claim for any of them lapses.
+A one-off event (`finished`, `alert`) skipped only because of local coverage
+is kept for 2 minutes and sent if the coverage lapses first; a deferred alert
+remembers its categories, so it is sent when the claim for any of them lapses.
 
 - `permission`, `input` and `finished` skip the devices that attend the window
   or are covered locally.
@@ -539,15 +532,19 @@ From 0.1.243:
 
 - An alert from a window's output is held for 1.5 seconds before it is raised,
   since the program's status report often comes in the next chunk.
-- A device that takes a window's status (its `events` include that kind) is
-  not sent the window's alert while the program there is `blocked`, or within
-  15 seconds after a status push for the window was raised while the program
-  that reported it still reports a status (once it exits, a bell is someone
-  else's). A device that turned that status off is still sent the alert,
-  which is then all it hears of the event.
+- A device is not sent a window's alert when it was sent the window's
+  current status event (each status change is numbered per window; one
+  coalesced into a push a moment earlier counts as sent) and that status
+  still holds: the program still waits on that approval or question, or that
+  turn finished under 15 seconds ago and the program still reports `done` or
+  `idle`. Anything else is a new event or one the device did not hear of (it
+  turned that status off, or its urgent budget was backing off), and the
+  alert is pushed.
 - When kept-back events go out together after a local claim lapses, a device
   gets a window's status without its alert.
-- Alerts still held when the server closes are sent, not dropped.
+- A closing server sends the alerts still held and waits up to 5 seconds for
+  pushes in flight, so a session that ends right after an alert still
+  delivers it.
 
 ### Coalescing, caps and retries
 
@@ -614,13 +611,6 @@ published status before and after each chunk:
   blocked kind to another raises again; the same block reported twice does not.
 - A rejected prompt (`blocked` to `idle`), an `error`, and a status that ends
   because the program exited raise nothing.
-
-From 0.1.243 each of these events is also numbered in the window's snapshot,
-`"statusEvents": [{"seq": 7, "kind": "finished"}]` (the latest 4, oldest
-first, numbered per window from 1 on each server), and a new one sends the
-snapshot again. A turn that finishes and starts again within one chunk leaves
-the window's status as it was, so the number is how a covering app learns of
-it.
 
 The push carries only its kind and window, never the report's `msg`, `title` or
 `app`. Unlike a native request, a terminal one is raised once, when the status
@@ -765,23 +755,19 @@ The endpoint is `https://us-central1-monkeyssh.cloudfunctions.net/pushNotify`.
   an FCM tap, also when it starts a new activity on the running engine (the
   bridge reads the activity's launch intent again when the app resumes).
 - **One notification per window:** the app's own notifications for a
-  MonkeyMux or tmux window (bells, desktop notifications the helper forwards,
-  and agent status) share one slot named by the saved host, session and
-  window (`buildWindowNotificationId`), so each replaces the last and two
-  connections to one session post once. A bell that arrives with a desktop
-  notification or an agent status for the same window is not posted on its
-  own, and while the window's program still reports the status the app raised
-  (still waiting, or still done), its bells and notifications are not posted
-  either. The app
-  raises agent status itself only for a connection whose presence claims
-  `status` (Android, backgrounded, with the window bar mounted), from the
-  numbered `statusEvents`: each once, the newest per window the host allows,
-  never one from before the bar opened. Otherwise the host pushes it. A slot
-  has one owner: a later bell, notification or status takes it, so an older
-  notification's close or a bell's flag clearing does not remove what shows.
-  Known limit: iOS cannot claim local coverage, so in the seconds before it
-  suspends a backgrounded app, a bell can show both from the app and as a
-  push for a window the app was not viewing.
+  MonkeyMux or tmux window (bells and the desktop notifications the helper
+  forwards) share one slot named by the saved host, session and window
+  (`buildWindowNotificationId`), and so do Android pushes (see Android), so
+  each replaces the last and two connections to one session post once. A bell
+  that arrives with a desktop notification for the same window is not posted
+  on its own. On Android the host's push of an agent's approval or finished
+  turn lands in the slot of the bell the app raised for it, so the window
+  shows one notification, whichever came last. A slot has one owner: a later
+  bell or notification takes it, so an older notification's close, one that
+  never showed, or a bell's flag clearing does not remove what shows. Known
+  limit: iOS notifications from pushes and from the app have different
+  identifiers, so in the seconds before iOS suspends a backgrounded app, a
+  bell can show beside the push for a window the app was not viewing.
 - **iOS:** the notification service extension
   (`ios/NotificationServiceExtension`) opens the payload with the shared
   context, rewrites the title and body, and groups a host's notifications by

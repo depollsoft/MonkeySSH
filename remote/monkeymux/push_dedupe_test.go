@@ -1,8 +1,6 @@
 package main
 
 import (
-	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -100,42 +98,44 @@ func TestPushHeldAlertIsPushedOnceItsHoldPasses(t *testing.T) {
 	}
 }
 
-// A turn that finishes and starts again within one read leaves the window's
-// status as it was, so nothing else in the snapshot changes; its status event
-// still reaches the clients, numbered, so a backgrounded app that claimed the
-// window's status raises it.
-func TestWindowStatusEventsReachClientsBetweenSnapshots(t *testing.T) {
-	server := newMuxServer("test")
-	control := newControlRecorder(server)
-	client := newControlClient(control)
-	window := &muxWindow{id: "@2", index: 1, name: "agent", lastActivity: time.Now()}
-	server.windows = []*muxWindow{{id: "@1", index: 0, lastActivity: time.Now()}, window}
-	server.activeID = "@1"
-	server.controls[client] = struct{}{}
+// A device whose newer approval was not posted (its urgent budget is backing
+// off) still gets that approval's bell, which its routine budget allows: an
+// alert yields only to the status event the device was sent, not an earlier
+// one of the same kind.
+func TestPushAlertForAStatusThatWasNotSentIsPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	device := newPushTestDevice(t, 1)
+	h.registerEvents(t, device, nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.clock.now = h.clock.now.Add(pushCoalesceWindow)
+	h.notifier.mu.Lock()
+	h.notifier.backoffUntil[pushBudgetKey{deviceID: device.id, budget: pushBudgetUrgent}] =
+		h.clock.now.Add(time.Hour)
+	h.notifier.mu.Unlock()
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission,alert" {
+		t.Fatalf("pushes = %q, want the first approval and the second one's bell", got)
+	}
+}
 
-	server.handleWindowOutput("@2", []byte(programStatusOsc("state=working:app=claude-code")))
-	broadcasts := strings.Count(control.String(), `"type":"window_updated"`)
-	server.handleWindowOutput("@2", []byte(
-		programStatusOsc("state=done:app=claude-code")+programStatusOsc("state=working:app=claude-code"),
-	))
-	if got := strings.Count(control.String(), `"type":"window_updated"`) - broadcasts; got != 1 {
-		t.Fatalf("broadcasts for the finished turn = %d, want 1", got)
-	}
-	want := []windowStatusEvent{{Seq: 1, Kind: pushKindFinished}}
-	if got := server.snapshotLocked(window).StatusEvents; !slices.Equal(got, want) {
-		t.Fatalf("status events = %+v, want %+v", got, want)
-	}
-
-	// Only the latest few are kept, oldest first.
-	for range maxWindowStatusEvents + 1 {
-		server.handleWindowOutput("@2", []byte(
-			programStatusOsc("state=blocked:app=claude-code:kind=permission")+
-				programStatusOsc("state=working:app=claude-code"),
-		))
-	}
-	got := server.snapshotLocked(window).StatusEvents
-	if len(got) != maxWindowStatusEvents || got[0].Seq != 3 || got[len(got)-1].Kind != pushKindPermission {
-		t.Fatalf("status events = %+v, want the latest %d", got, maxWindowStatusEvents)
+// A second approval moments after the first is coalesced into it, so the
+// device still shows "needs approval" for the window and its bell is not
+// pushed over it.
+func TestPushAlertForACoalescedStatusIsNotPushed(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "permission" {
+		t.Fatalf("pushes = %q, want the first approval alone", got)
 	}
 }
 
@@ -156,69 +156,59 @@ func TestPushAlertAfterTheProgramLeftIsPushed(t *testing.T) {
 }
 
 // Alerts still held when the server closes were taken in before its end and
-// are sent, not dropped.
-func TestPushHeldAlertsAreSentWhenTheServerCloses(t *testing.T) {
+// are sent before close returns, so the process cannot exit first.
+// A turn that finished and then asks for approval rings for the approval: a
+// device that turned approvals off gets that bell rather than have it taken
+// for the finished turn's.
+func TestPushAlertForANewRequestIsNotTakenForTheFinishedTurn(t *testing.T) {
 	h := newPushTestHarness(t)
-	h.registerEvents(t, newPushTestDevice(t, 1), nil)
-	h.holdAlert("@4", pushAlertBell)
-	h.server.releaseHeldPushAlertsAt(true)
-	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "alert" {
-		t.Fatalf("pushes = %q, want the held alert", got)
+	h.registerEvents(t, newPushTestDevice(t, 1), pushTestEvents(pushEventFinished, pushEventBell))
+	h.addPushStatusWindow("@2", "")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=done:app=claude-code")
+	h.writeStatus("@2", "state=working:app=claude-code")
+	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
+	h.clock.now = h.clock.now.Add(5 * time.Second)
+	h.raise("@2", pushKindAlert)
+	if got := h.kinds(); got != "finished,alert" {
+		t.Fatalf("pushes = %q, want the finished turn and the approval's bell", got)
 	}
 }
 
-// A backgrounded app that claims program status raises the window's approval
-// itself, so the host keeps the push back, and sends it only if that claim
-// lapses (the app died before it could). With the approval goes no alert
-// for the same window.
-func TestPushClaimedStatusIsDeferredAndAlertGivesWay(t *testing.T) {
+func TestPushHeldAlertsAreSentBeforeTheServerCloses(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.registerEvents(t, newPushTestDevice(t, 1), nil)
+	h.holdAlert("@4", pushAlertBell)
+	h.server.close()
+	if got := h.kinds(); got != "alert" {
+		t.Fatalf("pushes when close returned = %q, want the held alert", got)
+	}
+}
+
+// A backgrounded app raises its window's bells and notifications itself;
+// the host still pushes the program's status, which takes the window's slot
+// on the phone.
+func TestPushStatusIsPushedToAnAppCoveringAlerts(t *testing.T) {
 	h := newPushTestHarness(t)
 	phone := newPushTestDevice(t, 1)
 	h.registerEvents(t, phone, nil)
 	registerTestAttachClient(t, h.server, &recordingConn{}, "phone-client", 80, 24)
 	notices := true
 	h.presenceReport(t, phone, "phone-client", pushControlRequest{
-		Local: true, Alerts: true, Notices: &notices, Status: true,
+		Local: true, Alerts: true, Notices: &notices,
 	})
 	h.addPushStatusWindow("@2", "")
 	h.writeStatus("@2", "state=working:app=claude-code")
-	h.holdAlert("@2", pushAlertBell|pushAlertNotice)
-	h.writeStatus("@2", "state=blocked:app=claude-code:kind=permission")
-	h.clock.now = h.clock.now.Add(pushAlertHold)
-	h.releaseHeld()
-	if got := h.kinds(); got != "" {
-		t.Fatalf("pushed %q while the app covers the window itself", got)
-	}
-
-	// The app stops reporting; the claim lapses.
-	h.clock.now = h.clock.now.Add(pushLocalTTL + time.Second)
-	h.server.flushPushDeferred()
-	h.notifier.inflight.Wait()
-	if got := h.kinds(); got != "permission" {
-		t.Fatalf("pushes after the claim lapsed = %q, want the approval alone", got)
-	}
-}
-
-// Without the status claim (an app before it, or one whose window bar is
-// not mounted), the host pushes program status as before.
-func TestPushStatusWithoutTheClaimIsPushed(t *testing.T) {
-	h := newPushTestHarness(t)
-	phone := newPushTestDevice(t, 1)
-	h.registerEvents(t, phone, nil)
-	registerTestAttachClient(t, h.server, &recordingConn{}, "phone-client", 80, 24)
-	h.presenceReport(t, phone, "phone-client", pushControlRequest{Local: true, Alerts: true})
-	h.addPushStatusWindow("@2", "")
-	h.writeStatus("@2", "state=working:app=claude-code")
 	h.writeStatus("@2", "state=done:app=claude-code")
+	h.raise("@2", pushKindAlert)
 	if got := h.kinds(); got != "finished" {
-		t.Fatalf("pushes = %q, want the finished turn", got)
+		t.Fatalf("pushes = %q, want the finished turn alone", got)
 	}
 }
 
-// An alert and a later finished turn both kept back for a covering app go
-// out together once its claim lapses; the window gets the finished turn only,
-// since both would land in its one slot in either order.
+// A native agent's finished turn and an alert both kept back for a covering
+// app go out together once its claim lapses; the window gets the finished
+// turn only, since both would land in its one slot in either order.
 func TestPushDeferredFlushSendsAWindowsStatusWithoutItsAlert(t *testing.T) {
 	h := newPushTestHarness(t)
 	phone := newPushTestDevice(t, 1)
@@ -226,13 +216,16 @@ func TestPushDeferredFlushSendsAWindowsStatusWithoutItsAlert(t *testing.T) {
 	registerTestAttachClient(t, h.server, &recordingConn{}, "phone-client", 80, 24)
 	notices := true
 	h.presenceReport(t, phone, "phone-client", pushControlRequest{
-		Local: true, Alerts: true, Notices: &notices, Status: true,
+		Local: true, Alerts: true, Notices: &notices, Bridges: []string{pushTestBridgeID},
 	})
-	h.addPushStatusWindow("@3", "")
-	h.writeStatus("@3", "state=working:app=claude-code")
+	h.addPushStatusWindow("@3", pushTestBridgeID)
 	h.raise("@3", pushKindAlert)
-	h.clock.now = h.clock.now.Add(pushStatusAlertGrace + time.Second)
-	h.writeStatus("@3", "state=done:app=claude-code")
+	h.clock.now = h.clock.now.Add(time.Second)
+	h.server.raisePushEvent("@3", pushKindFinished, pushTestBridgeID)
+	h.notifier.inflight.Wait()
+	if got := h.kinds(); got != "" {
+		t.Fatalf("pushed %q while the app covers the window itself", got)
+	}
 	h.clock.now = h.clock.now.Add(pushLocalTTL + time.Second)
 	h.server.flushPushDeferred()
 	h.notifier.inflight.Wait()

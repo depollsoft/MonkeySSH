@@ -11,7 +11,6 @@ import 'package:monkeyssh/domain/services/monkeymux_service.dart';
 import 'package:monkeyssh/domain/services/push/push_crypto.dart';
 import 'package:monkeyssh/domain/services/push/push_device_store.dart';
 import 'package:monkeyssh/domain/services/push/push_event.dart';
-import 'package:monkeyssh/domain/services/push/push_local_alerts.dart';
 import 'package:monkeyssh/domain/services/push/push_messaging_gateway.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_context.dart';
 import 'package:monkeyssh/domain/services/push/push_notification_service.dart';
@@ -203,10 +202,6 @@ class _FakeLink implements PushHostLink {
   /// Whether push_unregister fails, as when the connection drops mid-way.
   bool failUnregister = false;
 
-  /// Whether the status claim covered this connection as each presence went
-  /// out.
-  final coveredAtPresence = <bool>[];
-
   Iterable<String> get types =>
       commands.map((command) => command['type']! as String);
 
@@ -216,9 +211,6 @@ class _FakeLink implements PushHostLink {
     bool lowPriority = false,
   }) async {
     commands.add(command);
-    if (command['type'] == 'push_presence') {
-      coveredAtPresence.add(pushLocalStatusCoverage.covers(connectionId));
-    }
     if (unsupported) {
       // As runPushControl: an unregister an older helper refused only fails.
       return MonkeyMuxPushControlResult(
@@ -971,75 +963,14 @@ void main() {
       expect(lastOf(link, 'push_presence'), containsPair('alerts', true));
       expect(lastOf(link, 'push_presence'), containsPair('notices', true));
 
-      expect(lastOf(link, 'push_presence'), containsPair('status', true));
-
       // The app shows no program notifications while the app-wide switch is
-      // off, so the host keeps pushing them; agents' status it still raises.
+      // off, so the host keeps pushing them.
       h.terminalNotifications = false;
       await h.editHost(1, const HostNotificationPrefs(windowAlerts: false));
       await h.controller.syncNow();
-      var presence = lastOf(link, 'push_presence');
-      expect(presence['local'], isTrue);
-      expect(presence, containsPair('alerts', false));
-      expect(presence, containsPair('notices', false));
-      expect(presence, containsPair('status', true));
-
-      // With the agent kinds off too, it raises nothing locally.
-      await h.editHost(
-        1,
-        const HostNotificationPrefs(
-          windowAlerts: false,
-          agentAttention: false,
-          agentFinished: false,
-        ),
-      );
-      await h.controller.syncNow();
-      presence = lastOf(link, 'push_presence');
+      final presence = lastOf(link, 'push_presence');
       expect(presence['local'], isFalse);
       expect(presence, isNot(contains('alerts')));
-      expect(presence, isNot(contains('status')));
-    });
-
-    group('the status claim', () {
-      tearDown(pushLocalStatusCoverage.clear);
-
-      Future<_FakeLink> background({bool windowBar = true}) async {
-        final link = _FakeLink(connectionId: 10, hostId: 1);
-        h.links.add(link);
-        if (windowBar) h.alertListeners.add(10);
-        await h.start();
-        await h.controller.enable();
-        h.controller.reportVisibility(foreground: false);
-        await pumpEventQueue();
-        await h.controller.syncNow();
-        return link;
-      }
-
-      // The host keeps status pushes back from the moment it reads the
-      // claim, so the bar must already raise what comes after it.
-      test('covers the connection before the claim goes out', () async {
-        final link = await background();
-        expect(lastOf(link, 'push_presence')['status'], isTrue);
-        expect(link.coveredAtPresence.last, isTrue);
-        expect(pushLocalStatusCoverage.covers(10), isTrue);
-      });
-
-      test('a connection without a window bar makes no claim', () async {
-        final link = await background(windowBar: false);
-        expect(lastOf(link, 'push_presence'), isNot(contains('status')));
-        expect(pushLocalStatusCoverage.covers(10), isFalse);
-      });
-
-      test(
-        'returning to the foreground hands status back to the host',
-        () async {
-          await background();
-          h.controller.reportVisibility(foreground: true);
-          await pumpEventQueue();
-          await h.controller.syncNow();
-          expect(pushLocalStatusCoverage.covers(10), isFalse);
-        },
-      );
     });
   });
 

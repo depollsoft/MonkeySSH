@@ -2850,28 +2850,7 @@ TmuxWindow? _windowFromJson(Object? value) {
     pendingNotifications: _muxWindowNotificationsFromJson(
       value['notifications'],
     ),
-    statusEvents: _muxWindowStatusEventsFromJson(value['statusEvents']),
   );
-}
-
-/// Parses a window's numbered program status events, skipping malformed or
-/// unknown ones so a newer server cannot make an older app raise a wrong one.
-List<MuxWindowStatusEvent> _muxWindowStatusEventsFromJson(Object? value) {
-  if (value is! List) return const [];
-  final events = <MuxWindowStatusEvent>[];
-  for (final entry in value) {
-    if (entry is! Map<String, Object?>) continue;
-    final seq = entry['seq'];
-    final kind = switch (entry['kind']) {
-      'permission' => MuxWindowStatusKind.permission,
-      'input' => MuxWindowStatusKind.input,
-      'finished' => MuxWindowStatusKind.finished,
-      _ => null,
-    };
-    if (seq is! int || seq <= 0 || kind == null) continue;
-    events.add(MuxWindowStatusEvent(seq: seq, kind: kind));
-  }
-  return events;
 }
 
 /// Parses server-forwarded background notification escapes, tolerating

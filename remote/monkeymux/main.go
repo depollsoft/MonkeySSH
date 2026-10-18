@@ -184,9 +184,6 @@ const (
 	// maxPendingWindowOscNotifications bounds unacknowledged background
 	// desktop notifications retained per window; oldest is dropped first.
 	maxPendingWindowOscNotifications = 8
-	// maxWindowStatusEvents bounds the recent program status events kept per
-	// window; oldest is dropped first.
-	maxWindowStatusEvents = 4
 )
 
 const terminalParserResetSequence = "\x1b\\"
@@ -599,17 +596,6 @@ type windowSnapshot struct {
 	// captured from this window while it ran in the background, oldest
 	// first. Absent for plain shells and older clients ignore it.
 	Notifications []pendingWindowOscNotification `json:"notifications,omitempty"`
-	// StatusEvents holds the window's latest program status changes that call
-	// for a notification, oldest first, each numbered by a counter that only
-	// grows on this server. Absent until the first.
-	StatusEvents []windowStatusEvent `json:"statusEvents,omitempty"`
-}
-
-// windowStatusEvent is one program status change that calls for a
-// notification: kind is the push kind (permission, input or finished).
-type windowStatusEvent struct {
-	Seq  uint64 `json:"seq"`
-	Kind string `json:"kind"`
 }
 
 type terminalProgressSnapshot struct {
@@ -858,11 +844,9 @@ type muxWindow struct {
 	// notifications, oldest first. Bounded; selecting the window clears it.
 	notificationOscs []pendingWindowOscNotification
 	// statusEventSeq counts the program status changes that call for a push
-	// (see programStatusPushKinds), and statusEvents holds the latest few,
-	// oldest first, so a backgrounded app raises each one even when the
-	// window's status changed and changed back between two snapshots.
+	// (see programStatusPushKinds), so the push notifier can tell the
+	// window's current status event from an earlier one.
 	statusEventSeq             uint64
-	statusEvents               []windowStatusEvent
 	historyStartTerminalOutput terminalOutputParserSnapshot
 	terminalOutputForwarding   bool
 	lastActivity               time.Time
@@ -6984,7 +6968,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		s.activeID == windowID && s.attachCountLocked() > 0
 	wasAlert := window.alert
 	wasNotificationOscSeq := window.notificationOscSeq
-	wasStatusEventSeq := window.statusEventSeq
 	// PTY output may contain real work even during a resize redraw pause.
 	// Replaying retained bytes bypasses this path and must not count as activity.
 	window.lastActivity = now
@@ -7078,20 +7061,10 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 			after.programStatus,
 		)
 	}
-	for _, kind := range statusPushes {
-		window.statusEventSeq++
-		window.statusEvents = append(window.statusEvents, windowStatusEvent{
-			Seq:  window.statusEventSeq,
-			Kind: kind,
-		})
-	}
-	if extra := len(window.statusEvents) - maxWindowStatusEvents; extra > 0 {
-		window.statusEvents = append([]windowStatusEvent(nil), window.statusEvents[extra:]...)
-	}
+	window.statusEventSeq += uint64(len(statusPushes))
 	if before != after ||
 		(!wasAlert && window.alert) ||
 		window.notificationOscSeq != wasNotificationOscSeq ||
-		window.statusEventSeq != wasStatusEventSeq ||
 		window.lastBroadcast.IsZero() ||
 		now.Sub(window.lastBroadcast) >= windowUpdateMinInterval {
 		snap := s.snapshotLocked(window)
@@ -9866,7 +9839,6 @@ func (s *muxServer) snapshotLocked(window *muxWindow) windowSnapshot {
 		Name:                      window.name,
 		Active:                    s.activeID == window.id,
 		Notifications:             copyPendingWindowOscNotifications(window.notificationOscs),
-		StatusEvents:              slices.Clone(window.statusEvents),
 		CurrentCommand:            window.currentCommandLocked(),
 		CurrentPath:               window.cwd,
 		PanePid:                   window.metadataProcessIDLocked(),
@@ -17314,6 +17286,7 @@ func (s *muxServer) close() {
 	}
 	teardown := s.beginShutdownLocked(false)
 	s.mu.Unlock()
+	s.drainPush()
 	teardown()
 }
 
@@ -17326,6 +17299,7 @@ func (s *muxServer) closeIfIdle() {
 	teardown := s.beginIdleShutdownLocked()
 	s.mu.Unlock()
 	if teardown != nil {
+		s.drainPush()
 		teardown()
 	}
 }

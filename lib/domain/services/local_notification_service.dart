@@ -959,24 +959,6 @@ class LocalNotificationService {
     details: _alertDetails(_acpNotificationChannel, subtitle: subtitle),
   );
 
-  /// Shows a terminal agent's approval, question or finished turn in its
-  /// window's notification slot, on the agent channel native chats use. A tap
-  /// focuses the window like a window alert. Same text rules as
-  /// [showAcpNotification]: never the program's own message or title.
-  Future<void> showAgentStatus({
-    required int notificationId,
-    required String title,
-    required String body,
-    required TmuxAlertNotificationPayload payload,
-    String? subtitle,
-  }) => _showNotification(
-    notificationId: notificationId,
-    title: title,
-    body: body,
-    payload: payload.encode(),
-    details: _alertDetails(_acpNotificationChannel, subtitle: subtitle),
-  );
-
   NotificationDetails _alertDetails(
     AndroidNotificationChannel channel, {
     String? subtitle,

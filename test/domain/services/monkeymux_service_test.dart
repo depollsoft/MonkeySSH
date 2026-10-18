@@ -767,31 +767,6 @@ void main() {
 
       expect(window, isNotNull);
       expect(window!.pendingNotifications, isEmpty);
-      expect(window.statusEvents, isEmpty);
-    });
-
-    test('maps numbered status events, skipping malformed and unknown', () {
-      final window = parseMonkeyMuxWindowSnapshotForTesting({
-        'id': '@2',
-        'index': 1,
-        'name': 'claude',
-        'active': false,
-        'statusEvents': [
-          {'seq': 0, 'kind': 'finished'},
-          {'seq': 1, 'kind': 'someday'},
-          {'seq': 2},
-          'not-a-map',
-          {'seq': 3, 'kind': 'permission'},
-          {'seq': 4, 'kind': 'input'},
-          {'seq': 5, 'kind': 'finished'},
-        ],
-      });
-
-      expect(window!.statusEvents, const [
-        MuxWindowStatusEvent(seq: 3, kind: MuxWindowStatusKind.permission),
-        MuxWindowStatusEvent(seq: 4, kind: MuxWindowStatusKind.input),
-        MuxWindowStatusEvent(seq: 5, kind: MuxWindowStatusKind.finished),
-      ]);
     });
   });
 

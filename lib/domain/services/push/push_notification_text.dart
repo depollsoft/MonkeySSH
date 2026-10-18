@@ -55,10 +55,13 @@ PushNotificationText pushNotificationText(
   String? hostLabel,
 }) {
   final generic = genericPushNotificationText(event.kind);
-  final title = agentStatusNotificationTitle(
-    event.kind,
-    agentLabel: pushAgentLabels[event.agent],
-  );
+  final agent = pushAgentLabels[event.agent];
+  final title = switch (event.kind) {
+    PushEventKind.permission when agent != null => '$agent needs approval',
+    PushEventKind.input when agent != null => '$agent has a question',
+    PushEventKind.finished when agent != null => '$agent finished',
+    _ => generic.title,
+  };
   if (event.kind == PushEventKind.test) return generic;
   final label = hostLabel?.trim() ?? '';
   final parts = <String>[];
@@ -72,16 +75,3 @@ PushNotificationText pushNotificationText(
   }
   return (title: title, body: parts.isEmpty ? generic.body : parts.join(' · '));
 }
-
-/// The title of an agent's status notification for [kind]: the agent by
-/// [agentLabel] when it is known, else the generic text. Pushes and the
-/// notifications a backgrounded app raises in their place share it.
-String agentStatusNotificationTitle(PushEventKind kind, {String? agentLabel}) =>
-    switch (kind) {
-      PushEventKind.permission when agentLabel != null =>
-        '$agentLabel needs approval',
-      PushEventKind.input when agentLabel != null =>
-        '$agentLabel has a question',
-      PushEventKind.finished when agentLabel != null => '$agentLabel finished',
-      _ => genericPushNotificationText(kind).title,
-    };

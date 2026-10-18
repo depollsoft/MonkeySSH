@@ -31,7 +31,6 @@ import 'package:monkeyssh/domain/services/agent_session_discovery_service.dart';
 import 'package:monkeyssh/domain/services/app_permission_service.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
-import 'package:monkeyssh/domain/services/push/push_local_alerts.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
@@ -1190,6 +1189,8 @@ void registerTmuxWindowNavigatorTests() {
           );
         });
 
+        // A window's slot has one owner: the newest notification in it. An
+        // older or unshown one going away must not clear it.
         testWidgets('a bell keeps its slot when an older notification closes', (
           tester,
         ) async {
@@ -1202,6 +1203,40 @@ void registerTmuxWindowNavigatorTests() {
           ]);
           await show(tester, [
             ringing('@2', ['99;i=old;Building', '99;i=old:p=close;']),
+          ]);
+          expect(notifications.shown, hasLength(2));
+          expect(notifications.cleared, isEmpty);
+        });
+
+        testWidgets('a notification that never showed cannot clear a bell', (
+          tester,
+        ) async {
+          await pumpBar(
+            tester,
+            prefs: const HostNotificationPrefs(shellNotifications: false),
+          );
+          await show(tester, [ringing('@2', [])]);
+          await show(tester, [
+            ringing('@2', ['99;i=off;Not shown']),
+          ]);
+          await show(tester, [
+            ringing('@2', ['99;i=off;Not shown', '99;i=off:p=close;']),
+          ]);
+          expect(notifications.shown, hasLength(1));
+          expect(notifications.cleared, isEmpty);
+        });
+
+        testWidgets('a notification keeps its slot when the bell clears', (
+          tester,
+        ) async {
+          await pumpBar(tester);
+          await show(tester, [ringing('@2', [])]);
+          await show(tester, [
+            ringing('@2', ['9;Build finished']),
+          ]);
+          // The bell's flag clears; the notification after it stays.
+          await show(tester, [
+            agent('@2', ['9;Build finished']),
           ]);
           expect(notifications.shown, hasLength(2));
           expect(notifications.cleared, isEmpty);
@@ -1223,235 +1258,6 @@ void registerTmuxWindowNavigatorTests() {
             shown.id,
             buildWindowNotificationId(session.hostId, 'main', '@2'),
           );
-        });
-
-        // The status MonkeyMux reports for an agent window, with the numbered
-        // status events it has raised so far (it keeps the latest few).
-        TmuxWindow agentWithStatus(
-          TerminalProgramStatus status, {
-          List<MuxWindowStatusKind> events = const [],
-          List<String> payloads = const [],
-          bool rang = false,
-        }) => TmuxWindow(
-          index: 2,
-          id: '@2',
-          name: 'claude',
-          isActive: false,
-          flags: rang ? '!' : '',
-          agentTool: AgentLaunchTool.claudeCode,
-          programStatus: status,
-          statusEvents: [
-            for (var i = 0; i < events.length; i++)
-              MuxWindowStatusEvent(seq: i + 1, kind: events[i]),
-          ],
-          pendingNotifications: [
-            for (var i = 0; i < payloads.length; i++)
-              MuxWindowNotification(seq: i + 1, payload: payloads[i]),
-          ],
-        );
-        const working = TerminalProgramStatus(
-          state: TerminalProgramState.working,
-        );
-        const approval = TerminalProgramStatus(
-          state: TerminalProgramState.blocked,
-          kind: TerminalProgramBlockedKind.permission,
-        );
-        const done = TerminalProgramStatus(state: TerminalProgramState.done);
-        const asked = MuxWindowStatusKind.permission;
-        const finished = MuxWindowStatusKind.finished;
-
-        group('while the host keeps status pushes back', () {
-          setUp(
-            () => pushLocalStatusCoverage.set(
-              session.connectionId,
-              covered: true,
-            ),
-          );
-          tearDown(pushLocalStatusCoverage.clear);
-
-          testWidgets('an approval and its bell are one notification', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [agentWithStatus(working)]);
-            await show(tester, [
-              agentWithStatus(
-                approval,
-                events: [asked],
-                rang: true,
-                payloads: ['9;Claude needs your permission'],
-              ),
-            ]);
-            final slot = buildWindowNotificationId(
-              session.hostId,
-              'main',
-              '@2',
-            );
-            final shown = notifications.shown.single;
-            expect(shown.title, 'Claude Code needs approval');
-            expect(shown.id, slot);
-
-            // Ringing again while it waits does not replace the approval.
-            await show(tester, [
-              agentWithStatus(
-                approval,
-                events: [asked],
-                rang: true,
-                payloads: ['9;Claude needs your permission', '9;Still waiting'],
-              ),
-            ]);
-            expect(notifications.shown, hasLength(1));
-
-            // The finished turn takes the window's slot.
-            await show(tester, [
-              agentWithStatus(working, events: [asked]),
-            ]);
-            await show(tester, [
-              agentWithStatus(done, events: [asked, finished]),
-            ]);
-            expect(notifications.shown.map((n) => (n.title, n.id)), [
-              ('Claude Code needs approval', slot),
-              ('Claude Code finished', slot),
-            ]);
-            // Nothing cleared the status the bell's slot now holds.
-            expect(notifications.cleared, isEmpty);
-          });
-
-          testWidgets('a finished turn and its notice are one notification', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [agentWithStatus(working)]);
-            await show(tester, [
-              agentWithStatus(done, events: [finished]),
-            ]);
-            // The turn's notice comes a snapshot later.
-            await show(tester, [
-              agentWithStatus(
-                done,
-                events: [finished],
-                rang: true,
-                payloads: ['9;Claude is waiting for your input'],
-              ),
-            ]);
-            expect(notifications.shown.single.title, 'Claude Code finished');
-
-            // Once it works again, a notice is a new event.
-            await show(tester, [
-              agentWithStatus(
-                working,
-                events: [finished],
-                payloads: ['9;Claude is waiting for your input', '9;Tests ran'],
-              ),
-            ]);
-            expect(notifications.shown.last.body, 'Tests ran');
-          });
-
-          testWidgets('a turn that finished between snapshots is raised', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [agentWithStatus(working)]);
-            // It finished and started again before the next snapshot.
-            await show(tester, [
-              agentWithStatus(working, events: [finished]),
-            ]);
-            expect(notifications.shown.single.title, 'Claude Code finished');
-          });
-
-          testWidgets('an older notification closing leaves the status', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [
-              agentWithStatus(working, payloads: ['99;i=old;Building']),
-            ]);
-            expect(notifications.shown.single.body, 'Building');
-            await show(tester, [
-              agentWithStatus(
-                done,
-                events: [finished],
-                payloads: ['99;i=old;Building'],
-              ),
-            ]);
-            // It works again, and closes the older notification.
-            await show(tester, [
-              agentWithStatus(
-                working,
-                events: [finished],
-                payloads: ['99;i=old;Building', '99;i=old:p=close;'],
-              ),
-            ]);
-            expect(notifications.shown.last.title, 'Claude Code finished');
-            expect(notifications.cleared, isEmpty);
-          });
-
-          testWidgets('a status takes the slot from an earlier bell', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [agentWithStatus(working)]);
-            await show(tester, [agentWithStatus(working, rang: true)]);
-            await show(tester, [
-              agentWithStatus(approval, events: [asked], rang: true),
-            ]);
-            expect(
-              notifications.shown.last.title,
-              'Claude Code needs approval',
-            );
-            // The bell's flag clearing does not clear the approval in its slot.
-            await show(tester, [
-              agentWithStatus(approval, events: [asked]),
-            ]);
-            expect(notifications.cleared, isEmpty);
-          });
-
-          testWidgets('a status from before the bar opened is not replayed', (
-            tester,
-          ) async {
-            await pumpBar(tester);
-            await show(tester, [
-              agentWithStatus(approval, events: [asked]),
-            ]);
-            expect(notifications.shown, isEmpty);
-          });
-
-          testWidgets('approvals stay with the host when the kind is off', (
-            tester,
-          ) async {
-            await pumpBar(
-              tester,
-              prefs: const HostNotificationPrefs(agentAttention: false),
-            );
-            await show(tester, [agentWithStatus(working)]);
-            await show(tester, [
-              agentWithStatus(
-                approval,
-                events: [asked],
-                rang: true,
-                payloads: ['9;Claude needs your permission'],
-              ),
-            ]);
-            // Not raised as a status, so its own notification still shows.
-            expect(
-              notifications.shown.single.body,
-              'Claude needs your permission',
-            );
-          });
-        });
-
-        testWidgets('without the claim the host pushes the status', (
-          tester,
-        ) async {
-          await pumpBar(tester);
-          await show(tester, [agentWithStatus(working)]);
-          await show(tester, [
-            agentWithStatus(approval, events: [asked]),
-          ]);
-          await show(tester, [
-            agentWithStatus(done, events: [asked, finished]),
-          ]);
-          expect(notifications.shown, isEmpty);
         });
 
         testWidgets('a host with shell notifications off forwards none', (
@@ -2889,20 +2695,6 @@ class _RecordingNotifications extends LocalNotificationService {
     TerminalNotificationUrgency? urgency,
     TerminalNotificationSound? sound,
     Duration? timeout,
-  }) async => shown.add((
-    id: notificationId,
-    title: title,
-    body: body,
-    windowId: payload.windowId,
-  ));
-
-  @override
-  Future<void> showAgentStatus({
-    required int notificationId,
-    required String title,
-    required String body,
-    required TmuxAlertNotificationPayload payload,
-    String? subtitle,
   }) async => shown.add((
     id: notificationId,
     title: title,

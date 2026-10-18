@@ -229,11 +229,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   List<TmuxWindow>? _windows;
   AgentLaunchTool? _preferredLaunchTool;
   final _alertTracker = TmuxAlertTracker();
-  final _statusTracker = TmuxProgramStatusTracker();
-  // Windows whose status this bar raised, while their program still reports
-  // it (still waiting, or still done): their bells and program notifications
-  // are the same event and stay quiet so as not to replace it.
-  final _statusWindowKeys = <String, MuxWindowStatusKind>{};
   HostNotificationPrefs _hostPrefs = const HostNotificationPrefs();
   ProviderSubscription<AsyncValue<HostNotificationPrefs>>?
   _hostPrefsSubscription;
@@ -686,10 +681,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     // A window has one notification slot. New bells wait until this
     // snapshot's forwarded notifications are posted: a window that also has
     // one shows that, since it says more, and gets one notification, not two.
-    final quietWindowKeys = _syncStatusNotifications(
-      windows,
-      _statusTracker.applyWindows(windows),
-    );
     final newAlerts =
         <({TmuxWindow window, int notificationId, String? windowId})>[];
     final hasNewAlert = _alertTracker.applyWindows(
@@ -709,17 +700,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         !(MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
       unawaited(_bounceController.forward(from: 0));
     }
-    final notifiedWindowKeys = _syncForwardedNotifications(
-      windows,
-      quietWindowKeys: quietWindowKeys,
-    );
+    final notifiedWindowKeys = _syncForwardedNotifications(windows);
     for (final alert in newAlerts) {
       final key = _tmuxAlertWindowKey(alert.window);
-      if (quietWindowKeys.contains(key) || notifiedWindowKeys.contains(key)) {
-        // Another notification has the window's slot.
-        _alertTracker.release(key);
-        continue;
-      }
+      if (notifiedWindowKeys.contains(key)) continue;
       // The bell takes the slot; an older program notification's close must
       // not clear it.
       _forwardedNotificationsByWindowKey.remove(key);
@@ -985,8 +969,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _clearSeenAlertNotifications() {
-    _statusTracker.clear();
-    _statusWindowKeys.clear();
     _alertTracker.clear(
       (id) => unawaited(_localNotifications.clearTerminalNotification(id)),
     );
@@ -1004,99 +986,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       ? window.id!
       : _tmuxAlertIndexWindowKey(window.index);
 
-  /// Raises the approvals, questions and finished turns terminal agents report
-  /// while the host keeps those pushes back for this backgrounded app (see
-  /// [PushLocalStatusCoverage]), in each window's notification slot: the
-  /// newest one the host allows. Returns the keys of windows whose bells and
-  /// program notifications stay quiet, being the same event.
-  Set<String> _syncStatusNotifications(
-    List<TmuxWindow> windows,
-    List<({TmuxWindow window, MuxWindowStatusKind kind})> events,
-  ) {
-    // Once the program works again or leaves, a bell is a new event.
-    _statusWindowKeys.removeWhere((key, kind) {
-      final state = windows
-          .where((window) => _tmuxAlertWindowKey(window) == key)
-          .firstOrNull
-          ?.programStatus
-          ?.state;
-      return switch (kind) {
-        MuxWindowStatusKind.finished =>
-          state != TerminalProgramState.done &&
-              state != TerminalProgramState.idle,
-        MuxWindowStatusKind.permission ||
-        MuxWindowStatusKind.input => state != TerminalProgramState.blocked,
-      };
-    });
-    if (pushLocalStatusCoverage.covers(widget.session.connectionId)) {
-      final newest = <String, ({TmuxWindow window, MuxWindowStatusKind kind})>{
-        for (final event in events)
-          if (_hostPrefs.allows(_statusNotificationKind(event.kind)))
-            _tmuxAlertWindowKey(event.window): event,
-      };
-      for (final MapEntry(:key, value: (:window, :kind)) in newest.entries) {
-        if (_sendStatusNotification(window, kind)) {
-          _statusWindowKeys[key] = kind;
-          // The status takes the slot from a bell or program notification.
-          _alertTracker.release(key);
-          _forwardedNotificationsByWindowKey.remove(key);
-        }
-      }
-    }
-    return _statusWindowKeys.keys.toSet();
-  }
-
-  HostNotificationKind _statusNotificationKind(MuxWindowStatusKind kind) =>
-      kind == MuxWindowStatusKind.finished
-      ? HostNotificationKind.agentFinished
-      : HostNotificationKind.agentAttention;
-
-  bool _sendStatusNotification(TmuxWindow window, MuxWindowStatusKind kind) {
-    final content = resolveTmuxAlertNotificationContent(
-      tmuxSessionName: widget.tmuxSessionName,
-      window: window,
-      hostLabel: widget.hostLabel,
-    );
-    final session = widget.session;
-    final windowId = window.id;
-    return _showIfHostAllows(
-      _statusNotificationKind(kind),
-      () => _localNotifications.showAgentStatus(
-        notificationId: buildWindowNotificationId(
-          session.hostId,
-          widget.tmuxSessionName,
-          _tmuxAlertWindowKey(window),
-        ),
-        title: agentStatusNotificationTitle(switch (kind) {
-          MuxWindowStatusKind.permission => PushEventKind.permission,
-          MuxWindowStatusKind.input => PushEventKind.input,
-          MuxWindowStatusKind.finished => PushEventKind.finished,
-        }, agentLabel: window.agentTool?.label),
-        subtitle: content.subtitle,
-        // The window, never the program's own message or title.
-        body: content.title,
-        payload: TmuxAlertNotificationPayload(
-          hostId: session.hostId,
-          connectionId: session.connectionId,
-          tmuxSessionName: widget.tmuxSessionName,
-          windowIndex: window.index,
-          windowId: windowId != null && isValidTmuxWindowId(windowId)
-              ? windowId
-              : null,
-        ),
-      ),
-    );
-  }
-
   /// Shows server-forwarded background notifications unseen since the last
   /// window list, and cancels shown ones whose window went active, closed,
   /// or dropped its pending entries (viewed on the server). Returns the keys
-  /// of the windows it posted a notification for. Windows in
-  /// [quietWindowKeys] have theirs recorded as seen but not posted.
-  Set<String> _syncForwardedNotifications(
-    List<TmuxWindow> windows, {
-    Set<String> quietWindowKeys = const <String>{},
-  }) {
+  /// of the windows it posted a notification for.
+  Set<String> _syncForwardedNotifications(List<TmuxWindow> windows) {
     final keys = <String>{
       for (final window in windows) _tmuxAlertWindowKey(window),
     };
@@ -1144,9 +1038,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     }
     final notified = <String>{};
     for (final show in shows) {
-      if (quietWindowKeys.contains(_tmuxAlertWindowKey(show.window))) {
-        continue;
-      }
       if (_showForwardedNotification(show.window, windows, show.notification)) {
         final key = _tmuxAlertWindowKey(show.window);
         notified.add(key);
@@ -1201,10 +1092,6 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       tmuxSessionName,
       windowKey,
     );
-    _forwardedNotificationsByWindowKey[windowKey] = (
-      id: notificationId,
-      identifier: request.identifier,
-    );
     final content = resolveTmuxAlertNotificationContent(
       tmuxSessionName: tmuxSessionName,
       window: window,
@@ -1212,7 +1099,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       title: request.title,
       body: request.body,
     );
-    return _showIfHostAllows(
+    final shown = _showIfHostAllows(
       HostNotificationKind.shellNotifications,
       () => _localNotifications.showTmuxAlert(
         notificationId: notificationId,
@@ -1231,6 +1118,15 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
         timeout: request.timeout,
       ),
     );
+    // Only a notification that showed owns the slot; closing one that never
+    // showed must not clear what does.
+    if (shown) {
+      _forwardedNotificationsByWindowKey[windowKey] = (
+        id: notificationId,
+        identifier: request.identifier,
+      );
+    }
+    return shown;
   }
 
   void _clearForwardedNotification(String windowKey) {

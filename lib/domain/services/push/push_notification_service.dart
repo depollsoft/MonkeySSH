@@ -476,7 +476,6 @@ class PushNotificationController extends Notifier<PushNotificationState> {
     _disposed = false;
     ref.onDispose(() {
       _disposed = true;
-      pushLocalStatusCoverage.clear();
       _heartbeat?.cancel();
       unawaited(_registrations?.cancel());
       unawaited(_hostChanges?.cancel());
@@ -1624,29 +1623,11 @@ class PushNotificationController extends Notifier<PushNotificationState> {
         windowBar &&
         prefs.shellNotifications &&
         _terminalNotificationsEnabled();
-    // The bar also raises the approvals, questions and finished turns
-    // terminal agents report, in the window's one notification slot beside
-    // its bells, so the host need not push them as a second notification.
-    final localStatus =
-        windowBar && (prefs.agentAttention || prefs.agentFinished);
     final presence = _foreground
         ? (_isViewed(link, links) ? _Presence.viewing : _Presence.idle)
-        : (localAlerts ||
-              localNotices ||
-              localStatus ||
-              localBridges.isNotEmpty)
+        : (localAlerts || localNotices || localBridges.isNotEmpty)
         ? _Presence.local
         : _Presence.idle;
-    // Set before the report goes out: the host keeps status pushes back from
-    // the moment it reads the claim, so the bar raises what comes after. A
-    // helper before 0.1.243 ignores the claim but also numbers no status
-    // events, so the bar raises nothing there and the host pushes as before.
-    // While a dropped claim is still in force on the host, it sends what the
-    // claim kept back once it reads the new report.
-    pushLocalStatusCoverage.set(
-      link.connectionId,
-      covered: presence == _Presence.local && localStatus,
-    );
     if (presence == _Presence.idle && _lastPresence[key] == _Presence.idle) {
       return;
     }
@@ -1661,7 +1642,6 @@ class PushNotificationController extends Notifier<PushNotificationState> {
           if (presence == _Presence.local) 'alerts': localAlerts,
           if (presence == _Presence.local) 'notices': localNotices,
           if (presence == _Presence.local) 'bridges': localBridges,
-          if (presence == _Presence.local) 'status': localStatus,
         },
       }, lowPriority: true);
       if (result.ok) _lastPresence[key] = presence;
