@@ -3147,53 +3147,77 @@ void main() {
   });
 
   group('history replay on load', () {
-    test(
-      'app-restart load dispatches input accepted by its provisional session',
-      () async {
-        final loadGate = Completer<void>();
-        final custom = _FakeConnector(
-          serverFactory: (_, _) => _FakeAcpServer(
-            supportsResume: false,
-            loadResponseGate: loadGate.future,
-            replayTextOnLoad: 'Old reply',
-          )..holdPrompts = true,
-        );
-        custom.availableBridges.add('live-pi');
-        final restored = buildManagerWith(custom);
-        final reconnect = restored.reconnectSession(
-          hostId: 1,
-          providerId: AcpBuiltinProviderIds.pi,
-          bridgeId: 'live-pi',
-          acpSessionId: 'restored-session',
-          cwd: '/repo',
-        );
-        await _pump();
-        final provisional = restored.state.sessions.single;
-        final prompt = restored.prompt(provisional.key, const [
-          AcpTextContent('While opening'),
-        ]);
-        final server = custom.servers['live-pi']!;
-        expect(server.methods, contains('session/load'));
-        expect(server.heldPromptCount, 0);
-        loadGate.complete();
-        expect(await reconnect, isA<AcpSessionLaunchStarted>());
-        await _pump();
-        expect(server.heldPromptCount, 1);
-        server.completeNextPrompt();
-        await prompt;
-        expect(
-          restored.state.sessions.single.timeline.entries
-              .whereType<AcpMessageEntry>()
-              .map(
-                (entry) => entry.content
-                    .whereType<AcpTextContent>()
-                    .map((c) => c.text)
-                    .join(),
-              ),
-          ['Old reply', 'While opening'],
-        );
-      },
-    );
+    for (final recoverTransport in [false, true]) {
+      test(
+        'app-restart load dispatches provisional input (SSH recovery: $recoverTransport)',
+        () async {
+          final loadGate = Completer<void>();
+          final custom = _FakeConnector(
+            serverFactory: (_, _) => _FakeAcpServer(
+              supportsResume: false,
+              loadResponseGate: loadGate.future,
+              replayTextOnLoad: 'Old reply',
+            )..holdPrompts = true,
+          );
+          custom.availableBridges.add('live-pi');
+          final restored = buildManagerWith(custom);
+          final reconnect = restored.reconnectSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.pi,
+            bridgeId: 'live-pi',
+            acpSessionId: 'restored-session',
+            cwd: '/repo',
+          );
+          await _pump();
+          final provisional = restored.state.sessions.single;
+          final prompt = restored.prompt(provisional.key, const [
+            AcpTextContent('While opening'),
+          ]);
+          final server = custom.servers['live-pi']!;
+          expect(server.methods, contains('session/load'));
+          expect(server.heldPromptCount, 0);
+          if (recoverTransport) {
+            for (final status in [
+              MonkeyMuxAcpTransportStatus.reconnecting,
+              MonkeyMuxAcpTransportStatus.connected,
+            ]) {
+              custom
+                  .statesFor('live-pi')
+                  .add(
+                    MonkeyMuxAcpTransportState(
+                      status: status,
+                      bridgeId: 'live-pi',
+                      lastDeliveredSequence: 0,
+                    ),
+                  );
+              await _pump();
+            }
+            expect(server.heldPromptCount, 0);
+          }
+          loadGate.complete();
+          expect(await reconnect, isA<AcpSessionLaunchStarted>());
+          await _pump();
+          expect(server.heldPromptCount, 1);
+          server.completeNextPrompt();
+          await prompt;
+          expect(
+            server.methods.where((method) => method == 'session/prompt'),
+            hasLength(1),
+          );
+          expect(
+            restored.state.sessions.single.timeline.entries
+                .whereType<AcpMessageEntry>()
+                .map(
+                  (entry) => entry.content
+                      .whereType<AcpTextContent>()
+                      .map((c) => c.text)
+                      .join(),
+                ),
+            ['Old reply', 'While opening'],
+          );
+        },
+      );
+    }
 
     for (final replay in ['absent', 'status', 'content', 'empty']) {
       test('reload preserves pending permission details with $replay replay', () async {

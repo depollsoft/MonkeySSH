@@ -2346,6 +2346,9 @@ class _SessionController {
       _subscribeSessionStreams();
     }
     if (reattachingActiveTurn) _startDetachedTurnMonitor();
+    // SSH recovery may have restored readiness while history was still held,
+    // so the readiness transition's earlier drain could not send input.
+    scheduleMicrotask(() => unawaited(_drainPromptQueue()));
     return _key;
   }
 
