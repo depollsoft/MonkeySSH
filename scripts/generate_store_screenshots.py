@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
-import gzip
 import getpass
+import gzip
 import hashlib
 import json
 import os
@@ -14,17 +14,17 @@ import platform
 import pty
 import queue
 import re
-import shutil
 import select
+import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
-import struct
-import termios
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +55,9 @@ CLEAR_SCREEN_SEQUENCES = (
 COPILOT_READY_MARKER_GROUPS = (
     ('GitHub Copilot',),
     ('/ commands', '? help'),
+    # Copilot CLI 1.0.98 dropped `? help` from the footer, and its model promo
+    # card can push the banner out of view.
+    ('/ commands', 'open sidebar'),
 )
 COPILOT_PRIVACY_STRIP_MARKERS = tuple(
     marker for marker_group in COPILOT_READY_MARKER_GROUPS for marker in marker_group
@@ -347,7 +350,7 @@ class StoreDemoEnvironment:
         self.port = _free_local_port()
         self.mux_session = f'monkeyssh-store-{os.getpid()}'
         self.demo_dir = Path('/tmp') / self.mux_session
-        self._process: subprocess.Popen[str] | None = None
+        self._process: subprocess.Popen[bytes] | None = None
         try:
             self._monkeymux = self._extract_monkeymux()
         except BaseException:
@@ -847,9 +850,8 @@ class StoreDemoEnvironment:
 
             # Keep PNG bytes (not JPEG) so the in-app paste filename image.png
             # matches the payload Copilot CLI attaches.
-            png_buffer = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            png_path = Path(png_buffer.name)
-            png_buffer.close()
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as png_buffer:
+                png_path = Path(png_buffer.name)
             try:
                 # Shrink slightly for argv-friendly dart-defines while staying PNG.
                 paste = frame
@@ -1863,10 +1865,7 @@ def _write_registered_monkeymux_sessions_unlocked(
 ) -> None:
     unique_entries = _unique_registry_entries(entries)
     if not unique_entries:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        path.unlink(missing_ok=True)
         return
 
     payload = [entry.to_json() for entry in unique_entries]
