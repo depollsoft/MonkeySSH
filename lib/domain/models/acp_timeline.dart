@@ -548,13 +548,17 @@ AcpContentBlock _truncatedContentBlock(AcpContentBlock block, int maxBytes) {
 /// protocol data never corrupts the timeline.
 class AcpTimelineBuilder {
   /// Creates a timeline builder bounded by [limits].
-  AcpTimelineBuilder({AcpTimelineLimits limits = const AcpTimelineLimits()})
-    : _limits = limits;
+  AcpTimelineBuilder({
+    AcpTimelineLimits limits = const AcpTimelineLimits(),
+    Map<String, AcpToolCallEntry> toolCallDefaults = const {},
+  }) : _limits = limits,
+       _toolCallDefaults = Map.of(toolCallDefaults);
 
   final AcpTimelineLimits _limits;
   final Object _source = Object();
   final List<AcpTimelineEntry> _entries = <AcpTimelineEntry>[];
   final Map<String, int> _toolCallIndex = <String, int>{};
+  final Map<String, AcpToolCallEntry> _toolCallDefaults;
   int _nextOrder = 0;
   int? _openMessageIndex;
   AcpJsonMap? _openTailMeta;
@@ -679,6 +683,68 @@ class AcpTimelineBuilder {
   AcpTimeline snapshot() =>
       AcpTimeline(entries: _entries, overflowed: _overflowed, source: _source);
 
+  /// Carries unsent local prompts into a replacement history after a reload.
+  /// Their identifiers remain valid for dispatch and failed-send rollback.
+  void retainPendingPromptsFrom(
+    AcpTimelineBuilder previous, {
+    required Set<String> pendingMessageIds,
+  }) {
+    _nextLocalUserMessageId = math.max(
+      _nextLocalUserMessageId,
+      previous._nextLocalUserMessageId,
+    );
+    for (final entry in previous._entries.whereType<AcpMessageEntry>()) {
+      if (!entry.isLocalPrompt ||
+          !pendingMessageIds.contains(entry.messageId)) {
+        continue;
+      }
+      final queued = AcpMessageEntry(
+        role: entry.role,
+        order: _nextOrder++,
+        messageId: entry.messageId,
+        queued: true,
+        droppedSize: entry.droppedSize,
+        content: entry.content,
+      );
+      _entries.add(queued);
+      _totalBytes += approximateTimelineEntryBytes(queued);
+    }
+    _openMessageIndex = null;
+    _enforceLimits();
+  }
+
+  /// Restores outstanding permission tools absent from loaded history.
+  /// Replayed tools already inherited their defaults before applying updates.
+  void retainPendingToolCalls(Set<String> pendingToolCallIds) {
+    for (final id in pendingToolCallIds) {
+      if (_toolCallIndex.containsKey(id) ||
+          !_toolCallDefaults.containsKey(id)) {
+        continue;
+      }
+      _applyToolCall(AcpToolCallUpdate(toolCallId: id, isInitial: true));
+    }
+    _toolCallDefaults.clear();
+    _enforceLimits();
+  }
+
+  AcpToolCallEntry _newToolCall(String id, int order) {
+    final defaults = _toolCallDefaults[id];
+    return AcpToolCallEntry(
+      toolCallId: id,
+      order: order,
+      title: defaults?.title,
+      name: defaults?.name,
+      toolKind: defaults?.toolKind,
+      status: defaults?.status,
+      content: defaults?.content ?? const [],
+      locations: defaults?.locations ?? const [],
+      rawInput: defaults?.rawInput,
+      rawOutput: defaults?.rawOutput,
+      parentToolCallId: defaults?.parentToolCallId,
+      isSubagent: defaults?.isSubagent ?? false,
+    );
+  }
+
   void _applyContentChunk(AcpContentChunkUpdate update) {
     final role = _roleFor(update.kind);
     if (role == null) return;
@@ -775,10 +841,7 @@ class AcpTimelineBuilder {
     }
     final order = _nextOrder++;
     final entry = _boundedToolCall(
-      AcpToolCallEntry(
-        toolCallId: update.toolCallId,
-        order: order,
-      ).merge(update),
+      _newToolCall(update.toolCallId, order).merge(update),
     );
     _toolCallIndex[update.toolCallId] = _entries.length;
     _totalBytes += approximateTimelineEntryBytes(entry);

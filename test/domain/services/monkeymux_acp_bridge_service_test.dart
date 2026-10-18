@@ -1509,6 +1509,108 @@ touch "$HOME/installed"
     expect(transport.didSkipHistoricalReplay(), isFalse);
   });
 
+  for (final overflow in [false, true]) {
+    test(
+      'replay barrier waits through a delayed handshake and status, overflow=$overflow',
+      () async {
+        final channel = _TestChannel();
+        final client = _MockSshClient();
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => channel.session);
+        final transport = _bridgeService().connect(
+          sessionProvider: () async => _sshSession(client),
+          bridgeId: _bridgeId,
+          providerId: 'pi',
+          lastAcknowledgedSequence: 23,
+          reconnectBackoff: const [],
+        );
+        addTearDown(transport.close);
+        final received = <List<int>>[];
+        final subscription = transport.incoming.listen(received.add);
+        addTearDown(subscription.cancel);
+        var finished = false;
+        final replay = transport.waitForReplay().then((_) => finished = true);
+        await _waitUntil(() => channel.writes.isNotEmpty);
+        expect(finished, isFalse);
+        expect(
+          channel.writes.map(_decodeFrame),
+          isNot(contains(containsPair('type', 'status'))),
+        );
+        channel.addText(
+          _frame({
+            'version': 1,
+            'type': 'hello',
+            'bridgeId': _bridgeId,
+            'clientId': _otherBridgeId,
+            'canSend': true,
+            'bridge': _metadata(nextSequence: 25),
+          }),
+        );
+        await _waitUntil(
+          () => channel.writes
+              .map(_decodeFrame)
+              .any((frame) => frame['type'] == 'status'),
+        );
+        expect(finished, isFalse);
+        if (overflow) {
+          channel.addText(
+            _frame({
+              'version': 1,
+              'type': 'overflow',
+              'bridgeId': _bridgeId,
+              'retainedFrom': 24,
+            }),
+          );
+        }
+        channel.addText(
+          _historyOutput(24, {'jsonrpc': '2.0', 'method': 'old-message'}),
+        );
+        if (!overflow) {
+          channel.addText(
+            _historyOutput(25, {'jsonrpc': '2.0', 'method': 'turn-complete'}),
+          );
+        }
+        await _waitUntil(() => received.length == (overflow ? 1 : 2));
+        expect(finished, isFalse);
+        channel.addText(
+          _frame({
+            'version': 1,
+            'type': 'status',
+            'bridge': _metadata(nextSequence: 25),
+          }),
+        );
+        await replay;
+        expect(finished, isTrue);
+        await transport.waitForReplay();
+        expect(
+          channel.writes
+              .map(_decodeFrame)
+              .where((frame) => frame['type'] == 'status'),
+          hasLength(1),
+        );
+      },
+    );
+  }
+
+  test('closing transport fails a pending replay barrier', () async {
+    final channel = _TestChannel();
+    final client = _MockSshClient();
+    when(() => client.execute(any(), pty: any(named: 'pty')))
+        .thenAnswer((_) async => channel.session);
+    final transport = _bridgeService().connect(
+      sessionProvider: () async => _sshSession(client),
+      bridgeId: _bridgeId,
+      providerId: 'pi',
+      reconnectBackoff: const [],
+    );
+    final failure = expectLater(
+      transport.waitForReplay(),
+      throwsA(isA<Exception>()),
+    );
+    await transport.close();
+    await failure;
+  });
+
   test('replacement transport queues input before its initial handshake', () async {
     final helloSent = Completer<void>();
     late _TestChannel channel;

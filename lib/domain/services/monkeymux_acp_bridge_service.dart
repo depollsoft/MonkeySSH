@@ -1057,6 +1057,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   var _connected = false;
   var _closed = false;
   var _terminalFailure = false;
+  Completer<void>? _replayWaiter;
+  var _replayStatusRequested = false;
+  var _replayComplete = false;
   int? _handshakeHighWaterSequence;
   var _pendingHandshakeRequestCount = 0;
   int? _replayWindowRetainedFrom;
@@ -1086,6 +1089,41 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
 
   /// Whether the first handshake deliberately skipped superseded replay.
   bool didSkipHistoricalReplay() => _skippedHistoricalReplay;
+
+  /// Waits for a status response queued after the attachment's buffered replay.
+  /// This also works when overflow omitted the advertised final sequence.
+  Future<void> waitForReplay({Duration timeout = const Duration(seconds: 60)}) {
+    if (_closed || _terminalFailure) {
+      return Future<void>.error(
+        const AcpTransportClosedException(
+          'The ACP bridge transport is closed.',
+        ),
+      );
+    }
+    if (_replayComplete) return Future<void>.value();
+    final waiter = _replayWaiter ??= Completer<void>();
+    _requestReplayStatus();
+    return waiter.future.timeout(timeout);
+  }
+
+  void _requestReplayStatus() {
+    if (!_connected || _replayWaiter == null || _replayStatusRequested) return;
+    _replayStatusRequested = true;
+    try {
+      _sendWire({
+        'version': monkeyMuxAcpBridgeProtocolVersion,
+        'type': 'status',
+      });
+    } on Object catch (error) {
+      _handleChannelLoss(_generation, error);
+    }
+  }
+
+  void _failReplayWait(Object error) {
+    final waiter = _replayWaiter;
+    _replayWaiter = null;
+    waiter?.completeError(error);
+  }
 
   /// Byte view of [incomingFrames], encoded lazily per listener. Production
   /// consumes the decoded frames, so no frame is re-encoded unless asked.
@@ -1427,6 +1465,12 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
                 : MonkeyMuxAcpTransportStatus.connecting,
             providerState: metadata.state,
           );
+          if (_replayStatusRequested) {
+            _replayComplete = true;
+            _replayStatusRequested = false;
+            _replayWaiter?.complete();
+            _replayWaiter = null;
+          }
         case 'error':
           _handleBridgeError(message);
         case 'lease':
@@ -1590,6 +1634,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     );
     if (directReplay) _finishDirectReplayIfComplete();
     if (!pendingOnly && !directReplay) _flushPendingInput();
+    _requestReplayStatus();
   }
 
   void _finishDirectReplayIfComplete() {
@@ -1884,6 +1929,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     _terminalFailure = true;
     _connected = false;
     _stopHeartbeat();
+    _failReplayWait(
+      const AcpTransportClosedException('The input lease was lost.'),
+    );
     _promptDeliveries = _settlePromptDeliveries(acceptedInputs);
     final remoteWriter = _parseRemoteWriter(writer, leaseLost: leaseLost);
     _emitState(MonkeyMuxAcpTransportStatus.heldElsewhere, writer: remoteWriter);
@@ -2163,6 +2211,8 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
   void _handleChannelLoss(int generation, Object? error) {
     if (generation != _generation || _closed || _terminalFailure) return;
     _connected = false;
+    _replayComplete = false;
+    _replayStatusRequested = false;
     _stopHeartbeat();
     _discardWireInput();
     _handshakeHighWaterSequence = null;
@@ -2232,6 +2282,7 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     if (_closed || _terminalFailure) return;
     _terminalFailure = true;
     _connected = false;
+    _failReplayWait(error);
     _errors.add(error);
     if (emitFailedState) {
       _emitState(MonkeyMuxAcpTransportStatus.failed);
@@ -2254,6 +2305,9 @@ final class MonkeyMuxAcpTransport implements AcpDecodedTransport {
     if (_closed) return;
     _closed = true;
     _connected = false;
+    _failReplayWait(
+      const AcpTransportClosedException('The ACP bridge transport is closed.'),
+    );
     _emitState(MonkeyMuxAcpTransportStatus.closed);
     await _releaseResources();
   }

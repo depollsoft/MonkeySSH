@@ -1876,6 +1876,7 @@ class _BridgeAttachment {
   AcpInitializeResult? get initialization => _initialization;
   bool get skippedHistoricalReplay => _session.skippedHistoricalReplay;
   int get lastDeliveredSequence => _session.lastDeliveredSequence;
+  Future<void> waitForReplay() => _session.waitForReplay();
   AcpInputDelivery promptDelivery(String sessionId) =>
       _session.promptDelivery(sessionId);
 
@@ -2055,7 +2056,8 @@ class _SessionController {
   bool _freshBridge;
   final Duration _detachedTurnPollInterval;
 
-  final AcpTimelineBuilder _timelineBuilder = AcpTimelineBuilder();
+  AcpTimelineBuilder _timelineBuilder = AcpTimelineBuilder();
+  AcpTimelineBuilder? _loadingTimelineBuilder;
   final Queue<AcpSessionNotification> _pendingSessionUpdates =
       Queue<AcpSessionNotification>();
   Future<void>? _sessionUpdatePumpFuture;
@@ -2344,6 +2346,9 @@ class _SessionController {
       _subscribeSessionStreams();
     }
     if (reattachingActiveTurn) _startDetachedTurnMonitor();
+    // SSH recovery may have restored readiness while history was still held,
+    // so the readiness transition's earlier drain could not send input.
+    scheduleMicrotask(() => unawaited(_drainPromptQueue()));
     return _key;
   }
 
@@ -2703,13 +2708,46 @@ class _SessionController {
     String sessionId,
     AcpSessionWorkspaceSetup workspace,
   ) async {
+    // session/load replays the whole conversation, including messages already
+    // retained locally or delivered by the bridge. Pi's chunks have no message
+    // IDs, so appending this replay duplicates old turns at the transcript tail.
+    final wasPublicationHeld = _historyReplayPublicationHeld;
+    _historyReplayPublicationHeld = true;
+    AcpTimelineBuilder? loadingTimeline;
+    var loaded = false;
     try {
-      return await attachment.client.loadSession(
+      // Cached initialization can finish before the SSH handshake. Its replay
+      // must reach the existing timeline before session/load starts a new one.
+      await attachment.waitForReplay();
+      _applyReceivedSessionUpdates();
+      final previousTools = {
+        for (final entry
+            in _timelineBuilder
+                .snapshot()
+                .entries
+                .whereType<AcpToolCallEntry>())
+          entry.toolCallId: entry,
+      };
+      loadingTimeline = AcpTimelineBuilder(
+        toolCallDefaults: {
+          for (final request in _pendingPermissionRequests)
+            request.permission.toolCall.toolCallId:
+                previousTools[request.permission.toolCall.toolCallId] ??
+                AcpToolCallEntry(
+                  toolCallId: request.permission.toolCall.toolCallId,
+                  order: 0,
+                ).merge(request.permission.toolCall),
+        },
+      );
+      _loadingTimelineBuilder = loadingTimeline;
+      final result = await attachment.client.loadSession(
         sessionId: sessionId,
         cwd: _cwd,
         mcpServers: workspace.mcpServers,
         additionalDirectories: workspace.additionalDirectories,
       );
+      loaded = true;
+      return result;
     } on AcpRemoteException catch (error) {
       if (!_isAcpSessionAlreadyLoadedError(error, sessionId)) rethrow;
       _diagnostics.info(
@@ -2719,6 +2757,33 @@ class _SessionController {
       );
       _historyRestoreUnavailable = true;
       return null;
+    } finally {
+      await _drainHistoryReplayNotifications();
+      if (loaded) {
+        loadingTimeline!.retainPendingToolCalls({
+          for (final request in _pendingPermissionRequests)
+            request.permission.toolCall.toolCallId,
+        });
+        // Local prompts continue to use the original builder while loading,
+        // so input queued during the replay also keeps its ID and dispatches.
+        // The first prompt accepted while detached can be pending without
+        // the queued display flag. The queue owns delivery state, not the row.
+        loadingTimeline.retainPendingPromptsFrom(
+          _timelineBuilder,
+          pendingMessageIds: {
+            for (final prompt in _promptQueue) prompt.localMessageId,
+          },
+        );
+        _timelineBuilder = loadingTimeline;
+      }
+      // Failed loads discard the partial replay and retain the original.
+      _loadingTimelineBuilder = null;
+      if (!wasPublicationHeld) {
+        _finishHistoryReplayPublication();
+        _update(
+          (state) => state.copyWith(timeline: _timelineBuilder.snapshot()),
+        );
+      }
     }
   }
 
@@ -2727,6 +2792,12 @@ class _SessionController {
       _update((state) => state.copyWith(clearWarning: true));
     }
   }
+
+  Iterable<cap.AcpPendingPermission> get _pendingPermissionRequests =>
+      (attachment.capabilityService?.registry.requests ??
+              const <cap.AcpPendingClientRequest>[])
+          .whereType<cap.AcpPendingPermission>()
+          .where((request) => request.sessionId == _key.acpSessionId);
 
   void _applyHistoryUnavailableWarningIfNeeded() {
     if (!_historyRestoreUnavailable ||
@@ -2913,7 +2984,10 @@ class _SessionController {
 
   void _applySessionUpdate(AcpSessionNotification notification) {
     final update = notification.update;
-    _timelineBuilder.apply(update, createSnapshot: false);
+    (_loadingTimelineBuilder ?? _timelineBuilder).apply(
+      update,
+      createSnapshot: false,
+    );
     _update((s) {
       var next = s.copyWith(lastActivityAt: _clock());
       switch (update) {
@@ -3220,7 +3294,11 @@ class _SessionController {
   }
 
   Future<void> _drainPromptQueue() async {
-    if (_promptActive || _detachedTurnInFlight || _disposed) {
+    if (_promptActive ||
+        _detachedTurnInFlight ||
+        _disposed ||
+        _historyReplayPublicationHeld ||
+        _state.status != AcpConnectionStatus.ready) {
       return;
     }
     _promptActive = true;
@@ -3228,6 +3306,8 @@ class _SessionController {
       while (_promptQueue.isNotEmpty &&
           !_disposed &&
           !_detachedTurnInFlight &&
+          !_historyReplayPublicationHeld &&
+          _state.status == AcpConnectionStatus.ready &&
           _holdsAttachment &&
           _state.attached) {
         final queued = _promptQueue.removeFirst();
@@ -3817,7 +3897,13 @@ class _SessionController {
           break;
         case MonkeyMuxAcpTransportStatus.connected:
           if (s.status == AcpConnectionStatus.reconnecting) {
-            next = next.copyWith(status: AcpConnectionStatus.ready);
+            // Transport recovery does not authenticate the agent. Preserve
+            // the sign-in requirement before retrying any queued input.
+            next = next.copyWith(
+              status: s.pendingAuthentication
+                  ? AcpConnectionStatus.authenticationRequired
+                  : AcpConnectionStatus.ready,
+            );
           }
         case MonkeyMuxAcpTransportStatus.reconnecting:
           if (s.attached) {
@@ -4034,6 +4120,7 @@ class _SessionController {
     AcpSessionKey? key,
     bool notifyManager = true,
   }) {
+    final previousStatus = _state.status;
     _state = transform(_state);
     // Rebuild under a new identity through the single copyWith path so no
     // field can ever be silently dropped when the key changes.
@@ -4048,6 +4135,13 @@ class _SessionController {
         _managerNotificationPending = false;
         _manager._onControllerChanged(this);
       }
+    }
+    if (previousStatus != AcpConnectionStatus.ready &&
+        _state.status == AcpConnectionStatus.ready) {
+      // All readiness transitions resume held input, including app-restart
+      // loads, authentication, and automatic SSH recovery. Defer until the
+      // caller finishes binding subscriptions and publishing the session.
+      scheduleMicrotask(() => unawaited(_drainPromptQueue()));
     }
   }
 

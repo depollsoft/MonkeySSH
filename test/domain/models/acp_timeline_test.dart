@@ -172,6 +172,55 @@ void main() {
   });
 
   group('AcpTimelineBuilder local user prompts', () {
+    test('history replacement retains queued prompt IDs and dispatch', () {
+      final previous = AcpTimelineBuilder()
+        ..appendLocalUserPrompt(const [AcpTextContent('sent')]);
+      final queuedId = previous.appendLocalUserPrompt(const [
+        AcpTextContent('queued'),
+      ], queued: true);
+      final replacement = AcpTimelineBuilder()
+        ..apply(_chunk('user_message_chunk', 'sent'))
+        ..apply(_chunk('agent_message_chunk', 'reply'))
+        ..retainPendingPromptsFrom(previous, pendingMessageIds: {queuedId});
+      final entries = replacement.snapshot().entries.cast<AcpMessageEntry>();
+      expect(
+        entries.map((entry) => (entry.content.single as AcpTextContent).text),
+        ['sent', 'reply', 'queued'],
+      );
+      expect(entries.last.messageId, queuedId);
+      expect(entries.last.queued, isTrue);
+      replacement
+        ..markLocalUserPromptDispatched(queuedId)
+        ..apply(_chunk('user_message_chunk', 'queued'))
+        ..apply(_chunk('agent_message_chunk', 'next reply'));
+      expect(replacement.snapshot().entries, hasLength(4));
+      final nextId = replacement.appendLocalUserPrompt(const [
+        AcpTextContent('next'),
+      ]);
+      expect(nextId, isNot(queuedId));
+      replacement.removeLocalUserPrompt(nextId);
+      expect(replacement.snapshot().entries, hasLength(4));
+    });
+
+    test('history retention follows pending IDs instead of queued flags', () {
+      final previous = AcpTimelineBuilder();
+      final pendingId = previous.appendLocalUserPrompt(const [
+        AcpTextContent('pending while detached'),
+      ]);
+      previous.appendLocalUserPrompt(const [
+        AcpTextContent('no longer pending'),
+      ], queued: true);
+      final replacement = AcpTimelineBuilder()
+        ..retainPendingPromptsFrom(previous, pendingMessageIds: {pendingId});
+      final retained = replacement.snapshot().entries.single as AcpMessageEntry;
+      expect(retained.messageId, pendingId);
+      expect(
+        (retained.content.single as AcpTextContent).text,
+        'pending while detached',
+      );
+      expect(replacement.removeLocalUserPrompt(pendingId).entries, isEmpty);
+    });
+
     test('shows a local prompt and suppresses the provider echo', () {
       final builder = AcpTimelineBuilder()
         ..appendLocalUserPrompt(const [AcpTextContent('hello')])

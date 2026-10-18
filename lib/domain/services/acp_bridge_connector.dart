@@ -51,10 +51,12 @@ final class AcpBridgeSession {
     bool Function()? skippedHistoricalReplay,
     int Function()? lastDeliveredSequence,
     AcpInputDelivery Function(String sessionId)? promptDelivery,
+    Future<void> Function()? waitForReplay,
   }) : _onClose = onClose,
        _skippedHistoricalReplay = skippedHistoricalReplay,
        _lastDeliveredSequence = lastDeliveredSequence,
-       _promptDelivery = promptDelivery;
+       _promptDelivery = promptDelivery,
+       _waitForReplay = waitForReplay;
 
   /// Typed ACP client bound to the bridge transport.
   final AcpClient client;
@@ -68,6 +70,10 @@ final class AcpBridgeSession {
   final bool Function()? _skippedHistoricalReplay;
   final int Function()? _lastDeliveredSequence;
   final AcpInputDelivery Function(String sessionId)? _promptDelivery;
+  final Future<void> Function()? _waitForReplay;
+
+  /// Waits until buffered output from the current bridge attachment arrives.
+  Future<void> waitForReplay() async => _waitForReplay?.call();
 
   /// Whether the newest prompt for [sessionId] reached the agent, once the
   /// transport found the input held by another device.
@@ -277,6 +283,8 @@ final class MonkeyMuxAcpBridgeConnector implements AcpBridgeConnector {
       skippedHistoricalReplay: transport.didSkipHistoricalReplay,
       lastDeliveredSequence: () => transport.lastDeliveredSequence,
       promptDelivery: transport.promptDelivery,
+      waitForReplay: () =>
+          transport.waitForReplay(timeout: defaultRequestTimeout),
       onClose: client.close,
     );
   }
