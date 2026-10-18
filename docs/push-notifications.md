@@ -582,8 +582,10 @@ every 2 seconds.
 - `permission` and `input` are raised while a request of that kind is pending,
   to each device that has not yet been sent that request (the counter value
   just after a request is its generation). From 0.1.245 the bridge's oldest
-  pending request must first stay pending for 3 seconds, measured from the
-  first poll that saw it: an attached app in YOLO mode approves requests within
+  pending request must first stay pending for at least 3 seconds, measured
+  from the first poll that saw it, so it is pushed on the first poll after
+  that (typically 4 seconds after it was first seen); a server that restarts
+  starts the wait over. An attached app in YOLO mode approves requests within
   a round trip, and a poll that caught one on its way pushed "needs approval"
   for a window that was not waiting. The push carries that request's
   generation, so newer requests that come and go beside it neither restart the

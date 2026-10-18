@@ -714,6 +714,8 @@ func TestPushBridgeCountersRaiseEvents(t *testing.T) {
 	// a pending permission count does not stand in for it.
 	setStatus(func(s *acpBridgeInfo) { s.InputRequests = 1; s.PendingPermission = 1 })
 	poll()
+	h.clock.Advance(pushAttentionHold)
+	poll()
 	// A restarted bridge resets the turn baseline without a "finished", and its
 	// pending request is a new one.
 	h.clock.Advance(pushCoalesceWindow)
@@ -721,6 +723,9 @@ func TestPushBridgeCountersRaiseEvents(t *testing.T) {
 		*s = acpBridgeInfo{ID: bridgeID, StartedAt: 200, PermissionRequests: 1, PendingPermission: 1}
 	})
 	poll()
+	if got := h.kinds(); got != "permission,finished" {
+		t.Fatalf("restarted bridge's request pushed before the hold: %q", got)
+	}
 	h.clock.Advance(pushAttentionHold)
 	poll()
 
@@ -818,6 +823,46 @@ func TestPushBridgeRequestsAnsweredWithinTheHoldAreNotPushed(t *testing.T) {
 	poll()
 	if got := h.kinds(); got != "permission,permission" {
 		t.Fatalf("request after the stuck one = %q", got)
+	}
+}
+
+func TestPushOldBridgeCounterRestartsTheHold(t *testing.T) {
+	h := newPushTestHarness(t)
+	h.register(t, newPushTestDevice(t, 1))
+	h.server.mu.Lock()
+	h.server.windows = append(h.server.windows, &muxWindow{id: "@7", nativeAcpBridgeID: pushTestBridgeID})
+	h.server.mu.Unlock()
+	var statusMu sync.Mutex
+	status := acpBridgeInfo{ID: pushTestBridgeID, StartedAt: 100}
+	previous := pushBridgeStatus
+	pushBridgeStatus = func(string) (acpBridgeInfo, error) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		return status, nil
+	}
+	t.Cleanup(func() { pushBridgeStatus = previous })
+	// A bridge before 0.1.245 reports no oldest pending request, so the
+	// permission counter stands in for it.
+	read := func(permissions uint64) {
+		statusMu.Lock()
+		status.PermissionRequests, status.PendingPermission = permissions, 1
+		statusMu.Unlock()
+		h.server.pollPushBridges()
+		h.notifier.inflight.Wait()
+	}
+
+	read(1)
+	h.clock.Advance(pushBridgePollInterval)
+	read(2)
+	h.clock.Advance(pushAttentionHold - pushBridgePollInterval)
+	read(2)
+	if got := h.kinds(); got != "" {
+		t.Fatalf("a newer request did not restart the wait: %q", got)
+	}
+	h.clock.Advance(pushAttentionHold)
+	read(2)
+	if got := h.kinds(); got != "permission" {
+		t.Fatalf("request after the restarted wait = %q", got)
 	}
 }
 
