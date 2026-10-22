@@ -45,6 +45,8 @@ class _FakeAcpServer implements AcpTransport {
     this.promptErrorMessage,
     this.replayTextOnLoad,
     this.replayTextOnResume,
+    this.loadErrorMessage,
+    this.onInitialize,
     this.replayUpdateCountOnLoad = 0,
     this.replayUpdatesOnLoad = const <Map<String, Object?>>[],
     this.loadResponseGate,
@@ -113,6 +115,12 @@ class _FakeAcpServer implements AcpTransport {
   /// Optional history text synchronously replayed by `session/resume`.
   final String? replayTextOnResume;
 
+  /// Fails a load after emitting its history, to exercise partial replay.
+  final String? loadErrorMessage;
+
+  /// Simulates bridge history delivered during a new attachment's handshake.
+  final void Function(_FakeAcpServer server)? onInitialize;
+
   /// Number of same-message content chunks synchronously replayed on load.
   final int replayUpdateCountOnLoad;
 
@@ -169,6 +177,7 @@ class _FakeAcpServer implements AcpTransport {
 
     switch (method) {
       case 'initialize':
+        onInitialize?.call(this);
         initializeParams = (message['params']! as Map).cast<String, Object?>();
         if (rejectInitialize) {
           _replyError(id, -32602, 'Invalid params');
@@ -261,6 +270,10 @@ class _FakeAcpServer implements AcpTransport {
           _pushPermission(permissionIdOnLoad!, sessionId, 'replay-tool');
         }
         if (loadResponseGate != null) await loadResponseGate;
+        if (loadErrorMessage != null) {
+          _replyError(id, -32603, loadErrorMessage!);
+          break;
+        }
         _reply(id, <String, Object?>{});
       case 'authenticate':
         final params = (message['params']! as Map).cast<String, Object?>();
@@ -506,6 +519,7 @@ class _FakeConnector implements AcpBridgeConnector {
   int _bridgeCounter = 0;
   int bridgeStatusInFlightTurnCount = 0;
   bool skippedHistoricalReplay = false;
+  Future<void> Function(_FakeAcpServer server)? waitForReplay;
   final Map<String, int> lastDeliveredSequences = <String, int>{};
   final Map<String, List<int>> connectionAcknowledgements =
       <String, List<int>>{};
@@ -625,6 +639,7 @@ class _FakeConnector implements AcpBridgeConnector {
       transportErrors: errors.stream,
       skippedHistoricalReplay: () => skippedHistoricalReplay,
       lastDeliveredSequence: () => lastDeliveredSequences[bridgeId] ?? 0,
+      waitForReplay: () async => waitForReplay?.call(server),
       onClose: () async {
         await client.close();
         await states.close();
@@ -1773,6 +1788,52 @@ void main() {
       },
     );
 
+    test(
+      'automatic SSH recovery dispatches a prompt accepted while reconnecting',
+      () async {
+        final key = await startCopilot();
+        final server = connector.servers[key.bridgeId]!..holdPrompts = true;
+        connector
+            .statesFor(key.bridgeId)
+            .add(
+              MonkeyMuxAcpTransportState(
+                status: MonkeyMuxAcpTransportStatus.reconnecting,
+                bridgeId: key.bridgeId,
+                lastDeliveredSequence: 0,
+              ),
+            );
+        await _pump();
+        final prompt = manager.prompt(key, const [
+          AcpTextContent('During recovery'),
+        ]);
+        await _pump();
+        expect(server.heldPromptCount, 0);
+        for (var event = 0; event < 2; event++) {
+          connector
+              .statesFor(key.bridgeId)
+              .add(
+                MonkeyMuxAcpTransportState(
+                  status: MonkeyMuxAcpTransportStatus.connected,
+                  bridgeId: key.bridgeId,
+                  lastDeliveredSequence: 0,
+                ),
+              );
+        }
+        await _pump();
+        expect(
+          manager.state.byKeyValue(key.value)!.status,
+          AcpConnectionStatus.ready,
+        );
+        expect(server.heldPromptCount, 1);
+        server.completeNextPrompt();
+        await prompt;
+        expect(
+          server.methods.where((method) => method == 'session/prompt'),
+          hasLength(1),
+        );
+      },
+    );
+
     test('cancel notifies the agent', () async {
       final key = await startCopilot();
       await manager.cancelPrompt(key);
@@ -2802,6 +2863,79 @@ void main() {
         );
       });
 
+      for (final recoverTransport in [false, true]) {
+        test(
+          'sign-in resumes follow-ups after authentication failure (SSH recovery: $recoverTransport)',
+          () async {
+            final custom = authConnector(authenticated: true);
+            final authManager = buildManagerWith(custom);
+            final started = await authManager.startNewSession(
+              hostId: 1,
+              providerId: AcpBuiltinProviderIds.copilotCli,
+              cwd: '/repo',
+            );
+            final key = (started as AcpSessionLaunchStarted).key;
+            final server = custom.servers[key.bridgeId]!..holdPrompts = true;
+            final first = authManager.prompt(key, const [
+              AcpTextContent('first'),
+            ]);
+            await _pump();
+            final followUp = authManager.prompt(key, const [
+              AcpTextContent('follow-up'),
+            ]);
+            final failure = expectLater(
+              first,
+              throwsA(isA<AcpRemoteException>()),
+            );
+            server.failNextPrompt('Authentication required');
+            await failure;
+            await _pump();
+            expect(server.heldPromptCount, 0);
+            if (recoverTransport) {
+              for (final status in [
+                MonkeyMuxAcpTransportStatus.reconnecting,
+                MonkeyMuxAcpTransportStatus.connected,
+              ]) {
+                custom
+                    .statesFor(key.bridgeId)
+                    .add(
+                      MonkeyMuxAcpTransportState(
+                        status: status,
+                        bridgeId: key.bridgeId,
+                        lastDeliveredSequence: 0,
+                      ),
+                    );
+                await _pump();
+                expect(server.heldPromptCount, 0);
+              }
+            }
+            final state = authManager.state.byKeyValue(key.value)!;
+            expect(state.pendingAuthentication, isTrue);
+            expect(
+              state.timeline.entries.whereType<AcpMessageEntry>(),
+              hasLength(1),
+            );
+            expect(state.status, AcpConnectionStatus.authenticationRequired);
+            final method = state.authMethods.singleWhere(
+              (method) => method.id == 'agent-login',
+            );
+            expect(await authManager.authenticateSession(key, method), isNull);
+            await _pump();
+            expect(server.heldPromptCount, 1);
+            server.completeNextPrompt();
+            await followUp;
+            expect(
+              authManager.state.byKeyValue(key.value)!.pendingAuthentication,
+              isFalse,
+            );
+            expect(
+              server.methods.where((method) => method == 'session/prompt'),
+              hasLength(2),
+            );
+          },
+        );
+      }
+
       test(
         'a detached reconnect carries the chosen terminal login back',
         () async {
@@ -3046,6 +3180,585 @@ void main() {
   });
 
   group('history replay on load', () {
+    for (final recoverTransport in [false, true]) {
+      test(
+        'app-restart load dispatches provisional input (SSH recovery: $recoverTransport)',
+        () async {
+          final loadGate = Completer<void>();
+          final custom = _FakeConnector(
+            serverFactory: (_, _) => _FakeAcpServer(
+              supportsResume: false,
+              loadResponseGate: loadGate.future,
+              replayTextOnLoad: 'Old reply',
+            )..holdPrompts = true,
+          );
+          custom.availableBridges.add('live-pi');
+          final restored = buildManagerWith(custom);
+          final reconnect = restored.reconnectSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.pi,
+            bridgeId: 'live-pi',
+            acpSessionId: 'restored-session',
+            cwd: '/repo',
+          );
+          await _pump();
+          final provisional = restored.state.sessions.single;
+          final prompt = restored.prompt(provisional.key, const [
+            AcpTextContent('While opening'),
+          ]);
+          final server = custom.servers['live-pi']!;
+          expect(server.methods, contains('session/load'));
+          expect(server.heldPromptCount, 0);
+          if (recoverTransport) {
+            for (final status in [
+              MonkeyMuxAcpTransportStatus.reconnecting,
+              MonkeyMuxAcpTransportStatus.connected,
+            ]) {
+              custom
+                  .statesFor('live-pi')
+                  .add(
+                    MonkeyMuxAcpTransportState(
+                      status: status,
+                      bridgeId: 'live-pi',
+                      lastDeliveredSequence: 0,
+                    ),
+                  );
+              await _pump();
+            }
+            expect(server.heldPromptCount, 0);
+          }
+          loadGate.complete();
+          expect(await reconnect, isA<AcpSessionLaunchStarted>());
+          await _pump();
+          expect(server.heldPromptCount, 1);
+          server.completeNextPrompt();
+          await prompt;
+          expect(
+            server.methods.where((method) => method == 'session/prompt'),
+            hasLength(1),
+          );
+          expect(
+            restored.state.sessions.single.timeline.entries
+                .whereType<AcpMessageEntry>()
+                .map(
+                  (entry) => entry.content
+                      .whereType<AcpTextContent>()
+                      .map((c) => c.text)
+                      .join(),
+                ),
+            ['Old reply', 'While opening'],
+          );
+        },
+      );
+    }
+
+    for (final replay in ['absent', 'status', 'content', 'empty']) {
+      test('reload preserves pending permission details with $replay replay', () async {
+        final custom = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayUpdatesOnLoad: [
+              if (replay != 'absent')
+                {
+                  'sessionUpdate': 'tool_call_update',
+                  'toolCallId': 'edit-1',
+                  'status': 'in_progress',
+                  if (replay == 'content')
+                    'content': [
+                      {
+                        'type': 'diff',
+                        'path': '/repo/main.dart',
+                        'newText': 'newer',
+                      },
+                    ],
+                  if (replay == 'empty') 'content': <Object?>[],
+                },
+            ],
+          ),
+        );
+        final restored = buildManagerWith(custom);
+        final started = await restored.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        custom.servers[key.bridgeId]!.pushServerRequest(
+          'session/request_permission',
+          {
+            'sessionId': key.acpSessionId,
+            'toolCall': {
+              'toolCallId': 'edit-1',
+              'title': 'Edit file',
+              'status': 'pending',
+              'content': [
+                {
+                  'type': 'diff',
+                  'path': '/repo/main.dart',
+                  'newText': 'original',
+                },
+              ],
+              'locations': [
+                {'path': '/repo/main.dart', 'line': 3},
+              ],
+            },
+            'options': [
+              {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+            ],
+          },
+        );
+        await _pump();
+        await restored.detachSession(key);
+        expect(
+          await restored.reconnectSession(
+            hostId: key.hostId,
+            providerId: key.providerId,
+            bridgeId: key.bridgeId,
+            acpSessionId: key.acpSessionId,
+            cwd: '/repo',
+          ),
+          isA<AcpSessionLaunchStarted>(),
+        );
+        expect(
+          restored.state.byKeyValue(key.value)!.pendingPermissions,
+          hasLength(1),
+        );
+        // Another registry update must not reapply old permission details over
+        // the newer status or duplicate a restored diff.
+        custom.servers[key.bridgeId]!.requestPermission(
+          key.acpSessionId,
+          'other-tool',
+        );
+        await _pump();
+        final tool = restored.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpToolCallEntry>()
+            .singleWhere((entry) => entry.toolCallId == 'edit-1');
+        expect(
+          tool.status,
+          replay == 'absent' ? AcpToolStatus.pending : AcpToolStatus.inProgress,
+        );
+        expect(tool.locations.single.line, 3);
+        expect(
+          tool.content.whereType<AcpToolDiff>().map((diff) => diff.newText),
+          [
+            if (replay == 'content')
+              'newer'
+            else if (replay != 'empty')
+              'original',
+          ],
+        );
+      });
+    }
+
+    test(
+      'cached initialization waits for delayed bridge replay before loading',
+      () async {
+        final handshake = Completer<void>();
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayUpdatesOnLoad: const [
+              {
+                'sessionUpdate': 'user_message_chunk',
+                'content': {'type': 'text', 'text': 'Old prompt'},
+              },
+              {
+                'sessionUpdate': 'agent_message_chunk',
+                'content': {'type': 'text', 'text': 'Completed while detached'},
+              },
+            ],
+          ),
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        replayConnector.waitForReplay = (server) async {
+          await handshake.future;
+          for (final update in server.replayUpdatesOnLoad) {
+            server.pushUpdate(key.acpSessionId, update);
+          }
+        };
+        final reconnect = replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.methods, isNot(contains('initialize')));
+        expect(server.methods, isNot(contains('session/load')));
+        handshake.complete();
+        expect(await reconnect, isA<AcpSessionLaunchStarted>());
+        expect(server.methods, contains('session/load'));
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Old prompt', 'Completed while detached'],
+        );
+      },
+    );
+
+    test(
+      'idle reconnect holds mid-load prompts until history is replaced',
+      () async {
+        final loadGate = Completer<void>();
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayTextOnLoad: 'Old reply',
+            loadResponseGate: loadGate.future,
+          )..holdPrompts = true,
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        final reconnect = replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.methods, contains('session/load'));
+        final prompt = replayManager.prompt(key, const [
+          AcpTextContent('Mid-load prompt'),
+        ]);
+        await _pump();
+        expect(server.methods, isNot(contains('session/prompt')));
+        loadGate.complete();
+        expect(await reconnect, isA<AcpSessionLaunchStarted>());
+        await _pump();
+        expect(server.heldPromptCount, 1);
+        server.completeNextPrompt();
+        await prompt;
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Old reply', 'Mid-load prompt'],
+        );
+      },
+    );
+
+    test(
+      'idle detached prompt survives reload and its provider echo',
+      () async {
+        final replayConnector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            supportsResume: false,
+            replayTextOnLoad: 'Previous reply',
+          )..holdPrompts = true,
+        );
+        final replayManager = buildManagerWith(replayConnector);
+        final started = await replayManager.startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.pi,
+          cwd: '/repo',
+        );
+        final key = (started as AcpSessionLaunchStarted).key;
+        await replayManager.detachSession(key);
+        final prompt = replayManager.prompt(key, const [
+          AcpTextContent('Sent while detached'),
+        ]);
+        final pending = replayManager.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpMessageEntry>()
+            .single;
+        // The first prompt has no preceding turn, so this display flag is false
+        // even though the unattached session cannot dispatch it yet.
+        expect(pending.queued, isFalse);
+        expect(
+          replayConnector.servers[key.bridgeId]!.methods,
+          isNot(contains('session/prompt')),
+        );
+
+        final result = await replayManager.reconnectSession(
+          hostId: key.hostId,
+          providerId: key.providerId,
+          bridgeId: key.bridgeId,
+          acpSessionId: key.acpSessionId,
+          cwd: '/repo',
+        );
+        expect(result, isA<AcpSessionLaunchStarted>());
+        await _pump();
+        final server = replayConnector.servers[key.bridgeId]!;
+        expect(server.heldPromptCount, 1);
+        final dispatched = replayManager.state
+            .byKeyValue(key.value)!
+            .timeline
+            .entries
+            .whereType<AcpMessageEntry>()
+            .where((entry) => entry.role == AcpMessageRole.user);
+        expect(dispatched, hasLength(1));
+        expect(dispatched.single.messageId, pending.messageId);
+        expect(dispatched.single.queued, isFalse);
+
+        server
+          ..pushUpdate(key.acpSessionId, {
+            'sessionUpdate': 'user_message_chunk',
+            'content': {'type': 'text', 'text': 'Sent while detached'},
+          })
+          ..pushUpdate(key.acpSessionId, {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': 'New reply'},
+          })
+          ..completeNextPrompt();
+        await prompt;
+        await _pump();
+        expect(
+          replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>()
+              .map(
+                (entry) => entry.content
+                    .whereType<AcpTextContent>()
+                    .map((content) => content.text)
+                    .join(),
+              ),
+          ['Previous reply', 'Sent while detached', 'New reply'],
+        );
+      },
+    );
+
+    for (final activeTurn in [false, true]) {
+      test(
+        activeTurn
+            ? 'Pi turn completion replaces bridge history and keeps queued input'
+            : 'Pi app restart replaces bridge history with loaded history',
+        () async {
+          const sessionId = 'restored-pi-session';
+          final loadGate = Completer<void>();
+          final history = <Map<String, Object?>>[
+            for (final (role, text) in [
+              ('user', 'old prompt'),
+              ('agent', 'latest reply'),
+            ])
+              {
+                'sessionUpdate': '${role}_message_chunk',
+                'content': {'type': 'text', 'text': text},
+              },
+          ];
+          final replayConnector = _FakeConnector(
+            serverFactory: (_, _) => _FakeAcpServer(
+              supportsResume: false,
+              replayUpdatesOnLoad: history,
+              loadResponseGate: activeTurn ? loadGate.future : null,
+              onInitialize: (server) {
+                for (final update in history) {
+                  server.pushUpdate(sessionId, update);
+                }
+              },
+            )..holdPrompts = true,
+          )..bridgeStatusInFlightTurnCount = activeTurn ? 1 : 0;
+          replayConnector.availableBridges.add('live-pi');
+          final replayManager = buildManagerWith(replayConnector);
+          final result = await replayManager.reconnectSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.pi,
+            bridgeId: 'live-pi',
+            acpSessionId: sessionId,
+            cwd: '/repo',
+          );
+          final key = (result as AcpSessionLaunchStarted).key;
+          final server = replayConnector.servers[key.bridgeId]!;
+          if (activeTurn) {
+            expect(server.methods, isNot(contains('session/load')));
+            final prompt = replayManager.prompt(key, const [
+              AcpTextContent('queued follow-up'),
+            ]);
+            expect(server.heldPromptCount, 0);
+            replayConnector.bridgeStatusInFlightTurnCount = 0;
+            for (
+              var attempt = 0;
+              attempt < 20 && !server.methods.contains('session/load');
+              attempt++
+            ) {
+              await _pump();
+            }
+            expect(server.methods, contains('session/load'));
+            final duringLoad = replayManager.prompt(key, const [
+              AcpTextContent('queued during reload'),
+            ]);
+            loadGate.complete();
+            for (
+              var attempt = 0;
+              attempt < 20 && server.heldPromptCount == 0;
+              attempt++
+            ) {
+              await _pump();
+            }
+            expect(server.heldPromptCount, 1);
+            server.completeNextPrompt();
+            await prompt;
+            await _pump();
+            expect(server.heldPromptCount, 1);
+            server.completeNextPrompt();
+            await duringLoad;
+          }
+          expect(server.methods, contains('session/load'));
+          final messages = replayManager.state
+              .byKeyValue(key.value)!
+              .timeline
+              .entries
+              .whereType<AcpMessageEntry>();
+          expect(
+            messages.map(
+              (entry) => entry.content
+                  .whereType<AcpTextContent>()
+                  .map((c) => c.text)
+                  .join(),
+            ),
+            [
+              'old prompt',
+              'latest reply',
+              if (activeTurn) ...['queued follow-up', 'queued during reload'],
+            ],
+          );
+          expect(messages.every((entry) => !entry.queued), isTrue);
+          final localIds = messages
+              .where((entry) => entry.isLocalPrompt)
+              .map((entry) => entry.messageId)
+              .toList();
+          expect(localIds.toSet(), hasLength(localIds.length));
+        },
+      );
+    }
+
+    for (final failLoad in [false, true]) {
+      test(
+        failLoad
+            ? 'failed Pi reload preserves the original transcript'
+            : 'repeated Pi reloads replace history without repeating old turns',
+        () async {
+          final history = <Map<String, Object?>>[
+            for (final (role, text) in [
+              ('user', 'original prompt'),
+              ('agent', 'first reply'),
+              ('user', 'earlier follow-up'),
+              ('agent', 'latest reply'),
+            ])
+              {
+                'sessionUpdate': '${role}_message_chunk',
+                'content': {'type': 'text', 'text': text},
+              },
+          ];
+          final replayConnector = _FakeConnector(
+            serverFactory: (_, _) => _FakeAcpServer(
+              supportsResume: false,
+              replayUpdatesOnLoad: failLoad
+                  ? history.take(2).toList()
+                  : history,
+              loadErrorMessage: failLoad ? 'History unavailable' : null,
+            ),
+          );
+          final replayManager = buildManagerWith(replayConnector);
+          final started = await replayManager.startNewSession(
+            hostId: 1,
+            providerId: AcpBuiltinProviderIds.pi,
+            cwd: '/repo',
+          );
+          final key = (started as AcpSessionLaunchStarted).key;
+          for (final update in history) {
+            replayConnector.servers[key.bridgeId]!.pushUpdate(
+              key.acpSessionId,
+              update,
+            );
+          }
+          await _pump();
+          var previous = replayManager.state.byKeyValue(key.value)!.timeline;
+
+          for (var attempt = 0; attempt < 2; attempt++) {
+            await replayManager.detachSession(key);
+            final observed = <List<String>>[];
+            final subscription = replayManager.states.listen((state) {
+              final session = state.byKeyValue(key.value);
+              if (session == null) return;
+              observed.add([
+                for (final entry
+                    in session.timeline.entries.whereType<AcpMessageEntry>())
+                  entry.content
+                      .whereType<AcpTextContent>()
+                      .map((c) => c.text)
+                      .join(),
+              ]);
+            });
+            final result = await replayManager.reconnectSession(
+              hostId: key.hostId,
+              providerId: key.providerId,
+              bridgeId: key.bridgeId,
+              acpSessionId: key.acpSessionId,
+              cwd: '/repo',
+            );
+            await _pump();
+            await subscription.cancel();
+            expect(
+              result,
+              failLoad
+                  ? isA<AcpSessionLaunchFailed>()
+                  : isA<AcpSessionLaunchStarted>(),
+            );
+            final timeline = replayManager.state
+                .byKeyValue(key.value)!
+                .timeline;
+            expect(
+              timeline.entries.map((entry) => entry.order),
+              previous.entries.map((entry) => entry.order),
+            );
+            if (failLoad) expect(timeline.entries, previous.entries);
+            expect(identical(timeline.source, previous.source), failLoad);
+            expect(observed, isNotEmpty);
+            for (final messages in observed) {
+              expect(messages, [
+                'original prompt',
+                'first reply',
+                'earlier follow-up',
+                'latest reply',
+              ]);
+            }
+            previous = timeline;
+          }
+        },
+      );
+    }
+
     test('retains replay emitted synchronously during session/load', () async {
       final replayConnector = _FakeConnector(
         serverFactory: (_, _) => _FakeAcpServer(

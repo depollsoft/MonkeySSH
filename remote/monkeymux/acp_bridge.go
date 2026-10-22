@@ -139,6 +139,12 @@ type acpBridgeInfo struct {
 	CompletedTurns     uint64 `json:"completedTurnCount,omitempty"`
 	PendingPermission  int    `json:"pendingPermissionCount,omitempty"`
 	PendingInput       int    `json:"pendingInputCount,omitempty"`
+	// OldestPendingPermission and OldestPendingInput are the generations (the
+	// kind's counter just after the request) of the oldest pending request of
+	// each kind, so a server can tell how long one request has waited while
+	// newer ones come and go. Bridges before 0.1.245 leave them out.
+	OldestPendingPermission uint64 `json:"oldestPendingPermission,omitempty"`
+	OldestPendingInput      uint64 `json:"oldestPendingInput,omitempty"`
 	// LegacyPendingAttention is the combined count an earlier build of this
 	// branch reported; read only so a bridge preserved across an upgrade keeps
 	// raising its pending requests.
@@ -2113,7 +2119,9 @@ func (b *acpBridge) snapshotLocked() acpBridgeInfo {
 		InputRequests:      b.push.inputRequests,
 		CompletedTurns:     b.push.completedTurns,
 	}
-	info.PendingPermission, info.PendingInput = b.push.pendingAttentionLocked(b.pendingRequests)
+	pending := b.push.pendingAttentionLocked(b.pendingRequests)
+	info.PendingPermission, info.PendingInput = pending.permission, pending.input
+	info.OldestPendingPermission, info.OldestPendingInput = pending.oldestPermission, pending.oldestInput
 	info.PushDelivered = b.push.deliveredSnapshotLocked()
 	return info
 }
