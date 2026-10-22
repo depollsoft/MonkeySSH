@@ -46,11 +46,8 @@ type terminalScreen struct {
 	g1Graphics bool
 	shiftOut   bool
 
-	// cursorUnknown records that a Kitty image placement moved the client's
-	// cursor by an amount the model does not compute (it skips APC strings),
-	// until the next absolute cursor position or reset. kittyPlacementPending
-	// marks a chunked transmission whose last chunk places its image.
-	cursorUnknown         bool
+	// kittyPlacementPending marks a chunked Kitty transmission whose last
+	// chunk places its image; see vtGrid.cursorUnknown.
 	kittyPlacementPending bool
 
 	savedMain vtSavedCursor
@@ -228,6 +225,10 @@ type vtGrid struct {
 	cursorRow   int
 	cursorCol   int
 	pendingWrap bool
+	// cursorUnknown records that a Kitty image placement moved the client's
+	// cursor by an amount the model does not compute (it skips APC strings),
+	// until the next absolute cursor position. Saved cursors carry it.
+	cursorUnknown bool
 }
 
 type vtSavedCursor struct {
@@ -236,12 +237,13 @@ type vtSavedCursor struct {
 	col   int
 	// pendingWrap is a cursor saved past the last glyph of a full row: the
 	// client keeps it at viewWidth and DECRC restores the deferred wrap.
-	pendingWrap bool
-	attrs       vtAttrs
-	originMode  bool
-	g0Graphics  bool
-	g1Graphics  bool
-	shiftOut    bool
+	pendingWrap   bool
+	attrs         vtAttrs
+	originMode    bool
+	g0Graphics    bool
+	g1Graphics    bool
+	shiftOut      bool
+	cursorUnknown bool
 }
 
 // vtCell holds one grid cell. r == 0 means blank. width is 1 or 2 for a cell
@@ -357,7 +359,6 @@ func (s *terminalScreen) Reset() {
 	// a frame rendered after RIS still reproduces those cells.
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
-	s.cursorUnknown = false
 	s.kittyPlacementPending = false
 	s.resetState()
 }
@@ -389,7 +390,7 @@ func (s *terminalScreen) CursorPosition() (int, int) {
 // image placement moved the cursor, and in origin mode, where xterm counts the
 // row from the top margin but the app's terminal does not.
 func (s *terminalScreen) CursorPositionReport() (report []byte, ok bool) {
-	if s.cursorUnknown || s.originMode {
+	if s.grid().cursorUnknown || s.originMode {
 		return nil, false
 	}
 	row, col := s.CursorPosition()
@@ -854,8 +855,9 @@ type vtParser struct {
 	stringUtf8 int
 	// apcHead keeps the start of an APC string, up to its first ';', so a
 	// Kitty graphics command's control keys can be read when it ends.
-	apcHead    []byte
-	apcCapture bool
+	apcHead      []byte
+	apcCapture   bool
+	apcTruncated bool
 	// Scratch space reused by csiParams so dispatch allocates nothing.
 	values []int
 	starts []int
@@ -1013,7 +1015,9 @@ func (s *terminalScreen) step(b byte) {
 		case b == 0x90:
 			p.state = vtSOSString
 			p.stringUtf8 = 0
+			p.apcHead = p.apcHead[:0]
 			p.apcCapture = false
+			p.apcTruncated = false
 		case b == 0x9c:
 			// A stray string terminator.
 		case b&0xE0 == 0xC0:
@@ -1046,6 +1050,7 @@ func (s *terminalScreen) step(b byte) {
 			p.stringUtf8 = 0
 			p.apcHead = p.apcHead[:0]
 			p.apcCapture = b == '_'
+			p.apcTruncated = false
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
 			p.state = vtEscapeIntermediate
@@ -1105,12 +1110,20 @@ func (s *terminalScreen) step(b byte) {
 			p.state = vtGround
 			s.endAPC()
 		case b == 0x18, b == 0x1a:
+			// A cancelled string runs nothing.
 			p.state = vtGround
+			p.apcHead = p.apcHead[:0]
+			p.apcCapture = false
+			p.apcTruncated = false
 		default:
 			if p.apcCapture {
-				if b == ';' || len(p.apcHead) >= vtAPCHeadLimit {
+				switch {
+				case b == ';':
 					p.apcCapture = false
-				} else {
+				case len(p.apcHead) >= vtAPCHeadLimit:
+					p.apcCapture = false
+					p.apcTruncated = true
+				default:
 					p.apcHead = append(p.apcHead, b)
 				}
 			}
@@ -1126,17 +1139,27 @@ func (s *terminalScreen) step(b byte) {
 }
 
 // vtAPCHeadLimit bounds how much of an APC string the parser keeps; Kitty
-// graphics control keys fit well within it.
-const vtAPCHeadLimit = 64
+// graphics control keys fit well within it, and a longer header is treated
+// as a placement.
+const vtAPCHeadLimit = 256
 
 // endAPC notes a completed Kitty graphics command that places an image: the
 // client moves its cursor past the image unless the command says C=1 or makes
 // a virtual placement (U=1), and the model cannot tell by how much.
 func (s *terminalScreen) endAPC() {
 	head := s.parser.apcHead
+	truncated := s.parser.apcTruncated
 	s.parser.apcHead = s.parser.apcHead[:0]
 	s.parser.apcCapture = false
+	s.parser.apcTruncated = false
 	if len(head) == 0 || head[0] != 'G' {
+		return
+	}
+	if truncated {
+		// Keys past the limit were not read; assume the command places an
+		// image, whether now or with a later chunk.
+		s.grid().cursorUnknown = true
+		s.kittyPlacementPending = true
 		return
 	}
 	action, hasAction, noMove, virtual, more := byte('t'), false, false, false, false
@@ -1161,12 +1184,12 @@ func (s *terminalScreen) endAPC() {
 	case placesImage:
 		// The first chunk of a chunked transmission already marks the cursor:
 		// the client may place the image before the model sees the last one.
-		s.cursorUnknown = true
+		s.grid().cursorUnknown = true
 		s.kittyPlacementPending = more
 	case !hasAction && s.kittyPlacementPending:
 		// A continuation chunk; the last one (m=0) places the image.
 		if !more {
-			s.cursorUnknown = true
+			s.grid().cursorUnknown = true
 			s.kittyPlacementPending = false
 		}
 	}
@@ -1350,15 +1373,16 @@ func (s *terminalScreen) saved() *vtSavedCursor {
 func (s *terminalScreen) saveCursor() {
 	g := s.grid()
 	*s.saved() = vtSavedCursor{
-		valid:       true,
-		row:         g.cursorRow,
-		col:         g.cursorCol,
-		pendingWrap: g.pendingWrap,
-		attrs:       s.attrs,
-		originMode:  s.originMode,
-		g0Graphics:  s.g0Graphics,
-		g1Graphics:  s.g1Graphics,
-		shiftOut:    s.shiftOut,
+		valid:         true,
+		row:           g.cursorRow,
+		col:           g.cursorCol,
+		pendingWrap:   g.pendingWrap,
+		attrs:         s.attrs,
+		originMode:    s.originMode,
+		g0Graphics:    s.g0Graphics,
+		g1Graphics:    s.g1Graphics,
+		shiftOut:      s.shiftOut,
+		cursorUnknown: g.cursorUnknown,
 	}
 }
 
@@ -1387,6 +1411,7 @@ func (s *terminalScreen) restoreCursor() {
 		s.attrs = vtAttrs{}
 		s.originMode = false
 		g.pendingWrap = false
+		g.cursorUnknown = false
 		return
 	}
 	s.restoreSavedPosition(g, saved)
@@ -1403,6 +1428,7 @@ func (s *terminalScreen) restoreSavedPosition(g *vtGrid, saved vtSavedCursor) {
 	g.cursorRow = clampInt(saved.row, 0, s.height-1)
 	g.cursorCol = clampInt(saved.col, 0, s.width-1)
 	g.pendingWrap = saved.pendingWrap && g.cursorCol == s.width-1
+	g.cursorUnknown = saved.cursorUnknown
 }
 
 func clampInt(v, lo, hi int) int {
@@ -1817,7 +1843,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 			row += s.top
 		}
 		s.moveCursor(row, col)
-		s.cursorUnknown = false
+		s.grid().cursorUnknown = false
 	case 'I':
 		s.tabForward(n)
 	case 'J':
@@ -1888,7 +1914,13 @@ func (s *terminalScreen) csiDispatch(final byte) {
 			}
 		}
 	case 's':
-		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol, pendingWrap: g.pendingWrap}
+		s.scoCursor = vtSavedCursor{
+			valid:         true,
+			row:           g.cursorRow,
+			col:           g.cursorCol,
+			pendingWrap:   g.pendingWrap,
+			cursorUnknown: g.cursorUnknown,
+		}
 	case 'u':
 		if s.scoCursor.valid {
 			defer s.noteCursorRow(g.cursorRow)
@@ -1987,6 +2019,7 @@ func (s *terminalScreen) switchScreen(toAlt bool, saveCursor bool, clear bool) {
 		}
 		s.alt.cursorRow = s.main.cursorRow
 		s.alt.cursorCol = s.main.cursorCol
+		s.alt.cursorUnknown = s.main.cursorUnknown
 		return
 	}
 	s.altActive = false

@@ -684,6 +684,11 @@ type muxServer struct {
 	publishedWidth  int
 	publishedHeight int
 
+	// detachedReplyClients holds removed attach clients whose input worker
+	// may still be writing received replies to windows; see
+	// terminalOwesRepliesLocked. Guarded by mu.
+	detachedReplyClients map[*attachClient]struct{}
+
 	mu                               sync.Mutex
 	resizeMu                         sync.Mutex
 	attachTransitionMu               sync.Mutex
@@ -1142,6 +1147,7 @@ type attachClient struct {
 	queuedQueryWrites   map[string]int
 	awaitedReplies      map[string]int
 	awaitedRepliesUntil time.Time
+	awaitedRepliesHeld  bool
 	routedReplies       map[string]int
 
 	// consumedKeyReleases holds keys whose kitty press MonkeyMux consumed as a
@@ -7566,6 +7572,7 @@ func (c *attachClient) enqueueInputActions(actions []attachInputAction) bool {
 	if c.inputQueueClosed ||
 		c.inputQueuedBytes+addedBytes > attachWriteQueueLimitBytes {
 		c.inputQueueMu.Unlock()
+		c.releaseReplies(actions)
 		c.close()
 		return false
 	}
@@ -7604,6 +7611,17 @@ func (c *attachClient) nextInputAction() (attachInputAction, bool) {
 			return attachInputAction{}, false
 		}
 	}
+}
+
+// discardInputActions drops the actions left when the input worker stops, so
+// replies it will never write stop counting as owed.
+func (c *attachClient) discardInputActions() {
+	c.inputQueueMu.Lock()
+	left := c.inputQueue
+	c.inputQueue = nil
+	c.inputQueuedBytes = 0
+	c.inputQueueMu.Unlock()
+	c.releaseReplies(left)
 }
 
 func writeConnection(conn net.Conn, data []byte) error {
@@ -7806,9 +7824,33 @@ func (c *attachClient) suppressesReplayedOutput(
 func (c *attachClient) owesTerminalReplies(windowID string, now time.Time) bool {
 	c.replyTrackMu.Lock()
 	defer c.replyTrackMu.Unlock()
+	if c.routedReplies[windowID] > 0 {
+		return true
+	}
+	if c.isClosed() {
+		// Nothing more can reach it, so only received replies are still owed.
+		return false
+	}
 	return c.queuedQueryWrites[windowID] > 0 ||
-		c.routedReplies[windowID] > 0 ||
-		(c.awaitedReplies[windowID] > 0 && now.Before(c.awaitedRepliesUntil))
+		(c.awaitedReplies[windowID] > 0 &&
+			(c.awaitedRepliesHeld || now.Before(c.awaitedRepliesUntil)))
+}
+
+// deliversReplies reports whether the client can still write a reply to a
+// window: it is open, or its input worker holds received replies.
+func (c *attachClient) deliversReplies() bool {
+	c.replyTrackMu.Lock()
+	defer c.replyTrackMu.Unlock()
+	return !c.isClosed() || len(c.routedReplies) > 0
+}
+
+func (c *attachClient) isClosed() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // trackRepliesLocked copies the awaited replies into the reply track and
@@ -7830,6 +7872,9 @@ func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
 		c.awaitedReplies = addReplyCount(c.awaitedReplies, windowID, 1)
 	}
 	c.awaitedRepliesUntil = c.terminalResponseUntil
+	// Bracketed paste input renews the client's wait before it checks the
+	// deadline, so a paste in progress keeps the replies owed.
+	c.awaitedRepliesHeld = c.inputBracketedPasteActive
 	for _, action := range routed {
 		if !action.userInput && action.windowID != "" {
 			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
@@ -7852,11 +7897,16 @@ func (c *attachClient) trackQueryWrite(write attachWrite, delta int) {
 	c.replyTrackMu.Unlock()
 }
 
-// replyDelivered records that a received reply was written to its window.
-func (c *attachClient) replyDelivered(windowID string) {
+// releaseReplies records that the replies among actions were written to their
+// windows, or will never be.
+func (c *attachClient) releaseReplies(actions []attachInputAction) {
 	c.replyTrackMu.Lock()
-	c.routedReplies = addReplyCount(c.routedReplies, windowID, -1)
-	c.replyTrackMu.Unlock()
+	defer c.replyTrackMu.Unlock()
+	for _, action := range actions {
+		if !action.userInput && action.windowID != "" {
+			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, -1)
+		}
+	}
 }
 
 func addReplyCount(counts map[string]int, windowID string, delta int) map[string]int {
@@ -8983,6 +9033,10 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		return
 	}
 	delete(s.attachClients, client.conn)
+	if s.detachedReplyClients == nil {
+		s.detachedReplyClients = map[*attachClient]struct{}{}
+	}
+	s.detachedReplyClients[client] = struct{}{}
 	if s.pendingFocusRefreshConn == client.conn {
 		s.pendingFocusRefreshConn = nil
 	}
@@ -9193,6 +9247,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 }
 
 func (s *muxServer) runAttachInputActions(client *attachClient) {
+	defer client.discardInputActions()
 	for {
 		action, ok := client.nextInputAction()
 		if !ok {
@@ -9209,16 +9264,14 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			}
 			continue
 		}
-		replyWindowID := action.windowID
+		reply := action
 		if action.windowID == "" {
 			s.mu.Lock()
 			action.windowID = s.activeID
 			s.mu.Unlock()
 		}
 		_ = s.writeWindow(action.windowID, action.data)
-		if replyWindowID != "" {
-			client.replyDelivered(replyWindowID)
-		}
+		client.releaseReplies([]attachInputAction{reply})
 	}
 }
 
@@ -10785,7 +10838,13 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	// A pause restarted while another is in flight likewise keeps the
 	// original snapshot when the first (empty) redraw already cleared the
 	// screen.
-	if screen := window.screenLocked(); screen.HasVisibleContent() {
+	//
+	// After MonkeyMux answered a cursor query from the model during the pause
+	// being restarted, the restart drops held bytes that answer depended on,
+	// so the snapshot must be the model as it is now, even an empty one: the
+	// program has been told its cursor.
+	if screen := window.screenLocked(); screen.HasVisibleContent() ||
+		window.redrawForwardingAnsweredCursor {
 		window.redrawForwardingFallbackScreen = screen.Clone()
 	} else if !window.redrawForwardingPaused {
 		window.redrawForwardingFallbackScreen = nil
@@ -14131,6 +14190,15 @@ func (s *muxServer) terminalOwesRepliesLocked(windowID string) bool {
 	now := time.Now()
 	for _, client := range s.attachClients {
 		if client.owesTerminalReplies(windowID, now) {
+			return true
+		}
+	}
+	// A removed client's input worker can still be writing replies it
+	// received before it went away.
+	for client := range s.detachedReplyClients {
+		if !client.deliversReplies() {
+			delete(s.detachedReplyClients, client)
+		} else if client.owesTerminalReplies(windowID, now) {
 			return true
 		}
 	}

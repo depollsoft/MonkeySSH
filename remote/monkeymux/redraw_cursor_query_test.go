@@ -74,6 +74,7 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		moves bool
 	}{
 		{"a=T,f=32,s=1,v=1,m=1", true},
+		{"a=T,f=32,s=1,v=1,r=2,c=2,q=2,m=1", true},
 		{"a=t,f=32,s=1,v=1,m=1", false},
 	} {
 		s.Write([]byte("\x1b_G" + tc.first + ";AAAA\x1b\\\x1b[2;2H\x1b_Gm=1;AAAA\x1b\\"))
@@ -85,6 +86,39 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 			t.Fatalf("after %s and its last chunk report = %q, want unanswerable=%v", tc.first, got, tc.moves)
 		}
 		s.Write([]byte("\x1b[1;1H"))
+	}
+
+	// A cancelled placement runs nothing, and leaves nothing for a later
+	// string's end to act on.
+	s.Write([]byte("\x1b_Ga=T,f=32,s=1,v=1\x18\x90q\x9c"))
+	if got := report(); got != "\x1b[1;1R" {
+		t.Fatalf("after a cancelled placement report = %q, want 1;1", got)
+	}
+
+	// A header too long to read in full is taken for a placement.
+	long := "f=32,s=1,v=1" + strings.Repeat(",X=0", 70) + ",a=T"
+	s.Write([]byte("\x1b_G" + long + ";/wAA/w==\x1b\\"))
+	if got := report(); got != "unanswerable" {
+		t.Fatalf("after a long placement header report = %q, want none", got)
+	}
+	s.Write([]byte("\x1b[1;1H"))
+
+	// The uncertainty travels with the cursor it describes.
+	placement := "\x1b[5;10H\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2;/wAA/w==\x1b\\"
+	for _, tc := range []struct {
+		name, seq, want string
+	}{
+		{"DECSC and DECRC", placement + "\x1b7\x1b[1;1H\x1b8", "unanswerable"},
+		{"SCO save and restore", placement + "\x1b[s\x1b[1;1H\x1b[u", "unanswerable"},
+		{"alternate screen entered", placement + "\x1b[?1049h", "unanswerable"},
+		{"alternate screen positioned", "\x1b[3;3H", "\x1b[3;3R"},
+		{"alternate screen left", "\x1b[?1049l", "unanswerable"},
+		{"saved before the image", "\x1b[1;1H\x1b7" + placement + "\x1b8", "\x1b[1;1R"},
+	} {
+		s.Write([]byte(tc.seq))
+		if got := report(); got != tc.want {
+			t.Fatalf("%s: report = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -437,6 +471,107 @@ func TestAttachClientOwesReplyUntilItReachesTheWindow(t *testing.T) {
 	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, dropped)
 	close(dropped.done)
 	waitForTerminalRepliesSettled(t, client, "@1")
+}
+
+// A removed client's input worker can still be writing a reply it received,
+// so the reply stays owed until it is written, and the client is forgotten
+// once it owes nothing.
+func TestRemovedClientOwesRepliesItIsStillDelivering(t *testing.T) {
+	server := newMuxServer("removed-client-replies")
+	pty := &recordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	conn := &recordingConn{}
+	client := registerTestAttachClient(t, server, conn, "leaving", 80, 24)
+	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, nil)
+	waitForRecordedOutput(t, conn, cursorPositionQuery)
+	waitForTestAttachWrites(t, server)
+	routing := client.routeInput([]byte("\x1b[1;1R"))
+	client.enqueueInputActions(routing.actions)
+
+	server.removeAttachClient(client)
+	owes := func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.terminalOwesRepliesLocked("@1")
+	}
+	if !owes() {
+		t.Fatal("a reply the removed client still holds must count as owed")
+	}
+	go server.runAttachInputActions(client)
+	deadline := time.Now().Add(time.Second)
+	for owes() {
+		if time.Now().After(deadline) {
+			t.Fatal("the delivered reply still counts as owed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := pty.String(); got != "\x1b[1;1R" {
+		t.Fatalf("window got %q, want the reply", got)
+	}
+	server.mu.Lock()
+	remembered := len(server.detachedReplyClients)
+	server.mu.Unlock()
+	if remembered != 0 {
+		t.Fatal("a removed client that owes nothing must be forgotten")
+	}
+}
+
+// The client keeps waiting for a reply while a bracketed paste is in
+// progress, however long it takes, so the reply stays owed.
+func TestReplyStaysOwedThroughABracketedPaste(t *testing.T) {
+	server := newMuxServer("paste-held-replies")
+	conn := &recordingConn{}
+	client := registerTestAttachClient(t, server, conn, "primary", 80, 24)
+	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, nil)
+	waitForRecordedOutput(t, conn, cursorPositionQuery)
+	waitForTestAttachWrites(t, server)
+	later := func() time.Time { return time.Now().Add(2 * terminalResponseFocusGrace) }
+
+	client.routeInput([]byte("\x1b[200~pasted"))
+	if !client.owesTerminalReplies("@1", later()) {
+		t.Fatal("a reply must stay owed while a paste is in progress")
+	}
+	client.routeInput([]byte(" text\x1b[201~"))
+	if client.owesTerminalReplies("@1", later()) {
+		t.Fatal("once the paste ends the usual wait applies")
+	}
+}
+
+// A pause restarted after a local answer drops held bytes the answer
+// depended on, so the client must still end up at the reported cursor.
+func TestRestartedRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
+	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
+	window.redrawForwardingPaused = false
+	server.handleWindowOutput("@1", []byte("\x1b[1;1Hbase"))
+	waitForTestAttachWrites(t, server)
+	server.mu.Lock()
+	server.pauseAttachForwardingForRedrawLocked(window, 80, 24)
+	server.mu.Unlock()
+
+	server.handleWindowOutput("@1", []byte("\x1b[2J\x1b[10;20H"+cursorPositionQuery))
+	waitForWindowReplies(t, window)
+	if got := pty.String(); got != "\x1b[10;20R" {
+		t.Fatalf("window got %q, want the reported position", got)
+	}
+	server.mu.Lock()
+	server.pauseAttachForwardingForRedrawLocked(window, 80, 24)
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.handleWindowOutput("@1", []byte("x"))
+	server.resumePausedAttachForwarding("@1", generation)
+	waitForTestAttachWrites(t, server)
+
+	client := newTerminalScreen(80, 24)
+	client.Write([]byte(attach.String()))
+	rows := client.TextRows()
+	if rows[0] != "" || rows[9] != strings.Repeat(" ", 19)+"x" {
+		t.Fatalf("client rows 0 and 9 = %q, %q, want x at 10;20 on a cleared screen", rows[0], rows[9])
+	}
+	if row, col := client.CursorPosition(); row != 9 || col != 20 {
+		t.Fatalf("client cursor = (%d,%d), want (9,20)", row, col)
+	}
 }
 
 func waitForTerminalRepliesSettled(t *testing.T, client *attachClient, windowID string) {
