@@ -8,21 +8,64 @@ import (
 
 func TestVTScreenCursorPositionReport(t *testing.T) {
 	s := newTerminalScreen(80, 24)
+	report := func() string {
+		t.Helper()
+		got, ok := s.CursorPositionReport()
+		if !ok {
+			return "unanswerable"
+		}
+		return string(got)
+	}
 	s.Write([]byte("\x1b[7;9H"))
-	if got := string(s.CursorPositionReport()); got != "\x1b[7;9R" {
+	if got := report(); got != "\x1b[7;9R" {
 		t.Fatalf("report = %q, want 1-based row 7 column 9", got)
 	}
-	s.Write([]byte("\x1b[5;20r\x1b[?6h\x1b[2;3H"))
-	if got := string(s.CursorPositionReport()); got != "\x1b[2;3R" {
-		t.Fatalf("origin-mode report = %q, want the row counted from the margin", got)
-	}
-	s.Write([]byte("\x1b[?6l\x1b[r\x1b[1;1H" + strings.Repeat("x", 80)))
-	if got := string(s.CursorPositionReport()); got != "\x1b[1;80R" {
+	s.Write([]byte("\x1b[1;1H" + strings.Repeat("x", 80)))
+	if got := report(); got != "\x1b[1;80R" {
 		t.Fatalf("pending-wrap report = %q, want the last column", got)
 	}
 	s.Write([]byte("\x1b[?1049h\x1b[3;4H"))
-	if got := string(s.CursorPositionReport()); got != "\x1b[3;4R" {
+	if got := report(); got != "\x1b[3;4R" {
 		t.Fatalf("alternate-screen report = %q, want the alternate cursor", got)
+	}
+
+	// The app's terminal reports the absolute row in origin mode, where xterm
+	// counts from the margin, so the model leaves that query to the client.
+	s.Write([]byte("\x1b[5;20r\x1b[?6h\x1b[2;3H"))
+	if got := report(); got != "unanswerable" {
+		t.Fatalf("origin-mode report = %q, want none", got)
+	}
+	s.Write([]byte("\x1b[?6l\x1b[r"))
+
+	// A Kitty placement moves the client's cursor past the image by an amount
+	// the model does not compute, until the next absolute position.
+	for _, tc := range []struct {
+		command string
+		moves   bool
+	}{
+		{"a=T,f=32,s=1,v=1,r=2,c=2,q=2", true},
+		{"a=p,i=7,r=2,c=2", true},
+		{"a=T,f=32,s=1,v=1,C=1", false},
+		{"a=T,f=32,s=1,v=1,U=1", false},
+		{"a=t,f=32,s=1,v=1", false},
+		{"a=d,d=a", false},
+	} {
+		s.Write([]byte("\x1b[5;10H\x1b_G" + tc.command + ";/wAA/w==\x1b\\"))
+		if got := report(); (got == "unanswerable") != tc.moves {
+			t.Fatalf("after %s report = %q, want unanswerable=%v", tc.command, got, tc.moves)
+		}
+		s.Write([]byte("\x1b[6;2H"))
+		if got := report(); got != "\x1b[6;2R" {
+			t.Fatalf("after %s and CUP report = %q, want 6;2", tc.command, got)
+		}
+	}
+	s.Write([]byte("\x1b_Ga=T,f=32,s=1,v=1\x9c"))
+	if got := report(); got != "unanswerable" {
+		t.Fatalf("C1-terminated placement report = %q, want none", got)
+	}
+	s.Write([]byte("\x1bc"))
+	if got := report(); got != "\x1b[1;1R" {
+		t.Fatalf("report after RIS = %q, want home", got)
 	}
 }
 
@@ -80,6 +123,72 @@ func TestRedrawPauseAnswersCursorPositionQueryFromScreenModel(t *testing.T) {
 	if got := attach.String(); strings.Contains(got, cursorPositionQuery) ||
 		!strings.Contains(got, "later") {
 		t.Fatalf("attach output = %q, want the redraw without the answered query", got)
+	}
+}
+
+// A query the model cannot answer as the client would goes to the terminal,
+// and so does every later one, which would otherwise be answered first.
+func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		chunk string
+	}{
+		{
+			name:  "after a Kitty placement",
+			chunk: "\x1b[5;10H\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2,q=2;/wAA/w==\x1b\\" + cursorPositionQuery,
+		},
+		{
+			name:  "in origin mode, then outside it",
+			chunk: "\x1b[5;20r\x1b[?6h" + cursorPositionQuery + "\x1b[?6l\x1b[r" + cursorPositionQuery,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, window, pty, _ := newRedrawCursorQueryTestServer(t)
+
+			server.handleWindowOutput("@1", []byte(tc.chunk))
+			waitForWindowReplies(t, window)
+
+			if got := pty.String(); got != "" {
+				t.Fatalf("window got %q, want the terminal left to answer", got)
+			}
+			server.mu.Lock()
+			queries := string(window.redrawForwardingQueryBuffer)
+			server.mu.Unlock()
+			if want := strings.Count(tc.chunk, cursorPositionQuery); strings.Count(queries, cursorPositionQuery) != want {
+				t.Fatalf("held queries = %q, want all %d cursor queries", queries, want)
+			}
+		})
+	}
+}
+
+// A redraw that only moves the cursor would normally be replaced by the frame
+// from before the pause, but the program has been told the moved position, so
+// the client must end up there too.
+func TestRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
+	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
+	window.redrawForwardingPaused = false
+	server.handleWindowOutput("@1", []byte("\x1b[1;1Hbase"))
+	waitForTestAttachWrites(t, server)
+	server.mu.Lock()
+	window.redrawForwardingPaused = true
+	window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
+	server.mu.Unlock()
+
+	server.handleWindowOutput("@1", []byte("\x1b[10;20H"+cursorPositionQuery))
+	waitForWindowReplies(t, window)
+	if got := pty.String(); got != "\x1b[10;20R" {
+		t.Fatalf("window got %q, want the reported position", got)
+	}
+	server.resumePausedAttachForwarding("@1", 1)
+	waitForTestAttachWrites(t, server)
+
+	client := newTerminalScreen(80, 24)
+	client.Write([]byte(attach.String()))
+	if row, col := client.CursorPosition(); row != 9 || col != 19 {
+		t.Fatalf("client cursor = (%d,%d), want the reported (9,19)", row, col)
+	}
+	if got := client.TextRows()[0]; got != "base" {
+		t.Fatalf("client row 0 = %q, want the frame kept", got)
 	}
 }
 
@@ -148,5 +257,106 @@ func TestCursorPositionQueryOutsideRedrawPauseReachesTerminal(t *testing.T) {
 	}
 	if got := attach.String(); !strings.Contains(got, cursorPositionQuery) {
 		t.Fatalf("attach output = %q, want the query forwarded", got)
+	}
+}
+
+// A cursor query sent to the terminal before the pause may still be waiting
+// for its reply when the next one is held. Answering the held one first would
+// pair each position with the wrong query, so the local answer waits until the
+// terminal's reply has reached the window.
+func TestRedrawPauseWaitsForTerminalReplyOwedFromBeforeIt(t *testing.T) {
+	for _, replied := range []bool{false, true} {
+		name := "reply outstanding"
+		if replied {
+			name = "reply delivered"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, window, pty, attach := newRedrawCursorQueryTestServer(t)
+			client := server.attachClients[attach]
+			go server.runAttachInputActions(client)
+			window.redrawForwardingPaused = false
+			server.handleWindowOutput("@1", []byte(cursorPositionQuery))
+			waitForTestAttachWrites(t, server)
+
+			server.mu.Lock()
+			window.redrawForwardingPaused = true
+			server.mu.Unlock()
+			reply := ""
+			if replied {
+				reply = "\x1b[1;1R"
+				routing := client.routeInput([]byte(reply))
+				client.enqueueInputActions(routing.actions)
+				waitForTerminalRepliesSettled(t, client, "@1")
+			}
+			server.handleWindowOutput("@1", []byte("\x1b[5;10H"+cursorPositionQuery))
+			waitForWindowReplies(t, window)
+
+			want := reply
+			if replied {
+				want += "\x1b[5;10R"
+			}
+			if got := pty.String(); got != want {
+				t.Fatalf("window got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A client owes a window a reply from the moment a query is queued to it
+// until the reply has been written to the window, or the wait for it expires.
+func TestAttachClientOwesReplyUntilItReachesTheWindow(t *testing.T) {
+	server := newMuxServer("owed-replies")
+	pty := &recordingPty{}
+	window := &muxWindow{id: "@1", pty: pty, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	conn := &recordingConn{}
+	client := registerTestAttachClient(t, server, conn, "primary", 80, 24)
+	owes := func() bool { return client.owesTerminalReplies("@1", time.Now()) }
+
+	gate := &attachWriteGate{done: make(chan struct{})}
+	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, gate)
+	if !owes() {
+		t.Fatal("a query queued to the client must count as owed")
+	}
+	if client.owesTerminalReplies("@2", time.Now()) {
+		t.Fatal("another window must not be owed anything")
+	}
+	gate.deliver.Store(true)
+	close(gate.done)
+	waitForRecordedOutput(t, conn, cursorPositionQuery)
+	waitForTestAttachWrites(t, server)
+	if !owes() {
+		t.Fatal("a sent query must count as owed until its reply arrives")
+	}
+	if client.owesTerminalReplies("@1", time.Now().Add(2*terminalResponseFocusGrace)) {
+		t.Fatal("a reply the client stopped waiting for must not count as owed")
+	}
+
+	routing := client.routeInput([]byte("\x1b[3;4R"))
+	if !owes() {
+		t.Fatal("a received reply must count as owed until it reaches the window")
+	}
+	client.enqueueInputActions(routing.actions)
+	go server.runAttachInputActions(client)
+	waitForTerminalRepliesSettled(t, client, "@1")
+	if got := pty.String(); got != "\x1b[3;4R" {
+		t.Fatalf("window got %q, want the reply", got)
+	}
+
+	dropped := &attachWriteGate{done: make(chan struct{})}
+	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, dropped)
+	close(dropped.done)
+	waitForTerminalRepliesSettled(t, client, "@1")
+}
+
+func waitForTerminalRepliesSettled(t *testing.T, client *attachClient, windowID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for client.owesTerminalReplies(windowID, time.Now()) {
+		if time.Now().After(deadline) {
+			t.Fatal("the client still owes the window a reply")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

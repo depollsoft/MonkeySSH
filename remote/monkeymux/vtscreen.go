@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strconv"
 	"unicode/utf8"
 )
@@ -44,6 +45,11 @@ type terminalScreen struct {
 	g0Graphics bool
 	g1Graphics bool
 	shiftOut   bool
+
+	// cursorUnknown records that a Kitty image placement moved the client's
+	// cursor by an amount the model does not compute (it skips APC strings),
+	// until the next absolute cursor position or reset.
+	cursorUnknown bool
 
 	savedMain vtSavedCursor
 	savedAlt  vtSavedCursor
@@ -349,6 +355,7 @@ func (s *terminalScreen) Reset() {
 	// a frame rendered after RIS still reproduces those cells.
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
+	s.cursorUnknown = false
 	s.resetState()
 }
 
@@ -373,19 +380,21 @@ func (s *terminalScreen) CursorPosition() (int, int) {
 	return g.cursorRow, g.cursorCol
 }
 
-// CursorPositionReport is a terminal's answer to a cursor position query
-// (CSI 6 n): the 1-based row and column of the cursor on the active grid, with
-// the row counted from the top margin in origin mode, as xterm reports it.
-func (s *terminalScreen) CursorPositionReport() []byte {
-	row, col := s.CursorPosition()
-	if s.originMode {
-		row -= s.top
+// CursorPositionReport is the client terminal's answer to a cursor position
+// query (CSI 6 n): the 1-based row and column of the cursor on the active
+// grid. ok is false when the model cannot match that answer: after a Kitty
+// image placement moved the cursor, and in origin mode, where xterm counts the
+// row from the top margin but the app's terminal does not.
+func (s *terminalScreen) CursorPositionReport() (report []byte, ok bool) {
+	if s.cursorUnknown || s.originMode {
+		return nil, false
 	}
+	row, col := s.CursorPosition()
 	out := append([]byte(nil), "\x1b["...)
 	out = strconv.AppendInt(out, int64(row+1), 10)
 	out = append(out, ';')
 	out = strconv.AppendInt(out, int64(col+1), 10)
-	return append(out, 'R')
+	return append(out, 'R'), true
 }
 
 // Clone returns an independent deep copy.
@@ -840,6 +849,10 @@ type vtParser struct {
 	// stringUtf8 counts UTF-8 continuation bytes still expected inside an
 	// OSC/DCS/APC string, so a 0x9c continuation byte is not taken for ST.
 	stringUtf8 int
+	// apcHead keeps the start of an APC string, up to its first ';', so a
+	// Kitty graphics command's control keys can be read when it ends.
+	apcHead    []byte
+	apcCapture bool
 	// Scratch space reused by csiParams so dispatch allocates nothing.
 	values []int
 	starts []int
@@ -850,6 +863,7 @@ func (p vtParser) clone() vtParser {
 	c := p
 	c.params = append([]byte(nil), p.params...)
 	c.intermediates = append([]byte(nil), p.intermediates...)
+	c.apcHead = append([]byte(nil), p.apcHead...)
 	c.values, c.starts, c.groups = nil, nil, nil
 	return c
 }
@@ -996,6 +1010,7 @@ func (s *terminalScreen) step(b byte) {
 		case b == 0x90:
 			p.state = vtSOSString
 			p.stringUtf8 = 0
+			p.apcCapture = false
 		case b == 0x9c:
 			// A stray string terminator.
 		case b&0xE0 == 0xC0:
@@ -1026,6 +1041,8 @@ func (s *terminalScreen) step(b byte) {
 		case b == 'P' || b == 'X' || b == '^' || b == '_':
 			p.state = vtSOSString
 			p.stringUtf8 = 0
+			p.apcHead = p.apcHead[:0]
+			p.apcCapture = b == '_'
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
 			p.state = vtEscapeIntermediate
@@ -1081,15 +1098,58 @@ func (s *terminalScreen) step(b byte) {
 		case p.inStringRune(b):
 		case b == 0x1b:
 			p.state = vtSOSEscape
-		case b == 0x9c, b == 0x18, b == 0x1a:
+		case b == 0x9c:
 			p.state = vtGround
+			s.endAPC()
+		case b == 0x18, b == 0x1a:
+			p.state = vtGround
+		default:
+			if p.apcCapture {
+				if b == ';' || len(p.apcHead) >= vtAPCHeadLimit {
+					p.apcCapture = false
+				} else {
+					p.apcHead = append(p.apcHead, b)
+				}
+			}
 		}
 	case vtSOSEscape:
 		if b == '\\' {
 			p.state = vtGround
+			s.endAPC()
 		} else if b != 0x1b {
 			p.state = vtSOSString
 		}
+	}
+}
+
+// vtAPCHeadLimit bounds how much of an APC string the parser keeps; Kitty
+// graphics control keys fit well within it.
+const vtAPCHeadLimit = 64
+
+// endAPC notes a completed Kitty graphics command that places an image: the
+// client moves its cursor past the image unless the command says C=1 or makes
+// a virtual placement (U=1), and the model cannot tell by how much.
+func (s *terminalScreen) endAPC() {
+	head := s.parser.apcHead
+	s.parser.apcHead = s.parser.apcHead[:0]
+	s.parser.apcCapture = false
+	if len(head) == 0 || head[0] != 'G' {
+		return
+	}
+	action, noMove, virtual := byte('t'), false, false
+	for _, field := range bytes.Split(head[1:], []byte{','}) {
+		key, value, _ := bytes.Cut(field, []byte{'='})
+		switch {
+		case bytes.Equal(key, []byte("a")) && len(value) == 1:
+			action = value[0]
+		case bytes.Equal(key, []byte("C")):
+			noMove = bytes.Equal(value, []byte("1"))
+		case bytes.Equal(key, []byte("U")):
+			virtual = bytes.Equal(value, []byte("1"))
+		}
+	}
+	if (action == 'T' || action == 'p') && !noMove && !virtual {
+		s.cursorUnknown = true
 	}
 }
 
@@ -1738,6 +1798,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 			row += s.top
 		}
 		s.moveCursor(row, col)
+		s.cursorUnknown = false
 	case 'I':
 		s.tabForward(n)
 	case 'J':

@@ -900,6 +900,9 @@ type muxWindow struct {
 	redrawForwardingQueryBuffer          []byte
 	redrawForwardingPrimaryConn          net.Conn
 	redrawForwardingPrimaryNeedsFailover bool
+	// redrawForwardingAnsweredCursor records that MonkeyMux answered a cursor
+	// position query from the screen model during the current pause.
+	redrawForwardingAnsweredCursor bool
 	// pendingTerminalQueries holds capability/status queries (device attributes,
 	// DSR, XTVERSION) the child emitted while no terminal was showing this window
 	// — e.g. an agent (Copilot CLI) relaunched during an upgrade restore, which
@@ -1129,6 +1132,17 @@ type attachClient struct {
 	replayMu                              sync.Mutex
 	replayedWindowID                      string
 	replayedOutputGeneration              uint64
+
+	// replyTrackMu guards a per-window count of the replies this client still
+	// owes to queries: written to it but still queued, sent and awaited until
+	// awaitedRepliesUntil, or received but not yet written to the window. It
+	// serves owesTerminalReplies, whose callers hold s.mu and so cannot take
+	// activityMu. It is a leaf lock.
+	replyTrackMu        sync.Mutex
+	queuedQueryWrites   map[string]int
+	awaitedReplies      map[string]int
+	awaitedRepliesUntil time.Time
+	routedReplies       map[string]int
 
 	// consumedKeyReleases holds keys whose kitty press MonkeyMux consumed as a
 	// prefix or command, so their release reports are not sent to the window.
@@ -6969,7 +6983,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.lastActivity = now
 	// Found before the chunk moves the output parser state they depend on.
 	var cursorQueries [][2]int
-	if window.terminalOutputForwarding {
+	if window.terminalOutputForwarding && window.redrawForwardingPaused &&
+		!s.terminalOwesRepliesLocked(windowID) {
 		cursorQueries = window.redrawHeldCursorQueriesLocked(chunk)
 	}
 	// Modes are observed before metadata so a `CSI ? 9001 h` arriving in the
@@ -6987,7 +7002,14 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
 	}
-	cursorReports := window.appendHistoryReportingCursorLocked(chunk, cursorQueries)
+	cursorReports, answered := window.appendHistoryReportingCursorLocked(
+		chunk,
+		cursorQueries,
+	)
+	cursorQueries = cursorQueries[:answered]
+	if answered > 0 {
+		window.redrawForwardingAnsweredCursor = true
+	}
 	window.outputGeneration++
 	outputGeneration = window.outputGeneration
 	if window.observeKittyGraphicsLocked(chunk) {
@@ -7501,6 +7523,9 @@ func (c *attachClient) finishQueuedWrite(write attachWrite, err error) {
 	c.queueMu.Lock()
 	c.queuedBytes -= len(write.data)
 	c.queueMu.Unlock()
+	// writeLoop registered a sent write's replies as awaited before sending
+	// it, so they stay counted.
+	c.trackQueryWrite(write, -1)
 	if write.complete != nil {
 		write.complete <- err
 		close(write.complete)
@@ -7521,6 +7546,7 @@ func (c *attachClient) failQueuedWrites(err error) {
 		c.queue = c.queue[1:]
 		c.queuedBytes -= len(write.data)
 		c.queueMu.Unlock()
+		c.trackQueryWrite(write, -1)
 		if write.complete != nil {
 			write.complete <- err
 			close(write.complete)
@@ -7674,6 +7700,8 @@ func (c *attachClient) enqueueWrite(
 			return nil, true
 		}
 	}
+	// Counted before the writer can take it, so its release cannot come first.
+	c.trackQueryWrite(write, 1)
 	c.queue = append(c.queue, write)
 	c.queueMu.Unlock()
 	if queueWasEmpty {
@@ -7773,6 +7801,76 @@ func (c *attachClient) suppressesReplayedOutput(
 	return false
 }
 
+// owesTerminalReplies reports whether this client still owes windowID a reply
+// to a query; see replyTrackMu.
+func (c *attachClient) owesTerminalReplies(windowID string, now time.Time) bool {
+	c.replyTrackMu.Lock()
+	defer c.replyTrackMu.Unlock()
+	return c.queuedQueryWrites[windowID] > 0 ||
+		c.routedReplies[windowID] > 0 ||
+		(c.awaitedReplies[windowID] > 0 && now.Before(c.awaitedRepliesUntil))
+}
+
+// trackRepliesLocked copies the awaited replies into the reply track and
+// counts routed, the replies just received, until they reach their window. It
+// ends every activityMu section that changes the awaited replies, so a reply
+// moves from awaited to received in one step. Requires activityMu.
+func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
+	c.replyTrackMu.Lock()
+	defer c.replyTrackMu.Unlock()
+	clear(c.awaitedReplies)
+	if c.terminalResponseActiveWindow != "" {
+		c.awaitedReplies = addReplyCount(
+			c.awaitedReplies,
+			c.terminalResponseActiveWindow,
+			1,
+		)
+	}
+	for _, windowID := range c.terminalResponseWindows {
+		c.awaitedReplies = addReplyCount(c.awaitedReplies, windowID, 1)
+	}
+	c.awaitedRepliesUntil = c.terminalResponseUntil
+	for _, action := range routed {
+		if !action.userInput && action.windowID != "" {
+			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
+		}
+	}
+}
+
+// trackQueryWrite counts a queued write that carries queries, from the moment
+// it is queued until the writer has sent or dropped it.
+func (c *attachClient) trackQueryWrite(write attachWrite, delta int) {
+	if write.responseWindowID == "" || write.responseCount <= 0 {
+		return
+	}
+	c.replyTrackMu.Lock()
+	c.queuedQueryWrites = addReplyCount(
+		c.queuedQueryWrites,
+		write.responseWindowID,
+		delta,
+	)
+	c.replyTrackMu.Unlock()
+}
+
+// replyDelivered records that a received reply was written to its window.
+func (c *attachClient) replyDelivered(windowID string) {
+	c.replyTrackMu.Lock()
+	c.routedReplies = addReplyCount(c.routedReplies, windowID, -1)
+	c.replyTrackMu.Unlock()
+}
+
+func addReplyCount(counts map[string]int, windowID string, delta int) map[string]int {
+	if counts == nil {
+		counts = map[string]int{}
+	}
+	if counts[windowID]+delta <= 0 {
+		delete(counts, windowID)
+	} else {
+		counts[windowID] += delta
+	}
+	return counts
+}
+
 func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	if c == nil || windowID == "" {
 		return
@@ -7834,6 +7932,7 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 		len(c.terminalResponsePasteStartCarry) > 0 {
 		c.scheduleTerminalResponseCarryLocked()
 	}
+	c.trackRepliesLocked(nil)
 	c.activityMu.Unlock()
 	if !inputLocked {
 		return
@@ -7875,6 +7974,7 @@ func (c *attachClient) routeInput(data []byte) attachInputRouting {
 		leadingInputUtf8Prefix,
 	)
 	c.routeInputLocked(data, leadingInputUtf8Prefix, &result)
+	c.trackRepliesLocked(result.actions)
 	return result
 }
 
@@ -8504,6 +8604,7 @@ func (c *attachClient) resolveAmbiguousTerminalResponseInput(
 	}
 	if c.inputBracketedPasteActive {
 		c.renewTerminalResponseDeadlineLocked()
+		c.trackRepliesLocked(nil)
 		c.activityMu.Unlock()
 		return
 	}
@@ -8523,6 +8624,7 @@ func (c *attachClient) resolveAmbiguousTerminalResponseInput(
 		time.Now().After(c.terminalResponseUntil) {
 		c.resetTerminalResponseStateLocked()
 	}
+	c.trackRepliesLocked(nil)
 	claim := c.focusClaim
 	passthrough := c.inputPassthrough
 	c.activityMu.Unlock()
@@ -9107,12 +9209,16 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			}
 			continue
 		}
+		replyWindowID := action.windowID
 		if action.windowID == "" {
 			s.mu.Lock()
 			action.windowID = s.activeID
 			s.mu.Unlock()
 		}
 		_ = s.writeWindow(action.windowID, action.data)
+		if replyWindowID != "" {
+			client.replyDelivered(replyWindowID)
+		}
 	}
 }
 
@@ -10803,6 +10909,24 @@ func (s *muxServer) resumePausedAttachForwarding(
 			secondaryBuffered = trimForegroundRedrawBuffer(secondaryBuffered, nil)
 		}
 	}
+	// A cursor report MonkeyMux gave during the pause came from the screen
+	// model, and the program has placed its output by it. A redraw that
+	// paints nothing would be replaced by the fallback snapshot below, which
+	// predates the bytes the report depended on, so paint the model as it is
+	// now, whose cursor is the one reported. A visible redraw is applied over
+	// the snapshot and reaches the same cursor.
+	if !paintedFromScreen && window.redrawForwardingAnsweredCursor &&
+		window.terminalOutputIsGroundLocked() && !visibleRedraw {
+		frame := s.foregroundHistoryFallbackReplayLocked(
+			window,
+			window.screenLocked().RenderFrame(),
+		)
+		replay = nil
+		buffered = append(append([]byte(nil), frame...), queryData...)
+		failoverBuffered = append(append([]byte(nil), frame...), queryData...)
+		secondaryBuffered = append([]byte(nil), frame...)
+		paintedFromScreen = true
+	}
 	// Substituting the fallback discards the buffered redraw, so it is only
 	// safe once that redraw has ended on a sequence boundary. Resuming mid
 	// escape sequence would drop the head of a sequence whose tail is still to
@@ -11049,6 +11173,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingSecondaryBuffer = nil
 	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
+	w.redrawForwardingAnsweredCursor = false
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
 }
@@ -12913,21 +13038,30 @@ func (w *muxWindow) appendHistoryLocked(chunk []byte) {
 
 // appendHistoryReportingCursorLocked records chunk like appendHistoryLocked and
 // returns the screen model's answers to the cursor position queries at
-// cursorQueries (ascending byte ranges of chunk), each as of its own position.
+// cursorQueries (ascending byte ranges of chunk), each as of its own position,
+// and how many of the queries they answer. The first query the model cannot
+// answer as the client would, and every one after it, is left unanswered so a
+// local answer never overtakes the client's.
 func (w *muxWindow) appendHistoryReportingCursorLocked(
 	chunk []byte,
 	cursorQueries [][2]int,
-) []byte {
+) ([]byte, int) {
 	if len(chunk) == 0 {
-		return nil
+		return nil, 0
 	}
 	screen := w.screenLocked()
 	var reports []byte
+	answered := 0
 	written := 0
 	for _, query := range cursorQueries {
 		screen.Write(chunk[written:query[1]])
 		written = query[1]
-		reports = append(reports, screen.CursorPositionReport()...)
+		report, ok := screen.CursorPositionReport()
+		if !ok {
+			break
+		}
+		reports = append(reports, report...)
+		answered++
 	}
 	screen.Write(chunk[written:])
 	if screen.TakeRedrewInPlace() {
@@ -12951,7 +13085,7 @@ func (w *muxWindow) appendHistoryReportingCursorLocked(
 			w.history[:0],
 			chunk[len(chunk)-limit:]...,
 		)
-		return reports
+		return reports, answered
 	}
 	// Grow the underlying buffer to 2x the limit so trims are amortized:
 	// each byte gets shifted at most once before falling out of history.
@@ -12968,7 +13102,7 @@ func (w *muxWindow) appendHistoryReportingCursorLocked(
 		n := copy(w.history, w.history[start:])
 		w.history = w.history[:n]
 	}
-	return reports
+	return reports, answered
 }
 
 func (w *muxWindow) historyTailWithParserLocked() (
@@ -13950,7 +14084,9 @@ const cursorPositionQuery = "\x1b[6n"
 // Only queries ahead of every other query qualify, and only while the window
 // holds or queues no other query for the terminal, so a local answer does not
 // overtake the terminal's answer to an earlier one. Callers check that the
-// window is active and attached and call this before the chunk is observed.
+// window is active and attached, that no attached terminal still owes it a
+// reply (terminalOwesRepliesLocked), and call this before the chunk is
+// observed.
 func (w *muxWindow) redrawHeldCursorQueriesLocked(chunk []byte) [][2]int {
 	if !w.redrawForwardingPaused ||
 		len(w.redrawForwardingQueryBuffer) > 0 ||
@@ -13986,6 +14122,19 @@ func (w *muxWindow) redrawHeldCursorQueriesLocked(chunk []byte) [][2]int {
 		i = end
 	}
 	return queries
+}
+
+// terminalOwesRepliesLocked reports whether an attached terminal still owes
+// windowID the reply to a query: one queued to it, sent and awaited, or
+// received but not yet written to the window.
+func (s *muxServer) terminalOwesRepliesLocked(windowID string) bool {
+	now := time.Now()
+	for _, client := range s.attachClients {
+		if client.owesTerminalReplies(windowID, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // withoutByteRanges returns data with the ascending, disjoint ranges removed.
