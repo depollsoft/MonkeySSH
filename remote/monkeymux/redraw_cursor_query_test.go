@@ -48,12 +48,16 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		"\x1b_Ga=T,f=32,s=1,v=1\x9c",
 		"\x1b_Gf=32,s=1,v=1" + strings.Repeat(",X=0", 70) + ",a=T;/wAA/w==\x1b\\",
 		"\x9b3;4H", "\x9c",
+		// Parser states the two leave differently.
+		"\x1b_Ga=t\x1bD\x1b\\", "\x1b\x07=", "\x1b(\x07B", "\x1b[?25?2C", "\x1b[3\x18",
+		"\x1b[3\x1b[0m",
 	} {
 		s.Write([]byte("\x1b[3;4H" + seq))
 		if got := report(); got != "unanswerable" {
 			t.Fatalf("report after %q = %q, want none", seq, got)
 		}
-		s.Write([]byte("\x1b[3;4H"))
+		// The BEL ends any string the app's output decoder is still in.
+		s.Write([]byte("\a\x1b[3;4H"))
 		if got := report(); got != "\x1b[3;4R" {
 			t.Fatalf("report after %q and CUP = %q, want 3;4", seq, got)
 		}
@@ -76,6 +80,55 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		t.Fatalf("origin-mode report = %q, want none", got)
 	}
 	s.Write([]byte("\x1b[?6l\x1b[r"))
+
+	// After some output even a CUP may land elsewhere in the app's terminal,
+	// until a reset or a real resize: origin mode, which it does not restore
+	// with DECRC; a CSI too long for the parser to keep; a resize request.
+	reset := func() { s.Write([]byte("\x1bc")) }
+	resize := func() {
+		s.Resize(81, 24)
+		s.Resize(80, 24)
+	}
+	for _, tc := range []struct {
+		name  string
+		seq   string
+		clear func()
+	}{
+		{"origin mode restored by DECRC", "\x1b[5;20r\x1b7\x1b[?6h\x1b8\x1b[r", reset},
+		{"truncated mode list", "\x1b[?" + strings.Repeat("25;", 21) + "1;1049h", reset},
+		{"truncated CUP", "\x1b[" + strings.Repeat("9", 64) + ";9H", reset},
+		{"resize request", "\x1b[8;10;20t", resize},
+		{"host resize request", "\x1b[?8;10;20t", resize},
+	} {
+		s.Write([]byte(tc.seq + "\x1b[3;4H"))
+		if got := report(); got != "unanswerable" {
+			t.Fatalf("%s: report after a CUP = %q, want none", tc.name, got)
+		}
+		tc.clear()
+		s.Write([]byte("\x1b[3;4H"))
+		if got := report(); got != "\x1b[3;4R" {
+			t.Fatalf("%s: report once cleared = %q, want 3;4", tc.name, got)
+		}
+	}
+
+	// The app's output decoder ends a string only at BEL or ESC \\ and holds
+	// everything after until then, so a string the model ended any other way
+	// leaves even a CUP unanswerable until one of those arrives.
+	for _, seq := range []string{
+		"\x1b]2;abc\x1b[5;5H", "\x1b]2;abc\x1bm", "\x1b]2;ab\x18", "\x1b]2;ab\x9c",
+		"\x1b_Ga=T\x18", "\x1bP\x1a", "\x1b_Ga=t\x9c",
+	} {
+		for _, end := range []string{"\a", "\x1b\\"} {
+			s.Write([]byte(seq + "\x1b[3;4H"))
+			if got := report(); got != "unanswerable" {
+				t.Fatalf("report after %q and CUP = %q, want none", seq, got)
+			}
+			s.Write([]byte(end + "\x1b[3;4H"))
+			if got := report(); got != "\x1b[3;4R" {
+				t.Fatalf("report after %q, %q and CUP = %q, want 3;4", seq, end, got)
+			}
+		}
+	}
 
 	// A chunked transmission places its image when the last chunk arrives,
 	// whatever the cursor did in between.

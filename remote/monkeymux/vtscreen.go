@@ -56,6 +56,20 @@ type terminalScreen struct {
 	// chunk places an image, which moves the client's cursor.
 	cursorKnown           bool
 	kittyPlacementPending bool
+	// absoluteUntrusted records output after which even a CUP may land
+	// elsewhere in the app's terminal: origin mode, which it saves and
+	// restores differently, or a CSI too long for the parser to keep, which
+	// could hide either. Only a reset clears it. sizeUnsynced records a
+	// resize request (CSI 8 t) the app's terminal may have acted on; the
+	// next real resize clears it.
+	absoluteUntrusted bool
+	sizeUnsynced      bool
+	// decoderInString records that the model ended a string the app's
+	// output decoder is still inside: that decoder ends strings only at BEL
+	// or ESC \, and holds everything after until one arrives. lastByteESC
+	// tracks the byte before, to see an ESC \ in any state.
+	decoderInString bool
+	lastByteESC     bool
 
 	savedMain vtSavedCursor
 	savedAlt  vtSavedCursor
@@ -356,6 +370,8 @@ func (s *terminalScreen) resetState() {
 func (s *terminalScreen) Reset() {
 	s.cursorKnown = false
 	s.kittyPlacementPending = false
+	s.absoluteUntrusted = false
+	s.sizeUnsynced = false
 	s.main = newVTGrid(s.width, s.height)
 	s.alt = newVTGrid(s.width, s.height)
 	s.altActive = false
@@ -451,6 +467,31 @@ func csiKeepsCursor(p *vtParser, final byte) bool {
 	return false
 }
 
+// noteUnsyncedCursorState records sequences after which a CUP may no longer
+// land in the same place in the model and the app's terminal.
+func (s *terminalScreen) noteUnsyncedCursorState(final byte) {
+	p := &s.parser
+	if p.truncated {
+		s.absoluteUntrusted = true
+		return
+	}
+	if len(p.intermediates) > 0 {
+		return
+	}
+	groups := p.csiParams()
+	switch {
+	case p.private == '?' && (final == 'h' || final == 'l'):
+		for _, group := range groups {
+			if group[0] == 6 {
+				s.absoluteUntrusted = true
+			}
+		}
+	case (p.private == 0 || p.private == '?') && final == 't' && len(groups) > 0 &&
+		groups[0][0] == 8:
+		s.sizeUnsynced = true
+	}
+}
+
 // cursorNeutralPrivateMode reports whether setting or resetting DEC private
 // mode leaves the cursor in place in both the model and the app's terminal.
 func cursorNeutralPrivateMode(mode int) bool {
@@ -517,8 +558,10 @@ func (s *terminalScreen) Resize(width, height int) {
 		return
 	}
 	// Both sides move the cursor on a resize, by rules the model does not
-	// track closely enough to answer for the client.
+	// track closely enough to answer for the client. The size itself is in
+	// step again.
 	s.cursorKnown = false
+	s.sizeUnsynced = false
 	s.resizeMain(width, height)
 	s.resizeAlt(width, height)
 	if width != s.width {
@@ -926,8 +969,10 @@ type vtParser struct {
 	apcCapture   bool
 	apcTruncated bool
 	// c1 records that the CSI being parsed began with the 8-bit 0x9b, which
-	// the app's terminal does not take for CSI.
-	c1 bool
+	// the app's terminal does not take for CSI. truncated records that its
+	// parameters ran past vtCSIParamLimit.
+	c1        bool
+	truncated bool
 	// Scratch space reused by csiParams so dispatch allocates nothing.
 	values []int
 	starts []int
@@ -971,6 +1016,7 @@ func (p *vtParser) clear() {
 	p.params = p.params[:0]
 	p.intermediates = p.intermediates[:0]
 	p.private = 0
+	p.truncated = false
 }
 
 // Write parses and applies pane output.
@@ -992,6 +1038,7 @@ func (s *terminalScreen) Write(data []byte) {
 // returns how many bytes it consumed.
 func (s *terminalScreen) printASCIIRun(data []byte) int {
 	s.cursorKnown = false
+	s.lastByteESC = false
 	if s.kittyPending.valid {
 		// Printable ASCII is never a placeholder diacritic, so the placeholder
 		// cell that was collecting them has ended. print() does this too; the
@@ -1049,6 +1096,10 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 
 func (s *terminalScreen) step(b byte) {
 	p := &s.parser
+	if s.decoderInString && (b == 0x07 || b == '\\' && s.lastByteESC) {
+		s.decoderInString = false
+	}
+	s.lastByteESC = b == 0x1b
 	switch p.state {
 	case vtGround:
 		if p.utf8Need > 0 {
@@ -1133,12 +1184,14 @@ func (s *terminalScreen) step(b byte) {
 	case vtEscapeIntermediate:
 		switch {
 		case b == 0x1b:
+			s.cursorKnown = false
 			p.state = vtEscape
 			p.clear()
 		case b >= 0x20 && b <= 0x2f:
 			if len(p.intermediates) < vtIntermediateLimit {
 				p.intermediates = append(p.intermediates, b)
 			} else {
+				s.cursorKnown = false
 				p.state = vtCSIIgnore
 			}
 		case b < 0x20:
@@ -1152,14 +1205,16 @@ func (s *terminalScreen) step(b byte) {
 	case vtOSCString:
 		switch {
 		case p.inStringRune(b):
-		case b == 0x07 || b == 0x9c:
+		case b == 0x07:
 			p.state = vtGround
+		case b == 0x9c:
+			p.state = vtGround
+			s.endStringEarly()
 		case b == 0x1b:
 			p.state = vtOSCEscape
 		case b == 0x18 || b == 0x1a:
-			// The app's terminal does not cancel an OSC here.
 			p.state = vtGround
-			s.cursorKnown = false
+			s.endStringEarly()
 		}
 	case vtOSCEscape:
 		if b == '\\' {
@@ -1169,6 +1224,7 @@ func (s *terminalScreen) step(b byte) {
 		} else {
 			// Not a string terminator: xterm treats ESC as ending the OSC and
 			// starts a new escape sequence with this byte.
+			s.endStringEarly()
 			p.state = vtEscape
 			p.clear()
 			s.step(b)
@@ -1181,11 +1237,15 @@ func (s *terminalScreen) step(b byte) {
 		case b == 0x9c:
 			p.state = vtGround
 			s.endString()
+			s.endStringEarly()
 		case b == 0x18, b == 0x1a:
-			// A cancelled string runs nothing; what the app's terminal makes
-			// of it is not modelled.
+			// A cancelled string runs nothing.
 			p.state = vtGround
 			p.beginString(0)
+			s.endStringEarly()
+		case b == 0x07:
+			// The app's output decoder ends the string here and passes what
+			// follows on as output, which the model keeps skipping.
 			s.cursorKnown = false
 		default:
 			if p.apcCapture {
@@ -1205,6 +1265,9 @@ func (s *terminalScreen) step(b byte) {
 			p.state = vtGround
 			s.endString()
 		} else if b != 0x1b {
+			// The app's terminal ends the string here and reads a new
+			// sequence; the model keeps skipping.
+			s.cursorKnown = false
 			p.state = vtSOSString
 		}
 	}
@@ -1214,6 +1277,14 @@ func (s *terminalScreen) step(b byte) {
 // graphics control keys fit well within it, and a longer header is treated
 // as a placement.
 const vtAPCHeadLimit = 256
+
+// endStringEarly notes a string the model ended where the app's output
+// decoder did not: at an 8-bit ST, a CAN or SUB, or an ESC that starts a new
+// sequence. The decoder holds everything after it until a BEL or ESC \.
+func (s *terminalScreen) endStringEarly() {
+	s.cursorKnown = false
+	s.decoderInString = true
+}
 
 // beginString starts skipping a DCS, SOS, PM or APC string; kind is its
 // introducer ('P', 'X', '^' or '_'), or 0 to drop the state of the last one.
@@ -1284,10 +1355,14 @@ func (s *terminalScreen) stepCSI(b byte) {
 	p := &s.parser
 	switch {
 	case b == 0x1b:
+		// An abandoned CSI is not modelled the way the app's terminal treats
+		// it, so neither is the cursor after it.
+		s.cursorKnown = false
 		p.state = vtEscape
 		p.clear()
 		return
 	case b == 0x18 || b == 0x1a:
+		s.cursorKnown = false
 		p.state = vtGround
 		return
 	case b < 0x20:
@@ -1317,8 +1392,12 @@ func (s *terminalScreen) stepCSI(b byte) {
 		case b >= '0' && b <= '9' || b == ';' || b == ':':
 			if len(p.params) < vtCSIParamLimit {
 				p.params = append(p.params, b)
+			} else {
+				p.truncated = true
 			}
 		case b >= '<' && b <= '?':
+			// The app's terminal reads such a sequence differently.
+			s.cursorKnown = false
 			p.state = vtCSIIgnore
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
@@ -1333,12 +1412,14 @@ func (s *terminalScreen) stepCSI(b byte) {
 			if len(p.intermediates) < vtIntermediateLimit {
 				p.intermediates = append(p.intermediates, b)
 			} else {
+				s.cursorKnown = false
 				p.state = vtCSIIgnore
 			}
 		case b >= 0x40 && b <= 0x7e:
 			p.state = vtGround
 			s.csiDispatch(b)
 		default:
+			s.cursorKnown = false
 			p.state = vtCSIIgnore
 		}
 	case vtCSIIgnore:
@@ -1389,7 +1470,9 @@ func (p *vtParser) param(groups [][]int, index int, fallback int) int {
 // ---- execution ------------------------------------------------------------
 
 func (s *terminalScreen) execute(b byte) {
-	if b != 0x07 {
+	// A BEL rings in both only on its own: inside an escape sequence the
+	// app's terminal ends the sequence differently.
+	if b != 0x07 || s.parser.state != vtGround {
 		s.cursorKnown = false
 	}
 	g := s.grid()
@@ -1891,6 +1974,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 	if !csiKeepsCursor(p, final) {
 		s.cursorKnown = false
 	}
+	s.noteUnsyncedCursorState(final)
 	if len(p.intermediates) > 0 {
 		if string(p.intermediates) == "!" && final == 'p' {
 			s.softReset()
@@ -1936,8 +2020,10 @@ func (s *terminalScreen) csiDispatch(final byte) {
 		}
 		s.moveCursor(row, col)
 		// Origin mode counts rows from the margin, which the app's terminal
-		// keeps per screen and the model does not.
-		s.cursorKnown = !s.originMode && !p.c1
+		// keeps per screen and does not restore with DECRC, as the model
+		// does; see absoluteUntrusted.
+		s.cursorKnown = !s.originMode && !s.absoluteUntrusted &&
+			!s.sizeUnsynced && !s.decoderInString && !p.c1
 	case 'I':
 		s.tabForward(n)
 	case 'J':
