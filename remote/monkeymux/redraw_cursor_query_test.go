@@ -109,11 +109,15 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		name, seq, want string
 	}{
 		{"DECSC and DECRC", placement + "\x1b7\x1b[1;1H\x1b8", "unanswerable"},
-		{"SCO save and restore", placement + "\x1b[s\x1b[1;1H\x1b[u", "unanswerable"},
 		{"alternate screen entered", placement + "\x1b[?1049h", "unanswerable"},
 		{"alternate screen positioned", "\x1b[3;3H", "\x1b[3;3R"},
 		{"alternate screen left", "\x1b[?1049l", "unanswerable"},
 		{"saved before the image", "\x1b[1;1H\x1b7" + placement + "\x1b8", "\x1b[1;1R"},
+		// The app's alternate buffer keeps its own cursor, not the main one.
+		{"alternate screen entered from a known cursor", "\x1b[?1049h", "unanswerable"},
+		{"alternate screen left again", "\x1b[3;3H\x1b[?1049l", "\x1b[1;1R"},
+		// The app's terminal ignores SCO save and restore.
+		{"SCO restore", "\x1b[s\x1b[5;5H\x1b[u", "unanswerable"},
 	} {
 		s.Write([]byte(tc.seq))
 		if got := report(); got != tc.want {
@@ -501,20 +505,53 @@ func TestRemovedClientOwesRepliesItIsStillDelivering(t *testing.T) {
 	}
 	go server.runAttachInputActions(client)
 	deadline := time.Now().Add(time.Second)
-	for owes() {
+	for {
+		server.mu.Lock()
+		remembered := len(server.detachedReplyClients)
+		server.mu.Unlock()
+		if remembered == 0 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the delivered reply still counts as owed")
+			t.Fatal("the removed client was not forgotten once its worker stopped")
 		}
 		time.Sleep(time.Millisecond)
 	}
 	if got := pty.String(); got != "\x1b[1;1R" {
 		t.Fatalf("window got %q, want the reply", got)
 	}
+	if owes() {
+		t.Fatal("the delivered reply still counts as owed")
+	}
+
+	// A client removed with nothing to deliver is not kept at all.
+	quiet := registerTestAttachClient(t, server, &recordingConn{}, "quiet", 80, 24)
+	server.removeAttachClient(quiet)
 	server.mu.Lock()
 	remembered := len(server.detachedReplyClients)
 	server.mu.Unlock()
 	if remembered != 0 {
-		t.Fatal("a removed client that owes nothing must be forgotten")
+		t.Fatal("a removed client that holds no replies must not be kept")
+	}
+}
+
+// Replies received just as the client closes cannot be queued for its worker,
+// so they stop counting as owed.
+func TestRepliesThatCannotBeQueuedAreReleased(t *testing.T) {
+	server := newMuxServer("unqueued-replies")
+	conn := &recordingConn{}
+	client := registerTestAttachClient(t, server, conn, "closing", 80, 24)
+	client.enqueueWrite([]byte(cursorPositionQuery), false, "@1", 1, nil)
+	waitForRecordedOutput(t, conn, cursorPositionQuery)
+	waitForTestAttachWrites(t, server)
+	routing := client.routeInput([]byte("\x1b[1;1R"))
+	client.close()
+
+	if client.enqueueInputActions(routing.actions) {
+		t.Fatal("a closed client must not queue input")
+	}
+	if client.holdsReceivedReplies() {
+		t.Fatal("replies that could not be queued must be released")
 	}
 }
 

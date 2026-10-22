@@ -1925,6 +1925,9 @@ func (s *terminalScreen) csiDispatch(final byte) {
 		if s.scoCursor.valid {
 			defer s.noteCursorRow(g.cursorRow)
 			s.restoreSavedPosition(g, s.scoCursor)
+			// The app's terminal ignores SCO save and restore, so its cursor
+			// did not move with the model's.
+			g.cursorUnknown = true
 		}
 	}
 }
@@ -2019,7 +2022,10 @@ func (s *terminalScreen) switchScreen(toAlt bool, saveCursor bool, clear bool) {
 		}
 		s.alt.cursorRow = s.main.cursorRow
 		s.alt.cursorCol = s.main.cursorCol
-		s.alt.cursorUnknown = s.main.cursorUnknown
+		// The app's alternate buffer keeps the cursor it last had there, not
+		// the main one, so the model cannot tell where the client's is until
+		// the program positions it.
+		s.alt.cursorUnknown = true
 		return
 	}
 	s.altActive = false

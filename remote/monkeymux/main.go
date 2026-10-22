@@ -7836,6 +7836,14 @@ func (c *attachClient) owesTerminalReplies(windowID string, now time.Time) bool 
 			(c.awaitedRepliesHeld || now.Before(c.awaitedRepliesUntil)))
 }
 
+// holdsReceivedReplies reports whether the client's input worker still has
+// received replies to write.
+func (c *attachClient) holdsReceivedReplies() bool {
+	c.replyTrackMu.Lock()
+	defer c.replyTrackMu.Unlock()
+	return len(c.routedReplies) > 0
+}
+
 // deliversReplies reports whether the client can still write a reply to a
 // window: it is open, or its input worker holds received replies.
 func (c *attachClient) deliversReplies() bool {
@@ -9033,10 +9041,14 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		return
 	}
 	delete(s.attachClients, client.conn)
-	if s.detachedReplyClients == nil {
-		s.detachedReplyClients = map[*attachClient]struct{}{}
+	// Its read loop has ended, so the replies it holds can only go down; its
+	// input worker forgets it once they have.
+	if client.holdsReceivedReplies() {
+		if s.detachedReplyClients == nil {
+			s.detachedReplyClients = map[*attachClient]struct{}{}
+		}
+		s.detachedReplyClients[client] = struct{}{}
 	}
-	s.detachedReplyClients[client] = struct{}{}
 	if s.pendingFocusRefreshConn == client.conn {
 		s.pendingFocusRefreshConn = nil
 	}
@@ -9247,7 +9259,12 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 }
 
 func (s *muxServer) runAttachInputActions(client *attachClient) {
-	defer client.discardInputActions()
+	defer func() {
+		client.discardInputActions()
+		s.mu.Lock()
+		delete(s.detachedReplyClients, client)
+		s.mu.Unlock()
+	}()
 	for {
 		action, ok := client.nextInputAction()
 		if !ok {
