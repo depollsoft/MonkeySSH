@@ -973,6 +973,9 @@ type vtParser struct {
 	// parameters ran past vtCSIParamLimit.
 	c1        bool
 	truncated bool
+	// oscHead keeps the start of an OSC payload, enough to recognise an
+	// iTerm2 inline image.
+	oscHead []byte
 	// Scratch space reused by csiParams so dispatch allocates nothing.
 	values []int
 	starts []int
@@ -984,6 +987,7 @@ func (p vtParser) clone() vtParser {
 	c.params = append([]byte(nil), p.params...)
 	c.intermediates = append([]byte(nil), p.intermediates...)
 	c.apcHead = append([]byte(nil), p.apcHead...)
+	c.oscHead = append([]byte(nil), p.oscHead...)
 	c.values, c.starts, c.groups = nil, nil, nil
 	return c
 }
@@ -1137,6 +1141,7 @@ func (s *terminalScreen) step(b byte) {
 		case b == 0x9d:
 			p.state = vtOSCString
 			p.stringUtf8 = 0
+			p.oscHead = p.oscHead[:0]
 			s.cursorKnown = false
 		case b == 0x90:
 			p.beginString('P')
@@ -1170,6 +1175,7 @@ func (s *terminalScreen) step(b byte) {
 		case b == ']':
 			p.state = vtOSCString
 			p.stringUtf8 = 0
+			p.oscHead = p.oscHead[:0]
 		case b == 'P' || b == 'X' || b == '^' || b == '_':
 			p.beginString(b)
 		case b >= 0x20 && b <= 0x2f:
@@ -1207,6 +1213,7 @@ func (s *terminalScreen) step(b byte) {
 		case p.inStringRune(b):
 		case b == 0x07:
 			p.state = vtGround
+			s.endOSC()
 		case b == 0x9c:
 			p.state = vtGround
 			s.endStringEarly()
@@ -1215,10 +1222,15 @@ func (s *terminalScreen) step(b byte) {
 		case b == 0x18 || b == 0x1a:
 			p.state = vtGround
 			s.endStringEarly()
+		default:
+			if len(p.oscHead) < vtOSCHeadLimit {
+				p.oscHead = append(p.oscHead, b)
+			}
 		}
 	case vtOSCEscape:
 		if b == '\\' {
 			p.state = vtGround
+			s.endOSC()
 		} else if b == 0x1b {
 			p.state = vtOSCEscape
 		} else {
@@ -1277,6 +1289,24 @@ func (s *terminalScreen) step(b byte) {
 // graphics control keys fit well within it, and a longer header is treated
 // as a placement.
 const vtAPCHeadLimit = 256
+
+// vtOSCHeadLimit bounds how much of an OSC payload the parser keeps.
+const vtOSCHeadLimit = 16
+
+// endOSC finishes an OSC string. The app places an iTerm2 inline image
+// (OSC 1337 ; File=...) like a Kitty one, moving the cursor past it.
+func (s *terminalScreen) endOSC() {
+	if bytes.HasPrefix(s.parser.oscHead, []byte("1337;File=")) {
+		s.cursorKnown = false
+	}
+	s.parser.oscHead = s.parser.oscHead[:0]
+}
+
+// AtGround reports whether the parser is between sequences and characters,
+// where a byte starts something new in the app's terminal too.
+func (s *terminalScreen) AtGround() bool {
+	return s.parser.state == vtGround && s.parser.utf8Need == 0
+}
 
 // endStringEarly notes a string the model ended where the app's output
 // decoder did not: at an 8-bit ST, a CAN or SUB, or an ESC that starts a new

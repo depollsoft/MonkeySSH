@@ -48,6 +48,8 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		"\x1b_Ga=T,f=32,s=1,v=1\x9c",
 		"\x1b_Gf=32,s=1,v=1" + strings.Repeat(",X=0", 70) + ",a=T;/wAA/w==\x1b\\",
 		"\x9b3;4H", "\x9c",
+		// The app places iTerm2 inline images like Kitty ones.
+		"\x1b]1337;File=inline=1;height=3:AAAA\x07", "\x1b]1337;File=inline=1:AAAA\x1b\\",
 		// Parser states the two leave differently.
 		"\x1b_Ga=t\x1bD\x1b\\", "\x1b\x07=", "\x1b(\x07B", "\x1b[?25?2C", "\x1b[3\x18",
 		"\x1b[3\x1b[0m",
@@ -251,6 +253,18 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 		{
 			name:   "read that starts inside an OSC",
 			chunks: []string{"\x1b]2;title", "\x07" + cursorPositionQuery},
+			held:   cursorPositionQuery,
+		},
+		{
+			// The scanner sees a query where the model is mid-sequence;
+			// removing it would turn the lone ESC into ESC h.
+			name:   "after a lone ESC",
+			chunks: []string{"\x1b" + cursorPositionQuery + "hello"},
+			held:   cursorPositionQuery,
+		},
+		{
+			name:   "inside an SOS string",
+			chunks: []string{"\x1bXabc" + cursorPositionQuery + "\x1b\\"},
 			held:   cursorPositionQuery,
 		},
 		{

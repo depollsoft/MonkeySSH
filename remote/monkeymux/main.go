@@ -13130,7 +13130,15 @@ func (w *muxWindow) appendHistoryReportingCursorLocked(
 	answered := 0
 	written := 0
 	for _, query := range cursorQueries {
-		screen.Write(chunk[written:query[1]])
+		screen.Write(chunk[written:query[0]])
+		written = query[0]
+		// The query scanner does not know every string or sequence the model
+		// is inside, so a query that does not start between sequences is
+		// not one, and removing it would change how what is left parses.
+		if !screen.AtGround() {
+			break
+		}
+		screen.Write(chunk[query[0]:query[1]])
 		written = query[1]
 		report, ok := screen.CursorPositionReport()
 		if !ok {
