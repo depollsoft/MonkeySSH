@@ -48,8 +48,10 @@ type terminalScreen struct {
 
 	// cursorUnknown records that a Kitty image placement moved the client's
 	// cursor by an amount the model does not compute (it skips APC strings),
-	// until the next absolute cursor position or reset.
-	cursorUnknown bool
+	// until the next absolute cursor position or reset. kittyPlacementPending
+	// marks a chunked transmission whose last chunk places its image.
+	cursorUnknown         bool
+	kittyPlacementPending bool
 
 	savedMain vtSavedCursor
 	savedAlt  vtSavedCursor
@@ -356,6 +358,7 @@ func (s *terminalScreen) Reset() {
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
 	s.cursorUnknown = false
+	s.kittyPlacementPending = false
 	s.resetState()
 }
 
@@ -1136,20 +1139,36 @@ func (s *terminalScreen) endAPC() {
 	if len(head) == 0 || head[0] != 'G' {
 		return
 	}
-	action, noMove, virtual := byte('t'), false, false
+	action, hasAction, noMove, virtual, more := byte('t'), false, false, false, false
 	for _, field := range bytes.Split(head[1:], []byte{','}) {
 		key, value, _ := bytes.Cut(field, []byte{'='})
 		switch {
 		case bytes.Equal(key, []byte("a")) && len(value) == 1:
-			action = value[0]
+			action, hasAction = value[0], true
 		case bytes.Equal(key, []byte("C")):
 			noMove = bytes.Equal(value, []byte("1"))
 		case bytes.Equal(key, []byte("U")):
 			virtual = bytes.Equal(value, []byte("1"))
+		case bytes.Equal(key, []byte("m")):
+			more = bytes.Equal(value, []byte("1"))
 		}
 	}
-	if (action == 'T' || action == 'p') && !noMove && !virtual {
+	if hasAction {
+		s.kittyPlacementPending = false
+	}
+	placesImage := (action == 'T' || action == 'p') && !noMove && !virtual
+	switch {
+	case placesImage:
+		// The first chunk of a chunked transmission already marks the cursor:
+		// the client may place the image before the model sees the last one.
 		s.cursorUnknown = true
+		s.kittyPlacementPending = more
+	case !hasAction && s.kittyPlacementPending:
+		// A continuation chunk; the last one (m=0) places the image.
+		if !more {
+			s.cursorUnknown = true
+			s.kittyPlacementPending = false
+		}
 	}
 }
 

@@ -67,6 +67,25 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	if got := report(); got != "\x1b[1;1R" {
 		t.Fatalf("report after RIS = %q, want home", got)
 	}
+
+	// A chunked transmission places its image when the last chunk arrives.
+	for _, tc := range []struct {
+		first string
+		moves bool
+	}{
+		{"a=T,f=32,s=1,v=1,m=1", true},
+		{"a=t,f=32,s=1,v=1,m=1", false},
+	} {
+		s.Write([]byte("\x1b_G" + tc.first + ";AAAA\x1b\\\x1b[2;2H\x1b_Gm=1;AAAA\x1b\\"))
+		if got := report(); got != "\x1b[2;2R" {
+			t.Fatalf("after %s and a middle chunk report = %q, want 2;2", tc.first, got)
+		}
+		s.Write([]byte("\x1b_Gm=0;AAAA\x1b\\"))
+		if got := report(); (got == "unanswerable") != tc.moves {
+			t.Fatalf("after %s and its last chunk report = %q, want unanswerable=%v", tc.first, got, tc.moves)
+		}
+		s.Write([]byte("\x1b[1;1H"))
+	}
 }
 
 func newRedrawCursorQueryTestServer(
@@ -130,22 +149,42 @@ func TestRedrawPauseAnswersCursorPositionQueryFromScreenModel(t *testing.T) {
 // and so does every later one, which would otherwise be answered first.
 func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		chunk string
+		name   string
+		chunks []string
+		held   string
 	}{
 		{
-			name:  "after a Kitty placement",
-			chunk: "\x1b[5;10H\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2,q=2;/wAA/w==\x1b\\" + cursorPositionQuery,
+			name:   "after a Kitty placement",
+			chunks: []string{"\x1b[5;10H\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2,q=2;/wAA/w==\x1b\\" + cursorPositionQuery},
+			held:   cursorPositionQuery,
 		},
 		{
-			name:  "in origin mode, then outside it",
-			chunk: "\x1b[5;20r\x1b[?6h" + cursorPositionQuery + "\x1b[?6l\x1b[r" + cursorPositionQuery,
+			name:   "in origin mode, then outside it",
+			chunks: []string{"\x1b[5;20r\x1b[?6h" + cursorPositionQuery + "\x1b[?6l\x1b[r" + cursorPositionQuery},
+			held:   cursorPositionQuery + cursorPositionQuery,
+		},
+		{
+			name:   "split across reads",
+			chunks: []string{"\x1b[6", "n"},
+			held:   cursorPositionQuery,
+		},
+		{
+			name:   "read that starts inside an OSC",
+			chunks: []string{"\x1b]2;title", "\x07" + cursorPositionQuery},
+			held:   cursorPositionQuery,
+		},
+		{
+			name:   "C1 and DECXCPR forms",
+			chunks: []string{"\x9b6n\x1b[?6n"},
+			held:   "\x9b6n\x1b[?6n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server, window, pty, _ := newRedrawCursorQueryTestServer(t)
 
-			server.handleWindowOutput("@1", []byte(tc.chunk))
+			for _, chunk := range tc.chunks {
+				server.handleWindowOutput("@1", []byte(chunk))
+			}
 			waitForWindowReplies(t, window)
 
 			if got := pty.String(); got != "" {
@@ -154,10 +193,29 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 			server.mu.Lock()
 			queries := string(window.redrawForwardingQueryBuffer)
 			server.mu.Unlock()
-			if want := strings.Count(tc.chunk, cursorPositionQuery); strings.Count(queries, cursorPositionQuery) != want {
-				t.Fatalf("held queries = %q, want all %d cursor queries", queries, want)
+			if queries != tc.held {
+				t.Fatalf("held queries = %q, want %q", queries, tc.held)
 			}
 		})
+	}
+}
+
+// Codex asks again after drawing each size, in separate reads; every answer
+// reflects the frame drawn before it.
+func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
+	server, window, pty, _ := newRedrawCursorQueryTestServer(t)
+
+	for _, chunk := range []string{
+		cursorPositionQuery,
+		"\x1b[1;1H\x1b[Jhello world!",
+		cursorPositionQuery,
+	} {
+		server.handleWindowOutput("@1", []byte(chunk))
+	}
+	waitForWindowReplies(t, window)
+
+	if got := pty.String(); got != "\x1b[1;1R\x1b[1;13R" {
+		t.Fatalf("window got %q, want one report per query", got)
 	}
 }
 
@@ -165,30 +223,61 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 // from before the pause, but the program has been told the moved position, so
 // the client must end up there too.
 func TestRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
-	server, window, pty, attach := newRedrawCursorQueryTestServer(t)
-	window.redrawForwardingPaused = false
-	server.handleWindowOutput("@1", []byte("\x1b[1;1Hbase"))
-	waitForTestAttachWrites(t, server)
-	server.mu.Lock()
-	window.redrawForwardingPaused = true
-	window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
-	server.mu.Unlock()
+	for _, tc := range []struct {
+		name     string
+		before   string
+		redraw   string
+		report   string
+		row, col int
+		rows     map[int]string
+	}{
+		{
+			name:   "cursor move",
+			before: "\x1b[1;1Hbase",
+			redraw: "\x1b[10;20H",
+			report: "\x1b[10;20R",
+			row:    9, col: 19,
+			rows: map[int]string{0: "base"},
+		},
+		{
+			// prompt_toolkit erases its area and asks where it now starts.
+			name:   "erase then ask",
+			before: "\x1b[2J\x1b[1;1Hbase\x1b[20;1Hprompt> ",
+			redraw: "\x1b[3A\r\x1b[J",
+			report: "\x1b[17;1R",
+			row:    16, col: 0,
+			rows: map[int]string{0: "base", 19: ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, window, pty, attach := newRedrawCursorQueryTestServer(t)
+			window.redrawForwardingPaused = false
+			server.handleWindowOutput("@1", []byte(tc.before))
+			waitForTestAttachWrites(t, server)
+			server.mu.Lock()
+			window.redrawForwardingPaused = true
+			window.redrawForwardingFallbackScreen = window.screenLocked().Clone()
+			server.mu.Unlock()
 
-	server.handleWindowOutput("@1", []byte("\x1b[10;20H"+cursorPositionQuery))
-	waitForWindowReplies(t, window)
-	if got := pty.String(); got != "\x1b[10;20R" {
-		t.Fatalf("window got %q, want the reported position", got)
-	}
-	server.resumePausedAttachForwarding("@1", 1)
-	waitForTestAttachWrites(t, server)
+			server.handleWindowOutput("@1", []byte(tc.redraw+cursorPositionQuery))
+			waitForWindowReplies(t, window)
+			if got := pty.String(); got != tc.report {
+				t.Fatalf("window got %q, want %q", got, tc.report)
+			}
+			server.resumePausedAttachForwarding("@1", 1)
+			waitForTestAttachWrites(t, server)
 
-	client := newTerminalScreen(80, 24)
-	client.Write([]byte(attach.String()))
-	if row, col := client.CursorPosition(); row != 9 || col != 19 {
-		t.Fatalf("client cursor = (%d,%d), want the reported (9,19)", row, col)
-	}
-	if got := client.TextRows()[0]; got != "base" {
-		t.Fatalf("client row 0 = %q, want the frame kept", got)
+			client := newTerminalScreen(80, 24)
+			client.Write([]byte(attach.String()))
+			if row, col := client.CursorPosition(); row != tc.row || col != tc.col {
+				t.Fatalf("client cursor = (%d,%d), want the reported (%d,%d)", row, col, tc.row, tc.col)
+			}
+			for row, want := range tc.rows {
+				if got := client.TextRows()[row]; got != want {
+					t.Fatalf("client row %d = %q, want %q", row, got, want)
+				}
+			}
+		})
 	}
 }
 
