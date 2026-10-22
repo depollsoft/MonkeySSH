@@ -16,59 +16,69 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		}
 		return string(got)
 	}
+	if got := report(); got != "unanswerable" {
+		t.Fatalf("report before any position = %q, want none", got)
+	}
 	s.Write([]byte("\x1b[7;9H"))
 	if got := report(); got != "\x1b[7;9R" {
 		t.Fatalf("report = %q, want 1-based row 7 column 9", got)
 	}
-	s.Write([]byte("\x1b[1;1H" + strings.Repeat("x", 80)))
-	if got := report(); got != "\x1b[1;80R" {
-		t.Fatalf("pending-wrap report = %q, want the last column", got)
-	}
-	s.Write([]byte("\x1b[?1049h\x1b[3;4H"))
-	if got := report(); got != "\x1b[3;4R" {
-		t.Fatalf("alternate-screen report = %q, want the alternate cursor", got)
+
+	// What moves the cursor in neither the model nor the app's terminal keeps
+	// it known: the tail of a Codex frame, titles, queries, erases.
+	s.Write([]byte("\x1b[0;1m\x1b]0;title\x07\x1b[?25h\x1b[?2026l\x1b[>7u" +
+		"\x1b[=0;1u\x1b[2 q\x1b[>q\x1b[c\x1b[?2004h\x1b[?1000;1006h\x1b[K\x1b[J" +
+		"\x07\x1b=\x1b(0\x1b(B\x1b_Ga=t,f=32,s=1,v=1;/wAA/w==\x1b\\"))
+	if got := report(); got != "\x1b[7;9R" {
+		t.Fatalf("report after cursor-neutral output = %q, want 7;9", got)
 	}
 
-	// The app's terminal reports the absolute row in origin mode, where xterm
-	// counts from the margin, so the model leaves that query to the client.
+	// Anything else leaves it unknown until the next absolute position: the
+	// two differ on a pending wrap, LNM, margins kept per screen, sequences
+	// one of them ignores, and image placements.
+	for _, seq := range []string{
+		"x", "\b", "\r", "\n", "\t", "\x1bD", "\x1bM", "\x1b7", "\x1b8", "\x1b#8", "\x1bc",
+		"\x1b[A", "\x1b[2D", "\x1b[5G", "\x1b[3d", "\x1b[2a", "\x1b[2e", "\x1b[3`", "\x1b[2b",
+		"\x1b[s", "\x1b[u", "\x1b[!p", "\x1b[2;10r", "\x1b[20h", "\x1b[4h", "\x1b[@", "\x1b[P",
+		"\x1b[X", "\x1b[L", "\x1b[S", "\x1b[?1049h\x1b[?1049l", "\x1b[?47h\x1b[?47l",
+		"\x1b[?1048h", "\x1b[?7l\x1b[?7h", "\x1b[?2C", "\x1b[2 A", "\x1b[?J",
+		"\x1bXsos\x1b\\", "\x1b^pm\x1b\\", "\x1bP$qm\x1b\\", "\x1b]0;a\x18b",
+		"\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2;/wAA/w==\x1b\\",
+		"\x1b_Ga=p,i=7,r=2,c=2\x1b\\",
+		"\x1b_Ga=T,f=32,s=1,v=1\x9c",
+		"\x1b_Gf=32,s=1,v=1" + strings.Repeat(",X=0", 70) + ",a=T;/wAA/w==\x1b\\",
+		"\x9b3;4H", "\x9c",
+	} {
+		s.Write([]byte("\x1b[3;4H" + seq))
+		if got := report(); got != "unanswerable" {
+			t.Fatalf("report after %q = %q, want none", seq, got)
+		}
+		s.Write([]byte("\x1b[3;4H"))
+		if got := report(); got != "\x1b[3;4R" {
+			t.Fatalf("report after %q and CUP = %q, want 3;4", seq, got)
+		}
+	}
+
+	// Placements that do not move the client's cursor keep it known.
+	for _, command := range []string{
+		"a=T,f=32,s=1,v=1,C=1", "a=T,f=32,s=1,v=1,U=1", "a=d,d=a", "a=q,i=1",
+	} {
+		s.Write([]byte("\x1b[3;4H\x1b_G" + command + ";/wAA/w==\x1b\\"))
+		if got := report(); got != "\x1b[3;4R" {
+			t.Fatalf("report after %s = %q, want 3;4", command, got)
+		}
+	}
+
+	// In origin mode the app's terminal counts rows from its own margins,
+	// which it keeps per screen, so even a CUP leaves the cursor unknown.
 	s.Write([]byte("\x1b[5;20r\x1b[?6h\x1b[2;3H"))
 	if got := report(); got != "unanswerable" {
 		t.Fatalf("origin-mode report = %q, want none", got)
 	}
 	s.Write([]byte("\x1b[?6l\x1b[r"))
 
-	// A Kitty placement moves the client's cursor past the image by an amount
-	// the model does not compute, until the next absolute position.
-	for _, tc := range []struct {
-		command string
-		moves   bool
-	}{
-		{"a=T,f=32,s=1,v=1,r=2,c=2,q=2", true},
-		{"a=p,i=7,r=2,c=2", true},
-		{"a=T,f=32,s=1,v=1,C=1", false},
-		{"a=T,f=32,s=1,v=1,U=1", false},
-		{"a=t,f=32,s=1,v=1", false},
-		{"a=d,d=a", false},
-	} {
-		s.Write([]byte("\x1b[5;10H\x1b_G" + tc.command + ";/wAA/w==\x1b\\"))
-		if got := report(); (got == "unanswerable") != tc.moves {
-			t.Fatalf("after %s report = %q, want unanswerable=%v", tc.command, got, tc.moves)
-		}
-		s.Write([]byte("\x1b[6;2H"))
-		if got := report(); got != "\x1b[6;2R" {
-			t.Fatalf("after %s and CUP report = %q, want 6;2", tc.command, got)
-		}
-	}
-	s.Write([]byte("\x1b_Ga=T,f=32,s=1,v=1\x9c"))
-	if got := report(); got != "unanswerable" {
-		t.Fatalf("C1-terminated placement report = %q, want none", got)
-	}
-	s.Write([]byte("\x1bc"))
-	if got := report(); got != "\x1b[1;1R" {
-		t.Fatalf("report after RIS = %q, want home", got)
-	}
-
-	// A chunked transmission places its image when the last chunk arrives.
+	// A chunked transmission places its image when the last chunk arrives,
+	// whatever the cursor did in between.
 	for _, tc := range []struct {
 		first string
 		moves bool
@@ -85,44 +95,14 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		if got := report(); (got == "unanswerable") != tc.moves {
 			t.Fatalf("after %s and its last chunk report = %q, want unanswerable=%v", tc.first, got, tc.moves)
 		}
-		s.Write([]byte("\x1b[1;1H"))
 	}
 
-	// A cancelled placement runs nothing, and leaves nothing for a later
-	// string's end to act on.
-	s.Write([]byte("\x1b_Ga=T,f=32,s=1,v=1\x18\x90q\x9c"))
-	if got := report(); got != "\x1b[1;1R" {
-		t.Fatalf("after a cancelled placement report = %q, want 1;1", got)
-	}
-
-	// A header too long to read in full is taken for a placement.
-	long := "f=32,s=1,v=1" + strings.Repeat(",X=0", 70) + ",a=T"
-	s.Write([]byte("\x1b_G" + long + ";/wAA/w==\x1b\\"))
+	// A resize moves the cursor on both sides by rules the model does not
+	// follow closely enough.
+	s.Write([]byte("\x1b[3;4H"))
+	s.Resize(100, 30)
 	if got := report(); got != "unanswerable" {
-		t.Fatalf("after a long placement header report = %q, want none", got)
-	}
-	s.Write([]byte("\x1b[1;1H"))
-
-	// The uncertainty travels with the cursor it describes.
-	placement := "\x1b[5;10H\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2;/wAA/w==\x1b\\"
-	for _, tc := range []struct {
-		name, seq, want string
-	}{
-		{"DECSC and DECRC", placement + "\x1b7\x1b[1;1H\x1b8", "unanswerable"},
-		{"alternate screen entered", placement + "\x1b[?1049h", "unanswerable"},
-		{"alternate screen positioned", "\x1b[3;3H", "\x1b[3;3R"},
-		{"alternate screen left", "\x1b[?1049l", "unanswerable"},
-		{"saved before the image", "\x1b[1;1H\x1b7" + placement + "\x1b8", "\x1b[1;1R"},
-		// The app's alternate buffer keeps its own cursor, not the main one.
-		{"alternate screen entered from a known cursor", "\x1b[?1049h", "unanswerable"},
-		{"alternate screen left again", "\x1b[3;3H\x1b[?1049l", "\x1b[1;1R"},
-		// The app's terminal ignores SCO save and restore.
-		{"SCO restore", "\x1b[s\x1b[5;5H\x1b[u", "unanswerable"},
-	} {
-		s.Write([]byte(tc.seq))
-		if got := report(); got != tc.want {
-			t.Fatalf("%s: report = %q, want %q", tc.name, got, tc.want)
-		}
+		t.Fatalf("report after a resize = %q, want none", got)
 	}
 }
 
@@ -147,6 +127,10 @@ func newRedrawCursorQueryTestServer(
 	attach := &recordingConn{}
 	registerTestAttachClient(t, server, attach, "primary", 80, 24)
 	window.redrawForwardingPrimaryConn = attach
+	// The program last placed the cursor absolutely, as Codex ends a frame.
+	server.mu.Lock()
+	window.screenLocked().Write([]byte("\x1b[1;1H"))
+	server.mu.Unlock()
 	return server, window, pty, attach
 }
 
@@ -160,11 +144,11 @@ func TestRedrawPauseAnswersCursorPositionQueryFromScreenModel(t *testing.T) {
 
 	server.handleWindowOutput(
 		"@1",
-		[]byte("\x1b[?1049h\x1b[H\x1b[2J\x1b[5;10Hhi"+cursorPositionQuery+"\x1b[1;1Hlater"),
+		[]byte("\x1b[?1049h\x1b[H\x1b[2Jhi\x1b[5;10H\x1b[?25h"+cursorPositionQuery+"\x1b[1;1Hlater"),
 	)
 	waitForWindowReplies(t, window)
 
-	if got := pty.String(); got != "\x1b[5;12R" {
+	if got := pty.String(); got != "\x1b[5;10R" {
 		t.Fatalf("window got %q, want the model's report at the query", got)
 	}
 	server.mu.Lock()
@@ -197,8 +181,13 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 			held:   cursorPositionQuery,
 		},
 		{
+			name:   "after printing",
+			chunks: []string{"\x1b[5;10Hhi" + cursorPositionQuery},
+			held:   cursorPositionQuery,
+		},
+		{
 			name:   "in origin mode, then outside it",
-			chunks: []string{"\x1b[5;20r\x1b[?6h" + cursorPositionQuery + "\x1b[?6l\x1b[r" + cursorPositionQuery},
+			chunks: []string{"\x1b[5;20r\x1b[?6h\x1b[2;3H" + cursorPositionQuery + "\x1b[?6l\x1b[r\x1b[1;1H" + cursorPositionQuery},
 			held:   cursorPositionQuery + cursorPositionQuery,
 		},
 		{
@@ -245,7 +234,7 @@ func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
 
 	for _, chunk := range []string{
 		cursorPositionQuery,
-		"\x1b[1;1H\x1b[Jhello world!",
+		"\x1b[1;1H\x1b[Jhello world!\x1b[1;13H",
 		cursorPositionQuery,
 	} {
 		server.handleWindowOutput("@1", []byte(chunk))
@@ -278,10 +267,10 @@ func TestRedrawPauseResumesAtTheReportedCursor(t *testing.T) {
 			rows: map[int]string{0: "base"},
 		},
 		{
-			// prompt_toolkit erases its area and asks where it now starts.
+			// Erasing the area below a position paints nothing either.
 			name:   "erase then ask",
 			before: "\x1b[2J\x1b[1;1Hbase\x1b[20;1Hprompt> ",
-			redraw: "\x1b[3A\r\x1b[J",
+			redraw: "\x1b[17;1H\x1b[J",
 			report: "\x1b[17;1R",
 			row:    16, col: 0,
 			rows: map[int]string{0: "base", 19: ""},
