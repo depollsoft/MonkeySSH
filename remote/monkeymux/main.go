@@ -15658,6 +15658,20 @@ func normalizedCsiQueryParams(params string) string {
 	return string(out)
 }
 
+// csiQueryPrefixAndFirstParam splits normalized CSI parameters into the
+// private prefix ('<' to '?', or 0) and the digits of the first parameter.
+func csiQueryPrefixAndFirstParam(params string) (byte, string) {
+	var prefix byte
+	if params != "" && params[0] >= '<' && params[0] <= '?' {
+		prefix, params = params[0], params[1:]
+	}
+	end := 0
+	for end < len(params) && params[end] >= '0' && params[end] <= '9' {
+		end++
+	}
+	return prefix, params[:end]
+}
+
 func isReplayUnsafeCsiQuery(sequence []byte) bool {
 	bodyStart := 0
 	switch {
@@ -15670,22 +15684,19 @@ func isReplayUnsafeCsiQuery(sequence []byte) bool {
 	}
 	final := sequence[len(sequence)-1]
 	params := normalizedCsiQueryParams(string(sequence[bodyStart : len(sequence)-1]))
+	// The terminal answers by the prefix and the first parameter, ignoring
+	// further parameters, sub-parameters and intermediates.
+	prefix, first := csiQueryPrefixAndFirstParam(params)
 	switch final {
 	case 'c':
-		return params == "" ||
-			params == "0" ||
-			strings.HasPrefix(params, "?") ||
-			strings.HasPrefix(params, ">") ||
-			strings.HasPrefix(params, "=")
+		// Any unprefixed form is DA1 to the terminal.
+		return prefix == 0 || prefix == '?' || prefix == '>' || prefix == '='
 	case 'n':
-		return params == "5" ||
-			params == "6" ||
-			params == "?6" ||
-			params == "?15" ||
-			params == "?25" ||
-			params == "?26" ||
-			params == "?53" ||
-			params == "?996"
+		if first == "5" || first == "6" {
+			return true
+		}
+		return prefix == '?' && (first == "15" || first == "25" ||
+			first == "26" || first == "53" || first == "996")
 	case 'q':
 		// XTVERSION (CSI > q): the child asks the terminal to identify itself,
 		// which agents such as Copilot CLI use to unlock richer rendering. The

@@ -318,6 +318,16 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 			held:   "\x1b[06n" + cursorPositionQuery,
 		},
 		{
+			name:   "behind a query with extra parameters",
+			chunks: []string{"\x1b[2;3H\x1b[6;0n\x1b[7;9H" + cursorPositionQuery + "x"},
+			held:   "\x1b[6;0n" + cursorPositionQuery,
+		},
+		{
+			name:   "behind a query with extra parameters in an earlier read",
+			chunks: []string{"\x1b[2;3H\x1b[6:0n", "\x1b[7;9H" + cursorPositionQuery + "x"},
+			held:   "\x1b[6:0n" + cursorPositionQuery,
+		},
+		{
 			name:   "C1 and DECXCPR forms",
 			chunks: []string{"\x9b6n\x1b[?6n"},
 			held:   "\x9b6n\x1b[?6n",
@@ -736,12 +746,18 @@ func TestCsiQueryParametersAreReadAsNumbers(t *testing.T) {
 			t.Fatalf("normalizedCsiQueryParams(%q) = %q, want %q", params, got, want)
 		}
 	}
-	for _, query := range []string{"\x1b[06n", "\x1b[?006n", "\x1b[00c", "\x1b[014t"} {
+	// The terminal answers by the prefix and the first parameter alone.
+	for _, query := range []string{
+		"\x1b[06n", "\x1b[?006n", "\x1b[00c", "\x1b[014t", "\x1b[6;0n", "\x1b[6:0n",
+		"\x1b[6 n", "\x1b[?5n", "\x1b[>6n", "\x1b[5c", "\x1b[0;1c",
+	} {
 		if !isReplayUnsafeCsiQuery([]byte(query)) {
 			t.Fatalf("%q must count as a query", query)
 		}
 	}
-	if isReplayUnsafeCsiQuery([]byte("\x1b[100n")) {
-		t.Fatal("CSI 100 n is not a query")
+	for _, other := range []string{"\x1b[100n", "\x1b[n", "\x1b[7n", "\x1b[<0c"} {
+		if isReplayUnsafeCsiQuery([]byte(other)) {
+			t.Fatalf("%q is not a query", other)
+		}
 	}
 }
