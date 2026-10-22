@@ -58,9 +58,10 @@ type terminalScreen struct {
 	kittyPlacementPending bool
 	// absoluteUntrusted records output after which even a CUP may land
 	// elsewhere in the app's terminal: origin mode, which it saves and
-	// restores differently, or a CSI too long for the parser to keep, which
-	// could hide either. Only a reset clears it. sizeUnsynced records a
-	// resize request (CSI 8 t) the app's terminal may have acted on; the
+	// restores differently, or a CSI the model dropped (ignored, cut short or
+	// too long to keep), which could hide it. Only a reset clears it.
+	// sizeUnsynced records a resize request (CSI 8 t), or a dropped CSI that
+	// could hide one, which the app's terminal may have acted on; only the
 	// next real resize clears it.
 	absoluteUntrusted bool
 	sizeUnsynced      bool
@@ -370,8 +371,9 @@ func (s *terminalScreen) resetState() {
 func (s *terminalScreen) Reset() {
 	s.cursorKnown = false
 	s.kittyPlacementPending = false
+	// The app's terminal keeps a size it was asked for through a reset, so
+	// sizeUnsynced stays.
 	s.absoluteUntrusted = false
-	s.sizeUnsynced = false
 	s.main = newVTGrid(s.width, s.height)
 	s.alt = newVTGrid(s.width, s.height)
 	s.altActive = false
@@ -467,12 +469,21 @@ func csiKeepsCursor(p *vtParser, final byte) bool {
 	return false
 }
 
+// distrustCursor notes a CSI the model dropped or cut short, which the app's
+// terminal may have run as a mode change or a resize: the cursor is unknown,
+// and stays so through CUPs until a reset and a real resize.
+func (s *terminalScreen) distrustCursor() {
+	s.cursorKnown = false
+	s.absoluteUntrusted = true
+	s.sizeUnsynced = true
+}
+
 // noteUnsyncedCursorState records sequences after which a CUP may no longer
 // land in the same place in the model and the app's terminal.
 func (s *terminalScreen) noteUnsyncedCursorState(final byte) {
 	p := &s.parser
 	if p.truncated {
-		s.absoluteUntrusted = true
+		s.distrustCursor()
 		return
 	}
 	if len(p.intermediates) > 0 {
@@ -1387,12 +1398,12 @@ func (s *terminalScreen) stepCSI(b byte) {
 	case b == 0x1b:
 		// An abandoned CSI is not modelled the way the app's terminal treats
 		// it, so neither is the cursor after it.
-		s.cursorKnown = false
+		s.distrustCursor()
 		p.state = vtEscape
 		p.clear()
 		return
 	case b == 0x18 || b == 0x1a:
-		s.cursorKnown = false
+		s.distrustCursor()
 		p.state = vtGround
 		return
 	case b < 0x20:
@@ -1426,8 +1437,9 @@ func (s *terminalScreen) stepCSI(b byte) {
 				p.truncated = true
 			}
 		case b >= '<' && b <= '?':
-			// The app's terminal reads such a sequence differently.
-			s.cursorKnown = false
+			// The app's terminal reads such a sequence differently, as a
+			// mode change for all the model knows.
+			s.distrustCursor()
 			p.state = vtCSIIgnore
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
@@ -1442,14 +1454,14 @@ func (s *terminalScreen) stepCSI(b byte) {
 			if len(p.intermediates) < vtIntermediateLimit {
 				p.intermediates = append(p.intermediates, b)
 			} else {
-				s.cursorKnown = false
+				s.distrustCursor()
 				p.state = vtCSIIgnore
 			}
 		case b >= 0x40 && b <= 0x7e:
 			p.state = vtGround
 			s.csiDispatch(b)
 		default:
-			s.cursorKnown = false
+			s.distrustCursor()
 			p.state = vtCSIIgnore
 		}
 	case vtCSIIgnore:

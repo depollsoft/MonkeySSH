@@ -51,8 +51,7 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		// The app places iTerm2 inline images like Kitty ones.
 		"\x1b]1337;File=inline=1;height=3:AAAA\x07", "\x1b]1337;File=inline=1:AAAA\x1b\\",
 		// Parser states the two leave differently.
-		"\x1b_Ga=t\x1bD\x1b\\", "\x1b\x07=", "\x1b(\x07B", "\x1b[?25?2C", "\x1b[3\x18",
-		"\x1b[3\x1b[0m",
+		"\x1b_Ga=t\x1bD\x1b\\", "\x1b\x07=", "\x1b(\x07B",
 	} {
 		s.Write([]byte("\x1b[3;4H" + seq))
 		if got := report(); got != "unanswerable" {
@@ -91,18 +90,28 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		s.Resize(81, 24)
 		s.Resize(80, 24)
 	}
+	both := func() {
+		reset()
+		resize()
+	}
 	for _, tc := range []struct {
 		name  string
 		seq   string
 		clear func()
 	}{
 		{"origin mode restored by DECRC", "\x1b[5;20r\x1b7\x1b[?6h\x1b8\x1b[r", reset},
-		{"truncated mode list", "\x1b[?" + strings.Repeat("25;", 21) + "1;1049h", reset},
-		{"truncated CUP", "\x1b[" + strings.Repeat("9", 64) + ";9H", reset},
+		{"truncated mode list", "\x1b[?" + strings.Repeat("25;", 21) + "1;1049h", both},
+		{"truncated CUP", "\x1b[" + strings.Repeat("9", 64) + ";9H", both},
+		{"ignored mode change", "\x1b[?6?h", both},
+		{"abandoned CSI", "\x1b[?6\x18", both},
 		{"resize request", "\x1b[8;10;20t", resize},
 		{"host resize request", "\x1b[?8;10;20t", resize},
 	} {
-		s.Write([]byte(tc.seq + "\x1b[3;4H"))
+		s.Write([]byte("\x1b[3;4H" + tc.seq))
+		if got := report(); got != "unanswerable" {
+			t.Fatalf("%s: report = %q, want none", tc.name, got)
+		}
+		s.Write([]byte("\x1b[3;4H"))
 		if got := report(); got != "unanswerable" {
 			t.Fatalf("%s: report after a CUP = %q, want none", tc.name, got)
 		}
@@ -112,6 +121,12 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 			t.Fatalf("%s: report once cleared = %q, want 3;4", tc.name, got)
 		}
 	}
+	// The app's terminal keeps a requested size through a reset.
+	s.Write([]byte("\x1b[8;10;20t\x1bc\x1b[3;4H"))
+	if got := report(); got != "unanswerable" {
+		t.Fatalf("report after a resize request and a reset = %q, want none", got)
+	}
+	resize()
 
 	// The app's output decoder ends a string only at BEL or ESC \\ and holds
 	// everything after until then, so a string the model ended any other way
