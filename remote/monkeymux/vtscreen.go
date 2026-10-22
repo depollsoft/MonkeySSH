@@ -71,6 +71,11 @@ type terminalScreen struct {
 	// tracks the byte before, to see an ESC \ in any state.
 	decoderInString bool
 	lastByteESC     bool
+	// afterAbandon records that an ESC abandoned the sequence before it. The
+	// app's output decoder can misframe the sequence that ESC starts (in
+	// insert mode it injects ICH into its parameters), so that one cannot
+	// make the cursor known.
+	afterAbandon bool
 
 	savedMain vtSavedCursor
 	savedAlt  vtSavedCursor
@@ -1178,6 +1183,8 @@ func (s *terminalScreen) step(b byte) {
 	case vtEscape:
 		switch {
 		case b == 0x1b:
+			s.cursorKnown = false
+			s.afterAbandon = true
 			p.clear()
 		case b == '[':
 			p.state = vtCSIEntry
@@ -1202,6 +1209,7 @@ func (s *terminalScreen) step(b byte) {
 		switch {
 		case b == 0x1b:
 			s.cursorKnown = false
+			s.afterAbandon = true
 			p.state = vtEscape
 			p.clear()
 		case b >= 0x20 && b <= 0x2f:
@@ -1399,6 +1407,7 @@ func (s *terminalScreen) stepCSI(b byte) {
 		// An abandoned CSI is not modelled the way the app's terminal treats
 		// it, so neither is the cursor after it.
 		s.distrustCursor()
+		s.afterAbandon = true
 		p.state = vtEscape
 		p.clear()
 		return
@@ -1540,6 +1549,7 @@ func (s *terminalScreen) execute(b byte) {
 
 func (s *terminalScreen) escapeDispatch(final byte) {
 	p := &s.parser
+	s.afterAbandon = false
 	if !escapeKeepsCursor(p.intermediates, final) {
 		s.cursorKnown = false
 	}
@@ -2013,6 +2023,8 @@ func (s *terminalScreen) moveCursor(row, col int) {
 
 func (s *terminalScreen) csiDispatch(final byte) {
 	p := &s.parser
+	abandoned := s.afterAbandon
+	s.afterAbandon = false
 	if !csiKeepsCursor(p, final) {
 		s.cursorKnown = false
 	}
@@ -2065,7 +2077,7 @@ func (s *terminalScreen) csiDispatch(final byte) {
 		// keeps per screen and does not restore with DECRC, as the model
 		// does; see absoluteUntrusted.
 		s.cursorKnown = !s.originMode && !s.absoluteUntrusted &&
-			!s.sizeUnsynced && !s.decoderInString && !p.c1
+			!s.sizeUnsynced && !s.decoderInString && !p.c1 && !abandoned
 	case 'I':
 		s.tabForward(n)
 	case 'J':

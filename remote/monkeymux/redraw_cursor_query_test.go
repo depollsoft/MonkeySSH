@@ -128,6 +128,29 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	}
 	resize()
 
+	// An ESC that abandons a sequence can make the app's output decoder
+	// misframe the one it starts (in insert mode it injects ICH into the
+	// parameters), so that CUP is not trusted; the next one is.
+	for _, abandoned := range []string{"\x1b", "\x1b(", "\x1b[2"} {
+		s.Write([]byte("\x1b[4h\x1b[r\x1bc\x1b[4h" + abandoned + "\x1b[5;5H"))
+		if got := report(); got != "unanswerable" {
+			t.Fatalf("report after %q and a CUP = %q, want none", abandoned, got)
+		}
+		s.Write([]byte("\x1b[5;5H"))
+		if abandoned == "\x1b[2" {
+			// An abandoned CSI also distrusts every CUP until a reset and
+			// a real resize.
+			s.Write([]byte("\x1bc"))
+			s.Resize(81, 24)
+			s.Resize(80, 24)
+			s.Write([]byte("\x1b[5;5H"))
+		}
+		if got := report(); got != "\x1b[5;5R" {
+			t.Fatalf("report after %q and two CUPs = %q, want 5;5", abandoned, got)
+		}
+	}
+	s.Write([]byte("\x1b[4l"))
+
 	// The app's output decoder ends a string only at BEL or ESC \\ and holds
 	// everything after until then, so a string the model ended any other way
 	// leaves even a CUP unanswerable until one of those arrives.
