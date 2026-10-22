@@ -51,7 +51,7 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		// The app places iTerm2 inline images like Kitty ones.
 		"\x1b]1337;File=inline=1;height=3:AAAA\x07", "\x1b]1337;File=inline=1:AAAA\x1b\\",
 		// Parser states the two leave differently.
-		"\x1b_Ga=t\x1bD\x1b\\", "\x1b\x07=", "\x1b(\x07B",
+		"\x1b\x07=", "\x1b(\x07B",
 	} {
 		s.Write([]byte("\x1b[3;4H" + seq))
 		if got := report(); got != "unanswerable" {
@@ -104,8 +104,13 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		{"truncated CUP", "\x1b[" + strings.Repeat("9", 64) + ";9H", both},
 		{"ignored mode change", "\x1b[?6?h", both},
 		{"abandoned CSI", "\x1b[?6\x18", both},
+		{"origin mode with an intermediate", "\x1b[5;20r\x1b[?6 h", reset},
+		{"sequence inside an SOS string", "\x1b[5;20r\x1bX\x1b[?6h\x1b\\", both},
+		{"tmux passthrough", "\x1bPtmux;\x1b\x1b[?6h\x1b\\", both},
+		{"ESC inside an APC", "\x1b_Ga=t\x1bD\x1b\\", both},
 		{"resize request", "\x1b[8;10;20t", resize},
 		{"host resize request", "\x1b[?8;10;20t", resize},
+		{"resize request with an intermediate", "\x1b[8;10;20 t", resize},
 	} {
 		s.Write([]byte("\x1b[3;4H" + tc.seq))
 		if got := report(); got != "unanswerable" {
@@ -304,6 +309,13 @@ func TestRedrawPauseLeavesUnanswerableCursorQueriesToTerminal(t *testing.T) {
 			name:   "inside an SOS string",
 			chunks: []string{"\x1bXabc" + cursorPositionQuery + "\x1b\\"},
 			held:   cursorPositionQuery,
+		},
+		{
+			// The terminal reads parameters as numbers, so CSI 06 n is a
+			// cursor query it answers first.
+			name:   "behind a zero-padded query",
+			chunks: []string{"\x1b[2;3H\x1b[06n\x1b[7;9H" + cursorPositionQuery},
+			held:   "\x1b[06n" + cursorPositionQuery,
 		},
 		{
 			name:   "C1 and DECXCPR forms",
@@ -713,5 +725,23 @@ func waitForTerminalRepliesSettled(t *testing.T, client *attachClient, windowID 
 			t.Fatal("the client still owes the window a reply")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCsiQueryParametersAreReadAsNumbers(t *testing.T) {
+	for params, want := range map[string]string{
+		"06": "6", "?006": "?6", "00": "0", "0": "0", "100": "100", "05;007": "5;7", ">0": ">0",
+	} {
+		if got := normalizedCsiQueryParams(params); got != want {
+			t.Fatalf("normalizedCsiQueryParams(%q) = %q, want %q", params, got, want)
+		}
+	}
+	for _, query := range []string{"\x1b[06n", "\x1b[?006n", "\x1b[00c", "\x1b[014t"} {
+		if !isReplayUnsafeCsiQuery([]byte(query)) {
+			t.Fatalf("%q must count as a query", query)
+		}
+	}
+	if isReplayUnsafeCsiQuery([]byte("\x1b[100n")) {
+		t.Fatal("CSI 100 n is not a query")
 	}
 }

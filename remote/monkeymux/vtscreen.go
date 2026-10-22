@@ -491,9 +491,8 @@ func (s *terminalScreen) noteUnsyncedCursorState(final byte) {
 		s.distrustCursor()
 		return
 	}
-	if len(p.intermediates) > 0 {
-		return
-	}
+	// The app's terminal runs mode changes and window operations whatever
+	// intermediates they carry.
 	groups := p.csiParams()
 	switch {
 	case p.private == '?' && (final == 'h' || final == 'l'):
@@ -1296,9 +1295,11 @@ func (s *terminalScreen) step(b byte) {
 			p.state = vtGround
 			s.endString()
 		} else if b != 0x1b {
-			// The app's terminal ends the string here and reads a new
-			// sequence; the model keeps skipping.
-			s.cursorKnown = false
+			// The app's terminal ends the string here and runs what follows
+			// as a new sequence, a mode change for all the model knows (tmux
+			// passthrough wraps whole sequences this way); the model keeps
+			// skipping.
+			s.distrustCursor()
 			p.state = vtSOSString
 		}
 	}

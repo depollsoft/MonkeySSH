@@ -15634,6 +15634,30 @@ func isReplayUnsafeOscNotificationSequence(sequence []byte) bool {
 	)
 }
 
+// normalizedCsiQueryParams drops leading zeros from each numeric parameter,
+// as the terminal reads parameters as numbers: CSI 06 n asks for the cursor
+// position as CSI 6 n does.
+func normalizedCsiQueryParams(params string) string {
+	out := make([]byte, 0, len(params))
+	started := false
+	for i := 0; i < len(params); i++ {
+		b := params[i]
+		if b < '0' || b > '9' {
+			started = false
+			out = append(out, b)
+			continue
+		}
+		if b == '0' && !started && i+1 < len(params) &&
+			params[i+1] >= '0' && params[i+1] <= '9' {
+			// A leading zero of a longer number.
+			continue
+		}
+		started = true
+		out = append(out, b)
+	}
+	return string(out)
+}
+
 func isReplayUnsafeCsiQuery(sequence []byte) bool {
 	bodyStart := 0
 	switch {
@@ -15645,7 +15669,7 @@ func isReplayUnsafeCsiQuery(sequence []byte) bool {
 		return false
 	}
 	final := sequence[len(sequence)-1]
-	params := string(sequence[bodyStart : len(sequence)-1])
+	params := normalizedCsiQueryParams(string(sequence[bodyStart : len(sequence)-1]))
 	switch final {
 	case 'c':
 		return params == "" ||
