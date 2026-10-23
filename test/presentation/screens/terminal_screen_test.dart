@@ -12725,6 +12725,47 @@ void main() {
       expect(find.text('shell'), findsNothing);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('⌃⌘S moves focus into a navigator pinned to its page', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      final focused = FocusManager.instance.primaryFocus?.context;
+      expect(
+        focused?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row has focus',
+      );
+      // The navigator stays open on its page.
+      expect(
+        tester.getSize(find.byKey(const ValueKey('tmux-handle-bar'))).width,
+        closeTo(475, 0.1),
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('keeps the title on the navigator page of a book fold', (
       tester,
     ) async {

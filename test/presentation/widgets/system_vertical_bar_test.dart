@@ -211,6 +211,65 @@ void main() {
       expect(find.byTooltip('Favorite'), findsNothing);
     });
 
+    testWidgets('gathers the actions it has no room for into a menu', (
+      tester,
+    ) async {
+      // A Live Activity lengthens the status cluster and the keyboard is up:
+      // room for two keys.
+      useOuterDisplay(tester);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 265);
+      const shortBar = SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+      );
+      final pressed = <String>[];
+      IconButton action(String name, IconData icon) => IconButton(
+        icon: Icon(icon),
+        tooltip: name,
+        onPressed: () => pressed.add(name),
+      );
+      await tester.pumpWidget(
+        withBar(
+          bar: shortBar,
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => Scaffold(
+                    appBar: VerticalBarAppBar(
+                      AppBar(
+                        title: const Text('Agent'),
+                        actions: [
+                          action('Search chat', Icons.search),
+                          action('Windows', Icons.window_outlined),
+                          action('Save', Icons.save_outlined),
+                        ],
+                      ),
+                    ),
+                    body: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BackButton), findsOneWidget);
+      expect(find.byTooltip('Search chat'), findsNothing);
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+      for (final name in ['Search chat', 'Windows', 'Save']) {
+        expect(find.text(name), findsOneWidget, reason: name);
+      }
+      await tester.tap(find.text('Windows'));
+      await tester.pumpAndSettle();
+      expect(pressed, ['Windows']);
+    });
+
     testWidgets('is the plain app bar without a vertical bar', (tester) async {
       await tester.pumpWidget(screen(bar: null));
       await tester.tap(find.text('open'));

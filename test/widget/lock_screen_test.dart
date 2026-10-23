@@ -416,7 +416,7 @@ void main() {
       });
     }
 
-    testWidgets('scrolls the propped PIN page above the keyboard', (
+    testWidgets('keeps Unlock above the keyboard when propped up', (
       tester,
     ) async {
       final authService = MockAuthService();
@@ -448,9 +448,50 @@ void main() {
 
       await tester.ensureVisible(find.text('Unlock'));
       await tester.pump();
-      final unlock = tester.getRect(find.text('Unlock'));
-      expect(unlock.top, greaterThanOrEqualTo(475));
-      expect(unlock.bottom, lessThanOrEqualTo(951 - 360));
+      // The keyboard leaves too little of the bottom page, so the screen is
+      // one scrolling page above the keyboard.
+      expect(
+        tester.getRect(find.text('Unlock')).bottom,
+        lessThanOrEqualTo(951 - 360),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('falls back to one page when the keyboard covers the PIN '
+        'page', (tester) async {
+      final authService = MockAuthService();
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+      tester.view
+        ..physicalSize = const Size(951, 669)
+        ..devicePixelRatio = 1
+        ..viewInsets = const FakeViewPadding(bottom: 360)
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTWH(0, 334, 951, 0),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      await tester.ensureVisible(find.text('Unlock'));
+      await tester.pump();
+      expect(
+        tester.getRect(find.text('Unlock')).bottom,
+        lessThanOrEqualTo(669 - 360),
+      );
       expect(tester.takeException(), isNull);
     });
 

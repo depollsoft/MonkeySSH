@@ -1495,12 +1495,16 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Opens the switcher with keyboard focus on the active row, or closes it.
   void toggleFromKeyboard() {
-    if (collapseIfExpanded()) {
-      return;
+    // A navigator pinned open on its own page cannot hide, so the shortcut
+    // moves focus into its list instead.
+    if (!widget.pinnedOpen) {
+      if (collapseIfExpanded()) {
+        return;
+      }
+      _toggleExpanded();
     }
-    _toggleExpanded();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_expanded) {
+      if (!mounted || !(_expanded || widget.pinnedOpen)) {
         return;
       }
       final list = _keyboardListKey.currentState;

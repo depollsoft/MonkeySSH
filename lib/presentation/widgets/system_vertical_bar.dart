@@ -486,11 +486,68 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     final leading = appBar.leading ?? _impliedLeading(context);
     final actions = appBar.actions ?? const <Widget>[];
     return VerticalBarRailPortal(
-      rail: (context) =>
-          VerticalBarRail(bar: bar, leading: [?leading], trailing: actions),
+      rail: (context) {
+        final capacity = verticalBarItemCapacity(
+          resolveVerticalBarColumn(bar, MediaQuery.of(context)),
+        );
+        // Back gives way first when the bar runs short: the edge swipe
+        // still goes back.
+        final showsLeading =
+            leading != null && (actions.isEmpty || capacity >= 2);
+        return VerticalBarRail(
+          bar: bar,
+          leading: [if (showsLeading) leading],
+          trailing: _fitActions(
+            actions,
+            math.max(1, capacity - (showsLeading ? 1 : 0)),
+          ),
+        );
+      },
       child: _titleOnly(appBar),
     );
   }
+
+  /// Fits [actions] into [slots] keys, the way native bars compress: the
+  /// actions farthest from the thumb move into a menu that takes their place.
+  static List<Widget> _fitActions(List<Widget> actions, int slots) {
+    if (actions.length <= slots) return actions;
+    final needed = actions.length - slots + 1;
+    final moved = <int, Widget>{};
+    for (var index = 0; index < actions.length; index += 1) {
+      if (moved.length == needed) break;
+      final entry = _menuEntryFor(actions[index]);
+      if (entry != null) moved[index] = entry;
+    }
+    if (moved.isEmpty) return actions;
+    return [
+      MenuAnchor(
+        menuChildren: moved.values.toList(),
+        builder: (context, controller, _) => IconButton(
+          icon: const Icon(Icons.more_vert),
+          tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+          onPressed: () =>
+              controller.isOpen ? controller.close() : controller.open(),
+        ),
+      ),
+      for (final (index, action) in actions.indexed)
+        if (!moved.containsKey(index)) action,
+    ];
+  }
+
+  /// A menu entry that does what [action] does, for the kinds of action a
+  /// menu can stand in for.
+  static Widget? _menuEntryFor(Widget action) => switch (action) {
+    IconButton(:final onPressed, :final icon, :final tooltip) => MenuItemButton(
+      onPressed: onPressed,
+      leadingIcon: icon,
+      child: Text(tooltip ?? ''),
+    ),
+    ButtonStyleButton(:final onPressed, :final child) => MenuItemButton(
+      onPressed: onPressed,
+      child: child,
+    ),
+    _ => null,
+  };
 
   Widget? _impliedLeading(BuildContext context) {
     if (!appBar.automaticallyImplyLeading) return null;

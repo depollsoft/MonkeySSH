@@ -279,8 +279,14 @@ class _LockScreenState extends ConsumerState<LockScreen> {
         ),
       ],
     ];
-    final fold = resolveDisplayFold(MediaQuery.of(context));
-    if (fold != null) {
+    final mediaQuery = MediaQuery.of(context);
+    final fold = resolveDisplayFold(mediaQuery);
+    // Propped up, the keyboard rises over the bottom page; once it leaves
+    // too little of that page for the PIN, the screen is one scrolling page.
+    final keyboardTop = mediaQuery.size.height - mediaQuery.viewInsets.bottom;
+    if (fold != null &&
+        (fold.isVertical ||
+            keyboardTop - fold.trailingPageStart >= _minPinPageExtent)) {
       // Across a fold, the brand is a cover page and the PIN sits on the
       // other page: the right one held like a book, the bottom one, where
       // the hands rest, propped up like a laptop.
@@ -324,6 +330,9 @@ class _LockScreenState extends ConsumerState<LockScreen> {
     );
   }
 }
+
+/// The least height a fold's PIN page keeps for its field and button.
+const double _minPinPageExtent = 240;
 
 /// One page of the lock screen spread across a fold: its content centred
 /// at the single-page width, scrolling when the page is short.

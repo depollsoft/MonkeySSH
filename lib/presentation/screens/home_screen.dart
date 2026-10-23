@@ -479,7 +479,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     }
     final isWide = mediaQuery.size.width >= _mobileBreakpoint;
 
-    return isWide ? _buildDesktopLayout() : _buildMobileLayout();
+    return isWide
+        ? _buildDesktopLayout()
+        : _buildMobileLayout(
+            verticalBar: SystemVerticalBarScope.maybeOf(context),
+          );
   }
 
   /// Splits home across a fold held like a book: the phone layout on the
@@ -504,15 +508,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               data: displayFoldPageMediaQuery(mediaQuery, leadingPage),
               // The page takes the vertical bar only when the bar runs down
               // its own edge rather than beside the other page.
-              child: SystemVerticalBarScope(
-                bar: switch (SystemVerticalBarScope.maybeOf(context)) {
+              child: _buildMobileLayout(
+                showsConnectionsTab: false,
+                showsSettings: false,
+                verticalBar: switch (SystemVerticalBarScope.maybeOf(context)) {
                   final bar? when bar.edge == SystemVerticalBarEdge.left => bar,
                   _ => null,
                 },
-                child: _buildMobileLayout(
-                  showsConnectionsTab: false,
-                  showsSettings: false,
-                ),
               ),
             ),
           ),
@@ -552,7 +554,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     onPressed: () => context.push('/settings'),
   );
 
+  /// The phone layout, with its bars in [verticalBar] when there is one: the
+  /// window's, or a fold page's own.
   Widget _buildMobileLayout({
+    required SystemVerticalBar? verticalBar,
     bool showsConnectionsTab = true,
     bool showsSettings = true,
   }) {
@@ -567,8 +572,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final content = _buildContent(index: tabIndexes[selectedTab]);
     final settingsButton = _buildSettingsButton();
 
-    final verticalBar = SystemVerticalBarScope.maybeOf(context);
-    if (verticalBar != null) {
+    final bar = verticalBar;
+    if (bar != null) {
       // As in native apps on iPhone Duo, the tab bar and the bar's actions
       // stand in the vertical bar beside the status cluster, and the list
       // gets the whole height. The panel headers name the tab.
@@ -576,7 +581,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         resizeToAvoidBottomInset: false,
         body: VerticalBarRailPortal(
           rail: (context) => VerticalBarRail(
-            bar: verticalBar,
+            bar: bar,
             // A tab bar stays put under the keyboard, as on any iPhone.
             avoidsKeyboard: false,
             leading: [if (showsSettings) settingsButton],
@@ -595,7 +600,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               ),
             ],
           ),
-          child: SafeArea(bottom: false, child: content),
+          // Without a tab bar across the bottom, the lists end above the
+          // home indicator themselves.
+          child: SafeArea(child: content),
         ),
       );
     }
