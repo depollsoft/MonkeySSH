@@ -265,22 +265,69 @@ void main() {
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
 
-      // Two keys fit: the actions' menu and the chat options, so Back
-      // gives way to the edge swipe.
-      expect(find.byType(BackButton), findsNothing);
-      expect(
-        tester.getRect(find.byTooltip('Chat options')).top,
-        greaterThanOrEqualTo(264),
-      );
+      // Two keys fit: Back, and a menu holding every action, the popup's
+      // items as a submenu.
+      expect(find.byType(BackButton), findsOneWidget);
       expect(find.byTooltip('Search chat'), findsNothing);
+      expect(find.byTooltip('Chat options'), findsNothing);
       await tester.tap(find.byTooltip('Show menu'));
       await tester.pumpAndSettle();
-      for (final name in ['Search chat', 'Windows', 'Save']) {
+      for (final name in ['Search chat', 'Windows', 'Save', 'Chat options']) {
         expect(find.text(name), findsOneWidget, reason: name);
       }
       await tester.tap(find.text('Windows'));
       await tester.pumpAndSettle();
       expect(pressed, ['Windows']);
+    });
+
+    testWidgets('folds Back into the menu when one key fits', (tester) async {
+      useOuterDisplay(tester);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 360);
+      const shortBar = SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+      );
+      await tester.pumpWidget(
+        withBar(
+          bar: shortBar,
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  fullscreenDialog: true,
+                  builder: (context) => Scaffold(
+                    appBar: VerticalBarAppBar(
+                      AppBar(
+                        title: const Text('Editor'),
+                        actions: [
+                          IconButton(
+                            icon: const Icon(Icons.save_outlined),
+                            tooltip: 'Save',
+                            onPressed: () {},
+                          ),
+                        ],
+                      ),
+                    ),
+                    body: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      // A full-screen dialog has no edge swipe, so Close stays in reach.
+      expect(find.byType(CloseButton), findsNothing);
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save'), findsOneWidget);
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(find.text('Editor'), findsNothing);
     });
 
     testWidgets('is the plain app bar without a vertical bar', (tester) async {

@@ -487,72 +487,139 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     final actions = appBar.actions ?? const <Widget>[];
     return VerticalBarRailPortal(
       rail: (context) {
-        final capacity = verticalBarItemCapacity(
-          resolveVerticalBarColumn(bar, MediaQuery.of(context)),
-        );
-        // Back gives way first when the bar runs short, including to
-        // actions a menu cannot hold: the edge swipe still goes back.
-        var showsLeading =
-            leading != null && (actions.isEmpty || capacity >= 2);
-        var trailing = _fitActions(
+        final (leadingKeys, trailingKeys) = _fit(
+          context,
+          leading,
           actions,
-          math.max(1, capacity - (showsLeading ? 1 : 0)),
+          math.max(
+            1,
+            verticalBarItemCapacity(
+              resolveVerticalBarColumn(bar, MediaQuery.of(context)),
+            ),
+          ),
         );
-        if (showsLeading && trailing.length >= capacity) {
-          showsLeading = false;
-          trailing = _fitActions(actions, math.max(1, capacity));
-        }
         return VerticalBarRail(
           bar: bar,
-          leading: [if (showsLeading) ?leading],
-          trailing: trailing,
+          leading: leadingKeys,
+          trailing: trailingKeys,
         );
       },
       child: _titleOnly(appBar),
     );
   }
 
-  /// Fits [actions] into [slots] keys, the way native bars compress: the
-  /// actions farthest from the thumb move into a menu that takes their place.
-  static List<Widget> _fitActions(List<Widget> actions, int slots) {
-    if (actions.length <= slots) return actions;
-    final needed = actions.length - slots + 1;
-    final moved = <int, Widget>{};
-    for (var index = 0; index < actions.length; index += 1) {
-      if (moved.length == needed) break;
-      final entry = _menuEntryFor(actions[index]);
-      if (entry != null) moved[index] = entry;
+  /// Fits [leading] and [actions] into [capacity] keys, the way native bars
+  /// compress: the actions farthest from the thumb fold into a menu key in
+  /// their place. With one key left, [leading] folds into that menu too,
+  /// since a full-screen dialog or an unsaved-changes guard can leave no
+  /// edge swipe to go back with.
+  static (List<Widget>, List<Widget>) _fit(
+    BuildContext context,
+    Widget? leading,
+    List<Widget> actions,
+    int capacity,
+  ) {
+    if ((leading == null ? 0 : 1) + actions.length <= capacity) {
+      return ([?leading], actions);
     }
-    if (moved.isEmpty) return actions;
-    return [
-      MenuAnchor(
-        menuChildren: moved.values.toList(),
-        builder: (context, controller, _) => IconButton(
-          icon: const Icon(Icons.more_vert),
-          tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-          onPressed: () =>
-              controller.isOpen ? controller.close() : controller.open(),
-        ),
-      ),
-      for (final (index, action) in actions.indexed)
-        if (!moved.containsKey(index)) action,
+    final entries = [
+      for (final action in actions) _menuEntryFor(context, action),
     ];
+    final kept = [
+      for (final (index, action) in actions.indexed)
+        if (entries[index] == null) action,
+    ];
+    final slots = capacity - (leading == null ? 0 : 1);
+    if (slots >= 1 + kept.length) {
+      // Fold the actions farthest from the thumb until the rest fit beside
+      // the menu key, keeping the ones a menu cannot hold.
+      final folded = <int>{};
+      var shown = actions.length;
+      for (var index = 0; index < actions.length; index += 1) {
+        if (shown <= slots - 1) break;
+        if (entries[index] == null) continue;
+        folded.add(index);
+        shown -= 1;
+      }
+      return (
+        [?leading],
+        [
+          _menuKey([for (final index in folded) entries[index]!]),
+          for (final (index, action) in actions.indexed)
+            if (!folded.contains(index)) action,
+        ],
+      );
+    }
+    final leadingEntry = leading == null
+        ? null
+        : _menuEntryFor(context, leading);
+    return (
+      const <Widget>[],
+      [
+        _menuKey([?leadingEntry, ...entries.nonNulls]),
+        ...kept,
+      ],
+    );
   }
+
+  static Widget _menuKey(List<Widget> entries) => MenuAnchor(
+    menuChildren: entries,
+    builder: (context, controller, _) => IconButton(
+      icon: const Icon(Icons.more_vert),
+      tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+      onPressed: () =>
+          controller.isOpen ? controller.close() : controller.open(),
+    ),
+  );
 
   /// A menu entry that does what [action] does, for the kinds of action a
   /// menu can stand in for.
-  static Widget? _menuEntryFor(Widget action) => switch (action) {
-    IconButton(:final onPressed, :final icon, :final tooltip) => MenuItemButton(
-      onPressed: onPressed,
-      leadingIcon: icon,
-      child: Text(tooltip ?? ''),
-    ),
-    ButtonStyleButton(:final onPressed, :final child) => MenuItemButton(
-      onPressed: onPressed,
-      child: child,
-    ),
-    _ => null,
-  };
+  static Widget? _menuEntryFor(BuildContext context, Widget action) {
+    final localizations = MaterialLocalizations.of(context);
+    return switch (action) {
+      // Back and Close pop through the route's guards, as their keys do.
+      BackButton(:final onPressed) => MenuItemButton(
+        onPressed: onPressed ?? () => Navigator.maybePop(context),
+        leadingIcon: const BackButtonIcon(),
+        child: Text(localizations.backButtonTooltip),
+      ),
+      CloseButton(:final onPressed) => MenuItemButton(
+        onPressed: onPressed ?? () => Navigator.maybePop(context),
+        leadingIcon: const Icon(Icons.close),
+        child: Text(localizations.closeButtonTooltip),
+      ),
+      IconButton(:final onPressed, :final icon, :final tooltip) =>
+        MenuItemButton(
+          onPressed: onPressed,
+          leadingIcon: icon,
+          child: Text(tooltip ?? ''),
+        ),
+      ButtonStyleButton(:final onPressed, :final child) => MenuItemButton(
+        onPressed: onPressed,
+        child: child,
+      ),
+      PopupMenuButton<Object?>() => SubmenuButton(
+        leadingIcon: action.icon ?? const Icon(Icons.more_horiz),
+        menuChildren: [
+          for (final item in action.itemBuilder(context))
+            if (item is PopupMenuItem<Object?>)
+              MenuItemButton(
+                onPressed: item.enabled
+                    ? () {
+                        item.onTap?.call();
+                        action.onSelected?.call(item.value);
+                      }
+                    : null,
+                child: item.child,
+              )
+            else if (item is PopupMenuDivider)
+              const Divider(height: 1),
+        ],
+        child: Text(action.tooltip ?? localizations.showMenuTooltip),
+      ),
+      _ => null,
+    };
+  }
 
   Widget? _impliedLeading(BuildContext context) {
     if (!appBar.automaticallyImplyLeading) return null;

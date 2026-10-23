@@ -12827,7 +12827,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   if (terminalBarBottom != null)
                     Material(
                       color: theme.colorScheme.surface,
-                      child: terminalBarBottom,
+                      // The terminal clears side insets itself; this row
+                      // must clear the vertical bar on its own.
+                      child: SafeArea(
+                        top: false,
+                        bottom: false,
+                        child: terminalBarBottom,
+                      ),
                     ),
                   Expanded(child: terminalBody),
                 ],
