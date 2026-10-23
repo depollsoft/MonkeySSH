@@ -1,15 +1,8 @@
-What's new in this beta
+What's fixed in this beta
 
-- Get push notifications when an agent finishes a turn or needs you, even while the app is closed. Choose them per host.
-- See what is waiting on you at the top of Connections.
-- Add SOCKS forwards and browse through them in the in-app browser.
-- Find text in the terminal scrollback and export it.
-- Review working tree changes and ask the agent about a hunk.
-- Start a preset's agent in a new git worktree with an initial prompt.
-- Add your own ACP agents. Search and export native chats, catch up on what changed while you were away, and keep unsent drafts after the app closes.
-- Import hosts from an ssh_config, install a key on a host, and share a public key as a QR code.
-- Forward your SSH agent to a host with MonkeySSH Pro.
-- Use keyboard shortcuts, open hosts and chats from monkeyssh:// and ssh:// links, and press keys from snippets.
-- Sort, filter, and act on many files at once in SFTP, and extract zip and tar archives on the host.
+- Fix duplicated Pi chat history after reconnecting.
+- Keep queued prompts and permission requests through connection recovery.
+- Stop false approval notifications for requests the app handles automatically.
+- Fix Codex terminal redraws when opening a session in MonkeyMux.
 
 Please report rough edges through the support link.

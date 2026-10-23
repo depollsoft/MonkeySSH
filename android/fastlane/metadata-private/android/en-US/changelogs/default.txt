@@ -1,11 +1,6 @@
-What's new in this beta
+What's fixed in this beta
 
-- Push notifications when an agent finishes or needs you, set per host.
-- What is waiting on you now leads Connections.
-- SOCKS forwards for the in-app browser.
-- Find and export terminal scrollback.
-- Review working tree changes and ask the agent about a hunk.
-- Presets can start agents in a new git worktree.
-- Custom ACP agents, plus chat search and export.
-- ssh_config import and key install on a host.
-- Keyboard shortcuts, app links, and SFTP batch actions.
+- Fix duplicated Pi chat history after reconnecting.
+- Keep queued prompts and permission requests through connection recovery.
+- Stop false approval notifications for requests the app handles automatically.
+- Fix Codex terminal redraws when opening a session in MonkeyMux.
