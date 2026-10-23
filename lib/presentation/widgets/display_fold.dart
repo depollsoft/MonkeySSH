@@ -4,6 +4,7 @@ import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 import 'package:flutter/widgets.dart';
 
 import '../controllers/platform_display_features_controller.dart';
+import 'system_vertical_bar.dart';
 
 /// A fold or hinge that currently splits the window into two pages.
 ///
@@ -106,6 +107,60 @@ DisplayFold? resolveDisplayFold(MediaQueryData mediaQuery) {
 MediaQueryData displayFoldPageMediaQuery(MediaQueryData window, Rect page) =>
     window.removeDisplayFeatures(page).copyWith(size: page.size);
 
+/// Lays [leading] and [trailing] out on the two pages of [fold], each with
+/// its own page's media query, so neither crosses the crease.
+///
+/// Like the other fold layouts, it expects to start at the window's origin,
+/// so the fold's window coordinates map onto it directly. When it gets less
+/// than the window, as when a Scaffold makes room for the keyboard, each page
+/// keeps only the part that is still on screen.
+class DisplayFoldSpread extends StatelessWidget {
+  /// Spreads [leading] and [trailing] across [fold].
+  const DisplayFoldSpread({
+    required this.fold,
+    required this.leading,
+    required this.trailing,
+    super.key,
+  });
+
+  /// The fold between the pages.
+  final DisplayFold fold;
+
+  /// The left page held like a book, the top page propped up.
+  final Widget leading;
+
+  /// The right page held like a book, the bottom page propped up.
+  final Widget trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final available = Offset.zero & constraints.biggest;
+        Widget page(Rect rect, Widget child) {
+          final visible = rect.intersect(available);
+          if (visible.isEmpty) return const SizedBox.shrink();
+          return Positioned.fromRect(
+            rect: visible,
+            child: MediaQuery(
+              data: displayFoldPageMediaQuery(mediaQuery, visible),
+              child: child,
+            ),
+          );
+        }
+
+        return Stack(
+          children: [
+            page(fold.leadingPage(mediaQuery.size), leading),
+            page(fold.trailingPage(mediaQuery.size), trailing),
+          ],
+        );
+      },
+    );
+  }
+}
+
 bool _separatesContent(DisplayFeature feature) => switch (feature.type) {
   DisplayFeatureType.hinge => true,
   DisplayFeatureType.fold =>
@@ -113,7 +168,8 @@ bool _separatesContent(DisplayFeature feature) => switch (feature.type) {
   DisplayFeatureType.cutout || DisplayFeatureType.unknown => false,
 };
 
-/// Adds natively reported display features to [MediaQueryData].
+/// Adds natively reported display features to [MediaQueryData] and provides
+/// the system vertical bar through [SystemVerticalBarScope].
 ///
 /// Installed once above the app's navigator, next to the keyboard inset
 /// guard, so every route, dialog, and popup sees the fold. Flutter's dialogs
@@ -133,34 +189,46 @@ class PlatformDisplayFeaturesMediaQuery extends StatefulWidget {
 }
 
 class _PlatformDisplayFeaturesMediaQueryState
-    extends State<PlatformDisplayFeaturesMediaQuery> {
+    extends State<PlatformDisplayFeaturesMediaQuery>
+    with WidgetsBindingObserver {
   final _controller = PlatformDisplayFeaturesController.instance;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_handleFeaturesChanged);
     unawaited(_controller.initialize());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.removeListener(_handleFeaturesChanged);
     super.dispose();
   }
+
+  // The vertical bar appears with new safe area insets, which can come after
+  // the first read at launch.
+  @override
+  void didChangeMetrics() => unawaited(_controller.refresh());
 
   void _handleFeaturesChanged() => setState(() {});
 
   @override
   Widget build(BuildContext context) {
     final platformFeatures = _controller.features;
-    if (platformFeatures.isEmpty) return widget.child;
+    final child = SystemVerticalBarScope(
+      bar: _controller.verticalBar,
+      child: widget.child,
+    );
+    if (platformFeatures.isEmpty) return child;
     final mediaQuery = MediaQuery.of(context);
     return MediaQuery(
       data: mediaQuery.copyWith(
         displayFeatures: [...mediaQuery.displayFeatures, ...platformFeatures],
       ),
-      child: widget.child,
+      child: child,
     );
   }
 }

@@ -12,6 +12,7 @@ import '../view_models/agent_management_view_model.dart';
 import '../widgets/agent_tool_icon.dart';
 import '../widgets/agent_usage_summary.dart';
 import '../widgets/premium_access.dart';
+import '../widgets/system_vertical_bar.dart';
 import 'agent_management_presentation.dart';
 
 /// Manages coding-agent CLIs and ACP adapters on an active remote host.
@@ -149,8 +150,10 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
         ref.read(monetizationServiceProvider).currentState;
     if (!access.allowsFeature(MonetizationFeature.agentManagement)) {
       return Scaffold(
-        appBar: AppBar(
-          title: Text('Agent Management', style: FluttyTheme.displayMono()),
+        appBar: VerticalBarAppBar(
+          AppBar(
+            title: Text('Agent Management', style: FluttyTheme.displayMono()),
+          ),
         ),
         body: SafeArea(
           child: Center(
@@ -255,26 +258,30 @@ class _AgentManagementScreenState extends ConsumerState<AgentManagementScreen> {
       'Providers available to native agent windows',
     );
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Agent Management', style: FluttyTheme.displayMono()),
-        actions: [
-          IconButton(
-            key: const ValueKey('agent-management-refresh'),
-            tooltip: 'Refresh agents',
-            onPressed: _model.refreshing || _model.busy ? null : _model.refresh,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(2),
-          child: SizedBox(
-            height: 2,
-            child: _model.refreshing
-                ? const LinearProgressIndicator(
-                    minHeight: 2,
-                    semanticsLabel: 'Checking agent versions',
-                  )
-                : null,
+      appBar: VerticalBarAppBar(
+        AppBar(
+          title: Text('Agent Management', style: FluttyTheme.displayMono()),
+          actions: [
+            IconButton(
+              key: const ValueKey('agent-management-refresh'),
+              tooltip: 'Refresh agents',
+              onPressed: _model.refreshing || _model.busy
+                  ? null
+                  : _model.refresh,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(2),
+            child: SizedBox(
+              height: 2,
+              child: _model.refreshing
+                  ? const LinearProgressIndicator(
+                      minHeight: 2,
+                      semanticsLabel: 'Checking agent versions',
+                    )
+                  : null,
+            ),
           ),
         ),
       ),

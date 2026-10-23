@@ -12,6 +12,7 @@ import '../../app/theme.dart';
 import '../../domain/models/acp_mcp_server.dart';
 import '../../domain/services/acp_mcp_server_service.dart';
 import '../widgets/brand_empty_state.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Opens the MCP server list on the nearest navigator.
 Future<void> openAcpMcpServersScreen(BuildContext context) =>
@@ -51,7 +52,7 @@ class AcpMcpServersScreen extends ConsumerWidget {
     final servers = serversAsync.asData?.value ?? const <AcpMcpServerConfig>[];
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('MCP Servers')),
+      appBar: VerticalBarAppBar(AppBar(title: const Text('MCP Servers'))),
       floatingActionButton: servers.isEmpty
           ? null
           : FloatingActionButton(
@@ -59,56 +60,60 @@ class AcpMcpServersScreen extends ConsumerWidget {
               onPressed: () => unawaited(_openEditor(context, servers)),
               child: const Icon(Icons.add),
             ),
-      body: serversAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) =>
-            const Center(child: Text('Could not load MCP servers.')),
-        data: (servers) => servers.isEmpty
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(FluttyTheme.spacingLg),
-                  child: BrandEmptyState(
-                    title: 'no mcp servers',
-                    message: 'Agents only know the tools you hand them.',
-                    primaryLabel: 'Add MCP server',
-                    onPrimary: () => unawaited(_openEditor(context, servers)),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: serversAsync.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, _) =>
+              const Center(child: Text('Could not load MCP servers.')),
+          data: (servers) => servers.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(FluttyTheme.spacingLg),
+                    child: BrandEmptyState(
+                      title: 'no mcp servers',
+                      message: 'Agents only know the tools you hand them.',
+                      primaryLabel: 'Add MCP server',
+                      onPrimary: () => unawaited(_openEditor(context, servers)),
+                    ),
                   ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.only(bottom: 96),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingSm,
+                      ),
+                      child: Text(
+                        'Switched-on servers attach to new native agent '
+                        'sessions; adjust the set per session when you start '
+                        'it. The agent launches stdio servers on the remote '
+                        'host.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    for (final server in servers)
+                      _ServerTile(
+                        key: ValueKey('mcp-server-${server.id}'),
+                        server: server,
+                        onTap: () =>
+                            unawaited(_openEditor(context, servers, server)),
+                        onDefaultChanged: (enabled) => unawaited(
+                          ref
+                              .read(acpMcpServerServiceProvider)
+                              .setUseByDefault(server.id, enabled: enabled),
+                        ),
+                      ),
+                  ],
                 ),
-              )
-            : ListView(
-                padding: const EdgeInsets.only(bottom: 96),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingSm,
-                    ),
-                    child: Text(
-                      'Switched-on servers attach to new native agent '
-                      'sessions; adjust the set per session when you start '
-                      'it. The agent launches stdio servers on the remote '
-                      'host.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  for (final server in servers)
-                    _ServerTile(
-                      key: ValueKey('mcp-server-${server.id}'),
-                      server: server,
-                      onTap: () =>
-                          unawaited(_openEditor(context, servers, server)),
-                      onDefaultChanged: (enabled) => unawaited(
-                        ref
-                            .read(acpMcpServerServiceProvider)
-                            .setUseByDefault(server.id, enabled: enabled),
-                      ),
-                    ),
-                ],
-              ),
+        ),
       ),
     );
   }
@@ -393,176 +398,183 @@ class _AcpMcpServerEditScreenState
         if (!didPop) unawaited(_confirmDiscard());
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: Text(isEditing ? 'Edit MCP Server' : 'Add MCP Server'),
-          actions: [
-            if (isEditing)
-              IconButton(
-                tooltip: 'Delete',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: _saving ? null : () => unawaited(_delete()),
-              ),
-          ],
+        appBar: VerticalBarAppBar(
+          AppBar(
+            title: Text(isEditing ? 'Edit MCP Server' : 'Add MCP Server'),
+            actions: [
+              if (isEditing)
+                IconButton(
+                  tooltip: 'Delete',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: _saving ? null : () => unawaited(_delete()),
+                ),
+            ],
+          ),
         ),
-        body: Form(
-          key: _formKey,
-          onChanged: _markDirty,
-          child: ListView(
-            padding: const EdgeInsets.all(FluttyTheme.spacingMd),
-            children: [
-              if (widget.server?.hasUnreadableSecrets ?? false) ...[
-                _UnreadableSecretsBanner(textStyle: muted),
-                const SizedBox(height: FluttyTheme.spacingMd),
-              ],
-              TextFormField(
-                key: const ValueKey('mcp-server-name'),
-                controller: _name,
-                autocorrect: false,
-                enableSuggestions: false,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  hintText: 'github',
-                ),
-                validator: (value) => AcpMcpServerValidation.name(
-                  value ?? '',
-                  otherNames: widget.otherNames,
-                ),
-              ),
-              const SizedBox(height: FluttyTheme.spacingMd),
-              SegmentedButton<AcpMcpServerTransport>(
-                segments: [
-                  for (final transport in AcpMcpServerTransport.values)
-                    ButtonSegment<AcpMcpServerTransport>(
-                      value: transport,
-                      label: Text(transport.label),
-                    ),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Form(
+            key: _formKey,
+            onChanged: _markDirty,
+            child: ListView(
+              padding: const EdgeInsets.all(FluttyTheme.spacingMd),
+              children: [
+                if (widget.server?.hasUnreadableSecrets ?? false) ...[
+                  _UnreadableSecretsBanner(textStyle: muted),
+                  const SizedBox(height: FluttyTheme.spacingMd),
                 ],
-                selected: {_transport},
-                showSelectedIcon: false,
-                onSelectionChanged: (selection) => setState(() {
-                  _transport = selection.single;
-                  _dirty = true;
-                }),
-              ),
-              const SizedBox(height: FluttyTheme.spacingSm),
-              Text(switch (_transport) {
-                AcpMcpServerTransport.stdio =>
-                  'The agent starts this server as a process on the remote '
-                      'host, so the command must be installed there. Every '
-                      'agent supports stdio.',
-                AcpMcpServerTransport.http =>
-                  'The agent connects to this URL from the remote host. '
-                      'Agents that do not support HTTP MCP servers skip it.',
-                AcpMcpServerTransport.sse =>
-                  'SSE is deprecated by MCP; prefer HTTP when the server '
-                      'offers it. Agents that do not support SSE skip it.',
-              }, style: muted),
-              const SizedBox(height: FluttyTheme.spacingMd),
-              if (_transport == AcpMcpServerTransport.stdio) ...[
                 TextFormField(
-                  key: const ValueKey('mcp-server-command'),
-                  controller: _command,
+                  key: const ValueKey('mcp-server-name'),
+                  controller: _name,
                   autocorrect: false,
                   enableSuggestions: false,
-                  style: FluttyTheme.monoStyle,
+                  textInputAction: TextInputAction.next,
                   decoration: const InputDecoration(
-                    labelText: 'Command',
-                    hintText: '/usr/local/bin/mcp-server',
-                    helperText: 'An absolute path is most reliable.',
+                    labelText: 'Name',
+                    hintText: 'github',
                   ),
-                  validator: (value) =>
-                      AcpMcpServerValidation.command(value ?? ''),
+                  validator: (value) => AcpMcpServerValidation.name(
+                    value ?? '',
+                    otherNames: widget.otherNames,
+                  ),
                 ),
                 const SizedBox(height: FluttyTheme.spacingMd),
-                TextFormField(
-                  key: const ValueKey('mcp-server-args'),
-                  controller: _args,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  minLines: 2,
-                  maxLines: 6,
-                  style: FluttyTheme.monoStyle,
-                  decoration: const InputDecoration(
-                    labelText: 'Arguments',
-                    hintText: '--stdio',
-                    helperText: 'One argument per line. No shell quoting.',
-                    alignLabelWithHint: true,
+                SegmentedButton<AcpMcpServerTransport>(
+                  segments: [
+                    for (final transport in AcpMcpServerTransport.values)
+                      ButtonSegment<AcpMcpServerTransport>(
+                        value: transport,
+                        label: Text(transport.label),
+                      ),
+                  ],
+                  selected: {_transport},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) => setState(() {
+                    _transport = selection.single;
+                    _dirty = true;
+                  }),
+                ),
+                const SizedBox(height: FluttyTheme.spacingSm),
+                Text(switch (_transport) {
+                  AcpMcpServerTransport.stdio =>
+                    'The agent starts this server as a process on the remote '
+                        'host, so the command must be installed there. Every '
+                        'agent supports stdio.',
+                  AcpMcpServerTransport.http =>
+                    'The agent connects to this URL from the remote host. '
+                        'Agents that do not support HTTP MCP servers skip it.',
+                  AcpMcpServerTransport.sse =>
+                    'SSE is deprecated by MCP; prefer HTTP when the server '
+                        'offers it. Agents that do not support SSE skip it.',
+                }, style: muted),
+                const SizedBox(height: FluttyTheme.spacingMd),
+                if (_transport == AcpMcpServerTransport.stdio) ...[
+                  TextFormField(
+                    key: const ValueKey('mcp-server-command'),
+                    controller: _command,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    style: FluttyTheme.monoStyle,
+                    decoration: const InputDecoration(
+                      labelText: 'Command',
+                      hintText: '/usr/local/bin/mcp-server',
+                      helperText: 'An absolute path is most reliable.',
+                    ),
+                    validator: (value) =>
+                        AcpMcpServerValidation.command(value ?? ''),
                   ),
-                ),
-                const SizedBox(height: FluttyTheme.spacingLg),
-                _PairsEditor(
-                  title: 'Environment variables',
-                  addLabel: 'Add variable',
-                  namePlaceholder: 'API_KEY',
-                  drafts: _env,
-                  isHeader: false,
-                  onChanged: () => setState(() => _dirty = true),
-                ),
-              ] else ...[
-                TextFormField(
-                  key: const ValueKey('mcp-server-url'),
-                  controller: _url,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  keyboardType: TextInputType.url,
-                  style: FluttyTheme.monoStyle,
-                  decoration: const InputDecoration(
-                    labelText: 'URL',
-                    hintText: 'https://mcp.example.com/mcp',
+                  const SizedBox(height: FluttyTheme.spacingMd),
+                  TextFormField(
+                    key: const ValueKey('mcp-server-args'),
+                    controller: _args,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    minLines: 2,
+                    maxLines: 6,
+                    style: FluttyTheme.monoStyle,
+                    decoration: const InputDecoration(
+                      labelText: 'Arguments',
+                      hintText: '--stdio',
+                      helperText: 'One argument per line. No shell quoting.',
+                      alignLabelWithHint: true,
+                    ),
                   ),
-                  validator: (value) => AcpMcpServerValidation.url(value ?? ''),
-                ),
-                const SizedBox(height: FluttyTheme.spacingLg),
-                _PairsEditor(
-                  title: 'Headers',
-                  addLabel: 'Add header',
-                  namePlaceholder: 'Authorization',
-                  drafts: _headers,
-                  isHeader: true,
-                  onChanged: () => setState(() => _dirty = true),
-                ),
-              ],
-              const SizedBox(height: FluttyTheme.spacingSm),
-              Text(
-                'Values are encrypted on this device and only sent to the '
-                'agent when a session starts.',
-                style: muted,
-              ),
-              const SizedBox(height: FluttyTheme.spacingMd),
-              SwitchListTile(
-                key: const ValueKey('mcp-server-default'),
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Use by default'),
-                subtitle: const Text('Preselect for new agent sessions'),
-                value: _useByDefault,
-                onChanged: (value) => setState(() {
-                  _useByDefault = value;
-                  _dirty = true;
-                }),
-              ),
-              if (_saveError != null) ...[
+                  const SizedBox(height: FluttyTheme.spacingLg),
+                  _PairsEditor(
+                    title: 'Environment variables',
+                    addLabel: 'Add variable',
+                    namePlaceholder: 'API_KEY',
+                    drafts: _env,
+                    isHeader: false,
+                    onChanged: () => setState(() => _dirty = true),
+                  ),
+                ] else ...[
+                  TextFormField(
+                    key: const ValueKey('mcp-server-url'),
+                    controller: _url,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    keyboardType: TextInputType.url,
+                    style: FluttyTheme.monoStyle,
+                    decoration: const InputDecoration(
+                      labelText: 'URL',
+                      hintText: 'https://mcp.example.com/mcp',
+                    ),
+                    validator: (value) =>
+                        AcpMcpServerValidation.url(value ?? ''),
+                  ),
+                  const SizedBox(height: FluttyTheme.spacingLg),
+                  _PairsEditor(
+                    title: 'Headers',
+                    addLabel: 'Add header',
+                    namePlaceholder: 'Authorization',
+                    drafts: _headers,
+                    isHeader: true,
+                    onChanged: () => setState(() => _dirty = true),
+                  ),
+                ],
                 const SizedBox(height: FluttyTheme.spacingSm),
                 Text(
-                  _saveError!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.error,
+                  'Values are encrypted on this device and only sent to the '
+                  'agent when a session starts.',
+                  style: muted,
+                ),
+                const SizedBox(height: FluttyTheme.spacingMd),
+                SwitchListTile(
+                  key: const ValueKey('mcp-server-default'),
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Use by default'),
+                  subtitle: const Text('Preselect for new agent sessions'),
+                  value: _useByDefault,
+                  onChanged: (value) => setState(() {
+                    _useByDefault = value;
+                    _dirty = true;
+                  }),
+                ),
+                if (_saveError != null) ...[
+                  const SizedBox(height: FluttyTheme.spacingSm),
+                  Text(
+                    _saveError!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
                   ),
+                ],
+                const SizedBox(height: FluttyTheme.spacingLg),
+                FilledButton.icon(
+                  onPressed: _saving ? null : () => unawaited(_save()),
+                  icon: _saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save),
+                  label: Text(isEditing ? 'Save Changes' : 'Add Server'),
                 ),
               ],
-              const SizedBox(height: FluttyTheme.spacingLg),
-              FilledButton.icon(
-                onPressed: _saving ? null : () => unawaited(_save()),
-                icon: _saving
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.save),
-                label: Text(isEditing ? 'Save Changes' : 'Add Server'),
-              ),
-            ],
+            ),
           ),
         ),
       ),

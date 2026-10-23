@@ -73,6 +73,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/public_key_share_sheet.dart';
 import '../widgets/reorder_helpers.dart';
 import '../widgets/snippet_folder_dialog.dart';
+import '../widgets/system_vertical_bar.dart';
 import '../widgets/tmux_window_navigator.dart' show confirmMuxWindowClose;
 import 'snippet_edit_screen.dart';
 import 'transfer_screen.dart';
@@ -175,6 +176,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   // Breakpoint for switching between mobile and desktop layout
   static const double _mobileBreakpoint = 600;
+
+  // The phone layout's tabs, by _selectedIndex.
+  static const _homeTabs = <_HomeTab>[
+    _HomeTab(Icons.dns_outlined, Icons.dns_rounded, 'Hosts'),
+    _HomeTab(Icons.link_outlined, Icons.link, 'Connections'),
+    _HomeTab(Icons.key_outlined, Icons.key_rounded, 'Keys'),
+    _HomeTab(Icons.code_outlined, Icons.code_rounded, 'Snippets'),
+  ];
 
   @override
   void initState() {
@@ -493,7 +502,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             width: leadingPage.width,
             child: MediaQuery(
               data: displayFoldPageMediaQuery(mediaQuery, leadingPage),
-              child: _buildMobileLayout(showsConnectionsTab: false),
+              // The page takes the vertical bar only when the bar runs down
+              // its own edge rather than beside the other page.
+              child: SystemVerticalBarScope(
+                bar: switch (SystemVerticalBarScope.maybeOf(context)) {
+                  final bar? when bar.edge == SystemVerticalBarEdge.left => bar,
+                  _ => null,
+                },
+                child: _buildMobileLayout(
+                  showsConnectionsTab: false,
+                  showsSettings: false,
+                ),
+              ),
             ),
           ),
           SizedBox(width: fold.thickness),
@@ -507,9 +527,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     left: BorderSide(color: colorScheme.outline.withAlpha(60)),
                   ),
                 ),
-                child: const Scaffold(
+                // A bar matching the other page's keeps both panel headers on
+                // one line, with Settings at the top right of the spread as on
+                // the phone.
+                child: Scaffold(
                   resizeToAvoidBottomInset: false,
-                  body: SafeArea(child: _ConnectionsPanel()),
+                  appBar: AppBar(
+                    automaticallyImplyLeading: false,
+                    actions: [_buildSettingsButton()],
+                  ),
+                  body: const SafeArea(top: false, child: _ConnectionsPanel()),
                 ),
               ),
             ),
@@ -519,13 +546,60 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
   }
 
-  Widget _buildMobileLayout({bool showsConnectionsTab = true}) {
+  Widget _buildSettingsButton() => IconButton(
+    icon: const Icon(Icons.settings_outlined),
+    tooltip: 'Settings',
+    onPressed: () => context.push('/settings'),
+  );
+
+  Widget _buildMobileLayout({
+    bool showsConnectionsTab = true,
+    bool showsSettings = true,
+  }) {
     // With connections on their own page, the tab bar skips that tab while
     // the selection keeps its place for when the page goes away.
     final tabIndexes = showsConnectionsTab
         ? const [0, 1, 2, 3]
         : const [0, 2, 3];
     final selectedTab = max(0, tabIndexes.indexOf(_selectedIndex));
+    final tabs = [for (final index in tabIndexes) _homeTabs[index]];
+    void selectTab(int tab) => setState(() => _selectedIndex = tabIndexes[tab]);
+    final content = _buildContent(index: tabIndexes[selectedTab]);
+    final settingsButton = _buildSettingsButton();
+
+    final verticalBar = SystemVerticalBarScope.maybeOf(context);
+    if (verticalBar != null) {
+      // As in native apps on iPhone Duo, the tab bar and the bar's actions
+      // stand in the vertical bar beside the status cluster, and the list
+      // gets the whole height. The panel headers name the tab.
+      return Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: VerticalBarRailPortal(
+          rail: (context) => VerticalBarRail(
+            bar: verticalBar,
+            // A tab bar stays put under the keyboard, as on any iPhone.
+            avoidsKeyboard: false,
+            leading: [if (showsSettings) settingsButton],
+            trailing: [
+              VerticalBarTabs(
+                tabs: [
+                  for (final tab in tabs)
+                    VerticalBarTab(
+                      icon: tab.icon,
+                      selectedIcon: tab.selectedIcon,
+                      label: tab.label,
+                    ),
+                ],
+                selectedIndex: selectedTab,
+                onSelected: selectTab,
+              ),
+            ],
+          ),
+          child: SafeArea(bottom: false, child: content),
+        ),
+      );
+    }
+
     return Scaffold(
       // This shell has no text input. Ignore stale IME insets left behind by
       // input-heavy routes.
@@ -546,51 +620,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             Text(ref.watch(appDisplayNameProvider)),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => context.push('/settings'),
-          ),
-        ],
+        actions: [if (showsSettings) settingsButton],
       ),
-      // Rows clear a side status bar strip, as on iPhone Duo's outer display;
-      // the app bar and tab bar already pad themselves.
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: _buildContent(index: tabIndexes[selectedTab]),
-      ),
+      // Rows clear a side inset, such as iPhone Duo's status bar strip when
+      // an app opts out of the vertical bar; the app bar and tab bar already
+      // pad themselves.
+      body: SafeArea(top: false, bottom: false, child: content),
       bottomNavigationBar: NavigationBar(
         // Keep destinations clear of edge-to-edge system navigation while an
         // IME inset temporarily reduces MediaQuery.padding.
         maintainBottomViewPadding: true,
         selectedIndex: selectedTab,
-        onDestinationSelected: (tab) =>
-            setState(() => _selectedIndex = tabIndexes[tab]),
+        onDestinationSelected: selectTab,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         height: 65,
         destinations: [
-          const NavigationDestination(
-            icon: Icon(Icons.dns_outlined),
-            selectedIcon: Icon(Icons.dns_rounded),
-            label: 'Hosts',
-          ),
-          if (showsConnectionsTab)
-            const NavigationDestination(
-              icon: Icon(Icons.link_outlined),
-              selectedIcon: Icon(Icons.link),
-              label: 'Connections',
+          for (final tab in tabs)
+            NavigationDestination(
+              icon: Icon(tab.icon),
+              selectedIcon: Icon(tab.selectedIcon),
+              label: tab.label,
             ),
-          const NavigationDestination(
-            icon: Icon(Icons.key_outlined),
-            selectedIcon: Icon(Icons.key_rounded),
-            label: 'Keys',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.code_outlined),
-            selectedIcon: Icon(Icons.code_rounded),
-            label: 'Snippets',
-          ),
         ],
       ),
     );
@@ -2401,23 +2451,35 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header bar
-        PanelHeader(
-          title: 'snippets',
-          actions: [
-            _ActionButton(
-              icon: Icons.create_new_folder_outlined,
-              label: 'New Folder',
-              onTap: () => unawaited(_createFolder(context)),
-            ),
-            const SizedBox(width: 8),
-            _ActionButton(
-              icon: Icons.add,
-              label: 'Add Snippet',
-              onTap: () => _addSnippet(context),
-              primary: true,
-            ),
-          ],
+        // Header bar. A narrow panel, such as iPhone Duo's outer display
+        // beside its vertical bar, keeps only the primary action labelled,
+        // like the hosts header.
+        LayoutBuilder(
+          builder: (context, constraints) => PanelHeader(
+            title: 'snippets',
+            actions: [
+              if (constraints.maxWidth < 420)
+                _SmallIconButton(
+                  icon: Icons.create_new_folder_outlined,
+                  tooltip: 'New Folder',
+                  onTap: () => unawaited(_createFolder(context)),
+                )
+              else ...[
+                _ActionButton(
+                  icon: Icons.create_new_folder_outlined,
+                  label: 'New Folder',
+                  onTap: () => unawaited(_createFolder(context)),
+                ),
+                const SizedBox(width: 8),
+              ],
+              _ActionButton(
+                icon: Icons.add,
+                label: 'Add Snippet',
+                onTap: () => _addSnippet(context),
+                primary: true,
+              ),
+            ],
+          ),
         ),
 
         // Snippets list
@@ -4106,4 +4168,12 @@ class _TmuxConnectionBadgeState extends ConsumerState<_TmuxConnectionBadge> {
       ),
     );
   }
+}
+
+class _HomeTab {
+  const _HomeTab(this.icon, this.selectedIcon, this.label);
+
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
 }

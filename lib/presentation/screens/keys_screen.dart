@@ -13,6 +13,7 @@ import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/public_key_share_sheet.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Screen displaying list of SSH keys.
 class KeysScreen extends ConsumerWidget {
@@ -24,15 +25,19 @@ class KeysScreen extends ConsumerWidget {
     final keysAsync = ref.watch(allKeysProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('SSH Keys')),
-      body: keysAsync.when(
-        loading: () => const BrandListSkeleton(),
-        error: (error, stack) => BrandErrorState(
-          title: 'couldn’t load keys',
-          message: 'Your SSH keys didn’t load.',
-          onRetry: () => ref.invalidate(allKeysProvider),
+      appBar: VerticalBarAppBar(AppBar(title: const Text('SSH Keys'))),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: keysAsync.when(
+          loading: () => const BrandListSkeleton(),
+          error: (error, stack) => BrandErrorState(
+            title: 'couldn’t load keys',
+            message: 'Your SSH keys didn’t load.',
+            onRetry: () => ref.invalidate(allKeysProvider),
+          ),
+          data: (keys) => _buildKeysList(context, ref, keys),
         ),
-        data: (keys) => _buildKeysList(context, ref, keys),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => context.push('/keys/add'),

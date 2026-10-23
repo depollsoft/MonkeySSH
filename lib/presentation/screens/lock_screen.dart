@@ -8,6 +8,7 @@ import '../../app/app_metadata.dart';
 import '../../app/theme.dart';
 import '../../domain/services/auth_service.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/display_fold.dart';
 
 /// Lock screen for PIN/biometric authentication.
 class LockScreen extends ConsumerStatefulWidget {
@@ -147,6 +148,151 @@ class _LockScreenState extends ConsumerState<LockScreen> {
       (false, false) => 'Enter your PIN to unlock',
     };
 
+    final brand = <Widget>[
+      // Logo/icon
+      ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: Image.asset(
+          'assets/icons/monkeyssh_icon.png',
+          width: 112,
+          height: 112,
+        ),
+      ),
+      const SizedBox(height: 32),
+      Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: appName,
+              style: FluttyTheme.displayMono(
+                fontSize: 24,
+                color: colorScheme.onSurface,
+              ),
+            ),
+            WidgetSpan(
+              alignment: PlaceholderAlignment.baseline,
+              baseline: TextBaseline.alphabetic,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: CursorBlock(size: 24, color: colorScheme.primary),
+              ),
+            ),
+          ],
+        ),
+        textAlign: TextAlign.center,
+      ),
+    ];
+    final controls = <Widget>[
+      Text(
+        subtitle,
+        style: theme.textTheme.bodyLarge?.copyWith(
+          color: colorScheme.onSurfaceVariant,
+        ),
+        textAlign: TextAlign.center,
+      ),
+      const SizedBox(height: 48),
+
+      if (isInitializing) ...[
+        const CircularProgressIndicator(),
+        const SizedBox(height: 24),
+      ],
+
+      // PIN input
+      if (!isInitializing &&
+          !showAuthMethodError &&
+          (_authMethod == AuthMethod.pin ||
+              _authMethod == AuthMethod.both)) ...[
+        SizedBox(
+          width: double.infinity,
+          child: TextField(
+            controller: _pinController,
+            focusNode: _focusNode,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            obscureText: !_showPin,
+            maxLength: 8,
+            style: theme.textTheme.headlineSmall?.copyWith(letterSpacing: 8),
+            decoration: InputDecoration(
+              counterText: '',
+              hintText: '••••',
+              errorText: _error,
+              prefixIcon: const SizedBox.shrink(),
+              prefixIconConstraints: const BoxConstraints.tightFor(
+                width: 48,
+                height: 48,
+              ),
+              suffixIconConstraints: const BoxConstraints.tightFor(
+                width: 48,
+                height: 48,
+              ),
+              suffixIcon: IconButton(
+                icon: Icon(_showPin ? Icons.visibility_off : Icons.visibility),
+                onPressed: () => setState(() => _showPin = !_showPin),
+              ),
+            ),
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            onSubmitted: (_) => _authenticateWithPin(),
+          ),
+        ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: _isLoading ? null : _authenticateWithPin,
+            child: _isLoading
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('Unlock'),
+          ),
+        ),
+      ],
+
+      // Biometric button
+      if (!isInitializing &&
+          !showAuthMethodError &&
+          (_authMethod == AuthMethod.biometric ||
+              _authMethod == AuthMethod.both)) ...[
+        const SizedBox(height: 24),
+        TextButton.icon(
+          onPressed: _isLoading ? null : _authenticateWithBiometrics,
+          icon: const Icon(Icons.fingerprint),
+          label: const Text('Use biometrics'),
+        ),
+      ],
+
+      if (showAuthMethodError) ...[
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: () {
+              setState(() {
+                _isCheckingAuthMethod = true;
+                _authMethodLoadFailed = false;
+              });
+              unawaited(_checkAuthMethod(refreshAuthState: true));
+            },
+            child: const Text('Retry'),
+          ),
+        ),
+      ],
+    ];
+    final fold = resolveDisplayFold(MediaQuery.of(context));
+    if (fold != null) {
+      // Across a fold, the brand is a cover page and the PIN sits on the
+      // other page: the right one held like a book, the bottom one, where
+      // the hands rest, propped up like a laptop.
+      return Scaffold(
+        body: DisplayFoldSpread(
+          fold: fold,
+          leading: _LockPage(children: brand),
+          trailing: _LockPage(children: controls),
+        ),
+      );
+    }
+
     return Scaffold(
       body: SafeArea(
         child: LayoutBuilder(
@@ -164,154 +310,9 @@ class _LockScreenState extends ConsumerState<LockScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      // Logo/icon
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(24),
-                        child: Image.asset(
-                          'assets/icons/monkeyssh_icon.png',
-                          width: 112,
-                          height: 112,
-                        ),
-                      ),
-                      const SizedBox(height: 32),
-                      Text.rich(
-                        TextSpan(
-                          children: [
-                            TextSpan(
-                              text: appName,
-                              style: FluttyTheme.displayMono(
-                                fontSize: 24,
-                                color: colorScheme.onSurface,
-                              ),
-                            ),
-                            WidgetSpan(
-                              alignment: PlaceholderAlignment.baseline,
-                              baseline: TextBaseline.alphabetic,
-                              child: Padding(
-                                padding: const EdgeInsets.only(left: 6),
-                                child: CursorBlock(
-                                  size: 24,
-                                  color: colorScheme.primary,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
+                      ...brand,
                       const SizedBox(height: 8),
-                      Text(
-                        subtitle,
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 48),
-
-                      if (isInitializing) ...[
-                        const CircularProgressIndicator(),
-                        const SizedBox(height: 24),
-                      ],
-
-                      // PIN input
-                      if (!isInitializing &&
-                          !showAuthMethodError &&
-                          (_authMethod == AuthMethod.pin ||
-                              _authMethod == AuthMethod.both)) ...[
-                        SizedBox(
-                          width: double.infinity,
-                          child: TextField(
-                            controller: _pinController,
-                            focusNode: _focusNode,
-                            keyboardType: TextInputType.number,
-                            textAlign: TextAlign.center,
-                            obscureText: !_showPin,
-                            maxLength: 8,
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                              letterSpacing: 8,
-                            ),
-                            decoration: InputDecoration(
-                              counterText: '',
-                              hintText: '••••',
-                              errorText: _error,
-                              prefixIcon: const SizedBox.shrink(),
-                              prefixIconConstraints:
-                                  const BoxConstraints.tightFor(
-                                    width: 48,
-                                    height: 48,
-                                  ),
-                              suffixIconConstraints:
-                                  const BoxConstraints.tightFor(
-                                    width: 48,
-                                    height: 48,
-                                  ),
-                              suffixIcon: IconButton(
-                                icon: Icon(
-                                  _showPin
-                                      ? Icons.visibility_off
-                                      : Icons.visibility,
-                                ),
-                                onPressed: () =>
-                                    setState(() => _showPin = !_showPin),
-                              ),
-                            ),
-                            inputFormatters: [
-                              FilteringTextInputFormatter.digitsOnly,
-                            ],
-                            onSubmitted: (_) => _authenticateWithPin(),
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: _isLoading ? null : _authenticateWithPin,
-                            child: _isLoading
-                                ? const SizedBox(
-                                    height: 20,
-                                    width: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Text('Unlock'),
-                          ),
-                        ),
-                      ],
-
-                      // Biometric button
-                      if (!isInitializing &&
-                          !showAuthMethodError &&
-                          (_authMethod == AuthMethod.biometric ||
-                              _authMethod == AuthMethod.both)) ...[
-                        const SizedBox(height: 24),
-                        TextButton.icon(
-                          onPressed: _isLoading
-                              ? null
-                              : _authenticateWithBiometrics,
-                          icon: const Icon(Icons.fingerprint),
-                          label: const Text('Use biometrics'),
-                        ),
-                      ],
-
-                      if (showAuthMethodError) ...[
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton(
-                            onPressed: () {
-                              setState(() {
-                                _isCheckingAuthMethod = true;
-                                _authMethodLoadFailed = false;
-                              });
-                              unawaited(
-                                _checkAuthMethod(refreshAuthState: true),
-                              );
-                            },
-                            child: const Text('Retry'),
-                          ),
-                        ),
-                      ],
+                      ...controls,
                     ],
                   ),
                 ),
@@ -322,4 +323,37 @@ class _LockScreenState extends ConsumerState<LockScreen> {
       ),
     );
   }
+}
+
+/// One page of the lock screen spread across a fold: its content centred
+/// at the single-page width, scrolling when the page is short.
+class _LockPage extends StatelessWidget {
+  const _LockPage({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: constraints.maxHeight > 48
+                ? constraints.maxHeight - 48
+                : 0,
+          ),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: children,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }

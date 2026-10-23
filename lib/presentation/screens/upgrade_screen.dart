@@ -11,6 +11,7 @@ import '../../domain/models/monetization.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/premium_badge.dart';
+import '../widgets/system_vertical_bar.dart';
 
 final _privacyPolicyUri = Uri.parse(
   'https://github.com/depollsoft/MonkeySSH/blob/main/docs/privacy-policy.md',
@@ -284,235 +285,241 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
     );
 
     return Scaffold(
-      appBar: AppBar(title: const Text('MonkeySSH Pro')),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          Row(
-            children: [
-              const PremiumBadge(),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  'Keep more agent work connected, make repeatable workflows one tap away, and move between remote sessions without losing your place.',
-                  style: theme.textTheme.bodyLarge,
+      appBar: VerticalBarAppBar(AppBar(title: const Text('MonkeySSH Pro'))),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            Row(
+              children: [
+                const PremiumBadge(),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Keep more agent work connected, make repeatable workflows one tap away, and move between remote sessions without losing your place.',
+                    style: theme.textTheme.bodyLarge,
+                  ),
                 ),
+              ],
+            ),
+            if (feature != null) ...[
+              const SizedBox(height: 20),
+              _UpgradeReasonCard(
+                feature: feature,
+                blockedAction: widget.blockedAction,
+                blockedOutcome: widget.blockedOutcome,
               ),
             ],
-          ),
-          if (feature != null) ...[
+            if (progressMessage case final message?) ...[
+              const SizedBox(height: 20),
+              _UpgradeProgressBanner(message: message),
+            ],
             const SizedBox(height: 20),
-            _UpgradeReasonCard(
-              feature: feature,
-              blockedAction: widget.blockedAction,
-              blockedOutcome: widget.blockedOutcome,
+            _SubscriptionLegalCard(
+              onOpenPrivacyPolicy: () =>
+                  _openLegalUrl(_privacyPolicyUri, 'the privacy policy'),
+              onOpenTermsOfUse: () =>
+                  _openLegalUrl(_termsOfUseUri, 'the Terms of Use'),
             ),
-          ],
-          if (progressMessage case final message?) ...[
-            const SizedBox(height: 20),
-            _UpgradeProgressBanner(message: message),
-          ],
-          const SizedBox(height: 20),
-          _SubscriptionLegalCard(
-            onOpenPrivacyPolicy: () =>
-                _openLegalUrl(_privacyPolicyUri, 'the privacy policy'),
-            onOpenTermsOfUse: () =>
-                _openLegalUrl(_termsOfUseUri, 'the Terms of Use'),
-          ),
-          if (isLifetimeUnlocked) ...[
-            const SizedBox(height: 20),
-            _UpgradeBanner(
-              key: const ValueKey('lifetime-status-banner'),
-              message:
-                  'MonkeySSH Pro Lifetime is already active. If an older monthly or annual subscription is still renewing, manage it in ${_storefrontLabel()} to cancel future renewals.',
-              backgroundColor: colorScheme.tertiaryContainer,
-              foregroundColor: colorScheme.onTertiaryContainer,
-            ),
-          ],
-          const SizedBox(height: 24),
-          Text(
-            'included with Pro',
-            style: FluttyTheme.displayMono(
-              fontSize: 15,
-              color: theme.colorScheme.onSurface,
-            ),
-          ),
-          const SizedBox(height: 12),
-          const _UpgradeBenefitTile(
-            icon: Icons.hub_outlined,
-            title: 'Parallel native chats',
-            subtitle: 'Keep multiple native agents connected, switch instantly, and fork active sessions.',
-          ),
-          const _UpgradeBenefitTile(
-            icon: Icons.history_outlined,
-            title: 'Recent terminal sessions',
-            subtitle: 'Discover agent work across windows and jump back in without hunting for it.',
-          ),
-          const _UpgradeBenefitTile(
-            icon: Icons.system_update_alt_rounded,
-            title: 'Agent Management',
-            subtitle: 'Install, repair, and update remote coding agents, with automatic update checks.',
-          ),
-          const _UpgradeBenefitTile(
-            icon: Icons.rocket_launch_outlined,
-            title: 'Agent launch presets',
-            subtitle: 'Save repeatable startup flows per host for Codex, Claude Code, Copilot CLI, OpenCode, and more.',
-          ),
-          const _UpgradeBenefitTile(
-            icon: Icons.play_circle_outline,
-            title: 'Auto-connect workflows',
-            subtitle: 'Run a command or saved snippet automatically after opening a terminal.',
-          ),
-          const _UpgradeBenefitTile(
-            icon: Icons.swap_horiz_outlined,
-            title: 'Encrypted transfers',
-            subtitle: 'Share hosts, keys, and migration bundles through encrypted files.',
-          ),
-          if (state.offers.isNotEmpty && !isLifetimeUnlocked) ...[
+            if (isLifetimeUnlocked) ...[
+              const SizedBox(height: 20),
+              _UpgradeBanner(
+                key: const ValueKey('lifetime-status-banner'),
+                message:
+                    'MonkeySSH Pro Lifetime is already active. If an older monthly or annual subscription is still renewing, manage it in ${_storefrontLabel()} to cancel future renewals.',
+                backgroundColor: colorScheme.tertiaryContainer,
+                foregroundColor: colorScheme.onTertiaryContainer,
+              ),
+            ],
             const SizedBox(height: 24),
             Text(
-              'choose a plan',
+              'included with Pro',
               style: FluttyTheme.displayMono(
                 fontSize: 15,
                 color: theme.colorScheme.onSurface,
               ),
             ),
-            if (annualSavingsPercent case final savings?) ...[
-              const SizedBox(height: 8),
-              _UpgradeBanner(
-                key: const ValueKey('annual-savings-label'),
-                message:
-                    'Annual is the best value - save about $savings% compared with paying monthly.',
-                backgroundColor: colorScheme.secondaryContainer,
-                foregroundColor: colorScheme.onSecondaryContainer,
-              ),
-            ],
-            if (sharedIntroductoryOfferLabel case final intro?) ...[
-              const SizedBox(height: 8),
-              _UpgradeBanner(
-                key: const ValueKey('shared-intro-offer-label'),
-                message: intro,
-                backgroundColor: colorScheme.primaryContainer,
-                foregroundColor: colorScheme.onPrimaryContainer,
-              ),
-            ],
             const SizedBox(height: 12),
-            Column(
-              children: state.offers
-                  .map(
-                    (offer) => Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: _PlanOfferCard(
-                        offer: offer,
-                        isCurrentPlan: state.isActiveOffer(offer),
-                        isBestValue:
-                            annualSavingsPercent != null &&
-                            offer.billingPeriod ==
-                                MonetizationBillingPeriod.annual,
-                        savingsPercent:
-                            offer.billingPeriod ==
-                                MonetizationBillingPeriod.annual
-                            ? annualSavingsPercent
-                            : null,
-                        hasAnyActiveSubscription: state.isProUnlocked,
-                        isBusy: isBusy,
-                        canManageSubscription: manageSubscriptionUrl != null,
-                        onSelect: () => _purchasePro(offer.id),
-                        onManage: _openManageSubscriptions,
-                      ),
-                    ),
-                  )
-                  .toList(growable: false),
+            const _UpgradeBenefitTile(
+              icon: Icons.hub_outlined,
+              title: 'Parallel native chats',
+              subtitle: 'Keep multiple native agents connected, switch instantly, and fork active sessions.',
             ),
-          ],
-          const SizedBox(height: 24),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    priceLabel,
-                    style: FluttyTheme.displayMono(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: colorScheme.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  if (priceDetailLabel case final detail?) ...[
-                    Text(detail, style: priceCardTextStyle),
-                    const SizedBox(height: 8),
-                  ],
-                  if (introductoryOfferLabel case final intro?) ...[
-                    _UpgradeBanner(
-                      message: intro,
-                      backgroundColor: colorScheme.primaryContainer,
-                      foregroundColor: colorScheme.onPrimaryContainer,
-                      compact: true,
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  Text(
-                    state.isProUnlocked
-                        ? isLifetimeUnlocked
-                              ? 'You already own MonkeySSH Pro Lifetime. If an older monthly or annual subscription is still active, manage it in ${_storefrontLabel()} to cancel future renewals.'
-                              : switch (state.activeOffer) {
-                                  final activeOffer? =>
-                                    '${activeOffer.planLabel} is active on this device.',
-                                  null => 'MonkeySSH Pro is already unlocked on this device.',
-                                }
-                        : 'No trial traps, fake urgency, or hidden close buttons. You can restore or manage your subscription from Settings at any time.',
-                    style: priceCardEmphasisStyle,
-                  ),
-                  if (state.lastError case final error?
-                      when error.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      error,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: colorScheme.error,
-                      ),
-                    ),
-                  ],
-                ],
+            const _UpgradeBenefitTile(
+              icon: Icons.history_outlined,
+              title: 'Recent terminal sessions',
+              subtitle: 'Discover agent work across windows and jump back in without hunting for it.',
+            ),
+            const _UpgradeBenefitTile(
+              icon: Icons.system_update_alt_rounded,
+              title: 'Agent Management',
+              subtitle: 'Install, repair, and update remote coding agents, with automatic update checks.',
+            ),
+            const _UpgradeBenefitTile(
+              icon: Icons.rocket_launch_outlined,
+              title: 'Agent launch presets',
+              subtitle: 'Save repeatable startup flows per host for Codex, Claude Code, Copilot CLI, OpenCode, and more.',
+            ),
+            const _UpgradeBenefitTile(
+              icon: Icons.play_circle_outline,
+              title: 'Auto-connect workflows',
+              subtitle: 'Run a command or saved snippet automatically after opening a terminal.',
+            ),
+            const _UpgradeBenefitTile(
+              icon: Icons.swap_horiz_outlined,
+              title: 'Encrypted transfers',
+              subtitle: 'Share hosts, keys, and migration bundles through encrypted files.',
+            ),
+            if (state.offers.isNotEmpty && !isLifetimeUnlocked) ...[
+              const SizedBox(height: 24),
+              Text(
+                'choose a plan',
+                style: FluttyTheme.displayMono(
+                  fontSize: 15,
+                  color: theme.colorScheme.onSurface,
+                ),
               ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          OutlinedButton(
-            onPressed: isBusy ? null : _restorePurchases,
-            child: Text(
-              _restoreInProgress ? 'Working...' : 'Restore purchases',
-            ),
-          ),
-          TextButton(
-            onPressed: isBusy || manageSubscriptionUrl == null
-                ? null
-                : _openManageSubscriptions,
-            style: TextButton.styleFrom(foregroundColor: colorScheme.onSurface),
-            child: Text(
-              isLifetimeUnlocked
-                  ? 'Manage existing subscription'
-                  : 'Manage subscription',
-            ),
-          ),
-          if (state.debugUnlockAvailable) ...[
+              if (annualSavingsPercent case final savings?) ...[
+                const SizedBox(height: 8),
+                _UpgradeBanner(
+                  key: const ValueKey('annual-savings-label'),
+                  message:
+                      'Annual is the best value - save about $savings% compared with paying monthly.',
+                  backgroundColor: colorScheme.secondaryContainer,
+                  foregroundColor: colorScheme.onSecondaryContainer,
+                ),
+              ],
+              if (sharedIntroductoryOfferLabel case final intro?) ...[
+                const SizedBox(height: 8),
+                _UpgradeBanner(
+                  key: const ValueKey('shared-intro-offer-label'),
+                  message: intro,
+                  backgroundColor: colorScheme.primaryContainer,
+                  foregroundColor: colorScheme.onPrimaryContainer,
+                ),
+              ],
+              const SizedBox(height: 12),
+              Column(
+                children: state.offers
+                    .map(
+                      (offer) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _PlanOfferCard(
+                          offer: offer,
+                          isCurrentPlan: state.isActiveOffer(offer),
+                          isBestValue:
+                              annualSavingsPercent != null &&
+                              offer.billingPeriod ==
+                                  MonetizationBillingPeriod.annual,
+                          savingsPercent:
+                              offer.billingPeriod ==
+                                  MonetizationBillingPeriod.annual
+                              ? annualSavingsPercent
+                              : null,
+                          hasAnyActiveSubscription: state.isProUnlocked,
+                          isBusy: isBusy,
+                          canManageSubscription: manageSubscriptionUrl != null,
+                          onSelect: () => _purchasePro(offer.id),
+                          onManage: _openManageSubscriptions,
+                        ),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ],
             const SizedBox(height: 24),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Debug: local Pro unlock'),
-              subtitle: const Text(
-                'Development-only switch for testing premium flows before the store product is live.',
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      priceLabel,
+                      style: FluttyTheme.displayMono(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    if (priceDetailLabel case final detail?) ...[
+                      Text(detail, style: priceCardTextStyle),
+                      const SizedBox(height: 8),
+                    ],
+                    if (introductoryOfferLabel case final intro?) ...[
+                      _UpgradeBanner(
+                        message: intro,
+                        backgroundColor: colorScheme.primaryContainer,
+                        foregroundColor: colorScheme.onPrimaryContainer,
+                        compact: true,
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    Text(
+                      state.isProUnlocked
+                          ? isLifetimeUnlocked
+                                ? 'You already own MonkeySSH Pro Lifetime. If an older monthly or annual subscription is still active, manage it in ${_storefrontLabel()} to cancel future renewals.'
+                                : switch (state.activeOffer) {
+                                    final activeOffer? =>
+                                      '${activeOffer.planLabel} is active on this device.',
+                                    null => 'MonkeySSH Pro is already unlocked on this device.',
+                                  }
+                          : 'No trial traps, fake urgency, or hidden close buttons. You can restore or manage your subscription from Settings at any time.',
+                      style: priceCardEmphasisStyle,
+                    ),
+                    if (state.lastError case final error?
+                        when error.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        error,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
-              value: state.debugUnlocked,
-              onChanged: (value) => ref
-                  .read(monetizationServiceProvider)
-                  .setDebugUnlocked(unlocked: value),
             ),
+            const SizedBox(height: 20),
+            OutlinedButton(
+              onPressed: isBusy ? null : _restorePurchases,
+              child: Text(
+                _restoreInProgress ? 'Working...' : 'Restore purchases',
+              ),
+            ),
+            TextButton(
+              onPressed: isBusy || manageSubscriptionUrl == null
+                  ? null
+                  : _openManageSubscriptions,
+              style: TextButton.styleFrom(
+                foregroundColor: colorScheme.onSurface,
+              ),
+              child: Text(
+                isLifetimeUnlocked
+                    ? 'Manage existing subscription'
+                    : 'Manage subscription',
+              ),
+            ),
+            if (state.debugUnlockAvailable) ...[
+              const SizedBox(height: 24),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Debug: local Pro unlock'),
+                subtitle: const Text(
+                  'Development-only switch for testing premium flows before the store product is live.',
+                ),
+                value: state.debugUnlocked,
+                onChanged: (value) => ref
+                    .read(monetizationServiceProvider)
+                    .setDebugUnlocked(unlocked: value),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

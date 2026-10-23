@@ -38,6 +38,7 @@ import '../widgets/delete_confirmation_dialog.dart';
 import '../widgets/syntax_highlight_controller.dart';
 import '../widgets/syntax_highlight_language.dart';
 import '../widgets/syntax_highlight_theme.dart';
+import '../widgets/system_vertical_bar.dart';
 import 'remote_text_editor_conflict.dart';
 import 'remote_text_editor_screen.dart';
 import 'sftp_batch_operations.dart';
@@ -1209,58 +1210,66 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
       }
     },
     child: Scaffold(
-      appBar: AppBar(
-        leading: widget.showCloseButton
-            ? IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: _closeBrowser,
-                tooltip: 'Close file browser',
-              )
-            : null,
-        title: Text(
-          _hostLabel == null
-              ? (_isSelectionMode ? 'Select files' : 'Files')
-              : '${_isSelectionMode ? 'Select files' : 'Files'} - $_hostLabel',
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              _clearHighlightedFile();
-              unawaited(_loadDirectory(_currentPath));
-            },
-            tooltip: 'Refresh',
+      appBar: VerticalBarAppBar(
+        AppBar(
+          leading: widget.showCloseButton
+              ? IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: _closeBrowser,
+                  tooltip: 'Close file browser',
+                )
+              : null,
+          title: Text(
+            _hostLabel == null
+                ? (_isSelectionMode ? 'Select files' : 'Files')
+                : '${_isSelectionMode ? 'Select files' : 'Files'} - $_hostLabel',
           ),
-          if (!_isSelectionMode)
+          actions: [
             IconButton(
-              icon: const Icon(Icons.create_new_folder),
+              icon: const Icon(Icons.refresh),
               onPressed: () {
                 _clearHighlightedFile();
-                unawaited(_showCreateDirectoryDialog());
+                unawaited(_loadDirectory(_currentPath));
               },
-              tooltip: 'New folder',
+              tooltip: 'Refresh',
             ),
-        ],
+            if (!_isSelectionMode)
+              IconButton(
+                icon: const Icon(Icons.create_new_folder),
+                onPressed: () {
+                  _clearHighlightedFile();
+                  unawaited(_showCreateDirectoryDialog());
+                },
+                tooltip: 'New folder',
+              ),
+          ],
+        ),
       ),
-      body: Column(
-        children: [
-          _buildLocationShortcuts(),
-          _buildBreadcrumbs(),
-          SftpBrowserToolbar(
-            filterController: _filterController,
-            onFilterChanged: _onFilterChanged,
-            settings: _viewSettings,
-            onShowViewOptions: () => unawaited(_showViewOptions()),
-            onStartSelection:
-                _isSelectionMode ||
-                    _isBatchSelecting ||
-                    _movingFiles != null ||
-                    _batchRunning
-                ? null
-                : _startBatchSelection,
-          ),
-          Expanded(child: _buildFileList()),
-        ],
+      // Clears side insets, such as iPhone Duo's vertical bar, for the
+      // toolbar rows as well as the list.
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: Column(
+          children: [
+            _buildLocationShortcuts(),
+            _buildBreadcrumbs(),
+            SftpBrowserToolbar(
+              filterController: _filterController,
+              onFilterChanged: _onFilterChanged,
+              settings: _viewSettings,
+              onShowViewOptions: () => unawaited(_showViewOptions()),
+              onStartSelection:
+                  _isSelectionMode ||
+                      _isBatchSelecting ||
+                      _movingFiles != null ||
+                      _batchRunning
+                  ? null
+                  : _startBatchSelection,
+            ),
+            Expanded(child: _buildFileList()),
+          ],
+        ),
       ),
       bottomNavigationBar: _buildBottomBar(),
       floatingActionButton:
@@ -3425,10 +3434,12 @@ class _RemoteVideoViewerScreenState extends State<_RemoteVideoViewerScreen> {
     final controller = _controller;
 
     return Scaffold(
-      appBar: AppBar(
-        title: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Text(widget.remotePath),
+      appBar: VerticalBarAppBar(
+        AppBar(
+          title: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Text(widget.remotePath),
+          ),
         ),
       ),
       body: error != null
@@ -3664,10 +3675,12 @@ class _RemoteImageViewerScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: Colors.black,
-    appBar: AppBar(
-      title: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Text(remotePath),
+    appBar: VerticalBarAppBar(
+      AppBar(
+        title: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Text(remotePath),
+        ),
       ),
     ),
     body: InteractiveViewer(

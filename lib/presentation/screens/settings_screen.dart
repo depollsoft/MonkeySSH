@@ -27,6 +27,7 @@ import '../widgets/message_of_the_day.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/push_notification_settings_section.dart';
+import '../widgets/system_vertical_bar.dart';
 import '../widgets/terminal_text_style.dart';
 import '../widgets/terminal_theme_picker.dart';
 import 'acp_custom_providers_screen.dart';
@@ -44,23 +45,27 @@ class SettingsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) => Scaffold(
-    appBar: AppBar(title: const Text('Settings')),
-    body: ListView(
-      padding: const EdgeInsets.only(top: 4, bottom: 32),
-      children: [
-        const _SubscriptionSection(),
-        const _AppearanceSection(),
-        const _SecuritySection(),
-        const _PrivacySection(),
-        const _TerminalSection(),
-        const _AgentsSection(),
-        const PushNotificationSettingsSection(),
-        const _ImportExportSection(),
-        if (BackgroundSshService.supportsBatteryOptimizationControls)
-          const _AndroidBackgroundSection(),
-        if (isDiagnosticsLoggingEnabled) const _DiagnosticsSection(),
-        const _AboutSection(),
-      ],
+    appBar: VerticalBarAppBar(AppBar(title: const Text('Settings'))),
+    body: SafeArea(
+      top: false,
+      bottom: false,
+      child: ListView(
+        padding: const EdgeInsets.only(top: 4, bottom: 32),
+        children: [
+          const _SubscriptionSection(),
+          const _AppearanceSection(),
+          const _SecuritySection(),
+          const _PrivacySection(),
+          const _TerminalSection(),
+          const _AgentsSection(),
+          const PushNotificationSettingsSection(),
+          const _ImportExportSection(),
+          if (BackgroundSshService.supportsBatteryOptimizationControls)
+            const _AndroidBackgroundSection(),
+          if (isDiagnosticsLoggingEnabled) const _DiagnosticsSection(),
+          const _AboutSection(),
+        ],
+      ),
     ),
   );
 }

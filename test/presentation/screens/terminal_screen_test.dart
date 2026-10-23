@@ -82,6 +82,7 @@ import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
+import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_key_input.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_text_input_handler.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_theme_picker.dart';
@@ -962,6 +963,19 @@ class _TestThemeModeNotifier extends ThemeModeNotifier {
   }
 }
 
+// The app's scopes above the navigator: hardware shortcuts, and the system
+// vertical bar iPhone Duo reports.
+Widget _withAppScopes(
+  Widget navigator, {
+  required bool appShortcuts,
+  SystemVerticalBar? verticalBar,
+}) {
+  final child = appShortcuts ? AppShortcutsHost(child: navigator) : navigator;
+  return verticalBar == null
+      ? child
+      : SystemVerticalBarScope(bar: verticalBar, child: child);
+}
+
 Host _buildHost({
   required int id,
   String? autoConnectCommand,
@@ -1762,6 +1776,7 @@ void main() {
       MonetizationState monetizationState = _proMonetizationState,
       List<Override> overrides = const [],
       bool appShortcuts = false,
+      SystemVerticalBar? verticalBar,
     }) => ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
@@ -1781,9 +1796,11 @@ void main() {
       child:
           child ??
           MaterialApp(
-            builder: appShortcuts
-                ? (context, child) => AppShortcutsHost(child: child!)
-                : null,
+            builder: (context, child) => _withAppScopes(
+              child!,
+              appShortcuts: appShortcuts,
+              verticalBar: verticalBar,
+            ),
             home: TerminalScreen(
               hostId: host.id,
               connectionId: session.connectionId,
@@ -1851,6 +1868,7 @@ void main() {
       bool sharedClipboardLocalRead = false,
       bool openedFromLink = false,
       bool appShortcuts = false,
+      SystemVerticalBar? verticalBar,
       List<Override> overrides = const [],
     }) async {
       await tester.pumpWidget(
@@ -1894,9 +1912,11 @@ void main() {
             theme: theme ?? ThemeData.light(),
             darkTheme: theme ?? ThemeData.dark(),
             themeMode: themeMode,
-            builder: appShortcuts
-                ? (context, child) => AppShortcutsHost(child: child!)
-                : null,
+            builder: (context, child) => _withAppScopes(
+              child!,
+              appShortcuts: appShortcuts,
+              verticalBar: verticalBar,
+            ),
             home: TerminalScreen(
               hostId: host.id,
               connectionId: resolveConnection ? null : session.connectionId,
@@ -12704,6 +12724,130 @@ void main() {
       expect(tester.getSize(handleFinder).width, tmuxSidebarCollapsedWidth);
       expect(find.text('shell'), findsNothing);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps the title on the navigator page of a book fold', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService());
+
+      final appBar = find.byType(AppBar);
+      final title = find.descendant(
+        of: appBar,
+        matching: find.text('Terminal test host'),
+      );
+      expect(tester.getRect(title).right, lessThanOrEqualTo(475));
+      expect(
+        tester.getRect(find.byTooltip('Browse files')).left,
+        greaterThanOrEqualTo(475),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps a plain shell above a propped fold, over a keyboard '
+        'deck', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTWH(0, 475, 669, 0),
+      );
+      await pumpScreen(tester);
+
+      final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
+      expect(terminalRect.bottom, lessThanOrEqualTo(475));
+      final deck = find.text('tap to type');
+      expect(deck, findsOneWidget);
+      expect(tester.getRect(deck).top, greaterThan(475));
+      expect(find.bySemanticsLabel('Show keyboard'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('lets a tall keyboard squeeze the propped keyboard deck', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTWH(0, 475, 669, 0),
+      );
+      tester.view.viewInsets = const FakeViewPadding(bottom: 420);
+      final keyboard = SystemKeyboardVisibilityController.instance
+        ..debugSetVisible(visible: true);
+      addTearDown(() => keyboard.debugSetVisible(visible: null));
+      await pumpScreen(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('tap to type'), findsNothing);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(475),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    group('with a system vertical bar', () {
+      // iPhone Duo's outer display, as the iOS 27.1 simulator reports it.
+      const outerDisplay = Size(466, 678);
+      const verticalBar = SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTRB(396, 174, 440, 644),
+      );
+
+      void useOuterDisplay(WidgetTester tester) {
+        tester.view
+          ..physicalSize = outerDisplay
+          ..devicePixelRatio = 1
+          ..padding = const FakeViewPadding(right: 84, bottom: 34)
+          ..viewPadding = const FakeViewPadding(right: 84, bottom: 34);
+        addTearDown(tester.view.reset);
+      }
+
+      testWidgets('stands the bar controls in it and drops the title bar', (
+        tester,
+      ) async {
+        useOuterDisplay(tester);
+        await pumpScreen(tester, verticalBar: verticalBar);
+
+        expect(find.byType(AppBar), findsNothing);
+        expect(
+          tester.getRect(find.byType(MonkeyTerminalView)).top,
+          lessThan(kToolbarHeight),
+        );
+        final column = verticalBar.itemColumn;
+        for (final tooltip in [
+          'Browse files',
+          'Hide extra keys',
+          'Show system keyboard',
+        ]) {
+          final rect = tester.getRect(find.byTooltip(tooltip));
+          expect(rect.center.dx, column.center.dx, reason: tooltip);
+          expect(rect.top, greaterThanOrEqualTo(column.top), reason: tooltip);
+        }
+        // The keyboard key is nearest the thumb.
+        expect(
+          tester.getRect(find.byTooltip('Show system keyboard')).bottom,
+          column.bottom,
+        );
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('moves controls the keyboard leaves no room for into the '
+          'menu', (tester) async {
+        useOuterDisplay(tester);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 265);
+        await pumpScreen(tester, verticalBar: verticalBar);
+
+        // Four controls fit above the keyboard: the keyboard key, the menu,
+        // the status, and the extra keys.
+        expect(find.byTooltip('Browse files'), findsNothing);
+        expect(find.byTooltip('Hide extra keys'), findsOneWidget);
+
+        await tester.tap(find.byTooltip('Show menu'));
+        await tester.pumpAndSettle();
+        expect(find.text('Browse Files'), findsOneWidget);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    });
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,

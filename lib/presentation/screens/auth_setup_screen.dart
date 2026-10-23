@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../domain/services/auth_service.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Screen for setting up PIN/biometric authentication.
 class AuthSetupScreen extends ConsumerStatefulWidget {
@@ -126,14 +127,16 @@ class _AuthSetupScreenState extends ConsumerState<AuthSetupScreen> {
     final colorScheme = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Security Setup'),
-        actions: [
-          TextButton(
-            onPressed: _isLoading ? null : _skip,
-            child: const Text('Skip'),
-          ),
-        ],
+      appBar: VerticalBarAppBar(
+        AppBar(
+          title: const Text('Security Setup'),
+          actions: [
+            TextButton(
+              onPressed: _isLoading ? null : _skip,
+              child: const Text('Skip'),
+            ),
+          ],
+        ),
       ),
       body: SafeArea(
         child: LayoutBuilder(

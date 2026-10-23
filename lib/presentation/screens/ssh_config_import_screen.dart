@@ -13,6 +13,7 @@ import '../../domain/services/ssh_config_import_planner.dart';
 import '../../domain/services/ssh_config_import_service.dart';
 import '../../domain/services/ssh_config_parser.dart';
 import '../providers/entity_list_providers.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Largest config the importer reads, to keep a stray binary file or paste
 /// from freezing the preview.
@@ -287,19 +288,25 @@ class _SshConfigImportScreenState extends ConsumerState<SshConfigImportScreen> {
         if (!didPop) setState(() => _plan = null);
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Import ssh_config'),
-          leading: plan == null
-              ? null
-              : IconButton(
-                  tooltip: 'Edit config text',
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: () => setState(() => _plan = null),
-                ),
+        appBar: VerticalBarAppBar(
+          AppBar(
+            title: const Text('Import ssh_config'),
+            leading: plan == null
+                ? null
+                : IconButton(
+                    tooltip: 'Edit config text',
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => setState(() => _plan = null),
+                  ),
+          ),
         ),
-        body: plan == null
-            ? _buildSource(context, savedHosts)
-            : _buildPreview(context, plan, savedHosts),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: plan == null
+              ? _buildSource(context, savedHosts)
+              : _buildPreview(context, plan, savedHosts),
+        ),
       ),
     );
   }

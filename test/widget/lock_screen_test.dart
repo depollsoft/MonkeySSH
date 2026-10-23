@@ -1,6 +1,7 @@
 // ignore_for_file: public_member_api_docs, directives_ordering
 
 import 'dart:async';
+import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -359,6 +360,97 @@ void main() {
       notifier.unlockCompleter.complete(false);
       await tester.pump();
 
+      expect(tester.takeException(), isNull);
+    });
+
+    for (final (name, size, fold) in [
+      (
+        'held like a book',
+        const Size(951, 669),
+        const Rect.fromLTWH(475, 0, 0, 669),
+      ),
+      ('propped up', const Size(669, 951), const Rect.fromLTWH(0, 475, 669, 0)),
+    ]) {
+      testWidgets('keeps the brand and the PIN on their own pages $name', (
+        tester,
+      ) async {
+        final authService = MockAuthService();
+        when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+        tester.view
+          ..physicalSize = size
+          ..devicePixelRatio = 1
+          ..displayFeatures = [
+            DisplayFeature(
+              bounds: fold,
+              type: DisplayFeatureType.fold,
+              state: DisplayFeatureState.postureHalfOpened,
+            ),
+          ];
+        addTearDown(tester.view.reset);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              authServiceProvider.overrideWithValue(authService),
+              authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+            ],
+            child: const MaterialApp(home: LockScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        final icon = tester.getRect(find.byType(Image));
+        final pin = tester.getRect(find.byType(TextField));
+        final unlock = tester.getRect(find.text('Unlock'));
+        if (fold.width == 0) {
+          expect(icon.right, lessThanOrEqualTo(fold.left));
+          expect(pin.left, greaterThanOrEqualTo(fold.right));
+          expect(unlock.left, greaterThanOrEqualTo(fold.right));
+        } else {
+          expect(icon.bottom, lessThanOrEqualTo(fold.top));
+          expect(pin.top, greaterThanOrEqualTo(fold.bottom));
+          expect(unlock.top, greaterThanOrEqualTo(fold.bottom));
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
+
+    testWidgets('scrolls the propped PIN page above the keyboard', (
+      tester,
+    ) async {
+      final authService = MockAuthService();
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+      tester.view
+        ..physicalSize = const Size(669, 951)
+        ..devicePixelRatio = 1
+        ..viewInsets = const FakeViewPadding(bottom: 360)
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTWH(0, 475, 669, 0),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      await tester.ensureVisible(find.text('Unlock'));
+      await tester.pump();
+      final unlock = tester.getRect(find.text('Unlock'));
+      expect(unlock.top, greaterThanOrEqualTo(475));
+      expect(unlock.bottom, lessThanOrEqualTo(951 - 360));
       expect(tester.takeException(), isNull);
     });
 

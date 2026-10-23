@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/controllers/platform_display_features_controller.dart';
 import 'package:monkeyssh/presentation/screens/terminal/terminal_screen_policy.dart';
 import 'package:monkeyssh/presentation/widgets/display_fold.dart';
+import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 
 // iPhone Duo's inner display, open wide, in points.
 const _openWide = Size(951, 669);
@@ -145,7 +146,7 @@ void main() {
     expect(right.displayFeatures, isEmpty);
   });
 
-  test('terminal fold layout needs a mux navigator for the second page', () {
+  test('a book fold needs a mux navigator; a propped one always splits', () {
     final book = resolveDisplayFold(_window(_openWide, const [_bookFold]));
     final propped = resolveDisplayFold(
       _window(const Size(669, 951), const [
@@ -169,36 +170,50 @@ void main() {
       resolveTerminalFoldLayout(book, showsMuxNavigator: false),
       TerminalFoldLayout.none,
     );
+    // Without a navigator the bottom page is a keyboard deck.
+    expect(
+      resolveTerminalFoldLayout(propped, showsMuxNavigator: false),
+      TerminalFoldLayout.propped,
+    );
     expect(
       resolveTerminalFoldLayout(null, showsMuxNavigator: true),
       TerminalFoldLayout.none,
     );
   });
 
-  test('parses native display features and skips malformed entries', () {
-    final features = parsePlatformDisplayFeatures([
-      {
-        'left': 475,
-        'top': 0,
-        'width': 0,
-        'height': 669.0,
-        'type': 'fold',
-        'state': 'halfOpened',
+  test('parses native display state and skips malformed entries', () {
+    final state = parsePlatformDisplayState({
+      'features': [
+        {
+          'left': 475,
+          'top': 0,
+          'width': 0,
+          'height': 669.0,
+          'type': 'fold',
+          'state': 'halfOpened',
+        },
+        {
+          'left': 0,
+          'top': 470,
+          'width': 669,
+          'height': 10,
+          'type': 'hinge',
+          'state': 'flat',
+        },
+        {'left': 1, 'top': 2, 'width': -3, 'height': 4},
+        {'left': 'x', 'top': 0, 'width': 0, 'height': 0},
+        'not a map',
+      ],
+      'verticalBar': {
+        'edge': 'right',
+        'left': 396,
+        'top': 174,
+        'width': 44,
+        'height': 470,
       },
-      {
-        'left': 0,
-        'top': 470,
-        'width': 669,
-        'height': 10,
-        'type': 'hinge',
-        'state': 'flat',
-      },
-      {'left': 1, 'top': 2, 'width': -3, 'height': 4},
-      {'left': 'x', 'top': 0, 'width': 0, 'height': 0},
-      'not a map',
-    ]);
+    });
 
-    expect(features, const [
+    expect(state.features, const [
       _bookFold,
       DisplayFeature(
         bounds: Rect.fromLTWH(0, 470, 669, 10),
@@ -206,8 +221,26 @@ void main() {
         state: DisplayFeatureState.postureFlat,
       ),
     ]);
-    expect(parsePlatformDisplayFeatures(null), isEmpty);
-    expect(parsePlatformDisplayFeatures({'left': 0}), isEmpty);
+    expect(
+      state.verticalBar,
+      const SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTWH(396, 174, 44, 470),
+      ),
+    );
+    expect(parsePlatformDisplayState(null).features, isEmpty);
+    expect(parsePlatformDisplayState({'features': 'x'}).features, isEmpty);
+    for (final bar in [
+      {'edge': 'top', 'left': 0, 'top': 0, 'width': 44, 'height': 400},
+      {'edge': 'left', 'left': 0, 'top': 0, 'width': 0, 'height': 400},
+      {'edge': 'right', 'left': 0, 'top': 0},
+    ]) {
+      expect(
+        parsePlatformDisplayState({'verticalBar': bar}).verticalBar,
+        isNull,
+        reason: '$bar',
+      );
+    }
   });
 
   group('PlatformDisplayFeaturesMediaQuery', () {
@@ -220,7 +253,7 @@ void main() {
     });
 
     tearDown(() {
-      controller.debugSetFeatures(const []);
+      controller.debugSetState();
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, null);
     });
@@ -252,13 +285,87 @@ void main() {
       );
       expect(seen, const [engineFeature]);
 
-      controller.debugSetFeatures(const [_bookFold]);
+      controller.debugSetState(features: const [_bookFold]);
       await tester.pump();
       expect(seen, const [engineFeature, _bookFold]);
 
-      controller.debugSetFeatures(const []);
+      controller.debugSetState();
       await tester.pump();
       expect(seen, const [engineFeature]);
+    });
+
+    testWidgets('provides the reported vertical bar to the subtree', (
+      tester,
+    ) async {
+      const bar = SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTWH(396, 174, 44, 470),
+      );
+      SystemVerticalBar? seen;
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(size: Size(466, 678)),
+          child: PlatformDisplayFeaturesMediaQuery(
+            child: Builder(
+              builder: (context) {
+                seen = SystemVerticalBarScope.maybeOf(context);
+                return const SizedBox.shrink();
+              },
+            ),
+          ),
+        ),
+      );
+      expect(seen, isNull);
+
+      controller.debugSetState(verticalBar: bar);
+      await tester.pump();
+      expect(seen, bar);
+
+      controller.debugSetState();
+      await tester.pump();
+      expect(seen, isNull);
+    });
+
+    testWidgets('reads the state again when the window metrics change', (
+      tester,
+    ) async {
+      // At launch the vertical bar settles after the first read.
+      var barSettled = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            channel,
+            (call) async => {
+              'features': const <Object?>[],
+              if (barSettled)
+                'verticalBar': {
+                  'edge': 'right',
+                  'left': 396,
+                  'top': 174,
+                  'width': 44,
+                  'height': 470,
+                },
+            },
+          );
+      SystemVerticalBar? seen;
+      await tester.pumpWidget(
+        PlatformDisplayFeaturesMediaQuery(
+          child: Builder(
+            builder: (context) {
+              seen = SystemVerticalBarScope.maybeOf(context);
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(seen, isNull);
+
+      barSettled = true;
+      tester.view.padding = const FakeViewPadding(right: 84);
+      addTearDown(tester.view.reset);
+      await tester.pump();
+      await tester.pump();
+      expect(seen?.edge, SystemVerticalBarEdge.right);
     });
 
     testWidgets('applies features the platform pushes over the channel', (
@@ -284,16 +391,18 @@ void main() {
           .handlePlatformMessage(
             channel.name,
             channel.codec.encodeMethodCall(
-              const MethodCall('onDisplayFeaturesChanged', [
-                {
-                  'left': 475,
-                  'top': 0,
-                  'width': 0,
-                  'height': 669,
-                  'type': 'fold',
-                  'state': 'halfOpened',
-                },
-              ]),
+              const MethodCall('onDisplayStateChanged', {
+                'features': [
+                  {
+                    'left': 475,
+                    'top': 0,
+                    'width': 0,
+                    'height': 669,
+                    'type': 'fold',
+                    'state': 'halfOpened',
+                  },
+                ],
+              }),
             ),
             (_) {},
           );

@@ -6,6 +6,7 @@ import '../../data/database/database.dart';
 import '../../data/repositories/host_repository.dart';
 import '../../data/repositories/port_forward_repository.dart';
 import '../widgets/host_port_forward_editor_sheet.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Screen for adding or editing a port forward rule.
 class PortForwardEditScreen extends ConsumerStatefulWidget {
@@ -51,23 +52,31 @@ class _PortForwardEditScreenState extends ConsumerState<PortForwardEditScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(
-        widget.portForwardId != null ? 'Edit Port Forward' : 'Add Port Forward',
+    appBar: VerticalBarAppBar(
+      AppBar(
+        title: Text(
+          widget.portForwardId != null
+              ? 'Edit Port Forward'
+              : 'Add Port Forward',
+        ),
       ),
     ),
-    body: _isLoading
-        ? const Center(child: CircularProgressIndicator())
-        : _loadError != null
-        ? Center(child: Text(_loadError!))
-        : PortForwardEditorForm(
-            hosts: _hosts,
-            existing: _existing,
-            onSaved: (result) {
-              final messenger = ScaffoldMessenger.of(context);
-              context.pop();
-              messenger.showSnackBar(SnackBar(content: Text(result.message)));
-            },
-          ),
+    body: SafeArea(
+      top: false,
+      bottom: false,
+      child: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _loadError != null
+          ? Center(child: Text(_loadError!))
+          : PortForwardEditorForm(
+              hosts: _hosts,
+              existing: _existing,
+              onSaved: (result) {
+                final messenger = ScaffoldMessenger.of(context);
+                context.pop();
+                messenger.showSnackBar(SnackBar(content: Text(result.message)));
+              },
+            ),
+    ),
   );
 }
