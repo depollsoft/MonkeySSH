@@ -243,11 +243,16 @@ void main() {
                           action('Search chat', Icons.search),
                           action('Windows', Icons.window_outlined),
                           action('Save', Icons.save_outlined),
-                          // A menu cannot hold another menu.
-                          PopupMenuButton<String>(
+                          // Its items fold into a submenu, typed as the
+                          // popup's own.
+                          PopupMenuButton<_ChatAction>(
                             tooltip: 'Chat options',
+                            onSelected: (value) => pressed.add(value.name),
                             itemBuilder: (context) => const [
-                              PopupMenuItem(value: 'x', child: Text('Export')),
+                              PopupMenuItem(
+                                value: _ChatAction.export,
+                                child: Text('Export'),
+                              ),
                             ],
                           ),
                         ],
@@ -278,6 +283,15 @@ void main() {
       await tester.tap(find.text('Windows'));
       await tester.pumpAndSettle();
       expect(pressed, ['Windows']);
+
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Chat options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(pressed, ['Windows', 'export']);
     });
 
     testWidgets('folds Back into the menu when one key fits', (tester) async {
@@ -388,3 +402,5 @@ void main() {
     expect(picked, 1);
   });
 }
+
+enum _ChatAction { export }

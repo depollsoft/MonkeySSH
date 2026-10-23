@@ -562,6 +562,16 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
   }
 
+  /// Calls [popup]'s `onSelected` with [value]. The callback takes the
+  /// popup's own item type, which a typed read through
+  /// `PopupMenuButton<Object?>` would reject at run time, so it is read
+  /// dynamically and called with the item's value of that type.
+  static void _selectPopupValue(PopupMenuButton<Object?> popup, Object? value) {
+    // ignore: avoid_dynamic_calls
+    final Object? onSelected = (popup as dynamic).onSelected;
+    if (onSelected is Function) Function.apply(onSelected, [value]);
+  }
+
   static Widget _menuKey(List<Widget> entries) => MenuAnchor(
     menuChildren: entries,
     builder: (context, controller, _) => IconButton(
@@ -607,7 +617,7 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
                 onPressed: item.enabled
                     ? () {
                         item.onTap?.call();
-                        action.onSelected?.call(item.value);
+                        _selectPopupValue(action, item.value);
                       }
                     : null,
                 child: item.child,
