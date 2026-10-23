@@ -22,6 +22,10 @@ class LockScreen extends ConsumerStatefulWidget {
 class _LockScreenState extends ConsumerState<LockScreen> {
   final _pinController = TextEditingController();
   final _focusNode = FocusNode();
+  // Moves the PIN field, rather than rebuilding it, when the keyboard
+  // switches a fold between the spread and one page, so the field keeps
+  // its focus and the keyboard stays up.
+  final _pinFieldKey = GlobalKey();
   bool _isLoading = false;
   bool _isCheckingAuthMethod = true;
   bool _authMethodLoadFailed = false;
@@ -203,6 +207,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
           (_authMethod == AuthMethod.pin ||
               _authMethod == AuthMethod.both)) ...[
         SizedBox(
+          key: _pinFieldKey,
           width: double.infinity,
           child: TextField(
             controller: _pinController,

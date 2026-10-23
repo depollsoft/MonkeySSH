@@ -243,6 +243,13 @@ void main() {
                           action('Search chat', Icons.search),
                           action('Windows', Icons.window_outlined),
                           action('Save', Icons.save_outlined),
+                          // A menu cannot hold another menu.
+                          PopupMenuButton<String>(
+                            tooltip: 'Chat options',
+                            itemBuilder: (context) => const [
+                              PopupMenuItem(value: 'x', child: Text('Export')),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -258,7 +265,13 @@ void main() {
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
 
-      expect(find.byType(BackButton), findsOneWidget);
+      // Two keys fit: the actions' menu and the chat options, so Back
+      // gives way to the edge swipe.
+      expect(find.byType(BackButton), findsNothing);
+      expect(
+        tester.getRect(find.byTooltip('Chat options')).top,
+        greaterThanOrEqualTo(264),
+      );
       expect(find.byTooltip('Search chat'), findsNothing);
       await tester.tap(find.byTooltip('Show menu'));
       await tester.pumpAndSettle();

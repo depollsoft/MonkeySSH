@@ -490,17 +490,22 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
         final capacity = verticalBarItemCapacity(
           resolveVerticalBarColumn(bar, MediaQuery.of(context)),
         );
-        // Back gives way first when the bar runs short: the edge swipe
-        // still goes back.
-        final showsLeading =
+        // Back gives way first when the bar runs short, including to
+        // actions a menu cannot hold: the edge swipe still goes back.
+        var showsLeading =
             leading != null && (actions.isEmpty || capacity >= 2);
+        var trailing = _fitActions(
+          actions,
+          math.max(1, capacity - (showsLeading ? 1 : 0)),
+        );
+        if (showsLeading && trailing.length >= capacity) {
+          showsLeading = false;
+          trailing = _fitActions(actions, math.max(1, capacity));
+        }
         return VerticalBarRail(
           bar: bar,
-          leading: [if (showsLeading) leading],
-          trailing: _fitActions(
-            actions,
-            math.max(1, capacity - (showsLeading ? 1 : 0)),
-          ),
+          leading: [if (showsLeading) ?leading],
+          trailing: trailing,
         );
       },
       child: _titleOnly(appBar),

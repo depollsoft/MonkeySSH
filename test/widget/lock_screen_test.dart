@@ -495,6 +495,60 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('keeps the PIN field focused as the keyboard folds the '
+        'spread into one page', (tester) async {
+      final authService = MockAuthService();
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+      tester.view
+        ..physicalSize = const Size(669, 951)
+        ..devicePixelRatio = 1
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTWH(0, 475, 669, 0),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester.getRect(find.byType(TextField)).top,
+        greaterThanOrEqualTo(475),
+      );
+
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      final field = tester.state<EditableTextState>(find.byType(EditableText));
+      expect(field.widget.focusNode.hasFocus, isTrue);
+
+      // The keyboard rises over the bottom page and the screen becomes one
+      // page; the same field keeps focus and its input connection.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 360);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester.state<EditableTextState>(find.byType(EditableText)),
+        same(field),
+      );
+      expect(field.widget.focusNode.hasFocus, isTrue);
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      expect(
+        tester.getRect(find.byType(TextField)).bottom,
+        lessThanOrEqualTo(951 - 360),
+      );
+    });
+
     testWidgets('balances PIN field icon spacing to keep entry centered', (
       tester,
     ) async {
