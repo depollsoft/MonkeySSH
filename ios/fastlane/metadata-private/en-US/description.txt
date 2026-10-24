@@ -1,4 +1,4 @@
-Test the latest MonkeySSH agent workflows on iPhone or iPad. MonkeySSH beta puts native agent conversations, a full SSH terminal, MonkeyMux or tmux windows, and SFTP in one remote workspace.
+Test the latest MonkeySSH agent workflows on iPhone, iPhone Duo, or iPad. MonkeySSH beta puts native agent conversations, a full SSH terminal, MonkeyMux or tmux windows, and SFTP in one remote workspace.
 
 Choose the right view for each task:
 

@@ -1,6 +1,4 @@
 What's fixed in this beta
 
-- Fix duplicated Pi chat history after reconnecting.
-- Keep queued prompts and permission requests through connection recovery.
-- Stop false approval notifications for requests the app handles automatically.
-- Fix Codex terminal redraws when opening a session in MonkeyMux.
+- Unlock stays in view above the keyboard when the phone is turned sideways.
+- The Snippets header fits on narrow screens.
