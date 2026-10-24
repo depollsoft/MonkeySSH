@@ -240,13 +240,13 @@ Include:
 
 ### Building flavors locally
 
-For iOS release validation, use the Xcode bundle that matches the installed runtime:
+For iOS release validation, use Xcode 27.1, which CI and release builds select (`/Applications/Xcode_27.1.app` on the `xcode-27` image):
 
 ```bash
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer  # Xcode 27.1
 ```
 
-The current supported release selector is `/Applications/Xcode.app` (Xcode 26.2 on the macOS 26 image). Do not validate with side-by-side Xcode versions unless their iOS runtime is installed.
+Do not validate with side-by-side Xcode versions unless their iOS runtime is installed.
 
 ```bash
 flutter build apk --flavor private --release

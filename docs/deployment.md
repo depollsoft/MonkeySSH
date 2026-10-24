@@ -426,14 +426,14 @@ The future refresh prompt lives in `docs/store-assets-prompt.md`.
 
 ### iOS release validation prerequisites
 
-Use the standard Xcode bundle with the installed iOS runtime when validating iOS releases locally:
+Validate iOS releases locally with Xcode 27.1, the version CI and release builds select (`/Applications/Xcode_27.1.app` on the `xcode-27` runner image). The iPhone Duo fold and vertical bar reader needs the iOS 27.1 SDK; an older Xcode still builds the app, without it.
 
 ```bash
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer  # Xcode 27.1
 flutter build ios --flavor production --release --no-codesign
 ```
 
-Do not validate releases with a side-by-side Xcode beta or point release unless its selected SDK has a matching installed iOS runtime. For example, Xcode 26.4.1 fails when only the iOS 26.2 simulator runtime is installed; `/Applications/Xcode.app` (Xcode 26.2 on the current release image) is the supported local and CI selector.
+Do not validate releases with a side-by-side Xcode beta or point release unless its selected SDK has a matching installed iOS runtime. For example, Xcode 26.4.1 fails when only the iOS 26.2 simulator runtime is installed.
 
 Flutter 3.41 also warns that UIScene lifecycle support will soon be required. MonkeySSH has a custom `AppDelegate` for native method channels, document pickers, Live Activities, and foreground/background state, so the automatic Flutter migration is not safe. Track the manual migration as release work: add `UIApplicationSceneManifest`, introduce a `SceneDelegate`/`FlutterSceneDelegate`, switch plugin registration to `FlutterImplicitEngineDelegate`, and move scene foreground/background handling out of `AppDelegate` together.
 

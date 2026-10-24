@@ -806,7 +806,7 @@ jobs:
     name: Build & Deploy iOS (${{ inputs.flavor }})
     needs: [validate-build-inputs, monkeymux-assets]
     if: inputs.build-ios
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     concurrency:
       group: ${{ inputs.deploy-ios-to == 'firebase' && !inputs.ios-resign-match-readonly && 'ios-profile-maintenance' || (inputs.deploy-ios-to == 'testflight' || inputs.deploy-ios-to == 'appstore') && format('app-store-{0}', inputs.flavor) || format('ios-{0}-{1}-{2}', github.run_id, inputs.deploy-ios-to, inputs.monkeymux-assets-artifact-name) }}
@@ -815,10 +815,9 @@ jobs:
       BUILD_FLAVOR: ${{ inputs.flavor }}
       BUILD_NAME: ${{ inputs.build-name }}
       BUILD_NUMBER: ${{ inputs.build-number }}
-      # Keep release validation on the runner Xcode that includes the installed
-      # iOS simulator runtime. Newer side-by-side Xcodes can drift ahead of the
-      # available runtime and fail builds before Flutter starts.
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      # The iPhone Duo fold and vertical bar reader compiles only with the
+      # iOS 27.1 SDK, so iOS builds use Xcode 27.1 on the xcode-27 image.
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
       FLUTTY_PR_NUMBER: ${{ inputs.pr-number }}
       FLUTTY_PR_TITLE: ${{ inputs.pr-title }}
       FLUTTY_DIAGNOSTICS_ENABLED: ${{ inputs.enable-diagnostics || inputs.pr-number != '' }}

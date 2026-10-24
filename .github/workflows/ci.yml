@@ -540,12 +540,11 @@ jobs:
       needs.changes.outputs.ios == 'true' &&
       (github.event_name != 'push' || needs.changes.outputs.deps == 'true') &&
       (github.event_name != 'pull_request' || needs.changes.outputs.ios_native == 'true')
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
-      # Keep release validation on the runner Xcode that includes the installed
-      # iOS simulator runtime. Newer side-by-side Xcodes can drift ahead of the
-      # available runtime and fail builds before Flutter starts.
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      # The iPhone Duo fold and vertical bar reader compiles only with the
+      # iOS 27.1 SDK, so iOS builds use Xcode 27.1 on the xcode-27 image.
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
