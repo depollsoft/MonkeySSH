@@ -448,6 +448,7 @@ void main() {
 
       // The keyboard leaves too little of the bottom page, so the PIN keeps
       // to the top page, clear of the fold and in view without scrolling.
+      expect(find.text('Unlock').hitTestable(), findsOneWidget);
       expect(tester.getRect(find.byType(TextField)).top, greaterThan(82));
       expect(tester.getRect(find.text('Unlock')).bottom, lessThan(455.5));
       expect(tester.takeException(), isNull);
@@ -497,6 +498,8 @@ void main() {
       // The number pad has no Return key, so Unlock must show without
       // scrolling; the brand gives way to make room.
       expect(find.byType(Image), findsNothing);
+      expect(find.text('Unlock').hitTestable(), findsOneWidget);
+      expect(find.byType(TextField).hitTestable(), findsOneWidget);
       expect(tester.getRect(find.text('Unlock')).bottom, lessThan(455.5));
       expect(tester.getRect(find.byType(TextField)).top, greaterThan(82));
       expect(
