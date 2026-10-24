@@ -140,7 +140,18 @@ class DisplayFoldSpread extends StatelessWidget {
         final available = Offset.zero & constraints.biggest;
         Widget page(Rect rect, Widget child) {
           final visible = rect.intersect(available);
-          if (visible.isEmpty) return const SizedBox.shrink();
+          // A page the keyboard covers is left out, still positioned: a
+          // Stack sizes itself to any child that is not, and a collapsed
+          // Stack would clip the other page away.
+          if (visible.isEmpty) {
+            return const Positioned(
+              left: 0,
+              top: 0,
+              width: 0,
+              height: 0,
+              child: SizedBox.shrink(),
+            );
+          }
           return Positioned.fromRect(
             rect: visible,
             child: MediaQuery(

@@ -243,6 +243,55 @@ void main() {
     }
   });
 
+  testWidgets('DisplayFoldSpread keeps a page when the keyboard covers the '
+      'other', (tester) async {
+    const fold = DisplayFeature(
+      bounds: Rect.fromLTRB(0, 455.5, 669, 495.5),
+      type: DisplayFeatureType.fold,
+      state: DisplayFeatureState.postureHalfOpened,
+    );
+    var taps = 0;
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(
+          size: Size(669, 951),
+          displayFeatures: [fold],
+        ),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          // What a Scaffold leaves its body above a keyboard that covers the
+          // bottom page: loose constraints, down to the fold.
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: ConstrainedBox(
+              constraints: BoxConstraints.loose(const Size(669, 455.5)),
+              child: Builder(
+                builder: (context) => DisplayFoldSpread(
+                  fold: resolveDisplayFold(MediaQuery.of(context))!,
+                  leading: Center(
+                    child: GestureDetector(
+                      onTap: () => taps += 1,
+                      child: const Text('top page'),
+                    ),
+                  ),
+                  trailing: const Text('bottom page'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      tester.getSize(find.byType(DisplayFoldSpread)),
+      const Size(669, 455.5),
+    );
+    expect(find.text('bottom page'), findsNothing);
+    await tester.tap(find.text('top page'));
+    expect(taps, 1);
+  });
+
   group('PlatformDisplayFeaturesMediaQuery', () {
     final controller = PlatformDisplayFeaturesController.instance;
     const channel = MethodChannel('xyz.depollsoft.monkeyssh/display_features');
