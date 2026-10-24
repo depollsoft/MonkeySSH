@@ -10347,6 +10347,29 @@ void main() {
           expect(windows.singleWhere((window) => window.isActive).index, 2);
           if (scenario == 'live') {
             expect(acpManager.reconnects, isEmpty);
+            // Folding the display moves the chat onto a page of its own. It
+            // keeps its state, and with it a message it is still sending.
+            final chatState = tester.state(find.byType(AgentChatScreen));
+            final window =
+                tester.view.physicalSize / tester.view.devicePixelRatio;
+            final foldX = window.width / 2;
+            tester.view.displayFeatures = [
+              DisplayFeature(
+                bounds: Rect.fromLTWH(foldX, 0, 0, window.height),
+                type: DisplayFeatureType.fold,
+                state: DisplayFeatureState.postureHalfOpened,
+              ),
+            ];
+            addTearDown(tester.view.resetDisplayFeatures);
+            await tester.pumpAndSettle();
+            expect(
+              tester.getRect(find.byType(AgentChatScreen)).left,
+              greaterThanOrEqualTo(foldX),
+            );
+            expect(tester.state(find.byType(AgentChatScreen)), same(chatState));
+            tester.view.resetDisplayFeatures();
+            await tester.pumpAndSettle();
+            expect(tester.state(find.byType(AgentChatScreen)), same(chatState));
           } else {
             expect(acpManager.reconnects.single.acpSessionId, key.acpSessionId);
           }
@@ -12766,6 +12789,52 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('moves focus into a pinned navigator without waiting for a '
+        'frame, and Esc gives it back to the terminal', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+      await tester.pump(const Duration(seconds: 1));
+
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      // An idle terminal draws no frame of its own, so focus must move
+      // without one.
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row has focus',
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await tester.pump();
+      final focused = FocusManager.instance.primaryFocus?.context;
+      expect(focused?.findAncestorWidgetOfExactType<ListTile>(), isNull);
+      expect(
+        focused?.findAncestorWidgetOfExactType<MonkeyTerminalView>(),
+        isNotNull,
+        reason: 'the terminal has keyboard focus again',
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('keeps the title on the navigator page of a book fold', (
       tester,
     ) async {
@@ -12786,6 +12855,43 @@ void main() {
         tester.getRect(find.byTooltip('Browse files')).left,
         greaterThanOrEqualTo(475),
       );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps the keyboard connected as the display folds', (
+      tester,
+    ) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+        state: DisplayFeatureState.postureFlat,
+      );
+      await pumpScreen(tester);
+      await tester.pump();
+      final input = tester.state(find.byType(TerminalTextInputHandler));
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      tester.testTextInput.log.clear();
+
+      // Propped up, the terminal moves onto the top page.
+      tester.view.displayFeatures = const [
+        DisplayFeature(
+          bounds: Rect.fromLTRB(0, 455.5, 669, 495.5),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureHalfOpened,
+        ),
+      ];
+      await tester.pump();
+      await tester.pump();
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(455.5),
+      );
+      expect(tester.state(find.byType(TerminalTextInputHandler)), same(input));
+      expect(
+        tester.testTextInput.log.map((call) => call.method),
+        isNot(contains('TextInput.clearClient')),
+      );
+      expect(tester.testTextInput.hasAnyClients, isTrue);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('keeps a plain shell above a propped fold, over a keyboard '

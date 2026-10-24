@@ -218,17 +218,45 @@ class _PlatformDisplayFeaturesMediaQueryState
   @override
   Widget build(BuildContext context) {
     final platformFeatures = _controller.features;
-    final child = SystemVerticalBarScope(
-      bar: _controller.verticalBar,
-      child: widget.child,
-    );
-    if (platformFeatures.isEmpty) return child;
     final mediaQuery = MediaQuery.of(context);
+    // The MediaQuery stays whether or not there is a fold, so opening or
+    // closing the device changes data only and the app below keeps its state.
     return MediaQuery(
-      data: mediaQuery.copyWith(
-        displayFeatures: [...mediaQuery.displayFeatures, ...platformFeatures],
+      data: platformFeatures.isEmpty
+          ? mediaQuery
+          : mediaQuery.copyWith(
+              displayFeatures: [
+                ...mediaQuery.displayFeatures,
+                for (final feature in platformFeatures)
+                  _withoutFlatFoldBand(feature),
+              ],
+            ),
+      child: SystemVerticalBarScope(
+        bar: _controller.verticalBar,
+        child: widget.child,
       ),
-      child: child,
     );
   }
+}
+
+/// [feature], or for a fold that is open flat, its centre line.
+///
+/// iOS reports a fold as a band (40 pt on iPhone Duo) in every posture, and
+/// Flutter's dialogs and menus keep clear of any feature with an area. Open
+/// flat, the display runs straight across the fold, so a line stands in for
+/// the band, as Android reports a flat fold.
+DisplayFeature _withoutFlatFoldBand(DisplayFeature feature) {
+  final bounds = feature.bounds;
+  if (feature.type != DisplayFeatureType.fold ||
+      feature.state == DisplayFeatureState.postureHalfOpened ||
+      bounds.shortestSide == 0) {
+    return feature;
+  }
+  return DisplayFeature(
+    bounds: bounds.width <= bounds.height
+        ? Rect.fromLTWH(bounds.center.dx, bounds.top, 0, bounds.height)
+        : Rect.fromLTWH(bounds.left, bounds.center.dy, bounds.width, 0),
+    type: feature.type,
+    state: feature.state,
+  );
 }

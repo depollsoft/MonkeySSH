@@ -121,6 +121,7 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
     this.pinnedOpen = false,
+    this.onPinnedEscape,
     this.tmuxExtraFlags,
     this.hostLabel,
     this.scopeWorkingDirectory,
@@ -170,6 +171,11 @@ class _TmuxExpandableBar extends StatefulWidget {
   /// The expanded state underneath still follows selections, so the bar
   /// returns to it once the page goes away.
   final bool pinnedOpen;
+
+  /// Called when Esc leaves the window list of a navigator that is
+  /// [pinnedOpen] and so cannot collapse; the screen takes keyboard focus
+  /// back for its input.
+  final VoidCallback? onPinnedEscape;
 
   /// Riverpod ref.
   final WidgetRef ref;
@@ -1496,22 +1502,27 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   /// Opens the switcher with keyboard focus on the active row, or closes it.
   void toggleFromKeyboard() {
     // A navigator pinned open on its own page cannot hide, so the shortcut
-    // moves focus into its list instead.
-    if (!widget.pinnedOpen) {
-      if (collapseIfExpanded()) {
-        return;
-      }
-      _toggleExpanded();
+    // moves focus into its list, which is already built.
+    if (widget.pinnedOpen) {
+      _focusActiveRow();
+      return;
     }
+    if (collapseIfExpanded()) {
+      return;
+    }
+    _toggleExpanded();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !(_expanded || widget.pinnedOpen)) {
-        return;
-      }
-      final list = _keyboardListKey.currentState;
-      if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
-        list.focusFirstRow();
+      if (mounted && _expanded) {
+        _focusActiveRow();
       }
     });
+  }
+
+  void _focusActiveRow() {
+    final list = _keyboardListKey.currentState;
+    if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
+      list.focusFirstRow();
+    }
   }
 
   static bool _isActiveRowNode(FocusNode node) =>
@@ -1523,9 +1534,17 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   Widget _withKeyboardNavigation(Widget list) => KeyboardListNavigation(
     key: _keyboardListKey,
-    onEscape: collapseIfExpanded,
+    onEscape: _handleListEscape,
     child: list,
   );
+
+  void _handleListEscape() {
+    if (widget.pinnedOpen) {
+      widget.onPinnedEscape?.call();
+    } else {
+      collapseIfExpanded();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

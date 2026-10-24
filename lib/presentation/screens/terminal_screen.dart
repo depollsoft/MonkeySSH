@@ -858,6 +858,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     milliseconds: 900,
   );
   final _terminalViewKey = GlobalKey<MonkeyTerminalViewState>();
+  // Fold layouts place the terminal and an embedded agent chat in different
+  // parents. Global keys carry them across, so folding the device keeps the
+  // keyboard's input connection and a chat's in-flight work.
+  final _terminalInputKey = GlobalKey();
+  final _nativeAgentViewKeys = <String, GlobalKey>{};
   final _tmuxBarKey = GlobalKey<_TmuxExpandableBarState>();
 
   late Terminal _terminal;
@@ -9320,6 +9325,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       availableHeight: availableHeight,
       placement: placement,
       pinnedOpen: pinnedOpen,
+      onPinnedEscape: _focusKeyboardInput,
       recoveryGeneration: _tmuxBarRecoveryGeneration,
       isProUser: isProUser,
       startClisInYoloMode: _startClisInYoloMode,
@@ -10740,7 +10746,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref.watch(fontFamilyNotifierProvider) ??
         'monospace';
     return AgentChatScreen(
-      key: ValueKey<String>('native-agent-${key.value}'),
+      key: _nativeAgentViewKeys.putIfAbsent(key.value, GlobalKey.new),
       hostId: key.hostId,
       providerId: key.providerId,
       bridgeId: key.bridgeId,
@@ -14044,6 +14050,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     Widget terminalViewWithInput = TerminalTextInputHandler(
+      key: _terminalInputKey,
       terminal: _terminal,
       focusNode: _terminalFocusNode,
       controller: _terminalTextInputController,

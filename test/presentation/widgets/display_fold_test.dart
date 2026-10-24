@@ -294,6 +294,80 @@ void main() {
       expect(seen, const [engineFeature]);
     });
 
+    testWidgets('keeps the subtree as a fold comes and goes', (tester) async {
+      await tester.pumpWidget(
+        const MediaQuery(
+          data: MediaQueryData(size: _openWide),
+          child: Directionality(
+            textDirection: TextDirection.ltr,
+            child: PlatformDisplayFeaturesMediaQuery(child: _Counter()),
+          ),
+        ),
+      );
+      final state = tester.state(find.byType(_Counter));
+
+      controller.debugSetState(features: const [_bookFold]);
+      await tester.pump();
+      expect(tester.state(find.byType(_Counter)), same(state));
+
+      controller.debugSetState();
+      await tester.pump();
+      expect(tester.state(find.byType(_Counter)), same(state));
+    });
+
+    testWidgets('passes a flat fold band on as its centre line', (
+      tester,
+    ) async {
+      List<DisplayFeature>? seen;
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(size: _openWide),
+          child: PlatformDisplayFeaturesMediaQuery(
+            child: Builder(
+              builder: (context) {
+                seen = MediaQuery.of(context).displayFeatures;
+                return const SizedBox.shrink();
+              },
+            ),
+          ),
+        ),
+      );
+      const band = Rect.fromLTRB(455.5, 0, 495.5, 669);
+      controller.debugSetState(
+        features: const [
+          DisplayFeature(
+            bounds: band,
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureFlat,
+          ),
+        ],
+      );
+      await tester.pump();
+      // Open flat, dialogs may cross the fold.
+      expect(seen, const [
+        DisplayFeature(
+          bounds: Rect.fromLTWH(475.5, 0, 0, 669),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureFlat,
+        ),
+      ]);
+      expect(
+        DisplayFeatureSubScreen.avoidBounds(
+          MediaQueryData(size: _openWide, displayFeatures: seen!),
+        ),
+        isEmpty,
+      );
+
+      const halfOpened = DisplayFeature(
+        bounds: band,
+        type: DisplayFeatureType.fold,
+        state: DisplayFeatureState.postureHalfOpened,
+      );
+      controller.debugSetState(features: const [halfOpened]);
+      await tester.pump();
+      expect(seen, const [halfOpened]);
+    });
+
     testWidgets('provides the reported vertical bar to the subtree', (
       tester,
     ) async {
@@ -410,4 +484,16 @@ void main() {
       expect(fold?.isVertical, isTrue);
     });
   });
+}
+
+class _Counter extends StatefulWidget {
+  const _Counter();
+
+  @override
+  State<_Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<_Counter> {
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

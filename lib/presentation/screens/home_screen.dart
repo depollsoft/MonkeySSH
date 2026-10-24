@@ -538,7 +538,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     automaticallyImplyLeading: false,
                     actions: [_buildSettingsButton()],
                   ),
-                  body: const SafeArea(top: false, child: _ConnectionsPanel()),
+                  // Arrows, Return and Esc drive the list here too.
+                  body: const SafeArea(
+                    top: false,
+                    child: KeyboardListNavigation(
+                      autofocus: true,
+                      child: _ConnectionsPanel(),
+                    ),
+                  ),
                 ),
               ),
             ),

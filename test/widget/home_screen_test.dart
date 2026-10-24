@@ -42,6 +42,7 @@ import 'package:monkeyssh/domain/services/transfer_intent_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
+import 'package:monkeyssh/presentation/widgets/keyboard_list_navigation.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
@@ -871,6 +872,17 @@ void main() {
         final settings = find.byTooltip('Settings');
         expect(settings, findsOneWidget);
         expect(tester.getRect(settings).left, greaterThanOrEqualTo(475));
+
+        // A hardware keyboard drives the connections as it does on the tab.
+        expect(
+          find.ancestor(
+            of: connectionsEmpty,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is KeyboardListNavigation && widget.autofocus,
+            ),
+          ),
+          findsOneWidget,
+        );
       },
     );
   });
