@@ -416,18 +416,18 @@ void main() {
       });
     }
 
-    testWidgets('keeps Unlock above the keyboard when propped up', (
-      tester,
-    ) async {
+    testWidgets('keeps Unlock above the fold when the keyboard stops short '
+        'of it', (tester) async {
       final authService = MockAuthService();
       when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
       tester.view
         ..physicalSize = const Size(669, 951)
         ..devicePixelRatio = 1
+        ..padding = const FakeViewPadding(top: 82)
         ..viewInsets = const FakeViewPadding(bottom: 360)
         ..displayFeatures = const [
           DisplayFeature(
-            bounds: Rect.fromLTWH(0, 475, 669, 0),
+            bounds: Rect.fromLTRB(0, 455.5, 669, 495.5),
             type: DisplayFeatureType.fold,
             state: DisplayFeatureState.postureHalfOpened,
           ),
@@ -446,14 +446,10 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      await tester.ensureVisible(find.text('Unlock'));
-      await tester.pump();
-      // The keyboard leaves too little of the bottom page, so the screen is
-      // one scrolling page above the keyboard.
-      expect(
-        tester.getRect(find.text('Unlock')).bottom,
-        lessThanOrEqualTo(951 - 360),
-      );
+      // The keyboard leaves too little of the bottom page, so the PIN keeps
+      // to the top page, clear of the fold and in view without scrolling.
+      expect(tester.getRect(find.byType(TextField)).top, greaterThan(82));
+      expect(tester.getRect(find.text('Unlock')).bottom, lessThan(455.5));
       expect(tester.takeException(), isNull);
     });
 

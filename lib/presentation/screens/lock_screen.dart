@@ -287,7 +287,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
     final mediaQuery = MediaQuery.of(context);
     final fold = resolveDisplayFold(mediaQuery);
     // Propped up, the keyboard rises over the bottom page; once it leaves
-    // too little of that page for the PIN, the screen is one scrolling page.
+    // too little of that page for the PIN, the PIN moves to the top page.
     final keyboardTop = mediaQuery.size.height - mediaQuery.viewInsets.bottom;
     if (fold != null &&
         (fold.isVertical ||
@@ -305,45 +305,52 @@ class _LockScreenState extends ConsumerState<LockScreen> {
     }
 
     final keyboardUp = mediaQuery.viewInsets.bottom > 0;
-    return Scaffold(
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            // With the keyboard up and no room for both, the brand gives way
-            // so Unlock stays in view: the number pad has no Return key.
-            // Propped up, the keyboard takes the whole bottom page.
-            final showsBrand =
-                !keyboardUp ||
-                constraints.maxHeight >= _brandExtent + _minPinPageExtent;
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minHeight: constraints.maxHeight > 48
-                      ? constraints.maxHeight - 48
-                      : 0,
-                ),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 360),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (showsBrand) ...[
-                          ...brand,
-                          const SizedBox(height: 8),
-                        ],
-                        ...controls,
-                      ],
-                    ),
+    final page = SafeArea(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // With the keyboard up and no room for both, the brand gives way
+          // so Unlock stays in view: the number pad has no Return key.
+          // Propped up, the keyboard takes the whole bottom page.
+          final showsBrand =
+              !keyboardUp ||
+              constraints.maxHeight >= _brandExtent + _minPinPageExtent;
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight > 48
+                    ? constraints.maxHeight - 48
+                    : 0,
+              ),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (showsBrand) ...[...brand, const SizedBox(height: 8)],
+                      ...controls,
+                    ],
                   ),
                 ),
               ),
-            );
-          },
-        ),
+            ),
+          );
+        },
       ),
     );
+    if (fold != null) {
+      // Propped up, the keyboard has taken the bottom page: the PIN keeps to
+      // the top one, off the crease.
+      return Scaffold(
+        body: DisplayFoldSpread(
+          fold: fold,
+          leading: page,
+          trailing: const SizedBox.shrink(),
+        ),
+      );
+    }
+    return Scaffold(body: page);
   }
 }
 

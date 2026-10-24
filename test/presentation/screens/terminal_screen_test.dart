@@ -12994,6 +12994,33 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('Browse Files'), findsOneWidget);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('keeps the title bar when no key fits in the vertical bar', (
+        tester,
+      ) async {
+        useOuterDisplay(tester);
+        // A Live Activity's status cluster and a very tall keyboard leave
+        // the item column no room at all.
+        tester.view.viewInsets = const FakeViewPadding(bottom: 420);
+        await pumpScreen(
+          tester,
+          verticalBar: const SystemVerticalBar(
+            edge: SystemVerticalBarEdge.right,
+            itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+          ),
+        );
+
+        final appBar = find.byType(AppBar);
+        expect(appBar, findsOneWidget);
+        expect(find.byType(VerticalBarRail), findsNothing);
+        for (final tooltip in ['Show menu', 'Browse files']) {
+          expect(
+            find.descendant(of: appBar, matching: find.byTooltip(tooltip)),
+            findsOneWidget,
+            reason: tooltip,
+          );
+        }
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     });
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (

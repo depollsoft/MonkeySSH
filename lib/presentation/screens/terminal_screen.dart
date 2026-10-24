@@ -12444,7 +12444,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     // On iPhone Duo the bar's controls stand in the system vertical bar,
     // which keeps fewer of them while the keyboard covers its lower part.
-    final verticalBar = SystemVerticalBarScope.maybeOf(context);
+    // The vertical bar takes the app bar's controls only while it has room
+    // for a key. Under a Live Activity with a very tall keyboard it has none,
+    // and the screen keeps its regular app bar.
+    final systemVerticalBar = SystemVerticalBarScope.maybeOf(context);
+    final verticalBar =
+        systemVerticalBar != null &&
+            verticalBarItemCapacity(
+                  resolveVerticalBarColumn(
+                    systemVerticalBar,
+                    MediaQuery.of(context),
+                  ),
+                ) >=
+                1
+        ? systemVerticalBar
+        : null;
     final verticalBarControls = verticalBar == null
         ? const <TerminalVerticalBarControl>{}
         : resolveTerminalVerticalBarControls(
