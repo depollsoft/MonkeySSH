@@ -22,6 +22,7 @@ import '../../domain/services/ssh_service.dart';
 import 'cursor_block.dart';
 import 'keyboard_toolbar.dart';
 import 'monkey_terminal_view.dart';
+import 'system_vertical_bar.dart';
 import 'terminal_text_input_handler.dart';
 import 'terminal_text_style.dart';
 
@@ -408,82 +409,88 @@ class _AcpSignInTerminalScreenState extends State<AcpSignInTerminalScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          tooltip: 'Cancel sign-in',
-          icon: const Icon(Icons.close),
-          onPressed: _cancel,
-        ),
-        titleSpacing: 0,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Sign in to ${widget.launch.providerLabel}',
-              style: FluttyTheme.displayMono(fontSize: 16),
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (methodName.isNotEmpty)
+      appBar: VerticalBarAppBar(
+        AppBar(
+          leading: IconButton(
+            tooltip: 'Cancel sign-in',
+            icon: const Icon(Icons.close),
+            onPressed: _cancel,
+          ),
+          titleSpacing: 0,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
               Text(
-                methodName,
-                style: FluttyTheme.monoStyle.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontSize: 12,
-                ),
+                'Sign in to ${widget.launch.providerLabel}',
+                style: FluttyTheme.displayMono(fontSize: 16),
                 overflow: TextOverflow.ellipsis,
               ),
-          ],
+              if (methodName.isNotEmpty)
+                Text(
+                  methodName,
+                  style: FluttyTheme.monoStyle.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+            ],
+          ),
         ),
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _SignInStatusBanner(
-            phase: _phase,
-            exitStatus: _exitStatus,
-            touchInput: isMobile,
-            onRetry: () => unawaited(_run()),
-          ),
-          if (description != null && description.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                FluttyTheme.spacingMd,
-                FluttyTheme.spacingSm,
-                FluttyTheme.spacingMd,
-                FluttyTheme.spacingSm,
-              ),
-              child: Text(
-                description,
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _SignInStatusBanner(
+              phase: _phase,
+              exitStatus: _exitStatus,
+              touchInput: isMobile,
+              onRetry: () => unawaited(_run()),
+            ),
+            if (description != null && description.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  FluttyTheme.spacingMd,
+                  FluttyTheme.spacingSm,
+                  FluttyTheme.spacingMd,
+                  FluttyTheme.spacingSm,
+                ),
+                child: Text(
+                  description,
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
+            Expanded(
+              child: ColoredBox(
+                color: terminalTheme.background,
+                child: SafeArea(top: false, bottom: false, child: terminal),
+              ),
             ),
-          Expanded(
-            child: ColoredBox(
-              color: terminalTheme.background,
-              child: SafeArea(top: false, bottom: false, child: terminal),
-            ),
-          ),
-          if (_link case final link?)
-            _SignInLinkBar(
-              link: link,
-              onOpen: () => _openLink(link),
-              onCopy: () => _copyLink(link),
-            ),
-          if (isMobile && running)
-            KeyboardToolbar(
-              controller: _toolbar,
-              terminal: _terminal,
-              onPasteRequested: _paste,
-              terminalFocusNode: _terminalFocus,
-            )
-          else
-            SizedBox(height: MediaQuery.paddingOf(context).bottom),
-        ],
+            if (_link case final link?)
+              _SignInLinkBar(
+                link: link,
+                onOpen: () => _openLink(link),
+                onCopy: () => _copyLink(link),
+              ),
+            if (isMobile && running)
+              KeyboardToolbar(
+                controller: _toolbar,
+                terminal: _terminal,
+                onPasteRequested: _paste,
+                terminalFocusNode: _terminalFocus,
+              )
+            else
+              SizedBox(height: MediaQuery.paddingOf(context).bottom),
+          ],
+        ),
       ),
     );
   }

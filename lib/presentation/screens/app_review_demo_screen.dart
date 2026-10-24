@@ -8,6 +8,7 @@ import '../../app/routes.dart';
 import '../../app/theme.dart';
 import '../../domain/services/app_review_demo_service.dart';
 import '../providers/entity_list_providers.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// App Review demo entry point shown from Settings > About.
 class AppReviewDemoScreen extends ConsumerStatefulWidget {
@@ -26,85 +27,89 @@ class _AppReviewDemoScreenState extends ConsumerState<AppReviewDemoScreen> {
   Widget build(BuildContext context) {
     final prepared = ref.watch(appReviewDemoPreparedProvider);
     return Scaffold(
-      appBar: AppBar(title: const Text('App Review Demo')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-        children: [
-          _DemoHeaderCard(
-            prepared: prepared.asData?.value ?? false,
-            isPreparing: _isPreparing,
-            onPrepare: () => unawaited(_prepareDemo()),
-          ),
-          const SizedBox(height: 16),
-          const _DemoSection(
-            title: 'What gets loaded',
-            children: [
-              _DemoFeatureTile(
-                icon: Icons.dns_outlined,
-                title: 'Hosts and jump host',
-                description: 'A MonkeyMux workspace, an agent workspace, an SFTP host, and a bastion jump host.',
-              ),
-              _DemoFeatureTile(
-                icon: Icons.key_outlined,
-                title: 'Key, snippets, and automation',
-                description: 'A sample SSH key, review snippets, auto-connect review prompts, and coding-agent launch presets.',
-              ),
-              _DemoFeatureTile(
-                icon: Icons.alt_route_outlined,
-                title: 'Tunnels and Pro configuration examples',
-                description: 'Local port-forward rules, host-specific terminal themes, and saved CLI YOLO preferences.',
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          _DemoSection(
-            title: 'Review path',
-            children: [
-              const _DemoInstructionTile(
-                number: '1',
-                title: 'Load the sample workspace',
-                description: 'Tap the primary button above. It only adds local sample data and never contacts an external server.',
-              ),
-              const _DemoInstructionTile(
-                number: '2',
-                title: 'Open the seeded app surfaces',
-                description: 'Use Hosts, Keys, Snippets, and Port Forwards to inspect the pre-populated content.',
-              ),
-              const _DemoInstructionTile(
-                number: '3',
-                title: 'Review connection-dependent controls',
-                description: 'Tap a seeded host to open an in-app local demo shell with sample SFTP files and tunnel responses.',
-              ),
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton.icon(
-                      onPressed: () => context.goNamed(Routes.home),
-                      icon: const Icon(Icons.home_outlined, size: 18),
-                      label: const Text('Open Hosts'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: () => context.go('/?tab=connections'),
-                      icon: const Icon(Icons.terminal, size: 18),
-                      label: const Text('Connections'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: () => context.pushNamed(Routes.portForwards),
-                      icon: const Icon(Icons.alt_route_outlined, size: 18),
-                      label: const Text('Port Forwards'),
-                    ),
-                  ],
+      appBar: VerticalBarAppBar(AppBar(title: const Text('App Review Demo'))),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+          children: [
+            _DemoHeaderCard(
+              prepared: prepared.asData?.value ?? false,
+              isPreparing: _isPreparing,
+              onPrepare: () => unawaited(_prepareDemo()),
+            ),
+            const SizedBox(height: 16),
+            const _DemoSection(
+              title: 'What gets loaded',
+              children: [
+                _DemoFeatureTile(
+                  icon: Icons.dns_outlined,
+                  title: 'Hosts and jump host',
+                  description: 'A MonkeyMux workspace, an agent workspace, an SFTP host, and a bastion jump host.',
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          const _DemoTerminalPreview(),
-        ],
+                _DemoFeatureTile(
+                  icon: Icons.key_outlined,
+                  title: 'Key, snippets, and automation',
+                  description: 'A sample SSH key, review snippets, auto-connect review prompts, and coding-agent launch presets.',
+                ),
+                _DemoFeatureTile(
+                  icon: Icons.alt_route_outlined,
+                  title: 'Tunnels and Pro configuration examples',
+                  description: 'Local port-forward rules, host-specific terminal themes, and saved CLI YOLO preferences.',
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _DemoSection(
+              title: 'Review path',
+              children: [
+                const _DemoInstructionTile(
+                  number: '1',
+                  title: 'Load the sample workspace',
+                  description: 'Tap the primary button above. It only adds local sample data and never contacts an external server.',
+                ),
+                const _DemoInstructionTile(
+                  number: '2',
+                  title: 'Open the seeded app surfaces',
+                  description: 'Use Hosts, Keys, Snippets, and Port Forwards to inspect the pre-populated content.',
+                ),
+                const _DemoInstructionTile(
+                  number: '3',
+                  title: 'Review connection-dependent controls',
+                  description: 'Tap a seeded host to open an in-app local demo shell with sample SFTP files and tunnel responses.',
+                ),
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () => context.goNamed(Routes.home),
+                        icon: const Icon(Icons.home_outlined, size: 18),
+                        label: const Text('Open Hosts'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => context.go('/?tab=connections'),
+                        icon: const Icon(Icons.terminal, size: 18),
+                        label: const Text('Connections'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => context.pushNamed(Routes.portForwards),
+                        icon: const Icon(Icons.alt_route_outlined, size: 18),
+                        label: const Text('Port Forwards'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const _DemoTerminalPreview(),
+          ],
+        ),
       ),
     );
   }

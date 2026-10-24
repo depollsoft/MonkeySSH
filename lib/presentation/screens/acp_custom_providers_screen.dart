@@ -16,6 +16,7 @@ import '../../app/theme.dart';
 import '../../domain/models/acp_provider.dart';
 import '../../domain/services/acp_provider_service.dart';
 import '../widgets/brand_empty_state.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Opens the custom agent list on the nearest navigator.
 Future<void> openAcpCustomProvidersScreen(BuildContext context) =>
@@ -85,36 +86,38 @@ class AcpCustomProvidersScreen extends ConsumerWidget {
         definitionsAsync.asData?.value ?? const <AcpCustomProviderDefinition>[];
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Custom Agents'),
-        actions: [
-          PopupMenuButton<_ListAction>(
-            tooltip: 'More actions',
-            onSelected: (action) => unawaited(switch (action) {
-              _ListAction.import => _import(context, ref),
-              _ListAction.exportAll => _exportAll(context, ref, definitions),
-            }),
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: _ListAction.import,
-                child: ListTile(
-                  leading: Icon(Icons.download_outlined),
-                  title: Text('Import'),
-                  contentPadding: EdgeInsets.zero,
+      appBar: VerticalBarAppBar(
+        AppBar(
+          title: const Text('Custom Agents'),
+          actions: [
+            PopupMenuButton<_ListAction>(
+              tooltip: 'More actions',
+              onSelected: (action) => unawaited(switch (action) {
+                _ListAction.import => _import(context, ref),
+                _ListAction.exportAll => _exportAll(context, ref, definitions),
+              }),
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: _ListAction.import,
+                  child: ListTile(
+                    leading: Icon(Icons.download_outlined),
+                    title: Text('Import'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-              PopupMenuItem(
-                value: _ListAction.exportAll,
-                enabled: definitions.isNotEmpty,
-                child: const ListTile(
-                  leading: Icon(Icons.copy_all_outlined),
-                  title: Text('Export all'),
-                  contentPadding: EdgeInsets.zero,
+                PopupMenuItem(
+                  value: _ListAction.exportAll,
+                  enabled: definitions.isNotEmpty,
+                  child: const ListTile(
+                    leading: Icon(Icons.copy_all_outlined),
+                    title: Text('Export all'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
       floatingActionButton: definitions.isEmpty
           ? null
@@ -123,59 +126,64 @@ class AcpCustomProvidersScreen extends ConsumerWidget {
               onPressed: () => unawaited(_openEditor(context)),
               child: const Icon(Icons.add),
             ),
-      body: definitionsAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) =>
-            const Center(child: Text('Could not load custom agents.')),
-        data: (definitions) => definitions.isEmpty
-            ? Center(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(FluttyTheme.spacingLg),
-                  child: BrandEmptyState(
-                    title: 'no custom agents',
-                    message: 'Speaks ACP? Then it can run here.',
-                    primaryLabel: 'Add custom agent',
-                    onPrimary: () => unawaited(_openEditor(context)),
-                    secondaryActions: [
-                      BrandEmptyAction(
-                        icon: Icons.download_outlined,
-                        label: 'Import',
-                        onTap: () => unawaited(_import(context, ref)),
-                      ),
-                    ],
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: definitionsAsync.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, _) =>
+              const Center(child: Text('Could not load custom agents.')),
+          data: (definitions) => definitions.isEmpty
+              ? Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(FluttyTheme.spacingLg),
+                    child: BrandEmptyState(
+                      title: 'no custom agents',
+                      message: 'Speaks ACP? Then it can run here.',
+                      primaryLabel: 'Add custom agent',
+                      onPrimary: () => unawaited(_openEditor(context)),
+                      secondaryActions: [
+                        BrandEmptyAction(
+                          icon: Icons.download_outlined,
+                          label: 'Import',
+                          onTap: () => unawaited(_import(context, ref)),
+                        ),
+                      ],
+                    ),
                   ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.only(bottom: 96),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingMd,
+                        FluttyTheme.spacingSm,
+                      ),
+                      child: Text(
+                        'Approved agents appear when you start a native agent '
+                        'session. MonkeySSH runs the exact command on the host '
+                        'through MonkeyMux, the same way as built-in agents.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    for (final definition in definitions)
+                      _AgentTile(
+                        key: ValueKey('custom-agent-${definition.id}'),
+                        definition: definition,
+                        onTap: () =>
+                            unawaited(_openEditor(context, definition)),
+                        onReview: () => unawaited(
+                          showAcpCustomProviderReviewSheet(context, definition),
+                        ),
+                      ),
+                  ],
                 ),
-              )
-            : ListView(
-                padding: const EdgeInsets.only(bottom: 96),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingMd,
-                      FluttyTheme.spacingSm,
-                    ),
-                    child: Text(
-                      'Approved agents appear when you start a native agent '
-                      'session. MonkeySSH runs the exact command on the host '
-                      'through MonkeyMux, the same way as built-in agents.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  for (final definition in definitions)
-                    _AgentTile(
-                      key: ValueKey('custom-agent-${definition.id}'),
-                      definition: definition,
-                      onTap: () => unawaited(_openEditor(context, definition)),
-                      onReview: () => unawaited(
-                        showAcpCustomProviderReviewSheet(context, definition),
-                      ),
-                    ),
-                ],
-              ),
+        ),
       ),
     );
   }
@@ -558,199 +566,206 @@ class _AcpCustomProviderEditScreenState
         if (!didPop) unawaited(_confirmDiscard());
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: Text(isEditing ? 'Edit Custom Agent' : 'Add Custom Agent'),
-          actions: [
-            if (definition != null) ...[
-              IconButton(
-                tooltip: 'Copy as JSON',
-                icon: const Icon(Icons.copy_all_outlined),
-                onPressed: () => unawaited(
-                  _copyExport(context, ref, count: 1, ids: {definition.id}),
+        appBar: VerticalBarAppBar(
+          AppBar(
+            title: Text(isEditing ? 'Edit Custom Agent' : 'Add Custom Agent'),
+            actions: [
+              if (definition != null) ...[
+                IconButton(
+                  tooltip: 'Copy as JSON',
+                  icon: const Icon(Icons.copy_all_outlined),
+                  onPressed: () => unawaited(
+                    _copyExport(context, ref, count: 1, ids: {definition.id}),
+                  ),
                 ),
-              ),
-              IconButton(
-                tooltip: 'Delete',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: _saving ? null : () => unawaited(_delete()),
-              ),
+                IconButton(
+                  tooltip: 'Delete',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: _saving ? null : () => unawaited(_delete()),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
-        body: Form(
-          key: _formKey,
-          onChanged: _markDirty,
-          child: ListView(
-            padding: const EdgeInsets.all(FluttyTheme.spacingMd),
-            children: [
-              if (definition != null) ...[
-                _EditorApprovalBanner(initial: definition),
-                const SizedBox(height: FluttyTheme.spacingMd),
-              ],
-              TextFormField(
-                key: const ValueKey('custom-agent-label'),
-                controller: _label,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  hintText: 'Goose',
-                ),
-                validator: (value) =>
-                    _validate(() => validateAcpProviderLabel(value ?? '')),
-              ),
-              if (definition != null) ...[
-                const SizedBox(height: FluttyTheme.spacingXs),
-                Text(
-                  'id: ${definition.id}',
-                  style: FluttyTheme.monoStyle.copyWith(
-                    fontSize: 12,
-                    color: theme.colorScheme.onSurfaceVariant,
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: Form(
+            key: _formKey,
+            onChanged: _markDirty,
+            child: ListView(
+              padding: const EdgeInsets.all(FluttyTheme.spacingMd),
+              children: [
+                if (definition != null) ...[
+                  _EditorApprovalBanner(initial: definition),
+                  const SizedBox(height: FluttyTheme.spacingMd),
+                ],
+                TextFormField(
+                  key: const ValueKey('custom-agent-label'),
+                  controller: _label,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: 'Name',
+                    hintText: 'Goose',
                   ),
+                  validator: (value) =>
+                      _validate(() => validateAcpProviderLabel(value ?? '')),
                 ),
-              ],
-              const SizedBox(height: FluttyTheme.spacingMd),
-              TextFormField(
-                key: const ValueKey('custom-agent-command'),
-                controller: _command,
-                autocorrect: false,
-                enableSuggestions: false,
-                // iOS would turn -- into an em dash and quotes into curly
-                // ones, changing the command.
-                smartDashesType: SmartDashesType.disabled,
-                smartQuotesType: SmartQuotesType.disabled,
-                style: FluttyTheme.monoStyle,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Command',
-                  hintText: 'goose',
-                  helperText:
-                      'Looked up on the host’s PATH after your shell profile '
-                      'loads. An absolute path is most reliable.',
-                  helperMaxLines: 3,
-                ),
-                validator: (value) => (value ?? '').trim().isEmpty
-                    ? 'Command must not be blank.'
-                    : null,
-              ),
-              const SizedBox(height: FluttyTheme.spacingMd),
-              TextFormField(
-                key: const ValueKey('custom-agent-arguments'),
-                controller: _arguments,
-                autocorrect: false,
-                enableSuggestions: false,
-                smartDashesType: SmartDashesType.disabled,
-                smartQuotesType: SmartQuotesType.disabled,
-                minLines: 2,
-                maxLines: 6,
-                style: FluttyTheme.monoStyle,
-                decoration: const InputDecoration(
-                  labelText: 'Arguments',
-                  hintText: 'acp',
-                  helperText:
-                      'One per line, exactly as written. No shell quoting, '
-                      r'~ or $VAR expansion. An empty line between arguments '
-                      'passes an empty one.',
-                  helperMaxLines: 5,
-                  alignLabelWithHint: true,
-                ),
-              ),
-              _CommandPreview(
-                command: _command,
-                arguments: _arguments,
-                current: _buildCommand,
-              ),
-              const SizedBox(height: FluttyTheme.spacingMd),
-              TextFormField(
-                key: const ValueKey('custom-agent-environment'),
-                controller: _environment,
-                autocorrect: false,
-                enableSuggestions: false,
-                smartDashesType: SmartDashesType.disabled,
-                smartQuotesType: SmartQuotesType.disabled,
-                minLines: 1,
-                maxLines: 4,
-                style: FluttyTheme.monoStyle,
-                decoration: const InputDecoration(
-                  labelText: 'Required environment variables',
-                  hintText: 'OPENAI_API_KEY',
-                  helperText:
-                      'Names only. MonkeySSH checks they are set on the host '
-                      'before starting the agent and never stores their '
-                      'values.',
-                  helperMaxLines: 3,
-                  alignLabelWithHint: true,
-                ),
-                validator: (_) => _validate(
-                  () =>
-                      validateAcpEnvironmentVariableNames(_environmentNames()),
-                ),
-              ),
-              const SizedBox(height: FluttyTheme.spacingLg),
-              Text('Starts in', style: theme.textTheme.labelLarge),
-              const SizedBox(height: FluttyTheme.spacingSm),
-              SegmentedButton<AcpCustomProviderCwdPolicy>(
-                key: const ValueKey('custom-agent-cwd-policy'),
-                segments: const [
-                  ButtonSegment(
-                    value: AcpCustomProviderCwdPolicy.chosenDirectory,
-                    label: Text('Chosen folder'),
-                  ),
-                  ButtonSegment(
-                    value: AcpCustomProviderCwdPolicy.homeDirectory,
-                    label: Text('Home folder'),
+                if (definition != null) ...[
+                  const SizedBox(height: FluttyTheme.spacingXs),
+                  Text(
+                    'id: ${definition.id}',
+                    style: FluttyTheme.monoStyle.copyWith(
+                      fontSize: 12,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
-                selected: {_cwdPolicy},
-                showSelectedIcon: false,
-                onSelectionChanged: (selection) => setState(() {
-                  _cwdPolicy = selection.single;
-                  _dirty = true;
-                }),
-              ),
-              const SizedBox(height: FluttyTheme.spacingSm),
-              Text(switch (_cwdPolicy) {
-                AcpCustomProviderCwdPolicy.chosenDirectory =>
-                  'The agent starts in the folder you pick for each session.',
-                AcpCustomProviderCwdPolicy.homeDirectory =>
-                  'The agent always starts in your home folder on the host, '
-                      'for agents that are not tied to one project.',
-              }, style: muted),
-              if (_saveError != null) ...[
                 const SizedBox(height: FluttyTheme.spacingMd),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.error_outline,
-                      size: 18,
-                      color: theme.colorScheme.error,
+                TextFormField(
+                  key: const ValueKey('custom-agent-command'),
+                  controller: _command,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  // iOS would turn -- into an em dash and quotes into curly
+                  // ones, changing the command.
+                  smartDashesType: SmartDashesType.disabled,
+                  smartQuotesType: SmartQuotesType.disabled,
+                  style: FluttyTheme.monoStyle,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: 'Command',
+                    hintText: 'goose',
+                    helperText:
+                        'Looked up on the host’s PATH after your shell profile '
+                        'loads. An absolute path is most reliable.',
+                    helperMaxLines: 3,
+                  ),
+                  validator: (value) => (value ?? '').trim().isEmpty
+                      ? 'Command must not be blank.'
+                      : null,
+                ),
+                const SizedBox(height: FluttyTheme.spacingMd),
+                TextFormField(
+                  key: const ValueKey('custom-agent-arguments'),
+                  controller: _arguments,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  smartDashesType: SmartDashesType.disabled,
+                  smartQuotesType: SmartQuotesType.disabled,
+                  minLines: 2,
+                  maxLines: 6,
+                  style: FluttyTheme.monoStyle,
+                  decoration: const InputDecoration(
+                    labelText: 'Arguments',
+                    hintText: 'acp',
+                    helperText:
+                        'One per line, exactly as written. No shell quoting, '
+                        r'~ or $VAR expansion. An empty line between arguments '
+                        'passes an empty one.',
+                    helperMaxLines: 5,
+                    alignLabelWithHint: true,
+                  ),
+                ),
+                _CommandPreview(
+                  command: _command,
+                  arguments: _arguments,
+                  current: _buildCommand,
+                ),
+                const SizedBox(height: FluttyTheme.spacingMd),
+                TextFormField(
+                  key: const ValueKey('custom-agent-environment'),
+                  controller: _environment,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  smartDashesType: SmartDashesType.disabled,
+                  smartQuotesType: SmartQuotesType.disabled,
+                  minLines: 1,
+                  maxLines: 4,
+                  style: FluttyTheme.monoStyle,
+                  decoration: const InputDecoration(
+                    labelText: 'Required environment variables',
+                    hintText: 'OPENAI_API_KEY',
+                    helperText:
+                        'Names only. MonkeySSH checks they are set on the host '
+                        'before starting the agent and never stores their '
+                        'values.',
+                    helperMaxLines: 3,
+                    alignLabelWithHint: true,
+                  ),
+                  validator: (_) => _validate(
+                    () => validateAcpEnvironmentVariableNames(
+                      _environmentNames(),
                     ),
-                    const SizedBox(width: FluttyTheme.spacingSm),
-                    Expanded(
-                      child: Text(
-                        _saveError!,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.error,
-                        ),
-                      ),
+                  ),
+                ),
+                const SizedBox(height: FluttyTheme.spacingLg),
+                Text('Starts in', style: theme.textTheme.labelLarge),
+                const SizedBox(height: FluttyTheme.spacingSm),
+                SegmentedButton<AcpCustomProviderCwdPolicy>(
+                  key: const ValueKey('custom-agent-cwd-policy'),
+                  segments: const [
+                    ButtonSegment(
+                      value: AcpCustomProviderCwdPolicy.chosenDirectory,
+                      label: Text('Chosen folder'),
+                    ),
+                    ButtonSegment(
+                      value: AcpCustomProviderCwdPolicy.homeDirectory,
+                      label: Text('Home folder'),
                     ),
                   ],
+                  selected: {_cwdPolicy},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (selection) => setState(() {
+                    _cwdPolicy = selection.single;
+                    _dirty = true;
+                  }),
+                ),
+                const SizedBox(height: FluttyTheme.spacingSm),
+                Text(switch (_cwdPolicy) {
+                  AcpCustomProviderCwdPolicy.chosenDirectory =>
+                    'The agent starts in the folder you pick for each session.',
+                  AcpCustomProviderCwdPolicy.homeDirectory =>
+                    'The agent always starts in your home folder on the host, '
+                        'for agents that are not tied to one project.',
+                }, style: muted),
+                if (_saveError != null) ...[
+                  const SizedBox(height: FluttyTheme.spacingMd),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.error_outline,
+                        size: 18,
+                        color: theme.colorScheme.error,
+                      ),
+                      const SizedBox(width: FluttyTheme.spacingSm),
+                      Expanded(
+                        child: Text(
+                          _saveError!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.error,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: FluttyTheme.spacingLg),
+                FilledButton.icon(
+                  key: const ValueKey('custom-agent-save'),
+                  onPressed: _saving ? null : () => unawaited(_save()),
+                  icon: _saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save),
+                  label: Text(isEditing ? 'Save Changes' : 'Save and Review'),
                 ),
               ],
-              const SizedBox(height: FluttyTheme.spacingLg),
-              FilledButton.icon(
-                key: const ValueKey('custom-agent-save'),
-                onPressed: _saving ? null : () => unawaited(_save()),
-                icon: _saving
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.save),
-                label: Text(isEditing ? 'Save Changes' : 'Save and Review'),
-              ),
-            ],
+            ),
           ),
         ),
       ),

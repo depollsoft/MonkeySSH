@@ -124,6 +124,29 @@ void registerMonkeyTerminalViewLayoutTests() {
         },
       );
 
+      test('keeps an iOS portrait side strip such as iPhone Duo outer', () {
+        const mediaQuery = MediaQueryData(
+          size: Size(466, 678),
+          padding: EdgeInsets.only(right: 84, bottom: 34),
+          viewPadding: EdgeInsets.only(right: 84, bottom: 34),
+        );
+
+        expect(
+          resolveTerminalRenderPadding(
+            mediaQuery,
+            platform: TargetPlatform.iOS,
+          ),
+          const EdgeInsets.only(right: 84),
+        );
+        expect(
+          resolveTerminalRenderPadding(
+            mediaQuery,
+            platform: TargetPlatform.android,
+          ),
+          EdgeInsets.zero,
+        );
+      });
+
       test('keeps horizontal cutout padding in landscape', () {
         const mediaQuery = MediaQueryData(
           size: Size(844, 390),

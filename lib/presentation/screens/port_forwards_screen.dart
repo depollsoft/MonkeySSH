@@ -18,6 +18,7 @@ import '../widgets/brand_empty_state.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/brand_list_skeleton.dart';
 import '../widgets/delete_confirmation_dialog.dart';
+import '../widgets/system_vertical_bar.dart';
 import 'port_forward_browser_screen.dart';
 
 /// Screen displaying list of port forwards grouped by host.
@@ -31,23 +32,27 @@ class PortForwardsScreen extends ConsumerWidget {
     final hostsAsync = ref.watch(allHostsProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Port Forwards')),
-      body: portForwardsAsync.when(
-        loading: () => const BrandListSkeleton(),
-        error: (_, _) => BrandErrorState(
-          title: 'couldn’t load forwards',
-          message: 'Your port forwards didn’t load.',
-          onRetry: () => ref.invalidate(allPortForwardsProvider),
-        ),
-        data: (portForwards) => hostsAsync.when(
+      appBar: VerticalBarAppBar(AppBar(title: const Text('Port Forwards'))),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: portForwardsAsync.when(
           loading: () => const BrandListSkeleton(),
           error: (_, _) => BrandErrorState(
-            title: 'couldn’t load hosts',
-            message: 'Your saved hosts didn’t load.',
-            onRetry: () => ref.invalidate(allHostsProvider),
+            title: 'couldn’t load forwards',
+            message: 'Your port forwards didn’t load.',
+            onRetry: () => ref.invalidate(allPortForwardsProvider),
           ),
-          data: (hosts) =>
-              _buildPortForwardsList(context, ref, portForwards, hosts),
+          data: (portForwards) => hostsAsync.when(
+            loading: () => const BrandListSkeleton(),
+            error: (_, _) => BrandErrorState(
+              title: 'couldn’t load hosts',
+              message: 'Your saved hosts didn’t load.',
+              onRetry: () => ref.invalidate(allHostsProvider),
+            ),
+            data: (hosts) =>
+                _buildPortForwardsList(context, ref, portForwards, hosts),
+          ),
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(

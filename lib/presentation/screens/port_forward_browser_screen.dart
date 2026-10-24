@@ -27,6 +27,7 @@ import '../browser/browser_file_picker.dart';
 import '../browser/socks_browser_panels.dart';
 import '../browser/socks_browser_store_binder.dart';
 import '../widgets/brand_error_state.dart';
+import '../widgets/system_vertical_bar.dart';
 
 /// Group used to prioritize and separate forwarded browser tabs.
 enum PortForwardBrowserTabGroup {
@@ -269,19 +270,23 @@ class _PortForwardBrowserScreenState
   Widget build(BuildContext context) {
     if (_directProxyBlocked) {
       return Scaffold(
-        appBar: AppBar(),
-        body: BrandErrorState(
-          icon: Icons.link_off_rounded,
-          title: 'browser proxy stuck',
-          message: _directProxyHeld
-              ? 'A SOCKS browser is still open, so this browser can’t open '
-                    'local forwards. Close the SOCKS browser first.'
-              : 'A SOCKS proxy is still set for the in-app browser, so it '
-                    'can’t open local forwards yet.',
-          onRetry: () {
-            setState(() => _directProxyBlocked = false);
-            unawaited(_initializeBrowser());
-          },
+        appBar: VerticalBarAppBar(AppBar()),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: BrandErrorState(
+            icon: Icons.link_off_rounded,
+            title: 'browser proxy stuck',
+            message: _directProxyHeld
+                ? 'A SOCKS browser is still open, so this browser can’t open '
+                      'local forwards. Close the SOCKS browser first.'
+                : 'A SOCKS proxy is still set for the in-app browser, so it '
+                      'can’t open local forwards yet.',
+            onRetry: () {
+              setState(() => _directProxyBlocked = false);
+              unawaited(_initializeBrowser());
+            },
+          ),
         ),
       );
     }

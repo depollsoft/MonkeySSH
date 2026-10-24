@@ -115,6 +115,7 @@ import '../widgets/brand_error_state.dart';
 import '../widgets/connection_attempt_dialog.dart';
 import '../widgets/cursor_block.dart';
 import '../widgets/device_debug_sheet.dart';
+import '../widgets/display_fold.dart';
 import '../widgets/keyboard_list_navigation.dart';
 import '../widgets/keyboard_toolbar.dart';
 import '../widgets/monkey_terminal_view.dart';
@@ -123,6 +124,7 @@ import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
 import '../widgets/snippet_key_sender.dart';
 import '../widgets/system_bottom_inset.dart';
+import '../widgets/system_vertical_bar.dart';
 import '../widgets/terminal_key_input.dart';
 import '../widgets/terminal_menu_style.dart';
 import '../widgets/terminal_overlay_focus.dart';
@@ -856,6 +858,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     milliseconds: 900,
   );
   final _terminalViewKey = GlobalKey<MonkeyTerminalViewState>();
+  // Fold layouts place the terminal and an embedded agent chat in different
+  // parents. Global keys carry them across, so folding the device keeps the
+  // keyboard's input connection and a chat's in-flight work.
+  final _terminalInputKey = GlobalKey();
+  final _nativeAgentViewKeys = <String, GlobalKey>{};
   final _tmuxBarKey = GlobalKey<_TmuxExpandableBarState>();
 
   late Terminal _terminal;
@@ -970,6 +977,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   AcpSessionKey? _pendingInitialNativeAcpSessionKey;
   bool _showTmuxBar = true;
   bool _isTmuxBarExpanded = false;
+  // Whether a fold layout keeps the mux navigator open on its own page.
+  bool _tmuxNavigatorPinned = false;
   double _tmuxSidebarDragOffset = 0;
   AcpSessionKey? _activeNativeAcpSessionKey;
   String? _autoOpenedNativeAcpBridgeId;
@@ -1537,6 +1546,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     ),
     trailingIcon: showProBadge ? const PremiumBadge() : null,
     onPressed: enabled ? () => unawaited(_handleMenuAction(action)) : null,
+    child: _terminalOverflowMenuLabel(label),
+  );
+
+  /// A menu entry standing in for a bar control the system vertical bar had
+  /// no room for; it does what [button] does.
+  Widget _terminalRailOverflowMenuItem({
+    required BuildContext context,
+    required IconButton button,
+    required IconData icon,
+    required String label,
+  }) => MenuItemButton(
+    style: TerminalMenuStyles.itemButtonStyle(context),
+    leadingIcon: Icon(icon, size: TerminalMenuStyles.iconSize),
+    onPressed: button.onPressed,
     child: _terminalOverflowMenuLabel(label),
   );
 
@@ -9274,6 +9297,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     ThemeData theme,
     double availableHeight, {
     required TmuxBarPlacement placement,
+    bool pinnedOpen = false,
   }) {
     final connectionId = _connectionId;
     if (connectionId == null || _tmuxSessionName == null) {
@@ -9300,6 +9324,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       tmuxExtraFlags: _activeTmuxExtraFlags,
       availableHeight: availableHeight,
       placement: placement,
+      pinnedOpen: pinnedOpen,
+      onPinnedEscape: _focusKeyboardInput,
       recoveryGeneration: _tmuxBarRecoveryGeneration,
       isProUser: isProUser,
       startClisInYoloMode: _startClisInYoloMode,
@@ -9436,7 +9462,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   bool _collapseTmuxBarIfExpanded() {
-    if (!_isTmuxBarExpanded) {
+    if (!_isTmuxBarExpanded || _tmuxNavigatorPinned) {
       return false;
     }
     final collapsed = _tmuxBarKey.currentState?.collapseIfExpanded() ?? false;
@@ -10720,7 +10746,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ref.watch(fontFamilyNotifierProvider) ??
         'monospace';
     return AgentChatScreen(
-      key: ValueKey<String>('native-agent-${key.value}'),
+      key: _nativeAgentViewKeys.putIfAbsent(key.value, GlobalKey.new),
       hostId: key.hostId,
       providerId: key.providerId,
       bridgeId: key.bridgeId,
@@ -12267,12 +12293,576 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final isOpeningTmuxNavigator = _isExclusiveTerminalActionRunning(
       _TerminalExclusiveAction.tmuxNavigator,
     );
+    final displayFold = resolveDisplayFold(MediaQuery.of(context));
+    final showsMuxNavigatorPage =
+        _isTmuxActive &&
+        _showTmuxBar &&
+        connectionState == SshConnectionState.connected &&
+        !showsDisconnectedOverlay;
+    final terminalFoldLayout = resolveTerminalFoldLayout(
+      displayFold,
+      showsMuxNavigator: showsMuxNavigatorPage,
+    );
+    // A navigator pinned to its own page is not an expanded overlay, so Back
+    // leaves the screen instead of trying to collapse it.
+    _tmuxNavigatorPinned =
+        showsMuxNavigatorPage && terminalFoldLayout != TerminalFoldLayout.none;
 
     // A native chat hides the find bar without closing it.
     final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
+
+    final terminalBarTitle = Row(
+      children: [
+        _TerminalConnectionStatusIcon(
+          label: connectionLabel,
+          state: connectionState,
+          isConnecting: _isConnecting,
+          connectedThroughJumpHost: isConnectedThroughJumpHost,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: AgentForwardingTitleSlot(
+            forwarding: connectionState == SshConnectionState.connected
+                ? (_observedSession ?? activeSession)?.config.agentForwarding
+                : null,
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _host?.label ?? 'Terminal',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: FluttyTheme.displayMono(
+                    fontSize: 16,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+                if (titleSubtitle.isNotEmpty)
+                  Text(
+                    titleSubtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: FluttyTheme.monoStyle.copyWith(
+                      fontSize: 11,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+    final PreferredSizeWidget? terminalBarBottom =
+        terminalProgress == null &&
+            (showsNativeAgent || !_showsTerminalMetadata || statusChips.isEmpty)
+        ? null
+        : PreferredSize(
+            preferredSize: Size.fromHeight(
+              (!showsNativeAgent &&
+                          _showsTerminalMetadata &&
+                          statusChips.isNotEmpty
+                      ? 40
+                      : 0) +
+                  (terminalProgress == null ? 0 : 3),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!showsNativeAgent &&
+                    _showsTerminalMetadata &&
+                    statusChips.isNotEmpty)
+                  Container(
+                    alignment: Alignment.centerLeft,
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: statusChips
+                            .map(
+                              (chip) => Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: chip,
+                              ),
+                            )
+                            .toList(growable: false),
+                      ),
+                    ),
+                  ),
+                if (terminalProgress != null)
+                  _TerminalProgressBar(progress: terminalProgress),
+              ],
+            ),
+          );
+    final showsMuxWindowsControl =
+        _isTmuxActive &&
+        !_showTmuxBar &&
+        connectionState == SshConnectionState.connected;
+    final muxWindowsButton = IconButton(
+      icon: const Icon(Icons.window_outlined),
+      onPressed: _connectionId == null || isOpeningTmuxNavigator
+          ? null
+          : _openTmuxNavigator,
+      tooltip: 'tmux windows',
+    );
+    final browseFilesButton = IconButton(
+      icon: const Icon(Icons.folder_outlined),
+      onPressed:
+          _connectionId == null ||
+              isOpeningSftpBrowser ||
+              connectionState != SshConnectionState.connected
+          ? null
+          : () => unawaited(_openConnectionFileBrowser()),
+      tooltip: 'Browse files',
+    );
+    final keyboardButton = IconButton(
+      icon: Icon(
+        systemKeyboardVisible
+            ? Icons.keyboard_hide
+            : Icons.keyboard_alt_outlined,
+      ),
+      onPressed: () => showsNativeAgent
+          ? _toggleNativeComposerKeyboard(systemKeyboardVisible)
+          : _toggleSystemKeyboard(systemKeyboardVisible),
+      tooltip: systemKeyboardVisible
+          ? 'Hide system keyboard'
+          : 'Show system keyboard',
+    );
+    final extraKeysButton = IconButton(
+      icon: _ExtraKeysToggleKeycap(
+        key: ValueKey<String>(
+          _showKeyboardToolbar
+              ? 'extra-keys-toggle-active'
+              : 'extra-keys-toggle-inactive',
+        ),
+        isActive: _showKeyboardToolbar,
+      ),
+      onPressed: _toggleKeyboardToolbar,
+      tooltip: _showKeyboardToolbar ? 'Hide extra keys' : 'Show extra keys',
+    );
+    // On iPhone Duo the bar's controls stand in the system vertical bar,
+    // which keeps fewer of them while the keyboard covers its lower part.
+    // The vertical bar takes the app bar's controls only while it has room
+    // for a key. Under a Live Activity with a very tall keyboard it has none,
+    // and the screen keeps its regular app bar.
+    final systemVerticalBar = SystemVerticalBarScope.maybeOf(context);
+    final verticalBar =
+        systemVerticalBar != null &&
+            verticalBarItemCapacity(
+                  resolveVerticalBarColumn(
+                    systemVerticalBar,
+                    MediaQuery.of(context),
+                  ),
+                ) >=
+                1
+        ? systemVerticalBar
+        : null;
+    final verticalBarControls = verticalBar == null
+        ? const <TerminalVerticalBarControl>{}
+        : resolveTerminalVerticalBarControls(
+            available: {
+              TerminalVerticalBarControl.menu,
+              TerminalVerticalBarControl.status,
+              TerminalVerticalBarControl.extraKeys,
+              TerminalVerticalBarControl.files,
+              if (isMobile) TerminalVerticalBarControl.keyboard,
+              if (ModalRoute.of(context)?.impliesAppBarDismissal ?? false)
+                TerminalVerticalBarControl.back,
+              if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
+            },
+            capacity: verticalBarItemCapacity(
+              resolveVerticalBarColumn(verticalBar, MediaQuery.of(context)),
+            ),
+          );
+    bool leftOutOfVerticalBar(TerminalVerticalBarControl control) =>
+        verticalBar != null && !verticalBarControls.contains(control);
+    final railOverflowMenuItems = <Widget>[
+      if (showsMuxWindowsControl &&
+          leftOutOfVerticalBar(TerminalVerticalBarControl.muxWindows))
+        _terminalRailOverflowMenuItem(
+          context: context,
+          button: muxWindowsButton,
+          icon: Icons.window_outlined,
+          label: 'Windows',
+        ),
+      if (leftOutOfVerticalBar(TerminalVerticalBarControl.files))
+        _terminalRailOverflowMenuItem(
+          context: context,
+          button: browseFilesButton,
+          icon: Icons.folder_outlined,
+          label: 'Browse Files',
+        ),
+      if (leftOutOfVerticalBar(TerminalVerticalBarControl.extraKeys))
+        _terminalRailOverflowMenuItem(
+          context: context,
+          button: extraKeysButton,
+          icon: Icons.keyboard_command_key_rounded,
+          label: _showKeyboardToolbar ? 'Hide Extra Keys' : 'Show Extra Keys',
+        ),
+    ];
+    if (railOverflowMenuItems.isNotEmpty) {
+      railOverflowMenuItems.add(_terminalOverflowMenuDivider(context));
+    }
+    final overflowMenu = MenuAnchor(
+      key: _terminalOverflowMenuButtonKey,
+      style: _terminalOverflowMenuStyle(
+        context: context,
+        isMobilePlatform: isMobile,
+      ),
+      reservedPadding: _terminalOverflowMenuReservedPadding(
+        context: context,
+        isMobilePlatform: isMobile,
+      ),
+      menuChildren: [
+        ...railOverflowMenuItems,
+        if (_activeNativeAcpSessionKey != null) ...[
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.search,
+            label: 'Search Chat',
+            action: 'search_chat',
+          ),
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.adaptive.share,
+            label: 'Export Chat',
+            action: 'export_chat',
+          ),
+        ],
+        if (showsTerminalViewportMenuActions)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.code_rounded,
+            label: 'Snippets',
+            action: 'snippets',
+          ),
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.palette_outlined,
+          label: 'Change Theme',
+          action: 'change_theme',
+        ),
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.smart_toy_outlined,
+          label: 'Agent Management',
+          action: 'agent_management',
+          showStatusDot: hasAgentUpdates,
+          showProBadge: !canManageAgents,
+          enabled:
+              _connectionId != null &&
+              connectionState == SshConnectionState.connected,
+        ),
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.alt_route_rounded,
+          label: 'Port Forwards',
+          action: 'port_forwards',
+          enabled:
+              _connectionId != null &&
+              connectionState == SshConnectionState.connected,
+        ),
+        // Always enabled: without a connection the sheet says why.
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.difference_outlined,
+          label: 'Working tree changes',
+          action: 'working_tree_changes',
+        ),
+        if (_forceMonkeyMuxReloadMenuState.visible)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.restart_alt_rounded,
+            label: 'Force MonkeyMux Reload',
+            action: 'force_monkeymux_reload',
+            enabled: _forceMonkeyMuxReloadMenuState.enabled,
+          ),
+        if (showsDeviceDebugAction)
+          _terminalOverflowSwitchMenuItem(
+            context: context,
+            icon: Icons.bug_report_outlined,
+            label: 'Device debugging',
+            value: deviceDebugController?.state.isActive ?? false,
+            loading: deviceDebugController?.state.isBusy ?? false,
+            action: 'toggle_device_debug',
+            enabled:
+                deviceDebugController != null &&
+                connectionState == SshConnectionState.connected,
+          ),
+        if (isPortForwardBrowserSupported())
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.open_in_browser_outlined,
+            label: 'Open Forwarded Browser',
+            action: 'open_port_forward_browser',
+          ),
+        _terminalOverflowSubmenuButton(
+          context: context,
+          isMobile: isMobile,
+          icon: Icons.tune_rounded,
+          label: 'Options',
+          menuChildren: _terminalOptionsMenuItems(
+            context: context,
+            hasTerminalInfo: statusChips.isNotEmpty,
+            isMobile: isMobile,
+            nativeAgentActive: showsNativeAgent,
+          ),
+        ),
+        _terminalOverflowMenuDivider(context),
+        if (showsTerminalViewportMenuActions && !isMobile)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: _isNativeSelectionMode
+                ? Icons.deselect_rounded
+                : Icons.select_all_rounded,
+            label: _isNativeSelectionMode
+                ? 'Exit Native Selection'
+                : 'Native Selection',
+            action: 'native_select',
+          ),
+        if (showsTerminalViewportMenuActions && commandMarkCount > 0)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.history_rounded,
+            label: commandMarkCount == 1
+                ? 'Previous Command'
+                : 'Previous Command ($commandMarkCount)',
+            action: 'previous_command',
+          ),
+        if (showsTerminalViewportMenuActions)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.search_rounded,
+            label: 'Find',
+            action: 'find_in_scrollback',
+          ),
+        if (showsTerminalViewportMenuActions)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: terminalScrollbackExportIcon(defaultTargetPlatform),
+            label: 'Export Scrollback',
+            action: 'export_scrollback',
+          ),
+        if (showsTerminalViewportMenuActions && _workingDirectoryPath != null)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.folder_copy_outlined,
+            label: 'Copy Current Directory',
+            action: 'copy_working_directory',
+          ),
+        if (showsTerminalViewportMenuActions &&
+            _currentTerminalSelectionText() != null)
+          _terminalOverflowMenuItem(
+            context: context,
+            icon: Icons.code_rounded,
+            label: 'Create Snippet',
+            action: 'create_snippet',
+          ),
+        if (showsTerminalViewportMenuActions)
+          _terminalOverflowSubmenuButton(
+            context: context,
+            isMobile: isMobile,
+            icon: Icons.paste_rounded,
+            label: 'Paste',
+            menuChildren: _terminalPastingMenuItems(context),
+          ),
+        if (showsTerminalViewportMenuActions)
+          _terminalOverflowMenuDivider(context),
+        _terminalOverflowMenuItem(
+          context: context,
+          icon: Icons.link_off_rounded,
+          label: 'Disconnect',
+          action: 'disconnect',
+        ),
+      ],
+      builder: (context, controller, _) => IconButton(
+        icon: Semantics(
+          label: hasAgentUpdates ? 'Agent updates available' : null,
+          child: Badge(
+            key: const ValueKey('terminal-agent-updates-dot'),
+            isLabelVisible: hasAgentUpdates,
+            backgroundColor: theme.colorScheme.primary,
+            smallSize: 8,
+            child: const Icon(Icons.more_vert),
+          ),
+        ),
+        tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+        onPressed: () {
+          if (controller.isOpen) {
+            controller.close();
+          } else {
+            controller.open();
+          }
+        },
+      ),
+    );
+    final terminalBody = Builder(
+      builder: (bodyContext) {
+        final showsKeyboardToolbar =
+            _showKeyboardToolbar &&
+            !showsDisconnectedOverlay &&
+            (!_isNativeSelectionMode || _isMobilePlatform);
+        // The find bar overlays the terminal area; the terminal gets that
+        // much scroll room below its last row. A native chat hides it.
+        _scrollbackSearch?.paused = showsNativeAgent;
+        final findField = showsNativeAgent
+            ? null
+            : _scrollbackSearch?.fieldInput;
+        _scrollbackSearchClearance =
+            _scrollbackSearch == null || showsNativeAgent
+            ? 0
+            : terminalSearchBarObscuredHeight(
+                showsKeyboardToolbar ||
+                        terminalFoldLayout == TerminalFoldLayout.propped
+                    ? removeSystemBottomInset(MediaQuery.of(bodyContext))
+                    : MediaQuery.of(bodyContext),
+                reservedBottom: _terminalViewportReservedBottomPadding,
+              );
+        Widget withFindBar(Widget terminal) => TerminalScrollbackSearchOverlay(
+          search: showsNativeAgent ? null : _scrollbackSearch,
+          scrollController: _terminalScrollController,
+          lineHeight: () => _terminalLineHeight,
+          onClose: _closeScrollbackSearch,
+          reservedBottom: _terminalViewportReservedBottomPadding,
+          child: terminal,
+        );
+        final keyboardToolbar = showsKeyboardToolbar
+            ? ListenableBuilder(
+                // Switches the toolbar to the find field while that has
+                // focus.
+                listenable: Listenable.merge([findField]),
+                builder: (context, _) => _buildKeyboardToolbar(
+                  showsNativeAgent: showsNativeAgent,
+                  findField: (findField?.hasFocus ?? false) ? findField : null,
+                ),
+              )
+            : null;
+        switch (terminalFoldLayout) {
+          case TerminalFoldLayout.book:
+            return _buildBookTerminalLayout(
+              bodyContext,
+              displayFold!,
+              terminalTheme,
+              isMobile,
+              theme,
+              connectionState,
+              keyboardToolbar: keyboardToolbar,
+              withFindBar: withFindBar,
+            );
+          case TerminalFoldLayout.propped:
+            return _buildProppedTerminalLayout(
+              bodyContext,
+              displayFold!,
+              terminalTheme,
+              isMobile,
+              theme,
+              connectionState,
+              keyboardToolbar: keyboardToolbar,
+              withFindBar: withFindBar,
+              showsMuxNavigator: showsMuxNavigatorPage,
+              // Where the body starts in the window: below the app bar, or
+              // with a vertical bar below the top inset and metadata row.
+              bodyTop: verticalBar == null
+                  ? Scaffold.of(bodyContext).appBarMaxHeight ?? 0
+                  : MediaQuery.paddingOf(context).top +
+                        (terminalBarBottom?.preferredSize.height ?? 0),
+              onShowKeyboard: () => showsNativeAgent
+                  ? _toggleNativeComposerKeyboard(false)
+                  : _toggleSystemKeyboard(false),
+            );
+          case TerminalFoldLayout.none:
+            break;
+        }
+        final terminalArea = withFindBar(
+          _buildTerminalWithTmuxBar(
+            terminalTheme,
+            isMobile,
+            theme,
+            connectionState,
+          ),
+        );
+        return Column(
+          children: [
+            Expanded(
+              // The KeyboardToolbar below already absorbs the bottom
+              // system inset, so strip it here to prevent the tmux bar
+              // from reserving that space a second time.
+              child: showsKeyboardToolbar
+                  ? MediaQuery(
+                      data: removeSystemBottomInset(MediaQuery.of(bodyContext)),
+                      child: terminalArea,
+                    )
+                  : terminalArea,
+            ),
+            ?keyboardToolbar,
+          ],
+        );
+      },
+    );
+    final scaffold = Scaffold(
+      resizeToAvoidBottomInset: !isMobile || systemKeyboardVisible,
+      backgroundColor: theme.colorScheme.surface,
+      appBar: verticalBar != null
+          ? null
+          : AppBar(
+              titleSpacing: 8,
+              title: terminalFoldLayout == TerminalFoldLayout.book
+                  // The title stays on the navigator's page, off the fold.
+                  ? ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: max(
+                          0,
+                          displayFold!.leadingPageExtent -
+                              displayFoldContentGutter -
+                              8 -
+                              ((ModalRoute.of(context)
+                                          ?.impliesAppBarDismissal ??
+                                      false)
+                                  ? kToolbarHeight
+                                  : 0),
+                        ).toDouble(),
+                      ),
+                      child: terminalBarTitle,
+                    )
+                  : terminalBarTitle,
+              bottom: terminalBarBottom,
+              actions: [
+                if (showsMuxWindowsControl) muxWindowsButton,
+                browseFilesButton,
+                if (isMobile) keyboardButton,
+                extraKeysButton,
+                overflowMenu,
+              ],
+            ),
+      body: verticalBar == null
+          ? terminalBody
+          : SafeArea(
+              left: false,
+              right: false,
+              bottom: false,
+              child: Column(
+                children: [
+                  if (terminalBarBottom != null)
+                    Material(
+                      color: theme.colorScheme.surface,
+                      // The terminal clears side insets itself; this row
+                      // must clear the vertical bar on its own.
+                      child: SafeArea(
+                        top: false,
+                        bottom: false,
+                        child: terminalBarBottom,
+                      ),
+                    ),
+                  Expanded(child: terminalBody),
+                ],
+              ),
+            ),
+    );
     return PopScope(
       canPop: resolveTerminalScreenCanPop(
-        isTmuxBarExpanded: _isTmuxBarExpanded,
+        isTmuxBarExpanded: _isTmuxBarExpanded && !_tmuxNavigatorPinned,
         isFindBarOpen: showsFindBar,
       ),
       onPopInvokedWithResult: (didPop, _) {
@@ -12293,410 +12883,55 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
         _collapseTmuxBarIfExpanded();
       },
-      child: Scaffold(
-        resizeToAvoidBottomInset: !isMobile || systemKeyboardVisible,
-        backgroundColor: theme.colorScheme.surface,
-        appBar: AppBar(
-          titleSpacing: 8,
-          title: Row(
-            children: [
-              _TerminalConnectionStatusIcon(
-                label: connectionLabel,
-                state: connectionState,
-                isConnecting: _isConnecting,
-                connectedThroughJumpHost: isConnectedThroughJumpHost,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: AgentForwardingTitleSlot(
-                  forwarding: connectionState == SshConnectionState.connected
-                      ? (_observedSession ?? activeSession)
-                            ?.config
-                            .agentForwarding
-                      : null,
-                  title: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _host?.label ?? 'Terminal',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: FluttyTheme.displayMono(
-                          fontSize: 16,
-                          color: theme.colorScheme.onSurface,
-                        ),
+      child: verticalBar == null
+          ? scaffold
+          : VerticalBarRailPortal(
+              rail: (context) => VerticalBarRail(
+                bar: verticalBar,
+                leading: [
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.back,
+                  ))
+                    const BackButton(),
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.status,
+                  ))
+                    _TerminalVerticalBarStatusKey(
+                      title: _host?.label ?? 'Terminal',
+                      subtitle: titleSubtitle,
+                      status: _TerminalConnectionStatusIcon(
+                        label: connectionLabel,
+                        state: connectionState,
+                        isConnecting: _isConnecting,
+                        connectedThroughJumpHost: isConnectedThroughJumpHost,
                       ),
-                      if (titleSubtitle.isNotEmpty)
-                        Text(
-                          titleSubtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: FluttyTheme.monoStyle.copyWith(
-                            fontSize: 11,
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          bottom:
-              terminalProgress == null &&
-                  (showsNativeAgent ||
-                      !_showsTerminalMetadata ||
-                      statusChips.isEmpty)
-              ? null
-              : PreferredSize(
-                  preferredSize: Size.fromHeight(
-                    (!showsNativeAgent &&
-                                _showsTerminalMetadata &&
-                                statusChips.isNotEmpty
-                            ? 40
-                            : 0) +
-                        (terminalProgress == null ? 0 : 3),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (!showsNativeAgent &&
-                          _showsTerminalMetadata &&
-                          statusChips.isNotEmpty)
-                        Container(
-                          alignment: Alignment.centerLeft,
-                          width: double.infinity,
-                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                          child: SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: Row(
-                              children: statusChips
-                                  .map(
-                                    (chip) => Padding(
-                                      padding: const EdgeInsets.only(right: 8),
-                                      child: chip,
-                                    ),
-                                  )
-                                  .toList(growable: false),
-                            ),
-                          ),
-                        ),
-                      if (terminalProgress != null)
-                        _TerminalProgressBar(progress: terminalProgress),
-                    ],
-                  ),
-                ),
-          actions: [
-            if (_isTmuxActive &&
-                !_showTmuxBar &&
-                connectionState == SshConnectionState.connected)
-              IconButton(
-                icon: const Icon(Icons.window_outlined),
-                onPressed: _connectionId == null || isOpeningTmuxNavigator
-                    ? null
-                    : _openTmuxNavigator,
-                tooltip: 'tmux windows',
-              ),
-            IconButton(
-              icon: const Icon(Icons.folder_outlined),
-              onPressed:
-                  _connectionId == null ||
-                      isOpeningSftpBrowser ||
-                      connectionState != SshConnectionState.connected
-                  ? null
-                  : () => unawaited(_openConnectionFileBrowser()),
-              tooltip: 'Browse files',
-            ),
-            if (isMobile)
-              IconButton(
-                icon: Icon(
-                  systemKeyboardVisible
-                      ? Icons.keyboard_hide
-                      : Icons.keyboard_alt_outlined,
-                ),
-                onPressed: () => showsNativeAgent
-                    ? _toggleNativeComposerKeyboard(systemKeyboardVisible)
-                    : _toggleSystemKeyboard(systemKeyboardVisible),
-                tooltip: systemKeyboardVisible
-                    ? 'Hide system keyboard'
-                    : 'Show system keyboard',
-              ),
-            IconButton(
-              icon: _ExtraKeysToggleKeycap(
-                key: ValueKey<String>(
-                  _showKeyboardToolbar
-                      ? 'extra-keys-toggle-active'
-                      : 'extra-keys-toggle-inactive',
-                ),
-                isActive: _showKeyboardToolbar,
-              ),
-              onPressed: _toggleKeyboardToolbar,
-              tooltip: _showKeyboardToolbar
-                  ? 'Hide extra keys'
-                  : 'Show extra keys',
-            ),
-            MenuAnchor(
-              key: _terminalOverflowMenuButtonKey,
-              style: _terminalOverflowMenuStyle(
-                context: context,
-                isMobilePlatform: isMobile,
-              ),
-              reservedPadding: _terminalOverflowMenuReservedPadding(
-                context: context,
-                isMobilePlatform: isMobile,
-              ),
-              menuChildren: [
-                if (_activeNativeAcpSessionKey != null) ...[
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.search,
-                    label: 'Search Chat',
-                    action: 'search_chat',
-                  ),
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.adaptive.share,
-                    label: 'Export Chat',
-                    action: 'export_chat',
-                  ),
-                ],
-                if (showsTerminalViewportMenuActions)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.code_rounded,
-                    label: 'Snippets',
-                    action: 'snippets',
-                  ),
-                _terminalOverflowMenuItem(
-                  context: context,
-                  icon: Icons.palette_outlined,
-                  label: 'Change Theme',
-                  action: 'change_theme',
-                ),
-                _terminalOverflowMenuItem(
-                  context: context,
-                  icon: Icons.smart_toy_outlined,
-                  label: 'Agent Management',
-                  action: 'agent_management',
-                  showStatusDot: hasAgentUpdates,
-                  showProBadge: !canManageAgents,
-                  enabled:
-                      _connectionId != null &&
-                      connectionState == SshConnectionState.connected,
-                ),
-                _terminalOverflowMenuItem(
-                  context: context,
-                  icon: Icons.alt_route_rounded,
-                  label: 'Port Forwards',
-                  action: 'port_forwards',
-                  enabled:
-                      _connectionId != null &&
-                      connectionState == SshConnectionState.connected,
-                ),
-                // Always enabled: without a connection the sheet says why.
-                _terminalOverflowMenuItem(
-                  context: context,
-                  icon: Icons.difference_outlined,
-                  label: 'Working tree changes',
-                  action: 'working_tree_changes',
-                ),
-                if (_forceMonkeyMuxReloadMenuState.visible)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.restart_alt_rounded,
-                    label: 'Force MonkeyMux Reload',
-                    action: 'force_monkeymux_reload',
-                    enabled: _forceMonkeyMuxReloadMenuState.enabled,
-                  ),
-                if (showsDeviceDebugAction)
-                  _terminalOverflowSwitchMenuItem(
-                    context: context,
-                    icon: Icons.bug_report_outlined,
-                    label: 'Device debugging',
-                    value: deviceDebugController?.state.isActive ?? false,
-                    loading: deviceDebugController?.state.isBusy ?? false,
-                    action: 'toggle_device_debug',
-                    enabled:
-                        deviceDebugController != null &&
-                        connectionState == SshConnectionState.connected,
-                  ),
-                if (isPortForwardBrowserSupported())
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.open_in_browser_outlined,
-                    label: 'Open Forwarded Browser',
-                    action: 'open_port_forward_browser',
-                  ),
-                _terminalOverflowSubmenuButton(
-                  context: context,
-                  isMobile: isMobile,
-                  icon: Icons.tune_rounded,
-                  label: 'Options',
-                  menuChildren: _terminalOptionsMenuItems(
-                    context: context,
-                    hasTerminalInfo: statusChips.isNotEmpty,
-                    isMobile: isMobile,
-                    nativeAgentActive: showsNativeAgent,
-                  ),
-                ),
-                _terminalOverflowMenuDivider(context),
-                if (showsTerminalViewportMenuActions && !isMobile)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: _isNativeSelectionMode
-                        ? Icons.deselect_rounded
-                        : Icons.select_all_rounded,
-                    label: _isNativeSelectionMode
-                        ? 'Exit Native Selection'
-                        : 'Native Selection',
-                    action: 'native_select',
-                  ),
-                if (showsTerminalViewportMenuActions && commandMarkCount > 0)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.history_rounded,
-                    label: commandMarkCount == 1
-                        ? 'Previous Command'
-                        : 'Previous Command ($commandMarkCount)',
-                    action: 'previous_command',
-                  ),
-                if (showsTerminalViewportMenuActions)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.search_rounded,
-                    label: 'Find',
-                    action: 'find_in_scrollback',
-                  ),
-                if (showsTerminalViewportMenuActions)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: terminalScrollbackExportIcon(defaultTargetPlatform),
-                    label: 'Export Scrollback',
-                    action: 'export_scrollback',
-                  ),
-                if (showsTerminalViewportMenuActions &&
-                    _workingDirectoryPath != null)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.folder_copy_outlined,
-                    label: 'Copy Current Directory',
-                    action: 'copy_working_directory',
-                  ),
-                if (showsTerminalViewportMenuActions &&
-                    _currentTerminalSelectionText() != null)
-                  _terminalOverflowMenuItem(
-                    context: context,
-                    icon: Icons.code_rounded,
-                    label: 'Create Snippet',
-                    action: 'create_snippet',
-                  ),
-                if (showsTerminalViewportMenuActions)
-                  _terminalOverflowSubmenuButton(
-                    context: context,
-                    isMobile: isMobile,
-                    icon: Icons.paste_rounded,
-                    label: 'Paste',
-                    menuChildren: _terminalPastingMenuItems(context),
-                  ),
-                if (showsTerminalViewportMenuActions)
-                  _terminalOverflowMenuDivider(context),
-                _terminalOverflowMenuItem(
-                  context: context,
-                  icon: Icons.link_off_rounded,
-                  label: 'Disconnect',
-                  action: 'disconnect',
-                ),
-              ],
-              builder: (context, controller, _) => IconButton(
-                icon: Semantics(
-                  label: hasAgentUpdates ? 'Agent updates available' : null,
-                  child: Badge(
-                    key: const ValueKey('terminal-agent-updates-dot'),
-                    isLabelVisible: hasAgentUpdates,
-                    backgroundColor: theme.colorScheme.primary,
-                    smallSize: 8,
-                    child: const Icon(Icons.more_vert),
-                  ),
-                ),
-                tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-                onPressed: () {
-                  if (controller.isOpen) {
-                    controller.close();
-                  } else {
-                    controller.open();
-                  }
-                },
-              ),
-            ),
-          ],
-        ),
-        body: Builder(
-          builder: (bodyContext) {
-            final showsKeyboardToolbar =
-                _showKeyboardToolbar &&
-                !showsDisconnectedOverlay &&
-                (!_isNativeSelectionMode || _isMobilePlatform);
-            // The find bar overlays the terminal area; the terminal gets that
-            // much scroll room below its last row. A native chat hides it.
-            _scrollbackSearch?.paused = showsNativeAgent;
-            final findField = showsNativeAgent
-                ? null
-                : _scrollbackSearch?.fieldInput;
-            _scrollbackSearchClearance =
-                _scrollbackSearch == null || showsNativeAgent
-                ? 0
-                : terminalSearchBarObscuredHeight(
-                    showsKeyboardToolbar
-                        ? removeSystemBottomInset(MediaQuery.of(bodyContext))
-                        : MediaQuery.of(bodyContext),
-                    reservedBottom: _terminalViewportReservedBottomPadding,
-                  );
-            final terminalArea = TerminalScrollbackSearchOverlay(
-              search: showsNativeAgent ? null : _scrollbackSearch,
-              scrollController: _terminalScrollController,
-              lineHeight: () => _terminalLineHeight,
-              onClose: _closeScrollbackSearch,
-              reservedBottom: _terminalViewportReservedBottomPadding,
-              child: _buildTerminalWithTmuxBar(
-                terminalTheme,
-                isMobile,
-                theme,
-                connectionState,
-              ),
-            );
-            return Column(
-              children: [
-                Expanded(
-                  // The KeyboardToolbar below already absorbs the bottom
-                  // system inset, so strip it here to prevent the tmux bar
-                  // from reserving that space a second time.
-                  child: showsKeyboardToolbar
-                      ? MediaQuery(
-                          data: removeSystemBottomInset(
-                            MediaQuery.of(bodyContext),
-                          ),
-                          child: terminalArea,
-                        )
-                      : terminalArea,
-                ),
-                if (showsKeyboardToolbar)
-                  ListenableBuilder(
-                    // Switches the toolbar to the find field while that has
-                    // focus.
-                    listenable: Listenable.merge([findField]),
-                    builder: (context, _) => _buildKeyboardToolbar(
-                      showsNativeAgent: showsNativeAgent,
-                      findField: (findField?.hasFocus ?? false)
-                          ? findField
-                          : null,
                     ),
-                  ),
-              ],
-            );
-          },
-        ),
-      ),
+                ],
+                trailing: [
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.muxWindows,
+                  ))
+                    muxWindowsButton,
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.files,
+                  ))
+                    browseFilesButton,
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.extraKeys,
+                  ))
+                    extraKeysButton,
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.menu,
+                  ))
+                    overflowMenu,
+                  if (verticalBarControls.contains(
+                    TerminalVerticalBarControl.keyboard,
+                  ))
+                    keyboardButton,
+                ],
+              ),
+              child: scaffold,
+            ),
     );
   }
 
@@ -12752,6 +12987,195 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       snippets: _keyboardToolbarSnippets,
       snippetFolders: _keyboardToolbarSnippetFolders,
       terminalFocusNode: showsNativeAgent ? null : _terminalFocusNode,
+    );
+  }
+
+  /// Lays the connection screen out across a fold running top to bottom.
+  ///
+  /// The mux navigator fills the left page and stays open while windows
+  /// change. The terminal and its keyboard toolbar share the right page, so
+  /// no keys or terminal columns sit on the fold.
+  Widget _buildBookTerminalLayout(
+    BuildContext bodyContext,
+    DisplayFold fold,
+    TerminalThemeData terminalTheme,
+    bool isMobile,
+    ThemeData theme,
+    SshConnectionState connectionState, {
+    required Widget? keyboardToolbar,
+    required Widget Function(Widget terminal) withFindBar,
+  }) {
+    // The connection route fills the window, so the fold's window
+    // coordinates map onto the body directly.
+    final mediaQuery = MediaQuery.of(bodyContext);
+    final leadingPage = fold.leadingPage(mediaQuery.size);
+    final trailingPage = fold.trailingPage(mediaQuery.size);
+    final navigatorMediaQuery = displayFoldPageMediaQuery(
+      mediaQuery,
+      leadingPage,
+    );
+    final terminalPageMediaQuery = displayFoldPageMediaQuery(
+      mediaQuery,
+      trailingPage,
+    );
+    final safeLeft = resolveTmuxBarSafeInsets(navigatorMediaQuery).left;
+
+    return ColoredBox(
+      color: terminalTheme.background,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(width: safeLeft),
+          SizedBox(
+            width: max(0, leadingPage.width - safeLeft).toDouble(),
+            child: MediaQuery(
+              // The spacer above already clears the left inset.
+              data: navigatorMediaQuery.removePadding(removeLeft: true),
+              child: _buildTmuxExpandableBar(
+                theme,
+                double.infinity,
+                placement: TmuxBarPlacement.sidebar,
+                pinnedOpen: true,
+              ),
+            ),
+          ),
+          SizedBox(width: fold.thickness + displayFoldContentGutter),
+          Expanded(
+            child: MediaQuery(
+              data: terminalPageMediaQuery,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        _terminalViewportLayoutSize = constraints.biggest;
+                        _terminalViewportReservedWidth = 0;
+                        _terminalViewportReservedBottomPadding = 0;
+                        final terminalView = withFindBar(
+                          _overlayUploadProgressStrip(
+                            _buildTerminalView(
+                              terminalTheme,
+                              isMobile,
+                              connectionState,
+                            ),
+                            applyBottomSafeArea: keyboardToolbar == null,
+                          ),
+                        );
+                        // The toolbar below absorbs the bottom inset.
+                        return keyboardToolbar == null
+                            ? terminalView
+                            : MediaQuery(
+                                data: removeSystemBottomInset(
+                                  terminalPageMediaQuery,
+                                ),
+                                child: terminalView,
+                              );
+                      },
+                    ),
+                  ),
+                  ?keyboardToolbar,
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Lays the connection screen out across a fold running left to right.
+  ///
+  /// The terminal fills the top page and never reaches past the fold, so it
+  /// stays readable while the device is propped up. The mux navigator takes
+  /// the bottom page above the keyboard toolbar. A tall system keyboard
+  /// shrinks the navigator first and only then the terminal.
+  Widget _buildProppedTerminalLayout(
+    BuildContext bodyContext,
+    DisplayFold fold,
+    TerminalThemeData terminalTheme,
+    bool isMobile,
+    ThemeData theme,
+    SshConnectionState connectionState, {
+    required Widget? keyboardToolbar,
+    required Widget Function(Widget terminal) withFindBar,
+    required bool showsMuxNavigator,
+    required double bodyTop,
+    required VoidCallback onShowKeyboard,
+  }) {
+    // The connection route fills the window, so the fold's window
+    // coordinates map onto the body once shifted by where it starts.
+    final topPageHeight = max(0, fold.leadingPageExtent - bodyTop).toDouble();
+    final mediaQuery = MediaQuery.of(bodyContext);
+    final pageMediaQuery = removeSystemBottomInset(mediaQuery);
+    final safeInsets = resolveTmuxBarSafeInsets(mediaQuery);
+
+    return ColoredBox(
+      color: terminalTheme.background,
+      child: CustomMultiChildLayout(
+        delegate: _ProppedTerminalLayoutDelegate(
+          topPageHeight: topPageHeight,
+          foldThickness: fold.thickness,
+          onTerminalSize: (size) {
+            _terminalViewportLayoutSize = size;
+            _terminalViewportReservedWidth = 0;
+            _terminalViewportReservedBottomPadding = 0;
+          },
+        ),
+        children: [
+          LayoutId(
+            id: _ProppedTerminalSlot.terminal,
+            child: MediaQuery(
+              data: pageMediaQuery,
+              child: withFindBar(
+                _overlayUploadProgressStrip(
+                  _buildTerminalView(terminalTheme, isMobile, connectionState),
+                  applyBottomSafeArea: false,
+                ),
+              ),
+            ),
+          ),
+          LayoutId(
+            id: _ProppedTerminalSlot.navigator,
+            child: MediaQuery(
+              // The padding below already clears the side insets.
+              data: (keyboardToolbar == null ? mediaQuery : pageMediaQuery)
+                  .removePadding(removeLeft: true, removeRight: true),
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: safeInsets.left,
+                  right: safeInsets.right,
+                ),
+                // The bar watches the mux windows, so it stays mounted even
+                // when a tall keyboard leaves the page too short to show it.
+                // Without a mux the page is a keyboard deck.
+                child: ClipRect(
+                  child: !showsMuxNavigator
+                      ? _TerminalKeyboardDeck(onShowKeyboard: onShowKeyboard)
+                      : LayoutBuilder(
+                          builder: (context, constraints) => OverflowBox(
+                            alignment: Alignment.topCenter,
+                            minHeight: _ProppedTerminalLayoutDelegate
+                                .navigatorMinHeight,
+                            maxHeight: max(
+                              _ProppedTerminalLayoutDelegate.navigatorMinHeight,
+                              constraints.maxHeight,
+                            ),
+                            child: _buildTmuxExpandableBar(
+                              theme,
+                              double.infinity,
+                              placement: TmuxBarPlacement.sidebar,
+                              pinnedOpen: true,
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ),
+          ),
+          if (keyboardToolbar != null)
+            LayoutId(id: _ProppedTerminalSlot.toolbar, child: keyboardToolbar),
+        ],
+      ),
     );
   }
 
@@ -13640,6 +14064,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     Widget terminalViewWithInput = TerminalTextInputHandler(
+      key: _terminalInputKey,
       terminal: _terminal,
       focusNode: _terminalFocusNode,
       controller: _terminalTextInputController,
@@ -17620,6 +18045,135 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 }
 
+enum _ProppedTerminalSlot { terminal, navigator, toolbar }
+
+/// Stacks the terminal above the fold and the navigator and keyboard toolbar
+/// below it.
+/// The bottom page of a fold propped up like a laptop when the session has
+/// no window navigator for it: a keyboard deck. A tap raises the system
+/// keyboard onto the page, below the terminal.
+class _TerminalKeyboardDeck extends StatelessWidget {
+  const _TerminalKeyboardDeck({required this.onShowKeyboard});
+
+  final VoidCallback onShowKeyboard;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final mutedColor = colorScheme.onSurface.withAlpha(150);
+    return Semantics(
+      button: true,
+      label: 'Show keyboard',
+      onTap: onShowKeyboard,
+      excludeSemantics: true,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: onShowKeyboard,
+          // A tall keyboard can leave the deck a sliver; the prompt shows
+          // only when it fits.
+          child: LayoutBuilder(
+            builder: (context, constraints) => constraints.maxHeight < 96
+                ? const SizedBox.expand()
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.keyboard_alt_outlined,
+                          size: 28,
+                          color: mutedColor,
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'tap to type',
+                              style: FluttyTheme.monoStyle.copyWith(
+                                color: mutedColor,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const CursorBlock(size: 14),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
+  _ProppedTerminalLayoutDelegate({
+    required this.topPageHeight,
+    required this.foldThickness,
+    required this.onTerminalSize,
+  });
+
+  /// Height of the navigator's handle row, the least it is laid out at.
+  static const double navigatorMinHeight = 56;
+
+  /// Distance from the top of the body to the fold.
+  final double topPageHeight;
+
+  /// Height of the fold itself, left empty.
+  final double foldThickness;
+
+  /// Reports the terminal's size for the pre-layout viewport estimate.
+  final ValueChanged<Size> onTerminalSize;
+
+  @override
+  void performLayout(Size size) {
+    var toolbarHeight = 0.0;
+    if (hasChild(_ProppedTerminalSlot.toolbar)) {
+      toolbarHeight = layoutChild(
+        _ProppedTerminalSlot.toolbar,
+        BoxConstraints(
+          minWidth: size.width,
+          maxWidth: size.width,
+          maxHeight: size.height,
+        ),
+      ).height;
+      positionChild(
+        _ProppedTerminalSlot.toolbar,
+        Offset(0, size.height - toolbarHeight),
+      );
+    }
+    final aboveToolbar = max(0, size.height - toolbarHeight).toDouble();
+    // The last terminal row stays a gutter clear of the crease. A keyboard
+    // taller than the bottom page pushes the toolbar above the fold; the
+    // terminal then ends at the toolbar instead.
+    final terminalHeight = max(
+      0,
+      min(topPageHeight - displayFoldContentGutter, aboveToolbar),
+    ).toDouble();
+    final terminalSize = Size(size.width, terminalHeight);
+    layoutChild(
+      _ProppedTerminalSlot.terminal,
+      BoxConstraints.tight(terminalSize),
+    );
+    positionChild(_ProppedTerminalSlot.terminal, Offset.zero);
+    onTerminalSize(terminalSize);
+
+    final navigatorTop = min(topPageHeight + foldThickness, aboveToolbar);
+    layoutChild(
+      _ProppedTerminalSlot.navigator,
+      BoxConstraints.tight(Size(size.width, aboveToolbar - navigatorTop)),
+    );
+    positionChild(_ProppedTerminalSlot.navigator, Offset(0, navigatorTop));
+  }
+
+  @override
+  bool shouldRelayout(_ProppedTerminalLayoutDelegate oldDelegate) =>
+      oldDelegate.topPageHeight != topPageHeight ||
+      oldDelegate.foldThickness != foldThickness;
+}
+
 class _TerminalConnectionStatusIcon extends StatelessWidget {
   const _TerminalConnectionStatusIcon({
     required this.label,
@@ -17703,6 +18257,41 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
                 ),
               )
             : statusIcon,
+      ),
+    );
+  }
+}
+
+/// The connection status as a key in the system vertical bar.
+///
+/// The vertical bar replaces the title bar, so a tap shows which host and
+/// session the screen is connected to.
+class _TerminalVerticalBarStatusKey extends StatelessWidget {
+  const _TerminalVerticalBarStatusKey({
+    required this.title,
+    required this.subtitle,
+    required this.status,
+  });
+
+  final String title;
+  final String subtitle;
+  final Widget status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      triggerMode: TooltipTriggerMode.tap,
+      message: subtitle.isEmpty ? title : '$title\n$subtitle',
+      child: Container(
+        width: verticalBarItemExtent,
+        height: verticalBarItemExtent,
+        alignment: Alignment.center,
+        decoration: ShapeDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          shape: CircleBorder(side: BorderSide(color: colorScheme.outline)),
+        ),
+        child: status,
       ),
     );
   }

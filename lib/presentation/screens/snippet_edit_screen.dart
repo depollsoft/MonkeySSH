@@ -14,6 +14,7 @@ import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/telemetry_service.dart';
 import '../widgets/snippet_folder_dialog.dart';
 import '../widgets/snippet_key_sender.dart';
+import '../widgets/system_vertical_bar.dart';
 import '../widgets/unsaved_changes_guard.dart';
 
 typedef _SnippetEditDraft = ({
@@ -179,166 +180,174 @@ class _SnippetEditScreenState extends ConsumerState<SnippetEditScreen> {
     return UnsavedChangesGuard(
       hasUnsavedChanges: _hasUnsavedChanges,
       child: Scaffold(
-        appBar: AppBar(
-          title: Text(isEditing ? 'Edit Snippet' : 'Add Snippet'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.help_outline),
-              onPressed: _showVariablesHelp,
-              tooltip: 'Snippet syntax',
-            ),
-          ],
+        appBar: VerticalBarAppBar(
+          AppBar(
+            title: Text(isEditing ? 'Edit Snippet' : 'Add Snippet'),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.help_outline),
+                onPressed: _showVariablesHelp,
+                tooltip: 'Snippet syntax',
+              ),
+            ],
+          ),
         ),
-        body: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _loadError != null
-            ? Center(child: Text(_loadError!))
-            : Form(
-                key: _formKey,
-                onChanged: () => setState(() {}),
-                child: ListView(
-                  padding: const EdgeInsets.all(16),
-                  children: [
-                    // Name
-                    TextFormField(
-                      controller: _nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Name',
-                        hintText: 'Restart Docker',
-                        prefixIcon: Icon(Icons.label),
-                      ),
-                      textInputAction: TextInputAction.next,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter a name';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Description (optional)
-                    TextFormField(
-                      controller: _descriptionController,
-                      decoration: const InputDecoration(
-                        labelText: 'Description (optional)',
-                        hintText: 'What this snippet does',
-                        prefixIcon: Icon(Icons.description),
-                      ),
-                      textInputAction: TextInputAction.next,
-                    ),
-                    const SizedBox(height: 16),
-
-                    DropdownButtonFormField<int?>(
-                      key: ValueKey(
-                        'snippet-folder-$_selectedFolderId-'
-                        '$_folderDropdownRevision-${_folders.length}',
-                      ),
-                      initialValue:
-                          _folders.any(
-                            (folder) => folder.id == _selectedFolderId,
-                          )
-                          ? _selectedFolderId
-                          : null,
-                      decoration: const InputDecoration(
-                        labelText: 'Folder (optional)',
-                        prefixIcon: Icon(Icons.folder_outlined),
-                      ),
-                      items: [
-                        const DropdownMenuItem<int?>(child: Text('No folder')),
-                        ..._folders.map(
-                          (folder) => DropdownMenuItem<int?>(
-                            value: folder.id,
-                            child: Text(folder.name),
-                          ),
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _loadError != null
+              ? Center(child: Text(_loadError!))
+              : Form(
+                  key: _formKey,
+                  onChanged: () => setState(() {}),
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      // Name
+                      TextFormField(
+                        controller: _nameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Name',
+                          hintText: 'Restart Docker',
+                          prefixIcon: Icon(Icons.label),
                         ),
-                        const DropdownMenuItem<int?>(
-                          value: _createFolderDropdownValue,
-                          child: Text('Create folder...'),
-                        ),
-                      ],
-                      onChanged: _handleFolderChanged,
-                    ),
-                    const SizedBox(height: 16),
+                        textInputAction: TextInputAction.next,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter a name';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
 
-                    // Content
-                    TextFormField(
-                      controller: _contentController,
-                      decoration: const InputDecoration(
-                        labelText: 'Command',
-                        hintText: 'docker restart {{container}}',
-                        alignLabelWithHint: true,
+                      // Description (optional)
+                      TextFormField(
+                        controller: _descriptionController,
+                        decoration: const InputDecoration(
+                          labelText: 'Description (optional)',
+                          hintText: 'What this snippet does',
+                          prefixIcon: Icon(Icons.description),
+                        ),
+                        textInputAction: TextInputAction.next,
                       ),
-                      maxLines: 6,
-                      style: FluttyTheme.monoStyle.copyWith(fontSize: 14),
-                      // Token errors show as the command is typed, like the
-                      // notes under it, not only on Save.
-                      autovalidateMode: AutovalidateMode.onUserInteraction,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter a command';
-                        }
-                        final errors = parseSnippetKeySequence(value).errors;
-                        return errors.isEmpty ? null : errors.first;
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    Text.rich(
-                      _withCode(
-                        'Use `{{variable}}` placeholders, such as '
-                        '`{{container}}`. Press keys with `{key:esc}`, '
-                        '`{key:ctrl+c}` or `{key:shift+tab}`, and pause with '
-                        '`{delay:100}`.',
-                      ),
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    for (final warning in snippetEditorWarnings(
-                      parseSnippetKeySequence(_contentController.text),
-                    )) ...[
-                      const SizedBox(height: 8),
-                      Row(
-                        key: const ValueKey('snippet-key-token-warning'),
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.info_outline_rounded,
-                            size: 16,
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant,
+                      const SizedBox(height: 16),
+
+                      DropdownButtonFormField<int?>(
+                        key: ValueKey(
+                          'snippet-folder-$_selectedFolderId-'
+                          '$_folderDropdownRevision-${_folders.length}',
+                        ),
+                        initialValue:
+                            _folders.any(
+                              (folder) => folder.id == _selectedFolderId,
+                            )
+                            ? _selectedFolderId
+                            : null,
+                        decoration: const InputDecoration(
+                          labelText: 'Folder (optional)',
+                          prefixIcon: Icon(Icons.folder_outlined),
+                        ),
+                        items: [
+                          const DropdownMenuItem<int?>(
+                            child: Text('No folder'),
                           ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text.rich(
-                              _withTokensInMono(warning),
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant,
-                                  ),
+                          ..._folders.map(
+                            (folder) => DropdownMenuItem<int?>(
+                              value: folder.id,
+                              child: Text(folder.name),
                             ),
                           ),
+                          const DropdownMenuItem<int?>(
+                            value: _createFolderDropdownValue,
+                            child: Text('Create folder...'),
+                          ),
                         ],
+                        onChanged: _handleFolderChanged,
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Content
+                      TextFormField(
+                        controller: _contentController,
+                        decoration: const InputDecoration(
+                          labelText: 'Command',
+                          hintText: 'docker restart {{container}}',
+                          alignLabelWithHint: true,
+                        ),
+                        maxLines: 6,
+                        style: FluttyTheme.monoStyle.copyWith(fontSize: 14),
+                        // Token errors show as the command is typed, like the
+                        // notes under it, not only on Save.
+                        autovalidateMode: AutovalidateMode.onUserInteraction,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter a command';
+                          }
+                          final errors = parseSnippetKeySequence(value).errors;
+                          return errors.isEmpty ? null : errors.first;
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      Text.rich(
+                        _withCode(
+                          'Use `{{variable}}` placeholders, such as '
+                          '`{{container}}`. Press keys with `{key:esc}`, '
+                          '`{key:ctrl+c}` or `{key:shift+tab}`, and pause with '
+                          '`{delay:100}`.',
+                        ),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      for (final warning in snippetEditorWarnings(
+                        parseSnippetKeySequence(_contentController.text),
+                      )) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          key: const ValueKey('snippet-key-token-warning'),
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.info_outline_rounded,
+                              size: 16,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text.rich(
+                                _withTokensInMono(warning),
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                    ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 24),
+
+                      // Variable preview
+                      _buildVariablePreview(),
+                      const SizedBox(height: 32),
+
+                      // Save button
+                      FilledButton.icon(
+                        onPressed: _saveSnippet,
+                        icon: const Icon(Icons.save),
+                        label: Text(isEditing ? 'Save Changes' : 'Add Snippet'),
                       ),
                     ],
-                    const SizedBox(height: 24),
-
-                    // Variable preview
-                    _buildVariablePreview(),
-                    const SizedBox(height: 32),
-
-                    // Save button
-                    FilledButton.icon(
-                      onPressed: _saveSnippet,
-                      icon: const Icon(Icons.save),
-                      label: Text(isEditing ? 'Save Changes' : 'Add Snippet'),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+        ),
       ),
     );
   }

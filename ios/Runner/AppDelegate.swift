@@ -8,7 +8,7 @@ import UserNotifications
 // AppDelegate owns the existing iOS channel/document bridge surface until the
 // legacy bridge is split by domain.
 // swiftlint:disable:next type_body_length
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let channelName = "xyz.depollsoft.monkeyssh/ssh_service"
   private let transferChannelName = "xyz.depollsoft.monkeyssh/transfer"
   private let appleDatabaseChannelName = "xyz.depollsoft.monkeyssh/apple_file_protection"
@@ -39,18 +39,6 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
-    AppPermissionsPlugin.register(in: self)
-    if let registrar = self.registrar(forPlugin: "AppDelegateBridge") {
-      setupBackgroundSshChannel(with: registrar)
-      setupTransferChannel(with: registrar)
-      setupAppleDatabaseChannel(with: registrar)
-      setupKeyboardVisibilityChannel(with: registrar)
-      socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
-      setupPushNotificationContextChannel(with: registrar)
-    } else {
-      NSLog("Failed to configure AppDelegate method channels.")
-    }
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(keyboardWillShow),
@@ -63,9 +51,6 @@ import UserNotifications
       name: UIResponder.keyboardWillHideNotification,
       object: nil
     )
-    if let launchUrl = launchOptions?[.url] as? URL {
-      _ = handleTransferFile(url: launchUrl)
-    }
     // FlutterAppDelegate forwards notification center callbacks to every
     // plugin that registered as an application delegate, which is how both
     // flutter_local_notifications and firebase_messaging receive taps and
@@ -113,47 +98,24 @@ import UserNotifications
     completeOnce()
   }
 
-  override func application(
-    _ app: UIApplication,
-    open url: URL,
-    options: [UIApplication.OpenURLOptionsKey: Any] = [:]
-  ) -> Bool {
-    if handleTransferFile(url: url) {
-      return true
+  // Under the UIScene lifecycle the storyboard's FlutterViewController creates
+  // the engine when the window scene connects, after launch has finished, so
+  // plugins and channels register here instead of in didFinishLaunching.
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    let registry = engineBridge.pluginRegistry
+    GeneratedPluginRegistrant.register(with: registry)
+    AppPermissionsPlugin.register(in: registry)
+    guard let registrar = registry.registrar(forPlugin: "AppDelegateBridge") else {
+      NSLog("Failed to configure AppDelegate method channels.")
+      return
     }
-    return super.application(app, open: url, options: options)
-  }
-
-  override func applicationDidEnterBackground(_ application: UIApplication) {
-    if #available(iOS 16.1, *) {
-      ConnectionStatusLiveActivityManager.shared.setForegroundState(
-        isForeground: false
-      )
-    }
-
-    // Request a brief amount of extra execution time so the Dart isolate can
-    // flush any in-flight SSH keepalive traffic before iOS suspends the app.
-    // The Live Activity remains a status surface only; it does not extend
-    // background execution beyond this short grace period.
-    backgroundTaskId = application.beginBackgroundTask(withName: "SSHKeepAlive") {
-      // Expiration handler — clean up when time runs out.
-      application.endBackgroundTask(self.backgroundTaskId)
-      self.backgroundTaskId = .invalid
-    }
-  }
-
-  override func applicationWillEnterForeground(_ application: UIApplication) {
-    if #available(iOS 16.1, *) {
-      ConnectionStatusLiveActivityManager.shared.setForegroundState(
-        isForeground: true
-      )
-    }
-
-    // End the background task when returning to the foreground.
-    if backgroundTaskId != .invalid {
-      application.endBackgroundTask(backgroundTaskId)
-      backgroundTaskId = .invalid
-    }
+    setupBackgroundSshChannel(with: registrar)
+    setupTransferChannel(with: registrar)
+    setupAppleDatabaseChannel(with: registrar)
+    setupKeyboardVisibilityChannel(with: registrar)
+    socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
+    setupPushNotificationContextChannel(with: registrar)
+    registrar.addSceneDelegate(self)
   }
 
   private func setupKeyboardVisibilityChannel(with registrar: FlutterPluginRegistrar) {
@@ -532,5 +494,67 @@ import UserNotifications
       ],
       ofItemAtPath: path
     )
+  }
+}
+
+// Scene callbacks forwarded by FlutterSceneDelegate. Once the app adopts
+// scenes, UIKit stops calling the application-level open-URL and
+// background/foreground delegate methods.
+extension AppDelegate: FlutterSceneLifeCycleDelegate {
+  func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions?
+  ) -> Bool {
+    // A transfer package opened while the app was not running arrives here.
+    guard let connectionOptions else {
+      return false
+    }
+    return handleTransferFiles(connectionOptions.urlContexts)
+  }
+
+  func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
+    handleTransferFiles(URLContexts)
+  }
+
+  func sceneDidEnterBackground(_ scene: UIScene) {
+    if #available(iOS 16.1, *) {
+      ConnectionStatusLiveActivityManager.shared.setForegroundState(
+        isForeground: false
+      )
+    }
+
+    // Request a brief amount of extra execution time so the Dart isolate can
+    // flush any in-flight SSH keepalive traffic before iOS suspends the app.
+    // The Live Activity remains a status surface only; it does not extend
+    // background execution beyond this short grace period.
+    let application = UIApplication.shared
+    backgroundTaskId = application.beginBackgroundTask(withName: "SSHKeepAlive") {
+      // Expiration handler — clean up when time runs out.
+      application.endBackgroundTask(self.backgroundTaskId)
+      self.backgroundTaskId = .invalid
+    }
+  }
+
+  func sceneWillEnterForeground(_ scene: UIScene) {
+    if #available(iOS 16.1, *) {
+      ConnectionStatusLiveActivityManager.shared.setForegroundState(
+        isForeground: true
+      )
+    }
+
+    // End the background task when returning to the foreground.
+    if backgroundTaskId != .invalid {
+      UIApplication.shared.endBackgroundTask(backgroundTaskId)
+      backgroundTaskId = .invalid
+    }
+  }
+
+  private func handleTransferFiles(_ urlContexts: Set<UIOpenURLContext>) -> Bool {
+    var handled = false
+    for context in urlContexts where handleTransferFile(url: context.url) {
+      handled = true
+    }
+    return handled
   }
 }

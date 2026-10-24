@@ -120,6 +120,8 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onAction,
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
+    this.pinnedOpen = false,
+    this.onPinnedEscape,
     this.tmuxExtraFlags,
     this.hostLabel,
     this.scopeWorkingDirectory,
@@ -162,6 +164,18 @@ class _TmuxExpandableBar extends StatefulWidget {
 
   /// Whether the tmux window list should start expanded.
   final bool initiallyExpanded;
+
+  /// Keeps the sidebar window list open on a page of its own, as when a fold
+  /// splits the screen. The handle and drags no longer collapse it.
+  ///
+  /// The expanded state underneath still follows selections, so the bar
+  /// returns to it once the page goes away.
+  final bool pinnedOpen;
+
+  /// Called when Esc leaves the window list of a navigator that is
+  /// [pinnedOpen] and so cannot collapse; the screen takes keyboard focus
+  /// back for its input.
+  final VoidCallback? onPinnedEscape;
 
   /// Riverpod ref.
   final WidgetRef ref;
@@ -294,7 +308,8 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   bool get _emptyWindowListEndsSession =>
       widget.activeMuxBackend == RemoteMuxBackend.monkeyMux;
 
-  bool get _showsExpandedSidebarContent => _expanded || _dragOffset > 0;
+  bool get _showsExpandedSidebarContent =>
+      widget.pinnedOpen || _expanded || _dragOffset > 0;
 
   List<TmuxWindow>? get _displayedWindows {
     final visibleWindows = _windows
@@ -821,7 +836,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   bool collapseIfExpanded() {
-    if (!_expanded) {
+    if (!_expanded || widget.pinnedOpen) {
       return false;
     }
     setState(() {
@@ -1256,7 +1271,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _onSidebarPointerDown(PointerDownEvent event) {
-    if (!_isSidebar || _sidebarDragPointer != null) {
+    if (!_isSidebar || widget.pinnedOpen || _sidebarDragPointer != null) {
       return;
     }
     _sidebarDragPointer = event.pointer;
@@ -1486,19 +1501,28 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   /// Opens the switcher with keyboard focus on the active row, or closes it.
   void toggleFromKeyboard() {
+    // A navigator pinned open on its own page cannot hide, so the shortcut
+    // moves focus into its list, which is already built.
+    if (widget.pinnedOpen) {
+      _focusActiveRow();
+      return;
+    }
     if (collapseIfExpanded()) {
       return;
     }
     _toggleExpanded();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_expanded) {
-        return;
-      }
-      final list = _keyboardListKey.currentState;
-      if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
-        list.focusFirstRow();
+      if (mounted && _expanded) {
+        _focusActiveRow();
       }
     });
+  }
+
+  void _focusActiveRow() {
+    final list = _keyboardListKey.currentState;
+    if (list != null && !list.focusRowWhere(_isActiveRowNode)) {
+      list.focusFirstRow();
+    }
   }
 
   static bool _isActiveRowNode(FocusNode node) =>
@@ -1510,9 +1534,17 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
   Widget _withKeyboardNavigation(Widget list) => KeyboardListNavigation(
     key: _keyboardListKey,
-    onEscape: collapseIfExpanded,
+    onEscape: _handleListEscape,
     child: list,
   );
+
+  void _handleListEscape() {
+    if (widget.pinnedOpen) {
+      widget.onPinnedEscape?.call();
+    } else {
+      collapseIfExpanded();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1630,6 +1662,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
   }
 
   void _toggleExpanded() {
+    if (widget.pinnedOpen) return;
     final wasExpanded = _expanded;
     setState(() => _expanded = !_expanded);
     widget.onExpandedChanged(!wasExpanded);
@@ -1760,6 +1793,51 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           : _nativeAcpWindowIndex(activeNative),
       nativeWindowTool: activeNativeTool,
     );
+    final handle = SizedBox(
+      height: 56,
+      width: double.infinity,
+      child: _showsExpandedSidebarContent
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  icon,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      handleLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  // A pinned page has nothing to collapse into.
+                  if (!widget.pinnedOpen) ...[
+                    const SizedBox(width: 8),
+                    Icon(
+                      Icons.chevron_left,
+                      size: 20,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
+                ],
+              ),
+            )
+          : Center(child: icon),
+    );
+    if (widget.pinnedOpen) {
+      return Semantics(
+        header: true,
+        label: 'tmux windows: $handleLabel',
+        child: ExcludeSemantics(
+          key: const ValueKey('tmux-handle-bar'),
+          child: handle,
+        ),
+      );
+    }
 
     return Semantics(
       button: true,
@@ -1774,38 +1852,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           key: const ValueKey('tmux-handle-bar'),
           behavior: HitTestBehavior.opaque,
           onTap: _toggleExpanded,
-          child: SizedBox(
-            height: 56,
-            width: double.infinity,
-            child: _showsExpandedSidebarContent
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Row(
-                      children: [
-                        icon,
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            handleLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Icon(
-                          Icons.chevron_left,
-                          size: 20,
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ],
-                    ),
-                  )
-                : Center(child: icon),
-          ),
+          child: handle,
         ),
       ),
     );

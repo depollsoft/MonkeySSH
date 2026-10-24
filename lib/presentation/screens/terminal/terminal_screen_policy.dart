@@ -22,6 +22,7 @@ import '../../../domain/services/remote_file_service.dart';
 import '../../../domain/services/shell_completion_service.dart';
 import '../../../domain/services/ssh_service.dart';
 import '../../models/app_platform_file.dart';
+import '../../widgets/display_fold.dart';
 import '../../widgets/monkey_terminal_view.dart';
 import '../../widgets/system_bottom_inset.dart';
 import '../../widgets/terminal_selection_text.dart' as terminal_selection_text;
@@ -701,6 +702,74 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
           tmuxSidebarExpandedWidth + tmuxSidebarMinTerminalWidth
       ? TmuxBarPlacement.sidebar
       : TmuxBarPlacement.bottomOverlay;
+}
+
+/// A control the connection screen puts in the system vertical bar, listed
+/// in the order the bar keeps them when it runs short of room.
+enum TerminalVerticalBarControl {
+  /// Shows or hides the system keyboard. It sits just above the keyboard.
+  keyboard,
+
+  /// Opens the overflow menu, which also takes the controls the bar leaves
+  /// out.
+  menu,
+
+  /// Leaves the screen; the edge swipe does too.
+  back,
+
+  /// Shows the connection's state, and its host on tap.
+  status,
+
+  /// Shows or hides the extra keys toolbar.
+  extraKeys,
+
+  /// Opens the file browser.
+  files,
+
+  /// Opens the window navigator while its bar is hidden.
+  muxWindows,
+}
+
+/// Chooses the [available] controls the vertical bar has room for.
+///
+/// The bar holds [capacity] controls, fewer while the keyboard covers its
+/// lower part or a Live Activity lengthens the status cluster above them.
+Set<TerminalVerticalBarControl> resolveTerminalVerticalBarControls({
+  required Set<TerminalVerticalBarControl> available,
+  required int capacity,
+}) => TerminalVerticalBarControl.values
+    .where(available.contains)
+    .take(capacity)
+    .toSet();
+
+/// How the connection screen splits across a fold, such as iPhone Duo's.
+enum TerminalFoldLayout {
+  /// No fold splits the screen, or there is nothing for a second page.
+  none,
+
+  /// Held like a book: the window navigator stays open on the left page and
+  /// the terminal fills the right page, clear of the fold.
+  book,
+
+  /// Propped up like a laptop: the terminal fills the top page to read at a
+  /// distance; the bottom page, where the hands rest, holds the keyboard
+  /// toolbar above the window navigator or, without one, a keyboard deck.
+  propped,
+}
+
+/// Resolves the fold layout for the connection screen.
+///
+/// Propped up, every session splits: the bottom page is where the keyboard
+/// goes. Held like a book, only a mux session has something for the second
+/// page (its window navigator), so a plain shell keeps one page and spans
+/// the fold rather than giving up half its columns.
+TerminalFoldLayout resolveTerminalFoldLayout(
+  DisplayFold? fold, {
+  required bool showsMuxNavigator,
+}) {
+  if (fold == null) return TerminalFoldLayout.none;
+  if (!fold.isVertical) return TerminalFoldLayout.propped;
+  return showsMuxNavigator ? TerminalFoldLayout.book : TerminalFoldLayout.none;
 }
 
 /// Whether Back should leave the connection screen.

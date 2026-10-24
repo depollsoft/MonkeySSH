@@ -14,6 +14,7 @@ import '../../domain/services/telemetry_service.dart';
 import '../widgets/file_picker_helpers.dart';
 import '../widgets/premium_access.dart';
 import '../widgets/premium_badge.dart';
+import '../widgets/system_vertical_bar.dart';
 import '../widgets/unsaved_changes_guard.dart';
 import 'ssh_key_validation.dart';
 import 'transfer_screen.dart';
@@ -70,28 +71,34 @@ class _KeyAddScreenState extends ConsumerState<KeyAddScreen>
   Widget build(BuildContext context) => UnsavedChangesGuard(
     hasUnsavedChanges: _hasUnsavedChanges,
     child: Scaffold(
-      appBar: AppBar(
-        title: const Text('Add SSH Key'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'Generate'),
-            Tab(text: 'Import'),
-          ],
+      appBar: VerticalBarAppBar(
+        AppBar(
+          title: const Text('Add SSH Key'),
+          bottom: TabBar(
+            controller: _tabController,
+            tabs: const [
+              Tab(text: 'Generate'),
+              Tab(text: 'Import'),
+            ],
+          ),
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _GenerateKeyTab(
-            onSaved: _closeWithoutUnsavedPrompt,
-            onUnsavedChangesChanged: _handleGenerateUnsavedChangesChanged,
-          ),
-          _ImportKeyTab(
-            onSaved: _closeWithoutUnsavedPrompt,
-            onUnsavedChangesChanged: _handleImportUnsavedChangesChanged,
-          ),
-        ],
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: TabBarView(
+          controller: _tabController,
+          children: [
+            _GenerateKeyTab(
+              onSaved: _closeWithoutUnsavedPrompt,
+              onUnsavedChangesChanged: _handleGenerateUnsavedChangesChanged,
+            ),
+            _ImportKeyTab(
+              onSaved: _closeWithoutUnsavedPrompt,
+              onUnsavedChangesChanged: _handleImportUnsavedChangesChanged,
+            ),
+          ],
+        ),
       ),
     ),
   );
