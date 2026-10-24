@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
+import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_menu_style.dart';
 import 'package:xterm/xterm.dart';
 
@@ -176,6 +177,64 @@ void registerKeyboardToolbarTests() {
 
         expect((escapeCenter.dy - upCenter.dy).abs(), lessThan(0.1));
         expect((escapeCenter.dy - endCenter.dy).abs(), lessThan(0.1));
+      });
+
+      testWidgets('stops at a vertical bar but runs beside a notch', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(const Size(678, 466));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        const padding = EdgeInsets.only(left: 84, bottom: 34);
+        Future<Rect> pumpToolbar(SystemVerticalBar? bar) async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: MediaQuery(
+                data: const MediaQueryData(
+                  size: Size(678, 466),
+                  padding: padding,
+                  viewPadding: padding,
+                ),
+                child: SystemVerticalBarScope(
+                  bar: bar,
+                  child: Scaffold(
+                    body: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: KeyboardToolbar(terminal: terminal),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          return tester.getRect(
+            find
+                .descendant(
+                  of: find.byType(KeyboardToolbar),
+                  matching: find.byWidgetPredicate(
+                    (widget) =>
+                        widget is DecoratedBox &&
+                        widget.decoration is BoxDecoration &&
+                        (widget.decoration as BoxDecoration).border != null,
+                  ),
+                )
+                .first,
+          );
+        }
+
+        final besideNotch = await pumpToolbar(null);
+        final notchEscapeLeft = tester.getTopLeft(find.byTooltip('Escape')).dx;
+        expect(besideNotch.left, 0);
+
+        final besideBar = await pumpToolbar(
+          const SystemVerticalBar(
+            edge: SystemVerticalBarEdge.left,
+            itemColumn: Rect.fromLTRB(26, 82, 70, 432),
+          ),
+        );
+        expect(besideBar.left, 84);
+        expect(besideBar.right, 678);
+        // The keys keep their place rather than clearing the bar twice.
+        expect(tester.getTopLeft(find.byTooltip('Escape')).dx, notchEscapeLeft);
       });
 
       testWidgets('keeps the landscape Enter key fully on screen', (

@@ -304,32 +304,43 @@ class _LockScreenState extends ConsumerState<LockScreen> {
       );
     }
 
+    final keyboardUp = mediaQuery.viewInsets.bottom > 0;
     return Scaffold(
       body: SafeArea(
         child: LayoutBuilder(
-          builder: (context, constraints) => SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: constraints.maxHeight > 48
-                    ? constraints.maxHeight - 48
-                    : 0,
-              ),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 360),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      ...brand,
-                      const SizedBox(height: 8),
-                      ...controls,
-                    ],
+          builder: (context, constraints) {
+            // With the keyboard up and no room for both, the brand gives way
+            // so Unlock stays in view: the number pad has no Return key.
+            // Propped up, the keyboard takes the whole bottom page.
+            final showsBrand =
+                !keyboardUp ||
+                constraints.maxHeight >= _brandExtent + _minPinPageExtent;
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: constraints.maxHeight > 48
+                      ? constraints.maxHeight - 48
+                      : 0,
+                ),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 360),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        if (showsBrand) ...[
+                          ...brand,
+                          const SizedBox(height: 8),
+                        ],
+                        ...controls,
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
@@ -338,6 +349,10 @@ class _LockScreenState extends ConsumerState<LockScreen> {
 
 /// The least height a fold's PIN page keeps for its field and button.
 const double _minPinPageExtent = 240;
+
+/// The height the brand adds above the PIN on one page: the icon, the space
+/// under it, the name, and the gap before the prompt.
+const double _brandExtent = 112 + 32 + 32 + 8;
 
 /// One page of the lock screen spread across a fold: its content centred
 /// at the single-page width, scrolling when the page is short.

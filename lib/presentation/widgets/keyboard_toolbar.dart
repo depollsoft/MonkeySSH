@@ -8,6 +8,7 @@ import 'package:xterm/xterm.dart';
 
 import '../../app/theme.dart';
 import 'system_bottom_inset.dart';
+import 'system_vertical_bar.dart';
 import 'terminal_key_input.dart';
 import 'terminal_menu_style.dart';
 
@@ -536,7 +537,7 @@ class _KeyboardToolbarState extends State<KeyboardToolbar> {
     final bottomInset = resolveSystemBottomInset(mediaQuery);
     final useSingleRow = shouldUseSingleRowKeyboardToolbar(mediaQuery);
 
-    return DecoratedBox(
+    final toolbar = DecoratedBox(
       decoration: BoxDecoration(
         color: colorScheme.surface,
         border: Border(top: BorderSide(color: colorScheme.outlineVariant)),
@@ -553,6 +554,22 @@ class _KeyboardToolbarState extends State<KeyboardToolbar> {
                   children: [_buildModifierRow(), _buildNavigationRow()],
                 ),
         ),
+      ),
+    );
+    final verticalBar = SystemVerticalBarScope.maybeOf(context);
+    if (verticalBar == null) return toolbar;
+    // The screen's controls sit in the vertical bar's strip, so the toolbar
+    // stops at the bar instead of running its divider under them.
+    final barOnLeft = verticalBar.edge == SystemVerticalBarEdge.left;
+    return Padding(
+      padding: barOnLeft
+          ? EdgeInsets.only(left: mediaQuery.padding.left)
+          : EdgeInsets.only(right: mediaQuery.padding.right),
+      child: MediaQuery.removePadding(
+        context: context,
+        removeLeft: barOnLeft,
+        removeRight: !barOnLeft,
+        child: toolbar,
       ),
     );
   }

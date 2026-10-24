@@ -457,6 +457,88 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('gives the PIN the top page when the keyboard takes the '
+        'bottom page', (tester) async {
+      // iPhone Duo propped up: a 40 pt fold band, and a keyboard that covers
+      // the whole bottom page up to the fold, as the iOS 27.1 simulator
+      // reports them.
+      final authService = MockAuthService();
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+      tester.view
+        ..physicalSize = const Size(669, 951)
+        ..devicePixelRatio = 1
+        ..padding = const FakeViewPadding(top: 82, bottom: 34)
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTRB(0, 455.5, 669, 495.5),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      final field = tester.state<EditableTextState>(find.byType(EditableText));
+
+      tester.view
+        ..padding = const FakeViewPadding(top: 82)
+        ..viewInsets = const FakeViewPadding(bottom: 495.5);
+      await tester.pump();
+      await tester.pump();
+
+      // The number pad has no Return key, so Unlock must show without
+      // scrolling; the brand gives way to make room.
+      expect(find.byType(Image), findsNothing);
+      expect(tester.getRect(find.text('Unlock')).bottom, lessThan(455.5));
+      expect(tester.getRect(find.byType(TextField)).top, greaterThan(82));
+      expect(
+        tester.state<EditableTextState>(find.byType(EditableText)),
+        same(field),
+      );
+      expect(field.widget.focusNode.hasFocus, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('keeps the brand above a keyboard that leaves room', (
+      tester,
+    ) async {
+      final authService = MockAuthService();
+      when(authService.getAuthMethod).thenAnswer((_) async => AuthMethod.pin);
+      tester.view
+        ..physicalSize = const Size(402, 874)
+        ..devicePixelRatio = 1
+        ..padding = const FakeViewPadding(top: 62)
+        ..viewInsets = const FakeViewPadding(bottom: 291);
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authServiceProvider.overrideWithValue(authService),
+            authStateProvider.overrideWith(_LockedAuthStateNotifier.new),
+          ],
+          child: const MaterialApp(home: LockScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(Image), findsOneWidget);
+      expect(tester.getRect(find.text('Unlock')).bottom, lessThan(874 - 291));
+    });
+
     testWidgets('falls back to one page when the keyboard covers the PIN '
         'page', (tester) async {
       final authService = MockAuthService();
