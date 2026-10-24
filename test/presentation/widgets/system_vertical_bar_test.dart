@@ -344,6 +344,66 @@ void main() {
       expect(find.text('Editor'), findsNothing);
     });
 
+    testWidgets('keeps the actions across the top when no key fits', (
+      tester,
+    ) async {
+      useOuterDisplay(tester);
+      // A Live Activity's status cluster and a very tall keyboard leave the
+      // bar's item column no room at all.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 420);
+      const shortBar = SystemVerticalBar(
+        edge: SystemVerticalBarEdge.right,
+        itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+      );
+      var saved = 0;
+      await tester.pumpWidget(
+        withBar(
+          bar: shortBar,
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  fullscreenDialog: true,
+                  builder: (context) => Scaffold(
+                    appBar: VerticalBarAppBar(
+                      AppBar(
+                        title: const Text('Editor'),
+                        actions: [
+                          IconButton(
+                            icon: const Icon(Icons.save_outlined),
+                            tooltip: 'Save',
+                            onPressed: () => saved += 1,
+                          ),
+                        ],
+                      ),
+                    ),
+                    body: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      final appBar = find.byType(AppBar);
+      expect(find.byType(VerticalBarRail), findsNothing);
+      expect(
+        find.descendant(of: appBar, matching: find.byTooltip('Save')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('Save'));
+      expect(saved, 1);
+      await tester.tap(
+        find.descendant(of: appBar, matching: find.byType(CloseButton)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Editor'), findsNothing);
+    });
+
     testWidgets('is the plain app bar without a vertical bar', (tester) async {
       await tester.pumpWidget(screen(bar: null));
       await tester.tap(find.text('open'));

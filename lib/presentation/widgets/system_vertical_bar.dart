@@ -482,7 +482,15 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final bar = SystemVerticalBarScope.maybeOf(context);
-    if (bar == null) return appBar;
+    // With no room in the bar for even one key, as under a Live Activity
+    // with a very tall keyboard, the actions stay across the top.
+    if (bar == null ||
+        verticalBarItemCapacity(
+              resolveVerticalBarColumn(bar, MediaQuery.of(context)),
+            ) <
+            1) {
+      return appBar;
+    }
     final leading = appBar.leading ?? _impliedLeading(context);
     final actions = appBar.actions ?? const <Widget>[];
     return VerticalBarRailPortal(
