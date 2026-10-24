@@ -38,6 +38,7 @@ import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/presentation/screens/agent_management_screen.dart';
 import 'package:monkeyssh/presentation/screens/terminal_screen.dart'
     show storeDemoImagePasteCompleter;
+import 'package:monkeyssh/presentation/widgets/display_fold.dart';
 
 const _targetName = String.fromEnvironment('STORE_SCREENSHOT_TARGET');
 const _selectedScene = String.fromEnvironment('STORE_SCREENSHOT_SCENE');
@@ -147,6 +148,46 @@ const _sceneNames = <String>[
   'agent_management',
 ];
 
+/// How the iPhone Duo is held for a capture, and the window it gives the app.
+enum _DuoPose {
+  /// Folded shut: the outer display, upright, with the vertical bar.
+  closed(Size(466, 678), null),
+
+  /// Opened flat and held wide: the inner display; the crease is ignored.
+  open(Size(951, 669), null),
+
+  /// Half open and held like a book: pages side by side.
+  book(Size(951, 669), Axis.vertical),
+
+  /// Half open, turned upright and propped up like a laptop: pages stacked.
+  propped(Size(669, 951), Axis.horizontal);
+
+  const _DuoPose(this.window, this.foldAxis);
+
+  final Size window;
+  final Axis? foldAxis;
+}
+
+class _DuoScene {
+  const _DuoScene(this.name, this.pose);
+
+  final String name;
+  final _DuoPose pose;
+}
+
+// Product page order. Must match DUO_SCREENSHOTS in
+// scripts/validate_store_screenshots.py.
+const _duoScenes = <_DuoScene>[
+  _DuoScene('duo_book_terminal', _DuoPose.book),
+  _DuoScene('duo_closed_terminal', _DuoPose.closed),
+  _DuoScene('duo_propped_terminal', _DuoPose.propped),
+  _DuoScene('duo_book_home', _DuoPose.book),
+  _DuoScene('duo_open_native', _DuoPose.open),
+  _DuoScene('duo_closed_windows', _DuoPose.closed),
+  _DuoScene('duo_closed_hosts', _DuoPose.closed),
+  _DuoScene('duo_closed_agent_management', _DuoPose.closed),
+];
+
 final _targets = <String, _ScreenshotTarget>{
   'ios_phone': _ScreenshotTarget(
     platform: TargetPlatform.iOS,
@@ -160,6 +201,13 @@ final _targets = <String, _ScreenshotTarget>{
     pathsByScene: [
       for (var index = 1; index <= _sceneNames.length; index += 1)
         ['ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_ipad_13.png'],
+    ],
+  ),
+  'ios_duo': _ScreenshotTarget(
+    platform: TargetPlatform.iOS,
+    pathsByScene: [
+      for (var index = 1; index <= _duoScenes.length; index += 1)
+        ['ios/fastlane/screenshots/en-US/${index.toString().padLeft(2, '0')}_iphone_duo.png'],
     ],
   ),
   'android_phone': _ScreenshotTarget(
@@ -635,6 +683,8 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
         await _runLightDemoImageFlow();
       } else if (_videoDemoMode) {
         await _runVideoDemoFlow();
+      } else if (_targetName == 'ios_duo') {
+        await _runDuoScreenshotFlow();
       } else {
         await _runScreenshotFlow();
       }
@@ -733,6 +783,12 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     await Future<void>.delayed(const Duration(seconds: 4));
     await _announceScene(6);
 
+    await _openAgentManagement();
+    await _announceScene(7);
+  }
+
+  /// Pushes Agent Management and waits for its live version probes.
+  Future<void> _openAgentManagement() async {
     final session = ref
         .read(activeSessionsProvider.notifier)
         .getSession(_connectionId!);
@@ -766,7 +822,166 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     );
     await refreshed.future.timeout(const Duration(seconds: 120));
     await Future<void>.delayed(const Duration(seconds: 2));
-    await _announceScene(7);
+  }
+
+  /// Captures the iPhone Duo set, grouped by pose so the hinge moves as
+  /// little as possible: open, book, propped, then closed, which ends on
+  /// Agent Management because its route stays pushed.
+  Future<void> _runDuoScreenshotFlow() async {
+    final terminalHostId = widget.terminalHostId;
+    await _connect(terminalHostId);
+    await _ensureMuxReady();
+    final base = '/terminal/$terminalHostId?connectionId=$_connectionId';
+
+    if (_duoSceneSelected('duo_open_native')) {
+      final nativeKey = await _ensureNativeCopilotSession();
+      _focusNativeCopilot(nativeKey);
+      _go(base);
+      await _setDuoPose(_DuoPose.open);
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await _announceDuoScene('duo_open_native');
+      _clearNativeFocus();
+    }
+
+    if (_duoSceneSelected('duo_book_terminal') ||
+        _duoSceneSelected('duo_propped_terminal')) {
+      await _selectClaudeWindow();
+    }
+    if (_duoSceneSelected('duo_book_terminal')) {
+      _go(base);
+      await _setDuoPose(_DuoPose.book);
+      await Future<void>.delayed(const Duration(seconds: 3));
+      await _announceDuoScene('duo_book_terminal');
+    }
+    if (_duoSceneSelected('duo_book_home')) {
+      _go('/');
+      await _setDuoPose(_DuoPose.book);
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await _announceDuoScene('duo_book_home');
+    }
+    if (_duoSceneSelected('duo_propped_terminal')) {
+      _go(base);
+      await _setDuoPose(_DuoPose.propped);
+      await Future<void>.delayed(const Duration(seconds: 3));
+      await _announceDuoScene('duo_propped_terminal');
+    }
+
+    if (_duoSceneSelected('duo_closed_terminal')) {
+      await _selectMonkeyMuxWindow('copilot');
+      _go(base);
+      await _setDuoPose(_DuoPose.closed);
+      await Future<void>.delayed(const Duration(seconds: 3));
+      await _announceDuoScene('duo_closed_terminal');
+    }
+    if (_duoSceneSelected('duo_closed_windows')) {
+      _go('$base&expandTmux=1');
+      await _setDuoPose(_DuoPose.closed);
+      await Future<void>.delayed(const Duration(seconds: 4));
+      await _scrollMuxWindows(toEnd: false);
+      await _announceDuoScene('duo_closed_windows');
+    }
+    if (_duoSceneSelected('duo_closed_hosts')) {
+      _go('/');
+      await _setDuoPose(_DuoPose.closed);
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await _announceDuoScene('duo_closed_hosts');
+    }
+    if (_duoSceneSelected('duo_closed_agent_management')) {
+      _go(base);
+      await _setDuoPose(_DuoPose.closed);
+      await _openAgentManagement();
+      await _announceDuoScene('duo_closed_agent_management');
+    }
+  }
+
+  bool _duoSceneSelected(String name) =>
+      _selectedScene.isEmpty || _selectedScene == name;
+
+  /// Asks the capture driver to move the hinge, then waits until the app's
+  /// window shows that pose. The driver presses Device Hub's preset; when the
+  /// window comes out turned the wrong way, this asks it to rotate as well.
+  Future<void> _setDuoPose(_DuoPose pose) async {
+    if (_duoPoseReached(pose)) return;
+    debugPrintSynchronously(
+      'STORE_SCREENSHOT_POSE ${jsonEncode({'pose': pose.name})}',
+    );
+    final deadline = DateTime.now().add(const Duration(seconds: 60));
+    var nextRotation = DateTime.now().add(const Duration(seconds: 5));
+    var rotations = 0;
+    while (!_duoPoseReached(pose)) {
+      final now = DateTime.now();
+      if (now.isAfter(deadline)) {
+        throw TimeoutException(
+          'iPhone Duo did not reach the ${pose.name} pose: '
+          '${_duoWindowDescription()}',
+        );
+      }
+      final window = _duoMediaQuery()?.size;
+      final turned =
+          window != null &&
+          (window.width - pose.window.height).abs() < 1 &&
+          (window.height - pose.window.width).abs() < 1;
+      if (turned && now.isAfter(nextRotation)) {
+        // Upside down is unsupported on iPhone, so three turns cover any start.
+        if (rotations == 3) {
+          throw StateError(
+            'iPhone Duo stayed turned after three rotations: '
+            '${_duoWindowDescription()}',
+          );
+        }
+        rotations += 1;
+        debugPrintSynchronously(
+          'STORE_SCREENSHOT_POSE ${jsonEncode({'rotate': true})}',
+        );
+        nextRotation = now.add(const Duration(seconds: 5));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    // Opening and closing moves the app between displays; let it settle.
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+
+  bool _duoPoseReached(_DuoPose pose) {
+    final mediaQuery = _duoMediaQuery();
+    if (mediaQuery == null) return false;
+    final window = mediaQuery.size;
+    if ((window.width - pose.window.width).abs() >= 1 ||
+        (window.height - pose.window.height).abs() >= 1) {
+      return false;
+    }
+    return resolveDisplayFold(mediaQuery)?.axis == pose.foldAxis;
+  }
+
+  // Read below PlatformDisplayFeaturesMediaQuery, which adds the fold the
+  // iPhone Duo reports outside the engine.
+  MediaQueryData? _duoMediaQuery() => appNavigatorKey.currentContext
+      ?.getInheritedWidgetOfExactType<MediaQuery>()
+      ?.data;
+
+  String _duoWindowDescription() {
+    final mediaQuery = _duoMediaQuery();
+    if (mediaQuery == null) return 'no window';
+    final fold = resolveDisplayFold(mediaQuery);
+    return 'window ${mediaQuery.size}, fold ${fold?.axis.name ?? 'none'}';
+  }
+
+  Future<void> _announceDuoScene(String name) async {
+    final index = _duoScenes.indexWhere((scene) => scene.name == name);
+    final scene = _duoScenes[index];
+    if (!_duoPoseReached(scene.pose)) {
+      throw StateError(
+        '$name needs the ${scene.pose.name} pose: ${_duoWindowDescription()}',
+      );
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    final payload = {
+      'scene': name,
+      'index': index + 1,
+      'pose': scene.pose.name,
+      'paths': widget.target.pathsByScene[index],
+    };
+    debugPrintSynchronously('STORE_SCREENSHOT_READY ${jsonEncode(payload)}');
+    await Future<void>.delayed(_postReadyCaptureDelay);
   }
 
   Future<void> _runVideoDemoFlow() async {

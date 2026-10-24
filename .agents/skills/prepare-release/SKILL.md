@@ -36,7 +36,7 @@ If flags conflict (`--ship` + `--no-ship`, `--media-only` + `--copy-only`), ask 
 1. **Branch from `origin/main`** after fetch unless the user says otherwise. Open PRs against `main`.
 2. **Never commit regenerated store media** (screenshots, App Previews, demo videos). Publish with `scripts/store_assets.sh`.
 3. Listing **copy**, feature graphics, and app icons stay in git.
-4. Generation needs a real Mac environment: Xcode simulators and/or a running Android emulator, plus the real agent CLIs listed in step 5 and Python Pillow.
+4. Generation needs a real Mac environment: Xcode simulators and/or a running Android emulator, plus the real agent CLIs listed in step 5 and Python Pillow. The iPhone Duo set also needs the iPhone Duo simulator's Device Hub window open, the Device Hub Accessibility helper, and an unlocked Mac screen.
 5. If live SSH/MonkeyMux capture cannot be created, **stop** — do not substitute mocks.
 6. Prefer Conventional Commits. Include required commit trailers when this environment specifies them.
 7. Use JDK 17 for any local Android build (`JAVA_HOME="$(/usr/libexec/java_home -v 17)"`).
@@ -178,6 +178,13 @@ omit their panes when absent, without placeholders. Configure any
 required logins and, if installed, the OpenClaw gateway on the capture host beforehand.
 Missing tools or exited panes are errors, never reasons to create placeholders.
 
+`--check-environment` for `ios` or `both` also checks the iPhone Duo setup:
+the Device Hub helper has the Accessibility permission, the screen is
+unlocked, and Device Hub has exactly one window titled with the iPhone Duo
+simulator's name. Ask the owner to unlock the Mac if it reports a locked
+screen. To refresh only the Duo set, restore the archive first, then run
+`python3 scripts/generate_store_screenshots.py duo`.
+
 Generate:
 
 ```bash
@@ -196,6 +203,7 @@ Quality bar (fail the run if violated — see `docs/store-assets-prompt.md`):
 - MonkeyMux selector shows current agent family: Copilot CLI, Claude Code, Codex, OpenCode, Antigravity, Cursor Agent, Pi, plus Hermes and OpenClaw when installed
 - No port-forward/subscription/checkout as primary scenes unless product direction changed
 - No secrets, local private paths, API keys, crash dialogs, empty shells
+- iPhone Duo shots come from the real hinge poses (no resized windows or injected folds)
 
 ### 6) Validate store media
 

@@ -35,6 +35,7 @@ from store_media import ROOT, float_or_none, require_agent_executables
 
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
+POSE_MARKER = 'STORE_SCREENSHOT_POSE '
 DONE_MARKER = 'STORE_SCREENSHOT_DONE'
 ERROR_MARKER = 'STORE_SCREENSHOT_ERROR '
 ANSI_ESCAPE_PATTERN = re.compile(
@@ -76,6 +77,39 @@ class ScreenshotTarget:
 
 
 @dataclass(frozen=True)
+class DuoPose:
+    # Device Hub button that sets the hinge.
+    hinge: str
+    # simctl display: 1 is the outer display, 3 the inner one.
+    display: int
+    size: tuple[int, int]
+
+
+# Must match _DuoPose in tool/store_screenshot_app.dart, which also checks the
+# orientation and asks for Rotate Right when the window comes out turned.
+DUO_POSES = {
+    'closed': DuoPose(hinge='Closed', display=1, size=(1398, 2034)),
+    'open': DuoPose(hinge='Open', display=3, size=(2853, 2007)),
+    'book': DuoPose(hinge='Partially Open', display=3, size=(2853, 2007)),
+    'propped': DuoPose(hinge='Partially Open', display=3, size=(2007, 2853)),
+}
+DUO_SCENES = (
+    'duo_book_terminal',
+    'duo_closed_terminal',
+    'duo_propped_terminal',
+    'duo_book_home',
+    'duo_open_native',
+    'duo_closed_windows',
+    'duo_closed_hosts',
+    'duo_closed_agent_management',
+)
+# Presses Device Hub's hinge buttons through the macOS Accessibility API. It
+# takes one JSON request argument and prints the JSON result (see AGENTS.md,
+# "iOS scene lifecycle and iPhone Duo").
+DEFAULT_AX_HELPER = '~/Library/Application Support/SimAXHelper/ax.py'
+
+
+@dataclass(frozen=True)
 class MonkeyMuxSessionRegistryEntry:
     session: str
     owner_pid: int | None = None
@@ -105,6 +139,13 @@ TARGETS = {
         platform='ios',
         simulator_name='iPad Pro 13-inch (M5)',
         size=(2064, 2752),
+    ),
+    # Each pose sets its own size; see DUO_POSES.
+    'ios_duo': ScreenshotTarget(
+        name='ios_duo',
+        platform='ios',
+        simulator_name='iPhone Duo',
+        size=DUO_POSES['closed'].size,
     ),
     'android_phone': ScreenshotTarget(
         name='android_phone',
@@ -139,8 +180,13 @@ def main() -> None:
     if args.check_environment:
         require_agent_executables()
         print("All required store-capture agent CLIs are available.")
+        if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
+            _check_duo_environment()
+            print('Device Hub can set the iPhone Duo hinge.')
         return
-    targets = _targets_for_platform(args.platform)
+    targets = _targets_for_platform(args.platform, scene=args.scene)
+    if TARGETS['ios_duo'] in targets:
+        _check_duo_environment()
     with StoreDemoEnvironment(seed_platform=args.platform) as demo:
         for target in targets:
             _run_target(target, demo, scene=args.scene)
@@ -152,15 +198,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         'platform',
-        choices=['ios', 'android', 'both'],
+        choices=['ios', 'android', 'both', 'duo'],
         nargs='?',
         default='both',
-        help='Which store screenshot set to generate.',
+        help='Which store screenshot set to generate. ios includes the iPhone Duo set; duo is that set alone.',
     )
     parser.add_argument(
         '--scene',
         choices=['terminal_copilot', 'hosts', 'snippets', 'monkeymux_windows',
-                 'sftp', 'terminal_claude', 'native_copilot', 'agent_management'],
+                 'sftp', 'terminal_claude', 'native_copilot', 'agent_management',
+                 *DUO_SCENES],
         help='Recapture one scene in place, preserving the other screenshots.',
     )
     parser.add_argument(
@@ -174,16 +221,28 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _targets_for_platform(platform: str) -> list[ScreenshotTarget]:
+def _targets_for_platform(
+    platform: str, *, scene: str | None = None,
+) -> list[ScreenshotTarget]:
     if platform == 'ios':
-        return [TARGETS['ios_phone'], TARGETS['ios_ipad']]
-    if platform == 'android':
-        return [
+        targets = [TARGETS['ios_phone'], TARGETS['ios_ipad'], TARGETS['ios_duo']]
+    elif platform == 'duo':
+        targets = [TARGETS['ios_duo']]
+    elif platform == 'android':
+        targets = [
             TARGETS['android_phone'],
             TARGETS['android_7_tablet'],
             TARGETS['android_10_tablet'],
         ]
-    return list(TARGETS.values())
+    else:
+        targets = list(TARGETS.values())
+    if scene is None:
+        return targets
+    # The iPhone Duo has its own scenes; the other devices share one list.
+    return [
+        target for target in targets
+        if (target.name == 'ios_duo') == (scene in DUO_SCENES)
+    ]
 
 
 def _run_target(
@@ -291,6 +350,10 @@ def _run_flutter_capture(
         for raw_line in process.stdout:
             print(raw_line, end='')
             line = raw_line.strip()
+            if POSE_MARKER in line:
+                _set_duo_pose(
+                    target, json.loads(line.split(POSE_MARKER, 1)[1]),
+                )
             if READY_MARKER in line:
                 payload = json.loads(line.split(READY_MARKER, 1)[1])
                 time.sleep(capture_delay)
@@ -299,6 +362,7 @@ def _run_flutter_capture(
                     device_id=device_id,
                     paths=[ROOT / path for path in payload['paths']],
                     scene=payload.get('scene'),
+                    pose=payload.get('pose'),
                 )
             if ERROR_MARKER in line:
                 failure = line.split(ERROR_MARKER, 1)[1].strip()
@@ -1966,11 +2030,13 @@ def _free_local_port() -> int:
 
 # Only entirely Pro-only features get store badges. Features with any free
 # access, including native chat, use the unbadged app capture.
+AGENT_MANAGEMENT_CAPTION = (
+    'Agent Management',
+    'Check versions. Install, update & repair remote agents.',
+)
 PRO_SCENE_CAPTIONS = {
-    'agent_management': (
-        'Agent Management',
-        'Check versions. Install, update & repair remote agents.',
-    ),
+    'agent_management': AGENT_MANAGEMENT_CAPTION,
+    'duo_closed_agent_management': AGENT_MANAGEMENT_CAPTION,
 }
 
 
@@ -2045,10 +2111,30 @@ def _capture_native_screenshot(
     device_id: str,
     paths: list[Path],
     scene: str | None = None,
+    pose: str | None = None,
 ) -> None:
+    expected_size = target.size
     with tempfile.NamedTemporaryFile(suffix='.png') as tmp:
         tmp_path = Path(tmp.name)
-        if target.platform == 'ios':
+        if target.name == 'ios_duo':
+            if pose not in DUO_POSES:
+                raise RuntimeError(f'iPhone Duo scene {scene} has no known pose: {pose}')
+            expected_size = DUO_POSES[pose].size
+            subprocess.run(
+                ['xcrun', 'simctl', 'io', device_id, 'screenshot',
+                 f'--display={DUO_POSES[pose].display}', str(tmp_path)],
+                cwd=ROOT,
+                check=True,
+            )
+            with Image.open(tmp_path) as image:
+                # Cropping or scaling would hide a capture of the wrong display
+                # or orientation, so require App Store Connect's exact size.
+                if image.size != expected_size:
+                    raise RuntimeError(
+                        f'iPhone Duo {scene} capture is {image.size[0]}x{image.size[1]}; '
+                        f'the {pose} pose should give {expected_size[0]}x{expected_size[1]}',
+                    )
+        elif target.platform == 'ios':
             subprocess.run(
                 ['xcrun', 'simctl', 'io', device_id, 'screenshot', str(tmp_path)],
                 cwd=ROOT,
@@ -2066,10 +2152,10 @@ def _capture_native_screenshot(
 
         with Image.open(tmp_path) as image:
             screenshot = image.convert('RGB')
-            if screenshot.size != target.size:
+            if screenshot.size != expected_size:
                 screenshot = ImageOps.fit(
                     screenshot,
-                    target.size,
+                    expected_size,
                     method=Image.Resampling.LANCZOS,
                 )
             if scene in PRO_SCENE_CAPTIONS:
@@ -2088,8 +2174,93 @@ def _capture_native_screenshot(
                     display_path = path
                 print(
                     f'Wrote {display_path} '
-                    f'({target.size[0]}x{target.size[1]})',
+                    f'({expected_size[0]}x{expected_size[1]})',
                 )
+
+
+def _ax_helper(request: dict[str, object]) -> object:
+    helper = Path(
+        os.environ.get('STORE_SCREENSHOT_AX_HELPER', DEFAULT_AX_HELPER),
+    ).expanduser()
+    if not helper.is_file():
+        raise RuntimeError(
+            f'iPhone Duo captures need the Device Hub helper at {helper} '
+            '(set STORE_SCREENSHOT_AX_HELPER); see AGENTS.md, "iOS scene '
+            'lifecycle and iPhone Duo".',
+        )
+    result = subprocess.run(
+        [sys.executable, str(helper), json.dumps(request)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    output = result.stdout.strip()
+    if result.returncode != 0 or output.startswith('ERROR'):
+        raise RuntimeError(
+            f'Device Hub helper failed on {request.get("cmd")}: '
+            f'{output or result.stderr.strip()}',
+        )
+    return json.loads(output)
+
+
+def _device_hub_window(name: str) -> list[float]:
+    """Returns the frame of the Device Hub window showing simulator `name`."""
+    apps = _ax_helper({'cmd': 'apps'})
+    device_hub = apps.get('devicehub', {}) if isinstance(apps, dict) else {}
+    windows = [
+        window for window in device_hub.get('windows', [])
+        if window.get('title') == name and window.get('frame')
+    ]
+    if len(windows) != 1:
+        titles = [window.get('title') for window in device_hub.get('windows', [])]
+        raise RuntimeError(
+            f'Open one Device Hub window for the {name!r} simulator; '
+            f'Device Hub shows {titles}.',
+        )
+    return windows[0]['frame']
+
+
+def _press_device_hub_button(device_name: str, description: str) -> None:
+    # Buttons in every Device Hub window match, so pick the one inside the
+    # capture simulator's window.
+    left, top, width, height = _device_hub_window(device_name)
+    match = {'role': 'AXButton', 'desc': description}
+    buttons = _ax_helper({'cmd': 'find', 'app': 'devicehub', 'match': match})
+    for index, button in enumerate(buttons):
+        frame = button.get('frame')
+        if not frame:
+            continue
+        center_x = frame[0] + frame[2] / 2
+        center_y = frame[1] + frame[3] / 2
+        if left <= center_x <= left + width and top <= center_y <= top + height:
+            _ax_helper({
+                'cmd': 'press', 'app': 'devicehub', 'match': {**match, 'index': index},
+            })
+            print(f'Pressed {description} in Device Hub for {device_name}')
+            return
+    raise RuntimeError(f'Device Hub has no {description!r} button for {device_name!r}')
+
+
+def _set_duo_pose(target: ScreenshotTarget, request: dict[str, object]) -> None:
+    if target.name != 'ios_duo':
+        raise RuntimeError(f'{target.name} asked for an iPhone Duo pose')
+    name = _ios_simulator_name(target)
+    if request.get('rotate'):
+        _press_device_hub_button(name, 'Rotate Right')
+        return
+    pose = request.get('pose')
+    if pose not in DUO_POSES:
+        raise RuntimeError(f'Unknown iPhone Duo pose: {pose}')
+    _press_device_hub_button(name, DUO_POSES[pose].hinge)
+
+
+def _check_duo_environment() -> None:
+    """Fails before any capture when Device Hub cannot move the Duo hinge."""
+    trusted = _ax_helper({'cmd': 'trusted'})
+    if not (isinstance(trusted, dict) and trusted.get('trusted')):
+        raise RuntimeError('The Device Hub helper lacks the Accessibility permission.')
+    name = _ios_simulator_name(TARGETS['ios_duo'])
+    device_id = _boot_ios_simulator(name)
+    _device_hub_window(name)
+    print(f'Device Hub shows {name} ({device_id}).')
 
 
 def _prepare_device(target: ScreenshotTarget) -> str:

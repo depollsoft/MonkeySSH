@@ -18,6 +18,140 @@ import validate_store_screenshots as validate
 import store_media
 
 
+class DuoCaptureTest(unittest.TestCase):
+    def _dart_duo_scenes(self):
+        source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
+        block = source.split('const _duoScenes = <_DuoScene>[', 1)[1].split('];', 1)[0]
+        return re.findall(r"_DuoScene\('([^']+)', _DuoPose\.(\w+)\)", block)
+
+    def test_duo_scenes_match_capture_app_and_validator(self):
+        scenes = self._dart_duo_scenes()
+        self.assertEqual([name for name, _ in scenes], list(capture.DUO_SCENES))
+        self.assertEqual(
+            [name for name, _, _ in validate.DUO_SCREENSHOTS], list(capture.DUO_SCENES),
+        )
+        sizes = {name: size for name, size, _ in validate.DUO_SCREENSHOTS}
+        for name, pose in scenes:
+            self.assertEqual(sizes[name], capture.DUO_POSES[pose].size, name)
+        source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
+        for name, _ in scenes:
+            self.assertIn(f"await _announceDuoScene('{name}')", source)
+
+    def test_duo_pose_windows_are_a_third_of_the_capture_size(self):
+        source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
+        windows = dict(
+            (pose, (int(width) * 3, int(height) * 3))
+            for pose, width, height in re.findall(r'  (\w+)\(Size\((\d+), (\d+)\)', source)
+        )
+        self.assertEqual(windows, {name: pose.size for name, pose in capture.DUO_POSES.items()})
+
+    def test_platform_and_scene_select_duo_target(self):
+        names = lambda targets: [target.name for target in targets]
+        self.assertIn('ios_duo', names(capture._targets_for_platform('ios')))
+        self.assertIn('ios_duo', names(capture._targets_for_platform('both')))
+        self.assertNotIn('ios_duo', names(capture._targets_for_platform('android')))
+        self.assertEqual(names(capture._targets_for_platform('duo')), ['ios_duo'])
+        self.assertEqual(
+            names(capture._targets_for_platform('ios', scene='duo_book_home')), ['ios_duo'],
+        )
+        self.assertEqual(
+            names(capture._targets_for_platform('ios', scene='hosts')), ['ios_phone', 'ios_ipad'],
+        )
+
+    def test_press_targets_the_capture_simulator_window(self):
+        replies = {
+            'apps': {'devicehub': {'windows': [
+                {'title': 'Duo Lead', 'frame': [0, 0, 500, 800]},
+                {'title': 'iPhone Duo', 'frame': [600, 0, 500, 800]},
+            ]}},
+            'find': [
+                {'desc': 'Partially Open', 'frame': [100, 700, 40, 20]},
+                {'desc': 'Partially Open', 'frame': [700, 700, 40, 20]},
+            ],
+            'press': {},
+        }
+        requests = []
+
+        def helper(request):
+            requests.append(request)
+            return replies[request['cmd']]
+
+        with patch.object(capture, '_ax_helper', side_effect=helper):
+            capture._set_duo_pose(capture.TARGETS['ios_duo'], {'pose': 'book'})
+        self.assertEqual(requests[-1], {
+            'cmd': 'press', 'app': 'devicehub',
+            'match': {'role': 'AXButton', 'desc': 'Partially Open', 'index': 1},
+        })
+
+    def test_press_requires_one_capture_window(self):
+        with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
+            {'title': 'Duo Lead', 'frame': [0, 0, 500, 800]},
+        ]}}):
+            with self.assertRaisesRegex(RuntimeError, "Open one Device Hub window for the 'iPhone Duo'"):
+                capture._set_duo_pose(capture.TARGETS['ios_duo'], {'rotate': True})
+
+    def test_pose_markers_drive_the_hinge_then_rotation(self):
+        process = Mock(stdout=iter([
+            capture.POSE_MARKER + '{"pose":"propped"}\n',
+            capture.POSE_MARKER + '{"rotate":true}\n',
+            capture.DONE_MARKER + '\n',
+        ]))
+        with patch.object(capture, '_flutter_environment', return_value={}), \
+             patch.object(capture, '_flutter_command', return_value=['flutter']), \
+             patch.object(capture.subprocess, 'Popen', return_value=process), \
+             patch.object(capture, '_press_device_hub_button') as press, \
+             patch.object(capture, '_terminate_process'):
+            capture._run_flutter_capture(capture.TARGETS['ios_duo'], 'device', [])
+        self.assertEqual(
+            [call.args for call in press.call_args_list],
+            [('iPhone Duo', 'Partially Open'), ('iPhone Duo', 'Rotate Right')],
+        )
+
+    def test_duo_capture_uses_pose_display_and_exact_size(self):
+        def fake_screenshot(size):
+            def run(command, **_):
+                Image.new('RGB', size, '#202030').save(command[-1])
+                return subprocess.CompletedProcess(command, 0)
+            return run
+
+        target = capture.TARGETS['ios_duo']
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / '01_iphone_duo.png'
+            with patch.object(capture.subprocess, 'run', side_effect=fake_screenshot((2853, 2007))) as run:
+                capture._capture_native_screenshot(
+                    target=target, device_id='device', paths=[output],
+                    scene='duo_book_home', pose='book',
+                )
+            self.assertIn('--display=3', run.call_args.args[0])
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (2853, 2007))
+            with patch.object(capture.subprocess, 'run', side_effect=fake_screenshot((2007, 2853))):
+                with self.assertRaisesRegex(RuntimeError, 'book pose should give 2853x2007'):
+                    capture._capture_native_screenshot(
+                        target=target, device_id='device', paths=[output],
+                        scene='duo_book_home', pose='book',
+                    )
+
+    def test_duo_validation_requires_scene_markers_and_agent_family(self):
+        paths = {
+            scene: ROOT / f'ios/fastlane/screenshots/en-US/{index:02d}_iphone_duo.png'
+            for index, (scene, _, _) in enumerate(validate.DUO_SCREENSHOTS, start=1)
+        }
+        family = ' '.join(store_media.AGENT_LABELS)
+        texts = {
+            paths[scene]: ' '.join(markers) + ' Add Host ' + family
+            for scene, _, markers in validate.DUO_SCREENSHOTS
+        }
+        with patch.object(validate, '_ocr_texts', return_value=texts), \
+             patch.object(validate, '_validate_copilot_image_frame'):
+            validate._validate_duo_ocr_content(paths)
+        texts[paths['duo_book_home']] = 'Hosts Add Host'
+        with patch.object(validate, '_ocr_texts', return_value=texts), \
+             patch.object(validate, '_validate_copilot_image_frame'):
+            with self.assertRaisesRegex(ValueError, 'missing expected store screenshot content: Connections'):
+                validate._validate_duo_ocr_content(paths)
+
+
 class LiveAgentCaptureTest(unittest.TestCase):
     def test_opencode_capture_uses_private_server_when_supported(self):
         for help_text, expected in (
@@ -317,7 +451,12 @@ class ProCaptionTest(unittest.TestCase):
     def test_validator_sizes_match_capture_targets(self):
         expected = {size for devices in validate.IOS_SCREENSHOTS.values() for size in devices.values()}
         expected |= set(validate.ANDROID_SCREENSHOTS.values())
-        self.assertEqual({target.size for target in capture.TARGETS.values()}, expected)
+        sizes = {target.size for name, target in capture.TARGETS.items() if name != 'ios_duo'}
+        self.assertEqual(sizes, expected)
+        self.assertEqual(
+            {pose.size for pose in capture.DUO_POSES.values()},
+            {size for _, size, _ in validate.DUO_SCREENSHOTS},
+        )
 
     def test_agent_scenes_resolve_live_names_not_stale_numeric_indices(self):
         source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
@@ -378,7 +517,11 @@ class ProCaptionTest(unittest.TestCase):
 
     def test_native_scene_has_no_badge_when_available_free(self):
         self.assertNotIn('native_copilot', capture.PRO_SCENE_CAPTIONS)
-        self.assertEqual(set(capture.PRO_SCENE_CAPTIONS), {'agent_management'})
+        self.assertNotIn('duo_open_native', capture.PRO_SCENE_CAPTIONS)
+        self.assertEqual(
+            set(capture.PRO_SCENE_CAPTIONS),
+            {'agent_management', 'duo_closed_agent_management'},
+        )
         path = ROOT / 'ios/fastlane/screenshots/en-US/07_iphone_6_9.png'
         valid = 'Message the agent reconnect'
         with patch.object(validate, '_ocr_texts', return_value={path: valid}):
@@ -713,7 +856,7 @@ class CaptureLaunchTest(unittest.TestCase):
              patch.object(capture.time, 'sleep'):
             target = capture.TARGETS['ios_phone']
             capture._run_target(target, demo, scene='hosts')
-        screenshot.assert_called_once_with(target=target, device_id='device', paths=[ROOT / 'capture.png'], scene='hosts')
+        screenshot.assert_called_once_with(target=target, device_id='device', paths=[ROOT / 'capture.png'], scene='hosts', pose=None)
         self.assertIn('--dart-define=STORE_SCREENSHOT_SCENE=hosts', command.call_args.args[3])
         terminate.assert_called_once_with(process, timeout=20)
 
