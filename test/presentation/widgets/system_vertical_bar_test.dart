@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 
@@ -88,6 +90,7 @@ void main() {
     IconButton key(String name) => IconButton(
       key: ValueKey(name),
       icon: const Icon(Icons.circle),
+      tooltip: name,
       onPressed: () {},
     );
 
@@ -148,6 +151,32 @@ void main() {
         );
         await tester.tap(find.byKey(ValueKey(hidden)), warnIfMissed: false);
       }
+
+      // Neither Tab nor VoiceOver reaches a key out of sight.
+      final semantics = tester.ensureSemantics();
+      await tester.pump();
+      final tooltips = <String>{};
+      void visit(SemanticsNode node) {
+        if (node.tooltip.isNotEmpty) tooltips.add(node.tooltip);
+        node.visitChildren((child) {
+          visit(child);
+          return true;
+        });
+      }
+
+      visit(tester.getSemantics(find.byType(VerticalBarRail)));
+      expect(tooltips, {'back', 'keys', 'menu', 'keyboard'});
+      final reached = <String>{};
+      for (var step = 0; step < 8; step += 1) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+        final key = FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<IconButton>()
+            ?.key;
+        if (key is ValueKey<String>) reached.add(key.value);
+      }
+      expect(reached, {'back', 'keys', 'menu', 'keyboard'});
+      semantics.dispose();
     });
   });
 

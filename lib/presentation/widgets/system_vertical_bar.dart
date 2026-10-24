@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../controllers/platform_display_features_controller.dart';
@@ -90,7 +91,7 @@ int verticalBarItemCapacity(Rect column) => math.max(
 ///
 /// Place it in a [Stack] that fills the window, such as the one
 /// [VerticalBarRailPortal] provides.
-class VerticalBarRail extends StatelessWidget {
+class VerticalBarRail extends StatefulWidget {
   /// Creates a rail in [bar].
   const VerticalBarRail({
     required this.bar,
@@ -114,11 +115,43 @@ class VerticalBarRail extends StatelessWidget {
   final bool avoidsKeyboard;
 
   @override
+  State<VerticalBarRail> createState() => _VerticalBarRailState();
+}
+
+class _VerticalBarRailState extends State<VerticalBarRail> {
+  // The controls the last layout had no room for. They stay mounted and keep
+  // their state, but leave focus traversal and the semantics tree, so Tab
+  // and VoiceOver cannot reach a control that is out of sight.
+  Set<Object> _hidden = const {};
+
+  void _handleHiddenChanged(Set<Object> hidden) {
+    if (setEquals(hidden, _hidden)) return;
+    // Layout reports this mid-frame; apply it once the frame is done.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !setEquals(hidden, _hidden)) {
+        setState(() => _hidden = hidden);
+      }
+    });
+  }
+
+  Widget _control(Object id, Widget control) {
+    final hidden = _hidden.contains(id);
+    return LayoutId(
+      id: id,
+      child: ExcludeFocus(
+        excluding: hidden,
+        child: ExcludeSemantics(excluding: hidden, child: control),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final bar = widget.bar;
     final column = resolveVerticalBarColumn(
       bar,
       MediaQuery.of(context),
-      avoidsKeyboard: avoidsKeyboard,
+      avoidsKeyboard: widget.avoidsKeyboard,
     );
     return Positioned(
       left: column.center.dx - verticalBarRailWidth / 2,
@@ -133,14 +166,15 @@ class VerticalBarRail extends StatelessWidget {
           child: ClipRect(
             child: CustomMultiChildLayout(
               delegate: _VerticalBarRailLayout(
-                leadingCount: leading.length,
-                trailingCount: trailing.length,
+                leadingCount: widget.leading.length,
+                trailingCount: widget.trailing.length,
+                onHiddenChanged: _handleHiddenChanged,
               ),
               children: [
-                for (final (index, control) in leading.indexed)
-                  LayoutId(id: ('leading', index), child: control),
-                for (final (index, control) in trailing.indexed)
-                  LayoutId(id: ('trailing', index), child: control),
+                for (final (index, control) in widget.leading.indexed)
+                  _control(('leading', index), control),
+                for (final (index, control) in widget.trailing.indexed)
+                  _control(('trailing', index), control),
               ],
             ),
           ),
@@ -154,10 +188,14 @@ class _VerticalBarRailLayout extends MultiChildLayoutDelegate {
   _VerticalBarRailLayout({
     required this.leadingCount,
     required this.trailingCount,
+    required this.onHiddenChanged,
   });
 
   final int leadingCount;
   final int trailingCount;
+
+  /// Receives the ids of the controls laid out of sight.
+  final ValueChanged<Set<Object>> onHiddenChanged;
 
   // Controls that do not fit are laid out out of sight; the rail clips them
   // and their hit area falls outside its bounds.
@@ -166,6 +204,7 @@ class _VerticalBarRailLayout extends MultiChildLayoutDelegate {
   @override
   void performLayout(Size size) {
     final constraints = BoxConstraints.loose(size);
+    final hidden = <Object>{};
     double centered(Size child) => (size.width - child.width) / 2;
     var top = 0.0;
     for (var index = 0; index < leadingCount; index += 1) {
@@ -173,6 +212,7 @@ class _VerticalBarRailLayout extends MultiChildLayoutDelegate {
       final child = layoutChild(id, constraints);
       if (top + child.height > size.height) {
         positionChild(id, _hidden);
+        hidden.add(id);
         continue;
       }
       positionChild(id, Offset(centered(child), top));
@@ -186,12 +226,14 @@ class _VerticalBarRailLayout extends MultiChildLayoutDelegate {
       if (full || bottom - child.height < top) {
         full = true;
         positionChild(id, _hidden);
+        hidden.add(id);
         continue;
       }
       bottom -= child.height;
       positionChild(id, Offset(centered(child), bottom));
       bottom -= verticalBarItemGap;
     }
+    onHiddenChanged(hidden);
   }
 
   @override
