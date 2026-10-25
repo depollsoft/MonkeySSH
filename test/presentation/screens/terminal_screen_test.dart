@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/routes.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
@@ -1777,6 +1778,7 @@ void main() {
       List<Override> overrides = const [],
       bool appShortcuts = false,
       SystemVerticalBar? verticalBar,
+      ThemeData? theme,
     }) => ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
@@ -1796,6 +1798,7 @@ void main() {
       child:
           child ??
           MaterialApp(
+            theme: theme,
             builder: (context, child) => _withAppScopes(
               child!,
               appShortcuts: appShortcuts,
@@ -5028,6 +5031,7 @@ void main() {
       Stream<TmuxWindowChangeEvent>? windowEvents,
       bool appShortcuts = false,
       SystemVerticalBar? verticalBar,
+      ThemeData? theme,
     }) async {
       const tmuxSessionName = 'work';
       const windows = <TmuxWindow>[
@@ -5115,6 +5119,7 @@ void main() {
           initialTmuxSessionName: tmuxSessionName,
           appShortcuts: appShortcuts,
           verticalBar: verticalBar,
+          theme: theme,
         ),
       );
 
@@ -12892,6 +12897,64 @@ void main() {
       }),
     );
 
+    testWidgets('names the host above a navigator pinned beside a vertical '
+        'bar', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTRB(455.5, 0, 495.5, 669),
+      );
+      tester.view
+        ..padding = const FakeViewPadding(right: 84, bottom: 20)
+        ..viewPadding = const FakeViewPadding(right: 84, bottom: 20);
+      final theme = FluttyTheme.fromTerminalTheme(
+        monkey_themes.TerminalThemes.resolveById(
+          brightness: Brightness.dark,
+          themeId: monkey_themes.TerminalThemes.defaultDarkThemeId,
+        ),
+        brightness: Brightness.dark,
+      );
+      await pumpTmuxScreen(
+        tester,
+        _MockTmuxService(),
+        theme: theme,
+        verticalBar: const SystemVerticalBar(
+          edge: SystemVerticalBarEdge.right,
+          itemColumn: Rect.fromLTRB(881, 124, 925, 635),
+        ),
+      );
+
+      expect(find.byType(AppBar), findsNothing);
+      final identity = find.bySemanticsLabel(
+        RegExp('^Terminal test host, Connected, '),
+      );
+      expect(tester.getSemantics(identity), isSemantics(isHeader: true));
+      final identityRect = tester.getRect(identity);
+      expect(identityRect.right, lessThanOrEqualTo(455.5));
+      expect(
+        identityRect.bottom,
+        lessThanOrEqualTo(
+          tester.getRect(find.byKey(const ValueKey('tmux-handle-bar'))).top,
+        ),
+      );
+      // The terminal's page keeps its full height.
+      final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
+      expect(terminalRect.left, greaterThanOrEqualTo(495.5));
+      expect(terminalRect.top, lessThanOrEqualTo(identityRect.top));
+      // The status glyph clears 3:1 against the navigator's fill, which
+      // the theme's own accent does not.
+      final glyph = tester.widget<Icon>(
+        find.descendant(
+          of: identity,
+          matching: find.byIcon(Icons.check_circle_outline),
+        ),
+      );
+      final fill = theme.colorScheme.surfaceContainerHighest;
+      expect(contrastRatio(theme.colorScheme.primary, fill), lessThan(3));
+      expect(contrastRatio(glyph.color!, fill), greaterThanOrEqualTo(3));
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('keeps the title on the navigator page of a book fold', (
       tester,
     ) async {
@@ -13017,16 +13080,41 @@ void main() {
         addTearDown(tester.view.reset);
       }
 
-      testWidgets('stands the bar controls in it and drops the title bar', (
-        tester,
-      ) async {
+      testWidgets('stands the bar controls in it and names the host in a '
+          'line in place of the title bar', (tester) async {
         useOuterDisplay(tester);
         await pumpScreen(tester, verticalBar: verticalBar);
 
         expect(find.byType(AppBar), findsNothing);
+        final identity = find.bySemanticsLabel(
+          'Terminal test host, Connected, '
+          'root@terminal.example.com · session #7',
+        );
+        expect(
+          tester.getSemantics(identity),
+          isSemantics(
+            label:
+                'Terminal test host, Connected, '
+                'root@terminal.example.com · session #7',
+            isHeader: true,
+          ),
+        );
+        final identityRect = tester.getRect(identity);
+        expect(identityRect.top, 0);
+        expect(identityRect.right, lessThanOrEqualTo(outerDisplay.width - 84));
         expect(
           tester.getRect(find.byType(MonkeyTerminalView)).top,
           lessThan(kToolbarHeight),
+        );
+        // The rail holds actions only; the line shows the status.
+        expect(
+          find.descendant(
+            of: find.byType(VerticalBarRail),
+            matching: find.bySemanticsLabel(
+              RegExp('Terminal connection status'),
+            ),
+          ),
+          findsNothing,
         );
         final column = verticalBar.itemColumn;
         for (final tooltip in [
@@ -13048,11 +13136,11 @@ void main() {
       testWidgets('moves controls the keyboard leaves no room for into the '
           'menu', (tester) async {
         useOuterDisplay(tester);
-        tester.view.viewInsets = const FakeViewPadding(bottom: 265);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 320);
         await pumpScreen(tester, verticalBar: verticalBar);
 
-        // Four controls fit above the keyboard: the keyboard key, the menu,
-        // the status, and the extra keys.
+        // Three controls fit above the keyboard: the keyboard key, the menu
+        // and the extra keys.
         expect(find.byTooltip('Browse files'), findsNothing);
         expect(find.byTooltip('Hide extra keys'), findsOneWidget);
 

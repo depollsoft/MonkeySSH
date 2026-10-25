@@ -121,6 +121,7 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
     this.pinnedOpen = false,
+    this.pinnedHeader,
     this.onPinnedEscape,
     this.tmuxExtraFlags,
     this.hostLabel,
@@ -171,6 +172,10 @@ class _TmuxExpandableBar extends StatefulWidget {
   /// The expanded state underneath still follows selections, so the bar
   /// returns to it once the page goes away.
   final bool pinnedOpen;
+
+  /// Shown above the handle of a navigator that is [pinnedOpen], such as the
+  /// connection's identity when the screen has no title bar.
+  final Widget? pinnedHeader;
 
   /// Called when Esc leaves the window list of a navigator that is
   /// [pinnedOpen] and so cannot collapse; the screen takes keyboard focus
@@ -1646,6 +1651,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           ),
           child: Column(
             children: [
+              if (widget.pinnedOpen && widget.pinnedHeader != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                  child: widget.pinnedHeader,
+                ),
               _buildSidebarHandle(theme),
               Expanded(
                 // An IndexedStack also lays out hidden rows at the rail's

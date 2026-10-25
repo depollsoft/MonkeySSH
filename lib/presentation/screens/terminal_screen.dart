@@ -102,6 +102,7 @@ import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_connection_support.dart';
+import '../widgets/acp_diff.dart' show legibleDiffColor;
 import '../widgets/acp_native_badge.dart';
 import '../widgets/acp_native_starting_view.dart';
 import '../widgets/acp_new_session_sheet.dart';
@@ -9314,6 +9315,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     double availableHeight, {
     required TmuxBarPlacement placement,
     bool pinnedOpen = false,
+    Widget? pinnedHeader,
   }) {
     final connectionId = _connectionId;
     if (connectionId == null || _tmuxSessionName == null) {
@@ -9341,6 +9343,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       availableHeight: availableHeight,
       placement: placement,
       pinnedOpen: pinnedOpen,
+      pinnedHeader: pinnedHeader,
       onPinnedEscape: _focusKeyboardInput,
       recoveryGeneration: _tmuxBarRecoveryGeneration,
       isProUser: isProUser,
@@ -12474,7 +12477,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         : resolveTerminalVerticalBarControls(
             available: {
               TerminalVerticalBarControl.menu,
-              TerminalVerticalBarControl.status,
               TerminalVerticalBarControl.extraKeys,
               TerminalVerticalBarControl.files,
               if (isMobile) TerminalVerticalBarControl.keyboard,
@@ -12488,6 +12490,31 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           );
     bool leftOutOfVerticalBar(TerminalVerticalBarControl control) =>
         verticalBar != null && !verticalBarControls.contains(control);
+    // Without a title bar a line names the host. Held like a book, it heads
+    // the navigator's page instead, so the terminal keeps its page's height.
+    final showsIdentityLine =
+        verticalBar != null && terminalFoldLayout != TerminalFoldLayout.book;
+    Widget identityLine({
+      required Color background,
+      double statusWidth = 16,
+      double statusGap = 8,
+    }) => _TerminalIdentityLine(
+      title: _host?.label ?? 'Terminal',
+      subtitle: titleSubtitle,
+      statusLabel: isConnectedThroughJumpHost
+          ? 'Connected through jump host'
+          : connectionLabel,
+      statusWidth: statusWidth,
+      statusGap: statusGap,
+      status: _TerminalConnectionStatusIcon(
+        label: connectionLabel,
+        state: connectionState,
+        isConnecting: _isConnecting,
+        connectedThroughJumpHost: isConnectedThroughJumpHost,
+        size: 16,
+        background: background,
+      ),
+    );
     final railOverflowMenuItems = <Widget>[
       if (showsMuxWindowsControl &&
           leftOutOfVerticalBar(TerminalVerticalBarControl.muxWindows))
@@ -12760,6 +12787,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               connectionState,
               keyboardToolbar: keyboardToolbar,
               withFindBar: withFindBar,
+              // Lined up with the navigator's handle below it.
+              navigatorHeader: verticalBar == null
+                  ? null
+                  : identityLine(
+                      background: theme.colorScheme.surfaceContainerHighest,
+                      statusWidth: 28,
+                      statusGap: 10,
+                    ),
             );
           case TerminalFoldLayout.propped:
             return _buildProppedTerminalLayout(
@@ -12773,10 +12808,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               withFindBar: withFindBar,
               showsMuxNavigator: showsMuxNavigatorPage,
               // Where the body starts in the window: below the app bar, or
-              // with a vertical bar below the top inset and metadata row.
+              // with a vertical bar below the top inset, the identity line
+              // and the metadata row.
               bodyTop: verticalBar == null
                   ? Scaffold.of(bodyContext).appBarMaxHeight ?? 0
                   : MediaQuery.paddingOf(context).top +
+                        (showsIdentityLine ? _TerminalIdentityLine.height : 0) +
                         (terminalBarBottom?.preferredSize.height ?? 0),
               onShowKeyboard: () => showsNativeAgent
                   ? _toggleNativeComposerKeyboard(false)
@@ -12854,6 +12891,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               bottom: false,
               child: Column(
                 children: [
+                  if (showsIdentityLine)
+                    Material(
+                      color: theme.colorScheme.surface,
+                      child: SafeArea(
+                        top: false,
+                        bottom: false,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: identityLine(
+                            background: theme.colorScheme.surface,
+                          ),
+                        ),
+                      ),
+                    ),
                   if (terminalBarBottom != null)
                     Material(
                       color: theme.colorScheme.surface,
@@ -12903,19 +12954,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     TerminalVerticalBarControl.back,
                   ))
                     const BackButton(),
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.status,
-                  ))
-                    _TerminalVerticalBarStatusKey(
-                      title: _host?.label ?? 'Terminal',
-                      subtitle: titleSubtitle,
-                      status: _TerminalConnectionStatusIcon(
-                        label: connectionLabel,
-                        state: connectionState,
-                        isConnecting: _isConnecting,
-                        connectedThroughJumpHost: isConnectedThroughJumpHost,
-                      ),
-                    ),
                 ],
                 trailing: [
                   if (verticalBarControls.contains(
@@ -13014,6 +13052,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshConnectionState connectionState, {
     required Widget? keyboardToolbar,
     required Widget Function(Widget terminal) withFindBar,
+    Widget? navigatorHeader,
   }) {
     // The connection route fills the window, so the fold's window
     // coordinates map onto the body directly.
@@ -13046,6 +13085,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 double.infinity,
                 placement: TmuxBarPlacement.sidebar,
                 pinnedOpen: true,
+                pinnedHeader: navigatorHeader,
               ),
             ),
           ),
@@ -18192,12 +18232,20 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
     required this.state,
     required this.isConnecting,
     required this.connectedThroughJumpHost,
+    this.size = 20,
+    this.background,
   });
 
   final String label;
   final SshConnectionState state;
   final bool isConnecting;
   final bool connectedThroughJumpHost;
+
+  /// The glyph's size.
+  final double size;
+
+  /// The colour behind the glyph; the theme's surface when null.
+  final Color? background;
 
   IconData get _icon {
     if (isConnecting &&
@@ -18244,9 +18292,19 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final statusColor = _color(colorScheme);
+    final background = this.background ?? colorScheme.surface;
+    final hue = _color(colorScheme);
+    // The glyph is the only sign of the state, so it keeps 3:1 against what
+    // is behind it; a theme hue that falls short moves toward the text.
+    final statusColor = contrastRatio(hue, background) >= 3
+        ? hue
+        : legibleDiffColor(
+            hue,
+            background: background,
+            ink: colorScheme.onSurface,
+          );
 
-    final statusIcon = Icon(_icon, size: 20, color: statusColor);
+    final statusIcon = Icon(_icon, size: size, color: statusColor);
 
     return Semantics(
       label: 'Terminal connection status: $label',
@@ -18255,7 +18313,7 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
         excludeFromSemantics: true,
         child: connectedThroughJumpHost
             ? SizedBox.square(
-                dimension: 24,
+                dimension: size + 4,
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -18274,36 +18332,85 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
   }
 }
 
-/// The connection status as a key in the system vertical bar.
-///
-/// The vertical bar replaces the title bar, so a tap shows which host and
-/// session the screen is connected to.
-class _TerminalVerticalBarStatusKey extends StatelessWidget {
-  const _TerminalVerticalBarStatusKey({
+/// The host a terminal is connected to, the connection's state and its
+/// identity, on one line. It stands in for the title bar when the system
+/// vertical bar takes the bar's controls.
+class _TerminalIdentityLine extends StatelessWidget {
+  const _TerminalIdentityLine({
     required this.title,
     required this.subtitle,
+    required this.statusLabel,
     required this.status,
+    this.statusWidth = 16,
+    this.statusGap = 8,
   });
+
+  /// The line's height.
+  static const double height = 28;
 
   final String title;
   final String subtitle;
+
+  /// The connection's state, as the status glyph shows it.
+  final String statusLabel;
+
+  /// The connection status glyph.
   final Widget status;
+
+  /// The width the glyph is centred in, and the space after it.
+  final double statusWidth;
+  final double statusGap;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Tooltip(
-      triggerMode: TooltipTriggerMode.tap,
-      message: subtitle.isEmpty ? title : '$title\n$subtitle',
-      child: Container(
-        width: verticalBarItemExtent,
-        height: verticalBarItemExtent,
-        alignment: Alignment.center,
-        decoration: ShapeDecoration(
-          color: colorScheme.surfaceContainerHighest,
-          shape: CircleBorder(side: BorderSide(color: colorScheme.outline)),
+    return Semantics(
+      container: true,
+      header: true,
+      label: [title, statusLabel, if (subtitle.isNotEmpty) subtitle].join(', '),
+      excludeSemantics: true,
+      child: Tooltip(
+        message: subtitle.isEmpty ? title : '$title\n$subtitle',
+        excludeFromSemantics: true,
+        child: SizedBox(
+          height: height,
+          child: Row(
+            children: [
+              SizedBox(
+                width: statusWidth,
+                child: Center(child: status),
+              ),
+              SizedBox(width: statusGap),
+              Expanded(
+                // The subtitle trails, so the ellipsis cuts it before the
+                // host's name.
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: title,
+                        style: FluttyTheme.displayMono(
+                          fontSize: 13,
+                          color: colorScheme.onSurface,
+                        ),
+                      ),
+                      if (subtitle.isNotEmpty)
+                        TextSpan(
+                          text: '  $subtitle',
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 11,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
-        child: status,
       ),
     );
   }

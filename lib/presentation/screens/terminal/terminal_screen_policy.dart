@@ -736,9 +736,6 @@ enum TerminalVerticalBarControl {
   /// Leaves the screen; the edge swipe does too.
   back,
 
-  /// Shows the connection's state, and its host on tap.
-  status,
-
   /// Shows or hides the extra keys toolbar.
   extraKeys,
 
