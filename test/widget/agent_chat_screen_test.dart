@@ -621,6 +621,18 @@ void main() {
         const ValueKey('acp-quick-selector-pill-Effort'),
       );
       expect(tester.getSize(modelPill).height, 40);
+      // Ink paints on its nearest Material, so that Material must sit inside
+      // the scroll viewport or pills scrolled out of view leave their
+      // backgrounds painted beside the composer.
+      expect(
+        find.descendant(
+          of: controls,
+          matching: find
+              .ancestor(of: modelPill, matching: find.byType(Material))
+              .first,
+        ),
+        findsOneWidget,
+      );
       expect(
         tester.getTopLeft(effortPill).dx - tester.getTopRight(modelPill).dx,
         FluttyTheme.spacingXs,

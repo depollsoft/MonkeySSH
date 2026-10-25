@@ -2333,96 +2333,103 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
         .firstOrNull;
     final hasScope = selector.hiddenChoices.isNotEmpty;
     final visibleChoices = _showAll ? allChoices : selector.choices;
-    return PopupMenuButton<Object>(
-      key: _menuKey,
-      tooltip: 'Change ${selector.label.toLowerCase()}',
-      borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
-      onSelected: _onSelected,
-      itemBuilder: (context) => <PopupMenuEntry<Object>>[
-        PopupMenuItem<Object>(
-          enabled: false,
-          height: 36,
-          child: Text(
-            selector.label,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: scheme.onSurface,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        if (hasScope)
+    // Ink paints on its nearest Material, clipped only to that Material. A
+    // Material of the pill's own keeps the background and splash inside the
+    // selector row's viewport; with the screen's, a pill scrolled out of view
+    // left its background painted beside the composer.
+    return Material(
+      type: MaterialType.transparency,
+      child: PopupMenuButton<Object>(
+        key: _menuKey,
+        tooltip: 'Change ${selector.label.toLowerCase()}',
+        borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+        onSelected: _onSelected,
+        itemBuilder: (context) => <PopupMenuEntry<Object>>[
           PopupMenuItem<Object>(
             enabled: false,
-            height: 28,
+            height: 36,
             child: Text(
-              _showAll ? 'All models' : 'Scoped models',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w500,
+              selector.label,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: scheme.onSurface,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
-        for (final choice in visibleChoices) _choiceItem(choice, scheme),
-        if (hasScope) ...[
-          const PopupMenuDivider(),
-          PopupMenuItem<Object>(
-            value: _showAll
-                ? _AcpQuickMenuAction.showScoped
-                : _AcpQuickMenuAction.showAll,
-            child: Row(
-              children: [
-                Icon(
-                  _showAll ? Icons.unfold_less : Icons.unfold_more,
-                  size: 18,
+          if (hasScope)
+            PopupMenuItem<Object>(
+              enabled: false,
+              height: 28,
+              child: Text(
+                _showAll ? 'All models' : 'Scoped models',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w500,
                 ),
-                const SizedBox(width: FluttyTheme.spacingSm),
-                Flexible(
-                  child: Text(
-                    _showAll ? 'Show scoped models' : 'Show all models',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          for (final choice in visibleChoices) _choiceItem(choice, scheme),
+          if (hasScope) ...[
+            const PopupMenuDivider(),
+            PopupMenuItem<Object>(
+              value: _showAll
+                  ? _AcpQuickMenuAction.showScoped
+                  : _AcpQuickMenuAction.showAll,
+              child: Row(
+                children: [
+                  Icon(
+                    _showAll ? Icons.unfold_less : Icons.unfold_more,
+                    size: 18,
                   ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ],
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 44),
-        child: Center(
-          child: Ink(
-            key: ValueKey('acp-quick-selector-pill-${selector.label}'),
-            height: 40,
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
-            ),
-            padding: const EdgeInsets.only(left: 10, right: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 110),
-                  child: Text(
-                    current?.label ?? selector.currentValue,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: scheme.onSurface,
-                      fontSize: 12,
-                      height: 1.15,
-                      fontWeight: FontWeight.w600,
+                  const SizedBox(width: FluttyTheme.spacingSm),
+                  Flexible(
+                    child: Text(
+                      _showAll ? 'Show scoped models' : 'Show all models',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                ),
-                const SizedBox(width: FluttyTheme.spacingXs),
-                Icon(
-                  Icons.keyboard_arrow_down_rounded,
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
-                ),
-              ],
+                ],
+              ),
+            ),
+          ],
+        ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
+          child: Center(
+            child: Ink(
+              key: ValueKey('acp-quick-selector-pill-${selector.label}'),
+              height: 40,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
+              ),
+              padding: const EdgeInsets.only(left: 10, right: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 110),
+                    child: Text(
+                      current?.label ?? selector.currentValue,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: scheme.onSurface,
+                        fontSize: 12,
+                        height: 1.15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: FluttyTheme.spacingXs),
+                  Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    size: 18,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
