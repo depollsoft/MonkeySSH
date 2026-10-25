@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -29,35 +32,46 @@ void main() {
 
   // As in the app, the scope sits above the navigator, so pushed routes see
   // the bar too.
-  Widget withBar(Widget child, {SystemVerticalBar? bar = _bar}) => MaterialApp(
-    builder: (context, navigator) =>
-        SystemVerticalBarScope(bar: bar, child: navigator!),
+  Widget withBar(
+    Widget child, {
+    SystemVerticalBar? bar = _bar,
+    bool disableAnimations = false,
+  }) => MaterialApp(
+    builder: (context, navigator) => MediaQuery(
+      data: MediaQuery.of(context)
+          .copyWith(disableAnimations: disableAnimations),
+      child: SystemVerticalBarScope(bar: bar, child: navigator!),
+    ),
     home: child,
   );
 
-  // A screen whose app bar hands [actions] to the vertical bar, pushed when
-  // 'open' is tapped.
+  // A screen whose app bar hands [actions] to the vertical bar, pushed with
+  // [route] when 'open' is tapped.
   Widget pushes({
     required List<Widget> actions,
     SystemVerticalBar? bar = _bar,
-  }) => withBar(
-    bar: bar,
-    Builder(
-      builder: (context) => TextButton(
-        onPressed: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (context) => Scaffold(
-              appBar: VerticalBarAppBar(
-                AppBar(title: const Text('Agent'), actions: actions),
-              ),
-              body: const SizedBox.expand(),
-            ),
-          ),
-        ),
-        child: const Text('open'),
+    bool disableAnimations = false,
+    PageRoute<void> Function(WidgetBuilder builder)? route,
+  }) {
+    Widget page(BuildContext context) => Scaffold(
+      appBar: VerticalBarAppBar(
+        AppBar(title: const Text('Agent'), actions: actions),
       ),
-    ),
-  );
+      body: const SizedBox.expand(),
+    );
+    return withBar(
+      bar: bar,
+      disableAnimations: disableAnimations,
+      Builder(
+        builder: (context) => TextButton(
+          onPressed: () => Navigator.of(
+            context,
+          ).push(route?.call(page) ?? MaterialPageRoute<void>(builder: page)),
+          child: const Text('open'),
+        ),
+      ),
+    );
+  }
 
   group('resolveVerticalBarColumn', () {
     const mediaQuery = MediaQueryData(
@@ -651,6 +665,126 @@ void main() {
         find.descendant(of: appBar, matching: find.byType(BackButton)),
         findsOneWidget,
       );
+    });
+  });
+
+  group('VerticalBarRailPortal', () {
+    // The rail's opacity, and whether it ignores taps, as the route fades it.
+    Opacity railOpacity(WidgetTester tester) => tester.widget<Opacity>(
+      find
+          .ancestor(
+            of: find.byType(VerticalBarRail),
+            matching: find.byType(Opacity),
+          )
+          .first,
+    );
+    bool railIgnoresTaps(WidgetTester tester) => tester
+        .widget<IgnorePointer>(
+          find
+              .ancestor(
+                of: find.byType(VerticalBarRail),
+                matching: find.byType(IgnorePointer),
+              )
+              .first,
+        )
+        .ignoring;
+
+    Widget screen({
+      required VoidCallback onFavorite,
+      bool reduceMotion = false,
+    }) => pushes(
+      disableAnimations: reduceMotion,
+      // Cupertino's 500 ms push, as on iOS.
+      route: (builder) => CupertinoPageRoute<void>(builder: builder),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.star_border),
+          tooltip: 'Favorite',
+          onPressed: onFavorite,
+        ),
+      ],
+    );
+
+    testWidgets('fades the rail in over the start of the push and takes '
+        'taps once it shows', (tester) async {
+      useOuterDisplay(tester);
+      var favorites = 0;
+      await tester.pumpWidget(screen(onFavorite: () => favorites += 1));
+      await tester.tap(find.text('open'));
+      await tester.pump();
+
+      await tester.pump(const Duration(milliseconds: 75));
+      // Eased out: more than half shown halfway through the fade.
+      expect(railOpacity(tester).opacity, inExclusiveRange(0.5, 1));
+      expect(railIgnoresTaps(tester), isTrue);
+
+      await tester.pump(const Duration(milliseconds: 75));
+      expect(railOpacity(tester).opacity, 1);
+      expect(railIgnoresTaps(tester), isFalse);
+      // The page is still sliding in, and the rail already takes taps.
+      final route = ModalRoute.of(tester.element(find.text('Agent')))!;
+      expect(route.animation!.value, lessThan(1));
+      await tester.tap(find.byTooltip('Favorite'));
+      expect(favorites, 1);
+      await tester.pumpAndSettle();
+
+      // Going back fades it out over the start of the pop.
+      await tester.tap(find.byType(BackButton));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 75));
+      expect(railOpacity(tester).opacity, inExclusiveRange(0, 0.5));
+      expect(railIgnoresTaps(tester), isTrue);
+      await tester.pump(const Duration(milliseconds: 75));
+      expect(railOpacity(tester).opacity, 0);
+      await tester.pumpAndSettle();
+      expect(find.byType(VerticalBarRail), findsNothing);
+    });
+
+    testWidgets('fades the rail out while a route covers it', (tester) async {
+      useOuterDisplay(tester);
+      await tester.pumpWidget(screen(onFavorite: () {}));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      unawaited(
+        Navigator.of(tester.element(find.text('Agent'))).push(
+          CupertinoPageRoute<void>(
+            builder: (context) => const Scaffold(body: Text('Details')),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(railOpacity(tester).opacity, 0);
+      expect(railIgnoresTaps(tester), isTrue);
+
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.text('Details'))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(railOpacity(tester).opacity, 1);
+      expect(railIgnoresTaps(tester), isFalse);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('switches the rail without a fade under reduced motion', (
+      tester,
+    ) async {
+      useOuterDisplay(tester);
+      await tester.pumpWidget(screen(onFavorite: () {}, reduceMotion: true));
+      await tester.tap(find.text('open'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(railOpacity(tester).opacity, 1);
+      expect(railIgnoresTaps(tester), isFalse);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(railOpacity(tester).opacity, 0);
+      expect(railIgnoresTaps(tester), isTrue);
+      await tester.pumpAndSettle();
     });
   });
 

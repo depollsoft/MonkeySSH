@@ -662,23 +662,103 @@ class _VerticalBarRailPortalState extends State<VerticalBarRailPortal> {
   }
 }
 
-class _RouteFade extends StatelessWidget {
+/// Fades a route's rail in over the start of the route's entrance, and out
+/// over the start of its exit or of the entrance of a route above it, so the
+/// rails of two routes cross-fade within [_duration] while the pages slide.
+/// The rail takes taps once it is fully shown.
+///
+/// With reduced motion, the rail appears and disappears without a fade.
+class _RouteFade extends StatefulWidget {
   const _RouteFade({required this.route, required this.child});
 
   final ModalRoute<Object?>? route;
   final Widget child;
 
+  static const _duration = Duration(milliseconds: 150);
+
   @override
-  Widget build(BuildContext context) {
+  State<_RouteFade> createState() => _RouteFadeState();
+}
+
+class _RouteFadeState extends State<_RouteFade> {
+  // How far this route has come in, and how far a route above it has.
+  CurvedAnimation? _entered;
+  CurvedAnimation? _covered;
+  bool? _reduceMotion;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    if (reduceMotion != _reduceMotion) {
+      _reduceMotion = reduceMotion;
+      _updateAnimations();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_RouteFade oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.route != widget.route) _updateAnimations();
+  }
+
+  @override
+  void dispose() {
+    _disposeAnimations();
+    super.dispose();
+  }
+
+  void _disposeAnimations() {
+    _entered?.dispose();
+    _covered?.dispose();
+    _entered = _covered = null;
+  }
+
+  void _updateAnimations() {
+    _disposeAnimations();
+    final route = widget.route;
     final animation = route?.animation;
     final secondaryAnimation = route?.secondaryAnimation;
-    if (animation == null || secondaryAnimation == null) return child;
+    if (route == null || animation == null || secondaryAnimation == null) {
+      return;
+    }
+    // The fade takes the start of each transition, as a share of the
+    // route's own durations; a route pushed above it is assumed to take as
+    // long.
+    double share(Duration duration) => duration <= _RouteFade._duration
+        ? 1
+        : _RouteFade._duration.inMicroseconds / duration.inMicroseconds;
+    final forward = share(route.transitionDuration);
+    final reverse = share(route.reverseTransitionDuration);
+    final (Curve curve, Curve reverseCurve) = _reduceMotion!
+        // Shown as soon as an entrance starts, gone as soon as an exit does.
+        ? (const Threshold(0), const Threshold(1))
+        : (
+            Interval(0, forward, curve: Curves.easeOut),
+            Interval(1 - reverse, 1, curve: Curves.easeIn),
+          );
+    _entered = CurvedAnimation(
+      parent: animation,
+      curve: curve,
+      reverseCurve: reverseCurve,
+    );
+    _covered = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: curve,
+      reverseCurve: reverseCurve,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entered = _entered;
+    final covered = _covered;
+    if (entered == null || covered == null) return widget.child;
     return AnimatedBuilder(
-      animation: Listenable.merge([animation, secondaryAnimation]),
-      child: child,
+      animation: Listenable.merge([entered, covered]),
+      child: widget.child,
       builder: (context, child) {
-        final opacity = (animation.value * (1 - secondaryAnimation.value))
-            .clamp(0.0, 1.0);
+        final opacity = (entered.value * (1 - covered.value)).clamp(0.0, 1.0);
         return IgnorePointer(
           ignoring: opacity < 1,
           child: Opacity(opacity: opacity, child: child),
