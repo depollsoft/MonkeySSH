@@ -1989,6 +1989,8 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     final sessionCaps = session.capabilities.session;
     return PopupMenuButton<_ChatAction>(
       icon: const Icon(Icons.more_vert),
+      // Names it apart from the menu key the vertical bar folds actions into.
+      tooltip: 'Chat actions',
       onSelected: (action) => _handleAction(action, session),
       itemBuilder: (context) => [
         if (session.status == AcpConnectionStatus.ready)

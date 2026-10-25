@@ -377,6 +377,7 @@ void main() {
     expect(find.byType(AcpComposer), findsOneWidget);
     expect(find.byTooltip('MonkeyMux windows'), findsOneWidget);
     expect(find.byTooltip('Session settings'), findsNothing);
+    expect(find.byTooltip('Chat actions'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
     expect(find.text('Session settings'), findsOneWidget);
