@@ -178,6 +178,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   // Breakpoint for switching between mobile and desktop layout
   static const double _mobileBreakpoint = 600;
 
+  // Keeps the snippets panel, and the folder it shows, when folding or
+  // turning the device moves it into another layout.
+  final _snippetsPanelKey = GlobalKey();
+
   // Home's tabs, by _selectedIndex.
   static const _homeTabs = <_HomeTab>[
     _HomeTab(Icons.dns_outlined, Icons.dns_rounded, 'Hosts'),
@@ -818,7 +822,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             child: _ConnectionsPanel(),
           ),
           2 => const _KeysPanel(),
-          3 => const SnippetsPanel(),
+          3 => SnippetsPanel(key: _snippetsPanelKey),
           _ => const HostsPanel(),
         },
       ),

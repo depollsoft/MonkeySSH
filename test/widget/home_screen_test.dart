@@ -415,10 +415,12 @@ Snippet _buildSnippet({
   required int id,
   required String name,
   required int sortOrder,
+  int? folderId,
 }) => Snippet(
   id: id,
   name: name,
   command: 'echo $name',
+  folderId: folderId,
   autoExecute: false,
   createdAt: DateTime(2026),
   usageCount: 0,
@@ -973,6 +975,12 @@ void main() {
       expect(panelTitled('hosts'), findsNothing);
     });
 
+    const closed = (
+      size: outerDisplay,
+      padding: outerPadding,
+      bar: verticalBar,
+      features: <DisplayFeature>[],
+    );
     // The other poses with a vertical bar: the inner display held wide,
     // half open like a book or open flat (which arrives as the fold's centre
     // line), and the outer display turned with the camera on the left.
@@ -1020,6 +1028,7 @@ void main() {
       _DuoPose pose, {
       List overrides = const [],
       HomeScreenTab initialTab = HomeScreenTab.hosts,
+      TextScaler textScaler = TextScaler.noScaling,
     }) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -1054,6 +1063,7 @@ void main() {
                   padding: pose.padding,
                   viewPadding: pose.padding,
                   displayFeatures: pose.features,
+                  textScaler: textScaler,
                 ),
                 child: SystemVerticalBarScope(bar: pose.bar, child: navigator!),
               ),
@@ -1064,6 +1074,16 @@ void main() {
       );
       await tester.pump();
       return current;
+    }
+
+    Future<void> changePose(
+      WidgetTester tester,
+      ValueNotifier<_DuoPose> current,
+      _DuoPose pose,
+    ) async {
+      tester.view.physicalSize = pose.size;
+      current.value = pose;
+      await tester.pump();
     }
 
     List<String> tabLabels(WidgetTester tester) => [
@@ -1199,6 +1219,64 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets('keeps the chosen snippet folder as the device folds', (
+      tester,
+    ) async {
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.watchAll).thenAnswer(
+        (_) => Stream.value([
+          _buildSnippet(id: 1, name: 'deploy app', sortOrder: 0, folderId: 1),
+          _buildSnippet(id: 2, name: 'tail logs', sortOrder: 1),
+        ]),
+      );
+      when(snippetRepository.watchAllFolders).thenAnswer(
+        (_) => Stream.value([
+          SnippetFolder(
+            id: 1,
+            name: 'Deploy',
+            sortOrder: 0,
+            createdAt: DateTime(2026),
+          ),
+        ]),
+      );
+      final pose = await pumpInPose(
+        tester,
+        closed,
+        initialTab: HomeScreenTab.snippets,
+        overrides: [
+          snippetRepositoryProvider.overrideWithValue(snippetRepository),
+        ],
+        // The test font sets every glyph a full em wide, so the snippets
+        // header needs a smaller scale to fit the book's 455 pt page, as it
+        // does at full size with Inter.
+        textScaler: const TextScaler.linear(0.6),
+      );
+      await tester.pump();
+
+      await tester.ensureVisible(find.text('Deploy (1)'));
+      await tester.tap(find.text('Deploy (1)'));
+      await tester.pump();
+      expect(find.text('tail logs'), findsNothing);
+
+      for (final (name, next) in [
+        ('book', book),
+        ('flat', flat),
+        ('closed', closed),
+      ]) {
+        await changePose(tester, pose, next);
+        expect(tester.takeException(), isNull, reason: name);
+        expect(
+          tester
+              .widget<FilterChip>(find.widgetWithText(FilterChip, 'Deploy (1)'))
+              .selected,
+          isTrue,
+          reason: name,
+        );
+        expect(find.text('deploy app'), findsOneWidget, reason: name);
+        expect(find.text('tail logs'), findsNothing, reason: name);
+      }
+    });
   });
 
   group('HomeScreen reorder affordance', () {
