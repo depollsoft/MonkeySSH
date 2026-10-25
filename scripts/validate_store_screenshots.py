@@ -38,7 +38,8 @@ IOS_SCREENSHOTS = {
 # tool/store_screenshot_app.dart.
 DUO_SCREENSHOTS = (
     ('duo_book_terminal', (2853, 2007), ['Claude Code', 'Copilot CLI']),
-    ('duo_closed_terminal', (1398, 2034), ['Copilot']),
+    # The outer display cuts the Copilot window's name short ("Mobile Copil…").
+    ('duo_closed_terminal', (1398, 2034), ['Mobile Copil']),
     ('duo_propped_terminal', (2007, 2853), ['Claude Code', 'Workspace']),
     ('duo_book_home', (2853, 2007), ['Hosts', 'Add Host', 'Connections']),
     ('duo_open_native', (2853, 2007), ['Message the agent', 'reconnect']),

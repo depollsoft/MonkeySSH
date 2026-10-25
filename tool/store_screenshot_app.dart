@@ -892,6 +892,8 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     if (_duoSceneSelected('duo_closed_agent_management')) {
       _go(base);
       await _setDuoPose(_DuoPose.closed);
+      // Let the route change land first: it would drop a route pushed above.
+      await Future<void>.delayed(const Duration(seconds: 2));
       await _openAgentManagement();
       await _announceDuoScene('duo_closed_agent_management');
     }
