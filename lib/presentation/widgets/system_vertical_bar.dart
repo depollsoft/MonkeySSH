@@ -375,6 +375,7 @@ class VerticalBarTabs extends StatelessWidget {
     required this.tabs,
     required this.selectedIndex,
     required this.onSelected,
+    this.showsLabels = true,
     super.key,
   });
 
@@ -387,11 +388,28 @@ class VerticalBarTabs extends StatelessWidget {
   /// Called with the index of the destination the user picks.
   final ValueChanged<int> onSelected;
 
+  /// Whether each destination shows its name under its icon. Without, the
+  /// destinations shrink to a key's height for a short bar, and the name
+  /// stays in the long-press label and for VoiceOver.
+  final bool showsLabels;
+
   /// The height of one destination.
   static const double tabExtent = 58;
 
+  /// The height of one destination without its label.
+  static const double compactTabExtent = verticalBarItemExtent;
+
   /// The capsule's padding above and below its destinations.
   static const double padding = 8;
+
+  /// The height of a capsule of [count] destinations.
+  static double extentFor(int count, {bool showsLabels = true}) =>
+      count * (showsLabels ? tabExtent : compactTabExtent) +
+      2 * padding +
+      2 * _borderWidth;
+
+  // The hairline's width, BorderSide's default.
+  static const double _borderWidth = 1;
 
   @override
   Widget build(BuildContext context) {
@@ -419,6 +437,7 @@ class VerticalBarTabs extends StatelessWidget {
                   index: index,
                   count: tabs.length,
                   selected: index == selectedIndex,
+                  showsLabel: showsLabels,
                   navigationTheme: navigationTheme,
                   onPressed: () => onSelected(index),
                 ),
@@ -436,6 +455,7 @@ class _VerticalBarTabButton extends StatelessWidget {
     required this.index,
     required this.count,
     required this.selected,
+    required this.showsLabel,
     required this.navigationTheme,
     required this.onPressed,
   });
@@ -444,6 +464,7 @@ class _VerticalBarTabButton extends StatelessWidget {
   final int index;
   final int count;
   final bool selected;
+  final bool showsLabel;
   final NavigationBarThemeData navigationTheme;
   final VoidCallback onPressed;
 
@@ -515,7 +536,9 @@ class _VerticalBarTabButton extends StatelessWidget {
           customBorder: const StadiumBorder(),
           child: SizedBox(
             width: double.infinity,
-            height: VerticalBarTabs.tabExtent,
+            height: showsLabel
+                ? VerticalBarTabs.tabExtent
+                : VerticalBarTabs.compactTabExtent,
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -534,32 +557,34 @@ class _VerticalBarTabButton extends StatelessWidget {
                     color: iconColor,
                   ),
                 ),
-                const SizedBox(height: _labelGap),
-                // Every label's box is as tall, so the destinations keep
-                // one rhythm when a long label shrinks.
-                SizedBox(
-                  width: _labelWidth,
-                  height: textScaler.scale(_labelSize) * _labelLineHeight,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.topCenter,
-                    child: Text(
-                      tab.label,
-                      maxLines: 1,
-                      softWrap: false,
-                      textAlign: TextAlign.center,
-                      textScaler: textScaler,
-                      style: (labelStyle ?? const TextStyle()).copyWith(
-                        fontSize: _labelSize,
-                        height: _labelLineHeight,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                        color: labelColor,
+                if (showsLabel) ...[
+                  const SizedBox(height: _labelGap),
+                  // Every label's box is as tall, so the destinations keep
+                  // one rhythm when a long label shrinks.
+                  SizedBox(
+                    width: _labelWidth,
+                    height: textScaler.scale(_labelSize) * _labelLineHeight,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.topCenter,
+                      child: Text(
+                        tab.label,
+                        maxLines: 1,
+                        softWrap: false,
+                        textAlign: TextAlign.center,
+                        textScaler: textScaler,
+                        style: (labelStyle ?? const TextStyle()).copyWith(
+                          fontSize: _labelSize,
+                          height: _labelLineHeight,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.w500,
+                          color: labelColor,
+                        ),
                       ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),

@@ -1213,12 +1213,56 @@ void main() {
         expectBarNavigation(tester, outerLandscape.bar);
         expect(tabLabels(tester), ['Hosts', 'Connections', 'Keys', 'Snippets']);
         expect(
+          tester.getSize(find.byType(VerticalBarTabs)).height,
+          VerticalBarTabs.extentFor(4),
+        );
+        expect(
           tester.getRect(find.byType(PanelHeader)).left,
           greaterThanOrEqualTo(84),
         );
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets('keeps the tabs reachable when a Live Activity shortens the '
+        'bar', (tester) async {
+      final semantics = tester.ensureSemantics();
+      _DuoPose shortened(double top) => (
+        size: outerLandscape.size,
+        padding: outerLandscape.padding,
+        bar: SystemVerticalBar(
+          edge: SystemVerticalBarEdge.left,
+          itemColumn: Rect.fromLTRB(26, top, 70, 432),
+        ),
+        features: const <DisplayFeature>[],
+      );
+      final pose = await pumpInPose(tester, shortened(150));
+      // The labels give way first, and Settings fits above the tabs.
+      for (final (top, showsSettings) in [(150.0, true), (200.0, false)]) {
+        await changePose(tester, pose, shortened(top));
+        final tabs = find.byType(VerticalBarTabs);
+        expect(tester.widget<VerticalBarTabs>(tabs).showsLabels, isFalse);
+        expect(
+          tester.getSize(tabs).height,
+          VerticalBarTabs.extentFor(4, showsLabels: false),
+        );
+        expect(tester.getRect(tabs).bottom, 432);
+        for (final label in ['Hosts', 'Connections', 'Keys', 'Snippets']) {
+          expect(
+            find.semantics.byLabel(RegExp('^$label\n')),
+            findsOne,
+            reason: '$label at $top',
+          );
+        }
+        expect(
+          find.byTooltip('Settings').hitTestable(),
+          showsSettings ? findsOneWidget : findsNothing,
+          reason: 'at $top',
+        );
+      }
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
 
     testWidgets('keeps the chosen snippet folder as the device folds', (
       tester,

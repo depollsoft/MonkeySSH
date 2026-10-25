@@ -528,27 +528,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     return Scaffold(
       resizeToAvoidBottomInset: false,
       body: VerticalBarRailPortal(
-        rail: (context) => VerticalBarRail(
-          bar: bar,
+        rail: (context) {
           // A tab bar stays put under the keyboard, as on any iPhone.
-          avoidsKeyboard: false,
-          leading: [_buildSettingsButton()],
-          trailing: [
-            VerticalBarTabs(
-              tabs: [
-                for (final index in indexes)
-                  VerticalBarTab(
-                    icon: _homeTabs[index].icon,
-                    selectedIcon: _homeTabs[index].selectedIcon,
-                    label: _homeTabs[index].label,
-                  ),
-              ],
-              selectedIndex: selected,
-              onSelected: (tab) =>
-                  setState(() => _selectedIndex = indexes[tab]),
-            ),
-          ],
-        ),
+          final column = resolveVerticalBarColumn(
+            bar,
+            MediaQuery.of(context),
+            avoidsKeyboard: false,
+          );
+          // A short bar, as beside a Live Activity in landscape, drops the
+          // tab labels first, then Settings, so the tabs stay reachable.
+          final room =
+              column.height - verticalBarItemExtent - verticalBarItemGap;
+          final showsLabels = VerticalBarTabs.extentFor(indexes.length) <= room;
+          final showsSettings =
+              VerticalBarTabs.extentFor(indexes.length, showsLabels: false) <=
+              room;
+          return VerticalBarRail(
+            bar: bar,
+            avoidsKeyboard: false,
+            leading: [if (showsSettings) _buildSettingsButton()],
+            trailing: [
+              VerticalBarTabs(
+                tabs: [
+                  for (final index in indexes)
+                    VerticalBarTab(
+                      icon: _homeTabs[index].icon,
+                      selectedIcon: _homeTabs[index].selectedIcon,
+                      label: _homeTabs[index].label,
+                    ),
+                ],
+                selectedIndex: selected,
+                showsLabels: showsLabels,
+                onSelected: (tab) =>
+                    setState(() => _selectedIndex = indexes[tab]),
+              ),
+            ],
+          );
+        },
         child: fold == null
             ? content
             : DisplayFoldSpread(

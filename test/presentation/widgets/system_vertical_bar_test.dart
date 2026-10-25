@@ -818,6 +818,7 @@ void main() {
       int selectedIndex = 0,
       ValueChanged<int>? onSelected,
       double textScale = 1,
+      bool showsLabels = true,
       ThemeData? theme,
     }) => MaterialApp(
       theme: theme,
@@ -836,6 +837,7 @@ void main() {
               tabs: tabs,
               selectedIndex: selectedIndex,
               onSelected: onSelected ?? (_) {},
+              showsLabels: showsLabels,
             ),
           ),
         ),
@@ -948,6 +950,25 @@ void main() {
       expect(tooltip.height, greaterThanOrEqualTo(11 * 2));
       expect(tooltip.right, lessThan(capsule.left));
       expect(tooltip.center.dy, closeTo(label.center.dy, 30));
+    });
+
+    testWidgets('shrinks to key-height destinations without labels', (
+      tester,
+    ) async {
+      final picked = <int>[];
+      await tester.pumpWidget(tabs(showsLabels: false, onSelected: picked.add));
+
+      expect(
+        tester.getSize(find.byType(VerticalBarTabs)).height,
+        VerticalBarTabs.extentFor(4, showsLabels: false),
+      );
+      expect(find.text('Keys'), findsNothing);
+      await tester.tap(find.byIcon(Icons.key_outlined));
+      expect(picked, [2]);
+      // The name stays in the long-press label.
+      await tester.longPress(find.byIcon(Icons.key_outlined));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Keys'), findsOneWidget);
     });
 
     testWidgets('keeps labels and icons legible in every built-in theme', (
