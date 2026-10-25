@@ -170,7 +170,12 @@ class _VerticalBarRailState extends State<VerticalBarRail> {
       id: id,
       child: ExcludeFocus(
         excluding: hidden,
-        child: ExcludeSemantics(excluding: hidden, child: control),
+        child: ExcludeSemantics(
+          excluding: hidden,
+          child: control is ButtonStyleButton
+              ? _VerticalBarTextKey(child: control)
+              : control,
+        ),
       ),
     );
   }
@@ -307,6 +312,55 @@ class VerticalBarButtonTheme extends StatelessWidget {
       child: IconTheme.merge(
         data: IconThemeData(color: colorScheme.onSurface, size: 22),
         child: child,
+      ),
+    );
+  }
+}
+
+/// Gives a text, filled, outlined or elevated button in the vertical bar the
+/// shape of the keys beside it: 44 pt tall, a stadium on the raised surface
+/// with a hairline border, as wide as its label up to the rail's width. A
+/// longer label shrinks to fit.
+///
+/// It themes one control, not the whole rail, because a menu that a rail
+/// control opens builds its rows from text buttons too.
+class _VerticalBarTextKey extends StatelessWidget {
+  const _VerticalBarTextKey({required this.child});
+
+  final ButtonStyleButton child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final fill = colorScheme.surfaceContainerHighest;
+    final style = TextButton.styleFrom(
+      minimumSize: const Size.square(verticalBarItemExtent),
+      maximumSize: const Size(verticalBarRailWidth, verticalBarItemExtent),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      visualDensity: VisualDensity.standard,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      elevation: 0,
+      backgroundColor: fill,
+      foregroundColor: _legible(colorScheme.onSurface, fill, _textContrast),
+      disabledBackgroundColor: fill.withAlpha(120),
+      disabledForegroundColor: colorScheme.onSurface.withAlpha(90),
+      textStyle: theme.textTheme.labelLarge,
+      shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
+      foregroundBuilder: (context, states, label) =>
+          FittedBox(fit: BoxFit.scaleDown, child: label),
+    );
+    return TextButtonTheme(
+      data: TextButtonThemeData(style: style),
+      child: FilledButtonTheme(
+        data: FilledButtonThemeData(style: style),
+        child: OutlinedButtonTheme(
+          data: OutlinedButtonThemeData(style: style),
+          child: ElevatedButtonTheme(
+            data: ElevatedButtonThemeData(style: style),
+            child: child,
+          ),
+        ),
       ),
     );
   }

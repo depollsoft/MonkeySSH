@@ -35,6 +35,30 @@ void main() {
     home: child,
   );
 
+  // A screen whose app bar hands [actions] to the vertical bar, pushed when
+  // 'open' is tapped.
+  Widget pushes({
+    required List<Widget> actions,
+    SystemVerticalBar? bar = _bar,
+  }) => withBar(
+    bar: bar,
+    Builder(
+      builder: (context) => TextButton(
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (context) => Scaffold(
+              appBar: VerticalBarAppBar(
+                AppBar(title: const Text('Agent'), actions: actions),
+              ),
+              body: const SizedBox.expand(),
+            ),
+          ),
+        ),
+        child: const Text('open'),
+      ),
+    ),
+  );
+
   group('resolveVerticalBarColumn', () {
     const mediaQuery = MediaQueryData(
       size: _outerDisplay,
@@ -324,6 +348,69 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(pressed, ['Windows', 'export']);
+    });
+
+    testWidgets('gives text-button actions a key in the vertical bar', (
+      tester,
+    ) async {
+      useOuterDisplay(tester);
+      var saved = 0;
+      await tester.pumpWidget(
+        pushes(
+          actions: [
+            TextButton(
+              onPressed: () => saved += 1,
+              child: const Text('Import everything'),
+            ),
+            TextButton(onPressed: () => saved += 1, child: const Text('Save')),
+          ],
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      final colorScheme = Theme.of(tester.element(find.text('Agent')))
+          .colorScheme;
+      final save = find.widgetWithText(TextButton, 'Save');
+      final key = tester.getRect(save);
+      expect(key.height, verticalBarItemExtent);
+      expect(key.width, inInclusiveRange(verticalBarItemExtent, 72));
+      expect(key.center.dx, _bar.itemColumn.center.dx);
+      expect(key.bottom, 644);
+      final material = tester.widget<Material>(
+        find.descendant(of: save, matching: find.byType(Material)),
+      );
+      expect(material.color, colorScheme.surfaceContainerHighest);
+      expect(
+        material.shape,
+        StadiumBorder(side: BorderSide(color: colorScheme.outline)),
+      );
+      final label = tester.renderObject<RenderParagraph>(find.text('Save'));
+      expect(
+        contrastRatio(
+          label.text.style!.color!,
+          colorScheme.surfaceContainerHighest,
+        ),
+        greaterThanOrEqualTo(4.5),
+      );
+
+      // A label longer than the bar is wide scales down inside its key.
+      final long = find.widgetWithText(TextButton, 'Import everything');
+      expect(tester.getRect(long).width, lessThanOrEqualTo(72));
+      expect(
+        tester
+            .getRect(long)
+            .deflate(1)
+            .contains(tester.getRect(find.text('Import everything')).topLeft),
+        isTrue,
+      );
+      expect(
+        tester.getRect(find.text('Import everything')).right,
+        lessThanOrEqualTo(tester.getRect(long).right),
+      );
+
+      await tester.tap(save);
+      expect(saved, 1);
     });
 
     testWidgets('folds Back into the menu when one key fits', (tester) async {
