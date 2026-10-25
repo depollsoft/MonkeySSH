@@ -3442,11 +3442,17 @@ class _RemoteVideoViewerScreenState extends State<_RemoteVideoViewerScreen> {
           ),
         ),
       ),
-      body: error != null
-          ? _buildErrorBody(context, error)
-          : controller == null || !controller.value.isInitialized
-          ? _buildLoadingBody(context)
-          : _buildPlayerBody(context, controller),
+      // The bodies set their own list padding, which replaces a list's side
+      // insets, so clear them here for iPhone Duo's vertical bar.
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: error != null
+            ? _buildErrorBody(context, error)
+            : controller == null || !controller.value.isInitialized
+            ? _buildLoadingBody(context)
+            : _buildPlayerBody(context, controller),
+      ),
     );
   }
 

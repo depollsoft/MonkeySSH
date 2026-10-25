@@ -434,6 +434,31 @@ void main() {
       expect(find.text('Open/Share'), findsOneWidget);
     });
 
+    testWidgets('video preview keeps clear of the iPhone Duo vertical bar', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(466, 678)
+        ..devicePixelRatio = 1
+        ..padding = const FakeViewPadding(right: 84, bottom: 34);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: buildRemoteVideoPreviewErrorForTesting(
+            fileName: 'screen-recording.mp4',
+            remotePath: '/home/depoll/screen-recording.mp4',
+            localPath: 'build/sftp-video-preview-test/screen-recording.mp4',
+            errorMessage: 'Unsupported codec',
+          ),
+        ),
+      );
+
+      expect(
+        tester.getRect(find.text('Could not play video preview')).right,
+        lessThanOrEqualTo(466 - 84),
+      );
+    });
+
     testWidgets(
       'requested image files open directly and return to a highlighted row',
       (tester) async {
