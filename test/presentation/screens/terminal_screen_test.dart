@@ -5027,6 +5027,7 @@ void main() {
       RemoteFileService? remoteFileServiceOverride,
       Stream<TmuxWindowChangeEvent>? windowEvents,
       bool appShortcuts = false,
+      SystemVerticalBar? verticalBar,
     }) async {
       const tmuxSessionName = 'work';
       const windows = <TmuxWindow>[
@@ -5113,6 +5114,7 @@ void main() {
           ],
           initialTmuxSessionName: tmuxSessionName,
           appShortcuts: appShortcuts,
+          verticalBar: verticalBar,
         ),
       );
 
@@ -13021,7 +13023,66 @@ void main() {
           );
         }
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('clears the bar once for the window navigator rows', (
+        tester,
+      ) async {
+        useOuterDisplay(tester);
+        await pumpTmuxScreen(
+          tester,
+          _MockTmuxService(),
+          verticalBar: verticalBar,
+        );
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        // The navigator ends at the bar; its rows keep only their own
+        // 4 pt end padding.
+        final navigatorRight = outerDisplay.width - 84;
+        expect(
+          tester.getRect(find.byKey(const ValueKey('tmux-handle-bar'))).right,
+          navigatorRight,
+        );
+        expect(
+          tester
+              .getRect(find.widgetWithIcon(IconButton, Icons.close).first)
+              .right,
+          navigatorRight - 4,
+        );
+        expect(
+          tester.getRect(find.text('New window')).left,
+          lessThan(navigatorRight / 2),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     });
+
+    testWidgets('keeps the window sidebar rows clear of only their own '
+        'padding beside a vertical bar', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+        state: DisplayFeatureState.postureFlat,
+      );
+      tester.view
+        ..padding = const FakeViewPadding(right: 84, bottom: 20)
+        ..viewPadding = const FakeViewPadding(right: 84, bottom: 20);
+      await pumpTmuxScreen(tester, _MockTmuxService());
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      // The bar's inset lies on the terminal's side, not the sidebar's.
+      expect(
+        tester
+            .getRect(find.widgetWithIcon(IconButton, Icons.close).first)
+            .right,
+        tmuxSidebarExpandedWidth - 4,
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,

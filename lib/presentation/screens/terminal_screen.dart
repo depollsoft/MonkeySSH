@@ -9068,7 +9068,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       ignoring: barOpacity == 0,
                       child: Opacity(
                         opacity: barOpacity,
-                        child: child ?? const SizedBox.shrink(),
+                        // The position already clears the side insets, so
+                        // the bar's rows must not pad for them again.
+                        child: MediaQuery.removePadding(
+                          context: context,
+                          removeLeft: true,
+                          removeRight: true,
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
                     ),
                   ),
@@ -9101,10 +9108,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           SizedBox(width: safeInsets.left),
           SizedBox(
             width: sidebarWidth,
-            child: _buildTmuxExpandableBar(
-              theme,
-              availableHeight,
-              placement: TmuxBarPlacement.sidebar,
+            // The spacer clears the left inset and the right one belongs to
+            // the terminal, so the bar's rows must not pad for either.
+            child: Builder(
+              builder: (context) => MediaQuery.removePadding(
+                context: context,
+                removeLeft: true,
+                removeRight: true,
+                child: _buildTmuxExpandableBar(
+                  theme,
+                  availableHeight,
+                  placement: TmuxBarPlacement.sidebar,
+                ),
+              ),
             ),
           ),
           Expanded(
