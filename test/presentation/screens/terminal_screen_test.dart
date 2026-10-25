@@ -1148,6 +1148,19 @@ void main() {
           ),
           396,
         );
+        // A key in the vertical bar sits just above the keyboard; its menu
+        // opens upward.
+        expect(
+          resolveTerminalOverflowMenuMaxHeight(
+            mediaQuery: const MediaQueryData(
+              size: Size(466, 678),
+              viewInsets: EdgeInsets.only(bottom: 336),
+            ),
+            isMobilePlatform: true,
+            anchorTop: 290,
+          ),
+          282,
+        );
         expect(
           resolveTerminalOverflowMenuMaxHeight(
             mediaQuery: mediaQuery,
@@ -13313,13 +13326,19 @@ void main() {
         await tester.tap(find.byTooltip('Show menu'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
+        // The menu opens upward from its key, clear of the keyboard.
         for (final label in [
           'Back',
           'Browse Files',
           'Hide Extra Keys',
           'Hide Keyboard',
         ]) {
-          expect(find.text(label), findsOneWidget, reason: label);
+          expect(find.text(label).hitTestable(), findsOneWidget, reason: label);
+          expect(
+            tester.getRect(find.text(label)).bottom,
+            lessThanOrEqualTo(outerDisplay.height - 336),
+            reason: label,
+          );
         }
 
         await tester.tap(find.text('Back'));

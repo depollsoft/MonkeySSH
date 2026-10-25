@@ -292,6 +292,9 @@ typedef _PendingMonkeyMuxServerReplacement = ({
 });
 
 /// Resolves the terminal overflow menu height when the mobile keyboard is up.
+///
+/// The menu opens below its anchor, or above it where there is more room,
+/// as for a key in the vertical bar just above the keyboard.
 @visibleForTesting
 double? resolveTerminalOverflowMenuMaxHeight({
   required MediaQueryData mediaQuery,
@@ -306,8 +309,12 @@ double? resolveTerminalOverflowMenuMaxHeight({
   final visibleBottom = mediaQuery.size.height - keyboardInset;
   final effectiveAnchorTop =
       anchorTop ?? mediaQuery.padding.top + kToolbarHeight;
-  final maxHeight =
-      visibleBottom - effectiveAnchorTop - _terminalOverflowMenuScreenPadding;
+  final maxHeight = max(
+    visibleBottom - effectiveAnchorTop - _terminalOverflowMenuScreenPadding,
+    effectiveAnchorTop -
+        mediaQuery.padding.top -
+        _terminalOverflowMenuScreenPadding,
+  );
   return maxHeight > 0 ? maxHeight : null;
 }
 
