@@ -46,6 +46,7 @@ import 'package:monkeyssh/presentation/widgets/keyboard_list_navigation.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
+import 'package:monkeyssh/presentation/widgets/display_fold.dart';
 import 'package:monkeyssh/presentation/widgets/mono_header_title.dart';
 import 'package:monkeyssh/presentation/widgets/panel_header.dart';
 import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
@@ -423,6 +424,15 @@ Snippet _buildSnippet({
   usageCount: 0,
   sortOrder: sortOrder,
 );
+
+/// A display pose with a system vertical bar: the window size, its safe area,
+/// the bar, and the fold.
+typedef _DuoPose = ({
+  Size size,
+  EdgeInsets padding,
+  SystemVerticalBar bar,
+  List<DisplayFeature> features,
+});
 
 ActiveConnection _buildActiveConnection({
   required int connectionId,
@@ -962,6 +972,233 @@ void main() {
       expect(panelTitled('keys'), findsOneWidget);
       expect(panelTitled('hosts'), findsNothing);
     });
+
+    // The other poses with a vertical bar: the inner display held wide,
+    // half open like a book or open flat (which arrives as the fold's centre
+    // line), and the outer display turned with the camera on the left.
+    const innerPadding = EdgeInsets.only(right: 84, bottom: 34);
+    const innerBar = SystemVerticalBar(
+      edge: SystemVerticalBarEdge.right,
+      itemColumn: Rect.fromLTRB(881, 124, 925, 635),
+    );
+    const book = (
+      size: Size(951, 669),
+      padding: innerPadding,
+      bar: innerBar,
+      features: [
+        DisplayFeature(
+          bounds: Rect.fromLTRB(455.5, 0, 495.5, 669),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureHalfOpened,
+        ),
+      ],
+    );
+    const flat = (
+      size: Size(951, 669),
+      padding: innerPadding,
+      bar: innerBar,
+      features: [
+        DisplayFeature(
+          bounds: Rect.fromLTWH(475.5, 0, 0, 669),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureFlat,
+        ),
+      ],
+    );
+    const outerLandscape = (
+      size: Size(678, 466),
+      padding: EdgeInsets.only(left: 84, bottom: 21),
+      bar: SystemVerticalBar(
+        edge: SystemVerticalBarEdge.left,
+        itemColumn: Rect.fromLTRB(26, 82, 70, 432),
+      ),
+      features: <DisplayFeature>[],
+    );
+
+    Future<ValueNotifier<_DuoPose>> pumpInPose(
+      WidgetTester tester,
+      _DuoPose pose, {
+      List overrides = const [],
+      HomeScreenTab initialTab = HomeScreenTab.hosts,
+    }) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      tester.view
+        ..physicalSize = pose.size
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final current = ValueNotifier(pose);
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          size: pose.size,
+          overrides: [
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith(
+              (ref) => Stream.value(const <Host>[]),
+            ),
+            allKeysProvider.overrideWith(
+              (ref) => Stream.value(const <SshKey>[]),
+            ),
+            ...overrides,
+          ],
+          child: MaterialApp(
+            builder: (context, navigator) => ValueListenableBuilder(
+              valueListenable: current,
+              builder: (context, pose, _) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  size: pose.size,
+                  padding: pose.padding,
+                  viewPadding: pose.padding,
+                  displayFeatures: pose.features,
+                ),
+                child: SystemVerticalBarScope(bar: pose.bar, child: navigator!),
+              ),
+            ),
+            home: HomeScreen(initialTab: initialTab),
+          ),
+        ),
+      );
+      await tester.pump();
+      return current;
+    }
+
+    List<String> tabLabels(WidgetTester tester) => [
+      for (final tab
+          in tester.widget<VerticalBarTabs>(find.byType(VerticalBarTabs)).tabs)
+        tab.label,
+    ];
+
+    // Settings and the tabs stand in the bar, with no app bar, tab bar or
+    // sidebar (whose Settings item is the only labelled one).
+    void expectBarNavigation(WidgetTester tester, SystemVerticalBar bar) {
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.text('Settings'), findsNothing);
+      final settings = find.byTooltip('Settings');
+      expect(settings.hitTestable(), findsOneWidget);
+      expect(tester.getRect(settings).top, bar.itemColumn.top);
+      expect(tester.getRect(settings).center.dx, bar.itemColumn.center.dx);
+      final tabs = tester.getRect(find.byType(VerticalBarTabs));
+      expect(tabs.bottom, bar.itemColumn.bottom);
+      expect(tabs.center.dx, bar.itemColumn.center.dx);
+      for (final label in tabLabels(tester)) {
+        expect(
+          find
+              .descendant(
+                of: find.byType(VerticalBarTabs),
+                matching: find.text(label),
+              )
+              .hitTestable(),
+          findsOneWidget,
+          reason: label,
+        );
+      }
+    }
+
+    testWidgets('keeps Settings and the tabs in the bar across a book fold', (
+      tester,
+    ) async {
+      await pumpInPose(tester, book, initialTab: HomeScreenTab.connections);
+
+      expectBarNavigation(tester, innerBar);
+      // Connections has the right page, so the tabs skip it and the
+      // selection falls back to Hosts.
+      expect(tabLabels(tester), ['Hosts', 'Keys', 'Snippets']);
+      expect(
+        tester
+            .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+            .selectedIndex,
+        0,
+      );
+      expect(
+        tester.getRect(find.text('no hosts yet')).right,
+        lessThanOrEqualTo(455.5),
+      );
+      final connectionsEmpty = find.text('no active sessions');
+      expect(
+        tester.getRect(connectionsEmpty).left,
+        greaterThanOrEqualTo(495.5),
+      );
+      expect(
+        tester.getRect(find.byType(PanelHeader).last).right,
+        lessThanOrEqualTo(951 - 84),
+      );
+      // Both pages' headers sit on one line at the top of the spread.
+      expect(tester.getRect(find.byType(PanelHeader).first).top, 0);
+      expect(tester.getRect(find.byType(PanelHeader).last).top, 0);
+      // A hardware keyboard drives the connections as it does on the tab.
+      expect(
+        find.ancestor(
+          of: connectionsEmpty,
+          matching: find.byWidgetPredicate(
+            (widget) => widget is KeyboardListNavigation && widget.autofocus,
+          ),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Keys'));
+      await tester.pump();
+      expect(
+        tester
+            .getRect(
+              find.byWidgetPredicate(
+                (widget) => widget is MonoHeaderTitle && widget.title == 'keys',
+              ),
+            )
+            .right,
+        lessThanOrEqualTo(455.5),
+      );
+      expect(connectionsEmpty, findsOneWidget);
+    });
+
+    testWidgets('splits the flat inner display at its fold, with the bar', (
+      tester,
+    ) async {
+      await pumpInPose(tester, flat);
+
+      expectBarNavigation(tester, innerBar);
+      expect(tabLabels(tester), ['Hosts', 'Keys', 'Snippets']);
+      // Text keeps clear of the crease on both pages.
+      expect(
+        tester.getRect(find.text('Add Host').first).right,
+        lessThanOrEqualTo(475.5 - displayFoldContentGutter),
+      );
+      expect(
+        tester.getRect(find.text('no active sessions')).left,
+        greaterThanOrEqualTo(475.5 + displayFoldContentGutter),
+      );
+      expect(
+        tester
+            .getRect(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is MonoHeaderTitle && widget.title == 'connections',
+              ),
+            )
+            .left,
+        greaterThanOrEqualTo(475.5 + displayFoldContentGutter),
+      );
+    });
+
+    testWidgets(
+      'keeps every tab in the short bar of the turned outer display',
+      (tester) async {
+        await pumpInPose(tester, outerLandscape);
+
+        expectBarNavigation(tester, outerLandscape.bar);
+        expect(tabLabels(tester), ['Hosts', 'Connections', 'Keys', 'Snippets']);
+        expect(
+          tester.getRect(find.byType(PanelHeader)).left,
+          greaterThanOrEqualTo(84),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
   });
 
   group('HomeScreen reorder affordance', () {

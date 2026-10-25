@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math';
+import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -177,7 +178,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   // Breakpoint for switching between mobile and desktop layout
   static const double _mobileBreakpoint = 600;
 
-  // The phone layout's tabs, by _selectedIndex.
+  // Home's tabs, by _selectedIndex.
   static const _homeTabs = <_HomeTab>[
     _HomeTab(Icons.dns_outlined, Icons.dns_rounded, 'Hosts'),
     _HomeTab(Icons.link_outlined, Icons.link, 'Connections'),
@@ -473,85 +474,133 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     });
 
     final mediaQuery = MediaQuery.of(context);
+    final verticalBar = SystemVerticalBarScope.maybeOf(context);
+    if (verticalBar != null) {
+      return _buildVerticalBarLayout(
+        verticalBar,
+        _resolveSpreadFold(mediaQuery),
+      );
+    }
     final fold = resolveDisplayFold(mediaQuery);
     if (fold != null && fold.isVertical) {
-      return _buildBookLayout(mediaQuery, fold);
+      return _buildBookLayout(fold);
     }
     final isWide = mediaQuery.size.width >= _mobileBreakpoint;
 
-    return isWide
-        ? _buildDesktopLayout()
-        : _buildMobileLayout(
-            verticalBar: SystemVerticalBarScope.maybeOf(context),
-          );
+    return isWide ? _buildDesktopLayout() : _buildMobileLayout();
   }
 
-  /// Splits home across a fold held like a book: the phone layout on the
-  /// left page and live connections on the right page.
+  /// The tabs a layout lists, as indexes into [_homeTabs], and which of them
+  /// is selected.
   ///
-  /// Each iPhone Duo page is about the size of its outer display, so the
-  /// left page is exactly the closed-device layout minus its Connections
-  /// tab, which the right page now shows permanently.
-  Widget _buildBookLayout(MediaQueryData mediaQuery, DisplayFold fold) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final leadingPage = fold.leadingPage(mediaQuery.size);
-    final trailingPage = fold.trailingPage(mediaQuery.size);
+  /// With connections on a page of their own, the tabs skip that one while
+  /// the selection keeps its place for when the page goes away.
+  ({List<int> indexes, int selected}) _visibleTabs({
+    required bool showsConnectionsTab,
+  }) {
+    final indexes = showsConnectionsTab ? const [0, 1, 2, 3] : const [0, 2, 3];
+    return (
+      indexes: indexes,
+      selected: max(0, indexes.indexOf(_selectedIndex)),
+    );
+  }
 
-    return ColoredBox(
-      color: colorScheme.surface,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            width: leadingPage.width,
-            child: MediaQuery(
-              data: displayFoldPageMediaQuery(mediaQuery, leadingPage),
-              // The page takes the vertical bar only when the bar runs down
-              // its own edge rather than beside the other page.
-              child: _buildMobileLayout(
-                showsConnectionsTab: false,
-                showsSettings: false,
-                verticalBar: switch (SystemVerticalBarScope.maybeOf(context)) {
-                  final bar? when bar.edge == SystemVerticalBarEdge.left => bar,
-                  _ => null,
-                },
-              ),
+  /// Home on a display with a vertical bar, such as iPhone Duo's, in every
+  /// pose.
+  ///
+  /// As in native apps, Settings and the tab bar stand in the vertical bar
+  /// beside the status cluster, and the lists get the whole height; the panel
+  /// headers name the tab. Across a [fold], held like a book or open flat,
+  /// the selected panel takes the left page and live connections the right
+  /// one, so the tabs skip Connections. Each page is about the size of the
+  /// outer display.
+  Widget _buildVerticalBarLayout(SystemVerticalBar bar, DisplayFold? fold) {
+    final (:indexes, :selected) = _visibleTabs(
+      showsConnectionsTab: fold == null,
+    );
+    // Without a tab bar across the bottom, the lists end above the home
+    // indicator themselves.
+    final content = SafeArea(child: _buildContent(index: indexes[selected]));
+    return Scaffold(
+      resizeToAvoidBottomInset: false,
+      body: VerticalBarRailPortal(
+        rail: (context) => VerticalBarRail(
+          bar: bar,
+          // A tab bar stays put under the keyboard, as on any iPhone.
+          avoidsKeyboard: false,
+          leading: [_buildSettingsButton()],
+          trailing: [
+            VerticalBarTabs(
+              tabs: [
+                for (final index in indexes)
+                  VerticalBarTab(
+                    icon: _homeTabs[index].icon,
+                    selectedIcon: _homeTabs[index].selectedIcon,
+                    label: _homeTabs[index].label,
+                  ),
+              ],
+              selectedIndex: selected,
+              onSelected: (tab) =>
+                  setState(() => _selectedIndex = indexes[tab]),
             ),
-          ),
-          SizedBox(width: fold.thickness),
-          SizedBox(
-            width: trailingPage.width,
-            child: MediaQuery(
-              data: displayFoldPageMediaQuery(mediaQuery, trailingPage),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border(
-                    left: BorderSide(color: colorScheme.outline.withAlpha(60)),
-                  ),
-                ),
-                // A bar matching the other page's keeps both panel headers on
-                // one line, with Settings at the top right of the spread as on
-                // the phone.
-                child: Scaffold(
-                  resizeToAvoidBottomInset: false,
-                  appBar: AppBar(
-                    automaticallyImplyLeading: false,
-                    actions: [_buildSettingsButton()],
-                  ),
-                  // Arrows, Return and Esc drive the list here too.
-                  body: const SafeArea(
-                    top: false,
-                    child: KeyboardListNavigation(
-                      autofocus: true,
-                      child: _ConnectionsPanel(),
-                    ),
-                  ),
-                ),
+          ],
+        ),
+        child: fold == null
+            ? content
+            : DisplayFoldSpread(
+                fold: fold,
+                leading: content,
+                trailing: _buildConnectionsPage(),
               ),
-            ),
-          ),
-        ],
       ),
+    );
+  }
+
+  /// Splits home across a fold held like a book on a display without a
+  /// vertical bar: the phone layout on the left page and live connections on
+  /// the right page.
+  Widget _buildBookLayout(DisplayFold fold) => ColoredBox(
+    color: Theme.of(context).colorScheme.surface,
+    child: DisplayFoldSpread(
+      fold: fold,
+      leading: _buildMobileLayout(
+        showsConnectionsTab: false,
+        showsSettings: false,
+      ),
+      // A bar matching the other page's keeps both panel headers on one
+      // line, with Settings at the top right of the spread as on the phone.
+      trailing: _buildConnectionsPage(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          actions: [_buildSettingsButton()],
+        ),
+      ),
+    ),
+  );
+
+  /// Live connections on a fold's right page, set off from the left page by
+  /// a hairline.
+  Widget _buildConnectionsPage({AppBar? appBar}) {
+    // Arrows, Return and Esc drive the list here too.
+    const connections = KeyboardListNavigation(
+      autofocus: true,
+      child: _ConnectionsPanel(),
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(
+            color: Theme.of(context).colorScheme.outline.withAlpha(60),
+          ),
+        ),
+      ),
+      child: appBar == null
+          ? const SafeArea(child: connections)
+          : Scaffold(
+              resizeToAvoidBottomInset: false,
+              appBar: appBar,
+              body: const SafeArea(top: false, child: connections),
+            ),
     );
   }
 
@@ -561,59 +610,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     onPressed: () => context.push('/settings'),
   );
 
-  /// The phone layout, with its bars in [verticalBar] when there is one: the
-  /// window's, or a fold page's own.
+  /// The phone layout, with an app bar across the top and a tab bar across
+  /// the bottom.
   Widget _buildMobileLayout({
-    required SystemVerticalBar? verticalBar,
     bool showsConnectionsTab = true,
     bool showsSettings = true,
   }) {
-    // With connections on their own page, the tab bar skips that tab while
-    // the selection keeps its place for when the page goes away.
-    final tabIndexes = showsConnectionsTab
-        ? const [0, 1, 2, 3]
-        : const [0, 2, 3];
-    final selectedTab = max(0, tabIndexes.indexOf(_selectedIndex));
-    final tabs = [for (final index in tabIndexes) _homeTabs[index]];
-    void selectTab(int tab) => setState(() => _selectedIndex = tabIndexes[tab]);
-    final content = _buildContent(index: tabIndexes[selectedTab]);
-    final settingsButton = _buildSettingsButton();
-
-    final bar = verticalBar;
-    if (bar != null) {
-      // As in native apps on iPhone Duo, the tab bar and the bar's actions
-      // stand in the vertical bar beside the status cluster, and the list
-      // gets the whole height. The panel headers name the tab.
-      return Scaffold(
-        resizeToAvoidBottomInset: false,
-        body: VerticalBarRailPortal(
-          rail: (context) => VerticalBarRail(
-            bar: bar,
-            // A tab bar stays put under the keyboard, as on any iPhone.
-            avoidsKeyboard: false,
-            leading: [if (showsSettings) settingsButton],
-            trailing: [
-              VerticalBarTabs(
-                tabs: [
-                  for (final tab in tabs)
-                    VerticalBarTab(
-                      icon: tab.icon,
-                      selectedIcon: tab.selectedIcon,
-                      label: tab.label,
-                    ),
-                ],
-                selectedIndex: selectedTab,
-                onSelected: selectTab,
-              ),
-            ],
-          ),
-          // Without a tab bar across the bottom, the lists end above the
-          // home indicator themselves.
-          child: SafeArea(child: content),
-        ),
-      );
-    }
-
+    final (:indexes, :selected) = _visibleTabs(
+      showsConnectionsTab: showsConnectionsTab,
+    );
     return Scaffold(
       // This shell has no text input. Ignore stale IME insets left behind by
       // input-heavy routes.
@@ -634,26 +639,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             Text(ref.watch(appDisplayNameProvider)),
           ],
         ),
-        actions: [if (showsSettings) settingsButton],
+        actions: [if (showsSettings) _buildSettingsButton()],
       ),
       // Rows clear a side inset, such as iPhone Duo's status bar strip when
       // an app opts out of the vertical bar; the app bar and tab bar already
       // pad themselves.
-      body: SafeArea(top: false, bottom: false, child: content),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: _buildContent(index: indexes[selected]),
+      ),
       bottomNavigationBar: NavigationBar(
         // Keep destinations clear of edge-to-edge system navigation while an
         // IME inset temporarily reduces MediaQuery.padding.
         maintainBottomViewPadding: true,
-        selectedIndex: selectedTab,
-        onDestinationSelected: selectTab,
+        selectedIndex: selected,
+        onDestinationSelected: (tab) =>
+            setState(() => _selectedIndex = indexes[tab]),
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         height: 65,
         destinations: [
-          for (final tab in tabs)
+          for (final index in indexes)
             NavigationDestination(
-              icon: Icon(tab.icon),
-              selectedIcon: Icon(tab.selectedIcon),
-              label: tab.label,
+              icon: Icon(_homeTabs[index].icon),
+              selectedIcon: Icon(_homeTabs[index].selectedIcon),
+              label: _homeTabs[index].label,
             ),
         ],
       ),
@@ -814,6 +824,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       ),
     ],
   );
+}
+
+/// The fold home's vertical bar layout splits into two pages at: a vertical
+/// one, half open like a book or open flat.
+///
+/// [resolveDisplayFold] takes a flat fold for a crease in one screen, but
+/// the open inner display is two outer displays wide, so home keeps the
+/// spread rather than stretching one list across it.
+DisplayFold? _resolveSpreadFold(MediaQueryData mediaQuery) {
+  final fold = resolveDisplayFold(
+    mediaQuery.copyWith(
+      displayFeatures: [
+        for (final feature in mediaQuery.displayFeatures)
+          if (feature.type == DisplayFeatureType.fold)
+            DisplayFeature(
+              bounds: feature.bounds,
+              type: feature.type,
+              state: DisplayFeatureState.postureHalfOpened,
+            )
+          else
+            feature,
+      ],
+    ),
+  );
+  return fold != null && fold.isVertical ? fold : null;
 }
 
 void _openTerminalRoute(BuildContext context, String route) {
