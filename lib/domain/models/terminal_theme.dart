@@ -702,3 +702,27 @@ double contrastRatio(Color a, Color b) {
   final darkest = luminanceA > luminanceB ? luminanceB : luminanceA;
   return (brightest + 0.05) / (darkest + 0.05);
 }
+
+/// Returns [color] moved toward black or white, whichever contrasts more with
+/// [background], just far enough to reach [minimumContrast] against it.
+///
+/// 4.5:1 is WCAG AA for text; 3:1 is enough for icons and large text.
+Color legibleColor(
+  Color color, {
+  required Color background,
+  double minimumContrast = 4.5,
+}) {
+  if (contrastRatio(color, background) >= minimumContrast) return color;
+  final ink =
+      contrastRatio(Colors.white, background) >=
+          contrastRatio(Colors.black, background)
+      ? Colors.white
+      : Colors.black;
+  for (var step = 1; step < 20; step += 1) {
+    final candidate = Color.lerp(color, ink, step / 20)!;
+    if (contrastRatio(candidate, background) >= minimumContrast) {
+      return candidate;
+    }
+  }
+  return ink;
+}

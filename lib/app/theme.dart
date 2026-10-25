@@ -189,6 +189,7 @@ abstract final class FluttyTheme {
         color: textPrimary,
       ),
     );
+    final navigationIndicator = colorScheme.primary.withAlpha(isDark ? 35 : 30);
 
     return ThemeData(
       useMaterial3: true,
@@ -429,23 +430,38 @@ abstract final class FluttyTheme {
         ),
       ),
 
-      // Navigation bar (mobile bottom nav)
+      // Navigation bar (mobile bottom nav). The selected label takes the ink
+      // and leaves the signal to the indicator and its icon, and each
+      // foreground clears WCAG AA against the colour behind it.
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: surface,
-        indicatorColor: colorScheme.primary.withAlpha(isDark ? 35 : 30),
+        indicatorColor: navigationIndicator,
         labelTextStyle: WidgetStateProperty.resolveWith((states) {
           final selected = states.contains(WidgetState.selected);
           return _inter(
             fontSize: 12,
             fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-            color: selected ? colorScheme.primary : textSecondary,
+            color: legibleColor(
+              selected ? textPrimary : textSecondary,
+              background: surface,
+            ),
           );
         }),
         iconTheme: WidgetStateProperty.resolveWith((states) {
           final selected = states.contains(WidgetState.selected);
           return IconThemeData(
             size: 22,
-            color: selected ? colorScheme.primary : textSecondary,
+            color: selected
+                ? legibleColor(
+                    colorScheme.primary,
+                    background: Color.alphaBlend(navigationIndicator, surface),
+                    minimumContrast: 3,
+                  )
+                : legibleColor(
+                    textSecondary,
+                    background: surface,
+                    minimumContrast: 3,
+                  ),
           );
         }),
         elevation: isDark ? 0 : 1,

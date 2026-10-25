@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart' show SemanticsRole;
 
-import '../../domain/models/terminal_theme.dart' show contrastRatio;
+import '../../domain/models/terminal_theme.dart' show legibleColor;
 import '../controllers/platform_display_features_controller.dart';
 import 'terminal_menu_style.dart';
 
@@ -51,33 +51,8 @@ const double verticalBarKeyboardGap = 8;
 /// labels under their icons.
 const double verticalBarRailWidth = 72;
 
-/// The contrast small text needs against what is behind it (WCAG AA).
-const double _textContrast = 4.5;
-
 /// The contrast an icon needs against what is behind it (WCAG AA).
 const double _iconContrast = 3;
-
-/// [color], moved toward black or white, whichever stands further from
-/// [background], only as far as it takes to reach [minimumContrast], so its
-/// hue stays recognizable.
-///
-/// Theme foregrounds are tuned for the page; the bar's controls sit on the
-/// raised surface, where some terminal themes leave them too faint.
-Color _legible(Color color, Color background, double minimumContrast) {
-  if (contrastRatio(color, background) >= minimumContrast) return color;
-  final ink =
-      contrastRatio(Colors.white, background) >=
-          contrastRatio(Colors.black, background)
-      ? Colors.white
-      : Colors.black;
-  for (var step = 1; step < 20; step += 1) {
-    final candidate = Color.lerp(color, ink, step / 20)!;
-    if (contrastRatio(candidate, background) >= minimumContrast) {
-      return candidate;
-    }
-  }
-  return ink;
-}
 
 /// The part of the vertical bar's item column left for controls in a window
 /// described by [mediaQuery].
@@ -343,7 +318,7 @@ class _VerticalBarTextKey extends StatelessWidget {
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       elevation: 0,
       backgroundColor: fill,
-      foregroundColor: _legible(colorScheme.onSurface, fill, _textContrast),
+      foregroundColor: legibleColor(colorScheme.onSurface, background: fill),
       disabledBackgroundColor: fill.withAlpha(120),
       disabledForegroundColor: colorScheme.onSurface.withAlpha(90),
       textStyle: theme.textTheme.labelLarge,
@@ -500,18 +475,19 @@ class _VerticalBarTabButton extends StatelessWidget {
         navigationTheme.indicatorColor ?? colorScheme.secondaryContainer;
     // The selected label takes the ink and leaves the signal to the
     // indicator and its icon, so the capsule shows one teal mark.
-    final labelColor = _legible(
+    // Theme foregrounds are tuned for the page; the capsule is the raised
+    // surface, where some terminal themes leave them too faint.
+    final labelColor = legibleColor(
       selected
           ? colorScheme.onSurface
           : labelStyle?.color ?? colorScheme.onSurfaceVariant,
-      fill,
-      _textContrast,
+      background: fill,
     );
     final iconColor = selected
-        ? _legible(
+        ? legibleColor(
             iconTheme?.color ?? colorScheme.primary,
-            Color.alphaBlend(indicator, fill),
-            _iconContrast,
+            background: Color.alphaBlend(indicator, fill),
+            minimumContrast: _iconContrast,
           )
         : labelColor;
     final textScaler = MediaQuery.textScalerOf(context)
