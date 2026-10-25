@@ -18071,9 +18071,11 @@ class _TerminalKeyboardDeck extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final mutedColor = colorScheme.onSurface.withAlpha(150);
+    // The name says what the deck shows, so voice control matches it.
     return Semantics(
       button: true,
-      label: 'Show keyboard',
+      label: 'Tap to type',
+      hint: 'Shows the keyboard',
       onTap: onShowKeyboard,
       excludeSemantics: true,
       child: Material(

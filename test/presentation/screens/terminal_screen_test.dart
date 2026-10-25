@@ -12910,7 +12910,16 @@ void main() {
       final deck = find.text('tap to type');
       expect(deck, findsOneWidget);
       expect(tester.getRect(deck).top, greaterThan(475));
-      expect(find.bySemanticsLabel('Show keyboard'), findsOneWidget);
+      // The accessible name holds the visible text.
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Tap to type')),
+        isSemantics(
+          label: 'Tap to type',
+          hint: 'Shows the keyboard',
+          isButton: true,
+          hasTapAction: true,
+        ),
+      );
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
