@@ -52,7 +52,9 @@ extension _TerminalScreenShortcuts on _TerminalScreenState {
               bar()?.closeActiveWindowFromKeyboard(),
             )
           : null,
-      AppShortcutAction.toggleWindowList: barShown
+      // While the keyboard covers the propped navigator's page, its rows
+      // cannot take focus, so the list opens as a sheet instead.
+      AppShortcutAction.toggleWindowList: barShown && !_proppedNavigatorCovered
           ? (_) => bar()?.toggleFromKeyboard()
           : muxActive
           ? (_) => _afterKeyboardWindowSwitch(_openTmuxNavigator())

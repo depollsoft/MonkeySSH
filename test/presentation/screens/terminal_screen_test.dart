@@ -12811,6 +12811,29 @@ void main() {
         reason: 'the terminal has keyboard focus again',
       );
 
+      // ⌃⌘S opens the windows as a sheet while their page is covered.
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(BottomSheet), findsNothing);
+
       // With the keyboard gone the page shows the windows again.
       tester.view.viewInsets = FakeViewPadding.zero;
       keyboard.debugSetVisible(visible: false);
