@@ -1,4 +1,4 @@
-Run coding agents on your own servers from iPhone or iPad. MonkeySSH puts native agent conversations, a full SSH terminal, MonkeyMux or tmux windows, and SFTP in one remote workspace.
+Run coding agents on your own servers from iPhone, iPhone Duo, or iPad. MonkeySSH puts native agent conversations, a full SSH terminal, MonkeyMux or tmux windows, and SFTP in one remote workspace.
 
 Choose the right view for each task:
 

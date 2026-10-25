@@ -1,8 +1,14 @@
-What's fixed in this beta
+What's new in this beta
 
-- Fix duplicated Pi chat history after reconnecting.
-- Keep queued prompts and permission requests through connection recovery.
-- Stop false approval notifications for requests the app handles automatically.
-- Fix Codex terminal redraws when opening a session in MonkeyMux.
+- Use MonkeySSH on iPhone Duo. Back, actions, terminal keys, and the home tabs move into the vertical bar, so each screen gets its full height. Turned sideways or opened wide, the keys follow the bar.
+- Hold iPhone Duo like a book to see hosts beside live connections, or the window navigator beside the terminal.
+- Prop it up like a laptop to keep the terminal above the fold, with the window navigator below.
+- The lock screen spreads across the fold, with the PIN on its own page.
+
+What's fixed
+
+- Add Host, Edit Host, MonkeySSH Pro, and the SFTP toolbar stay clear of the notch in landscape.
+- Unlock stays in view above the keyboard when the phone is turned sideways.
+- The Snippets header fits on narrow screens.
 
 Please report rough edges through the support link.

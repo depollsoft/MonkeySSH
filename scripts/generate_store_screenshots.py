@@ -31,10 +31,20 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from store_media import ROOT, float_or_none, require_agent_executables
+from store_media import (
+    ROOT, float_or_none, require_agent_executables, require_unlocked_keychain,
+)
 
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
+# Set by Claude Code for the processes it starts.
+CLAUDE_CODE_SESSION_MARKERS = frozenset({
+    'CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH',
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION',
+    'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET',
+    'CLAUDE_CODE_MESSAGING_TOKEN',
+})
+POSE_MARKER = 'STORE_SCREENSHOT_POSE '
 DONE_MARKER = 'STORE_SCREENSHOT_DONE'
 ERROR_MARKER = 'STORE_SCREENSHOT_ERROR '
 ANSI_ESCAPE_PATTERN = re.compile(
@@ -76,6 +86,39 @@ class ScreenshotTarget:
 
 
 @dataclass(frozen=True)
+class DuoPose:
+    # Device Hub button that sets the hinge.
+    hinge: str
+    # simctl display: 1 is the outer display, 3 the inner one.
+    display: int
+    size: tuple[int, int]
+
+
+# Must match _DuoPose in tool/store_screenshot_app.dart, which also checks the
+# orientation and asks for Rotate Right when the window comes out turned.
+DUO_POSES = {
+    'closed': DuoPose(hinge='Closed', display=1, size=(1398, 2034)),
+    'open': DuoPose(hinge='Open', display=3, size=(2853, 2007)),
+    'book': DuoPose(hinge='Partially Open', display=3, size=(2853, 2007)),
+    'propped': DuoPose(hinge='Partially Open', display=3, size=(2007, 2853)),
+}
+DUO_SCENES = (
+    'duo_book_terminal',
+    'duo_closed_terminal',
+    'duo_propped_terminal',
+    'duo_book_home',
+    'duo_open_native',
+    'duo_closed_windows',
+    'duo_closed_hosts',
+    'duo_closed_agent_management',
+)
+# Presses Device Hub's hinge buttons through the macOS Accessibility API. It
+# takes one JSON request argument and prints the JSON result (see AGENTS.md,
+# "iOS scene lifecycle and iPhone Duo").
+DEFAULT_AX_HELPER = '~/Library/Application Support/SimAXHelper/ax.py'
+
+
+@dataclass(frozen=True)
 class MonkeyMuxSessionRegistryEntry:
     session: str
     owner_pid: int | None = None
@@ -105,6 +148,13 @@ TARGETS = {
         platform='ios',
         simulator_name='iPad Pro 13-inch (M5)',
         size=(2064, 2752),
+    ),
+    # Each pose sets its own size; see DUO_POSES.
+    'ios_duo': ScreenshotTarget(
+        name='ios_duo',
+        platform='ios',
+        simulator_name='iPhone Duo',
+        size=DUO_POSES['closed'].size,
     ),
     'android_phone': ScreenshotTarget(
         name='android_phone',
@@ -138,9 +188,17 @@ def main() -> None:
         return
     if args.check_environment:
         require_agent_executables()
+        require_unlocked_keychain()
         print("All required store-capture agent CLIs are available.")
+        if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
+            _check_duo_environment()
+            print('Device Hub can set the iPhone Duo hinge.')
         return
-    targets = _targets_for_platform(args.platform)
+    targets = _targets_for_platform(args.platform, scene=args.scene)
+    if not targets:
+        raise SystemExit(f'error: {args.platform} has no {args.scene} scene')
+    if TARGETS['ios_duo'] in targets:
+        _check_duo_environment()
     with StoreDemoEnvironment(seed_platform=args.platform) as demo:
         for target in targets:
             _run_target(target, demo, scene=args.scene)
@@ -152,15 +210,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         'platform',
-        choices=['ios', 'android', 'both'],
+        choices=['ios', 'android', 'both', 'duo'],
         nargs='?',
         default='both',
-        help='Which store screenshot set to generate.',
+        help='Which store screenshot set to generate. ios includes the iPhone Duo set; duo is that set alone.',
     )
     parser.add_argument(
         '--scene',
         choices=['terminal_copilot', 'hosts', 'snippets', 'monkeymux_windows',
-                 'sftp', 'terminal_claude', 'native_copilot', 'agent_management'],
+                 'sftp', 'terminal_claude', 'native_copilot', 'agent_management',
+                 *DUO_SCENES],
         help='Recapture one scene in place, preserving the other screenshots.',
     )
     parser.add_argument(
@@ -174,16 +233,28 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _targets_for_platform(platform: str) -> list[ScreenshotTarget]:
+def _targets_for_platform(
+    platform: str, *, scene: str | None = None,
+) -> list[ScreenshotTarget]:
     if platform == 'ios':
-        return [TARGETS['ios_phone'], TARGETS['ios_ipad']]
-    if platform == 'android':
-        return [
+        targets = [TARGETS['ios_phone'], TARGETS['ios_ipad'], TARGETS['ios_duo']]
+    elif platform == 'duo':
+        targets = [TARGETS['ios_duo']]
+    elif platform == 'android':
+        targets = [
             TARGETS['android_phone'],
             TARGETS['android_7_tablet'],
             TARGETS['android_10_tablet'],
         ]
-    return list(TARGETS.values())
+    else:
+        targets = list(TARGETS.values())
+    if scene is None:
+        return targets
+    # The iPhone Duo has its own scenes; the other devices share one list.
+    return [
+        target for target in targets
+        if (target.name == 'ios_duo') == (scene in DUO_SCENES)
+    ]
 
 
 def _run_target(
@@ -291,6 +362,10 @@ def _run_flutter_capture(
         for raw_line in process.stdout:
             print(raw_line, end='')
             line = raw_line.strip()
+            if POSE_MARKER in line:
+                _set_duo_pose(
+                    target, json.loads(line.split(POSE_MARKER, 1)[1]),
+                )
             if READY_MARKER in line:
                 payload = json.loads(line.split(READY_MARKER, 1)[1])
                 time.sleep(capture_delay)
@@ -299,6 +374,7 @@ def _run_flutter_capture(
                     device_id=device_id,
                     paths=[ROOT / path for path in payload['paths']],
                     scene=payload.get('scene'),
+                    pose=payload.get('pose'),
                 )
             if ERROR_MARKER in line:
                 failure = line.split(ERROR_MARKER, 1)[1].strip()
@@ -344,6 +420,7 @@ def _build_android_screenshot_apk(
 class StoreDemoEnvironment:
     def __init__(self, *, seed_platform: str = 'both') -> None:
         self._agent_executables = require_agent_executables()
+        require_unlocked_keychain()
         self._seed_platform = seed_platform
         self._tmpdir = Path(tempfile.mkdtemp(prefix='monkeyssh-store-demo-'))
         self.username = getpass.getuser()
@@ -506,7 +583,15 @@ class StoreDemoEnvironment:
         os.chmod(executable, 0o700)
 
     def _build_monkeymux_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        # Drop the markers of the session running this script (Claude Code,
+        # MonkeyMux, tmux). Agents in the capture panes would otherwise think
+        # they run nested in it; Claude Code then warns about it on screen.
+        # Claude Code's own settings (CLAUDE_CODE_USE_BEDROCK, ...) stay.
+        env = {
+            name: value for name, value in os.environ.items()
+            if name not in CLAUDE_CODE_SESSION_MARKERS
+            and not name.startswith(('MONKEYMUX_', 'TMUX'))
+        }
         env.pop('XDG_RUNTIME_DIR', None)
         env.setdefault('TERM', 'xterm-256color')
         return env
@@ -1966,11 +2051,13 @@ def _free_local_port() -> int:
 
 # Only entirely Pro-only features get store badges. Features with any free
 # access, including native chat, use the unbadged app capture.
+AGENT_MANAGEMENT_CAPTION = (
+    'Agent Management',
+    'Check versions. Install, update & repair remote agents.',
+)
 PRO_SCENE_CAPTIONS = {
-    'agent_management': (
-        'Agent Management',
-        'Check versions. Install, update & repair remote agents.',
-    ),
+    'agent_management': AGENT_MANAGEMENT_CAPTION,
+    'duo_closed_agent_management': AGENT_MANAGEMENT_CAPTION,
 }
 
 
@@ -2045,10 +2132,30 @@ def _capture_native_screenshot(
     device_id: str,
     paths: list[Path],
     scene: str | None = None,
+    pose: str | None = None,
 ) -> None:
+    expected_size = target.size
     with tempfile.NamedTemporaryFile(suffix='.png') as tmp:
         tmp_path = Path(tmp.name)
-        if target.platform == 'ios':
+        if target.name == 'ios_duo':
+            if pose not in DUO_POSES:
+                raise RuntimeError(f'iPhone Duo scene {scene} has no known pose: {pose}')
+            expected_size = DUO_POSES[pose].size
+            subprocess.run(
+                ['xcrun', 'simctl', 'io', device_id, 'screenshot',
+                 f'--display={DUO_POSES[pose].display}', str(tmp_path)],
+                cwd=ROOT,
+                check=True,
+            )
+            with Image.open(tmp_path) as image:
+                # Cropping or scaling would hide a capture of the wrong display
+                # or orientation, so require App Store Connect's exact size.
+                if image.size != expected_size:
+                    raise RuntimeError(
+                        f'iPhone Duo {scene} capture is {image.size[0]}x{image.size[1]}; '
+                        f'the {pose} pose should give {expected_size[0]}x{expected_size[1]}',
+                    )
+        elif target.platform == 'ios':
             subprocess.run(
                 ['xcrun', 'simctl', 'io', device_id, 'screenshot', str(tmp_path)],
                 cwd=ROOT,
@@ -2066,10 +2173,10 @@ def _capture_native_screenshot(
 
         with Image.open(tmp_path) as image:
             screenshot = image.convert('RGB')
-            if screenshot.size != target.size:
+            if screenshot.size != expected_size:
                 screenshot = ImageOps.fit(
                     screenshot,
-                    target.size,
+                    expected_size,
                     method=Image.Resampling.LANCZOS,
                 )
             if scene in PRO_SCENE_CAPTIONS:
@@ -2088,8 +2195,150 @@ def _capture_native_screenshot(
                     display_path = path
                 print(
                     f'Wrote {display_path} '
-                    f'({target.size[0]}x{target.size[1]})',
+                    f'({expected_size[0]}x{expected_size[1]})',
                 )
+
+
+def _ax_helper(request: dict[str, object]) -> object:
+    helper = Path(
+        os.environ.get('STORE_SCREENSHOT_AX_HELPER', DEFAULT_AX_HELPER),
+    ).expanduser()
+    if not helper.is_file():
+        raise RuntimeError(
+            f'iPhone Duo captures need the Device Hub helper at {helper} '
+            '(set STORE_SCREENSHOT_AX_HELPER); see AGENTS.md, "iOS scene '
+            'lifecycle and iPhone Duo".',
+        )
+    result = subprocess.run(
+        [sys.executable, str(helper), json.dumps(request)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    output = result.stdout.strip()
+    if result.returncode != 0 or output.startswith('ERROR'):
+        raise RuntimeError(
+            f'Device Hub helper failed on {request.get("cmd")}: '
+            f'{output or result.stderr.strip()}',
+        )
+    return json.loads(output)
+
+
+def _device_hub_windows(name: str) -> tuple[list[dict], list[dict]]:
+    """Returns every Device Hub window and those showing simulator `name`."""
+    apps = _ax_helper({'cmd': 'apps'})
+    device_hub = apps.get('devicehub', {}) if isinstance(apps, dict) else {}
+    windows = device_hub.get('windows', [])
+    # Device Hub titles a device window "iPhone Duo – iOS 27.1".
+    showing = [
+        window for window in windows
+        if window.get('frame') and (
+            window.get('title') == name
+            or str(window.get('title', '')).startswith(f'{name} – ')
+        )
+    ]
+    return windows, showing
+
+
+def _device_hub_window(name: str, *, alone: bool = False) -> list[float]:
+    """Returns the frame of the Device Hub window showing simulator `name`.
+
+    With `alone`, also fails when another Device Hub window overlaps it.
+    """
+    windows, showing = _device_hub_windows(name)
+    if len(showing) != 1:
+        titles = [window.get('title') for window in windows]
+        raise RuntimeError(
+            f'Open one Device Hub window for the {name!r} simulator; '
+            f'Device Hub shows {titles}.',
+        )
+    frame = showing[0]['frame']
+    left, top, width, height = frame
+    for window in windows:
+        other = window.get('frame')
+        if not alone or window is showing[0] or not other:
+            continue
+        if (other[0] < left + width and left < other[0] + other[2]
+                and other[1] < top + height and top < other[1] + other[3]):
+            raise RuntimeError(
+                f'Device Hub window {window.get("title")!r} overlaps the {name!r} '
+                'window; move or close it so its buttons are not pressed instead.',
+            )
+    return frame
+
+
+def _show_in_device_hub(name: str, device_id: str) -> None:
+    """Selects the simulator in Device Hub's sidebar unless a window shows it."""
+    if not _device_hub_windows(name)[1]:
+        _ax_helper({
+            'cmd': 'click', 'app': 'devicehub',
+            'match': {
+                'role': 'AXStaticText', 'value': name,
+                'id': f'TableRow.Device.{device_id}',
+            },
+        })
+        deadline = time.monotonic() + 10
+        while not _device_hub_windows(name)[1] and time.monotonic() < deadline:
+            time.sleep(0.5)
+    _device_hub_window(name)
+
+
+def _press_device_hub_button(device_name: str, description: str) -> None:
+    # Buttons in every Device Hub window match, so pick the one inside the
+    # capture simulator's window, which no other window may overlap.
+    left, top, width, height = _device_hub_window(device_name, alone=True)
+    match = {'role': 'AXButton', 'desc': description}
+    buttons = _ax_helper({'cmd': 'find', 'app': 'devicehub', 'match': match})
+    for index, button in enumerate(buttons):
+        frame = button.get('frame')
+        if not frame:
+            continue
+        center_x = frame[0] + frame[2] / 2
+        center_y = frame[1] + frame[3] / 2
+        if left <= center_x <= left + width and top <= center_y <= top + height:
+            _ax_helper({
+                'cmd': 'press', 'app': 'devicehub', 'match': {**match, 'index': index},
+            })
+            print(f'Pressed {description} in Device Hub for {device_name}')
+            return
+    raise RuntimeError(f'Device Hub has no {description!r} button for {device_name!r}')
+
+
+def _set_duo_pose(target: ScreenshotTarget, request: dict[str, object]) -> None:
+    if target.name != 'ios_duo':
+        raise RuntimeError(f'{target.name} asked for an iPhone Duo pose')
+    name = _ios_simulator_name(target)
+    if request.get('rotate'):
+        _press_device_hub_button(name, 'Rotate Right')
+        return
+    pose = request.get('pose')
+    if pose not in DUO_POSES:
+        raise RuntimeError(f'Unknown iPhone Duo pose: {pose}')
+    _press_device_hub_button(name, DUO_POSES[pose].hinge)
+
+
+def _check_duo_environment() -> None:
+    """Fails before any capture when Device Hub cannot move the Duo hinge."""
+    # Older SDKs compile out the fold reader, so no hinge pose would arrive.
+    sdk = subprocess.check_output(
+        ['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True,
+    ).strip()
+    if tuple(int(part) for part in sdk.split('.')[:2]) < (27, 1):
+        raise RuntimeError(
+            f'iPhone Duo captures need the iOS 27.1 SDK; the selected Xcode has '
+            f'{sdk}. Set DEVELOPER_DIR to Xcode 27.1 or later.',
+        )
+    trusted = _ax_helper({'cmd': 'trusted'})
+    if not (isinstance(trusted, dict) and trusted.get('trusted')):
+        raise RuntimeError('The Device Hub helper lacks the Accessibility permission.')
+    name = _ios_simulator_name(TARGETS['ios_duo'])
+    # Device Hub windows show a name, not a UDID.
+    if len(_ios_simulator_udids(name)) > 1:
+        raise RuntimeError(
+            f'Several iOS simulators are named {name!r}; rename the extras or set '
+            'STORE_SCREENSHOT_IOS_DUO_SIMULATOR to a unique name.',
+        )
+    device_id = _boot_ios_simulator(name)
+    _show_in_device_hub(name, device_id)
+    print(f'Device Hub shows {name} ({device_id}).')
 
 
 def _prepare_device(target: ScreenshotTarget) -> str:
@@ -2101,23 +2350,27 @@ def _prepare_device(target: ScreenshotTarget) -> str:
     return device_id
 
 
-def _boot_ios_simulator(name: str) -> str:
+def _ios_simulator_udids(name: str) -> list[str]:
     devices = json.loads(
         subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json'])
     )
-    for runtime, runtime_devices in devices['devices'].items():
-        if not runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-'):
-            continue
-        for device in runtime_devices:
-            if device['name'] == name:
-                device_id = device['udid']
-                subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
-                subprocess.run(
-                    ['xcrun', 'simctl', 'bootstatus', device_id, '-b'],
-                    check=True,
-                )
-                return device_id
-    raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
+    return [
+        device['udid']
+        for runtime, runtime_devices in devices['devices'].items()
+        if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-')
+        for device in runtime_devices
+        if device['name'] == name
+    ]
+
+
+def _boot_ios_simulator(name: str) -> str:
+    device_ids = _ios_simulator_udids(name)
+    if not device_ids:
+        raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
+    device_id = device_ids[0]
+    subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
+    subprocess.run(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], check=True)
+    return device_id
 
 
 def _ios_simulator_name(target: ScreenshotTarget) -> str:
@@ -2307,6 +2560,9 @@ def _java_home_17() -> str | None:
 
 
 def _prefer_stable_xcode() -> None:
+    # An explicit DEVELOPER_DIR wins over the stable Xcode.
+    if os.environ.get('DEVELOPER_DIR'):
+        return
     developer_dir = Path('/Applications/Xcode.app/Contents/Developer')
     if developer_dir.exists():
         os.environ['DEVELOPER_DIR'] = str(developer_dir)
