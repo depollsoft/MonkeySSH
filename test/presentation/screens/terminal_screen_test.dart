@@ -12738,6 +12738,80 @@ void main() {
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('offers Windows in the app bar while the keyboard covers a '
+        'propped navigator', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+      final windowsAction = find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byTooltip('tmux windows'),
+      );
+      expect(windowsAction, findsNothing);
+
+      // A window row takes keyboard focus.
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row has focus',
+      );
+
+      // Propped up, the keyboard covers the whole bottom page.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 951 - 455.5);
+      final keyboard = SystemKeyboardVisibilityController.instance
+        ..debugSetVisible(visible: true);
+      addTearDown(() => keyboard.debugSetVisible(visible: null));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(windowsAction, findsOneWidget);
+      expect(
+        Focus.of(tester.element(find.text('shell'))).canRequestFocus,
+        isFalse,
+      );
+      expect(find.semantics.byLabel(RegExp('shell')), findsNothing);
+      final focused = FocusManager.instance.primaryFocus?.context;
+      expect(focused?.findAncestorWidgetOfExactType<ListTile>(), isNull);
+      expect(
+        focused?.findAncestorWidgetOfExactType<MonkeyTerminalView>(),
+        isNotNull,
+        reason: 'the terminal has keyboard focus again',
+      );
+
+      // With the keyboard gone the page shows the windows again.
+      tester.view.viewInsets = FakeViewPadding.zero;
+      keyboard.debugSetVisible(visible: false);
+      await tester.pump();
+      await tester.pump();
+      expect(windowsAction, findsNothing);
+      expect(
+        Focus.of(tester.element(find.text('shell'))).canRequestFocus,
+        isTrue,
+      );
+      expect(find.semantics.byLabel(RegExp('shell')), findsWidgets);
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('a flat fold keeps the single-page terminal layout', (
       tester,
     ) async {

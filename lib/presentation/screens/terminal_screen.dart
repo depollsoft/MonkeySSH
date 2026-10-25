@@ -980,6 +980,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isTmuxBarExpanded = false;
   // Whether a fold layout keeps the mux navigator open on its own page.
   bool _tmuxNavigatorPinned = false;
+  // Whether the keyboard leaves a propped fold's navigator page too short
+  // for a window row.
+  bool _proppedNavigatorCovered = false;
   double _tmuxSidebarDragOffset = 0;
   AcpSessionKey? _activeNativeAcpSessionKey;
   String? _autoOpenedNativeAcpBridgeId;
@@ -12320,6 +12323,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // leaves the screen instead of trying to collapse it.
     _tmuxNavigatorPinned =
         showsMuxNavigatorPage && terminalFoldLayout != TerminalFoldLayout.none;
+    if (!showsMuxNavigatorPage ||
+        terminalFoldLayout != TerminalFoldLayout.propped) {
+      _proppedNavigatorCovered = false;
+    }
 
     // A native chat hides the find bar without closing it.
     final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
@@ -12409,9 +12416,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ],
             ),
           );
+    // Offered while the navigator is hidden from the Options menu, or while
+    // the keyboard covers its propped page.
     final showsMuxWindowsControl =
         _isTmuxActive &&
-        !_showTmuxBar &&
+        (!_showTmuxBar || _proppedNavigatorCovered) &&
         connectionState == SshConnectionState.connected;
     final muxWindowsButton = IconButton(
       icon: const Icon(Icons.window_outlined),
@@ -13225,21 +13234,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   child: !showsMuxNavigator
                       ? _TerminalKeyboardDeck(onShowKeyboard: onShowKeyboard)
                       : LayoutBuilder(
-                          builder: (context, constraints) => OverflowBox(
-                            alignment: Alignment.topCenter,
-                            minHeight: _ProppedTerminalLayoutDelegate
-                                .navigatorMinHeight,
-                            maxHeight: max(
-                              _ProppedTerminalLayoutDelegate.navigatorMinHeight,
-                              constraints.maxHeight,
-                            ),
-                            child: _buildTmuxExpandableBar(
-                              theme,
-                              double.infinity,
-                              placement: TmuxBarPlacement.sidebar,
-                              pinnedOpen: true,
-                            ),
-                          ),
+                          builder: (context, constraints) {
+                            // Without room for a row, the navigator leaves
+                            // focus and semantics, and the app bar offers
+                            // Windows in its place.
+                            final covered =
+                                constraints.maxHeight <
+                                _ProppedTerminalLayoutDelegate
+                                    .navigatorUsableHeight;
+                            _handleProppedNavigatorCovered(covered);
+                            return ExcludeFocus(
+                              excluding: covered,
+                              child: ExcludeSemantics(
+                                excluding: covered,
+                                child: OverflowBox(
+                                  alignment: Alignment.topCenter,
+                                  minHeight: _ProppedTerminalLayoutDelegate
+                                      .navigatorMinHeight,
+                                  maxHeight: max(
+                                    _ProppedTerminalLayoutDelegate
+                                        .navigatorMinHeight,
+                                    constraints.maxHeight,
+                                  ),
+                                  child: _buildTmuxExpandableBar(
+                                    theme,
+                                    double.infinity,
+                                    placement: TmuxBarPlacement.sidebar,
+                                    pinnedOpen: true,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
                         ),
                 ),
               ),
@@ -13250,6 +13276,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ],
       ),
     );
+  }
+
+  /// Records, from the propped navigator's layout, whether the keyboard
+  /// covers it. Keyboard focus on one of its rows goes back to the input.
+  void _handleProppedNavigatorCovered(bool covered) {
+    if (covered == _proppedNavigatorCovered) return;
+    if (covered && _isFocusWithinTmuxBar()) {
+      _restoreKeyboardInputFocusIfLost();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && covered != _proppedNavigatorCovered) {
+        setState(() => _proppedNavigatorCovered = covered);
+      }
+    });
   }
 
   // Rebuilds so the keyboard toggle button reflects the current
@@ -18120,8 +18160,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
 enum _ProppedTerminalSlot { terminal, navigator, toolbar }
 
-/// Stacks the terminal above the fold and the navigator and keyboard toolbar
-/// below it.
 /// The bottom page of a fold propped up like a laptop when the session has
 /// no window navigator for it: a keyboard deck. A tap raises the system
 /// keyboard onto the page, below the terminal.
@@ -18183,6 +18221,8 @@ class _TerminalKeyboardDeck extends StatelessWidget {
   }
 }
 
+/// Stacks the terminal above the fold and the navigator and keyboard toolbar
+/// below it.
 class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
   _ProppedTerminalLayoutDelegate({
     required this.topPageHeight,
@@ -18192,6 +18232,11 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
 
   /// Height of the navigator's handle row, the least it is laid out at.
   static const double navigatorMinHeight = 56;
+
+  /// Height that shows the handle and one window row. A shorter navigator
+  /// counts as covered.
+  static const double navigatorUsableHeight =
+      navigatorMinHeight + kMinInteractiveDimension;
 
   /// Distance from the top of the body to the fold.
   final double topPageHeight;
