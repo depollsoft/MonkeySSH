@@ -105,6 +105,8 @@ class DuoCaptureTest(unittest.TestCase):
             return {'devicehub': {'windows': list(windows)}}
 
         with patch.object(capture, '_ax_helper', side_effect=helper), \
+             patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
+             patch.object(capture, '_ios_simulator_udids', return_value=['DUO-UDID']), \
              patch.object(capture, '_boot_ios_simulator', return_value='DUO-UDID'):
             capture._check_duo_environment()
         self.assertEqual([request for request in requests if request['cmd'] == 'click'], [{
@@ -114,6 +116,28 @@ class DuoCaptureTest(unittest.TestCase):
                 'id': 'TableRow.Device.DUO-UDID',
             },
         }])
+
+    def test_environment_rejects_an_old_sdk_and_duplicate_names(self):
+        with patch.object(capture.subprocess, 'check_output', return_value='27.0\n'), \
+             patch.object(capture, '_ax_helper') as helper:
+            with self.assertRaisesRegex(RuntimeError, 'need the iOS 27.1 SDK'):
+                capture._check_duo_environment()
+        helper.assert_not_called()
+        with patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
+             patch.object(capture, '_ax_helper', return_value={'trusted': True}), \
+             patch.object(capture, '_ios_simulator_udids', return_value=['A', 'B']), \
+             patch.object(capture, '_boot_ios_simulator') as boot:
+            with self.assertRaisesRegex(RuntimeError, "Several iOS simulators are named 'iPhone Duo'"):
+                capture._check_duo_environment()
+        boot.assert_not_called()
+
+    def test_scene_outside_the_platform_stops_before_the_workspace(self):
+        with patch.object(sys, 'argv', ['generate', 'duo', '--scene', 'hosts']), \
+             patch.object(capture, '_prefer_stable_xcode'), \
+             patch.object(capture, 'StoreDemoEnvironment') as demo:
+            with self.assertRaisesRegex(SystemExit, 'duo has no hosts scene'):
+                capture.main()
+        demo.assert_not_called()
 
     def test_pose_markers_drive_the_hinge_then_rotation(self):
         process = Mock(stdout=iter([
@@ -343,12 +367,14 @@ class LiveAgentCaptureTest(unittest.TestCase):
             'CLAUDECODE': '1', 'CLAUDE_PID': '42', 'CLAUDE_CODE_CHILD_SESSION': '1',
             'CLAUDE_CODE_MESSAGING_TOKEN': 'secret', 'MONKEYMUX_PANE_TTY': '/dev/ttys001',
             'TMUX': '/tmp/tmux-501/default,1,0', 'TMUX_PANE': '%1',
+            'CLAUDE_CODE_USE_BEDROCK': '1', 'CLAUDE_CODE_OAUTH_TOKEN': 'token',
         }
         demo = object.__new__(capture.StoreDemoEnvironment)
         with patch.dict(capture.os.environ, inherited, clear=True):
             env = demo._build_monkeymux_env()
         self.assertEqual(env, {
             'PATH': '/usr/bin', 'HOME': '/Users/store', 'TERM': 'xterm-256color',
+            'CLAUDE_CODE_USE_BEDROCK': '1', 'CLAUDE_CODE_OAUTH_TOKEN': 'token',
         })
 
     def test_failed_agent_does_not_fall_back_to_an_interactive_shell(self):

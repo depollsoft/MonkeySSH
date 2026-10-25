@@ -37,6 +37,13 @@ from store_media import (
 
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
+# Set by Claude Code for the processes it starts.
+CLAUDE_CODE_SESSION_MARKERS = frozenset({
+    'CLAUDECODE', 'CLAUDE_PID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH',
+    'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION',
+    'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET',
+    'CLAUDE_CODE_MESSAGING_TOKEN',
+})
 POSE_MARKER = 'STORE_SCREENSHOT_POSE '
 DONE_MARKER = 'STORE_SCREENSHOT_DONE'
 ERROR_MARKER = 'STORE_SCREENSHOT_ERROR '
@@ -188,6 +195,8 @@ def main() -> None:
             print('Device Hub can set the iPhone Duo hinge.')
         return
     targets = _targets_for_platform(args.platform, scene=args.scene)
+    if not targets:
+        raise SystemExit(f'error: {args.platform} has no {args.scene} scene')
     if TARGETS['ios_duo'] in targets:
         _check_duo_environment()
     with StoreDemoEnvironment(seed_platform=args.platform) as demo:
@@ -577,10 +586,11 @@ class StoreDemoEnvironment:
         # Drop the markers of the session running this script (Claude Code,
         # MonkeyMux, tmux). Agents in the capture panes would otherwise think
         # they run nested in it; Claude Code then warns about it on screen.
+        # Claude Code's own settings (CLAUDE_CODE_USE_BEDROCK, ...) stay.
         env = {
             name: value for name, value in os.environ.items()
-            if name not in {'CLAUDECODE', 'CLAUDE_PID'}
-            and not name.startswith(('CLAUDE_CODE_', 'MONKEYMUX_', 'TMUX'))
+            if name not in CLAUDE_CODE_SESSION_MARKERS
+            and not name.startswith(('MONKEYMUX_', 'TMUX'))
         }
         env.pop('XDG_RUNTIME_DIR', None)
         env.setdefault('TERM', 'xterm-256color')
@@ -2292,10 +2302,25 @@ def _set_duo_pose(target: ScreenshotTarget, request: dict[str, object]) -> None:
 
 def _check_duo_environment() -> None:
     """Fails before any capture when Device Hub cannot move the Duo hinge."""
+    # Older SDKs compile out the fold reader, so no hinge pose would arrive.
+    sdk = subprocess.check_output(
+        ['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True,
+    ).strip()
+    if tuple(int(part) for part in sdk.split('.')[:2]) < (27, 1):
+        raise RuntimeError(
+            f'iPhone Duo captures need the iOS 27.1 SDK; the selected Xcode has '
+            f'{sdk}. Set DEVELOPER_DIR to Xcode 27.1 or later.',
+        )
     trusted = _ax_helper({'cmd': 'trusted'})
     if not (isinstance(trusted, dict) and trusted.get('trusted')):
         raise RuntimeError('The Device Hub helper lacks the Accessibility permission.')
     name = _ios_simulator_name(TARGETS['ios_duo'])
+    # Device Hub windows show a name, not a UDID.
+    if len(_ios_simulator_udids(name)) > 1:
+        raise RuntimeError(
+            f'Several iOS simulators are named {name!r}; rename the extras or set '
+            'STORE_SCREENSHOT_IOS_DUO_SIMULATOR to a unique name.',
+        )
     device_id = _boot_ios_simulator(name)
     _show_in_device_hub(name, device_id)
     print(f'Device Hub shows {name} ({device_id}).')
@@ -2310,23 +2335,27 @@ def _prepare_device(target: ScreenshotTarget) -> str:
     return device_id
 
 
-def _boot_ios_simulator(name: str) -> str:
+def _ios_simulator_udids(name: str) -> list[str]:
     devices = json.loads(
         subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json'])
     )
-    for runtime, runtime_devices in devices['devices'].items():
-        if not runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-'):
-            continue
-        for device in runtime_devices:
-            if device['name'] == name:
-                device_id = device['udid']
-                subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
-                subprocess.run(
-                    ['xcrun', 'simctl', 'bootstatus', device_id, '-b'],
-                    check=True,
-                )
-                return device_id
-    raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
+    return [
+        device['udid']
+        for runtime, runtime_devices in devices['devices'].items()
+        if runtime.startswith('com.apple.CoreSimulator.SimRuntime.iOS-')
+        for device in runtime_devices
+        if device['name'] == name
+    ]
+
+
+def _boot_ios_simulator(name: str) -> str:
+    device_ids = _ios_simulator_udids(name)
+    if not device_ids:
+        raise RuntimeError(f'Unable to find available iOS simulator named {name!r}')
+    device_id = device_ids[0]
+    subprocess.run(['xcrun', 'simctl', 'boot', device_id], check=False)
+    subprocess.run(['xcrun', 'simctl', 'bootstatus', device_id, '-b'], check=True)
+    return device_id
 
 
 def _ios_simulator_name(target: ScreenshotTarget) -> str:
@@ -2516,6 +2545,9 @@ def _java_home_17() -> str | None:
 
 
 def _prefer_stable_xcode() -> None:
+    # An explicit DEVELOPER_DIR wins over the stable Xcode.
+    if os.environ.get('DEVELOPER_DIR'):
+        return
     developer_dir = Path('/Applications/Xcode.app/Contents/Developer')
     if developer_dir.exists():
         os.environ['DEVELOPER_DIR'] = str(developer_dir)
