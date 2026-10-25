@@ -2238,8 +2238,11 @@ def _device_hub_windows(name: str) -> tuple[list[dict], list[dict]]:
     return windows, showing
 
 
-def _device_hub_window(name: str) -> list[float]:
-    """Returns the frame of the Device Hub window showing simulator `name`."""
+def _device_hub_window(name: str, *, alone: bool = False) -> list[float]:
+    """Returns the frame of the Device Hub window showing simulator `name`.
+
+    With `alone`, also fails when another Device Hub window overlaps it.
+    """
     windows, showing = _device_hub_windows(name)
     if len(showing) != 1:
         titles = [window.get('title') for window in windows]
@@ -2247,7 +2250,19 @@ def _device_hub_window(name: str) -> list[float]:
             f'Open one Device Hub window for the {name!r} simulator; '
             f'Device Hub shows {titles}.',
         )
-    return showing[0]['frame']
+    frame = showing[0]['frame']
+    left, top, width, height = frame
+    for window in windows:
+        other = window.get('frame')
+        if not alone or window is showing[0] or not other:
+            continue
+        if (other[0] < left + width and left < other[0] + other[2]
+                and other[1] < top + height and top < other[1] + other[3]):
+            raise RuntimeError(
+                f'Device Hub window {window.get("title")!r} overlaps the {name!r} '
+                'window; move or close it so its buttons are not pressed instead.',
+            )
+    return frame
 
 
 def _show_in_device_hub(name: str, device_id: str) -> None:
@@ -2268,8 +2283,8 @@ def _show_in_device_hub(name: str, device_id: str) -> None:
 
 def _press_device_hub_button(device_name: str, description: str) -> None:
     # Buttons in every Device Hub window match, so pick the one inside the
-    # capture simulator's window.
-    left, top, width, height = _device_hub_window(device_name)
+    # capture simulator's window, which no other window may overlap.
+    left, top, width, height = _device_hub_window(device_name, alone=True)
     match = {'role': 'AXButton', 'desc': description}
     buttons = _ax_helper({'cmd': 'find', 'app': 'devicehub', 'match': match})
     for index, button in enumerate(buttons):

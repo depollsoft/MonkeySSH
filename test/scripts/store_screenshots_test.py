@@ -83,6 +83,15 @@ class DuoCaptureTest(unittest.TestCase):
             'match': {'role': 'AXButton', 'desc': 'Partially Open', 'index': 1},
         })
 
+    def test_press_refuses_an_overlapping_window(self):
+        with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
+            {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [400, 0, 500, 800]},
+            {'title': 'iPhone Duo \u2013 iOS 27.1', 'frame': [600, 0, 500, 800]},
+        ]}}) as helper:
+            with self.assertRaisesRegex(RuntimeError, "'Duo Lead – iOS 27.1' overlaps"):
+                capture._set_duo_pose(capture.TARGETS['ios_duo'], {'pose': 'book'})
+        self.assertEqual([call.args[0]['cmd'] for call in helper.call_args_list], ['apps'])
+
     def test_press_requires_one_capture_window(self):
         with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
             {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [0, 0, 500, 800]},
