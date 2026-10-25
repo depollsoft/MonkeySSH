@@ -6,6 +6,7 @@ import 'package:flutter/semantics.dart' show SemanticsRole;
 
 import '../../domain/models/terminal_theme.dart' show contrastRatio;
 import '../controllers/platform_display_features_controller.dart';
+import 'terminal_menu_style.dart';
 
 export '../controllers/platform_display_features_controller.dart'
     show SystemVerticalBar, SystemVerticalBarEdge;
@@ -741,9 +742,10 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
 
   /// Fits [leading] and [actions] into [capacity] keys, the way native bars
   /// compress: the actions farthest from the thumb fold into a menu key in
-  /// their place. With one key left, [leading] folds into that menu too,
-  /// since a full-screen dialog or an unsaved-changes guard can leave no
-  /// edge swipe to go back with.
+  /// their place. A popup action always folds once there is a menu key, so
+  /// the bar never shows two keys that open menus. With one key left,
+  /// [leading] folds into that menu too, since a full-screen dialog or an
+  /// unsaved-changes guard can leave no edge swipe to go back with.
   static (List<Widget>, List<Widget>) _fit(
     BuildContext context,
     Widget? leading,
@@ -764,18 +766,24 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     if (slots >= 1 + kept.length) {
       // Fold the actions farthest from the thumb until the rest fit beside
       // the menu key, keeping the ones a menu cannot hold.
-      final folded = <int>{};
-      var shown = actions.length;
+      final folded = {
+        for (final (index, entry) in entries.indexed)
+          if (entry?.section ?? false) index,
+      };
+      var shown = actions.length - folded.length;
       for (var index = 0; index < actions.length; index += 1) {
         if (shown <= slots - 1) break;
-        if (entries[index] == null) continue;
+        if (entries[index] == null || folded.contains(index)) continue;
         folded.add(index);
         shown -= 1;
       }
       return (
         [?leading],
         [
-          _menuKey([for (final index in folded) entries[index]!]),
+          _menuKey(context, [
+            for (final (index, entry) in entries.indexed)
+              if (folded.contains(index)) entry!,
+          ]),
           for (final (index, action) in actions.indexed)
             if (!folded.contains(index)) action,
         ],
@@ -787,7 +795,7 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     return (
       const <Widget>[],
       [
-        _menuKey([?leadingEntry, ...entries.nonNulls]),
+        _menuKey(context, [?leadingEntry, ...entries.nonNulls]),
         ...kept,
       ],
     );
@@ -803,63 +811,118 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     if (onSelected is Function) Function.apply(onSelected, [value]);
   }
 
-  static Widget _menuKey(List<Widget> entries) => MenuAnchor(
-    menuChildren: entries,
-    builder: (context, controller, _) => IconButton(
-      icon: const Icon(Icons.more_vert),
-      tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-      onPressed: () =>
-          controller.isOpen ? controller.close() : controller.open(),
-    ),
-  );
+  /// The menu key holding [entries], styled like the app's other menus: the
+  /// raised surface, a hairline, and 44 pt rows. A popup's items stand
+  /// between dividers.
+  static Widget _menuKey(BuildContext context, List<_MenuEntry> entries) =>
+      MenuAnchor(
+        style: TerminalMenuStyles.menuStyle(context).copyWith(
+          side: WidgetStatePropertyAll(
+            BorderSide(color: Theme.of(context).colorScheme.outline),
+          ),
+        ),
+        menuChildren: [
+          for (final (index, entry) in entries.indexed) ...[
+            if (index > 0 && (entry.section || entries[index - 1].section))
+              const Divider(height: 1),
+            ...entry.rows,
+          ],
+        ],
+        builder: (context, controller, _) => IconButton(
+          icon: const Icon(Icons.more_vert),
+          tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+          onPressed: () =>
+              controller.isOpen ? controller.close() : controller.open(),
+        ),
+      );
 
-  /// A menu entry that does what [action] does, for the kinds of action a
+  /// The menu rows that do what [action] does, for the kinds of action a
   /// menu can stand in for.
-  static Widget? _menuEntryFor(BuildContext context, Widget action) {
+  static _MenuEntry? _menuEntryFor(BuildContext context, Widget action) {
     final localizations = MaterialLocalizations.of(context);
+    final style = TerminalMenuStyles.itemButtonStyle(context);
+    _MenuEntry row({
+      required VoidCallback? onPressed,
+      required Widget? child,
+      Widget? leadingIcon,
+    }) => (
+      rows: [
+        MenuItemButton(
+          style: style,
+          onPressed: onPressed,
+          leadingIcon: leadingIcon,
+          child: child,
+        ),
+      ],
+      section: false,
+    );
     return switch (action) {
       // Back and Close pop through the route's guards, as their keys do.
-      BackButton(:final onPressed) => MenuItemButton(
+      BackButton(:final onPressed) => row(
         onPressed: onPressed ?? () => Navigator.maybePop(context),
         leadingIcon: const BackButtonIcon(),
         child: Text(localizations.backButtonTooltip),
       ),
-      CloseButton(:final onPressed) => MenuItemButton(
+      CloseButton(:final onPressed) => row(
         onPressed: onPressed ?? () => Navigator.maybePop(context),
         leadingIcon: const Icon(Icons.close),
         child: Text(localizations.closeButtonTooltip),
       ),
-      IconButton(:final onPressed, :final icon, :final tooltip) =>
-        MenuItemButton(
-          onPressed: onPressed,
-          leadingIcon: icon,
-          child: Text(tooltip ?? ''),
-        ),
-      ButtonStyleButton(:final onPressed, :final child) => MenuItemButton(
+      IconButton(:final onPressed, :final icon, :final tooltip) => row(
+        onPressed: onPressed,
+        leadingIcon: icon,
+        child: Text(tooltip ?? ''),
+      ),
+      ButtonStyleButton(:final onPressed, :final child) => row(
         onPressed: onPressed,
         child: child,
       ),
-      PopupMenuButton<Object?>() => SubmenuButton(
-        leadingIcon: action.icon ?? const Icon(Icons.more_horiz),
-        menuChildren: [
-          for (final item in action.itemBuilder(context))
-            if (item is PopupMenuItem<Object?>)
-              MenuItemButton(
-                onPressed: item.enabled
-                    ? () {
-                        item.onTap?.call();
-                        _selectPopupValue(action, item.value);
-                      }
-                    : null,
-                child: item.child,
-              )
-            else if (item is PopupMenuDivider)
-              const Divider(height: 1),
-        ],
-        child: Text(action.tooltip ?? localizations.showMenuTooltip),
-      ),
+      PopupMenuButton<Object?>() => _popupEntry(context, action, style),
       _ => null,
     };
+  }
+
+  /// [popup]'s items as rows of the menu, in place of a submenu or a second
+  /// menu key. A list tile item gives its row its icon and title, so the
+  /// row is as tall as the others.
+  static _MenuEntry _popupEntry(
+    BuildContext context,
+    PopupMenuButton<Object?> popup,
+    ButtonStyle style,
+  ) {
+    final rows = <Widget>[
+      for (final item in popup.itemBuilder(context))
+        if (item is PopupMenuItem<Object?>)
+          switch (item.child) {
+            final ListTile tile => MenuItemButton(
+              style: style,
+              onPressed: popup.enabled && item.enabled && tile.enabled
+                  ? () => _selectPopupItem(popup, item)
+                  : null,
+              leadingIcon: tile.leading,
+              trailingIcon: tile.trailing,
+              child: tile.title,
+            ),
+            final child => MenuItemButton(
+              style: style,
+              onPressed: popup.enabled && item.enabled
+                  ? () => _selectPopupItem(popup, item)
+                  : null,
+              child: child,
+            ),
+          }
+        else if (item is PopupMenuDivider)
+          const Divider(height: 1),
+    ];
+    return (rows: rows, section: rows.isNotEmpty);
+  }
+
+  static void _selectPopupItem(
+    PopupMenuButton<Object?> popup,
+    PopupMenuItem<Object?> item,
+  ) {
+    item.onTap?.call();
+    _selectPopupValue(popup, item.value);
   }
 
   Widget? _impliedLeading(BuildContext context) {
@@ -900,3 +963,8 @@ AppBar _titleOnly(AppBar appBar) => AppBar(
   forceMaterialTransparency: appBar.forceMaterialTransparency,
   clipBehavior: appBar.clipBehavior,
 );
+
+/// The menu rows standing in for one action folded into a vertical bar menu
+/// key; a popup's items form a [section], set apart from the rows around
+/// them by dividers.
+typedef _MenuEntry = ({List<Widget> rows, bool section});

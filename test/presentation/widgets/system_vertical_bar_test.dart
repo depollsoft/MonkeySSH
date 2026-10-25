@@ -285,69 +285,183 @@ void main() {
         onPressed: () => pressed.add(name),
       );
       await tester.pumpWidget(
-        withBar(
+        pushes(
           bar: shortBar,
-          Builder(
-            builder: (context) => TextButton(
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (context) => Scaffold(
-                    appBar: VerticalBarAppBar(
-                      AppBar(
-                        title: const Text('Agent'),
-                        actions: [
-                          action('Search chat', Icons.search),
-                          action('Windows', Icons.window_outlined),
-                          action('Save', Icons.save_outlined),
-                          // Its items fold into a submenu, typed as the
-                          // popup's own.
-                          PopupMenuButton<_ChatAction>(
-                            tooltip: 'Chat options',
-                            onSelected: (value) => pressed.add(value.name),
-                            itemBuilder: (context) => const [
-                              PopupMenuItem(
-                                value: _ChatAction.export,
-                                child: Text('Export'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    body: const SizedBox.expand(),
+          actions: [
+            action('Search chat', Icons.search),
+            action('Windows', Icons.window_outlined),
+            action('Save', Icons.save_outlined),
+            // Its items join the menu, typed as the popup's own.
+            PopupMenuButton<_ChatAction>(
+              tooltip: 'Chat options',
+              onSelected: (value) => pressed.add(value.name),
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: _ChatAction.export,
+                  child: ListTile(
+                    leading: Icon(Icons.ios_share),
+                    title: Text('Export chat'),
                   ),
                 ),
-              ),
-              child: const Text('open'),
+                PopupMenuItem(value: _ChatAction.fork, child: Text('Fork')),
+              ],
             ),
-          ),
+          ],
         ),
       );
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
 
-      // Two keys fit: Back, and a menu holding every action, the popup's
-      // items as a submenu.
+      // Two keys fit: Back, and a menu holding every action, with the
+      // popup's items set apart at its end.
       expect(find.byType(BackButton), findsOneWidget);
       expect(find.byTooltip('Search chat'), findsNothing);
       expect(find.byTooltip('Chat options'), findsNothing);
       await tester.tap(find.byTooltip('Show menu'));
       await tester.pumpAndSettle();
-      for (final name in ['Search chat', 'Windows', 'Save', 'Chat options']) {
+      for (final name in ['Search chat', 'Windows', 'Save', 'Export chat']) {
         expect(find.text(name), findsOneWidget, reason: name);
       }
+      expect(find.text('Chat options'), findsNothing);
+      expect(find.byType(SubmenuButton), findsNothing);
+      final save = tester.getRect(find.widgetWithText(MenuItemButton, 'Save'));
+      final divider = tester.getRect(find.byType(Divider));
+      final export = tester.getRect(
+        find.widgetWithText(MenuItemButton, 'Export chat'),
+      );
+      expect(divider.top, greaterThanOrEqualTo(save.bottom));
+      expect(export.top, greaterThanOrEqualTo(divider.bottom));
+      // The popup's list tile becomes the row's icon and label, so its row
+      // is as tall as the rest.
+      expect(find.byType(ListTile), findsNothing);
+      expect(export.height, save.height);
+      expect(
+        find.descendant(
+          of: find.widgetWithText(MenuItemButton, 'Export chat'),
+          matching: find.byIcon(Icons.ios_share),
+        ),
+        findsOneWidget,
+      );
       await tester.tap(find.text('Windows'));
       await tester.pumpAndSettle();
       expect(pressed, ['Windows']);
 
       await tester.tap(find.byTooltip('Show menu'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Chat options'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Export'));
+      await tester.tap(find.text('Export chat'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(pressed, ['Windows', 'export']);
+    });
+
+    testWidgets('folds a popup action into the menu it opens beside', (
+      tester,
+    ) async {
+      // The native chat's actions with the keyboard up: room for three keys.
+      useOuterDisplay(tester);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 336);
+      final pressed = <String>[];
+      await tester.pumpWidget(
+        pushes(
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Search chat',
+              onPressed: () => pressed.add('search'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.window_outlined),
+              tooltip: 'MonkeyMux windows',
+              onPressed: () => pressed.add('windows'),
+            ),
+            PopupMenuButton<_ChatAction>(
+              icon: const Icon(Icons.more_vert),
+              onSelected: (value) => pressed.add(value.name),
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: _ChatAction.export,
+                  child: ListTile(
+                    leading: Icon(Icons.ios_share),
+                    title: Text('Export chat'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      // Back, one menu key, and the action nearest the thumb: never a second
+      // key that looks and reads the same as the menu key.
+      expect(find.byType(BackButton), findsOneWidget);
+      expect(find.byTooltip('Show menu'), findsOneWidget);
+      expect(find.byType(PopupMenuButton<_ChatAction>), findsNothing);
+      expect(find.byTooltip('MonkeyMux windows'), findsOneWidget);
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+      expect(find.text('Search chat'), findsOneWidget);
+      await tester.tap(find.text('Export chat'));
+      await tester.pumpAndSettle();
+      expect(pressed, ['export']);
+    });
+
+    testWidgets("styles the folded menu like the app's other menus", (
+      tester,
+    ) async {
+      useOuterDisplay(tester);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 360);
+      await tester.pumpWidget(
+        pushes(
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Search chat',
+              onPressed: () {},
+            ),
+            IconButton(
+              icon: const Icon(Icons.save_outlined),
+              tooltip: 'Save',
+              onPressed: () {},
+            ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+
+      final colorScheme = Theme.of(tester.element(find.text('Agent')))
+          .colorScheme;
+      final panel = tester
+          .widgetList<Material>(
+            find.ancestor(
+              of: find.text('Save'),
+              matching: find.byType(Material),
+            ),
+          )
+          .firstWhere((material) => material.type == MaterialType.canvas);
+      expect(panel.color, colorScheme.surfaceContainerHighest);
+      expect(
+        panel.shape,
+        RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: colorScheme.outline),
+        ),
+      );
+      expect(
+        tester
+            .getSize(
+              find.descendant(
+                of: find.widgetWithText(MenuItemButton, 'Save'),
+                matching: find.byType(Material),
+              ),
+            )
+            .height,
+        44,
+      );
     });
 
     testWidgets('gives text-button actions a key in the vertical bar', (
@@ -775,4 +889,4 @@ void main() {
   });
 }
 
-enum _ChatAction { export }
+enum _ChatAction { export, fork }
