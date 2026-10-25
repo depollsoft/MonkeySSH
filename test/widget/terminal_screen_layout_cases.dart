@@ -161,6 +161,38 @@ void registerTerminalScreenLayoutTests() {
         );
       });
 
+      test('vertical bar keeps the menu while any key fits', () {
+        const all = {...TerminalVerticalBarControl.values};
+        Set<TerminalVerticalBarControl> fit(int capacity) =>
+            resolveTerminalVerticalBarControls(
+              available: all,
+              capacity: capacity,
+            );
+
+        expect(fit(0), isEmpty);
+        expect(fit(1), {TerminalVerticalBarControl.menu});
+        expect(fit(2), {
+          TerminalVerticalBarControl.menu,
+          TerminalVerticalBarControl.keyboard,
+        });
+        expect(fit(3), {
+          TerminalVerticalBarControl.menu,
+          TerminalVerticalBarControl.keyboard,
+          TerminalVerticalBarControl.back,
+        });
+        expect(fit(all.length), all);
+        expect(
+          resolveTerminalVerticalBarControls(
+            available: {
+              TerminalVerticalBarControl.keyboard,
+              TerminalVerticalBarControl.files,
+            },
+            capacity: 1,
+          ),
+          {TerminalVerticalBarControl.keyboard},
+        );
+      });
+
       test('terminal title subtitle names a program title once', () {
         expect(
           formatTerminalTitleSubtitle(

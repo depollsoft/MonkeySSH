@@ -13176,6 +13176,87 @@ void main() {
         }
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+      testWidgets('keeps every control in reach when one key fits in the '
+          'vertical bar', (tester) async {
+        useOuterDisplay(tester);
+        // A Live Activity's status cluster and a tall keyboard leave
+        // (678 - 336 - 8) - 264 = 70 pt: room for one key.
+        tester.view.viewInsets = const FakeViewPadding(bottom: 336);
+        final keyboard = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: true);
+        addTearDown(() => keyboard.debugSetVisible(visible: null));
+        await tester.pumpWidget(
+          buildScreen(
+            child: MaterialApp(
+              builder: (context, child) => _withAppScopes(
+                child!,
+                appShortcuts: false,
+                verticalBar: const SystemVerticalBar(
+                  edge: SystemVerticalBarEdge.right,
+                  itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+                ),
+              ),
+              home: const Scaffold(body: Text('hosts')),
+            ),
+          ),
+        );
+        // A pushed screen, so Back applies.
+        unawaited(
+          tester
+              .state<NavigatorState>(find.byType(Navigator))
+              .push(
+                MaterialPageRoute<void>(
+                  builder: (_) => TerminalScreen(
+                    hostId: host.id,
+                    connectionId: session.connectionId,
+                  ),
+                ),
+              ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+
+        expect(find.byType(AppBar), findsNothing);
+        final rail = find.byType(VerticalBarRail);
+        expect(
+          find.descendant(of: rail, matching: find.byTooltip('Show menu')),
+          findsOneWidget,
+        );
+        for (final tooltip in [
+          'Back',
+          'Hide system keyboard',
+          'Browse files',
+          'Hide extra keys',
+        ]) {
+          expect(
+            find.descendant(of: rail, matching: find.byTooltip(tooltip)),
+            findsNothing,
+            reason: tooltip,
+          );
+        }
+
+        await tester.tap(find.byTooltip('Show menu'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        for (final label in [
+          'Back',
+          'Browse Files',
+          'Hide Extra Keys',
+          'Hide Keyboard',
+        ]) {
+          expect(find.text(label), findsOneWidget, reason: label);
+        }
+
+        await tester.tap(find.text('Back'));
+        for (var frame = 0; frame < 4; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+        expect(find.byType(TerminalScreen), findsNothing);
+        expect(find.text('hosts'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
       testWidgets('clears the bar once for the window navigator rows', (
         tester,
       ) async {

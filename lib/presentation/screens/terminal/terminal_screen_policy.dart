@@ -724,7 +724,8 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
 }
 
 /// A control the connection screen puts in the system vertical bar, listed
-/// in the order the bar keeps them when it runs short of room.
+/// in the order the bar keeps them when it runs short of room. The menu
+/// takes the controls the bar leaves out, so it stays while any key fits.
 enum TerminalVerticalBarControl {
   /// Shows or hides the system keyboard. It sits just above the keyboard.
   keyboard,
@@ -750,13 +751,25 @@ enum TerminalVerticalBarControl {
 ///
 /// The bar holds [capacity] controls, fewer while the keyboard covers its
 /// lower part or a Live Activity lengthens the status cluster above them.
+/// When some are left out the menu stays, even with room for one key, since
+/// it takes the rest.
 Set<TerminalVerticalBarControl> resolveTerminalVerticalBarControls({
   required Set<TerminalVerticalBarControl> available,
   required int capacity,
-}) => TerminalVerticalBarControl.values
-    .where(available.contains)
-    .take(capacity)
-    .toSet();
+}) {
+  final ordered = TerminalVerticalBarControl.values.where(available.contains);
+  if (capacity < 1) return const {};
+  if (ordered.length <= capacity ||
+      !available.contains(TerminalVerticalBarControl.menu)) {
+    return ordered.take(capacity).toSet();
+  }
+  return {
+    TerminalVerticalBarControl.menu,
+    ...ordered
+        .where((control) => control != TerminalVerticalBarControl.menu)
+        .take(capacity - 1),
+  };
+}
 
 /// How the connection screen splits across a fold, such as iPhone Duo's.
 enum TerminalFoldLayout {

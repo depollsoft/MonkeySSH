@@ -12460,6 +12460,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // The vertical bar takes the app bar's controls only while it has room
     // for a key. Under a Live Activity with a very tall keyboard it has none,
     // and the screen keeps its regular app bar.
+    final impliesBack = ModalRoute.of(context)?.impliesAppBarDismissal ?? false;
     final systemVerticalBar = SystemVerticalBarScope.maybeOf(context);
     final verticalBar =
         systemVerticalBar != null &&
@@ -12480,8 +12481,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               TerminalVerticalBarControl.extraKeys,
               TerminalVerticalBarControl.files,
               if (isMobile) TerminalVerticalBarControl.keyboard,
-              if (ModalRoute.of(context)?.impliesAppBarDismissal ?? false)
-                TerminalVerticalBarControl.back,
+              if (impliesBack) TerminalVerticalBarControl.back,
               if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
             },
             capacity: verticalBarItemCapacity(
@@ -12515,7 +12515,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         background: background,
       ),
     );
+    // Listed in the order the bar stacks them.
     final railOverflowMenuItems = <Widget>[
+      // Back pops through the screen's guards, as the key does.
+      if (impliesBack && leftOutOfVerticalBar(TerminalVerticalBarControl.back))
+        MenuItemButton(
+          style: TerminalMenuStyles.itemButtonStyle(context),
+          leadingIcon: Icon(
+            Icons.adaptive.arrow_back,
+            size: TerminalMenuStyles.iconSize,
+          ),
+          onPressed: () => unawaited(Navigator.maybePop(context)),
+          child: _terminalOverflowMenuLabel(
+            MaterialLocalizations.of(context).backButtonTooltip,
+          ),
+        ),
       if (showsMuxWindowsControl &&
           leftOutOfVerticalBar(TerminalVerticalBarControl.muxWindows))
         _terminalRailOverflowMenuItem(
@@ -12537,6 +12551,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           button: extraKeysButton,
           icon: Icons.keyboard_command_key_rounded,
           label: _showKeyboardToolbar ? 'Hide Extra Keys' : 'Show Extra Keys',
+        ),
+      if (isMobile && leftOutOfVerticalBar(TerminalVerticalBarControl.keyboard))
+        _terminalRailOverflowMenuItem(
+          context: context,
+          button: keyboardButton,
+          icon: systemKeyboardVisible
+              ? Icons.keyboard_hide
+              : Icons.keyboard_alt_outlined,
+          label: systemKeyboardVisible ? 'Hide Keyboard' : 'Show Keyboard',
         ),
     ];
     if (railOverflowMenuItems.isNotEmpty) {
