@@ -12837,6 +12837,61 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets(
+      'gives a navigator pinned to its page full-size touch '
+      'targets',
+      (tester) async {
+        useFoldedDisplay(
+          tester,
+          size: const Size(951, 669),
+          fold: const Rect.fromLTWH(475, 0, 0, 669),
+        );
+        tester.view
+          ..padding = const FakeViewPadding(bottom: 20)
+          ..viewPadding = const FakeViewPadding(bottom: 20);
+        await pumpTmuxScreen(tester, _MockTmuxService());
+
+        final platform = Theme.of(tester.element(find.byType(TerminalScreen)))
+            .platform;
+        final target = platform == TargetPlatform.iOS ? 44.0 : 48.0;
+        final close = find.widgetWithIcon(IconButton, Icons.close);
+        expect(close, findsNWidgets(2));
+        for (final button in [close.first, close.last]) {
+          final size = tester.getSize(button);
+          expect(size.width, greaterThanOrEqualTo(target));
+          expect(size.height, greaterThanOrEqualTo(target));
+        }
+        for (final row in ['shell', 'agent', 'New window', 'AI Sessions']) {
+          expect(
+            tester
+                .getSize(
+                  find.ancestor(
+                    of: find.text(row),
+                    matching: find.byType(ListTile),
+                  ),
+                )
+                .height,
+            greaterThanOrEqualTo(target),
+            reason: row,
+          );
+        }
+        // The list scrolls its last rows clear of the home indicator.
+        expect(
+          tester
+              .widget<SingleChildScrollView>(
+                find.byKey(const ValueKey('tmux-window-list')),
+              )
+              .padding,
+          const EdgeInsets.only(bottom: 20),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
     testWidgets('keeps the title on the navigator page of a book fold', (
       tester,
     ) async {

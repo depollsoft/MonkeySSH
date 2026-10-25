@@ -2169,6 +2169,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
     return SingleChildScrollView(
       key: const ValueKey('tmux-window-list'),
+      // A page of its own reaches the bottom of the window, so its last
+      // rows scroll clear of the home indicator.
+      padding: widget.pinnedOpen
+          ? EdgeInsets.only(bottom: MediaQuery.paddingOf(context).bottom)
+          : null,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -2180,7 +2185,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           ListTile(
             dense: true,
             visualDensity: _denseTileVisualDensity,
-            minTileHeight: 42,
+            minTileHeight: _actionTileHeight(theme),
             contentPadding: _denseTilePadding,
             horizontalTitleGap: 12,
             minLeadingWidth: 20,
@@ -2208,6 +2213,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
   }
 
+  // A navigator pinned to its own page has room for full-size targets.
+  double _actionTileHeight(ThemeData theme) =>
+      widget.pinnedOpen ? muxNavigatorMinTouchTarget(theme.platform) : 42;
+
   Widget _buildSessionsSection(ThemeData theme) => MuxRecentSessionsSection(
     session: widget.session,
     tmuxSessionName: widget.tmuxSessionName,
@@ -2228,7 +2237,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     headerBuilder: (context, toggle, {required expanded}) => ListTile(
       dense: true,
       visualDensity: _denseTileVisualDensity,
-      minTileHeight: 42,
+      minTileHeight: _actionTileHeight(theme),
       contentPadding: _denseTilePadding,
       horizontalTitleGap: 12,
       minLeadingWidth: 18,
@@ -2370,6 +2379,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       MuxWindowRow(
         key: ValueKey(('native-session', session.key)),
         inBar: true,
+        comfortable: widget.pinnedOpen,
         presentation: MuxWindowPresentation.session(
           session,
           index: _nativeAcpWindowIndex(session),
@@ -2452,6 +2462,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     return MuxWindowRow(
       key: ValueKey(('server-window', window.index)),
       inBar: true,
+      comfortable: widget.pinnedOpen,
       presentation: MuxWindowPresentation.window(
         window,
         session: _sessionForNativeWindow(window),

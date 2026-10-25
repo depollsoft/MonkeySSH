@@ -1897,6 +1897,14 @@ class MuxWindowPresentation {
       : window?.foregroundAgentTool;
 }
 
+/// The smallest touch target the platform's guidelines allow: 44 pt on
+/// Apple platforms and 48 dp elsewhere.
+double muxNavigatorMinTouchTarget(TargetPlatform platform) =>
+    switch (platform) {
+      TargetPlatform.iOS || TargetPlatform.macOS => 44,
+      _ => kMinInteractiveDimension,
+    };
+
 /// Shared expanded row, with the bar's smaller spacing and touch controls.
 class MuxWindowRow extends StatelessWidget {
   /// Creates a window row; parents retain navigation and close ownership.
@@ -1905,6 +1913,7 @@ class MuxWindowRow extends StatelessWidget {
     required this.onTap,
     required this.onClose,
     this.inBar = false,
+    this.comfortable = false,
     this.autofocus = false,
     super.key,
   });
@@ -1920,6 +1929,10 @@ class MuxWindowRow extends StatelessWidget {
 
   /// Uses the compact persistent-bar layout.
   final bool inBar;
+
+  /// Gives the row and its close button full-size touch targets, for a
+  /// navigator that fills a page of its own rather than a compact bar.
+  final bool comfortable;
 
   /// Whether the row takes keyboard focus when its scope has none.
   final bool autofocus;
@@ -1956,15 +1969,23 @@ class MuxWindowRow extends StatelessWidget {
     final progressKey = orphan
         ? '$prefix-progress-$identity'
         : '${inBar ? 'monkeymux-window' : 'native-acp-window'}-progress-$identity';
+    final minTouchTarget = muxNavigatorMinTouchTarget(theme.platform);
+    final closeSize = comfortable ? minTouchTarget : (inBar ? 30.0 : 44.0);
     return ListTile(
       key: ValueKey(
         orphan && !inBar ? 'native-acp-session-$identity' : '$prefix-$identity',
       ),
       autofocus: autofocus,
       dense: true,
-      visualDensity: inBar && orphan ? null : _tmuxNavigatorDenseVisualDensity,
+      visualDensity: comfortable
+          ? VisualDensity.standard
+          : inBar && orphan
+          ? null
+          : _tmuxNavigatorDenseVisualDensity,
       minVerticalPadding: inBar && orphan ? null : 2,
-      minTileHeight: inBar && orphan ? 44 : null,
+      minTileHeight: inBar && orphan
+          ? (comfortable ? minTouchTarget : 44)
+          : null,
       selected: inBar && orphan && p.isActive,
       selectedTileColor: theme.colorScheme.primaryContainer.withAlpha(96),
       contentPadding: EdgeInsets.only(left: inBar ? 12 : 16, right: 4),
@@ -2073,10 +2094,12 @@ class MuxWindowRow extends StatelessWidget {
           ),
           IconButton(
             icon: const Icon(Icons.close, size: 16),
-            visualDensity: VisualDensity.compact,
+            visualDensity: comfortable
+                ? VisualDensity.standard
+                : VisualDensity.compact,
             constraints: BoxConstraints.tightFor(
-              width: inBar ? 30 : 44,
-              height: inBar ? 30 : 44,
+              width: closeSize,
+              height: closeSize,
             ),
             padding: EdgeInsets.zero,
             tooltip: 'Close window',
