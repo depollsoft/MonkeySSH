@@ -31,7 +31,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from store_media import ROOT, float_or_none, require_agent_executables
+from store_media import (
+    ROOT, float_or_none, require_agent_executables, require_unlocked_keychain,
+)
 
 ADB: Path | None = None
 READY_MARKER = 'STORE_SCREENSHOT_READY '
@@ -179,6 +181,7 @@ def main() -> None:
         return
     if args.check_environment:
         require_agent_executables()
+        require_unlocked_keychain()
         print("All required store-capture agent CLIs are available.")
         if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
             _check_duo_environment()
@@ -408,6 +411,7 @@ def _build_android_screenshot_apk(
 class StoreDemoEnvironment:
     def __init__(self, *, seed_platform: str = 'both') -> None:
         self._agent_executables = require_agent_executables()
+        require_unlocked_keychain()
         self._seed_platform = seed_platform
         self._tmpdir = Path(tempfile.mkdtemp(prefix='monkeyssh-store-demo-'))
         self.username = getpass.getuser()
@@ -570,7 +574,14 @@ class StoreDemoEnvironment:
         os.chmod(executable, 0o700)
 
     def _build_monkeymux_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        # Drop the markers of the session running this script (Claude Code,
+        # MonkeyMux, tmux). Agents in the capture panes would otherwise think
+        # they run nested in it; Claude Code then warns about it on screen.
+        env = {
+            name: value for name, value in os.environ.items()
+            if name not in {'CLAUDECODE', 'CLAUDE_PID'}
+            and not name.startswith(('CLAUDE_CODE_', 'MONKEYMUX_', 'TMUX'))
+        }
         env.pop('XDG_RUNTIME_DIR', None)
         env.setdefault('TERM', 'xterm-256color')
         return env
@@ -2201,21 +2212,48 @@ def _ax_helper(request: dict[str, object]) -> object:
     return json.loads(output)
 
 
-def _device_hub_window(name: str) -> list[float]:
-    """Returns the frame of the Device Hub window showing simulator `name`."""
+def _device_hub_windows(name: str) -> tuple[list[dict], list[dict]]:
+    """Returns every Device Hub window and those showing simulator `name`."""
     apps = _ax_helper({'cmd': 'apps'})
     device_hub = apps.get('devicehub', {}) if isinstance(apps, dict) else {}
-    windows = [
-        window for window in device_hub.get('windows', [])
-        if window.get('title') == name and window.get('frame')
+    windows = device_hub.get('windows', [])
+    # Device Hub titles a device window "iPhone Duo – iOS 27.1".
+    showing = [
+        window for window in windows
+        if window.get('frame') and (
+            window.get('title') == name
+            or str(window.get('title', '')).startswith(f'{name} – ')
+        )
     ]
-    if len(windows) != 1:
-        titles = [window.get('title') for window in device_hub.get('windows', [])]
+    return windows, showing
+
+
+def _device_hub_window(name: str) -> list[float]:
+    """Returns the frame of the Device Hub window showing simulator `name`."""
+    windows, showing = _device_hub_windows(name)
+    if len(showing) != 1:
+        titles = [window.get('title') for window in windows]
         raise RuntimeError(
             f'Open one Device Hub window for the {name!r} simulator; '
             f'Device Hub shows {titles}.',
         )
-    return windows[0]['frame']
+    return showing[0]['frame']
+
+
+def _show_in_device_hub(name: str, device_id: str) -> None:
+    """Selects the simulator in Device Hub's sidebar unless a window shows it."""
+    if not _device_hub_windows(name)[1]:
+        _ax_helper({
+            'cmd': 'click', 'app': 'devicehub',
+            'match': {
+                'role': 'AXStaticText', 'value': name,
+                'id': f'TableRow.Device.{device_id}',
+            },
+        })
+        deadline = time.monotonic() + 10
+        while not _device_hub_windows(name)[1] and time.monotonic() < deadline:
+            time.sleep(0.5)
+    _device_hub_window(name)
 
 
 def _press_device_hub_button(device_name: str, description: str) -> None:
@@ -2259,7 +2297,7 @@ def _check_duo_environment() -> None:
         raise RuntimeError('The Device Hub helper lacks the Accessibility permission.')
     name = _ios_simulator_name(TARGETS['ios_duo'])
     device_id = _boot_ios_simulator(name)
-    _device_hub_window(name)
+    _show_in_device_hub(name, device_id)
     print(f'Device Hub shows {name} ({device_id}).')
 
 

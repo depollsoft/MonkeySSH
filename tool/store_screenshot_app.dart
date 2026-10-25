@@ -841,6 +841,9 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       await Future<void>.delayed(const Duration(seconds: 2));
       await _announceDuoScene('duo_open_native');
       _clearNativeFocus();
+      // The terminal shows the native chat until it is rebuilt.
+      _go('/');
+      await Future<void>.delayed(const Duration(milliseconds: 500));
     }
 
     if (_duoSceneSelected('duo_book_terminal') ||
@@ -898,7 +901,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       _selectedScene.isEmpty || _selectedScene == name;
 
   /// Asks the capture driver to move the hinge, then waits until the app's
-  /// window shows that pose. The driver presses Device Hub's preset; when the
+  /// window holds that pose. The driver presses Device Hub's preset; when the
   /// window comes out turned the wrong way, this asks it to rotate as well.
   Future<void> _setDuoPose(_DuoPose pose) async {
     if (_duoPoseReached(pose)) return;
@@ -908,12 +911,26 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     final deadline = DateTime.now().add(const Duration(seconds: 60));
     var nextRotation = DateTime.now().add(const Duration(seconds: 5));
     var rotations = 0;
-    while (!_duoPoseReached(pose)) {
+    DateTime? reachedAt;
+    var description = '';
+    while (true) {
       final now = DateTime.now();
+      final current = _duoWindowDescription();
+      if (current != description) {
+        description = current;
+        debugPrintSynchronously('iPhone Duo $description');
+      }
+      // Device Hub's presets sweep the hinge, and opening moves the app to the
+      // inner display, so the window can pass through the pose on the way.
+      if (_duoPoseReached(pose)) {
+        reachedAt ??= now;
+        if (now.difference(reachedAt) >= const Duration(seconds: 3)) return;
+      } else {
+        reachedAt = null;
+      }
       if (now.isAfter(deadline)) {
         throw TimeoutException(
-          'iPhone Duo did not reach the ${pose.name} pose: '
-          '${_duoWindowDescription()}',
+          'iPhone Duo did not hold the ${pose.name} pose: $description',
         );
       }
       final window = _duoMediaQuery()?.size;
@@ -925,8 +942,7 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
         // Upside down is unsupported on iPhone, so three turns cover any start.
         if (rotations == 3) {
           throw StateError(
-            'iPhone Duo stayed turned after three rotations: '
-            '${_duoWindowDescription()}',
+            'iPhone Duo stayed turned after three rotations: $description',
           );
         }
         rotations += 1;
@@ -937,8 +953,6 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    // Opening and closing moves the app between displays; let it settle.
-    await Future<void>.delayed(const Duration(seconds: 2));
   }
 
   bool _duoPoseReached(_DuoPose pose) {
@@ -962,12 +976,20 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
     final mediaQuery = _duoMediaQuery();
     if (mediaQuery == null) return 'no window';
     final fold = resolveDisplayFold(mediaQuery);
-    return 'window ${mediaQuery.size}, fold ${fold?.axis.name ?? 'none'}';
+    final features = [
+      for (final feature in mediaQuery.displayFeatures)
+        '${feature.type.name} ${feature.state.name}',
+    ];
+    return 'window ${mediaQuery.size}, fold ${fold?.axis.name ?? 'none'} '
+        '$features';
   }
 
   Future<void> _announceDuoScene(String name) async {
     final index = _duoScenes.indexWhere((scene) => scene.name == name);
     final scene = _duoScenes[index];
+    // Navigating can rebuild the window, and the hinge or rotation can still
+    // change after the pose was first reached.
+    await _setDuoPose(scene.pose);
     if (!_duoPoseReached(scene.pose)) {
       throw StateError(
         '$name needs the ${scene.pose.name} pose: ${_duoWindowDescription()}',

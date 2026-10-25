@@ -61,8 +61,8 @@ class DuoCaptureTest(unittest.TestCase):
     def test_press_targets_the_capture_simulator_window(self):
         replies = {
             'apps': {'devicehub': {'windows': [
-                {'title': 'Duo Lead', 'frame': [0, 0, 500, 800]},
-                {'title': 'iPhone Duo', 'frame': [600, 0, 500, 800]},
+                {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [0, 0, 500, 800]},
+                {'title': 'iPhone Duo \u2013 iOS 27.1', 'frame': [600, 0, 500, 800]},
             ]}},
             'find': [
                 {'desc': 'Partially Open', 'frame': [100, 700, 40, 20]},
@@ -85,10 +85,35 @@ class DuoCaptureTest(unittest.TestCase):
 
     def test_press_requires_one_capture_window(self):
         with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
-            {'title': 'Duo Lead', 'frame': [0, 0, 500, 800]},
+            {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [0, 0, 500, 800]},
+            {'title': 'iPhone Duo Pro \u2013 iOS 27.1', 'frame': [600, 0, 500, 800]},
         ]}}):
             with self.assertRaisesRegex(RuntimeError, "Open one Device Hub window for the 'iPhone Duo'"):
                 capture._set_duo_pose(capture.TARGETS['ios_duo'], {'rotate': True})
+
+    def test_environment_selects_the_capture_simulator_by_udid(self):
+        windows = [{'title': 'iPhone 17 Pro \u2013 iOS 26.5', 'frame': [0, 0, 1100, 800]}]
+        requests = []
+
+        def helper(request):
+            requests.append(request)
+            if request['cmd'] == 'trusted':
+                return {'trusted': True}
+            if request['cmd'] == 'click':
+                windows[0] = {**windows[0], 'title': 'iPhone Duo \u2013 iOS 27.1'}
+                return {'at': [500, 300]}
+            return {'devicehub': {'windows': list(windows)}}
+
+        with patch.object(capture, '_ax_helper', side_effect=helper), \
+             patch.object(capture, '_boot_ios_simulator', return_value='DUO-UDID'):
+            capture._check_duo_environment()
+        self.assertEqual([request for request in requests if request['cmd'] == 'click'], [{
+            'cmd': 'click', 'app': 'devicehub',
+            'match': {
+                'role': 'AXStaticText', 'value': 'iPhone Duo',
+                'id': 'TableRow.Device.DUO-UDID',
+            },
+        }])
 
     def test_pose_markers_drive_the_hinge_then_rotation(self):
         process = Mock(stdout=iter([
@@ -292,6 +317,17 @@ class LiveAgentCaptureTest(unittest.TestCase):
              patch.object(capture.os, 'kill'):
             demo._require_live_agent_windows()
 
+    def test_locked_keychain_stops_capture_with_the_unlock_command(self):
+        locked = subprocess.CompletedProcess(['security'], 36)
+        with patch.object(store_media.sys, 'platform', 'darwin'), \
+             patch.object(store_media.subprocess, 'run', return_value=locked):
+            with self.assertRaisesRegex(RuntimeError, 'security unlock-keychain'):
+                store_media.require_unlocked_keychain()
+        with patch.object(store_media.sys, 'platform', 'linux'), \
+             patch.object(store_media.subprocess, 'run') as run:
+            store_media.require_unlocked_keychain()
+        run.assert_not_called()
+
     def test_preflight_resolves_executable_aliases(self):
         def which(name):
             return None if name in {'agy', 'antigravity', 'hermes'} else '/tools/' + name
@@ -300,6 +336,20 @@ class LiveAgentCaptureTest(unittest.TestCase):
         self.assertEqual(found['antigravity'], '/tools/antigravity-cli')
         self.assertEqual(found['hermes'], '/tools/hermes-agent')
         self.assertEqual(len(found), 10)
+
+    def test_capture_panes_do_not_inherit_the_running_agent_session(self):
+        inherited = {
+            'PATH': '/usr/bin', 'HOME': '/Users/store', 'XDG_RUNTIME_DIR': '/run/user',
+            'CLAUDECODE': '1', 'CLAUDE_PID': '42', 'CLAUDE_CODE_CHILD_SESSION': '1',
+            'CLAUDE_CODE_MESSAGING_TOKEN': 'secret', 'MONKEYMUX_PANE_TTY': '/dev/ttys001',
+            'TMUX': '/tmp/tmux-501/default,1,0', 'TMUX_PANE': '%1',
+        }
+        demo = object.__new__(capture.StoreDemoEnvironment)
+        with patch.dict(capture.os.environ, inherited, clear=True):
+            env = demo._build_monkeymux_env()
+        self.assertEqual(env, {
+            'PATH': '/usr/bin', 'HOME': '/Users/store', 'TERM': 'xterm-256color',
+        })
 
     def test_failed_agent_does_not_fall_back_to_an_interactive_shell(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -758,6 +808,7 @@ class CaptureLaunchTest(unittest.TestCase):
             scratch = Path(directory) / 'demo'
             scratch.mkdir()
             with patch.object(capture, 'require_agent_executables', return_value={}), \
+                 patch.object(capture, 'require_unlocked_keychain'), \
                  patch.object(capture.tempfile, 'mkdtemp', return_value=str(scratch)), \
                  patch.object(capture.StoreDemoEnvironment, '_extract_monkeymux',
                               side_effect=RuntimeError('checksum mismatch')):
