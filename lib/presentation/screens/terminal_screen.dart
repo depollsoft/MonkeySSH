@@ -12512,7 +12512,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         verticalBar != null && terminalFoldLayout != TerminalFoldLayout.book;
     Widget identityLine({
       required Color background,
-      double statusWidth = 16,
+      double statusWidth = 20,
       double statusGap = 8,
     }) => _TerminalIdentityLine(
       title: _host?.label ?? 'Terminal',
@@ -18416,7 +18416,7 @@ class _TerminalIdentityLine extends StatelessWidget {
     required this.subtitle,
     required this.statusLabel,
     required this.status,
-    this.statusWidth = 16,
+    this.statusWidth = 20,
     this.statusGap = 8,
   });
 
@@ -18432,8 +18432,10 @@ class _TerminalIdentityLine extends StatelessWidget {
   /// The connection status glyph.
   final Widget status;
 
-  /// The width the glyph is centred in, and the space after it.
+  /// The width the glyph is centred in, which fits its jump host badge.
   final double statusWidth;
+
+  /// The space between the glyph and the text.
   final double statusGap;
 
   @override
