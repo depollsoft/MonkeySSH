@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/app/theme.dart';
+import 'package:monkeyssh/domain/models/terminal_theme.dart';
+import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
 
 // iPhone Duo's outer display, as the iOS 27.1 simulator reports it: a vertical
@@ -450,45 +453,238 @@ void main() {
     });
   });
 
-  testWidgets('VerticalBarTabs reports the picked destination', (tester) async {
-    var picked = -1;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Center(
-          child: VerticalBarTabs(
-            tabs: const [
-              VerticalBarTab(
-                icon: Icons.dns_outlined,
-                selectedIcon: Icons.dns_rounded,
-                label: 'Hosts',
-              ),
-              VerticalBarTab(
-                icon: Icons.link_outlined,
-                selectedIcon: Icons.link,
-                label: 'Connections',
-              ),
-            ],
-            selectedIndex: 0,
-            onSelected: (index) => picked = index,
+  group('VerticalBarTabs', () {
+    const homeTabs = [
+      VerticalBarTab(
+        icon: Icons.dns_outlined,
+        selectedIcon: Icons.dns_rounded,
+        label: 'Hosts',
+      ),
+      VerticalBarTab(
+        icon: Icons.link_outlined,
+        selectedIcon: Icons.link,
+        label: 'Connections',
+      ),
+      VerticalBarTab(
+        icon: Icons.key_outlined,
+        selectedIcon: Icons.key_rounded,
+        label: 'Keys',
+      ),
+      VerticalBarTab(
+        icon: Icons.code_outlined,
+        selectedIcon: Icons.code_rounded,
+        label: 'Snippets',
+      ),
+    ];
+
+    // The capsule against the right edge, as in the vertical bar.
+    Widget tabs({
+      List<VerticalBarTab> tabs = homeTabs,
+      int selectedIndex = 0,
+      ValueChanged<int>? onSelected,
+      double textScale = 1,
+      ThemeData? theme,
+    }) => MaterialApp(
+      theme: theme,
+      themeAnimationDuration: Duration.zero,
+      builder: (context, navigator) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: TextScaler.linear(textScale)),
+        child: navigator!,
+      ),
+      home: Scaffold(
+        body: Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: VerticalBarTabs(
+              tabs: tabs,
+              selectedIndex: selectedIndex,
+              onSelected: onSelected ?? (_) {},
+            ),
           ),
         ),
       ),
     );
 
-    expect(find.byIcon(Icons.dns_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.link_outlined), findsOneWidget);
-    expect(
-      tester.getSemantics(find.bySemanticsLabel('Hosts')),
-      matchesSemantics(
-        label: 'Hosts',
-        isButton: true,
-        isSelected: true,
-        hasSelectedState: true,
-        hasTapAction: true,
-      ),
-    );
-    await tester.tap(find.text('Connections'));
-    expect(picked, 1);
+    testWidgets('reads as a tab bar and reports the picked destination', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      var picked = -1;
+      await tester.pumpWidget(
+        tabs(tabs: homeTabs.take(2).toList(), onSelected: (i) => picked = i),
+      );
+
+      expect(find.byIcon(Icons.dns_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.link_outlined), findsOneWidget);
+      final bar = tester.getSemantics(find.byType(VerticalBarTabs));
+      expect(bar.getSemanticsData().role, SemanticsRole.tabBar);
+      expect(bar.childrenCount, 2);
+      expect(
+        tester.getSemantics(find.bySemanticsLabel(RegExp('^Hosts'))),
+        matchesSemantics(
+          label: 'Hosts\nTab 1 of 2',
+          role: SemanticsRole.tab,
+          isButton: true,
+          isSelected: true,
+          hasSelectedState: true,
+          hasTapAction: true,
+        ),
+      );
+      expect(
+        tester.getSemantics(find.bySemanticsLabel(RegExp('^Connections'))),
+        matchesSemantics(
+          label: 'Connections\nTab 2 of 2',
+          role: SemanticsRole.tab,
+          isButton: true,
+          hasSelectedState: true,
+          hasTapAction: true,
+        ),
+      );
+      await tester.tap(find.text('Connections'));
+      expect(picked, 1);
+      semantics.dispose();
+    });
+
+    testWidgets('sets labels from 11 to 13 pt, centred and inside the '
+        'capsule, at every text size', (tester) async {
+      for (final scale in [1.0, 1.15, 1.3, 2.0, 3.0]) {
+        await tester.pumpWidget(tabs(textScale: scale));
+        final capsule = tester.getRect(find.byType(VerticalBarTabs));
+        final interior = Rect.fromLTRB(
+          capsule.left + 2,
+          capsule.top,
+          capsule.right - 2,
+          capsule.bottom,
+        );
+        for (final tab in homeTabs) {
+          final label = find.text(tab.label);
+          expect(tester.widget<Text>(label).style!.fontSize, 11);
+          final rect = tester.getRect(label);
+          final reason = '${tab.label} at $scale';
+          expect(rect.height, lessThanOrEqualTo(13 * 1.1 + 0.1));
+          expect(interior.contains(rect.topLeft), isTrue, reason: reason);
+          expect(interior.contains(rect.bottomRight), isTrue, reason: reason);
+          expect(
+            rect.center.dx,
+            closeTo(capsule.center.dx, 0.5),
+            reason: reason,
+          );
+          // Each destination keeps its icon and label within its own 58 pt.
+          final icon = tester.getRect(
+            find.byIcon(tab == homeTabs.first ? tab.selectedIcon : tab.icon),
+          );
+          expect(rect.bottom - (icon.center.dy - 14), lessThanOrEqualTo(58));
+        }
+      }
+
+      // A label with room follows the text size up to 13 pt, unshrunk.
+      for (final (scale, size) in [(1.1, 11 * 1.1), (2.0, 13.0)]) {
+        await tester.pumpWidget(tabs(textScale: scale));
+        final keys = tester.renderObject<RenderParagraph>(find.text('Keys'));
+        expect(keys.textScaler.scale(11), closeTo(size, 0.01));
+        expect(
+          tester.getRect(find.text('Keys')).width,
+          closeTo(keys.size.width, 0.01),
+        );
+      }
+    });
+
+    testWidgets('shows the full-size name on long press beside the rail', (
+      tester,
+    ) async {
+      await tester.pumpWidget(tabs(textScale: 2));
+      final label = tester.getRect(find.text('Connections'));
+      await tester.longPress(find.text('Connections'));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final capsule = tester.getRect(find.byType(VerticalBarTabs));
+      final shown = find
+          .text('Connections')
+          .evaluate()
+          .map(
+            (element) =>
+                tester.getRect(find.byElementPredicate((e) => e == element)),
+          );
+      final tooltip = shown.singleWhere((rect) => rect != label);
+      // Unshrunk, at the user's text size, and clear of the thumb on the tab.
+      expect(tooltip.height, greaterThan(label.height * 2));
+      expect(tooltip.height, greaterThanOrEqualTo(11 * 2));
+      expect(tooltip.right, lessThan(capsule.left));
+      expect(tooltip.center.dy, closeTo(label.center.dy, 30));
+    });
+
+    testWidgets('keeps labels and icons legible in every built-in theme', (
+      tester,
+    ) async {
+      final themes = {
+        'app dark': FluttyTheme.dark,
+        'app light': FluttyTheme.light,
+        for (final theme in TerminalThemes.darkThemes)
+          theme.id: FluttyTheme.fromTerminalTheme(
+            theme,
+            brightness: Brightness.dark,
+          ),
+        for (final theme in TerminalThemes.lightThemes)
+          theme.id: FluttyTheme.fromTerminalTheme(
+            theme,
+            brightness: Brightness.light,
+          ),
+      };
+      for (final MapEntry(key: name, value: theme) in themes.entries) {
+        await tester.pumpWidget(
+          tabs(theme: theme, tabs: homeTabs.take(2).toList()),
+        );
+        final fill = theme.colorScheme.surfaceContainerHighest;
+        final indicatorDecoration =
+            tester
+                    .widget<AnimatedContainer>(
+                      find.ancestor(
+                        of: find.byIcon(Icons.dns_rounded),
+                        matching: find.byType(AnimatedContainer),
+                      ),
+                    )
+                    .decoration!
+                as ShapeDecoration;
+        // The selection stays teal-led: the theme's own indicator pill.
+        expect(
+          indicatorDecoration.color,
+          theme.navigationBarTheme.indicatorColor,
+          reason: name,
+        );
+        final indicator = Color.alphaBlend(indicatorDecoration.color!, fill);
+        double label(String text) => contrastRatio(
+          tester.widget<Text>(find.text(text)).style!.color!,
+          fill,
+        );
+        double icon(IconData data, Color background) => contrastRatio(
+          tester.widget<Icon>(find.byIcon(data)).color!,
+          background,
+        );
+
+        expect(
+          label('Hosts'),
+          greaterThanOrEqualTo(4.5),
+          reason: '$name selected',
+        );
+        expect(
+          label('Connections'),
+          greaterThanOrEqualTo(4.5),
+          reason: '$name unselected',
+        );
+        expect(
+          icon(Icons.dns_rounded, indicator),
+          greaterThanOrEqualTo(3),
+          reason: '$name selected icon',
+        );
+        expect(
+          icon(Icons.link_outlined, fill),
+          greaterThanOrEqualTo(3),
+          reason: '$name unselected icon',
+        );
+      }
+    });
   });
 }
 

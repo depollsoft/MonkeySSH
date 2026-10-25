@@ -2,7 +2,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show SemanticsRole;
 
+import '../../domain/models/terminal_theme.dart' show contrastRatio;
 import '../controllers/platform_display_features_controller.dart';
 
 export '../controllers/platform_display_features_controller.dart'
@@ -47,6 +49,34 @@ const double verticalBarKeyboardGap = 8;
 /// The width the rail takes in the vertical bar, which leaves room for tab
 /// labels under their icons.
 const double verticalBarRailWidth = 72;
+
+/// The contrast small text needs against what is behind it (WCAG AA).
+const double _textContrast = 4.5;
+
+/// The contrast an icon needs against what is behind it (WCAG AA).
+const double _iconContrast = 3;
+
+/// [color], moved toward black or white, whichever stands further from
+/// [background], only as far as it takes to reach [minimumContrast], so its
+/// hue stays recognizable.
+///
+/// Theme foregrounds are tuned for the page; the bar's controls sit on the
+/// raised surface, where some terminal themes leave them too faint.
+Color _legible(Color color, Color background, double minimumContrast) {
+  if (contrastRatio(color, background) >= minimumContrast) return color;
+  final ink =
+      contrastRatio(Colors.white, background) >=
+          contrastRatio(Colors.black, background)
+      ? Colors.white
+      : Colors.black;
+  for (var step = 1; step < 20; step += 1) {
+    final candidate = Color.lerp(color, ink, step / 20)!;
+    if (contrastRatio(candidate, background) >= minimumContrast) {
+      return candidate;
+    }
+  }
+  return ink;
+}
 
 /// The part of the vertical bar's item column left for controls in a window
 /// described by [mediaQuery].
@@ -306,7 +336,9 @@ class VerticalBarTab {
 /// destination's icon above its label.
 ///
 /// It follows [NavigationBarTheme], so the selected destination gets the same
-/// signal-teal indicator and label as the bottom navigation bar it replaces.
+/// signal-teal indicator as the bottom navigation bar it replaces. Its
+/// foregrounds are resolved against the capsule and the indicator, which sit
+/// behind them here instead of the bottom bar's surface.
 class VerticalBarTabs extends StatelessWidget {
   /// Creates a capsule of [tabs].
   const VerticalBarTabs({
@@ -329,33 +361,39 @@ class VerticalBarTabs extends StatelessWidget {
   static const double tabExtent = 58;
 
   /// The capsule's padding above and below its destinations.
-  static const double padding = 5;
+  static const double padding = 8;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    final colorScheme = Theme.of(context).colorScheme;
     final navigationTheme = NavigationBarTheme.of(context);
-    return Container(
-      width: verticalBarRailWidth,
-      padding: const EdgeInsets.symmetric(vertical: padding, horizontal: 2),
-      decoration: ShapeDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
-      ),
-      child: Material(
-        type: MaterialType.transparency,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final (index, tab) in tabs.indexed)
-              _VerticalBarTabButton(
-                tab: tab,
-                selected: index == selectedIndex,
-                navigationTheme: navigationTheme,
-                onPressed: () => onSelected(index),
-              ),
-          ],
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      role: SemanticsRole.tabBar,
+      child: Container(
+        width: verticalBarRailWidth,
+        padding: const EdgeInsets.symmetric(vertical: padding, horizontal: 2),
+        decoration: ShapeDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (index, tab) in tabs.indexed)
+                _VerticalBarTabButton(
+                  tab: tab,
+                  index: index,
+                  count: tabs.length,
+                  selected: index == selectedIndex,
+                  navigationTheme: navigationTheme,
+                  onPressed: () => onSelected(index),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -365,65 +403,154 @@ class VerticalBarTabs extends StatelessWidget {
 class _VerticalBarTabButton extends StatelessWidget {
   const _VerticalBarTabButton({
     required this.tab,
+    required this.index,
+    required this.count,
     required this.selected,
     required this.navigationTheme,
     required this.onPressed,
   });
 
   final VerticalBarTab tab;
+  final int index;
+  final int count;
   final bool selected;
   final NavigationBarThemeData navigationTheme;
   final VoidCallback onPressed;
 
+  // The label starts at iOS's smallest text size and follows the user's
+  // text size up to 13 pt. Larger, the last label meets the capsule's
+  // rounded end and the labels crowd the next destination; the long-press
+  // label shows the name at full size instead.
+  static const double _labelSize = 11;
+  static const double _labelMaxSize = 13;
+  static const double _labelLineHeight = 1.1;
+  static const double _labelGap = 3;
+  static const double _indicatorHeight = 28;
+
+  // The label's width: the capsule's inside, less a point either side. A
+  // label too long for it, such as "Connections", shrinks to fit.
+  static const double _labelWidth = verticalBarRailWidth - 6;
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final fill = colorScheme.surfaceContainerHighest;
     final states = <WidgetState>{if (selected) WidgetState.selected};
     final iconTheme = navigationTheme.iconTheme?.resolve(states);
-    final labelStyle = navigationTheme.labelTextStyle?.resolve(states);
+    final labelStyle =
+        navigationTheme.labelTextStyle?.resolve(states) ??
+        theme.textTheme.labelMedium;
+    final indicator =
+        navigationTheme.indicatorColor ?? colorScheme.secondaryContainer;
+    // The selected label takes the ink and leaves the signal to the
+    // indicator and its icon, so the capsule shows one teal mark.
+    final labelColor = _legible(
+      selected
+          ? colorScheme.onSurface
+          : labelStyle?.color ?? colorScheme.onSurfaceVariant,
+      fill,
+      _textContrast,
+    );
+    final iconColor = selected
+        ? _legible(
+            iconTheme?.color ?? colorScheme.primary,
+            Color.alphaBlend(indicator, fill),
+            _iconContrast,
+          )
+        : labelColor;
+    final textScaler = MediaQuery.textScalerOf(context)
+        .clamp(maxScaleFactor: _labelMaxSize / _labelSize);
+    final localizations = MaterialLocalizations.of(context);
     return Semantics(
+      container: true,
+      role: SemanticsRole.tab,
       selected: selected,
       button: true,
-      label: tab.label,
+      label:
+          '${tab.label}\n'
+          '${localizations.tabLabel(tabIndex: index + 1, tabCount: count)}',
       onTap: onPressed,
       excludeSemantics: true,
-      child: InkWell(
-        onTap: onPressed,
-        customBorder: const StadiumBorder(),
-        child: SizedBox(
-          height: VerticalBarTabs.tabExtent,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                curve: Curves.easeOutCubic,
-                width: 44,
-                height: 28,
-                decoration: ShapeDecoration(
-                  color: selected
-                      ? navigationTheme.indicatorColor
-                      : Colors.transparent,
-                  shape: const StadiumBorder(),
+      // Stands in for UIKit's Large Content Viewer: a long press shows the
+      // name at the user's full text size, beside the rail.
+      child: Tooltip(
+        message: tab.label,
+        triggerMode: TooltipTriggerMode.longPress,
+        excludeFromSemantics: true,
+        positionDelegate: _besideRail,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const StadiumBorder(),
+          child: SizedBox(
+            width: double.infinity,
+            height: VerticalBarTabs.tabExtent,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOutCubic,
+                  width: 44,
+                  height: _indicatorHeight,
+                  decoration: ShapeDecoration(
+                    color: selected ? indicator : Colors.transparent,
+                    shape: const StadiumBorder(),
+                  ),
+                  child: Icon(
+                    selected ? tab.selectedIcon : tab.icon,
+                    size: iconTheme?.size ?? 22,
+                    color: iconColor,
+                  ),
                 ),
-                child: Icon(
-                  selected ? tab.selectedIcon : tab.icon,
-                  size: iconTheme?.size ?? 22,
-                  color: iconTheme?.color,
+                const SizedBox(height: _labelGap),
+                // Every label's box is as tall, so the destinations keep
+                // one rhythm when a long label shrinks.
+                SizedBox(
+                  width: _labelWidth,
+                  height: textScaler.scale(_labelSize) * _labelLineHeight,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.topCenter,
+                    child: Text(
+                      tab.label,
+                      maxLines: 1,
+                      softWrap: false,
+                      textAlign: TextAlign.center,
+                      textScaler: textScaler,
+                      style: (labelStyle ?? const TextStyle()).copyWith(
+                        fontSize: _labelSize,
+                        height: _labelLineHeight,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.w500,
+                        color: labelColor,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                tab.label,
-                maxLines: 1,
-                overflow: TextOverflow.visible,
-                softWrap: false,
-                textScaler: MediaQuery.textScalerOf(context)
-                    .clamp(maxScaleFactor: 1.15),
-                style: labelStyle?.copyWith(fontSize: 10, height: 1.1),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Centres the tooltip on the destination, on the side of the rail away
+  /// from the screen's edge, where the thumb on the tab does not cover it.
+  static Offset _besideRail(TooltipPositionContext context) {
+    const gap = 8.0;
+    final TooltipPositionContext(:target, :targetSize, :tooltipSize) = context;
+    final overlay = context.overlaySize;
+    final left = target.dx > overlay.width / 2
+        ? target.dx - targetSize.width / 2 - gap - tooltipSize.width
+        : target.dx + targetSize.width / 2 + gap;
+    return Offset(
+      left.clamp(gap, math.max(gap, overlay.width - tooltipSize.width - gap)),
+      (target.dy - tooltipSize.height / 2).clamp(
+        gap,
+        math.max(gap, overlay.height - tooltipSize.height - gap),
       ),
     );
   }
