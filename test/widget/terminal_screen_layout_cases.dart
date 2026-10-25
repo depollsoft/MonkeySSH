@@ -161,6 +161,34 @@ void registerTerminalScreenLayoutTests() {
         );
       });
 
+      test('terminal title subtitle names a program title once', () {
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: 'deploy@example.com · session #7',
+            iconName: 'Claude Code Workspace',
+            windowTitle: 'Claude Code Workspace',
+          ),
+          'deploy@example.com · session #7 · Claude Code Workspace',
+        );
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: 'session #8',
+            iconName: 'vim',
+            windowTitle: 'notes.md',
+          ),
+          'session #8 · vim · notes.md',
+        );
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: null,
+            iconName: '  ',
+            windowTitle: 'htop',
+          ),
+          'htop',
+        );
+        expect(formatTerminalTitleSubtitle(connectionIdentity: null), isEmpty);
+      });
+
       test('terminal identity includes remote host and session id', () {
         expect(
           formatTerminalConnectionIdentity(
@@ -218,7 +246,7 @@ void registerTerminalScreenLayoutTests() {
             'workspace',
             activeWindowTitle: resolveTmuxBarActiveWindowTitle(windows),
           ),
-          'workspace · ✨ Editing main.dart',
+          '✨ Editing main.dart · workspace',
         );
       });
 
@@ -244,7 +272,7 @@ void registerTerminalScreenLayoutTests() {
             'workspace',
             activeWindowTitle: resolveTmuxBarActiveWindowTitle(windows),
           ),
-          'workspace · Fix tmux session labels',
+          'Fix tmux session labels · workspace',
         );
       });
 

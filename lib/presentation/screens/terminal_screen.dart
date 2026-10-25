@@ -12266,17 +12266,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       port: _redactStoreScreenshotIdentities ? null : _host?.port,
       connectionId: _connectionId,
     );
-    final titleSubtitleSegments = <String>[];
-    if (connectionIdentity != null) {
-      titleSubtitleSegments.add(connectionIdentity);
-    }
-    if (!showsNativeAgent && (_iconName ?? '').isNotEmpty) {
-      titleSubtitleSegments.add(_iconName!);
-    }
-    if (!showsNativeAgent && (_windowTitle ?? '').isNotEmpty) {
-      titleSubtitleSegments.add(_windowTitle!);
-    }
-    final titleSubtitle = titleSubtitleSegments.join(' • ');
+    final titleSubtitle = formatTerminalTitleSubtitle(
+      connectionIdentity: connectionIdentity,
+      iconName: showsNativeAgent ? null : _iconName,
+      windowTitle: showsNativeAgent ? null : _windowTitle,
+    );
     final statusChips = _buildTerminalStatusChips(theme);
     final activeNativeKey = _activeNativeAcpSessionKey;
     final nativeActivitySnapshot = activeNativeKey == null

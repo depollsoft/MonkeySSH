@@ -87,6 +87,25 @@ String? formatTerminalConnectionIdentity({
   return '$hostWithPort · $sessionLabel';
 }
 
+/// Formats the terminal title's subtitle: the [connectionIdentity], then the
+/// remote program's [iconName] and [windowTitle].
+///
+/// OSC 0 sets the icon name and the window title to the same text, which
+/// appears once.
+String formatTerminalTitleSubtitle({
+  required String? connectionIdentity,
+  String? iconName,
+  String? windowTitle,
+}) {
+  final segments = <String>[];
+  for (final segment in [connectionIdentity, iconName, windowTitle]) {
+    final text = segment?.trim();
+    if (text == null || text.isEmpty || segments.contains(text)) continue;
+    segments.add(text);
+  }
+  return segments.join(' · ');
+}
+
 /// Resolves the user-visible text for a mux window notification.
 ///
 /// The title is the window the tap lands on (its navigator title, or the
@@ -1130,6 +1149,10 @@ int? resolveTmuxBarPendingSelectedWindowIndex(
 }
 
 /// Resolves the compact label shown in the tmux bar handle.
+///
+/// The active window's title leads, since it tells windows apart; the
+/// session name is the same for every window, so it trails and is what an
+/// ellipsis cuts first.
 String resolveTmuxBarHandleLabel(
   String tmuxSessionName, {
   String? activeWindowTitle,
@@ -1142,7 +1165,7 @@ String resolveTmuxBarHandleLabel(
   if (sessionName.isEmpty) {
     return title;
   }
-  return '$sessionName · $title';
+  return '$title · $sessionName';
 }
 
 final _oscEscapeSequencePattern = RegExp(
