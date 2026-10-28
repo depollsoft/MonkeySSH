@@ -203,7 +203,7 @@ class DuoCaptureTest(unittest.TestCase):
         with patch.object(validate, '_ocr_texts', return_value=texts), \
              patch.object(validate, '_validate_copilot_image_frame'):
             validate._validate_duo_ocr_content(paths)
-        texts[paths['duo_book_home']] = 'Hosts Add Host'
+        texts[paths['duo_book_home']] = 'Hosts Build runner'
         with patch.object(validate, '_ocr_texts', return_value=texts), \
              patch.object(validate, '_validate_copilot_image_frame'):
             with self.assertRaisesRegex(ValueError, 'missing expected store screenshot content: Connections'):
