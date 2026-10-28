@@ -199,7 +199,7 @@ const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
 const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -215,6 +215,7 @@ var (
 		"1004",
 		"1007",
 		"2004",
+		"5522",
 		"2031",
 	}
 	postReplayPrivateModes = []string{
@@ -227,6 +228,7 @@ var (
 		"1004",
 		"1007",
 		"2004",
+		"5522",
 		"2031",
 	}
 	groupedReplayPrivateModes = [][]string{
@@ -250,6 +252,7 @@ var (
 		"1049": {},
 		"2004": {},
 		"2031": {},
+		"5522": {},
 	}
 )
 
@@ -689,6 +692,12 @@ type muxServer struct {
 	// terminalOwesRepliesLocked. Guarded by mu.
 	detachedReplyClients map[*attachClient]struct{}
 
+	// kittyClipboardWriteWindow is the window whose OSC 5522 write is open on
+	// the attached clients; kittyClipboardRepliesOwedUntil is when they are
+	// last expected to be sending OSC 5522 replies (unix nanoseconds).
+	kittyClipboardWriteWindow      string
+	kittyClipboardRepliesOwedUntil atomic.Int64
+
 	mu                               sync.Mutex
 	resizeMu                         sync.Mutex
 	attachTransitionMu               sync.Mutex
@@ -850,6 +859,7 @@ type muxWindow struct {
 	notificationOscs           []pendingWindowOscNotification
 	historyStartTerminalOutput terminalOutputParserSnapshot
 	terminalOutputForwarding   bool
+	kittyClipboard             kittyClipboardWindowState
 	lastActivity               time.Time
 	outputGeneration           uint64
 	lastProcessMetadataRefresh time.Time
@@ -1054,8 +1064,11 @@ type attachWriteGate struct {
 type attachInputAction struct {
 	userInput      bool
 	bracketedPaste bool
-	windowID       string
-	data           []byte
+	// kittyClipboardReply marks an OSC 5522 reply for windowID, routed by its
+	// id rather than by the terminal-response tracking.
+	kittyClipboardReply bool
+	windowID            string
+	data                []byte
 }
 
 type attachInputRouting struct {
@@ -1129,6 +1142,7 @@ type attachClient struct {
 	focusClaim                            func(uint64)
 	inputPassthrough                      func([]byte)
 	inputDispatchMu                       sync.Mutex
+	kittyClipboardInput                   kittyClipboardInputState
 	inputQueueMu                          sync.Mutex
 	inputQueue                            []attachInputAction
 	inputQueueReady                       chan struct{}
@@ -6982,6 +6996,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.programStatusStepping = true
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
+	window.kittyClipboard.route = s.kittyClipboardRouteLocked(window)
 	wasAlert := window.alert
 	wasNotificationOscSeq := window.notificationOscSeq
 	// PTY output may contain real work even during a resize redraw pause.
@@ -7053,6 +7068,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint,
 	)
 	programStatusReplies := window.takeProgramStatusRepliesLocked()
+	kittyClipboardReplies := s.settleKittyClipboardOutputLocked(window, now)
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -7173,6 +7189,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	if len(programStatusReplies) > 0 {
 		s.queueWindowReply(window, programStatusReplies)
+	}
+	if len(kittyClipboardReplies) > 0 {
+		s.queueWindowReply(window, kittyClipboardReplies)
 	}
 	if len(themeHintData) > 0 {
 		s.queueWindowReply(window, themeHintData)
@@ -9099,6 +9118,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
+	client.kittyClipboardInput.owedUntil = &s.kittyClipboardRepliesOwedUntil
 	client.focusClaim = func(expectedFocusSequence uint64) {
 		s.focusAttachClientIfUnchanged(client, expectedFocusSequence)
 	}
@@ -9242,7 +9262,11 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		n, err := reader.Read(buf)
 		if n > 0 {
 			client.inputDispatchMu.Lock()
-			routing := client.routeInput(buf[:n])
+			input, clipboardReplies := client.splitKittyClipboardRepliesLocked(buf[:n], time.Now())
+			routing := client.routeInput(input)
+			if len(clipboardReplies) > 0 {
+				routing.actions = append(clipboardReplies, routing.actions...)
+			}
 			if routing.claimsFocus {
 				s.promoteAttachClient(client)
 			}
@@ -9269,6 +9293,10 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 		action, ok := client.nextInputAction()
 		if !ok {
 			return
+		}
+		if action.kittyClipboardReply {
+			_ = s.writeWindow(action.windowID, action.data)
+			continue
 		}
 		if action.userInput {
 			if s.handleAttachInputSerialized(
@@ -11463,6 +11491,7 @@ func privateModesForRestore(privateModes map[string]bool) map[string]bool {
 	}
 	for _, mode := range []string{
 		"1", "1000", "1002", "1003", "1004", "1006", "1007", "2004", "2031",
+		"5522",
 	} {
 		delete(copied, mode)
 	}
@@ -13914,6 +13943,19 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		}
 		sequenceEnd := payloadStart + payloadEnd + terminatorLength
 		payload := data[payloadStart : payloadStart+payloadEnd]
+		if isKittyClipboardOscPayload(payload) {
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			output = append(output, w.forwardKittyClipboardLocked(
+				payload,
+				data[payloadStart+payloadEnd:sequenceEnd],
+			)...)
+			copyStart = sequenceEnd
+			i = sequenceEnd
+			continue
+		}
 		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi=")) ||
 			bytes.HasPrefix(payload, []byte("1337;"+monkeyMuxAgentIdentityOSCPrefix))
 		queryKeys := themeQueryKeysFromOscPayload(string(payload))
@@ -14004,6 +14046,7 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 		}
 		shouldStrip := isQuery ||
 			isReplayUnsafeOscNotificationSequence(data[i:sequenceEnd]) ||
+			isKittyClipboardOscSequence(data[i:sequenceEnd]) ||
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
@@ -14294,6 +14337,11 @@ func (w *muxWindow) secondaryAttachOutputLocked(chunk []byte) []byte {
 					data[i:sequenceEnd]...,
 				)
 			}
+			output = append(output, data[copyStart:i]...)
+			copyStart = sequenceEnd
+		} else if isKittyClipboardOscSequence(data[i:sequenceEnd]) {
+			// Clipboard requests go to the primary client alone, which
+			// answers them.
 			output = append(output, data[copyStart:i]...)
 			copyStart = sequenceEnd
 		}
@@ -16898,7 +16946,7 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 func (w *muxWindow) resetTerminalModesLocked(full bool) {
 	modes := []string{"1", "6", "7", "1004", "2004"}
 	if full {
-		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "5522")
 		w.resetKeyboardModesLocked()
 	}
 	for _, mode := range modes {

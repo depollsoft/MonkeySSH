@@ -15,6 +15,7 @@ var attachInputModePrivateModes = []int{
 	1000, 1002, 1003, 1005, 1006, 1015, // mouse reporting
 	1004, // focus reporting
 	2004, // bracketed paste
+	5522, // kitty clipboard paste events
 	1,    // application cursor keys
 }
 
