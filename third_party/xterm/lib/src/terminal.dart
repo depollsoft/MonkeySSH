@@ -11,6 +11,7 @@ import 'package:xterm/src/core/cursor.dart';
 import 'package:xterm/src/core/escape/emitter.dart';
 import 'package:xterm/src/core/escape/handler.dart';
 import 'package:xterm/src/core/graphics_manager.dart';
+import 'package:xterm/src/core/kitty_graphics_validation.dart';
 import 'package:xterm/src/core/escape/parser.dart';
 import 'package:xterm/src/core/input/handler.dart';
 import 'package:xterm/src/core/input/kitty_keyboard.dart';
@@ -1703,7 +1704,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   void graphicsCommandStart(Map<String, String> args) {
     if (_graphicsActive) {
       if (_isBareContinuationArgs(args)) {
-        return; // continuation chunk; keep the first args
+        // A continuation chunk keeps the first chunk's keys, but a `q` on it
+        // replaces the quiet setting, as Kitty does.
+        final quiet = args['q'];
+        if (quiet != null && quiet.isNotEmpty && quiet != '0') {
+          _graphicsArgs = {..._graphicsArgs, 'q': quiet};
+        }
+        return;
       }
       // A first chunk (it carries the action/format/id keys) arrived while an
       // `m=1` transmission was still open, so that transmission's final chunk
@@ -1711,8 +1718,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       // native viewport pause mid-image. Treating this start as a no-op would
       // append this image's payload to the truncated one and finalize it under
       // the stale args, losing both. Drop the truncated transmission instead.
-      _graphicsActive = false;
-      _graphicsData.clear();
+      _abandonGraphicsTransmission();
     }
     if (_isBareContinuationArgs(args)) {
       // An orphaned continuation chunk: it carries only the `m` more-data flag,
@@ -1748,11 +1754,20 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// protocol attempts to interleave a complete image.
   bool submitGraphicsCommand(Map<String, String> args, List<int> data) {
     if (_graphicsActive) return false;
-    graphicsCommandStart(args);
-    graphicsDataChunk(data);
-    graphicsCommandEnd();
+    _graphicsAllowsEncodedFormat = true;
+    try {
+      graphicsCommandStart(args);
+      graphicsDataChunk(data);
+      graphicsCommandEnd();
+    } finally {
+      _graphicsAllowsEncodedFormat = false;
+    }
     return true;
   }
+
+  // Set while [submitGraphicsCommand] runs: only the app's own bridges may use
+  // the private any-container format (f=98).
+  bool _graphicsAllowsEncodedFormat = false;
 
   /// Fits an encoded image inside a terminal-cell bounding box while
   /// preserving its decoded pixel aspect ratio as closely as cell rounding
@@ -1787,8 +1802,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (!_graphicsActive) return;
     if (_graphicsData.length + data.length > _maxGraphicsBytes) {
       // Discard oversized transmissions instead of growing without bound.
-      _graphicsActive = false;
-      _graphicsData.clear();
+      final args = _graphicsArgs;
+      _abandonGraphicsTransmission();
+      final manager = _buffer.graphics;
+      _scheduleGraphicsOperation(
+        manager,
+        args,
+        () => _respondToGraphics(args, 'EFBIG: too much image data'),
+      );
       return;
     }
     _graphicsData.addAll(data);
@@ -1796,13 +1817,39 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void graphicsCommandAbort() {
-    // An ESC ended the command before its terminator, so whatever an earlier
-    // `m=1` chunk opened can never be completed. Dropping it keeps the next
-    // real image from being swallowed as a continuation of this one.
+    // An ESC, CAN or SUB ended the command before its terminator, so whatever
+    // an earlier `m=1` chunk opened can never be completed. Dropping it keeps
+    // the next real image from being swallowed as a continuation of this one.
     if (!_graphicsActive) return;
+    _abandonGraphicsTransmission();
+  }
+
+  /// Drops a chunked transmission that will never complete. A retransmission
+  /// of an explicit image id replaced the old image the moment it began, as
+  /// in Kitty, so that image goes too rather than staying on as stale data.
+  void _abandonGraphicsTransmission() {
+    final args = _graphicsArgs;
     _graphicsActive = false;
     _graphicsData.clear();
+    final action = args['a'] ?? 't';
+    final imageId = int.tryParse(args['i'] ?? '') ?? 0;
+    if ((action == 't' || action == 'T') &&
+        imageId > 0 &&
+        !_hasConflictingImageIdentifiers(args)) {
+      final manager = _buffer.graphics;
+      _scheduleGraphicsOperation(
+        manager,
+        args,
+        () => manager.replaceImageForRetransmission(imageId, keepData: false),
+      );
+    }
   }
+
+  /// Whether a command names both an image id and an image number, which the
+  /// Kitty protocol forbids for every action.
+  static bool _hasConflictingImageIdentifiers(Map<String, String> args) =>
+      (int.tryParse(args['i'] ?? '') ?? 0) > 0 &&
+      (int.tryParse(args['I'] ?? '') ?? 0) > 0;
 
   @override
   void graphicsCommandEnd() {
@@ -1814,75 +1861,70 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _graphicsData.clear();
 
     if (!kittyGraphicsEnabled) {
-      _respondToGraphicsFailure(args, 'ENOTSUP: graphics disabled');
+      _respondToGraphics(args, 'ENOTSUP: graphics disabled');
       return;
     }
 
-    if (args['a'] == 'q') {
-      _respondToGraphicsQuery(args, data);
+    // Kitty rejects an unknown action, delete selector, medium or compression
+    // while parsing, with no reply at all.
+    if (!kittyGraphicsFlagKeysValid(args)) {
+      return;
+    }
+
+    final manager = _buffer.graphics;
+    if (_hasConflictingImageIdentifiers(args)) {
+      _scheduleGraphicsOperation(
+        manager,
+        args,
+        () => _respondToGraphics(
+          args,
+          'EINVAL: image ID and number are mutually exclusive',
+        ),
+      );
       return;
     }
 
     final action = args['a'] ?? 't';
-    final virtualPlacement = args['U'] == '1';
-    final manager = _buffer.graphics;
-    final explicitImageId = int.tryParse(args['i'] ?? '');
-    final imageNumber = int.tryParse(args['I'] ?? '');
-    _GraphicsImageNumberReservation? imageNumberReservation;
-    if (explicitImageId != null &&
-        explicitImageId > 0 &&
-        imageNumber != null &&
-        imageNumber > 0) {
-      if ((action == 't' || action == 'T') && data.isNotEmpty) {
-        final reservation = manager.reserveExplicitImageIdForNumber(
-          imageNumber,
-          explicitImageId,
-        );
-        if (!reservation.accepted) {
-          _respondToGraphicsFailure(
-            args,
-            'ENOSPC: image-number limit exceeded',
-          );
-          return;
-        }
-        imageNumberReservation = (
-          number: imageNumber,
-          imageId: explicitImageId,
-          previousImageId: reservation.previousImageId,
-        );
-      } else {
-        // Establish explicit id/number mappings before placement or async image
-        // commands so every action in the stream observes the same association.
-        if (!manager.registerImageNumber(imageNumber, explicitImageId)) {
-          _respondToGraphicsFailure(
-            args,
-            'ENOSPC: image-number limit exceeded',
-          );
-          return;
-        }
-      }
+    if (action == 'q') {
+      _respondToGraphicsQuery(args, data);
+      return;
     }
     if (action == 'p') {
-      if (virtualPlacement) {
-        _setVirtualGraphicsPlacement(args);
-      } else {
-        _placeStoredGraphics(args);
-      }
+      _placeStoredGraphics(args);
       return;
     }
 
-    if (imageNumberReservation == null &&
-        (action == 't' || action == 'T') &&
+    final explicitImageId = int.tryParse(args['i'] ?? '') ?? 0;
+    if (action == 't' || action == 'T') {
+      // Reject what Kitty rejects before looking at the data. The old image
+      // is gone all the same: a retransmission replaces it as it starts.
+      final error = kittyGraphicsTransmissionError(
+            args,
+            allowEncoded: _graphicsAllowsEncodedFormat,
+          ) ??
+          _graphicsRawPayloadError(args, data);
+      if (error != null) {
+        _scheduleGraphicsOperation(manager, args, () {
+          manager.replaceImageForRetransmission(
+            explicitImageId,
+            keepData: false,
+          );
+          _respondToGraphics(args, error);
+        });
+        return;
+      }
+    }
+
+    final imageNumber = int.tryParse(args['I'] ?? '');
+    _GraphicsImageNumberReservation? imageNumberReservation;
+    if ((action == 't' || action == 'T') &&
         data.isNotEmpty &&
-        (explicitImageId == null || explicitImageId <= 0) &&
+        explicitImageId <= 0 &&
         imageNumber != null &&
         imageNumber > 0) {
       final reserved = manager.reserveImageIdForNumber(imageNumber);
       if (reserved.imageId <= 0) {
-        _respondToGraphicsFailure(
-          args,
-          'ENOSPC: image-number limit exceeded',
-        );
+        _respondToGraphics(args, 'ENOSPC: image-number limit exceeded');
         return;
       }
       imageNumberReservation = (
@@ -1922,7 +1964,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         _scheduleGraphicsOperation(
           manager,
           args,
-          () async => _deleteGraphics(
+          () => _deleteGraphics(
             args,
             position,
             commandImageId: commandImageId,
@@ -1931,7 +1973,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       } else {
         _scheduleGraphicsBarrier(
           manager,
-          () async => _deleteGraphics(
+          () => _deleteGraphics(
             args,
             position,
             commandImageId: commandImageId,
@@ -2010,16 +2052,21 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     }
 
     // Only transmit (a=t) and transmit-and-display (a=T) remain.
-    if ((action != 't' && action != 'T') || data.isEmpty) {
+    if (action != 't' && action != 'T') {
       return;
     }
     // a=T transmits and displays at the cursor. When U=1 is also set the client
     // is using the Unicode placeholder protocol: the image is displayed by
     // U+10EEEE placeholder cells (see `_paintKittyPlaceholderGraphics`), not a
     // physical placement, so creating one here would draw a second, misplaced
-    // copy. Only place — and advance the cursor — for a non-virtual a=T.
+    // copy. Only place — and advance the cursor — for a non-virtual a=T. A
+    // relative placement (P=) is placed from its parent once the image is
+    // stored, and never moves the cursor.
+    final virtualPlacement = _graphicsFlag(args['U']);
+    final relativePlacement =
+        !virtualPlacement && (int.tryParse(args['P'] ?? '') ?? 0) > 0;
     final shouldPlace = action == 'T' && !virtualPlacement;
-    if (virtualPlacement) {
+    if (virtualPlacement && (int.tryParse(args['P'] ?? '') ?? 0) <= 0) {
       _setVirtualGraphicsPlacement(args);
     }
 
@@ -2027,21 +2074,21 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // any further output can move the cursor. Bind it to the buffer that is
     // active at command time so a later buffer switch can't misplace it.
     final buffer = _buffer;
+    final anchored = shouldPlace && !relativePlacement;
     final anchor =
-        shouldPlace ? buffer.currentLine.createAnchor(buffer.cursorX) : null;
-    final generation = shouldPlace ? buffer.graphics.generation : null;
+        anchored ? buffer.currentLine.createAnchor(buffer.cursorX) : null;
+    final generation = anchored ? buffer.graphics.generation : null;
     if (anchor != null) {
       buffer.graphics.retainPendingPlacementAnchor(anchor);
     }
 
-    // Move the cursor below the image so following output does not overlap it,
+    // Move the cursor past the image so following output does not overlap it,
     // unless the client set the no-cursor-movement policy (C=1) — e.g. a client
     // redrawing a full-screen image in place keeps the cursor where it is, and
     // advancing it past the bottom margin would scroll the screen.
-    final keepCursor = args['C'] == '1';
+    final moveCursor = anchored && !_graphicsFlag(args['C'], one: true);
     _GraphicsPreinflation? preinflation;
-    if (shouldPlace &&
-        !keepCursor &&
+    if (moveCursor &&
         args['o'] == 'z' &&
         _graphicsDisplayNeedsPayloadDimensions(args)) {
       final observer = terminalGraphicsDecodeObserver;
@@ -2051,47 +2098,89 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         micros: stopwatch?.elapsedMicroseconds ?? 0,
       );
     }
-    final rows = shouldPlace && !keepCursor
-        ? _graphicsDisplayRows(
-            args,
-            data,
-            buffer.graphics,
-            preinflation: preinflation,
-            maxRows: buffer.viewHeight,
-          )
-        : 0;
-    if (shouldPlace && !keepCursor) {
-      _advanceGraphicsCursor(buffer, rows);
+    if (moveCursor) {
+      _advanceGraphicsCursor(
+        buffer,
+        _graphicsDisplaySpan(
+          args,
+          buffer.graphics,
+          _graphicsPayloadDimensionsForDisplay(args, data, preinflation),
+          column: buffer.cursorX,
+        ),
+      );
     }
 
-    _scheduleGraphicsOperation(
-      buffer.graphics,
-      args,
-      () async {
-        try {
-          await _finalizeGraphics(
-            args,
-            data,
-            anchor,
-            buffer.graphics,
-            generation,
-            preinflation: preinflation,
-            commandImageId: commandImageId,
-            imageNumberReservation: imageNumberReservation,
-          );
-        } finally {
-          if (anchor != null) {
-            buffer.graphics.releasePendingPlacementAnchor(anchor);
-          }
+    buffer.graphics.beginImageTransmission(explicitImageId);
+    FutureOr<void> transmit() {
+      void finish() {
+        buffer.graphics.endImageTransmission(explicitImageId);
+        if (anchor != null) {
+          buffer.graphics.releasePendingPlacementAnchor(anchor);
         }
-      },
+      }
+
+      final FutureOr<void> result;
+      try {
+        result = _finalizeGraphics(
+          args,
+          data,
+          anchor,
+          buffer.graphics,
+          generation,
+          preinflation: preinflation,
+          commandImageId: commandImageId,
+          imageNumberReservation: imageNumberReservation,
+        );
+      } catch (_) {
+        finish();
+        rethrow;
+      }
+      if (result is Future<void>) return result.whenComplete(finish);
+      finish();
+    }
+
+    if (relativePlacement) {
+      // The parent can belong to any image, so wait for every queued image
+      // operation.
+      _scheduleGraphicsBarrier(buffer.graphics, transmit);
+    } else {
+      _scheduleGraphicsOperation(buffer.graphics, args, transmit);
+    }
+  }
+
+  /// The error an uncompressed transmission's data gets before it is queued:
+  /// none at all, or raw pixels whose size does not match `s` x `v`. Cheap
+  /// checks only; PNG data is checked when the command runs.
+  String? _graphicsRawPayloadError(Map<String, String> args, Uint8List data) {
+    if (data.isEmpty) return 'EINVAL: missing image data';
+    if (args['o'] == 'z') return null;
+    final format = _graphicsFormat(args);
+    if (format != kittyGraphicsFormatRgb && format != kittyGraphicsFormatRgba) {
+      return null;
+    }
+    return kittyGraphicsPayloadError(
+      format,
+      data,
+      width: int.tryParse(args['s'] ?? '') ?? 0,
+      height: int.tryParse(args['v'] ?? '') ?? 0,
     );
   }
 
+  /// Reads a Kitty boolean key the way Kitty does: any non-zero value is true,
+  /// or, with [one], only exactly 1 (the cursor movement key `C`).
+  static bool _graphicsFlag(String? value, {bool one = false}) {
+    final parsed = int.tryParse(value ?? '') ?? 0;
+    return one ? parsed == 1 : parsed != 0;
+  }
+
+  /// Runs a graphics operation after every earlier operation on the same image
+  /// (and any barrier). An operation with nothing to wait for runs at once,
+  /// and one that completes synchronously holds nothing up after it, so
+  /// commands on an idle image still take effect before the next output.
   void _scheduleGraphicsOperation(
     GraphicsManager manager,
     Map<String, String> args,
-    Future<void> Function() operation,
+    FutureOr<void> Function() operation,
   ) {
     final key =
         _graphicsOperationKey(manager, args) ?? _graphicsUnkeyedOperationKey;
@@ -2102,9 +2191,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       if (previous != null) previous,
       if (barrier != null) barrier,
     };
-    final future = blockers.isEmpty
+    final result = blockers.isEmpty
         ? operation()
         : Future.wait(blockers).then((_) => operation());
+    if (result is! Future<void>) {
+      if (operations.isEmpty) _graphicsOperations.remove(manager);
+      return;
+    }
+    final future = result;
     operations[key] = future;
     unawaited(
       future.whenComplete(() {
@@ -2123,13 +2217,18 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// barrier because they have no image id to share a per-image queue with.
   void _scheduleGraphicsBarrier(
     GraphicsManager manager,
-    Future<void> Function() operation,
+    FutureOr<void> Function() operation,
   ) {
     final operations = _graphicsOperations.putIfAbsent(manager, () => {});
     final blockers = operations.values.toSet();
-    final future = blockers.isEmpty
+    final result = blockers.isEmpty
         ? operation()
         : Future.wait(blockers).then((_) => operation());
+    if (result is! Future<void>) {
+      if (operations.isEmpty) _graphicsOperations.remove(manager);
+      return;
+    }
+    final future = result;
     operations[_graphicsBarrierOperationKey] = future;
     unawaited(
       future.whenComplete(() {
@@ -2181,18 +2280,18 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     int? commandImageId,
   }) async {
     if (data.isEmpty) {
-      _respondToGraphicsFailure(args, 'EINVAL: missing frame data');
+      _respondToGraphics(args, 'EINVAL: missing frame data');
       return;
     }
     manager.onChanged ??= notifyListeners;
     final imageId = commandImageId ?? _resolveGraphicsImageId(manager, args);
     if (imageId == null) {
-      _respondToGraphicsFailure(args, 'ENOENT: image not found');
+      _respondToGraphics(args, 'ENOENT: image not found');
       return;
     }
     final image = await manager.resolveImage(imageId);
     if (image == null) {
-      _respondToGraphicsFailure(args, 'ENOENT: image not found');
+      _respondToGraphics(args, 'ENOENT: image not found');
       return;
     }
 
@@ -2214,7 +2313,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           imageId: imageId.toString(),
           action: 'f',
         );
-        _respondToGraphicsFailure(args, 'EINVAL: invalid compressed frame');
+        _respondToGraphics(args, 'EINVAL: invalid compressed frame');
         return;
       }
       payload = inflated;
@@ -2248,7 +2347,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       reused: false,
     );
     if (decoded == null) {
-      _respondToGraphicsFailure(args, 'EINVAL: invalid frame data');
+      _respondToGraphics(args, 'EINVAL: invalid frame data');
       return;
     }
 
@@ -2278,9 +2377,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         'EINVAL: frame composition failed',
     };
     if (error == null) {
-      _respondToGraphicsSuccess(args);
+      _respondToGraphics(args, null);
     } else {
-      _respondToGraphicsFailure(args, error);
+      _respondToGraphics(args, error);
     }
   }
 
@@ -2300,12 +2399,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       if (imageId == null ||
           (manager.imageById(imageId) == null &&
               !manager.hasPendingImage(imageId))) {
-        _respondToGraphicsFailure(args, 'ENOENT: image not found');
+        _respondToGraphics(args, 'ENOENT: image not found');
       }
       return;
     }
     if (imageId == null || await manager.resolveImage(imageId) == null) {
-      _respondToGraphicsFailure(args, 'ENOENT: image not found');
+      _respondToGraphics(args, 'ENOENT: image not found');
       return;
     }
 
@@ -2333,7 +2432,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     manager.onChanged ??= notifyListeners;
     final imageId = commandImageId ?? _resolveGraphicsImageId(manager, args);
     if (imageId == null) {
-      _respondToGraphicsFailure(args, 'ENOENT: image not found');
+      _respondToGraphics(args, 'ENOENT: image not found');
       return;
     }
     await manager.resolveImage(imageId);
@@ -2351,7 +2450,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       destinationY: int.tryParse(args['y'] ?? '') ?? 0,
       width: int.tryParse(args['w'] ?? '') ?? 0,
       height: int.tryParse(args['h'] ?? '') ?? 0,
-      replace: args['C'] == '1',
+      // Kitty overwrites for any non-zero C here.
+      replace: _graphicsFlag(args['C']),
     );
     final error = switch (result) {
       TerminalAnimationCompositionResult.success => null,
@@ -2366,9 +2466,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         'EINVAL: frame composition failed',
     };
     if (error == null) {
-      _respondToGraphicsSuccess(args);
+      _respondToGraphics(args, null);
     } else {
-      _respondToGraphicsFailure(args, error);
+      _respondToGraphics(args, error);
     }
   }
 
@@ -2380,34 +2480,37 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     return Duration(milliseconds: max(0, milliseconds));
   }
 
-  void _respondToGraphicsFailure(
+  /// Answers a graphics command with OK, or [error], as Kitty does: only when
+  /// it names an image id or number, echoing `i`, `I` and `p`, and not when
+  /// `q` silences it (`q=1` silences OK, `q=2` or above everything).
+  /// [imageId] is the id the image was stored under, when the terminal picked
+  /// it for an `I=` number.
+  void _respondToGraphics(
     Map<String, String> args,
-    String error,
-  ) {
-    if (_graphicsResponseSuppressed(args, success: false)) {
+    String? error, {
+    int? imageId,
+  }) {
+    if (_graphicsResponseSuppressed(args, success: error == null)) {
       return;
     }
-    final control = <String>[
-      if (args['i'] case final imageId? when imageId.isNotEmpty) 'i=$imageId',
-      if (args['I'] case final imageNumber? when imageNumber.isNotEmpty)
-        'I=$imageNumber',
-    ];
-    onOutput?.call('\x1b_G${control.join(',')};$error\x1b\\');
-  }
-
-  void _respondToGraphicsSuccess(Map<String, String> args) {
-    if (_graphicsResponseSuppressed(args, success: true)) {
+    final id = imageId ?? int.tryParse(args['i'] ?? '') ?? 0;
+    final number = int.tryParse(args['I'] ?? '') ?? 0;
+    if (id <= 0 && number <= 0) {
       return;
     }
+    final placementId = int.tryParse(args['p'] ?? '') ?? 0;
     final control = <String>[
-      if (args['i'] case final imageId? when imageId.isNotEmpty) 'i=$imageId',
-      if (args['I'] case final imageNumber? when imageNumber.isNotEmpty)
-        'I=$imageNumber',
+      if (id > 0) 'i=$id',
+      if (number > 0) 'I=$number',
+      if (placementId > 0) 'p=$placementId',
     ];
-    onOutput?.call('\x1b_G${control.join(',')};OK\x1b\\');
+    onOutput?.call('\x1b_G${control.join(',')};${error ?? 'OK'}\x1b\\');
   }
 
-  Future<void> _finalizeGraphics(
+  /// Stores (and places) a completed transmission. Everything up to the
+  /// decode runs synchronously, so a store-only or reused image is in place
+  /// before the next command; only an eager decode returns a future.
+  FutureOr<void> _finalizeGraphics(
     Map<String, String> args,
     Uint8List data,
     CellAnchor? anchor,
@@ -2416,7 +2519,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _GraphicsPreinflation? preinflation,
     int? commandImageId,
     _GraphicsImageNumberReservation? imageNumberReservation,
-  }) async {
+  }) {
     final format = _graphicsFormat(args);
     final width = int.tryParse(args['s'] ?? '') ?? 0;
     final height = int.tryParse(args['v'] ?? '') ?? 0;
@@ -2427,6 +2530,39 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
     final observer = terminalGraphicsDecodeObserver;
     final compressed = args['o'] == 'z';
+
+    final parsedImageId = int.tryParse(args['i'] ?? '');
+    final explicitImageId =
+        parsedImageId != null && parsedImageId > 0 ? parsedImageId : null;
+    final imageId = explicitImageId ?? commandImageId;
+    // Signature over the base64-decoded payload *before* inflation. The
+    // MonkeyMux server computes the same hash over the base64-decoded
+    // transmission bytes (which it stores compressed for o=z), so hashing
+    // pre-inflate lets the server match without having to decompress, and keeps
+    // the client/server skip protocol in agreement.
+    final signature = terminalGraphicsSourceSignature(data);
+
+    // Retransmitting an image id replaces the image: Kitty deletes the old one
+    // with every placement as the new data starts loading, so a load that
+    // fails leaves no stale image behind. Commands on the same image wait for
+    // this one, so the old image is only dropped once the outcome is known,
+    // just before the new one is stored: it keeps painting while the new one
+    // decodes, where a synchronous Kitty would show no gap either.
+    void replaceOldImage({required bool keepData}) {
+      if (explicitImageId != null) {
+        manager.replaceImageForRetransmission(
+          explicitImageId,
+          keepData: keepData,
+        );
+      }
+    }
+
+    void fail(String error) {
+      replaceOldImage(keepData: false);
+      _rollbackGraphicsImageNumberReservation(manager, imageNumberReservation);
+      anchor?.dispose();
+      _respondToGraphics(args, error, imageId: imageId);
+    }
 
     // Inflate zlib-compressed payloads (o=z) before decoding. This runs
     // synchronously on the UI thread, so time it separately from the decode.
@@ -2453,26 +2589,24 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           imageId: args['i'],
           action: args['a'],
         );
-        _rollbackGraphicsImageNumberReservation(
-          manager,
-          imageNumberReservation,
-        );
-        anchor?.dispose();
-        return;
+        fail('EINVAL: invalid compressed data');
+        return null;
       }
       payload = inflated;
+      final rawError =
+          format == kittyGraphicsFormatRgb || format == kittyGraphicsFormatRgba
+              ? kittyGraphicsPayloadError(
+                  format,
+                  payload,
+                  width: width,
+                  height: height,
+                )
+              : null;
+      if (rawError != null) {
+        fail(rawError);
+        return null;
+      }
     }
-
-    final parsedImageId = int.tryParse(args['i'] ?? '');
-    final imageId = parsedImageId != null && parsedImageId > 0
-        ? parsedImageId
-        : commandImageId;
-    // Signature over the base64-decoded payload *before* inflation. The
-    // MonkeyMux server computes the same hash over the base64-decoded
-    // transmission bytes (which it stores compressed for o=z), so hashing
-    // pre-inflate lets the server match without having to decompress, and keeps
-    // the client/server skip protocol in agreement.
-    final signature = terminalGraphicsSourceSignature(data);
 
     // Dedup: if this id is already decoded from identical bytes, reuse it and
     // skip the expensive decode. A window switch replays the active window's
@@ -2481,6 +2615,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // compositing. The signature guards against an app that updates an id with
     // new content (different bytes -> miss -> decode).
     if (imageId != null && manager.hasImageWithSignature(imageId, signature)) {
+      replaceOldImage(keepData: true);
       manager.imageById(imageId); // keep retained and bump LRU access
       observer?.call(
         payloadBytes: payload.length,
@@ -2496,22 +2631,42 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         manager,
         imageNumberReservation,
       );
-      _placeStoredImageId(manager, imageId, anchor, args, generation);
-      return;
+      _respondToGraphics(
+        args,
+        _placeStoredImageId(manager, imageId, anchor, args, generation),
+        imageId: imageId,
+      );
+      return null;
     }
 
     // Defer decoding of images that are not being placed right now (store-only
-    // `a=t`, or a virtual `a=T,U=1` placeholder backing). A MonkeyMux window
-    // switch replays every retained image up front, but the foreground app only
-    // re-displays the few currently on screen, so decoding them all eagerly
-    // burns CPU, memory and raster bandwidth on images the user never sees.
-    // Keep the encoded payload and decode on first paint reference instead.
-    // Compressed (`o=z`) and immediately-placed (`a=T`) images keep the eager
-    // path: the former to avoid deferring the inflate/signature handling, the
-    // latter because they must appear at the anchored cell straight away.
+    // `a=t`, a virtual `a=T,U=1` placeholder backing, or an `a=T` placed
+    // relative to a parent). A MonkeyMux window switch replays every retained
+    // image up front, but the foreground app only re-displays the few currently
+    // on screen, so decoding them all eagerly burns CPU, memory and raster
+    // bandwidth on images the user never sees. Keep the encoded payload and
+    // decode on first paint reference instead. Compressed (`o=z`) and
+    // immediately-placed (`a=T`) images keep the eager path: the former to
+    // avoid deferring the inflate/signature handling, the latter because they
+    // must appear at the anchored cell straight away.
     if (anchor == null && imageId != null && !compressed) {
       if (imageNumberReservation != null ||
           !manager.hasPendingWithSignature(imageId, signature)) {
+        // The decode comes later, so only a structural check can tell the
+        // client its data is bad; skip it when no answer could be sent.
+        final payloadError = _graphicsResponseSuppressed(args, success: false)
+            ? null
+            : kittyGraphicsPayloadError(
+                format,
+                payload,
+                width: width,
+                height: height,
+              );
+        if (payloadError != null) {
+          fail(payloadError);
+          return null;
+        }
+        replaceOldImage(keepData: false);
         final sourceDimensions = _graphicsPayloadDimensions(args, payload);
         manager.storePendingImage(
           imageId,
@@ -2522,27 +2677,69 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           sourceWidth: sourceDimensions?.width ?? 0,
           sourceHeight: sourceDimensions?.height ?? 0,
           sourceSignature: signature,
+          transient: _graphicsTransientHint(args),
           imageNumber: imageNumberReservation?.number,
           mappedImageId: imageNumberReservation?.imageId,
           previousImageId: imageNumberReservation?.previousImageId,
         );
+      } else {
+        replaceOldImage(keepData: true);
       }
       if (!manager.hasPendingImage(imageId)) {
         _rollbackGraphicsImageNumberReservation(
           manager,
           imageNumberReservation,
         );
-        _respondToGraphicsFailure(
+        _respondToGraphics(
           args,
           'ENOSPC: pending image memory limit exceeded',
+          imageId: imageId,
         );
-        return;
+        return null;
       }
-      _placeStoredImageId(manager, imageId, null, args, generation);
+      final error = _placeStoredImageId(manager, imageId, null, args, null);
       notifyListeners();
-      return;
+      _respondToGraphics(args, error, imageId: imageId);
+      return null;
     }
 
+    return _decodeAndPlaceGraphics(
+      args,
+      payload,
+      anchor,
+      manager,
+      generation,
+      format: format,
+      width: width,
+      height: height,
+      imageId: imageId,
+      signature: signature,
+      compressed: compressed,
+      inflateMicros: inflateMicros,
+      imageNumberReservation: imageNumberReservation,
+      fail: fail,
+      replaceOldImage: () => replaceOldImage(keepData: false),
+    );
+  }
+
+  Future<void> _decodeAndPlaceGraphics(
+    Map<String, String> args,
+    Uint8List payload,
+    CellAnchor? anchor,
+    GraphicsManager manager,
+    int? generation, {
+    required int format,
+    required int width,
+    required int height,
+    required int? imageId,
+    required int signature,
+    required bool compressed,
+    required int inflateMicros,
+    required _GraphicsImageNumberReservation? imageNumberReservation,
+    required void Function(String error) fail,
+    required void Function() replaceOldImage,
+  }) async {
+    final observer = terminalGraphicsDecodeObserver;
     final decodeStopwatch = observer == null ? null : (Stopwatch()..start());
     await terminalGraphicsDecodeGate.acquire();
     final decoded = await () async {
@@ -2572,39 +2769,41 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // screen was cleared while we were decoding (e.g. a MonkeyMux replay clear
     // racing this decode — placing now would leave a duplicate/stale image).
     if (decoded == null) {
-      _rollbackGraphicsImageNumberReservation(
-        manager,
-        imageNumberReservation,
-      );
-      anchor?.dispose();
+      fail('EINVAL: invalid image data');
       return;
     }
 
+    replaceOldImage();
     final storedImageId = imageId == null
-        ? manager.storeDecodedImage(decoded, sourceSignature: signature)
+        ? manager.storeDecodedImage(
+            decoded,
+            sourceSignature: signature,
+            transient: _graphicsTransientHint(args),
+          )
         : manager.storeDecodedImageWithId(
             imageId,
             decoded,
             sourceSignature: signature,
+            transient: _graphicsTransientHint(args),
           );
     if (storedImageId <= 0) {
-      _rollbackGraphicsImageNumberReservation(
-        manager,
-        imageNumberReservation,
-      );
-      anchor?.dispose();
-      _respondToGraphicsFailure(
-        args,
-        'ENOSPC: image memory limit exceeded',
-      );
+      fail('ENOSPC: image memory limit exceeded');
       return;
     }
     _commitGraphicsImageNumberReservation(
       manager,
       imageNumberReservation,
     );
-    _placeStoredImageId(manager, storedImageId, anchor, args, generation);
+    _respondToGraphics(
+      args,
+      _placeStoredImageId(manager, storedImageId, anchor, args, generation),
+      imageId: imageId,
+    );
   }
+
+  /// Whether a transmission carries Kitty's transient usage hint (`N=1`).
+  static bool _graphicsTransientHint(Map<String, String> args) =>
+      ((int.tryParse(args['N'] ?? '') ?? 0) & 1) != 0;
 
   void _rollbackGraphicsImageNumberReservation(
     GraphicsManager manager,
@@ -2633,35 +2832,35 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     );
   }
 
-  /// Registers the image number, virtual placement and cell placement for an
-  /// already-stored [storedImageId]. Shared by the fresh-decode and the
-  /// dedup-reuse paths so both honor the same Kitty display keys and the
-  /// decode-race anchor/generation check.
-  void _placeStoredImageId(
+  /// Registers the virtual placement and the cell or relative placement for
+  /// an already-stored [storedImageId]. An `I=` number was mapped when its id
+  /// was reserved. Shared by the
+  /// fresh-decode and the dedup-reuse paths so both honor the same Kitty
+  /// display keys and the decode-race anchor/generation check. Returns the
+  /// error the display part of the command gets, if any.
+  String? _placeStoredImageId(
     GraphicsManager manager,
     int storedImageId,
     CellAnchor? anchor,
     Map<String, String> args,
     int? generation,
   ) {
-    // Associate a client image number (`I=`) with the stored id and answer the
-    // handshake so the client learns the id it can address later.
-    final imageNumber = int.tryParse(args['I'] ?? '');
-    if (imageNumber != null && imageNumber > 0) {
-      final explicitImageId = int.tryParse(args['i'] ?? '');
-      if (explicitImageId == null || explicitImageId <= 0) {
-        manager.registerImageNumber(imageNumber, storedImageId);
+    final parentImageId = int.tryParse(args['P'] ?? '') ?? 0;
+    if (_graphicsFlag(args['U'])) {
+      if (parentImageId > 0) {
+        notifyListeners();
+        return 'EINVAL: virtual placement cannot refer to a parent';
       }
-      if (!_graphicsResponseSuppressed(args, success: true)) {
-        onOutput?.call('\x1b_GI=$imageNumber,i=$storedImageId;OK\x1b\\');
-      }
-    }
-    if (args['U'] == '1') {
       manager.setVirtualPlacement(
         storedImageId,
         cols: int.tryParse(args['c'] ?? '') ?? 0,
         rows: int.tryParse(args['r'] ?? '') ?? 0,
+        clientPlacementId: int.tryParse(args['p'] ?? '') ?? 0,
       );
+    } else if (parentImageId > 0 && args['a'] == 'T') {
+      final error = _placeRelativeGraphics(manager, storedImageId, args);
+      notifyListeners();
+      return error;
     }
     if (anchor != null) {
       if (!anchor.attached || manager.generation != generation) {
@@ -2671,11 +2870,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         // retained for Unicode-placeholder reuse, rather than leaving it in the
         // cache until the next erase or memory-pressure eviction.
         manager.pruneUnreferencedImages();
-        return;
+        return null;
       }
       _placeImageWithDisplayArgs(manager, storedImageId, anchor, args);
     }
     notifyListeners();
+    return null;
   }
 
   /// Creates a placement from the display-related Kitty graphics keys: cell span
@@ -2703,43 +2903,153 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     );
   }
 
+  /// Places [imageId] relative to the parent the Kitty keys `P`/`Q` name,
+  /// offset by `H`/`V` cells. Returns the protocol error when it is rejected.
+  String? _placeRelativeGraphics(
+    GraphicsManager manager,
+    int imageId,
+    Map<String, String> args,
+  ) {
+    final result = manager.placeRelativeImage(
+      imageId,
+      parentImageId: int.tryParse(args['P'] ?? '') ?? 0,
+      parentPlacementId: int.tryParse(args['Q'] ?? '') ?? 0,
+      horizontalOffset: int.tryParse(args['H'] ?? '') ?? 0,
+      verticalOffset: int.tryParse(args['V'] ?? '') ?? 0,
+      cols: int.tryParse(args['c'] ?? '') ?? 0,
+      rows: int.tryParse(args['r'] ?? '') ?? 0,
+      z: int.tryParse(args['z'] ?? '') ?? 0,
+      clientPlacementId: int.tryParse(args['p'] ?? '') ?? 0,
+      srcX: int.tryParse(args['x'] ?? '') ?? 0,
+      srcY: int.tryParse(args['y'] ?? '') ?? 0,
+      srcWidth: int.tryParse(args['w'] ?? '') ?? 0,
+      srcHeight: int.tryParse(args['h'] ?? '') ?? 0,
+      xOffset: int.tryParse(args['X'] ?? '') ?? 0,
+      yOffset: int.tryParse(args['Y'] ?? '') ?? 0,
+    );
+    return switch (result.error) {
+      null => null,
+      TerminalRelativePlacementError.parentImageNotFound =>
+        'ENOPARENT: parent image not found',
+      TerminalRelativePlacementError.parentPlacementNotFound =>
+        'ENOPARENT: parent placement not found',
+      TerminalRelativePlacementError.selfParent =>
+        'EINVAL: placement cannot be its own parent',
+      TerminalRelativePlacementError.cycle =>
+        'ECYCLE: parent chain creates a cycle',
+      TerminalRelativePlacementError.tooDeep =>
+        'ETOODEEP: parent chain too deep',
+    };
+  }
+
+  /// Handles a Kitty display command (`a=p`): a cell placement at the cursor,
+  /// a virtual placement for Unicode placeholders (`U`), or a placement
+  /// relative to a parent (`P`).
+  ///
+  /// The placement itself waits for earlier commands on the same image, so a
+  /// display that follows a retransmission lands after it. The cursor moves
+  /// now, before later output, from what is known about the image.
   void _placeStoredGraphics(Map<String, String> args) {
     final manager = _buffer.graphics;
-    var imageId = int.tryParse(args['i'] ?? '');
-    // a=p may address the image by number (`I=`) instead of id.
-    if (imageId == null) {
-      final number = int.tryParse(args['I'] ?? '');
-      if (number != null) {
-        imageId = manager.imageIdForNumber(number);
-      }
-    }
-    if (imageId == null) {
+    final virtualPlacement = _graphicsFlag(args['U']);
+    final parentImageId = int.tryParse(args['P'] ?? '') ?? 0;
+    // Kitty rejects a virtual relative placement before looking at the image.
+    if (virtualPlacement && parentImageId > 0) {
+      _scheduleGraphicsOperation(
+        manager,
+        args,
+        () => _respondToGraphics(
+          args,
+          'EINVAL: virtual placement cannot refer to a parent',
+        ),
+      );
       return;
     }
-    final image = manager.imageById(imageId);
-    if (image == null && !manager.hasPendingImage(imageId)) {
+    // a=p may address the image by number (`I=`) instead of id.
+    final imageId = _resolveGraphicsImageId(manager, args);
+    if (imageId == null) {
+      // Kitty ignores a display command that names no image.
+      if ((int.tryParse(args['I'] ?? '') ?? 0) > 0) {
+        _respondToGraphics(args, 'ENOENT: image not found');
+      }
+      return;
+    }
+    bool imageExists() =>
+        manager.imageById(imageId) != null || manager.hasPendingImage(imageId);
+
+    if (virtualPlacement) {
+      _scheduleGraphicsOperation(manager, args, () {
+        if (!imageExists()) {
+          _respondToGraphics(args, 'ENOENT: image not found', imageId: imageId);
+          return;
+        }
+        _setVirtualGraphicsPlacement(args);
+        notifyListeners();
+        _respondToGraphics(args, null, imageId: imageId);
+      });
+      return;
+    }
+    if (parentImageId > 0) {
+      // The parent can belong to any image, so wait for every queued image
+      // operation. A relative placement never moves the cursor.
+      _scheduleGraphicsBarrier(manager, () {
+        if (!imageExists()) {
+          _respondToGraphics(args, 'ENOENT: image not found', imageId: imageId);
+          return;
+        }
+        final error = _placeRelativeGraphics(manager, imageId, args);
+        notifyListeners();
+        _respondToGraphics(args, error, imageId: imageId);
+      });
+      return;
+    }
+
+    if (!imageExists() && !manager.isImageTransmitting(imageId)) {
+      _scheduleGraphicsOperation(
+        manager,
+        args,
+        () => _respondToGraphics(
+          args,
+          'ENOENT: image not found',
+          imageId: imageId,
+        ),
+      );
       return;
     }
     final anchor = _buffer.currentLine.createAnchor(_buffer.cursorX);
-    _placeImageWithDisplayArgs(manager, imageId, anchor, args);
-    // Respect the no-cursor-movement policy (C=1); otherwise drop below the
+    manager.retainPendingPlacementAnchor(anchor);
+    // Respect the no-cursor-movement policy (C=1); otherwise move past the
     // image so subsequent output does not overlap it.
-    final keepCursor = args['C'] == '1';
-    final dimensions = image == null
-        ? manager.pendingImageDimensions(imageId)
-        : (width: image.sourceWidth, height: image.sourceHeight);
-    final rows = dimensions == null
-        ? (int.tryParse(args['r'] ?? '') ?? 0)
-        : _graphicsDisplayRowsForDimensions(
-            args,
-            manager,
-            dimensions,
-            maxRows: _buffer.viewHeight,
-          );
-    if (!keepCursor) {
-      _advanceGraphicsCursor(_buffer, rows);
+    if (!_graphicsFlag(args['C'], one: true)) {
+      final image = manager.imageById(imageId);
+      final dimensions = image == null
+          ? manager.pendingImageDimensions(imageId)
+          : (width: image.sourceWidth, height: image.sourceHeight);
+      _advanceGraphicsCursor(
+        _buffer,
+        _graphicsDisplaySpan(
+          args,
+          manager,
+          dimensions,
+          column: _buffer.cursorX,
+        ),
+      );
     }
-    notifyListeners();
+    _scheduleGraphicsOperation(manager, args, () {
+      manager.releasePendingPlacementAnchor(anchor);
+      if (!imageExists()) {
+        anchor.dispose();
+        _respondToGraphics(args, 'ENOENT: image not found', imageId: imageId);
+        return;
+      }
+      if (!anchor.attached) {
+        _respondToGraphics(args, null, imageId: imageId);
+        return;
+      }
+      _placeImageWithDisplayArgs(manager, imageId, anchor, args);
+      notifyListeners();
+      _respondToGraphics(args, null, imageId: imageId);
+    });
   }
 
   /// Handles a Kitty graphics delete command (`a=d`). Without this the image a
@@ -2783,6 +3093,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       cursorRow: position.cursorRow,
       cellCol: x == null ? null : x - 1,
       cellRow: y == null ? null : (y - 1) + position.scrollBack,
+      zIndex: int.tryParse(args['z'] ?? ''),
+      // `d=r` names an image id range with `x` and `y` instead of a cell.
+      rangeStart: x ?? 0,
+      rangeEnd: y ?? 0,
+      firstVisibleRow: position.scrollBack,
     );
     if (removed) {
       notifyListeners();
@@ -2804,174 +3119,176 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       imageId,
       cols: int.tryParse(args['c'] ?? '') ?? 0,
       rows: int.tryParse(args['r'] ?? '') ?? 0,
+      clientPlacementId: int.tryParse(args['p'] ?? '') ?? 0,
     );
   }
 
+  /// Answers a query (`a=q`): the image is loaded and checked like a real
+  /// transmission, then discarded. As in Kitty, a query without an image id
+  /// gets no reply, and the reply carries only that id.
   void _respondToGraphicsQuery(Map<String, String> args, Uint8List data) {
-    final error = _graphicsQueryError(args, data);
-    final success = error == null;
-    if (_graphicsResponseSuppressed(args, success: success)) {
+    final imageId = int.tryParse(args['i'] ?? '') ?? 0;
+    if (imageId <= 0) {
       return;
     }
-
-    final control = <String>[];
-    if (args['i'] case final imageId? when imageId.isNotEmpty) {
-      control.add('i=$imageId');
-    }
-    if (args['I'] case final imageNumber? when imageNumber.isNotEmpty) {
-      control.add('I=$imageNumber');
-    }
-    onOutput?.call(
-      '\x1b_G${control.join(',')};${success ? 'OK' : error}\x1b\\',
+    _respondToGraphics(
+      {'i': '$imageId', if (args['q'] case final quiet?) 'q': quiet},
+      _graphicsQueryError(args, data),
     );
   }
 
   String? _graphicsQueryError(Map<String, String> args, Uint8List data) {
-    if ((args['t'] ?? 'd') != 'd') {
-      return 'EINVAL: unsupported transmission medium';
-    }
-    final compression = args['o'];
-    if (compression != null && compression != 'z') {
-      return 'EINVAL: unsupported compression';
+    final error = kittyGraphicsTransmissionError(args);
+    if (error != null) {
+      return error;
     }
     if (data.isEmpty) {
       return 'EINVAL: missing image data';
     }
-
     var payload = data;
-    if (compression == 'z') {
+    if (args['o'] == 'z') {
       final inflated = inflateZlibData(data);
       if (inflated == null) {
         return 'EINVAL: invalid compressed data';
       }
       payload = inflated;
     }
-
-    final format = _graphicsFormat(args);
-    if (format == 24 || format == 32) {
-      final width = int.tryParse(args['s'] ?? '') ?? 0;
-      final height = int.tryParse(args['v'] ?? '') ?? 0;
-      if (width <= 0 || height <= 0) {
-        return 'EINVAL: missing image dimensions';
-      }
-      final bytesPerPixel = format == 24 ? 3 : 4;
-      if (payload.length < width * height * bytesPerPixel) {
-        return 'EINVAL: invalid image data';
-      }
-      return null;
-    }
-
-    if (format == 100) {
-      return _looksLikePng(payload) ? null : 'EINVAL: invalid PNG data';
-    }
-
-    return 'EINVAL: unsupported image format';
-  }
-
-  int _graphicsFormat(Map<String, String> args) =>
-      int.tryParse(args['f'] ?? '') ?? 32;
-
-  void _advanceGraphicsCursor(Buffer buffer, int rows) {
-    // Once the requested span leaves the viewport Kitty declares the exact
-    // cursor position undefined. A viewport's worth fully clears the visible
-    // placement while bounding work for untrusted r= values.
-    final boundedRows = min(max(0, rows), buffer.viewHeight);
-    for (var i = 0; i < boundedRows; i++) {
-      buffer.index();
-    }
-  }
-
-  int _graphicsDisplayRows(
-    Map<String, String> args,
-    Uint8List data,
-    GraphicsManager manager, {
-    _GraphicsPreinflation? preinflation,
-    required int maxRows,
-  }) {
-    if (maxRows <= 0) {
-      return 0;
-    }
-    final explicitRows = int.tryParse(args['r'] ?? '') ?? 0;
-    if (explicitRows > 0) {
-      return explicitRows;
-    }
-    final columns = int.tryParse(args['c'] ?? '') ?? 0;
-    if (columns <= 0) {
-      return 0;
-    }
-    final dimensions = preinflation == null
-        ? _graphicsPayloadDimensions(args, data)
-        : preinflation.payload == null
-            ? null
-            : _graphicsPayloadDimensions(
-                args,
-                preinflation.payload!,
-                payloadIsInflated: true,
-              );
-    if (dimensions == null) {
-      return 1;
-    }
-    return _graphicsDisplayRowsForDimensions(
-      args,
-      manager,
-      dimensions,
-      maxRows: maxRows,
+    return kittyGraphicsPayloadError(
+      _graphicsFormat(args),
+      payload,
+      width: int.tryParse(args['s'] ?? '') ?? 0,
+      height: int.tryParse(args['v'] ?? '') ?? 0,
+      deep: true,
     );
   }
 
+  int _graphicsFormat(Map<String, String> args) =>
+      kittyGraphicsFormat(args, allowEncoded: true) ?? kittyGraphicsFormatRgba;
+
+  /// Moves the cursor past an image placed at it, as Kitty does for `C=0`: to
+  /// the cell right of the image on its last row, or to the start of the next
+  /// row when the image reaches the right edge. Rows past the bottom margin
+  /// scroll, so consecutive images never overlap.
+  void _advanceGraphicsCursor(Buffer buffer, ({int cols, int rows}) span) {
+    final int startX = min(buffer.cursorX, buffer.viewWidth - 1);
+    final int targetX = startX + max(0, span.cols);
+    final wraps = targetX >= buffer.viewWidth;
+    final requestedRows = max(0, span.rows - 1) + (wraps ? 1 : 0);
+    // The row count comes from the program and may be huge. Allow enough
+    // moves to reach the bottom of the scroll region, then at most one
+    // screen of scrolling, which clears everything visible anyway.
+    final rowsBeforeScroll = buffer.isInVerticalMargin
+        ? max(0, buffer.marginBottom - buffer.cursorY)
+        : 0;
+    final moves = min(requestedRows, rowsBeforeScroll + buffer.viewHeight);
+    for (var i = 0; i < moves; i++) {
+      buffer.index();
+    }
+    buffer.setCursorX(wraps ? 0 : targetX);
+  }
+
+  /// The image's size in cells as Kitty computes it to move the cursor: an
+  /// explicit `c`/`r` span, the other side following the source aspect ratio
+  /// (including the in-cell offset), or its natural pixel size (here scaled
+  /// down to fit the row, as it is drawn). [dimensions] is the source size,
+  /// null when unknown.
+  ({int cols, int rows}) _graphicsDisplaySpan(
+    Map<String, String> args,
+    GraphicsManager manager,
+    ({int width, int height})? dimensions, {
+    required int column,
+  }) {
+    final cols = max(0, int.tryParse(args['c'] ?? '') ?? 0);
+    final rows = max(0, int.tryParse(args['r'] ?? '') ?? 0);
+    if (cols > 0 && rows > 0) {
+      return (cols: cols, rows: rows);
+    }
+    final source = dimensions == null
+        ? null
+        : _graphicsSourceRect(args, dimensions.width, dimensions.height);
+    if (source == null) {
+      return (cols: cols, rows: max(1, rows));
+    }
+    final cellWidth = manager.cellPixelWidth;
+    final cellHeight = manager.cellPixelHeight;
+    final xOffset = (int.tryParse(args['X'] ?? '') ?? 0)
+        .toDouble()
+        .clamp(0.0, max(0.0, cellWidth - 1));
+    final yOffset = (int.tryParse(args['Y'] ?? '') ?? 0)
+        .toDouble()
+        .clamp(0.0, max(0.0, cellHeight - 1));
+    int cells(double pixels, double cell) =>
+        pixels.isFinite && pixels > 0 ? (pixels / cell).ceil() : 1;
+    if (cols > 0) {
+      final width = cols * cellWidth + xOffset;
+      return (
+        cols: cols,
+        rows: cells(width * source.height / source.width, cellHeight),
+      );
+    }
+    if (rows > 0) {
+      final height = rows * cellHeight + yOffset;
+      return (
+        cols: cells(height * source.width / source.height, cellWidth),
+        rows: rows,
+      );
+    }
+    final maxWidth = max(1, buffer.viewWidth - column) * cellWidth;
+    final scale = source.width > maxWidth ? maxWidth / source.width : 1.0;
+    return (
+      cols: cells(source.width * scale + xOffset, cellWidth),
+      rows: cells(source.height * scale + yOffset, cellHeight),
+    );
+  }
+
+  /// The source rectangle `x`/`y`/`w`/`h` select within an image of
+  /// [width] x [height] pixels, intersected with the image before it is sized,
+  /// as Kitty does, so a crop is never stretched to the full image size.
+  ({double width, double height})? _graphicsSourceRect(
+    Map<String, String> args,
+    int width,
+    int height,
+  ) {
+    if (width <= 0 || height <= 0) {
+      return null;
+    }
+    final x = (int.tryParse(args['x'] ?? '') ?? 0).clamp(0, width);
+    final y = (int.tryParse(args['y'] ?? '') ?? 0).clamp(0, height);
+    final requestedWidth = int.tryParse(args['w'] ?? '') ?? 0;
+    final requestedHeight = int.tryParse(args['h'] ?? '') ?? 0;
+    final sourceWidth =
+        requestedWidth > 0 ? min(requestedWidth, width - x) : width - x;
+    final sourceHeight =
+        requestedHeight > 0 ? min(requestedHeight, height - y) : height - y;
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      return null;
+    }
+    return (width: sourceWidth.toDouble(), height: sourceHeight.toDouble());
+  }
+
+  /// Whether placing a transmission needs its payload's pixel size, read from
+  /// its header, to move the cursor: unless both cell spans are explicit.
   bool _graphicsDisplayNeedsPayloadDimensions(Map<String, String> args) {
     final explicitRows = int.tryParse(args['r'] ?? '') ?? 0;
     final columns = int.tryParse(args['c'] ?? '') ?? 0;
     final rawWidth = int.tryParse(args['s'] ?? '') ?? 0;
     final rawHeight = int.tryParse(args['v'] ?? '') ?? 0;
-    return explicitRows <= 0 &&
-        columns > 0 &&
+    return !(explicitRows > 0 && columns > 0) &&
         (rawWidth <= 0 || rawHeight <= 0);
   }
 
-  int _graphicsDisplayRowsForDimensions(
+  ({int width, int height})? _graphicsPayloadDimensionsForDisplay(
     Map<String, String> args,
-    GraphicsManager manager,
-    ({int width, int height}) dimensions, {
-    required int maxRows,
-  }) {
-    final explicitRows = int.tryParse(args['r'] ?? '') ?? 0;
-    if (explicitRows > 0) {
-      return explicitRows;
+    Uint8List data,
+    _GraphicsPreinflation? preinflation,
+  ) {
+    if (preinflation == null) {
+      return _graphicsPayloadDimensions(args, data);
     }
-    final columns = int.tryParse(args['c'] ?? '') ?? 0;
-    if (columns <= 0) {
-      return 0;
-    }
-    final x = (int.tryParse(args['x'] ?? '') ?? 0).clamp(
-      0,
-      dimensions.width,
-    );
-    final y = (int.tryParse(args['y'] ?? '') ?? 0).clamp(
-      0,
-      dimensions.height,
-    );
-    final availableWidth = dimensions.width - x;
-    final availableHeight = dimensions.height - y;
-    final requestedWidth = int.tryParse(args['w'] ?? '') ?? 0;
-    final requestedHeight = int.tryParse(args['h'] ?? '') ?? 0;
-    final width = requestedWidth > 0
-        ? min(requestedWidth, availableWidth)
-        : availableWidth;
-    final height = requestedHeight > 0
-        ? min(requestedHeight, availableHeight)
-        : availableHeight;
-    if (width <= 0 || height <= 0) {
-      return 1;
-    }
-    final rowsPerColumn = height / width * manager.cellPixelAspectRatio;
-    if (!rowsPerColumn.isFinite || rowsPerColumn <= 0) {
-      return 1;
-    }
-    if (columns >= maxRows / rowsPerColumn) {
-      return maxRows;
-    }
-    return min(maxRows, max(1, (rowsPerColumn * columns).ceil()));
+    final payload = preinflation.payload;
+    return payload == null
+        ? null
+        : _graphicsPayloadDimensions(args, payload, payloadIsInflated: true);
   }
 
   ({int width, int height})? _graphicsPayloadDimensions(
@@ -3069,8 +3386,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     Map<String, String> args, {
     required bool success,
   }) {
-    final quiet = args['q'];
-    return success ? quiet == '1' || quiet == '2' : quiet == '2';
+    // Kitty silences OK for any non-zero q and errors for anything above 1.
+    final quiet = int.tryParse(args['q'] ?? '') ?? 0;
+    return success ? quiet >= 1 : quiet >= 2;
   }
 
   bool _looksLikePng(Uint8List data) =>

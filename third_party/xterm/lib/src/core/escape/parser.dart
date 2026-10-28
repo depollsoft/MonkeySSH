@@ -1356,6 +1356,12 @@ class EscapeParser {
 
       final char = _queue.consume();
 
+      // CAN and SUB cancel the string; like xterm, a cancelled OSC runs
+      // nothing.
+      if (char == Ascii.CAN || char == Ascii.SUB) {
+        return _SeqParse.aborted;
+      }
+
       // OSC terminates with BEL
       if (char == Ascii.BEL) {
         _osc.add(param.toString());
@@ -1500,6 +1506,7 @@ class EscapeParser {
       if (_queue.isEmpty) return _ApcParse.incomplete;
       final char = _queue.consume();
 
+      if (_cancelsGraphicsCommand(char)) return _ApcParse.aborted;
       if (char == Ascii.semicolon) {
         flush();
         return _ApcParse.payloadFollows;
@@ -1559,6 +1566,7 @@ class EscapeParser {
         return terminator;
       }
       if (char == Ascii.BEL) break;
+      if (_cancelsGraphicsCommand(char)) return _SeqParse.aborted;
 
       final value = char >= 0 && char < 128 ? _base64DecodeTable[char] : -1;
       if (value < 0) continue; // whitespace, padding or non-base64 byte
@@ -1574,12 +1582,19 @@ class EscapeParser {
     return _SeqParse.complete;
   }
 
-  /// Skips an unrecognized string sequence up to ST. Returns false when the
-  /// terminator has not arrived yet.
+  /// Whether [char] cuts a Kitty graphics APC short. CAN and SUB cancel it and
+  /// a C1 control aborts it; either way ECMA-48 has the string discarded, and
+  /// xterm and Ghostty run nothing for it.
+  static bool _cancelsGraphicsCommand(int char) =>
+      char == Ascii.CAN || char == Ascii.SUB || (char >= 0x80 && char <= 0x9f);
+
+  /// Skips an unrecognized string sequence up to ST, or to a CAN or SUB that
+  /// cancels it. Returns false when the terminator has not arrived yet.
   bool _skipToStringTerminator() {
     while (true) {
       if (_queue.isEmpty) return false;
       final char = _queue.consume();
+      if (char == Ascii.CAN || char == Ascii.SUB) return true;
       if (char == Ascii.ESC) {
         final terminator = _consumeStringTerminator();
         // Aborted counts as handled: the rolled-back ESC starts a new sequence.
@@ -1612,9 +1627,10 @@ enum _ApcParse { incomplete, payloadFollows, terminated, aborted }
 /// Outcome of parsing a sequence whose end is only known once its terminator
 /// arrives.
 ///
-/// [aborted] means an ESC appeared where the terminator was expected. ECMA-48
-/// treats that ESC as the start of a new sequence, so the consumer rolls it
-/// back and discards whatever it had gathered.
+/// [aborted] means an ESC appeared where the terminator was expected, or a CAN
+/// or SUB cancelled the sequence. ECMA-48 treats that ESC as the start of a new
+/// sequence, so the consumer rolls it back; either way it discards whatever it
+/// had gathered.
 enum _SeqParse { complete, incomplete, aborted }
 
 class _Csi {

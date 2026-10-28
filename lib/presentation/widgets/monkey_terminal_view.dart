@@ -4737,32 +4737,22 @@ class MonkeyRenderTerminal extends RenderBox
       if (src == null) {
         continue;
       }
-      final srcWidth = src.width;
-      final srcHeight = src.height;
-
-      final double dstWidth;
-      final double dstHeight;
-      if (placement.cols > 0 && placement.rows > 0) {
-        dstWidth = placement.cols * cellWidth;
-        dstHeight = placement.rows * cellHeight;
-      } else if (placement.cols > 0) {
-        dstWidth = placement.cols * cellWidth;
-        dstHeight = srcHeight * (dstWidth / srcWidth);
-      } else if (placement.rows > 0) {
-        dstHeight = placement.rows * cellHeight;
-        dstWidth = srcWidth * (dstHeight / srcHeight);
-      } else {
-        // No explicit cell span: fit the (cropped) source width within the row.
-        final maxWidth =
-            (_terminal.viewWidth - placement.col).clamp(
-              1,
-              _terminal.viewWidth,
-            ) *
-            cellWidth;
-        final scale = srcWidth > maxWidth ? maxWidth / srcWidth : 1.0;
-        dstWidth = srcWidth * scale;
-        dstHeight = srcHeight * scale;
-      }
+      // An explicit span keeps its far edges on the cell grid, so the in-cell
+      // offset shrinks the image; without one the (cropped) source is fitted
+      // within the row. Offsets never leave the top-left cell, as in Kitty.
+      final dstSize = terminalImagePlacementSize(
+        placement,
+        sourceWidth: src.width,
+        sourceHeight: src.height,
+        cellWidth: cellWidth,
+        cellHeight: cellHeight,
+        availableColumns: (_terminal.viewWidth - placement.col).clamp(
+          1,
+          _terminal.viewWidth,
+        ),
+      );
+      final dstWidth = dstSize.width;
+      final dstHeight = dstSize.height;
       if (!dstWidth.isFinite ||
           !dstHeight.isFinite ||
           dstWidth <= 0 ||
@@ -4772,8 +4762,8 @@ class MonkeyRenderTerminal extends RenderBox
 
       // Apply the in-cell pixel offset (X=,Y=) to the destination top-left.
       final topLeft = _linePaintOffset(offset, placement.row).translate(
-        placement.col * cellWidth + placement.xOffset,
-        placement.yOffset.toDouble(),
+        placement.col * cellWidth + placement.cellXOffset(cellWidth),
+        placement.cellYOffset(cellHeight),
       );
       if (!topLeft.dx.isFinite || !topLeft.dy.isFinite) {
         continue;

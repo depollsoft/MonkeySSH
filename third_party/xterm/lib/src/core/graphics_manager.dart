@@ -148,8 +148,12 @@ class DecodedTerminalImage {
 
 /// A decoded image retained for the Kitty graphics protocol.
 class TerminalImage {
-  TerminalImage(this.id, ui.Image image, {this.sourceSignature = 0})
-      : sourceWidth = image.width,
+  TerminalImage(
+    this.id,
+    ui.Image image, {
+    this.sourceSignature = 0,
+    this.transient = false,
+  })  : sourceWidth = image.width,
         sourceHeight = image.height,
         _frames = <TerminalImageFrame>[TerminalImageFrame(image)];
 
@@ -158,6 +162,7 @@ class TerminalImage {
     this.id,
     DecodedTerminalImage decoded, {
     this.sourceSignature = 0,
+    this.transient = false,
   })  : sourceWidth = decoded.sourceWidth,
         sourceHeight = decoded.sourceHeight,
         _frames = List<TerminalImageFrame>.of(decoded.frames) {
@@ -218,6 +223,11 @@ class TerminalImage {
   /// bytes (e.g. MonkeyMux replays cached images on every window switch).
   /// Zero means "unknown" and never matches an incoming signature.
   final int sourceSignature;
+
+  /// Whether the client marked the image transient (Kitty usage hint `N=1`):
+  /// it is used briefly, so under memory pressure it is evicted before other
+  /// images.
+  final bool transient;
 
   /// Approximate size of every decoded frame in bytes (RGBA).
   int get sizeBytes =>
@@ -386,12 +396,15 @@ class TerminalImage {
 /// A placement of a [TerminalImage] anchored to a cell in the buffer.
 ///
 /// The placement is anchored with a [CellAnchor] so it tracks its cell across
-/// scrollback and reflow, and detaches when that cell is evicted.
+/// scrollback and reflow, and detaches when that cell is evicted. A Kitty
+/// relative placement (`P=`, `Q=`, `H=`, `V=`) has no anchor of its own: it
+/// sits a cell offset away from the top-left cell of its parent placement and
+/// moves with it.
 class TerminalImagePlacement {
   TerminalImagePlacement({
     required this.placementId,
     required this.imageId,
-    required this.anchor,
+    required CellAnchor this.anchor,
     required int fallbackCol,
     required int fallbackRow,
     this.clientPlacementId = 0,
@@ -405,10 +418,41 @@ class TerminalImagePlacement {
     this.xOffset = 0,
     this.yOffset = 0,
   })  : _fallbackCol = fallbackCol,
-        _fallbackRow = fallbackRow;
+        _fallbackRow = fallbackRow,
+        _parent = null,
+        horizontalOffset = 0,
+        verticalOffset = 0,
+        _resolvePosition = null;
+
+  TerminalImagePlacement._relative({
+    required this.placementId,
+    required this.imageId,
+    required _TerminalPlacementParent parent,
+    required this.horizontalOffset,
+    required this.verticalOffset,
+    required ({int col, int row})? Function(TerminalImagePlacement placement)
+        resolvePosition,
+    this.clientPlacementId = 0,
+    this.cols = 0,
+    this.rows = 0,
+    this.z = 0,
+    this.srcX = 0,
+    this.srcY = 0,
+    this.srcWidth = 0,
+    this.srcHeight = 0,
+    this.xOffset = 0,
+    this.yOffset = 0,
+  })  : anchor = null,
+        _fallbackCol = 0,
+        _fallbackRow = 0,
+        _parent = parent,
+        _resolvePosition = resolvePosition;
 
   /// Internal placement id assigned by the [GraphicsManager], unique per
   /// placement and monotonically increasing (used for stable paint ordering).
+  /// Re-placing an image with the same image and placement id keeps it, as
+  /// Kitty updates such a placement in place, so relative placements that
+  /// refer to it follow it to its new position.
   final int placementId;
 
   /// The id of the placed [TerminalImage].
@@ -418,11 +462,30 @@ class TerminalImagePlacement {
   /// — not [placementId] — is what a delete command (`a=d` with `p=`) targets.
   final int clientPlacementId;
 
-  /// Anchor for the top-left cell of the placement.
-  final CellAnchor anchor;
+  /// Anchor for the top-left cell of the placement, or null for a relative
+  /// placement, which is positioned from its parent instead.
+  final CellAnchor? anchor;
 
   final int _fallbackCol;
   final int _fallbackRow;
+
+  final _TerminalPlacementParent? _parent;
+  final ({int col, int row})? Function(TerminalImagePlacement placement)?
+      _resolvePosition;
+
+  /// Whether this is a Kitty relative placement (`P=`), positioned from a
+  /// parent placement rather than a cell of its own.
+  bool get isRelative => _parent != null;
+
+  /// Image id of the parent placement (`P=`), or 0 for a placement anchored to
+  /// a cell.
+  int get parentImageId => _parent?.imageId ?? 0;
+
+  /// Columns from the parent's top-left cell (`H=`); negative moves left.
+  final int horizontalOffset;
+
+  /// Rows from the parent's top-left cell (`V=`); negative moves up.
+  final int verticalOffset;
 
   /// Number of columns the image should occupy (from `c=`), or `0` to size the
   /// image from its own pixel dimensions.
@@ -457,16 +520,183 @@ class TerminalImagePlacement {
   final int yOffset;
 
   /// Column of the top-left cell.
-  int get col => anchor.attached ? anchor.x : _fallbackCol;
+  int get col {
+    final anchor = this.anchor;
+    if (anchor == null) return _resolvePosition?.call(this)?.col ?? 0;
+    return anchor.attached ? anchor.x : _fallbackCol;
+  }
 
   /// Absolute buffer row of the top-left cell.
-  int get row => anchor.attached ? anchor.y : _fallbackRow;
+  int get row {
+    final anchor = this.anchor;
+    if (anchor == null) return _resolvePosition?.call(this)?.row ?? 0;
+    return anchor.attached ? anchor.y : _fallbackRow;
+  }
 
-  /// Whether the anchored cell is still present in the buffer.
-  bool get attached => anchor.attached;
+  /// Whether the anchored cell is still present in the buffer. A relative
+  /// placement is attached while its parent chain resolves to a position: a
+  /// virtual parent with no placeholder cells on screen leaves it unplaced but
+  /// kept, as Kitty does.
+  bool get attached {
+    final anchor = this.anchor;
+    if (anchor == null) return _resolvePosition?.call(this) != null;
+    return anchor.attached;
+  }
+
+  /// [xOffset] limited to the top-left cell for a cell [cellWidth] pixels wide.
+  ///
+  /// Kitty keeps the in-cell offset inside the first cell (`X=` is at most one
+  /// pixel less than the cell width), so a large value can never move an image
+  /// away from the cell it is placed at.
+  double cellXOffset(double cellWidth) =>
+      xOffset.toDouble().clamp(0.0, math.max(0.0, cellWidth - 1));
+
+  /// [yOffset] limited to the top-left cell; see [cellXOffset].
+  double cellYOffset(double cellHeight) =>
+      yOffset.toDouble().clamp(0.0, math.max(0.0, cellHeight - 1));
 
   /// Releases the underlying anchor.
-  void dispose() => anchor.dispose();
+  void dispose() => anchor?.dispose();
+
+  TerminalImagePlacement _withAnchor(
+    CellAnchor anchor, {
+    int? rows,
+    int? srcY,
+    int? srcHeight,
+    int? yOffset,
+  }) =>
+      TerminalImagePlacement(
+        placementId: placementId,
+        imageId: imageId,
+        anchor: anchor,
+        fallbackCol: anchor.x,
+        fallbackRow: anchor.y,
+        clientPlacementId: clientPlacementId,
+        cols: cols,
+        rows: rows ?? this.rows,
+        z: z,
+        srcX: srcX,
+        srcY: srcY ?? this.srcY,
+        srcWidth: srcWidth,
+        srcHeight: srcHeight ?? this.srcHeight,
+        xOffset: xOffset,
+        yOffset: yOffset ?? this.yOffset,
+      );
+}
+
+/// The parent of a relative placement: either another placement, by its
+/// internal [TerminalImagePlacement.placementId], or the virtual (Unicode
+/// placeholder) placement of [imageId] when [placementId] is null.
+class _TerminalPlacementParent {
+  const _TerminalPlacementParent.placement(this.imageId, int this.placementId);
+
+  const _TerminalPlacementParent.virtual(this.imageId) : placementId = null;
+
+  final int imageId;
+  final int? placementId;
+}
+
+/// Placements a scroll region is moving; see
+/// [GraphicsManager.beginRegionScroll].
+class GraphicsRegionScroll {
+  GraphicsRegionScroll._(
+    this._moves, {
+    required this.top,
+    required this.bottom,
+    required this.delta,
+    required this.hasMargins,
+  });
+
+  final List<_RegionScrollMove> _moves;
+
+  /// First absolute row of the region.
+  final int top;
+
+  /// Last absolute row of the region.
+  final int bottom;
+
+  /// Rows the region scrolls by; negative scrolls up.
+  final int delta;
+
+  /// Whether the region is narrower than the screen.
+  final bool hasMargins;
+}
+
+typedef _RegionScrollMove = ({
+  TerminalImagePlacement placement,
+  int row,
+  bool scrolls,
+});
+
+/// Why a Kitty relative placement (`P=`) was rejected.
+enum TerminalRelativePlacementError {
+  /// The parent image (`P=`) does not exist (`ENOPARENT`).
+  parentImageNotFound,
+
+  /// The parent image has no placement, or none with the requested `Q=`
+  /// (`ENOPARENT`).
+  parentPlacementNotFound,
+
+  /// The placement names itself as its parent (`EINVAL`).
+  selfParent,
+
+  /// The parent chain would loop back to the placement (`ECYCLE`).
+  cycle,
+
+  /// The parent chain would exceed the depth limit (`ETOODEEP`).
+  tooDeep,
+}
+
+/// Largest image id a Kitty client can name (`i=` is a 32-bit value).
+const _maxProtocolImageId = 0xFFFFFFFF;
+
+/// First id of the range the terminal gives images transmitted without an id.
+const _firstAnonymousImageId = _maxProtocolImageId + 1;
+
+/// Maximum number of parent links in a relative placement chain. The Kitty
+/// protocol requires at least 8 and Kitty allows exactly 8.
+const kittyRelativePlacementDepthLimit = 8;
+
+/// The on-screen size, in pixels, of [placement] showing a source rectangle
+/// [sourceWidth] x [sourceHeight] pixels, with cells [cellWidth] x [cellHeight]
+/// pixels and [availableColumns] columns to the right edge of the screen.
+///
+/// An explicit cell span (`c=`, `r=`) fixes the far edges at those cell
+/// boundaries, so the in-cell offset (`X=`, `Y=`, kept inside the first cell)
+/// shrinks the image rather than pushing it into the next cell, as Kitty draws
+/// it. With one span the other side follows the source aspect ratio. With
+/// neither the image keeps its own pixel size, scaled down to fit the columns
+/// left on the row. An unknown source size falls back to the cell span.
+({double width, double height}) terminalImagePlacementSize(
+  TerminalImagePlacement placement, {
+  required double sourceWidth,
+  required double sourceHeight,
+  required double cellWidth,
+  required double cellHeight,
+  required int availableColumns,
+}) {
+  final xOffset = placement.cellXOffset(cellWidth);
+  final yOffset = placement.cellYOffset(cellHeight);
+  final spanWidth = placement.cols * cellWidth - xOffset;
+  final spanHeight = placement.rows * cellHeight - yOffset;
+  if (placement.cols > 0 && placement.rows > 0) {
+    return (width: spanWidth, height: spanHeight);
+  }
+  if (sourceWidth <= 0 || sourceHeight <= 0) {
+    return (
+      width: math.max(1, placement.cols) * cellWidth,
+      height: math.max(1, placement.rows) * cellHeight,
+    );
+  }
+  if (placement.cols > 0) {
+    return (width: spanWidth, height: sourceHeight * spanWidth / sourceWidth);
+  }
+  if (placement.rows > 0) {
+    return (width: sourceWidth * spanHeight / sourceHeight, height: spanHeight);
+  }
+  final maxWidth = math.max(1, availableColumns) * cellWidth;
+  final scale = sourceWidth > maxWidth ? maxWidth / sourceWidth : 1.0;
+  return (width: sourceWidth * scale, height: sourceHeight * scale);
 }
 
 /// A Kitty Unicode-placeholder cell that references a stored image.
@@ -597,13 +827,21 @@ class _TerminalImagePlaceholderGrid {
 
 /// A virtual Kitty Unicode-placeholder placement prototype.
 class TerminalImageVirtualPlacement {
-  TerminalImageVirtualPlacement({required this.cols, required this.rows});
+  TerminalImageVirtualPlacement({
+    required this.cols,
+    required this.rows,
+    this.clientPlacementId = 0,
+  });
 
   /// Number of columns the image should occupy.
   final int cols;
 
   /// Number of rows the image should occupy.
   final int rows;
+
+  /// Client-assigned placement id (`p=`), 0 when unspecified. A relative
+  /// placement's `Q=` selects the virtual placement by it.
+  final int clientPlacementId;
 }
 
 /// A transmitted-but-not-yet-decoded image, held so its decode can be deferred
@@ -630,6 +868,7 @@ class _PendingGraphicsImage {
     required this.sourceWidth,
     required this.sourceHeight,
     required this.sourceSignature,
+    this.transient = false,
     this.imageNumberReservations = const <_PendingImageNumberReservation>[],
   });
 
@@ -640,6 +879,7 @@ class _PendingGraphicsImage {
   final int sourceWidth;
   final int sourceHeight;
   final int sourceSignature;
+  final bool transient;
   final List<_PendingImageNumberReservation> imageNumberReservations;
 }
 
@@ -659,6 +899,11 @@ class GraphicsManager {
 
   final Map<int, TerminalImage> _images = {};
   final Map<CellAnchor, TerminalImagePlacement> _placementsByAnchor = {};
+  // Relative placements (`P=`), which have no anchor, oldest first.
+  final Map<int, TerminalImagePlacement> _relativePlacements = {};
+  // Every placement, anchored or relative, by its internal placement id: the
+  // key a relative placement's parent link resolves through.
+  final Map<int, TerminalImagePlacement> _placementsById = {};
   final Map<CellAnchor, TerminalImagePlaceholder> _placeholdersByAnchor = {};
   final Map<({int imageId, int bitWidth}), _TerminalImagePlaceholderGrid>
       _placeholderGrids = {};
@@ -700,7 +945,14 @@ class GraphicsManager {
 
   int _pendingBytes = 0;
 
+  // Next candidate for an image id the terminal picks for an `I=` number.
   int _nextImageId = 1;
+  // Ids of images transmitted without `i=` or `I=`, from a range above Kitty's
+  // 32-bit ids so they can never collide with an id a program chooses.
+  int _nextAnonymousImageId = _firstAnonymousImageId;
+  // Explicit ids of transmissions still being decoded, so an id the terminal
+  // assigns meanwhile never takes one a program is about to store.
+  final Map<int, int> _transmittingImageIds = {};
   int _nextPlacementId = 1;
   int _nextPlaceholderSequence = 1;
   int _generation = 0;
@@ -716,9 +968,11 @@ class GraphicsManager {
   double _cellPixelHeight = 0;
   int _viewportColumns = 80;
 
-  /// Active placements, oldest first.
-  List<TerminalImagePlacement> get placements =>
-      _placementsByAnchor.values.toList(growable: false);
+  /// Active placements: anchored placements oldest first, then relative ones.
+  List<TerminalImagePlacement> get placements => <TerminalImagePlacement>[
+        ..._placementsByAnchor.values,
+        ..._relativePlacements.values,
+      ];
 
   /// Active Unicode-placeholder cells, oldest first.
   List<TerminalImagePlaceholder> get placeholders =>
@@ -861,6 +1115,13 @@ class GraphicsManager {
     }
   }
 
+  /// Cell width in pixels, with the same fallback the placement geometry uses
+  /// before the renderer has reported one.
+  double get cellPixelWidth => _cellPixelWidth > 0 ? _cellPixelWidth : 10.0;
+
+  /// Cell height in pixels; see [cellPixelWidth].
+  double get cellPixelHeight => _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
+
   /// Cell width divided by cell height, with a terminal-like fallback.
   double get cellPixelAspectRatio => _cellPixelWidth > 0 && _cellPixelHeight > 0
       ? _cellPixelWidth / _cellPixelHeight
@@ -874,7 +1135,8 @@ class GraphicsManager {
       _images.values.where((image) => image.frameCount > 1).length;
 
   /// Whether any images are currently placed.
-  bool get hasPlacements => _placementsByAnchor.isNotEmpty;
+  bool get hasPlacements =>
+      _placementsByAnchor.isNotEmpty || _relativePlacements.isNotEmpty;
 
   /// Whether any Unicode-placeholder cells are currently tracked.
   bool get hasPlaceholders => _placeholdersByAnchor.isNotEmpty;
@@ -902,6 +1164,168 @@ class GraphicsManager {
             anchor,
       };
 
+  /// Takes the placements anchored in a scroll region out of their rows before
+  /// the region scrolls by [delta] rows (negative scrolls up), for
+  /// [endRegionScroll] to put back once the rows have moved.
+  ///
+  /// [top] and [bottom] are absolute buffer rows. As Kitty specifies, an image
+  /// entirely inside the region scrolls with the text and is clipped where it
+  /// would leave the region; one that extends past a margin stays where it
+  /// is. [hasMargins] is false for a region spanning the whole screen, where
+  /// an image may run off the bottom and still scroll, and is only clipped at
+  /// the top edge, as the screen would clip it.
+  ///
+  /// Returns null, cheaply, when nothing is anchored in the region.
+  GraphicsRegionScroll? beginRegionScroll(
+    IndexAwareCircularBuffer<BufferLine> lines, {
+    required int top,
+    required int bottom,
+    required int delta,
+    required bool hasMargins,
+  }) {
+    if (_placementsByAnchor.isEmpty || delta == 0 || bottom < top) return null;
+    final moves = <_RegionScrollMove>[];
+    final lastRow = math.min(bottom, lines.length - 1);
+    for (var row = math.max(0, top); row <= lastRow; row++) {
+      for (final anchor in lines[row].anchors.toList()) {
+        final placement = _placementsByAnchor[anchor];
+        if (placement == null) continue;
+        final range = _placementRelativeCellRange(placement);
+        final scrolls = row + range.firstRow >= top &&
+            (!hasMargins || row + range.lastRow <= bottom);
+        moves.add((placement: placement, row: row, scrolls: scrolls));
+        // Detach without disposing: the placement keeps its internal id, so
+        // relative placements that refer to it survive the move.
+        _placementsByAnchor.remove(anchor);
+        _unindexPlacementRows(anchor);
+        anchor.onDispose = null;
+        anchor.dispose();
+      }
+    }
+    if (moves.isEmpty) return null;
+    return GraphicsRegionScroll._(
+      moves,
+      top: top,
+      bottom: bottom,
+      delta: delta,
+      hasMargins: hasMargins,
+    );
+  }
+
+  /// Re-anchors the placements [beginRegionScroll] took out, after the region's
+  /// rows have moved: moved and clipped, kept in place, or removed once they
+  /// have scrolled out of the region entirely.
+  void endRegionScroll(
+    IndexAwareCircularBuffer<BufferLine> lines,
+    GraphicsRegionScroll? scroll,
+  ) {
+    if (scroll == null) return;
+    var removed = false;
+    for (final move in scroll._moves) {
+      final placement = move.placement;
+      final row = move.scrolls ? move.row + scroll.delta : move.row;
+      final next = move.scrolls
+          ? _scrolledPlacement(placement, row, scroll, lines)
+          : placement._withAnchor(lines[row].createAnchor(placement.col));
+      if (next == null) {
+        _placementsById.remove(placement.placementId);
+        _decrementPlacementImageCount(placement.imageId);
+        removed = true;
+        continue;
+      }
+      _placementsById[next.placementId] = next;
+      final anchor = next.anchor!;
+      anchor.onDispose = _handleAnchorDisposed;
+      _placementsByAnchor[anchor] = next;
+      if (!_placementRelativeRowsDirty) _indexPlacementRows(next);
+    }
+    if (removed) _removeOrphanedRelativePlacements();
+  }
+
+  /// [placement] moved to [row] by a region scroll, clipped to the region the
+  /// way Kitty clips it, or null once no part of it is left inside.
+  TerminalImagePlacement? _scrolledPlacement(
+    TerminalImagePlacement placement,
+    int row,
+    GraphicsRegionScroll scroll,
+    IndexAwareCircularBuffer<BufferLine> lines,
+  ) {
+    final range = _placementRelativeCellRange(placement);
+    final first = row + range.firstRow;
+    final last = row + range.lastRow;
+    if (last < scroll.top || first > scroll.bottom) return null;
+    final clipTop = first < scroll.top;
+    final clipBottom = scroll.hasMargins && last > scroll.bottom;
+    if (!clipTop && !clipBottom) {
+      return placement._withAnchor(lines[row].createAnchor(placement.col));
+    }
+
+    final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
+    final destinationHeight = _placementDestinationSize(placement).height;
+    final source = _placementLogicalSourceRect(placement);
+    if (source == null || destinationHeight <= 0) {
+      // Without the image size the crop cannot be computed; drop what would
+      // otherwise spill out of the region.
+      return null;
+    }
+    // Source pixels per screen pixel, as Kitty derives it from the placement.
+    final scale = source.height / destinationHeight;
+    final yOffset = placement.cellYOffset(cellHeight);
+    var srcY = source.top;
+    var srcHeight = source.height;
+    var rows = placement.rows;
+    var anchorRow = row;
+    var newYOffset = placement.yOffset;
+    // The image was inside the region before it scrolled one way, so only
+    // one edge can cut it.
+    if (clipTop) {
+      final clippedRows = scroll.top - row;
+      final clip = scale * (cellHeight * clippedRows - yOffset);
+      if (srcHeight <= clip) return null;
+      srcY += clip;
+      srcHeight -= clip;
+      if (rows > 0) rows = math.max(1, rows - clippedRows);
+      anchorRow = scroll.top;
+      newYOffset = 0;
+    } else {
+      final clippedRows = last - scroll.bottom;
+      final visibleHeight =
+          cellHeight * (last - first + 1 - clippedRows) - yOffset;
+      final visibleSource = scale * visibleHeight;
+      if (visibleSource <= 0) return null;
+      if (visibleSource < srcHeight) srcHeight = visibleSource;
+      if (rows > 0) rows = math.max(1, rows - clippedRows);
+    }
+    // The crop is kept in whole source pixels; round outwards so a sliver of
+    // a small image is not lost.
+    final top = srcY.floor();
+    final bottom = (srcY + srcHeight).ceil();
+    if (bottom <= top) return null;
+    return placement._withAnchor(
+      lines[anchorRow].createAnchor(placement.col),
+      rows: rows,
+      srcY: top,
+      srcHeight: bottom - top,
+      yOffset: newYOffset,
+    );
+  }
+
+  /// The source rectangle a placement shows, in the image's original pixels.
+  ({double top, double height})? _placementLogicalSourceRect(
+    TerminalImagePlacement placement,
+  ) {
+    final image = _images[placement.imageId];
+    final pending = _pendingImages[placement.imageId];
+    final sourceHeight = image?.sourceHeight ?? pending?.sourceHeight ?? 0;
+    if (sourceHeight <= 0) return null;
+    final top = placement.srcY.clamp(0, sourceHeight).toDouble();
+    final available = sourceHeight - top;
+    final height = placement.srcHeight > 0
+        ? math.min(placement.srcHeight.toDouble(), available)
+        : available;
+    return height > 0 ? (top: top, height: height) : null;
+  }
+
   /// Removes Unicode placeholders attached to [line] within `[start, end)`.
   /// Physical placement anchors are independent layers and are left intact.
   void removePlaceholdersInLineRange(BufferLine line, int start, int end) {
@@ -928,7 +1352,7 @@ class GraphicsManager {
     int firstRow,
     int lastRow,
   ) {
-    if (_placementsByAnchor.isEmpty || lines.length == 0) {
+    if (!hasPlacements || lines.length == 0) {
       return const <TerminalImagePlacement>[];
     }
     final first = firstRow.clamp(0, lines.length - 1);
@@ -936,30 +1360,41 @@ class GraphicsManager {
     if (last < first) {
       return const <TerminalImagePlacement>[];
     }
-    final relativeRows = _placementRelativeRowExtent;
-    final firstAnchorRow = math.max(0, first - relativeRows.last);
-    final lastAnchorRow = math.min(
-      lines.length - 1,
-      last - relativeRows.first,
-    );
-    final candidateRowCount = math.max(0, lastAnchorRow - firstAnchorRow + 1);
-    if (candidateRowCount > _placementsByAnchor.length) {
-      return <TerminalImagePlacement>[
-        for (final placement in _placementsByAnchor.values)
-          if (placement.attached &&
-              _placementIntersectsRows(placement, first, last))
-            placement,
-      ];
-    }
     final result = <TerminalImagePlacement>[];
-    for (var row = firstAnchorRow; row <= lastAnchorRow; row++) {
-      for (final anchor in lines[row].anchors) {
-        final placement = _placementsByAnchor[anchor];
-        if (placement != null &&
-            placement.attached &&
-            _placementIntersectsRows(placement, first, last)) {
-          result.add(placement);
+    if (_placementsByAnchor.isNotEmpty) {
+      final relativeRows = _placementRelativeRowExtent;
+      final firstAnchorRow = math.max(0, first - relativeRows.last);
+      final lastAnchorRow = math.min(
+        lines.length - 1,
+        last - relativeRows.first,
+      );
+      final candidateRowCount = math.max(0, lastAnchorRow - firstAnchorRow + 1);
+      if (candidateRowCount > _placementsByAnchor.length) {
+        for (final placement in _placementsByAnchor.values) {
+          if (placement.attached &&
+              _placementIntersectsRows(placement, first, last)) {
+            result.add(placement);
+          }
         }
+      } else {
+        for (var row = firstAnchorRow; row <= lastAnchorRow; row++) {
+          for (final anchor in lines[row].anchors) {
+            final placement = _placementsByAnchor[anchor];
+            if (placement != null &&
+                placement.attached &&
+                _placementIntersectsRows(placement, first, last)) {
+              result.add(placement);
+            }
+          }
+        }
+      }
+    }
+    // Relative placements move with their parents, so they cannot be found
+    // through line anchors; there are few of them, so test each one.
+    for (final placement in _relativePlacements.values) {
+      if (placement.attached &&
+          _placementIntersectsRows(placement, first, last)) {
+        result.add(placement);
       }
     }
     return result;
@@ -988,7 +1423,7 @@ class GraphicsManager {
 
   void _indexPlacementRows(TerminalImagePlacement placement) {
     final range = _placementCandidateRelativeRows(placement);
-    _placementRowsByAnchor[placement.anchor] = range;
+    _placementRowsByAnchor[placement.anchor!] = range;
     _placementFirstRowCounts.update(
       range.first,
       (count) => count + 1,
@@ -1110,7 +1545,7 @@ class GraphicsManager {
       return (imageId: 0, previousImageId: null);
     }
     final previousImageId = _imageNumberToId[number];
-    final imageId = _nextImageId++;
+    final imageId = _allocateProtocolImageId();
     _imageNumberToId[number] = imageId;
     _imageNumberLastAccess[number] = ++_accessClock;
     _trackImageNumberReservation(number, imageId, previousImageId);
@@ -1130,6 +1565,89 @@ class GraphicsManager {
     _imageNumberLastAccess[number] = ++_accessClock;
     _trackImageNumberReservation(number, imageId, previousImageId);
     return (accepted: true, previousImageId: previousImageId);
+  }
+
+  /// Picks a protocol image id for an `I=` number that no image, placement,
+  /// mapping or in-flight transmission uses, so it never collides with an id
+  /// the program chose (Kitty picks a free one too).
+  int _allocateProtocolImageId() {
+    for (var probes = 0; probes <= _maxProtocolImageId; probes++) {
+      var id = _nextImageId;
+      if (id <= 0 || id > _maxProtocolImageId) id = 1;
+      _nextImageId = id + 1;
+      if (!_protocolImageIdInUse(id)) return id;
+    }
+    return 0;
+  }
+
+  bool _protocolImageIdInUse(int id) =>
+      _images.containsKey(id) ||
+      _pendingImages.containsKey(id) ||
+      _decodingImages.containsKey(id) ||
+      _transmittingImageIds.containsKey(id) ||
+      _virtualPlacements.containsKey(id) ||
+      (_placementCountByImage[id] ?? 0) > 0 ||
+      _imageNumberToId.containsValue(id) ||
+      _activeImageNumberReservations.values.any(
+        (reservations) => reservations.containsKey(id),
+      );
+
+  /// Notes that a transmission with the explicit protocol id [id] has started,
+  /// so [reserveImageIdForNumber] will not hand the id out before it is stored.
+  /// Pair with [endImageTransmission].
+  void beginImageTransmission(int id) {
+    if (id <= 0) return;
+    _transmittingImageIds.update(id, (count) => count + 1, ifAbsent: () => 1);
+    if (id >= _nextImageId && id < _maxProtocolImageId) {
+      _nextImageId = id + 1;
+    }
+  }
+
+  /// Whether image [id] is still arriving: a transmission with that explicit
+  /// id, or one an `I=` number reserved it for, has not been stored yet.
+  bool isImageTransmitting(int id) =>
+      _transmittingImageIds.containsKey(id) ||
+      _activeImageNumberReservations.values.any(
+        (reservations) => reservations.containsKey(id),
+      );
+
+  /// Ends a transmission noted by [beginImageTransmission].
+  void endImageTransmission(int id) {
+    final count = _transmittingImageIds[id];
+    if (count == null) return;
+    if (count <= 1) {
+      _transmittingImageIds.remove(id);
+    } else {
+      _transmittingImageIds[id] = count - 1;
+    }
+  }
+
+  /// Applies a retransmission of protocol image [id]. Kitty replaces the
+  /// image: every placement of the old one goes now (anchored, relative and
+  /// virtual, with the relative placements that hang off them), and so does
+  /// its data unless [keepData] says the new bytes are identical. A
+  /// retransmission that then fails or never completes leaves no image rather
+  /// than the stale one. Image-number mappings to [id] are kept.
+  void replaceImageForRetransmission(int id, {required bool keepData}) {
+    if (id <= 0) return;
+    final hadVirtual = _virtualPlacements.remove(id) != null;
+    final removed = _removePlacementsWhere(
+      (placement) => placement.imageId == id,
+    );
+    if (hadVirtual && removed.isEmpty) _removeOrphanedRelativePlacements();
+    if (keepData) return;
+    final image = _images.remove(id);
+    if (image != null) {
+      _currentMemoryBytes -= image.sizeBytes;
+    }
+    final pending = _pendingImages.remove(id);
+    if (pending != null) {
+      _pendingBytes -= pending.payload.length;
+      for (final reservation in pending.imageNumberReservations) {
+        commitImageIdReservation(reservation.number, reservation.mappedImageId);
+      }
+    }
+    _pendingAnimationMutations.remove(id);
   }
 
   bool _makeRoomForImageNumber(int number) {
@@ -1452,6 +1970,7 @@ class GraphicsManager {
     int sourceWidth = 0,
     int sourceHeight = 0,
     int sourceSignature = 0,
+    bool transient = false,
     int? imageNumber,
     int? mappedImageId,
     int? previousImageId,
@@ -1509,11 +2028,12 @@ class GraphicsManager {
       sourceWidth: sourceWidth > 0 ? sourceWidth : width,
       sourceHeight: sourceHeight > 0 ? sourceHeight : height,
       sourceSignature: sourceSignature,
+      transient: transient,
       imageNumberReservations:
           List<_PendingImageNumberReservation>.unmodifiable(reservations),
     );
     _pendingBytes += payload.length;
-    if (id >= _nextImageId) {
+    if (id >= _nextImageId && id < _maxProtocolImageId) {
       _nextImageId = id + 1;
     }
     _evictPendingIfNeeded();
@@ -1523,7 +2043,7 @@ class GraphicsManager {
     while (_pendingImages.isNotEmpty &&
         (_pendingBytes > _maxPendingBytes ||
             _pendingImages.length > _maxPendingImages)) {
-      final oldest = _pendingImages.keys.first;
+      final oldest = _pendingEvictionCandidate();
       final removed = _pendingImages.remove(oldest);
       if (removed != null) {
         _pendingBytes -= removed.payload.length;
@@ -1535,7 +2055,34 @@ class GraphicsManager {
         _virtualPlacements.remove(oldest);
       }
     }
+    _removeOrphanedRelativePlacements();
   }
+
+  /// The pending image to evict first: by [_evictionRank], oldest first.
+  int _pendingEvictionCandidate() {
+    int? best;
+    var bestRank = 0;
+    for (final entry in _pendingImages.entries) {
+      final rank = _evictionRank(entry.key, transient: entry.value.transient);
+      if (best == null || rank < bestRank) {
+        best = entry.key;
+        bestRank = rank;
+      }
+    }
+    return best!;
+  }
+
+  /// Eviction order under memory pressure, lowest first, as Ghostty orders
+  /// it: unplaced transient images (Kitty usage hint `N=1`), other unplaced
+  /// images, placed transient images, then placed images.
+  int _evictionRank(int imageId, {required bool transient}) =>
+      (transient ? 0 : 1) +
+      (_imageHasPlacements(imageId) || _isReferencedByPlaceholder(imageId)
+          ? 2
+          : 0);
+
+  bool _isReferencedByPlaceholder(int imageId) =>
+      _placeholderGrids.keys.any((key) => key.imageId == imageId);
 
   Future<TerminalImage?> _decodePendingImage(
     int id,
@@ -1584,6 +2131,7 @@ class GraphicsManager {
       id,
       decoded,
       sourceSignature: pending.sourceSignature,
+      transient: pending.transient,
     );
     if (storedImageId <= 0) {
       _rollbackPendingImageNumber(pending);
@@ -1613,7 +2161,11 @@ class GraphicsManager {
   ///
   /// Returns `0` and disposes [image] when its decoded frames exceed
   /// [maxMemoryBytes].
-  int storeDecodedImage(DecodedTerminalImage image, {int sourceSignature = 0}) {
+  int storeDecodedImage(
+    DecodedTerminalImage image, {
+    int sourceSignature = 0,
+    bool transient = false,
+  }) {
     final sizeBytes = image.sizeBytes;
     if (sizeBytes > maxMemoryBytes) {
       _disposeDecodedTerminalImage(image);
@@ -1621,11 +2173,12 @@ class GraphicsManager {
     }
     _evictIfNeeded(sizeBytes);
 
-    final id = _nextImageId++;
+    final id = _nextAnonymousImageId++;
     _images[id] = TerminalImage.fromDecoded(
       id,
       image,
       sourceSignature: sourceSignature,
+      transient: transient,
     ).._lastAccess = ++_accessClock;
     _currentMemoryBytes += sizeBytes;
     return id;
@@ -1656,9 +2209,14 @@ class GraphicsManager {
     int id,
     DecodedTerminalImage image, {
     int sourceSignature = 0,
+    bool transient = false,
   }) {
     if (id <= 0) {
-      return storeDecodedImage(image, sourceSignature: sourceSignature);
+      return storeDecodedImage(
+        image,
+        sourceSignature: sourceSignature,
+        transient: transient,
+      );
     }
 
     final sizeBytes = image.sizeBytes;
@@ -1689,10 +2247,11 @@ class GraphicsManager {
       id,
       image,
       sourceSignature: sourceSignature,
+      transient: transient,
     ).._lastAccess = ++_accessClock;
     _retainedImageIds.add(id);
     _currentMemoryBytes += sizeBytes;
-    if (id >= _nextImageId) {
+    if (id >= _nextImageId && id < _maxProtocolImageId) {
       _nextImageId = id + 1;
     }
     return id;
@@ -2017,6 +2576,8 @@ class GraphicsManager {
     final placed = <int>{
       for (final placement in _placementsByAnchor.values)
         if (placement.attached) placement.imageId,
+      for (final placement in _relativePlacements.values)
+        if (placement.attached) placement.imageId,
     };
     final narrow = <int>{};
     final wide = <int>{};
@@ -2059,15 +2620,13 @@ class GraphicsManager {
     // on every scroll repaint). Appending instead of replacing left a stale
     // copy behind at every scroll step. Placements without a client id (p=0)
     // always accumulate, per the spec.
-    if (clientPlacementId > 0) {
-      _removePlacementsWhere(
-        (existing) =>
-            existing.imageId == imageId &&
-            existing.clientPlacementId == clientPlacementId,
-      );
-    }
+    final placementId = _takePlacementIdForReplacement(
+          imageId,
+          clientPlacementId,
+        ) ??
+        _nextPlacementId++;
     final placement = TerminalImagePlacement(
-      placementId: _nextPlacementId++,
+      placementId: placementId,
       imageId: imageId,
       anchor: anchor,
       fallbackCol: anchor.x,
@@ -2083,15 +2642,283 @@ class GraphicsManager {
       xOffset: xOffset,
       yOffset: yOffset,
     );
+    _addAnchoredPlacement(placement);
+    return placement;
+  }
+
+  void _addAnchoredPlacement(TerminalImagePlacement placement) {
+    final anchor = placement.anchor!;
     anchor.onDispose = _handleAnchorDisposed;
     _placementsByAnchor[anchor] = placement;
+    _placementsById[placement.placementId] = placement;
+    _incrementPlacementImageCount(placement.imageId);
+    if (!_placementRelativeRowsDirty) _indexPlacementRows(placement);
+  }
+
+  void _incrementPlacementImageCount(int imageId) {
     _placementCountByImage.update(
       imageId,
       (count) => count + 1,
       ifAbsent: () => 1,
     );
-    if (!_placementRelativeRowsDirty) _indexPlacementRows(placement);
-    return placement;
+  }
+
+  /// Removes the placement of [imageId] with client id [clientPlacementId], if
+  /// any, and returns its internal id for the placement replacing it. Kitty
+  /// updates such a placement in place, so the relative placements that refer
+  /// to it are kept and follow the replacement.
+  int? _takePlacementIdForReplacement(int imageId, int clientPlacementId) {
+    if (clientPlacementId <= 0) return null;
+    final existing = _placementWithClientId(imageId, clientPlacementId);
+    if (existing == null) return null;
+    _disposePlacement(existing, removeOrphans: false);
+    return existing.placementId;
+  }
+
+  TerminalImagePlacement? _placementWithClientId(
+    int imageId,
+    int clientPlacementId,
+  ) {
+    for (final placement in _placementsById.values) {
+      if (placement.imageId == imageId &&
+          placement.clientPlacementId == clientPlacementId) {
+        return placement;
+      }
+    }
+    return null;
+  }
+
+  /// Places [imageId] relative to a parent placement, as a Kitty `a=p` or
+  /// `a=T` command with `P=` does.
+  ///
+  /// The parent is the placement of [parentImageId] whose client placement id
+  /// is [parentPlacementId], or its oldest placement when that is 0; a virtual
+  /// (Unicode placeholder) placement of the image counts too. The new placement
+  /// sits [horizontalOffset] columns and [verticalOffset] rows from the
+  /// parent's top-left cell, moves with it, and is removed with it.
+  ///
+  /// Returns the placement, or why it was rejected, following Kitty: a missing
+  /// parent, a placement that would be its own parent, a cycle, or a chain
+  /// deeper than [kittyRelativePlacementDepthLimit].
+  ({TerminalImagePlacement? placement, TerminalRelativePlacementError? error})
+      placeRelativeImage(
+    int imageId, {
+    required int parentImageId,
+    int parentPlacementId = 0,
+    int horizontalOffset = 0,
+    int verticalOffset = 0,
+    int cols = 0,
+    int rows = 0,
+    int z = 0,
+    int clientPlacementId = 0,
+    int srcX = 0,
+    int srcY = 0,
+    int srcWidth = 0,
+    int srcHeight = 0,
+    int xOffset = 0,
+    int yOffset = 0,
+  }) {
+    if (!_images.containsKey(parentImageId) &&
+        !_pendingImages.containsKey(parentImageId)) {
+      return (
+        placement: null,
+        error: TerminalRelativePlacementError.parentImageNotFound,
+      );
+    }
+    final parent = _findParentPlacement(parentImageId, parentPlacementId);
+    if (parent == null) {
+      return (
+        placement: null,
+        error: TerminalRelativePlacementError.parentPlacementNotFound,
+      );
+    }
+    final replaced = clientPlacementId > 0
+        ? _placementWithClientId(imageId, clientPlacementId)
+        : null;
+    final chainError = _relativeChainError(parent, replaced?.placementId);
+    if (chainError != null) {
+      return (placement: null, error: chainError);
+    }
+    final placementId = _takePlacementIdForReplacement(
+          imageId,
+          clientPlacementId,
+        ) ??
+        _nextPlacementId++;
+    final placement = TerminalImagePlacement._relative(
+      placementId: placementId,
+      imageId: imageId,
+      parent: parent,
+      horizontalOffset: horizontalOffset,
+      verticalOffset: verticalOffset,
+      resolvePosition: _resolveRelativePosition,
+      clientPlacementId: clientPlacementId,
+      cols: cols,
+      rows: rows,
+      z: z,
+      srcX: srcX,
+      srcY: srcY,
+      srcWidth: srcWidth,
+      srcHeight: srcHeight,
+      xOffset: xOffset,
+      yOffset: yOffset,
+    );
+    _relativePlacements[placementId] = placement;
+    _placementsById[placementId] = placement;
+    _incrementPlacementImageCount(imageId);
+    return (placement: placement, error: null);
+  }
+
+  _TerminalPlacementParent? _findParentPlacement(
+    int parentImageId,
+    int parentPlacementId,
+  ) {
+    TerminalImagePlacement? oldest;
+    for (final placement in _placementsById.values) {
+      if (placement.imageId != parentImageId) continue;
+      if (parentPlacementId > 0) {
+        if (placement.clientPlacementId == parentPlacementId) {
+          return _TerminalPlacementParent.placement(
+            parentImageId,
+            placement.placementId,
+          );
+        }
+      } else if (oldest == null || placement.placementId < oldest.placementId) {
+        oldest = placement;
+      }
+    }
+    if (oldest != null) {
+      return _TerminalPlacementParent.placement(
+        parentImageId,
+        oldest.placementId,
+      );
+    }
+    final virtual = _virtualPlacements[parentImageId];
+    if (virtual != null &&
+        (parentPlacementId <= 0 ||
+            virtual.clientPlacementId == parentPlacementId)) {
+      return _TerminalPlacementParent.virtual(parentImageId);
+    }
+    return null;
+  }
+
+  /// Validates the chain a placement would get from [parent]: it must not be
+  /// its own parent ([replacedPlacementId] is the placement it replaces, if
+  /// any), must not loop back to itself, and must stay within the depth limit.
+  TerminalRelativePlacementError? _relativeChainError(
+    _TerminalPlacementParent parent,
+    int? replacedPlacementId,
+  ) {
+    if (replacedPlacementId != null &&
+        parent.placementId == replacedPlacementId) {
+      return TerminalRelativePlacementError.selfParent;
+    }
+    var link = parent;
+    // Counts parent links, starting with the one being created.
+    var depth = 1;
+    while (true) {
+      final id = link.placementId;
+      if (id == null) return null; // a virtual placement is a chain root
+      if (id == replacedPlacementId) {
+        return TerminalRelativePlacementError.cycle;
+      }
+      final ancestor = _placementsById[id];
+      if (ancestor == null) {
+        return TerminalRelativePlacementError.parentPlacementNotFound;
+      }
+      final next = ancestor._parent;
+      if (next == null) return null; // an anchored placement is a chain root
+      if (depth >= kittyRelativePlacementDepthLimit) {
+        return TerminalRelativePlacementError.tooDeep;
+      }
+      depth += 1;
+      link = next;
+    }
+  }
+
+  /// Resolves a relative placement to the cell its parent chain puts it at, or
+  /// null when the chain is broken, too deep, or ends at a virtual placement
+  /// with no placeholder cells in the buffer.
+  ({int col, int row})? _resolveRelativePosition(
+    TerminalImagePlacement placement,
+  ) {
+    var col = placement.horizontalOffset;
+    var row = placement.verticalOffset;
+    var link = placement._parent;
+    var depth = 1;
+    while (link != null) {
+      final id = link.placementId;
+      if (id == null) {
+        final origin = _virtualPlacementOrigin(link.imageId);
+        if (origin == null) return null;
+        return (col: origin.col + col, row: origin.row + row);
+      }
+      final parent = _placementsById[id];
+      if (parent == null) return null;
+      final anchor = parent.anchor;
+      if (anchor != null) {
+        if (!anchor.attached) return null;
+        return (col: anchor.x + col, row: anchor.y + row);
+      }
+      if (depth >= kittyRelativePlacementDepthLimit) return null;
+      depth += 1;
+      col += parent.horizontalOffset;
+      row += parent.verticalOffset;
+      link = parent._parent;
+    }
+    return null;
+  }
+
+  /// Top-left of a virtual placement: as Kitty specifies, the smallest column
+  /// and the smallest row of the placeholder cells that show [imageId].
+  ({int col, int row})? _virtualPlacementOrigin(int imageId) {
+    int? minCol;
+    int? minRow;
+    void include(TerminalImagePlaceholder placeholder) {
+      final col = placeholder.cellCol;
+      final row = placeholder.cellRow;
+      if (minCol == null || col < minCol!) minCol = col;
+      if (minRow == null || row < minRow!) minRow = row;
+    }
+
+    for (final placeholder in _placeholdersByAnchor.values) {
+      if (placeholder.attached && placeholder.imageId == imageId) {
+        include(placeholder);
+      }
+    }
+    if (minCol == null) {
+      // A placeholder whose color carries only the low bits of the id.
+      for (final placeholder in _placeholdersByAnchor.values) {
+        final mask = placeholder.imageIdBitWidth >= 24 ? 0xFFFFFF : 0xFF;
+        if (placeholder.attached &&
+            placeholder.imageId == (imageId & mask) &&
+            placeholder.imageId != imageId) {
+          include(placeholder);
+        }
+      }
+    }
+    if (minCol == null || minRow == null) return null;
+    return (col: minCol!, row: minRow!);
+  }
+
+  /// Removes relative placements whose parent is gone, repeatedly, so a whole
+  /// orphaned subtree goes: a relative placement lives only as long as its
+  /// parent. Call after anything that removes a placement or a virtual one.
+  void _removeOrphanedRelativePlacements() {
+    var removed = true;
+    while (removed && _relativePlacements.isNotEmpty) {
+      removed = false;
+      for (final placement in _relativePlacements.values.toList()) {
+        final parent = placement._parent!;
+        final id = parent.placementId;
+        final exists = id == null
+            ? _virtualPlacements.containsKey(parent.imageId)
+            : _placementsById.containsKey(id);
+        if (!exists) {
+          _disposePlacement(placement, removeOrphans: false);
+          removed = true;
+        }
+      }
+    }
   }
 
   /// Records a virtual placement prototype for [imageId].
@@ -2099,6 +2926,7 @@ class GraphicsManager {
     int imageId, {
     required int cols,
     required int rows,
+    int clientPlacementId = 0,
   }) {
     if (imageId <= 0 || cols <= 0 || rows <= 0) {
       return;
@@ -2106,6 +2934,7 @@ class GraphicsManager {
     _virtualPlacements[imageId] = TerminalImageVirtualPlacement(
       cols: cols,
       rows: rows,
+      clientPlacementId: clientPlacementId,
     );
     _retainedImageIds.add(imageId);
   }
@@ -2159,8 +2988,11 @@ class GraphicsManager {
   void removePlacementsInRows(int firstRow, int lastRow) {
     final removed = _removePlacementsWhere(
       (placement) =>
-          !placement.attached ||
-          _placementIntersectsRows(placement, firstRow, lastRow),
+          // A relative placement whose virtual parent shows no placeholder
+          // cells is unplaced, not gone; it goes with its parent instead.
+          (!placement.isRelative && !placement.attached) ||
+          (placement.attached &&
+              _placementIntersectsRows(placement, firstRow, lastRow)),
     );
     if (removed.isNotEmpty) {
       _generation++;
@@ -2169,17 +3001,32 @@ class GraphicsManager {
     _dropUnreferencedImages();
   }
 
-  /// Deletes physical image placements in response to a Kitty graphics delete
-  /// command (`a=d`).
+  /// Deletes image placements in response to a Kitty graphics delete command
+  /// (`a=d`), following Kitty's reference implementation.
   ///
-  /// [what] is the `d=` selector. The Kitty default, when `d=` is omitted, is
-  /// `a` — every placement currently on screen. Lowercase selectors remove the
-  /// matching placement(s) only; uppercase selectors additionally free the
-  /// underlying image data (and, for the id form, its Unicode placeholders).
-  /// Selectors target placements by image/placement id ([imageId]/[placementId]
-  /// for `i`/`I`), the cursor cell ([cursorCol]/[cursorRow] for `c`/`C`), or an
-  /// explicit cell, column or row ([cellCol]/[cellRow] for `p`/`P`, `x`/`X`,
-  /// `y`/`Y`). Unsupported selectors delete nothing.
+  /// [what] is the `d=` selector; Kitty's default when `d=` is omitted is `a`.
+  /// Lowercase selectors remove the matching placements only (an image without
+  /// a protocol id that loses its last placement goes too, since nothing could
+  /// place it again). Uppercase selectors also free the image data of every
+  /// image that had a matching placement and has none left; `I` and `R` free a
+  /// matching image that has no placements at all as well.
+  ///
+  /// * `a`: placements on the visible screen, rows from [firstVisibleRow]
+  ///   down; placements wholly in the scrollback stay.
+  /// * `i`: placements of [imageId], only the one with client id
+  ///   [placementId] when given. Its virtual (Unicode placeholder) placement
+  ///   counts as one of them.
+  /// * `r`: placements of images whose id is in [rangeStart]..[rangeEnd]; an
+  ///   empty range matches nothing.
+  /// * `c`, `p`, `q`: placements covering the cursor cell
+  ///   ([cursorCol]/[cursorRow]) or [cellCol]/[cellRow]; `q` also needs
+  ///   z-index [zIndex].
+  /// * `x`, `y`, `z`: placements covering column [cellCol], row [cellRow], or
+  ///   with z-index [zIndex].
+  ///
+  /// Other selectors (animation frames) delete nothing. Relative placements
+  /// match at their resolved position, and every placement removed takes its
+  /// relative placements with it.
   ///
   /// Returns true if anything was removed.
   bool deletePlacements({
@@ -2190,66 +3037,119 @@ class GraphicsManager {
     int? cursorRow,
     int? cellCol,
     int? cellRow,
+    int? zIndex,
+    int? rangeStart,
+    int? rangeEnd,
+    int firstVisibleRow = 0,
   }) {
     final selector = what.isEmpty ? 'a' : what;
     final mode = selector.toLowerCase();
     final freeImages = selector != mode; // an uppercase selector frees data
 
+    bool atCell(TerminalImagePlacement placement, int? col, int? row) =>
+        col != null &&
+        row != null &&
+        placement.attached &&
+        _placementIntersectsRows(placement, row, row) &&
+        _placementIntersectsCols(placement, col, col);
+
+    bool imageMatches(int id) => switch (mode) {
+          'i' => id == imageId,
+          'r' => rangeStart != null &&
+              rangeEnd != null &&
+              id >= rangeStart &&
+              id <= rangeEnd,
+          _ => false,
+        };
+
     bool matches(TerminalImagePlacement placement) {
       switch (mode) {
         case 'a':
-          return true;
+          return placement.attached &&
+              _placementIntersectsRows(
+                placement,
+                firstVisibleRow,
+                _maxPlacementRow,
+              );
         case 'i':
-          if (imageId != null && placement.imageId != imageId) return false;
-          if (placementId != null &&
-              placement.clientPlacementId != placementId) {
-            return false;
-          }
-          return true;
+          return imageMatches(placement.imageId) &&
+              (placementId == null ||
+                  placementId <= 0 ||
+                  placement.clientPlacementId == placementId);
+        case 'r':
+          return imageMatches(placement.imageId);
         case 'c':
-          return cursorCol != null &&
-              cursorRow != null &&
-              _placementIntersectsRows(placement, cursorRow, cursorRow) &&
-              _placementIntersectsCols(placement, cursorCol, cursorCol);
+          return atCell(placement, cursorCol, cursorRow);
         case 'p':
-          return cellCol != null &&
-              cellRow != null &&
-              _placementIntersectsRows(placement, cellRow, cellRow) &&
-              _placementIntersectsCols(placement, cellCol, cellCol);
+          return atCell(placement, cellCol, cellRow);
+        case 'q':
+          return placement.z == zIndex && atCell(placement, cellCol, cellRow);
         case 'x':
           return cellCol != null &&
+              placement.attached &&
               _placementIntersectsCols(placement, cellCol, cellCol);
         case 'y':
           return cellRow != null &&
+              placement.attached &&
               _placementIntersectsRows(placement, cellRow, cellRow);
+        case 'z':
+          return zIndex != null && placement.z == zIndex;
         default:
-          // Unsupported selector (image number, z-index, animation frames,
-          // ranges): delete nothing rather than risk wiping live images.
+          // Animation frame deletes (`f`) are not supported: delete nothing
+          // rather than risk wiping live images.
           return false;
       }
     }
 
-    final removed = _removePlacementsWhere(matches);
-    final freedImageIds = {for (final placement in removed) placement.imageId};
-    var changed = removed.isNotEmpty;
-
-    if (freeImages) {
-      // The client explicitly asked to free the image data, so allow even
-      // images retained for Unicode-placeholder reuse to be reclaimed.
-      for (final id in freedImageIds) {
-        _retainedImageIds.remove(id);
-      }
-      if (mode == 'i' && imageId != null) {
-        // `d=I` with an id frees the image and all of its placements and
-        // placeholders, whether or not a physical placement was on screen.
-        if (_images.containsKey(imageId) ||
-            _placeholdersByAnchor.values.any((p) => p.imageId == imageId)) {
-          _dropImage(imageId);
+    final matchedImageIds = <int>{};
+    var changed = false;
+    if (mode == 'i' || mode == 'r') {
+      // Kitty's id selectors cover the image's virtual placement too.
+      for (final entry in _virtualPlacements.entries.toList()) {
+        if (imageMatches(entry.key) &&
+            (mode == 'r' ||
+                placementId == null ||
+                placementId <= 0 ||
+                entry.value.clientPlacementId == placementId)) {
+          _virtualPlacements.remove(entry.key);
+          matchedImageIds.add(entry.key);
           changed = true;
         }
-      } else {
-        _dropUnreferencedImages();
       }
+    }
+    final removed = _removePlacementsWhere(matches);
+    if (changed) _removeOrphanedRelativePlacements();
+    changed = changed || removed.isNotEmpty;
+    matchedImageIds.addAll(removed.map((placement) => placement.imageId));
+
+    if (freeImages) {
+      final candidates = <int>{...matchedImageIds};
+      if ((mode == 'i' || mode == 'r') &&
+          (mode == 'r' || placementId == null || placementId <= 0)) {
+        // Kitty frees a matching image that has no placement at all.
+        candidates.addAll(_images.keys.where(imageMatches));
+        candidates.addAll(_pendingImages.keys.where(imageMatches));
+      }
+      for (final id in candidates) {
+        if (!_imageHasPlacements(id) &&
+            (_images.containsKey(id) || _pendingImages.containsKey(id))) {
+          _dropImage(id);
+          changed = true;
+        }
+      }
+      if (mode == 'i' &&
+          imageId != null &&
+          (placementId == null || placementId <= 0) &&
+          !_images.containsKey(imageId) &&
+          !_pendingImages.containsKey(imageId) &&
+          _placeholdersByAnchor.values.any((p) => p.imageId == imageId)) {
+        // Freed data must not be asked for again by placeholder cells that
+        // still name it.
+        _dropImage(imageId);
+        changed = true;
+      }
+    } else if (removed.isNotEmpty) {
+      _dropUnreferencedImages();
     }
 
     if (changed) {
@@ -2258,19 +3158,29 @@ class GraphicsManager {
     return changed;
   }
 
+  /// Whether [imageId] still has a physical, relative or virtual placement.
+  bool _imageHasPlacements(int imageId) =>
+      (_placementCountByImage[imageId] ?? 0) > 0 ||
+      _virtualPlacements.containsKey(imageId);
+
+  /// A row past any placement, for row ranges open at the bottom.
+  static const _maxPlacementRow = 1 << 40;
+
   /// Removes every physical placement and drops placement-only images. Images
   /// with protocol ids are retained so Unicode-placeholder redraws can reuse
   /// them after a clear.
   void clear() {
     _generation++;
     _pendingPlacementAnchors.clear();
-    for (final placement in _placementsByAnchor.values.toList()) {
-      _disposePlacement(placement);
+    for (final placement in _placementsById.values.toList()) {
+      _disposePlacement(placement, removeOrphans: false);
     }
     for (final placeholder in _placeholdersByAnchor.values.toList()) {
       _disposePlaceholder(placeholder);
     }
     _placementsByAnchor.clear();
+    _relativePlacements.clear();
+    _placementsById.clear();
     _placeholdersByAnchor.clear();
     _placeholderGrids.clear();
     for (final id in _images.keys.toList()) {
@@ -2342,15 +3252,15 @@ class GraphicsManager {
     final size = _placementDestinationSize(placement);
     final cellWidth = _cellPixelWidth > 0 ? _cellPixelWidth : 10.0;
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
-    final firstCol = (placement.xOffset / cellWidth).floor();
-    final firstRow = (placement.yOffset / cellHeight).floor();
-    final lastCol = ((placement.xOffset + size.width) / cellWidth).ceil() - 1;
-    final lastRow = ((placement.yOffset + size.height) / cellHeight).ceil() - 1;
+    final xOffset = placement.cellXOffset(cellWidth);
+    final yOffset = placement.cellYOffset(cellHeight);
+    final lastCol = ((xOffset + size.width) / cellWidth).ceil() - 1;
+    final lastRow = ((yOffset + size.height) / cellHeight).ceil() - 1;
     return (
-      firstCol: firstCol,
-      lastCol: math.max(firstCol, lastCol),
-      firstRow: firstRow,
-      lastRow: math.max(firstRow, lastRow),
+      firstCol: 0,
+      lastCol: math.max(0, lastCol),
+      firstRow: 0,
+      lastRow: math.max(0, lastRow),
     );
   }
 
@@ -2362,9 +3272,9 @@ class GraphicsManager {
       maximizeNaturalWidth: true,
     );
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
-    final first = (placement.yOffset / cellHeight).floor();
-    final last = ((placement.yOffset + size.height) / cellHeight).ceil() - 1;
-    return (first: first, last: math.max(first, last));
+    final yOffset = placement.cellYOffset(cellHeight);
+    final last = ((yOffset + size.height) / cellHeight).ceil() - 1;
+    return (first: 0, last: math.max(0, last));
   }
 
   ({double width, double height}) _placementDestinationSize(
@@ -2373,33 +3283,19 @@ class GraphicsManager {
   }) {
     final cellWidth = _cellPixelWidth > 0 ? _cellPixelWidth : 10.0;
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
-    if (placement.cols > 0 && placement.rows > 0) {
-      return (
-        width: placement.cols * cellWidth,
-        height: placement.rows * cellHeight,
-      );
-    }
-    final source = _placementSourceSize(placement);
-    if (source == null) {
-      return (
-        width: math.max(1, placement.cols) * cellWidth,
-        height: math.max(1, placement.rows) * cellHeight,
-      );
-    }
-    if (placement.cols > 0) {
-      final width = placement.cols * cellWidth;
-      return (width: width, height: source.height * (width / source.width));
-    }
-    if (placement.rows > 0) {
-      final height = placement.rows * cellHeight;
-      return (width: source.width * (height / source.height), height: height);
-    }
-    final availableColumns = maximizeNaturalWidth
-        ? math.max(1, _viewportColumns)
-        : math.max(1, _viewportColumns - placement.col);
-    final maxWidth = availableColumns * cellWidth;
-    final scale = source.width > maxWidth ? maxWidth / source.width : 1.0;
-    return (width: source.width * scale, height: source.height * scale);
+    final source = placement.cols > 0 && placement.rows > 0
+        ? null
+        : _placementSourceSize(placement);
+    return terminalImagePlacementSize(
+      placement,
+      sourceWidth: source?.width ?? 0,
+      sourceHeight: source?.height ?? 0,
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+      availableColumns: maximizeNaturalWidth
+          ? math.max(1, _viewportColumns)
+          : math.max(1, _viewportColumns - placement.col),
+    );
   }
 
   ({double width, double height})? _placementSourceSize(
@@ -2450,11 +3346,29 @@ class GraphicsManager {
     while (_images.isNotEmpty &&
         (_currentMemoryBytes + requiredBytes > targetMemory ||
             _images.length >= maxImageCount)) {
-      final oldest = _images.entries.reduce((a, b) {
-        return a.value._lastAccess <= b.value._lastAccess ? a : b;
-      });
-      _dropImage(oldest.key);
+      _dropImage(_imageEvictionCandidate()!);
     }
+  }
+
+  /// The decoded image to evict first: by [_evictionRank], then least recently
+  /// used. Never [protectedImageId].
+  int? _imageEvictionCandidate({int? protectedImageId}) {
+    int? best;
+    var bestRank = 0;
+    var bestAccess = 0;
+    for (final entry in _images.entries) {
+      if (entry.key == protectedImageId) continue;
+      final rank = _evictionRank(entry.key, transient: entry.value.transient);
+      final access = entry.value._lastAccess;
+      if (best == null ||
+          rank < bestRank ||
+          (rank == bestRank && access < bestAccess)) {
+        best = entry.key;
+        bestRank = rank;
+        bestAccess = access;
+      }
+    }
+    return best;
   }
 
   bool _evictAdditionalMemory(
@@ -2476,20 +3390,13 @@ class GraphicsManager {
     final targetMemory = (maxMemoryBytes * 0.5).toInt();
     while (_images.length > 1 &&
         _currentMemoryBytes + requiredBytes > targetMemory) {
-      MapEntry<int, TerminalImage>? oldest;
-      for (final entry in _images.entries) {
-        if (entry.key == protectedImageId) {
-          continue;
-        }
-        if (oldest == null ||
-            entry.value._lastAccess < oldest.value._lastAccess) {
-          oldest = entry;
-        }
-      }
-      if (oldest == null) {
+      final victim = _imageEvictionCandidate(
+        protectedImageId: protectedImageId,
+      );
+      if (victim == null) {
         break;
       }
-      _dropImage(oldest.key);
+      _dropImage(victim);
     }
     return _currentMemoryBytes + requiredBytes <= maxMemoryBytes;
   }
@@ -2518,6 +3425,7 @@ class GraphicsManager {
       _activeImageNumberReservations.remove(number);
     }
     _removePlacementsWhere((placement) => placement.imageId == imageId);
+    _removeOrphanedRelativePlacements();
     final imagePlaceholders = <TerminalImagePlaceholder>[
       for (final placeholder in _placeholdersByAnchor.values)
         if (placeholder.imageId == imageId) placeholder,
@@ -2572,25 +3480,43 @@ class GraphicsManager {
     }
   }
 
+  /// Removes every placement matching [predicate], then the relative
+  /// placements orphaned by that. Returns the matched placements.
   List<TerminalImagePlacement> _removePlacementsWhere(
     bool Function(TerminalImagePlacement placement) predicate,
   ) {
     final removed = <TerminalImagePlacement>[
       for (final placement in _placementsByAnchor.values)
         if (predicate(placement)) placement,
+      for (final placement in _relativePlacements.values)
+        if (predicate(placement)) placement,
     ];
     for (final placement in removed) {
-      _disposePlacement(placement);
+      _disposePlacement(placement, removeOrphans: false);
     }
+    if (removed.isNotEmpty) _removeOrphanedRelativePlacements();
     return removed;
   }
 
-  void _disposePlacement(TerminalImagePlacement placement) {
-    _placementsByAnchor.remove(placement.anchor);
-    _unindexPlacementRows(placement.anchor);
+  void _disposePlacement(
+    TerminalImagePlacement placement, {
+    bool removeOrphans = true,
+  }) {
+    if (!identical(_placementsById[placement.placementId], placement)) {
+      return; // already removed, e.g. as an orphan of an earlier removal
+    }
+    _placementsById.remove(placement.placementId);
     _decrementPlacementImageCount(placement.imageId);
-    placement.anchor.onDispose = null;
-    placement.dispose();
+    final anchor = placement.anchor;
+    if (anchor == null) {
+      _relativePlacements.remove(placement.placementId);
+    } else {
+      _placementsByAnchor.remove(anchor);
+      _unindexPlacementRows(anchor);
+      anchor.onDispose = null;
+      placement.dispose();
+    }
+    if (removeOrphans) _removeOrphanedRelativePlacements();
   }
 
   void _decrementPlacementImageCount(int imageId) {
@@ -2607,6 +3533,10 @@ class GraphicsManager {
     if (placement != null) {
       _unindexPlacementRows(anchor);
       _decrementPlacementImageCount(placement.imageId);
+      if (identical(_placementsById[placement.placementId], placement)) {
+        _placementsById.remove(placement.placementId);
+      }
+      _removeOrphanedRelativePlacements();
     }
     final placeholder = _placeholdersByAnchor.remove(anchor);
     if (placeholder != null) {

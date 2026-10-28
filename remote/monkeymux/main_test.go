@@ -7766,40 +7766,24 @@ func TestObserveKittyGraphicsPreservesSameChunkHardDeleteOrder(t *testing.T) {
 	}
 }
 
-func TestObserveKittyGraphicsAppliesDeleteAllInStreamOrder(t *testing.T) {
-	window := &muxWindow{}
-	window.observeKittyGraphicsLocked([]byte(
-		"\x1b_Ga=t,i=7,I=5,f=100;ROOT7\x1b\\" +
-			"\x1b_Ga=t,i=8,I=6,f=100;ROOT8\x1b\\" +
-			"\x1b_Ga=d,d=A\x1b\\" +
-			"\x1b_Ga=t,i=9,I=7,f=100;ROOT9\x1b\\"))
-
-	replay := string(window.kittyImageReplayLocked(nil))
-	if strings.Contains(replay, "ROOT7") || strings.Contains(replay, "ROOT8") {
-		t.Fatalf("d=A retained image data transmitted before it: %q", replay)
-	}
-	if !strings.Contains(replay, "ROOT9") {
-		t.Fatalf("d=A removed image data transmitted after it: %q", replay)
-	}
-	if len(window.kittyImageNumberToID) != 1 ||
-		window.kittyImageNumberToID["7"] != "9" {
-		t.Fatalf("d=A left stale image-number mappings: %#v", window.kittyImageNumberToID)
-	}
-}
-
-func TestObserveKittyGraphicsInvalidatesForPositionalHardDeletes(t *testing.T) {
-	for _, selector := range []string{"C", "P", "X", "Y"} {
+// TestObserveKittyGraphicsKeepsImagesForPositionalDeletes covers d=A and the
+// other positional hard deletes. The client frees only the images placed at
+// the cells they name, which MonkeyMux cannot see; an image shown only through
+// Unicode placeholders survives them. Dropping every retained image left such
+// placeholders blank after an attach, while keeping one too many costs only
+// replay bytes.
+func TestObserveKittyGraphicsKeepsImagesForPositionalDeletes(t *testing.T) {
+	for _, selector := range []string{"A", "C", "P", "Q", "X", "Y", "Z"} {
 		t.Run(selector, func(t *testing.T) {
 			window := &muxWindow{}
 			window.observeKittyGraphicsLocked([]byte(
-				"\x1b_Ga=t,i=7,I=5,f=100;ROOT\x1b\\" +
-					"\x1b_Ga=d,d=" + selector + ",x=1,y=1\x1b\\"))
+				"\x1b_Ga=t,i=7,f=100;ROOT7\x1b\\" +
+					"\x1b_Ga=d,d=" + selector + ",x=1,y=1,z=0\x1b\\" +
+					"\x1b_Ga=t,i=9,f=100;ROOT9\x1b\\"))
 
-			if got := window.kittyImageReplayLocked(nil); len(got) != 0 {
-				t.Fatalf("d=%s retained conservatively matched image data: %q", selector, got)
-			}
-			if len(window.kittyImageNumberToID) != 0 {
-				t.Fatalf("d=%s retained image-number mappings", selector)
+			replay := string(window.kittyImageReplayLocked(nil))
+			if !strings.Contains(replay, "ROOT7") || !strings.Contains(replay, "ROOT9") {
+				t.Fatalf("d=%s dropped retained image data: %q", selector, replay)
 			}
 		})
 	}

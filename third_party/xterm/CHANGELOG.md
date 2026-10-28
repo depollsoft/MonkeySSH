@@ -6,6 +6,18 @@ current xterm.js behavior. Upstream's renderer (DOM/canvas/WebGL), addon system
 and accessibility DOM have no analog in this Flutter port and are intentionally
 out of scope.
 
+### MonkeySSH Kitty graphics conformance
+* Relative placements (`P=`, `Q=`, `H=`, `V=`): a placement sits a cell offset
+  from an anchored, relative or virtual parent, moves with it and is removed
+  with it, with Kitty's `ENOPARENT`, `ECYCLE`, `ETOODEEP` and `EINVAL` replies.
+* Kitty semantics where Ghostty 1.4 fixed its own divergences: retransmission
+  replaces an image and its placements; images scroll and clip with a scroll
+  region; terminal-assigned ids never collide with program ids; Kitty's delete
+  selectors (`a`, `r`, `z`, `q`, ...); `i` with `I` is `EINVAL`; replies only
+  with an id, echoing `i`, `I` and `p`, and errors for invalid data; crops and
+  in-cell offsets; the cursor after a placement; transient images (`N=1`) are
+  evicted first; CAN, SUB and C1 controls discard a graphics APC.
+
 ### MonkeySSH performance fixes
 * Index Kitty Unicode placeholders and physical placements by their owning
   `CellAnchor`. Terminal paint now resolves only physical placements intersecting

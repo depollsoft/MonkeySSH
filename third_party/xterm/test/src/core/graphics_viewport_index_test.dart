@@ -100,7 +100,10 @@ void main() {
       expect(graphics.placementsInRows(lines, 36, 36), [targetPlacement]);
     });
 
-    test('placement lookup honors positive and negative cell offsets', () {
+    test('cell offsets never move a placement out of its first cell', () {
+      // Kitty keeps X= and Y= inside the top-left cell (at most one pixel
+      // short of its size), so oversized or negative offsets cannot shift a
+      // placement onto a neighbouring row or column (Ghostty #13891).
       final terminal = Terminal(maxLines: 100)..resize(12, 6);
       terminal.write(
         List<String>.generate(40, (index) => 'line $index').join('\r\n'),
@@ -124,15 +127,18 @@ void main() {
         xOffset: -10,
       );
 
+      expect(graphics.placementsInRows(lines, 21, 21), isEmpty);
+      expect(graphics.placementsInRows(lines, 20, 20), [shiftedDown]);
+      expect(graphics.placementsInRows(lines, 22, 22), [shiftedUp]);
       expect(
-        graphics.placementsInRows(lines, 21, 21),
-        unorderedEquals([shiftedDown, shiftedUp]),
+        graphics.deletePlacements(what: 'p', cellCol: 1, cellRow: 20),
+        isFalse,
       );
       expect(
-        graphics.deletePlacements(what: 'p', cellCol: 1, cellRow: 21),
+        graphics.deletePlacements(what: 'p', cellCol: 0, cellRow: 20),
         isTrue,
       );
-      expect(graphics.placements, isEmpty);
+      expect(graphics.placements, [shiftedUp]);
     });
 
     test('fractional natural placement bounds do not double-round', () {

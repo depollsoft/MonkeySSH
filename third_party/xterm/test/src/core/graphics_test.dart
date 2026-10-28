@@ -1031,7 +1031,7 @@ void main() {
       final terminal = Terminal(onOutput: responses.add);
 
       terminal
-        ..write('\x1b_Ga=T,i=19,f=32,s=1,v=1;$pixel\x1b\\')
+        ..write('\x1b_Ga=T,i=19,f=32,s=1,v=1,q=1;$pixel\x1b\\')
         ..write('\x1b_Ga=f,i=19,f=32,s=1,v=1,q=0;$pixel\x1b\\');
       var waited = 0;
       while (responses.isEmpty && waited < 2000) {
@@ -1080,7 +1080,7 @@ void main() {
       final terminal = Terminal(onOutput: responses.add);
 
       terminal
-        ..write('\x1b_Ga=t,i=66,f=100;$pngBase64\x1b\\')
+        ..write('\x1b_Ga=t,i=66,f=100,q=1;$pngBase64\x1b\\')
         ..write('\x1b_Ga=f,i=66,f=32,s=1,v=1,q=0;$pixel\x1b\\')
         ..write('\x1b_Ga=f,i=66,q=0\x1b\\');
 
@@ -1114,7 +1114,7 @@ void main() {
       final blue = base64.encode(<int>[0, 0, 255, 255]);
 
       terminal
-        ..write('\x1b_Ga=t,i=8,f=32,s=2,v=1;$redGreen\x1b\\')
+        ..write('\x1b_Ga=t,i=8,f=32,s=2,v=1,q=1;$redGreen\x1b\\')
         ..write(
           '\x1b_Ga=f,i=8,f=32,s=1,v=1,x=1,c=1,X=1,z=60,q=2;'
           '$blue\x1b\\',
@@ -1192,7 +1192,9 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
-      expect(terminal.buffer.cursorY, 10);
+      // Kitty leaves the cursor right of the image on its last (tenth) row.
+      expect(terminal.buffer.cursorY, 9);
+      expect(terminal.buffer.cursorX, 30);
       expect(terminal.graphics.placements, hasLength(1));
 
       // Copilot/shell redraws the current row after the image command. The
@@ -1456,13 +1458,14 @@ void main() {
       final blue = base64.encode(<int>[0, 0, 255, 255]);
 
       terminal
-        ..write('\x1b_Ga=T,i=28,I=9,f=32,s=1,v=1;$red\x1b\\')
+        ..write('\x1b_Ga=T,I=9,f=32,s=1,v=1;$red\x1b\\')
         ..write('\x1b_Ga=f,I=9,f=32,s=1,v=1,z=50;$blue\x1b\\')
         ..write('\x1b_Ga=a,I=9,r=1,z=40,s=3,v=1\x1b\\');
+      final imageId = terminal.graphics.imageIdForNumber(9)!;
 
       var waited = 0;
       while (waited < 2000) {
-        final image = terminal.graphics.imageById(28);
+        final image = terminal.graphics.imageById(imageId);
         if (image?.frameCount == 2 &&
             image?.animationState == TerminalAnimationState.running) {
           break;
@@ -1470,36 +1473,11 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
-      final image = terminal.graphics.imageById(28);
+      final image = terminal.graphics.imageById(imageId);
       expect(image, isNotNull);
       expect(image!.frameCount, 2);
       expect(image.frameDuration(1), const Duration(milliseconds: 40));
       expect(image.animationState, TerminalAnimationState.running);
-    });
-  });
-
-  testWidgets('newest explicit id remains authoritative for an image number', (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final slowPng = await _buildPngBase64(1200, 800);
-      final fastPng = await _buildPngBase64(2, 2);
-      final terminal = Terminal();
-
-      terminal
-        ..write('\x1b_Ga=T,i=100,I=5,f=100,c=4,r=2;$slowPng\x1b\\')
-        ..write('\x1b_Ga=T,i=200,I=5,f=100,c=4,r=2;$fastPng\x1b\\');
-
-      var waited = 0;
-      while ((terminal.graphics.imageById(100) == null ||
-              terminal.graphics.imageById(200) == null) &&
-          waited < 5000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-      expect(terminal.graphics.imageById(100), isNotNull);
-      expect(terminal.graphics.imageById(200), isNotNull);
-      expect(terminal.graphics.imageIdForNumber(5), 200);
     });
   });
 
@@ -1514,22 +1492,25 @@ void main() {
 
       terminal
         ..write(
-          '\x1b_Ga=T,i=100,I=5,f=100,c=4,r=2,C=1;$slowPng\x1b\\',
+          '\x1b_Ga=T,I=5,f=100,c=4,r=2,C=1;$slowPng\x1b\\',
         )
-        ..write('\x1b_Ga=f,I=5,f=32,s=1,v=1,q=2;$blue\x1b\\')
-        ..write('\x1b_Ga=t,i=200,I=5,f=100;$fastPng\x1b\\');
+        ..write('\x1b_Ga=f,I=5,f=32,s=1,v=1,q=2;$blue\x1b\\');
+      final first = terminal.graphics.imageIdForNumber(5)!;
+      terminal.write('\x1b_Ga=t,I=5,f=100;$fastPng\x1b\\');
+      final second = terminal.graphics.imageIdForNumber(5)!;
+      expect(second, isNot(first));
 
       var waited = 0;
-      while ((terminal.graphics.imageById(100)?.frameCount ?? 0) < 2 &&
+      while ((terminal.graphics.imageById(first)?.frameCount ?? 0) < 2 &&
           waited < 5000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
 
-      expect(terminal.graphics.imageById(100)?.frameCount, 2);
-      expect(terminal.graphics.imageIdForNumber(5), 200);
-      expect(terminal.graphics.imageById(200), isNull);
-      expect(terminal.graphics.hasPendingImage(200), isTrue);
+      expect(terminal.graphics.imageById(first)?.frameCount, 2);
+      expect(terminal.graphics.imageIdForNumber(5), second);
+      expect(terminal.graphics.imageById(second), isNull);
+      expect(terminal.graphics.hasPendingImage(second), isTrue);
     });
   });
 
@@ -1541,19 +1522,19 @@ void main() {
       final blue = base64.encode(<int>[0, 0, 255, 255]);
       final terminal = Terminal();
 
-      terminal.write('\x1b_Ga=T,i=1,I=5,f=32,s=1,v=1,C=1;$red\x1b\\');
+      terminal.write('\x1b_Ga=T,I=5,f=32,s=1,v=1,C=1;$red\x1b\\');
+      final firstId = terminal.graphics.imageIdForNumber(5)!;
       var waited = 0;
-      while (terminal.graphics.imageById(1) == null && waited < 2000) {
+      while (terminal.graphics.imageById(firstId) == null && waited < 2000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
-      expect(terminal.graphics.imageIdForNumber(5), 1);
 
       terminal
         ..write('\x1b_Ga=t,I=5,f=32,s=1,v=1,q=2;$red\x1b\\')
         ..write('\x1b_Ga=f,I=5,f=32,s=1,v=1,q=2;$blue\x1b\\');
       final replacementId = terminal.graphics.imageIdForNumber(5)!;
-      expect(replacementId, isNot(1));
+      expect(replacementId, isNot(firstId));
 
       waited = 0;
       while (
@@ -1563,7 +1544,7 @@ void main() {
         waited += 20;
       }
 
-      expect(terminal.graphics.imageById(1)!.frameCount, 1);
+      expect(terminal.graphics.imageById(firstId)!.frameCount, 1);
       expect(terminal.graphics.imageById(replacementId)!.frameCount, 2);
     });
   });
@@ -1575,73 +1556,30 @@ void main() {
       final pixel = base64.encode(<int>[255, 0, 0, 255]);
       final terminal = Terminal();
 
-      terminal.write(
-        '\x1b_Ga=T,i=1,I=5,f=32,s=1,v=1,C=1;$pixel\x1b\\',
-      );
+      terminal.write('\x1b_Ga=T,I=5,f=32,s=1,v=1,C=1;$pixel\x1b\\');
+      final firstId = terminal.graphics.imageIdForNumber(5)!;
       var waited = 0;
-      while (terminal.graphics.imageById(1) == null && waited < 2000) {
+      while (terminal.graphics.imageById(firstId) == null && waited < 2000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
-      expect(terminal.graphics.imageIdForNumber(5), 1);
 
-      terminal.write(
-        '\x1b_Ga=T,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\',
-      );
+      // Rejected before any id is reserved: the mapping never moves.
+      terminal.write('\x1b_Ga=T,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\');
+      expect(terminal.graphics.imageIdForNumber(5), firstId);
+
+      // Rejected by the decoder: the reservation is rolled back.
+      terminal.write('\x1b_Ga=T,I=5,f=100,C=1,q=2;$pixel\x1b\\');
+      expect(terminal.graphics.imageIdForNumber(5), isNot(firstId));
       waited = 0;
-      while (terminal.graphics.imageIdForNumber(5) != 1 && waited < 2000) {
+      while (
+          terminal.graphics.imageIdForNumber(5) != firstId && waited < 2000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
 
-      expect(terminal.graphics.imageIdForNumber(5), 1);
-      expect(terminal.graphics.imageById(1), isNotNull);
-
-      terminal.write(
-        '\x1b_Ga=T,i=2,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\',
-      );
-      waited = 0;
-      while (terminal.graphics.imageIdForNumber(5) != 1 && waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageIdForNumber(5), 1);
-      expect(terminal.graphics.imageById(2), isNull);
-
-      terminal.write(
-        '\x1b_Ga=t,i=3,I=5,f=32,s=0,v=0,q=2;$pixel\x1b\\',
-      );
-      expect(terminal.graphics.imageIdForNumber(5), 3);
-      expect(terminal.graphics.imageById(3), isNull);
-      expect(terminal.graphics.hasPendingImage(3), isTrue);
-      terminal.graphics.imageForPlacement(3);
-      waited = 0;
-      while (terminal.graphics.imageIdForNumber(5) != 1 && waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageIdForNumber(5), 1);
-      expect(terminal.graphics.hasPendingImage(3), isFalse);
-
-      terminal.graphics.registerImageNumber(6, 2);
-      terminal
-        ..write('\x1b_Ga=t,i=4,I=5,f=32,s=0,v=0,q=2;$pixel\x1b\\')
-        ..write('\x1b_Ga=t,i=4,I=6,f=32,s=0,v=0,q=2;$pixel\x1b\\');
-      expect(terminal.graphics.imageIdForNumber(5), 4);
-      expect(terminal.graphics.imageIdForNumber(6), 4);
-      terminal.graphics.imageForPlacement(4);
-      waited = 0;
-      while ((terminal.graphics.imageIdForNumber(5) != 1 ||
-              terminal.graphics.imageIdForNumber(6) != 2) &&
-          waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageIdForNumber(5), 1);
-      expect(terminal.graphics.imageIdForNumber(6), 2);
+      expect(terminal.graphics.imageIdForNumber(5), firstId);
+      expect(terminal.graphics.imageById(firstId), isNotNull);
     });
   });
 
@@ -1669,108 +1607,27 @@ void main() {
     });
   });
 
-  testWidgets('failed remap chains skip failed predecessor reservations', (
+  testWidgets('failed I= roots in a row restore the last good mapping', (
     tester,
   ) async {
     await tester.runAsync(() async {
       final pixel = base64.encode(<int>[255, 0, 0, 255]);
       final terminal = Terminal();
 
+      terminal.write('\x1b_Ga=t,I=5,f=32,s=1,v=1,q=2;$pixel\x1b\\');
+      final goodId = terminal.graphics.imageIdForNumber(5)!;
       terminal
-        ..write('\x1b_Ga=t,i=1,I=5,f=32,s=1,v=1,q=2;$pixel\x1b\\')
-        ..write('\x1b_Ga=T,i=100,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\')
-        ..write('\x1b_Ga=T,i=200,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\');
+        ..write('\x1b_Ga=T,I=5,f=100,C=1,q=2;$pixel\x1b\\')
+        ..write('\x1b_Ga=T,I=5,f=100,C=1,q=2;$pixel\x1b\\');
 
       var waited = 0;
-      while (terminal.graphics.imageIdForNumber(5) != 1 && waited < 2000) {
+      while (terminal.graphics.imageIdForNumber(5) != goodId && waited < 2000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
 
-      expect(terminal.graphics.imageIdForNumber(5), 1);
-      expect(terminal.graphics.imageById(100), isNull);
-      expect(terminal.graphics.imageById(200), isNull);
-    });
-  });
-
-  testWidgets('synchronous remap survives completion of older reservations', (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final pixel = base64.encode(<int>[255, 0, 0, 255]);
-      final pngBase64 = await _buildPngBase64(1200, 800);
-      final terminal = Terminal();
-
-      terminal
-        ..write('\x1b_Ga=T,i=100,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\')
-        ..write('\x1b_Ga=T,i=200,I=5,f=100,C=1,q=2;$pngBase64\x1b\\')
-        ..write('\x1b_Ga=a,i=300,I=5,q=2\x1b\\');
-      expect(terminal.graphics.imageIdForNumber(5), 300);
-
-      var waited = 0;
-      while (terminal.graphics.imageById(200) == null && waited < 5000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageById(100), isNull);
-      expect(terminal.graphics.imageById(200), isNotNull);
-      expect(terminal.graphics.imageIdForNumber(5), 300);
-    });
-  });
-
-  testWidgets('same-id concurrent reservations keep a later successful root', (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final pixel = base64.encode(<int>[255, 0, 0, 255]);
-      final pngBase64 = await _buildPngBase64(8, 8);
-      final terminal = Terminal();
-
-      terminal
-        ..write('\x1b_Ga=T,i=100,I=5,f=32,s=0,v=0,C=1,q=2;$pixel\x1b\\')
-        ..write('\x1b_Ga=T,i=100,I=5,f=100,C=1,q=2;$pngBase64\x1b\\');
-
-      var waited = 0;
-      while (terminal.graphics.imageById(100) == null && waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageById(100), isNotNull);
-      expect(terminal.graphics.imageIdForNumber(5), 100);
-    });
-  });
-
-  testWidgets('same-id concurrent failures restore a null predecessor', (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final invalid = base64.encode(<int>[255, 0, 0, 255]);
-      final terminal = Terminal();
-
-      await terminalGraphicsDecodeGate.acquire();
-      await terminalGraphicsDecodeGate.acquire();
-      await terminalGraphicsDecodeGate.acquire();
-      try {
-        terminal
-          ..write('\x1b_Ga=T,i=100,I=5,f=32,s=0,v=0,C=1,q=2;$invalid\x1b\\')
-          ..write('\x1b_Ga=T,i=100,I=5,f=32,s=0,v=0,C=1,q=2;$invalid\x1b\\');
-        expect(terminal.graphics.imageIdForNumber(5), 100);
-      } finally {
-        terminalGraphicsDecodeGate.release();
-        terminalGraphicsDecodeGate.release();
-        terminalGraphicsDecodeGate.release();
-      }
-
-      var waited = 0;
-      while (terminal.graphics.imageIdForNumber(5) != null && waited < 2000) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        waited += 20;
-      }
-
-      expect(terminal.graphics.imageIdForNumber(5), isNull);
-      expect(terminal.graphics.imageById(100), isNull);
+      expect(terminal.graphics.imageIdForNumber(5), goodId);
+      expect(terminal.graphics.hasPendingImage(goodId), isTrue);
     });
   });
 
@@ -1783,7 +1640,7 @@ void main() {
       final terminal = Terminal(onOutput: responses.add);
 
       terminal
-        ..write('\x1b_Ga=t,i=29,f=32,s=1,v=1;$red\x1b\\')
+        ..write('\x1b_Ga=t,i=29,f=32,s=1,v=1,q=1;$red\x1b\\')
         ..write('\x1b_Ga=c,i=29,r=2,c=1,w=1,h=1\x1b\\');
       var waited = 0;
       while (responses.isEmpty && waited < 2000) {
@@ -1838,37 +1695,45 @@ void main() {
     });
   });
 
-  testWidgets('mapping-only a=a keeps a retained root lazily encoded', (
+  testWidgets('an image id and an image number together are rejected', (
     tester,
   ) async {
     await tester.runAsync(() async {
+      // Kitty forbids naming both i and I in any command and replies EINVAL
+      // with both, before anything changes (Ghostty #13889).
       final pngBase64 = await _buildPngBase64(3, 2);
-      final terminal = Terminal();
+      final responses = <String>[];
+      final terminal = Terminal(onOutput: responses.add);
+      terminal.write('\x1b_Ga=t,i=42,f=100,q=2;$pngBase64\x1b\\');
 
-      terminal
-        ..write('\x1b_Ga=t,i=42,f=100,q=2;$pngBase64\x1b\\')
-        ..write('\x1b_Ga=a,i=42,I=9,q=2\x1b\\');
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-
-      expect(terminal.graphics.imageIdForNumber(9), 42);
-      expect(terminal.graphics.hasPendingImage(42), isTrue);
-      expect(terminal.graphics.imageById(42), isNull);
-    });
-  });
-
-  testWidgets('mapping-only commands keep image-number aliases bounded', (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final terminal = Terminal();
-      terminal.graphics.storeImageWithId(1, await _buildImage(1, 1));
-
-      for (var number = 1; number <= 300; number++) {
-        terminal.write('\x1b_Ga=a,i=1,I=$number,q=2\x1b\\');
+      for (final command in [
+        'a=t,i=7,I=9,f=100;$pngBase64',
+        'a=T,i=7,I=9,f=100;$pngBase64',
+        'a=p,i=42,I=9',
+        'a=a,i=42,I=9',
+        'a=d,d=I,i=42,I=9',
+        'a=f,i=42,I=9,f=100;$pngBase64',
+        'a=c,i=42,I=9,r=1,c=1',
+      ]) {
+        responses.clear();
+        terminal.write('\x1b_G$command\x1b\\');
+        expect(
+          responses,
+          [
+            '\x1b_Gi=42,I=9;EINVAL: image ID and number are mutually exclusive\x1b\\'
+          ].map((r) => command.contains('i=7') ? r.replaceAll('42', '7') : r),
+          reason: command,
+        );
       }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(terminal.graphics.imageIdForNumber(9), isNull);
+      expect(terminal.graphics.hasPendingImage(42), isTrue);
+      expect(terminal.graphics.hasPendingImage(7), isFalse);
+      expect(terminal.graphics.placements, isEmpty);
 
-      expect(terminal.graphics.imageIdForNumber(1), isNull);
-      expect(terminal.graphics.imageIdForNumber(300), 1);
+      responses.clear();
+      terminal.write('\x1b_Ga=p,i=42,I=9,q=2\x1b\\');
+      expect(responses, isEmpty);
     });
   });
 
@@ -2265,7 +2130,7 @@ void main() {
     expect(terminal.unresolvedPlaceholderImageIds(), {55});
   });
 
-  testWidgets('a=T advances the cursor below the image by r rows', (
+  testWidgets('a=T leaves the cursor right of the image on its last row', (
     tester,
   ) async {
     await tester.runAsync(() async {
@@ -2274,8 +2139,9 @@ void main() {
 
       terminal.write('\x1b_Ga=T,f=100,r=3;$pngBase64\x1b\\X');
 
-      // 'X' should land three rows below where the image was anchored.
-      expect(terminal.buffer.lines[3].getText().trimRight(), 'X');
+      // Three 20-pixel rows of a square image are six 10-pixel columns, so
+      // Kitty puts the cursor at column six of the image's third row.
+      expect(terminal.buffer.lines[2].getText().trimRight(), '${' ' * 6}X');
     });
   });
 
@@ -2290,7 +2156,7 @@ void main() {
       terminal.write('\x1b_Ga=T,f=100,c=30;$pngBase64\x1b\\X');
 
       // 240x160 at 30 ten-pixel columns is 200 pixels high, or ten rows.
-      expect(terminal.buffer.lines[10].getText().trimRight(), 'X');
+      expect(terminal.buffer.lines[9].getText().trimRight(), '${' ' * 30}X');
       expect(terminal.buffer.lines[0].getText().trimRight(), isEmpty);
     });
   });
@@ -2327,7 +2193,7 @@ void main() {
 
       terminal.write('\x1b_Ga=T,i=92,f=100,o=z,c=30;$compressed\x1b\\X');
 
-      expect(terminal.buffer.lines[10].getText().trimRight(), 'X');
+      expect(terminal.buffer.lines[9].getText().trimRight(), '${' ' * 30}X');
       await _awaitImage(terminal, 92);
       expect(terminal.graphics.imageById(92), isNotNull);
     });
@@ -2345,8 +2211,9 @@ void main() {
         '\x1b_Ga=T,f=100,c=30,x=120;$pngBase64\x1b\\X',
       );
 
-      // Cropping 120 pixels from the 240-pixel width leaves a 120x160 source.
-      expect(terminal.buffer.lines[20].getText().trimRight(), 'X');
+      // Cropping 120 pixels from the 240-pixel width leaves a 120x160 source,
+      // 400 pixels or twenty rows high at 30 columns.
+      expect(terminal.buffer.lines[19].getText().trimRight(), '${' ' * 30}X');
     });
   });
 
@@ -2355,12 +2222,16 @@ void main() {
       final terminal = Terminal();
       terminal.graphics.setCellPixelSize(10, 20);
 
-      terminal.write(
-        '\x1b_Ga=T,f=98,c=30;$_jpeg240x160Base64\x1b\\X',
-      );
+      // f=98 (any encoded container) is private to the app's own bridges.
+      terminal
+        ..submitGraphicsCommand(
+          const {'a': 'T', 'f': '98', 'c': '30'},
+          base64.decode(_jpeg240x160Base64),
+        )
+        ..write('X');
 
-      expect(terminal.buffer.cursorY, 10);
-      expect(terminal.buffer.lines[10].getText().trimRight(), 'X');
+      expect(terminal.buffer.cursorY, 9);
+      expect(terminal.buffer.lines[9].getText().trimRight(), '${' ' * 30}X');
     });
   });
 
@@ -2376,7 +2247,7 @@ void main() {
 
       terminal.write('\x1b_Ga=p,i=42,c=30\x1b\\X');
 
-      expect(terminal.buffer.lines[10].getText().trimRight(), 'X');
+      expect(terminal.buffer.lines[9].getText().trimRight(), '${' ' * 30}X');
     });
   });
 
@@ -3033,8 +2904,8 @@ void main() {
       final pngBase64 = await _buildPngBase64(4, 3);
       final terminal = Terminal();
       terminal
-        ..write('\x1b_Ga=T,i=1,I=5,f=100,c=4,r=2;$pngBase64\x1b\\')
-        ..write('\x1b_Ga=T,i=2,I=6,f=100,c=4,r=2;$pngBase64\x1b\\');
+        ..write('\x1b_Ga=T,i=1,f=100,c=4,r=2;$pngBase64\x1b\\')
+        ..write('\x1b_Ga=T,i=2,f=100,c=4,r=2;$pngBase64\x1b\\');
       var waited = 0;
       while (terminal.graphics.placements.length < 2 && waited < 2000) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -3125,11 +2996,12 @@ void main() {
       expect(responses.single, contains('OK'));
 
       responses.clear();
-      // An unknown compression value must still be rejected.
+      // Kitty drops a command with an unknown compression value while
+      // parsing it, so there is no reply at all.
       terminal.write(
         '\x1b_Ga=q,i=2,f=100,o=w,q=0;${base64.encode(pngBytes)}\x1b\\',
       );
-      expect(responses.single, contains('EINVAL'));
+      expect(responses, isEmpty);
     });
   });
 
@@ -3150,7 +3022,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 20));
         waited += 20;
       }
-      expect(responses.single, matches(RegExp(r'I=5,i=\d+;OK')));
+      expect(responses.single, matches(RegExp(r'i=\d+,I=5;OK')));
 
       // The image can be placed by number.
       terminal.write('\x1b_Ga=p,I=5,c=3,r=2\x1b\\');
@@ -3187,25 +3059,6 @@ void main() {
       expect(terminal.graphics.hasPendingImage(imageId), isTrue);
       expect(terminal.graphics.placements, hasLength(1));
       expect(terminal.graphics.placements.single.imageId, imageId);
-    });
-  });
-
-  testWidgets('I=-only virtual placement resolves an explicit placement remap',
-      (
-    tester,
-  ) async {
-    await tester.runAsync(() async {
-      final terminal = Terminal();
-      terminal.graphics.storeImageWithId(7, await _buildImage(2, 2));
-
-      terminal.write('\x1b_Ga=p,U=1,i=7,I=9,c=1,r=1\x1b\\');
-      expect(terminal.graphics.imageIdForNumber(9), 7);
-
-      terminal.write('\x1b_Ga=p,U=1,I=9,c=3,r=2\x1b\\');
-      final virtual = terminal.graphics.virtualPlacementById(7);
-      expect(virtual, isNotNull);
-      expect(virtual!.cols, 3);
-      expect(virtual.rows, 2);
     });
   });
 
@@ -3383,7 +3236,7 @@ void main() {
         hasLength(1),
         reason: 'shrinking must not drop the row the image is anchored to',
       );
-      expect(terminal.graphics.placements.single.anchor.attached, isTrue);
+      expect(terminal.graphics.placements.single.anchor!.attached, isTrue);
     });
   });
 
@@ -3428,7 +3281,7 @@ void main() {
         hasLength(1),
         reason: 'dropping the footer must not reach the image row',
       );
-      expect(terminal.graphics.placements.single.anchor.attached, isTrue);
+      expect(terminal.graphics.placements.single.anchor!.attached, isTrue);
       expect(terminal.graphics.placements.single.row, 1);
     });
   });

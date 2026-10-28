@@ -1410,8 +1410,11 @@ func (s *terminalScreen) endString() {
 			action, hasAction = value[0], true
 		case bytes.Equal(key, []byte("C")):
 			noMove = bytes.Equal(value, []byte("1"))
-		case bytes.Equal(key, []byte("U")):
-			virtual = bytes.Equal(value, []byte("1"))
+		case bytes.Equal(key, []byte("U")), bytes.Equal(key, []byte("P")):
+			// Like Kitty, the client reads U as set for any non-zero value,
+			// and a placement relative to a parent (P) never moves the
+			// cursor either.
+			virtual = virtual || kittyNonZero(string(value))
 		case bytes.Equal(key, []byte("m")):
 			more = bytes.Equal(value, []byte("1"))
 		}

@@ -984,6 +984,10 @@ type muxWindow struct {
 	kittyGraphicsPendingTerm int
 	// visibility holds visibility-report state (terminal_visibility.go).
 	visibility windowVisibility
+	// Kitty virtual and relative placements replayed after the images (see
+	// kitty_placements.go), and the screen they were last reconciled with.
+	kittyPlacements    []kittyRetainedPlacement
+	kittyPlacementsAlt bool
 }
 
 type terminalOutputParserState int
@@ -11245,6 +11249,16 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 	window *muxWindow,
 	clientHas map[string]uint32,
 ) ([]byte, []byte) {
+	replay, followUp := s.replayBytesWithImagesLocked(window, clientHas)
+	// Kept virtual and relative placements go last, after every image they
+	// show and the frame whose placeholder cells position them.
+	return replay, append(followUp, window.kittyPlacementReplayLocked()...)
+}
+
+func (s *muxServer) replayBytesWithImagesLocked(
+	window *muxWindow,
+	clientHas map[string]uint32,
+) ([]byte, []byte) {
 	history, historyStart := window.historyTailWithParserLocked()
 	if window.retainsConPtyNormalScreenLocked() {
 		// Keep the full bounded screen history: differential updates may leave
@@ -11348,9 +11362,11 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 		)...,
 	)
 	history = window.withheldAttachOscSuffixTrimmedLocked(history)
-	replayHistory := make([]byte, 0, len(images)+len(history))
+	placements := window.kittyPlacementReplayLocked()
+	replayHistory := make([]byte, 0, len(images)+len(history)+len(placements))
 	replayHistory = append(replayHistory, images...)
 	replayHistory = append(replayHistory, history...)
+	replayHistory = append(replayHistory, placements...)
 	return buildWindowReplay(window, replayHistory, s.keyboardModesUsed)
 }
 
@@ -14457,8 +14473,11 @@ type kittyGraphicsEvent struct {
 	buf         []byte
 	animation   bool
 	delete      bool
-	clearCache  bool
 	mappingOnly bool
+	// control holds the keys of a delete or a placement event; placement is
+	// the display command a placement event replays.
+	control   map[string]string
+	placement []byte
 }
 
 // scanKittyTransmissions parses complete Kitty graphics events from the front of
@@ -14502,26 +14521,36 @@ func scanKittyTransmissions(
 			return events, i
 		}
 		if isDelete {
-			selector := parseKittyControl(kittyControl(data, i, end))["d"]
-			clearCache := selector == "A" ||
-				selector == "C" ||
-				selector == "P" ||
-				selector == "X" ||
-				selector == "Y"
-			if id != "" || imageNumber != "" || clearCache {
-				events = append(events, kittyGraphicsEvent{
-					id: id, imageNumber: imageNumber, delete: true, clearCache: clearCache,
-				})
-			}
+			args := parseKittyControl(kittyControl(data, i, end))
+			events = append(events, kittyGraphicsEvent{
+				id: id, imageNumber: imageNumber, delete: true, control: args,
+			})
 		} else if buf != nil {
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
 			})
+			if !isAnimation {
+				// An a=T root placed relative to a parent replays as an
+				// a=p after the image, since the root itself replays as a=t.
+				args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
+				if args["a"] == "T" && kittyNonZero(args["P"]) &&
+					!kittyNonZero(args["U"]) {
+					if command := kittyRelativeCommandFromRoot(args); command != nil {
+						events = append(events, kittyGraphicsEvent{
+							control: args, placement: command,
+						})
+					}
+				}
+			}
 		} else {
 			args := parseKittyControl(kittyControl(data, i, end))
 			if args["a"] == "p" && args["i"] != "" && args["I"] != "" {
 				events = append(events, kittyGraphicsEvent{
 					id: args["i"], imageNumber: args["I"], mappingOnly: true,
+				})
+			} else if args["a"] == "p" {
+				events = append(events, kittyGraphicsEvent{
+					control: args, placement: data[i:end],
 				})
 			}
 		}
@@ -14560,16 +14589,9 @@ func assembleKittyTransmission(
 	}
 	switch action {
 	case "d":
-		selector := args["d"]
-		freeImageData := selector == "A" ||
-			selector == "C" ||
-			selector == "I" ||
-			selector == "N" ||
-			selector == "P" ||
-			selector == "X" ||
-			selector == "Y"
-		return apcEnd, nil, args["i"], args["I"],
-			freeImageData, false, true
+		// Every delete reaches the retained placements; which ones also free
+		// retained image data is decided when the event is applied.
+		return apcEnd, nil, args["i"], args["I"], true, false, true
 	case "t", "T":
 		// An image transmission; assemble continuation chunks below.
 		buf = append(buf, rewriteKittyReplayCommand(data[start:apcEnd], true)...)
@@ -14769,19 +14791,16 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	events []kittyGraphicsEvent,
 ) bool {
 	changed := false
+	w.reconcileKittyPlacementScreenLocked()
 	for _, event := range events {
+		if event.placement != nil {
+			if w.observeKittyPlacementLocked(event.control, event.placement) {
+				changed = true
+			}
+			continue
+		}
 		if event.delete {
-			if event.clearCache {
-				if w.clearKittyImagesLocked() {
-					changed = true
-				}
-				continue
-			}
-			id := event.id
-			if id == "" && event.imageNumber != "" {
-				id = w.kittyImageNumberToID[event.imageNumber]
-			}
-			if w.removeKittyImageLocked(id) {
+			if w.applyKittyImageDeleteLocked(event) {
 				changed = true
 			}
 			continue
@@ -14832,6 +14851,8 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			animation := rewriteKittyImageReferenceToID(event.buf, id)
 			changed = w.appendKittyImageAnimationLocked(id, animation) || changed
 		} else {
+			// A retransmission replaces the image and every placement of it.
+			w.dropKittyImagePlacementsLocked(id)
 			w.storeKittyImageLocked(id, event.buf)
 			changed = true
 		}
@@ -14886,6 +14907,7 @@ func (w *muxWindow) removeKittyImageLocked(id string) bool {
 	if _, ok := w.kittyImages[id]; !ok {
 		return false
 	}
+	w.dropKittyImagePlacementsLocked(id)
 	delete(w.kittyImages, id)
 	delete(w.kittyImageAnimations, id)
 	delete(w.kittyImageSeq, id)
@@ -14938,6 +14960,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageOrder = nil
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
+	w.kittyPlacements = nil
 	return changed
 }
 
@@ -14949,12 +14972,7 @@ func (w *muxWindow) enforceKittyImageCapsLocked() {
 	for len(w.kittyImageOrder) > 0 &&
 		(len(w.kittyImageOrder) > maxRetainedKittyImages ||
 			(total > maxRetainedKittyImageBytes && len(w.kittyImageOrder) > 1)) {
-		oldest := w.kittyImageOrder[0]
-		for _, id := range w.kittyImageOrder[1:] {
-			if w.kittyImageSeq[id] < w.kittyImageSeq[oldest] {
-				oldest = id
-			}
-		}
+		oldest := w.kittyEvictionCandidateLocked()
 		total -= len(w.kittyImages[oldest]) + len(w.kittyImageAnimations[oldest])
 		w.removeKittyImageLocked(oldest)
 	}
@@ -14999,17 +15017,23 @@ func (s *muxServer) enforceGlobalKittyImageBudgetLocked() {
 		var victimWin *muxWindow
 		var victimID string
 		var victimSeq uint64
+		victimTransient := false
 		found := false
 		for _, w := range s.windows {
 			for id, seq := range w.kittyImageSeq {
-				if _, ok := w.kittyImages[id]; !ok {
+				root, ok := w.kittyImages[id]
+				if !ok {
 					continue
 				}
-				if !found || seq < victimSeq {
+				// Transient images (Kitty usage hint N=1) go first.
+				transient := kittyRootTransient(root)
+				if !found || (transient && !victimTransient) ||
+					(transient == victimTransient && seq < victimSeq) {
 					found = true
 					victimSeq = seq
 					victimWin = w
 					victimID = id
+					victimTransient = transient
 				}
 			}
 		}
@@ -15135,7 +15159,12 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
 		return nil
 	}
-	wanted := w.screenLocked().PlaceholderImageIDs()
+	// The images kept virtual and relative placements show come back too, or
+	// the placements replayed after them would have nothing to place.
+	wanted := append(
+		w.screenLocked().PlaceholderImageIDs(),
+		w.kittyPlacementImageIDsLocked()...,
+	)
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -16324,9 +16353,25 @@ func isTerminalResponseKitty(payload []byte) bool {
 		return false
 	}
 	response := payload[separator+1:]
-	return bytes.HasPrefix(response, []byte("OK")) ||
-		bytes.HasPrefix(response, []byte("ERROR")) ||
-		bytes.HasPrefix(response, []byte("ENOTSUP"))
+	return bytes.HasPrefix(response, []byte("OK")) || isKittyErrorCode(response)
+}
+
+// isKittyErrorCode reports a Kitty graphics error reply: an errno-style code
+// (E and capitals, such as EINVAL, ENOENT or ENOPARENT), then the end or a
+// colon and its message.
+func isKittyErrorCode(response []byte) bool {
+	if len(response) < 2 || response[0] != 'E' {
+		return false
+	}
+	for _, b := range response[1:] {
+		if b == ':' {
+			return true
+		}
+		if b < 'A' || b > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func isReplayUnsafeOscQuery(payload []byte) bool {
