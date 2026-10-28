@@ -351,13 +351,12 @@ void main() {
           terminal.promptClickInput(const CellOffset(2, 0)), typed.single * 2);
     });
 
-    test('click_events=1 reports a press and release at the screen cell', () {
+    test('click_events=1 reports a press at the screen cell', () {
       final terminal = prompt('click_events=1', 'ls -la');
-      expect(terminal.promptClickInput(const CellOffset(4, 0)),
-          '\x1b[<0;5;1M\x1b[<0;5;1m');
+      expect(terminal.promptClickInput(const CellOffset(4, 0)), '\x1b[<0;5;1M');
       // After the input too; the shell decides.
-      expect(terminal.promptClickInput(const CellOffset(12, 0)),
-          '\x1b[<0;13;1M\x1b[<0;13;1m');
+      expect(
+          terminal.promptClickInput(const CellOffset(12, 0)), '\x1b[<0;13;1M');
       expect(terminal.promptClickInput(const CellOffset(0, 0)), isNull);
     });
 
@@ -366,8 +365,7 @@ void main() {
       terminal.write('1\r\n2\r\n3\r\n4\r\n');
       terminal.write('${_mark('133;A;click_events=1')}\$ ${_mark('133;B')}ls');
       final row = terminal.buffer.absoluteCursorY;
-      expect(terminal.promptClickInput(CellOffset(2, row)),
-          '\x1b[<0;3;3M\x1b[<0;3;3m');
+      expect(terminal.promptClickInput(CellOffset(2, row)), '\x1b[<0;3;3M');
     });
 
     test(
@@ -380,12 +378,9 @@ void main() {
       terminal.write('b\r\n');
       terminal.write('${_mark('133;A;k=s')}> ${_mark('133;B')}c\r\nd');
       // Rows: 1 prompt, 2 input continuing it, 3 secondary prompt, 4 input.
-      expect(terminal.promptClickInput(const CellOffset(0, 2)),
-          '\x1b[<0;1;2M\x1b[<0;1;2m');
-      expect(terminal.promptClickInput(const CellOffset(2, 3)),
-          '\x1b[<0;3;1M\x1b[<0;3;1m');
-      expect(terminal.promptClickInput(const CellOffset(0, 4)),
-          '\x1b[<0;1;2M\x1b[<0;1;2m');
+      expect(terminal.promptClickInput(const CellOffset(0, 2)), '\x1b[<0;1;2M');
+      expect(terminal.promptClickInput(const CellOffset(2, 3)), '\x1b[<0;3;1M');
+      expect(terminal.promptClickInput(const CellOffset(0, 4)), '\x1b[<0;1;2M');
     });
 
     test('cl=m crosses line breaks with left and right', () {

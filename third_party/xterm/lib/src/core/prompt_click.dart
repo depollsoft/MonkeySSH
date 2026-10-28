@@ -171,8 +171,9 @@ extension TerminalPromptClick on Terminal {
     return out.toString();
   }
 
-  /// A left-button press and release at [position] in SGR encoding, as
-  /// kitty's `click_events` asks. Absolute rows count from the top of the
+  /// A left-button press at [position] in SGR encoding, as kitty's
+  /// `click_events` asks. Like kitty and Ghostty, no release follows: the
+  /// shell moves the cursor on the press. Absolute rows count from the top of the
   /// screen; relative rows from the current prompt's top line, or, as kitty
   /// does, from a secondary prompt at or above the clicked row.
   String? _promptClickEvent(
@@ -198,7 +199,7 @@ extension TerminalPromptClick on Terminal {
       if (row < 1) return null;
     }
     final column = position.x.clamp(0, buffer.viewWidth - 1) + 1;
-    return '\x1b[<0;$column;${row}M\x1b[<0;$column;${row}m';
+    return '\x1b[<0;$column;${row}M';
   }
 
   /// Whether a row shows prompt text: a secondary prompt rather than a row

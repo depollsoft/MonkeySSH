@@ -17046,10 +17046,7 @@ void main() {
         // The next tap reports the click, as fish asks with click_events=1.
         await tester.tapAt(cell(8));
         await tester.pump(const Duration(milliseconds: 400));
-        expect(
-          shellWrites.map(String.fromCharCodes).join(),
-          '\x1b[<0;9;1M\x1b[<0;9;1m',
-        );
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;9;1M');
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
