@@ -42,6 +42,8 @@ import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
+import 'kitty_clipboard_protocol.dart';
+import 'kitty_clipboard_service.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
@@ -3697,6 +3699,19 @@ class SshSession {
   final ClipboardSharingService _clipboardSharingService =
       const ClipboardSharingService();
 
+  /// Answers the kitty clipboard protocol (OSC 5522) under the same settings
+  /// as OSC 52, and sends paste events to programs that set mode 5522.
+  late final KittyClipboardHandler kittyClipboard = KittyClipboardHandler(
+    canWrite: () => clipboardSharingEnabled,
+    canRead: () => clipboardSharingEnabled && localClipboardReadEnabled,
+    sendReply: (data) {
+      if (!_runtime.hasShell) return false;
+      _runtime.writeToShell(data);
+      return true;
+    },
+    connectionId: () => connectionId,
+  );
+
   late final _SshSessionRuntime _runtime = _SshSessionRuntime(this);
 
   TerminalThemeData? _configuredTerminalTheme;
@@ -4492,6 +4507,11 @@ class SshSession {
 
     if (code == ClipboardSharingService.oscCode) {
       _handleOsc52(args);
+      return;
+    }
+
+    if (code == kittyClipboardOscCode) {
+      kittyClipboard.handleOsc(args);
       return;
     }
 
@@ -6651,6 +6671,7 @@ while($true){
     }
     await stopAllForwards();
     await closeShell();
+    kittyClipboard.dispose();
     _sftpClientFuture = null;
     discardSftpClient(_sftpClient);
     await _portForwardChanges.close();

@@ -2925,6 +2925,7 @@ TmuxWindow? _windowFromJson(Object? value) {
     terminalReportsMouseWheel: terminalReportsMouseWheel,
     terminalMouseReportSgr: terminalMouseReportSgr,
     terminalBracketedPasteMode: terminalBracketedPasteMode,
+    terminalKittyPasteEventsMode: _privateModeValue(privateModes, '5522'),
     terminalProgress: _terminalProgressFromJson(value['terminalProgress']),
     programStatus: TerminalProgramStatus.fromJson(value['programStatus']),
     programStatusReporter: value['programStatusReporter'] == true,

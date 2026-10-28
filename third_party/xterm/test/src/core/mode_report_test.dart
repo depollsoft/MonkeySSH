@@ -40,6 +40,7 @@ void main() {
         (1048, '\x1b[?1048h', 2),
         (2004, '\x1b[?2004h', 2),
         (2026, '\x1b[?2026h', 2),
+        (5522, '\x1b[?5522h', 2),
       ];
       for (final (mode, change, initial) in cases) {
         expect(

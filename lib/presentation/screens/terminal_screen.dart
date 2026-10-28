@@ -278,6 +278,7 @@ typedef _TerminalPasteMode = ({
   String? muxSessionName,
   bool refreshAttempted,
   bool refreshSucceeded,
+  bool sendsKittyPasteEvents,
   SshSession? session,
   Terminal terminal,
 });
@@ -2750,6 +2751,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ? resolveTmuxBarActiveWindowKey(_currentTmuxWindowsSnapshot)
         : null;
     final currentMuxSessionName = isMuxActive ? _tmuxSessionName : null;
+    bool sendsKittyPasteEvents({required bool? activeWindowMode}) =>
+        shouldSendTerminalKittyPasteEvent(
+          isMuxActive: isMuxActive,
+          muxBackend: muxBackend,
+          terminalKittyPasteEventsMode: terminal.kittyPasteEventsMode,
+          activeWindowKittyPasteEventsMode: activeWindowMode,
+        );
     if (!isMuxActive || muxBackend != RemoteMuxBackend.monkeyMux) {
       return (
         activeWindowKey: currentActiveWindowKey,
@@ -2761,6 +2769,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         muxSessionName: currentMuxSessionName,
         refreshAttempted: false,
         refreshSucceeded: false,
+        sendsKittyPasteEvents: sendsKittyPasteEvents(activeWindowMode: null),
         session: activeSession,
         terminal: terminal,
       );
@@ -2783,6 +2792,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         muxSessionName: currentMuxSessionName,
         refreshAttempted: false,
         refreshSucceeded: false,
+        sendsKittyPasteEvents: sendsKittyPasteEvents(
+          activeWindowMode: resolveTmuxBarActiveWindowKittyPasteEventsMode(
+            _currentTmuxWindowsSnapshot,
+          ),
+        ),
         session: session,
         terminal: terminal,
       );
@@ -2826,6 +2840,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         muxSessionName: sessionName,
         refreshAttempted: true,
         refreshSucceeded: true,
+        sendsKittyPasteEvents: sendsKittyPasteEvents(
+          activeWindowMode: refreshedMode.kittyPasteEventsMode,
+        ),
         session: session,
         terminal: terminal,
       );
@@ -2859,6 +2876,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       muxSessionName: sessionName,
       refreshAttempted: true,
       refreshSucceeded: false,
+      sendsKittyPasteEvents: sendsKittyPasteEvents(
+        activeWindowMode: resolveTmuxBarActiveWindowKittyPasteEventsMode(
+          _currentTmuxWindowsSnapshot,
+        ),
+      ),
       session: session,
       terminal: terminal,
     );
@@ -16438,6 +16460,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _pasteClipboard({String? promptText}) async {
     final inputGeneration = _terminalUserInputGeneration;
     try {
+      if (promptText == null &&
+          _mayPasteAsKittyPasteEvent() &&
+          await _pasteClipboardAsKittyPasteEvent(inputGeneration)) {
+        return;
+      }
       if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
@@ -16699,6 +16726,104 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage('Clipboard upload failed. Try again.');
     }
+  }
+
+  /// A cheap first check for [_pasteClipboardAsKittyPasteEvent], so a paste
+  /// into a program that never set mode 5522 takes the usual path without an
+  /// extra MonkeyMux round trip. The settled paste mode decides.
+  bool _mayPasteAsKittyPasteEvent() {
+    final isMuxActive =
+        _isTmuxActive && _tmuxStateConnectionId == _connectionId;
+    if (isMuxActive && _activeMuxBackend == RemoteMuxBackend.monkeyMux) {
+      return _terminal.kittyPasteEventsMode ||
+          resolveTmuxBarActiveWindowKittyPasteEventsMode(
+                _currentTmuxWindowsSnapshot,
+              ) ==
+              true;
+    }
+    return shouldSendTerminalKittyPasteEvent(
+      isMuxActive: isMuxActive,
+      muxBackend: _activeMuxBackend,
+      terminalKittyPasteEventsMode: _terminal.kittyPasteEventsMode,
+      activeWindowKittyPasteEventsMode: null,
+    );
+  }
+
+  /// Announces the clipboard to a program that set kitty paste events (mode
+  /// 5522): it gets the clipboard's MIME types and reads the one it wants,
+  /// and an image travels in-band instead of being uploaded over SFTP.
+  ///
+  /// Returns false when the paste should take the usual text or attachment
+  /// path instead: the mode is off once settled, or the clipboard holds files
+  /// or an image too large for the protocol.
+  Future<bool> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
+    final pasteMode = await _resolveSettledTerminalPasteMode();
+    if (pasteMode == null || !mounted) {
+      if (mounted) {
+        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      }
+      return true;
+    }
+    final session = pasteMode.session;
+    if (session == null ||
+        !pasteMode.sendsKittyPasteEvents ||
+        !_terminalPasteModeOwnsCurrentContext(pasteMode) ||
+        !_terminalPasteModeCanUseResolvedState(pasteMode)) {
+      return false;
+    }
+    final clipboard = await session.kittyClipboard.platform.readPasteSnapshot();
+    final snapshot = clipboard.snapshot;
+    if (clipboard.useAttachmentFlow || snapshot == null) {
+      return false;
+    }
+    if (!mounted) {
+      return true;
+    }
+    if (snapshot.isEmpty) {
+      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      _showClipboardMessage('Clipboard is empty');
+      return true;
+    }
+    if (!_terminalPasteModeOwnsCurrentContext(pasteMode) ||
+        !_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+      DiagnosticsLogService.instance.warning(
+        'terminal.clipboard',
+        'paste_event_skipped_window_changed',
+        fields: {'connectionId': _connectionId},
+      );
+      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      return true;
+    }
+    if (_terminalUserInputGeneration != inputGeneration) {
+      DiagnosticsLogService.instance.warning(
+        'terminal.clipboard',
+        'paste_event_skipped_intervening_input',
+        fields: {'connectionId': _connectionId},
+      );
+      _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      _showClipboardMessage('Paste canceled because terminal input changed.');
+      return true;
+    }
+    _followLiveOutput();
+    _terminalUserInputGeneration++;
+    final sent = await session.kittyClipboard.sendPasteEvent(snapshot);
+    unawaited(
+      ref
+          .read(telemetryServiceProvider)
+          .logTerminalPasteUsed(
+            source: 'clipboard_event',
+            requiredReview: false,
+          ),
+    );
+    if (!mounted) {
+      return true;
+    }
+    _terminalController.clearSelection();
+    _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+    if (!sent) {
+      _showClipboardMessage('Paste failed because the connection is closed.');
+    }
+    return true;
   }
 
   Future<void> _pastePickedMedia() async {

@@ -863,6 +863,32 @@ bool? resolveTmuxBarActiveWindowBracketedPasteMode(
   Iterable<TmuxWindow>? windows,
 ) => _activeTmuxWindowOrNull(windows)?.terminalBracketedPasteMode;
 
+/// Resolves whether the active mux window's program set kitty paste events
+/// (DEC private mode 5522). Null when the server does not report it.
+bool? resolveTmuxBarActiveWindowKittyPasteEventsMode(
+  Iterable<TmuxWindow>? windows,
+) => _activeTmuxWindowOrNull(windows)?.terminalKittyPasteEventsMode;
+
+/// Whether a clipboard paste should become a kitty paste event (mode 5522)
+/// rather than typed text.
+///
+/// A plain shell reads the mode from the terminal, which sees the program's
+/// own `CSI ? 5522 h`. A MonkeyMux window trusts only the server's snapshot of
+/// that window, so a paste right after a window switch never sends an event
+/// to a program that did not ask for one. tmux does not carry the protocol.
+bool shouldSendTerminalKittyPasteEvent({
+  required bool isMuxActive,
+  required RemoteMuxBackend muxBackend,
+  required bool terminalKittyPasteEventsMode,
+  required bool? activeWindowKittyPasteEventsMode,
+}) {
+  if (!isMuxActive) {
+    return terminalKittyPasteEventsMode;
+  }
+  return muxBackend == RemoteMuxBackend.monkeyMux &&
+      activeWindowKittyPasteEventsMode == true;
+}
+
 /// Resolves a stable identity for the active mux window.
 String? resolveTmuxBarActiveWindowKey(Iterable<TmuxWindow>? windows) =>
     _activeTmuxWindowOrNull(windows)?.stableKey;
@@ -897,6 +923,7 @@ Future<
     bool bracketedPasteMode,
     bool bracketedPasteModeKnown,
     String? activeWindowKey,
+    bool? kittyPasteEventsMode,
   })
 >
 refreshTerminalBracketedPasteModeFromMuxWindows({
@@ -914,6 +941,9 @@ refreshTerminalBracketedPasteModeFromMuxWindows({
     bracketedPasteMode: terminal.bracketedPasteMode,
     bracketedPasteModeKnown: activeWindowBracketedPasteMode != null,
     activeWindowKey: resolveTmuxBarActiveWindowKey(windows),
+    kittyPasteEventsMode: resolveTmuxBarActiveWindowKittyPasteEventsMode(
+      windows,
+    ),
   );
 }
 

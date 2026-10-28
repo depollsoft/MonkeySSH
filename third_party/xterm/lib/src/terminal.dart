@@ -60,6 +60,12 @@ const _saveCursorDecMode = 1048;
 // Visibility reports: https://rockorager.dev/misc/visibility-reports/
 const _visibilityReportsDecMode = 2033;
 
+// Kitty clipboard paste events (DECSET 5522): a program that sets it asks for
+// a list of the clipboard's MIME types on paste instead of the pasted text.
+// The core only tracks the mode; the app sends the event and serves the reads.
+// https://sw.kovidgoyal.net/kitty/clipboard/
+const _kittyPasteEventsMode = 5522;
+
 /// [Terminal] is an interface to interact with command line applications. It
 /// translates escape sequences from the application into updates to the
 /// [buffer] and events such as [onTitleChange] or [onBell], as well as
@@ -104,6 +110,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   int _hostResizeGeneration = 0;
   bool _monkeyMuxSynchronizedOutput = false;
   bool _synchronizedOutput = false;
+  bool _kittyPasteEvents = false;
+
+  /// Whether the application has DEC mode 5522 (kitty clipboard paste events)
+  /// set, so a paste should be announced with its MIME types.
+  bool get kittyPasteEventsMode => _kittyPasteEvents;
 
   /// Whether the application has DEC mode 2026 (synchronized output) set.
   ///
@@ -937,6 +948,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _saveCursorMode = false;
     // The view's visibility belongs to the host and survives the reset.
     _reportVisibilityMode = false;
+    _kittyPasteEvents = false; // DEC mode 5522
     _mainKittyKeyboardState.reset();
     _altKittyKeyboardState.reset();
 
@@ -1480,6 +1492,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         if (enabled) {
           sendVisibilityReport();
         }
+      case _kittyPasteEventsMode:
+        _kittyPasteEvents = enabled;
     }
   }
 

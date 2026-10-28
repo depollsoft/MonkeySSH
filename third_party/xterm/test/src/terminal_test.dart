@@ -152,6 +152,27 @@ void main() {
     });
   });
 
+  group('DEC 5522 kitty paste events', () {
+    test('tracks the mode until RIS but keeps it through DECSTR', () {
+      final terminal = Terminal();
+      expect(terminal.kittyPasteEventsMode, isFalse);
+
+      terminal.write('\x1b[?5522h');
+      expect(terminal.kittyPasteEventsMode, isTrue);
+
+      // Like kitty and Ghostty, a soft reset leaves the mode alone.
+      terminal.write('\x1b[!p');
+      expect(terminal.kittyPasteEventsMode, isTrue);
+
+      terminal.write('\x1bc');
+      expect(terminal.kittyPasteEventsMode, isFalse);
+
+      terminal.write('\x1b[?2004;5522h\x1b[?5522l');
+      expect(terminal.kittyPasteEventsMode, isFalse);
+      expect(terminal.bracketedPasteMode, isTrue);
+    });
+  });
+
   group('DEC 2026 synchronized output', () {
     test('tracks the mode for DECRQM without holding repaints', () {
       final terminal = Terminal()..resize(20, 2);

@@ -526,7 +526,7 @@ func (s *terminalScreen) noteUnsyncedCursorState(final byte) {
 func cursorNeutralPrivateMode(mode int) bool {
 	switch mode {
 	case 1, 12, 25, 67, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016,
-		2004, 2026, 2031, 2033:
+		2004, 2026, 2031, 2033, 5522:
 		return true
 	}
 	return false
