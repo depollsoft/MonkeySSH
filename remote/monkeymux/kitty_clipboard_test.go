@@ -701,3 +701,50 @@ func TestKittyClipboardDiscardEndsAtTheTerminatorAcrossReads(t *testing.T) {
 		t.Fatalf("got %q after the discard ended", got)
 	}
 }
+
+// A read that outgrows the carry can end anywhere around the packet's
+// terminator, ESC \ or BEL; the output after it must survive every split.
+func TestKittyClipboardOversizedPacketEndsAtSplitTerminator(t *testing.T) {
+	body := "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;" +
+		strings.Repeat("QUFB", kittyClipboardPacketLimitBytes/4+16)
+	for _, terminator := range []string{"\x1b\\", "\a"} {
+		packet := body + terminator
+		for _, carried := range []bool{false, true} {
+			for split := len(body) - 3; split <= len(packet); split++ {
+				server, _, _, attach := newKittyClipboardTestServer(t)
+				first := "before" + packet[:split]
+				second := packet[split:] + "after\x1b[1mbold"
+				if carried {
+					// Most of the packet is held first, then the read that
+					// outgrows the carry ends at split.
+					server.handleWindowOutput("@1", []byte(first[:len(first)-oscBufferLimitBytes]))
+					first = first[len(first)-oscBufferLimitBytes:]
+				}
+				server.handleWindowOutput("@1", []byte(first))
+				server.handleWindowOutput("@1", []byte(second))
+				server.handleWindowOutput("@1", []byte("tail"))
+
+				got := waitForAttachOutput(t, attach, "tail")
+				if got != "beforeafter\x1b[1mboldtail" {
+					t.Fatalf("terminator %q, carried %v, split %d: attach got %q",
+						terminator, carried, split-len(body), got[max(0, len(got)-60):])
+				}
+			}
+		}
+	}
+}
+
+// A packet cancelled by another escape sequence ends there: the output after
+// the cancelling ESC is never discarded with it.
+func TestKittyClipboardOversizedCancelledPacketKeepsFollowingOutput(t *testing.T) {
+	server, _, _, attach := newKittyClipboardTestServer(t)
+	cancelled := "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;QUFB\x1b[1m" +
+		strings.Repeat("x", kittyClipboardPacketLimitBytes)
+	server.handleWindowOutput("@1", []byte(cancelled))
+	server.handleWindowOutput("@1", []byte("tail"))
+
+	got := waitForAttachOutput(t, attach, "tail")
+	if !strings.HasSuffix(got, strings.Repeat("x", 64)+"tail") {
+		t.Fatalf("attach lost the output after the cancelling ESC: %q", got[max(0, len(got)-60):])
+	}
+}

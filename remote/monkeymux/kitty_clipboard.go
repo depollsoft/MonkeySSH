@@ -185,9 +185,19 @@ func (w *muxWindow) discardKittyClipboardOscLocked(payload []byte) bool {
 	if !isKittyClipboardOscPayload(payload) {
 		return false
 	}
+	for index := 0; index+1 < len(payload); index++ {
+		// An ESC that does not start ST cancels the string, so what follows
+		// it is ordinary output: leave it all to the generic path, where the
+		// terminal drops the cancelled packet itself.
+		if payload[index] == '\x1b' && payload[index+1] != '\\' {
+			return false
+		}
+	}
 	state := &w.kittyClipboard
 	state.discarding = true
-	state.discardEscape = false
+	// A read can end on the ESC of the packet's own ST, which the next read
+	// completes.
+	state.discardEscape = payload[len(payload)-1] == '\x1b'
 	body := payload[len(kittyClipboardOscCode)+1:]
 	rawMetadata, _, _ := bytes.Cut(body, []byte(";"))
 	metadata, ok := parseKittyClipboardMetadata(string(rawMetadata))
