@@ -211,7 +211,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       _buffer.graphics.unresolvedPlaceholderImageIds();
 
   /// Cap on the size of a single buffered graphics transmission (16 MiB).
-  static const _maxGraphicsBytes = 16 * 1024 * 1024;
+  static const _maxGraphicsBytes = maxTerminalGraphicsPayloadBytes;
   static const _graphicsBarrierOperationKey = 'barrier';
   static const _graphicsUnkeyedOperationKey = 'unkeyed';
 
@@ -1919,7 +1919,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       final observer = terminalGraphicsDecodeObserver;
       final stopwatch = observer == null ? null : (Stopwatch()..start());
       preinflation = (
-        payload: inflateZlibData(data),
+        payload: inflateZlibData(data, maxBytes: _graphicsInflateLimit(args)),
         micros: stopwatch?.elapsedMicroseconds ?? 0,
       );
     }
@@ -2126,7 +2126,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     var inflateMicros = 0;
     if (compressed) {
       final inflateStopwatch = observer == null ? null : (Stopwatch()..start());
-      final inflated = inflateZlibData(data);
+      final inflated =
+          inflateZlibData(data, maxBytes: _graphicsInflateLimit(args));
       inflateMicros = inflateStopwatch?.elapsedMicroseconds ?? 0;
       if (inflated == null) {
         observer?.call(
@@ -2401,7 +2402,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       } else {
         final inflateStopwatch =
             observer == null ? null : (Stopwatch()..start());
-        inflated = inflateZlibData(data);
+        inflated = inflateZlibData(data, maxBytes: _graphicsInflateLimit(args));
         inflateMicros = inflateStopwatch?.elapsedMicroseconds ?? 0;
       }
       if (inflated == null) {
@@ -2808,7 +2809,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           _respondToGraphics(args, 'ENOENT: image not found', imageId: imageId);
           return;
         }
-        _setVirtualGraphicsPlacement(args);
+        // The screen and image are the ones the command named, not whatever
+        // is current once earlier operations on the image have finished.
+        manager.setVirtualPlacement(
+          imageId,
+          cols: int.tryParse(args['c'] ?? '') ?? 0,
+          rows: int.tryParse(args['r'] ?? '') ?? 0,
+          clientPlacementId: int.tryParse(args['p'] ?? '') ?? 0,
+        );
         notifyListeners();
         _respondToGraphics(args, null, imageId: imageId);
       });
@@ -2972,7 +2980,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     }
     var payload = data;
     if (args['o'] == 'z') {
-      final inflated = inflateZlibData(data);
+      final inflated =
+          inflateZlibData(data, maxBytes: _graphicsInflateLimit(args));
       if (inflated == null) {
         return 'EINVAL: invalid compressed data';
       }
@@ -2985,6 +2994,22 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       height: int.tryParse(args['v'] ?? '') ?? 0,
       deep: true,
     );
+  }
+
+  /// How far an `o=z` payload may inflate: raw pixels to exactly `s` x `v`
+  /// pixels, which is all Kitty accepts, and anything else to the payload cap.
+  int _graphicsInflateLimit(Map<String, String> args) {
+    final format = _graphicsFormat(args);
+    final width = int.tryParse(args['s'] ?? '') ?? 0;
+    final height = int.tryParse(args['v'] ?? '') ?? 0;
+    if ((format == kittyGraphicsFormatRgb ||
+            format == kittyGraphicsFormatRgba) &&
+        width > 0 &&
+        height > 0) {
+      final bytesPerPixel = format == kittyGraphicsFormatRgb ? 3 : 4;
+      return min(width * height * bytesPerPixel, _maxGraphicsBytes);
+    }
+    return _maxGraphicsBytes;
   }
 
   int _graphicsFormat(Map<String, String> args) =>
@@ -3129,7 +3154,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
     var payload = data;
     if (!payloadIsInflated && args['o'] == 'z') {
-      final inflated = inflateZlibData(data);
+      final inflated =
+          inflateZlibData(data, maxBytes: _graphicsInflateLimit(args));
       if (inflated == null) {
         return null;
       }

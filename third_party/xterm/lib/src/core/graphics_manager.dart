@@ -625,6 +625,7 @@ class GraphicsRegionScroll {
 typedef _RegionScrollMove = ({
   TerminalImagePlacement placement,
   int row,
+  int col,
   bool scrolls,
 });
 
@@ -1193,7 +1194,14 @@ class GraphicsManager {
         final range = _placementRelativeCellRange(placement);
         final scrolls = row + range.firstRow >= top &&
             (!hasMargins || row + range.lastRow <= bottom);
-        moves.add((placement: placement, row: row, scrolls: scrolls));
+        // The column is read while the anchor is attached: insertions and
+        // deletions may have moved it since the placement was made.
+        moves.add((
+          placement: placement,
+          row: row,
+          col: anchor.x,
+          scrolls: scrolls,
+        ));
         // Detach without disposing: the placement keeps its internal id, so
         // relative placements that refer to it survive the move.
         _placementsByAnchor.remove(anchor);
@@ -1225,8 +1233,8 @@ class GraphicsManager {
       final placement = move.placement;
       final row = move.scrolls ? move.row + scroll.delta : move.row;
       final next = move.scrolls
-          ? _scrolledPlacement(placement, row, scroll, lines)
-          : placement._withAnchor(lines[row].createAnchor(placement.col));
+          ? _scrolledPlacement(placement, row, move.col, scroll, lines)
+          : placement._withAnchor(lines[row].createAnchor(move.col));
       if (next == null) {
         _placementsById.remove(placement.placementId);
         _decrementPlacementImageCount(placement.imageId);
@@ -1247,21 +1255,23 @@ class GraphicsManager {
   TerminalImagePlacement? _scrolledPlacement(
     TerminalImagePlacement placement,
     int row,
+    int col,
     GraphicsRegionScroll scroll,
     IndexAwareCircularBuffer<BufferLine> lines,
   ) {
-    final range = _placementRelativeCellRange(placement);
+    final range = _placementRelativeCellRange(placement, column: col);
     final first = row + range.firstRow;
     final last = row + range.lastRow;
     if (last < scroll.top || first > scroll.bottom) return null;
     final clipTop = first < scroll.top;
     final clipBottom = scroll.hasMargins && last > scroll.bottom;
     if (!clipTop && !clipBottom) {
-      return placement._withAnchor(lines[row].createAnchor(placement.col));
+      return placement._withAnchor(lines[row].createAnchor(col));
     }
 
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
-    final destinationHeight = _placementDestinationSize(placement).height;
+    final destinationHeight =
+        _placementDestinationSize(placement, column: col).height;
     final source = _placementLogicalSourceRect(placement);
     if (source == null || destinationHeight <= 0) {
       // Without the image size the crop cannot be computed; drop what would
@@ -1302,7 +1312,7 @@ class GraphicsManager {
     final bottom = (srcY + srcHeight).ceil();
     if (bottom <= top) return null;
     return placement._withAnchor(
-      lines[anchorRow].createAnchor(placement.col),
+      lines[anchorRow].createAnchor(col),
       rows: rows,
       srcY: top,
       srcHeight: bottom - top,
@@ -3247,9 +3257,14 @@ class GraphicsManager {
     return placementFirst <= lastCol && placementLast >= firstCol;
   }
 
+  /// [column] overrides the placement's own column, for a placement whose
+  /// anchor is detached while it moves.
   ({int firstCol, int lastCol, int firstRow, int lastRow})
-      _placementRelativeCellRange(TerminalImagePlacement placement) {
-    final size = _placementDestinationSize(placement);
+      _placementRelativeCellRange(
+    TerminalImagePlacement placement, {
+    int? column,
+  }) {
+    final size = _placementDestinationSize(placement, column: column);
     final cellWidth = _cellPixelWidth > 0 ? _cellPixelWidth : 10.0;
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
     final xOffset = placement.cellXOffset(cellWidth);
@@ -3280,6 +3295,7 @@ class GraphicsManager {
   ({double width, double height}) _placementDestinationSize(
     TerminalImagePlacement placement, {
     bool maximizeNaturalWidth = false,
+    int? column,
   }) {
     final cellWidth = _cellPixelWidth > 0 ? _cellPixelWidth : 10.0;
     final cellHeight = _cellPixelHeight > 0 ? _cellPixelHeight : 20.0;
@@ -3294,7 +3310,7 @@ class GraphicsManager {
       cellHeight: cellHeight,
       availableColumns: maximizeNaturalWidth
           ? math.max(1, _viewportColumns)
-          : math.max(1, _viewportColumns - placement.col),
+          : math.max(1, _viewportColumns - (column ?? placement.col)),
     );
   }
 
@@ -3990,19 +4006,25 @@ Future<DecodedTerminalImage?> _decodeEncodedImageSequenceBounded(
   }
 }
 
+/// Largest Kitty graphics payload the terminal accepts, compressed or, once
+/// inflated, uncompressed.
+const maxTerminalGraphicsPayloadBytes = 16 * 1024 * 1024;
+
 /// Inflates a zlib-compressed (`o=z`) Kitty graphics payload.
 ///
-/// Returns null if [bytes] is empty or not valid zlib data. Uses
-/// `package:archive`, whose decoder works on both `dart:io` and web targets.
-Uint8List? inflateZlibData(Uint8List bytes) {
+/// Returns null if [bytes] is empty, is not valid zlib data, or would inflate
+/// past [maxBytes]: the decoder stops there, so a small payload cannot expand
+/// to fill memory or hold up the UI thread. Uses `package:archive`, whose
+/// decoder works on both `dart:io` and web targets.
+Uint8List? inflateZlibData(
+  Uint8List bytes, {
+  int maxBytes = maxTerminalGraphicsPayloadBytes,
+}) {
   if (bytes.isEmpty) {
     return null;
   }
   try {
-    // archive 3.x returns List<int>, 4.x returns Uint8List; widen to List<int>
-    // and copy so this compiles cleanly against both without a type check.
-    final List<int> inflated = const ZLibDecoder().decodeBytes(bytes);
-    return Uint8List.fromList(inflated);
+    return const ZLibDecoder().decodeBytes(bytes, maxOutputSize: maxBytes);
   } catch (_) {
     return null;
   }
