@@ -925,6 +925,52 @@ void main() {
       expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (3, 5));
     });
 
+    testWidgets(
+        'a downscaled image covers the same cells before and after '
+        'its decode', (tester) async {
+      await tester.runAsync(() async {
+        // 3000x1501 decodes to 1280x640: 25 px high at c=5, where the
+        // source ratio would give 25.02 px. With Y=15 the kept pixels end on
+        // the second row's bottom edge; the source ones would reach a third.
+        final png = base64.encode(await _png(3000, 1501));
+        final terminal = _terminal();
+        final lines = terminal.buffer.lines;
+
+        terminal
+          ..write('\x1b_Ga=t,i=1,f=100,q=2;$png\x1b\\')
+          ..write('\x1b[H\x1b_Ga=p,i=1,p=1,c=5,Y=15,q=2\x1b\\');
+        expect(terminal.graphics.hasPendingImage(1), isTrue);
+        expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (5, 1));
+
+        await terminal.graphics.resolveImage(1);
+        final decoded = terminal.graphics.imageById(1)!.image;
+        expect((decoded.width, decoded.height), (1280, 640));
+        terminal.write('\x1b[H\x1b_Ga=p,i=1,p=2,c=5,Y=15,q=2\x1b\\');
+        expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (5, 1));
+
+        final placement = _placementOf(terminal, 1, clientPlacementId: 2)!;
+        expect(terminal.graphics.placementsInRows(lines, 1, 1), [
+          _placementOf(terminal, 1, clientPlacementId: 1),
+          placement,
+        ]);
+        expect(terminal.graphics.placementsInRows(lines, 2, 2), isEmpty);
+        // The painter sizes the crop in the decoded pixels.
+        final painted = terminalImagePlacementSize(
+          placement,
+          sourceWidth: 1280,
+          sourceHeight: 640,
+          cellWidth: 10,
+          cellHeight: 20,
+          availableColumns: 40,
+        );
+        expect((painted.width, painted.height), (50.0, 25.0));
+
+        // A transmission placed before it decodes moves the cursor the same.
+        terminal.write('\x1b[H\x1b_Ga=T,i=2,f=100,c=5,Y=15,q=2;$png\x1b\\');
+        expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (5, 1));
+      });
+    });
+
     test('consecutive tall images do not overlap', () {
       // An eight-row, full-width image in a five-row terminal: the cursor
       // ends up below it after four moves and four scrolls (Ghostty #13887).

@@ -1941,7 +1941,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         _graphicsDisplaySpan(
           args,
           buffer.graphics,
-          _graphicsPayloadDimensionsForDisplay(args, data, preinflation),
+          _graphicsTransmissionGeometry(
+            args,
+            _graphicsPayloadDimensionsForDisplay(args, data, preinflation),
+          ),
           column: buffer.cursorX,
         ),
       );
@@ -2871,16 +2874,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // Respect the no-cursor-movement policy (C=1); otherwise move past the
     // image so subsequent output does not overlap it.
     if (!_graphicsFlag(args['C'], one: true)) {
-      final image = manager.imageById(imageId);
-      final dimensions = image == null
-          ? manager.pendingImageDimensions(imageId)
-          : (width: image.sourceWidth, height: image.sourceHeight);
       _advanceGraphicsCursor(
         _buffer,
         _graphicsDisplaySpan(
           args,
           manager,
-          dimensions,
+          manager.imageGeometry(imageId),
           column: _buffer.cursorX,
         ),
       );
@@ -3107,11 +3106,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// an explicit `c`/`r` span, the other side following the source aspect
   /// ratio, or its natural pixel size scaled down to fit the row, with the
   /// in-cell offset applied as [terminalImageSpanSize] applies it.
-  /// [dimensions] is the source size, null when unknown.
+  /// [geometry] is the image's source size and the size its pixels are kept
+  /// at, which the painter sizes it in; null when unknown.
   ({int cols, int rows}) _graphicsDisplaySpan(
     Map<String, String> args,
     GraphicsManager manager,
-    ({int width, int height})? dimensions, {
+    ({int sourceWidth, int sourceHeight, int width, int height})? geometry, {
     required int column,
   }) {
     final cols = max(0, int.tryParse(args['c'] ?? '') ?? 0);
@@ -3119,12 +3119,18 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (cols > 0 && rows > 0) {
       return (cols: cols, rows: rows);
     }
-    final source = dimensions == null
+    final crop = geometry == null
         ? null
-        : _graphicsSourceRect(args, dimensions.width, dimensions.height);
-    if (source == null) {
+        : _graphicsSourceRect(
+            args, geometry.sourceWidth, geometry.sourceHeight);
+    if (crop == null) {
       return (cols: cols, rows: max(1, rows));
     }
+    // The crop is in source pixels; the painter draws it from the kept ones.
+    final source = (
+      width: crop.width * geometry!.width / geometry.sourceWidth,
+      height: crop.height * geometry.height / geometry.sourceHeight,
+    );
     final cellWidth = manager.cellPixelWidth;
     final cellHeight = manager.cellPixelHeight;
     final double xOffset = (int.tryParse(args['X'] ?? '') ?? 0)
@@ -3154,6 +3160,27 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     return (
       cols: cols > 0 ? cols : cells(xOffset, size.width, cellWidth),
       rows: rows > 0 ? rows : cells(yOffset, size.height, cellHeight),
+    );
+  }
+
+  /// The geometry of an image arriving with [args], from its source size
+  /// [dimensions]: it is kept at the size its decode will have.
+  ({int sourceWidth, int sourceHeight, int width, int height})?
+      _graphicsTransmissionGeometry(
+    Map<String, String> args,
+    ({int width, int height})? dimensions,
+  ) {
+    if (dimensions == null) return null;
+    final kept = terminalDecodedImageSize(
+      dimensions.width,
+      dimensions.height,
+      format: _graphicsFormat(args),
+    );
+    return (
+      sourceWidth: dimensions.width,
+      sourceHeight: dimensions.height,
+      width: kept.width,
+      height: kept.height,
     );
   }
 
