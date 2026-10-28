@@ -429,6 +429,7 @@ class EscapeParser {
     'p'.codeUnitAt(0): _csiHandleRequestMode,
     'r'.codeUnitAt(0): _csiHandleSetMargins,
     't'.codeUnitAt(0): _csiWindowManipulation,
+    'y'.codeUnitAt(0): _csiHandleChecksum,
     'A'.codeUnitAt(0): _csiHandleCursorUp,
     'B'.codeUnitAt(0): _csiHandleCursorDown,
     'C'.codeUnitAt(0): _csiHandleCursorForward,
@@ -999,6 +1000,28 @@ class EscapeParser {
       default:
         return;
     }
+  }
+
+  /// `CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y` Request Checksum of Rectangular
+  /// Area (DECRQCRA) and `CSI Ps # y` Select Checksum Extension (XTCHECKSUM).
+  /// Like Ghostty, a request with too many parameters is ignored.
+  ///
+  /// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+  void _csiHandleChecksum() {
+    if (_csi.prefix == null) {
+      final params = _csi.params;
+      if (_csi.intermediate == '*'.charCode) {
+        if (params.length <= 6) handler.sendRectangularAreaChecksum(params);
+        return;
+      }
+      if (_csi.intermediate == '#'.charCode) {
+        if (params.length <= 1) {
+          handler.setChecksumExtension(params.isEmpty ? 0 : params[0]);
+        }
+        return;
+      }
+    }
+    handler.unknownCSI(_csi.finalByte);
   }
 
   /// `ESC [ Ps A` Cursor Up (CUU)

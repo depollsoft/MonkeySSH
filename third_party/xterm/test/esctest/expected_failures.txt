@@ -1,0 +1,361 @@
+# esctest2 tests that fail against this terminal (see esctest_test.dart).
+#
+# esctest_test.dart fails on any failure not listed here and on any listed
+# test that passes, so this list only shrinks. One test per line; '#' starts
+# a comment. Groups marked BUG are behaviour that differs from xterm in a way
+# programs can see; the rest is missing or deliberately left out.
+#
+# The harness runs the terminal without the app layer, apart from turning
+# cursor position reports one-based as the app does.
+
+# BUG: IND, LF, VT, FF and NEL on the last row scroll the whole screen when
+# the cursor is below the scroll region. xterm moves nothing (Buffer.index).
+DECSTBMTests.test_DECSTBM_CursorBelowRegionAtBottomTriesToScroll
+FFTests.test_FF_StopsAtBottomLineWhenBegunBelowScrollRegion
+INDTests.test_IND_StopsAtBottomLineWhenBegunBelowScrollRegion
+LFTests.test_LF_StopsAtBottomLineWhenBegunBelowScrollRegion
+NELTests.test_NEL_StopsAtBottomLineWhenBegunBelowScrollRegion
+VTTests.test_VT_StopsAtBottomLineWhenBegunBelowScrollRegion
+
+# BUG: BS from the pending-wrap position lands on the last column instead of
+# the one before it, as in xterm.
+BSTests.test_BS_CursorStartsInDoWrapPosition
+
+# BUG: DECSET 47 and 1047 move the cursor. Each screen keeps its own cursor,
+# but only 1049 should save and restore it.
+DECSETTests.test_DECSET_ALTBUF
+DECSETTests.test_DECSET_OPT_ALTBUF
+
+# BUG: PM (ESC ^) and SOS (ESC X) strings are printed instead of ignored.
+PMTests.test_PM_Basic
+SOSTests.test_SOS_Basic
+
+# BUG: DECRC and SCORC don't restore origin mode, which DECSC saves in xterm.
+# These also need left/right margins.
+DECRCTests.test_SaveRestoreCursor_ResetsOriginMode
+DECSETTiteInhibitTests.test_SaveRestoreCursor_ResetsOriginMode
+SCORCTests.test_SaveRestoreCursor_ResetsOriginMode
+
+# Not implemented: HPA (CSI Ps `), HPR (CSI Ps a) and VPR (CSI Ps e).
+HPATests.test_HPA_DefaultParams
+HPATests.test_HPA_DoesNotChangeRow
+HPATests.test_HPA_StopsAtRightEdge
+HPRTests.test_HPR_DefaultParams
+HPRTests.test_HPR_DoesNotChangeRow
+HPRTests.test_HPR_StopsAtRightEdge
+VPRTests.test_VPR_DefaultParams
+VPRTests.test_VPR_DoesNotChangeColumn
+VPRTests.test_VPR_StopsAtBottomEdge
+
+# Not implemented: SCOSC and SCORC (CSI s, CSI u).
+SCORCTests.test_SaveRestoreCursor_Basic
+SCORCTests.test_SaveRestoreCursor_MoveToHomeWhenNotSaved
+SCORCTests.test_SaveRestoreCursor_Reset
+
+# Not implemented: XTSAVE and XTRESTORE (CSI ? Pm s, CSI ? Pm r).
+XtermSaveTests.test_XtermSave_SaveResetState
+XtermSaveTests.test_XtermSave_SaveSetState
+
+# Not implemented: DECALN (ESC # 8).
+DECALNTests.test_DECALN_ClearsMargins
+DECALNTests.test_DECALN_FillsScreen
+DECALNTests.test_DECALN_MovesCursorHome
+
+# IRM: the terminal records the mode but doesn't shift cells. The app makes
+# up for it by inserting ICH before each printed cell
+# (TerminalXtermOutputDecoder in lib/domain/services/ssh_service.dart),
+# which this harness doesn't run.
+SMTests.test_SM_IRM
+SMTests.test_SM_IRM_TruncatesAtRightMargin
+
+# Not implemented: reverse wraparound (DECSET 45 and 1045).
+BSTests.test_BS_AfterNoWrappedInlines
+BSTests.test_BS_AfterOneWrappedInline
+BSTests.test_BS_ReverseWrapGoesToBottom
+BSTests.test_BS_ReverseWrapWithLeftRight
+BSTests.test_BS_ReversewrapFromLeftEdgeToRightMargin
+BSTests.test_BS_WrapsInWraparoundMode
+CUBTests.test_CUB_AfterNoWrappedInlines
+CUBTests.test_CUB_AfterOneWrappedInline
+DECSETTests.test_DECSET_ReverseWraparound_BS
+DECSETTests.test_DECSET_ReverseWraparound_Multi
+
+# Not implemented: character protection (DECSCA, SPA/EPA) and selective erase
+# (DECSED, DECSEL). The doesNotRespectISOProtect tests pass here only
+# because nothing is protected, and esctest expects them to fail as in xterm.
+DECRQSSTests.test_DECRQSS_DECSCA
+DECSEDTests.test_DECSED_0_Protection
+DECSEDTests.test_DECSED_0_WithScrollRegion_Protection
+DECSEDTests.test_DECSED_1_Protection
+DECSEDTests.test_DECSED_1_WithScrollRegion_Protection
+DECSEDTests.test_DECSED_2_Protection
+DECSEDTests.test_DECSED_2_WithScrollRegion_Protection
+DECSEDTests.test_DECSED_DECSCA_2
+DECSEDTests.test_DECSED_Default_Protection
+DECSEDTests.test_DECSED_doesNotRespectISOProtect
+DECSELTests.test_DECSEL_0_Protection
+DECSELTests.test_DECSEL_1_Protection
+DECSELTests.test_DECSEL_2_Protection
+DECSELTests.test_DECSEL_Default_Protection
+DECSELTests.test_DECSEL_IgnoresScrollRegion_Protection
+DECSELTests.test_DECSEL_doesNotRespectISOProtect
+ECHTests.test_ECH_respectsISOProtection
+EDTests.test_ED_respectsISOProtection
+ELTests.test_EL_respectsISOProtection
+
+# Not implemented: the VT420 rectangle and column operations DECCRA, DECERA,
+# DECFRA, DECSERA, DECIC, DECDC, DECBI and DECFI.
+DECBITests.test_DECBI_Basic
+DECBITests.test_DECBI_LeftOfMargin
+DECBITests.test_DECBI_Scrolls
+DECBITests.test_DECBI_WholeScreenScrolls
+DECCRATests.test_DECCRA_defaultValuesInDest
+DECCRATests.test_DECCRA_defaultValuesInSource
+DECCRATests.test_DECCRA_destinationPartiallyOffscreen
+DECCRATests.test_DECCRA_ignoresMargins
+DECCRATests.test_DECCRA_nonOverlappingSourceAndDest
+DECCRATests.test_DECCRA_overlappingSourceAndDest
+DECCRATests.test_DECCRA_overlyLargeSourceClippedToScreenSize
+DECCRATests.test_DECCRA_respectsOriginMode
+DECDCTests.test_DECDC_CursorWithinTopBottom
+DECDCTests.test_DECDC_DefaultParam
+DECDCTests.test_DECDC_DeleteAll
+DECDCTests.test_DECDC_DeleteAllWithLeftRightMargins
+DECDCTests.test_DECDC_DeleteWithLeftRightMargins
+DECDCTests.test_DECDC_ExplicitParam
+DECERATests.test_DECERA_basic
+DECERATests.test_DECERA_defaultArgs
+DECERATests.test_DECERA_ignoresMargins
+DECERATests.test_DECERA_overlyLargeSourceClippedToScreenSize
+DECERATests.test_DECERA_respectsOriginMode
+DECFITests.test_DECFI_Basic
+DECFITests.test_DECFI_RightOfMargin
+DECFITests.test_DECFI_Scrolls
+DECFITests.test_DECFI_WholeScreenScrolls
+DECFRATests.test_DECFRA_basic
+DECFRATests.test_DECFRA_defaultArgs
+DECFRATests.test_DECFRA_ignoresMargins
+DECFRATests.test_DECFRA_overlyLargeSourceClippedToScreenSize
+DECFRATests.test_DECFRA_respectsOriginMode
+DECICTests.test_DECIC_CursorWithinTopBottom
+DECICTests.test_DECIC_DefaultParam
+DECICTests.test_DECIC_ExplicitParam
+DECICTests.test_DECIC_ScrollEntirelyOffRightEdge
+DECICTests.test_DECIC_ScrollOffRightEdge
+DECICTests.test_DECIC_ScrollOffRightMarginInScrollRegion
+DECSERATests.test_DECSERA_basic
+DECSERATests.test_DECSERA_defaultArgs
+DECSERATests.test_DECSERA_doesNotRespectISOProtect
+DECSERATests.test_DECSERA_ignoresMargins
+DECSERATests.test_DECSERA_overlyLargeSourceClippedToScreenSize
+DECSERATests.test_DECSERA_respectsOriginMode
+
+# Not implemented: left/right margins (DECLRMM, DECSLRM). Some of these also
+# need cursor position reports relative to the margins under origin mode
+# (DECOM), which this terminal reports from the top left of the screen.
+BSTests.test_BS_StopsAtLeftMargin
+CHATests.test_CHA_RespectsOriginMode
+CHTTests.test_CHT_IgnoresScrollingRegion
+CNLTests.test_CNL_StopsAtBottomLineWhenBegunBelowScrollRegion
+CNLTests.test_CNL_StopsAtBottomMarginInScrollRegion
+CPLTests.test_CPL_StopsAtTopLineWhenBegunAboveScrollRegion
+CPLTests.test_CPL_StopsAtTopMarginInScrollRegion
+CRTests.test_CR_MovesToLeftMarginWhenLeftOfLeftMarginInOriginMode
+CRTests.test_CR_MovesToLeftMarginWhenRightOfLeftMargin
+CRTests.test_CR_StaysPutWhenAtLeftMargin
+CUBTests.test_CUB_StopsAtLeftMarginInScrollRegion
+CUFTests.test_CUF_StopsAtRightMarginInScrollRegion
+CUPTests.test_CUP_RespectsOriginMode
+DCHTests.test_DCH_DeleteAllWithMargins
+DCHTests.test_DCH_DoesNothingOutsideLeftRightMargin
+DCHTests.test_DCH_RespectsMargins
+DECSETTests.test_DECSET_DECAWM_NoLineWrapOnTabWithLeftRightMargin
+DECSETTests.test_DECSET_DECAWM_OffRespectsLeftRightMargin
+DECSETTests.test_DECSET_DECAWM_OnRespectsLeftRightMargin
+DECSETTests.test_DECSET_DECLRMM
+DECSETTests.test_DECSET_DECOM
+DECSETTests.test_DECSET_DECOM_DECRQCRA
+DLTests.test_DL_ClearOutLeftRightAndTopBottomScrollRegion
+DLTests.test_DL_InLeftRightAndTopBottomScrollRegion
+DLTests.test_DL_InLeftRightScrollRegion
+DLTests.test_DL_OutsideLeftRightScrollRegion
+FFTests.test_FF_MovesDoesNotScrollOutsideLeftRight
+HPATests.test_HPA_IgnoresOriginMode
+HPRTests.test_HPR_IgnoresOriginMode
+HVPTests.test_HVP_RespectsOriginMode
+ICHTests.test_ICH_IsNoOpWhenCursorBeginsOutsideScrollRegion
+ICHTests.test_ICH_ScrollOffRightMarginInScrollRegion
+ILTests.test_IL_RespectsScrollRegion
+ILTests.test_IL_RespectsScrollRegion_Over
+INDTests.test_IND_MovesDoesNotScrollOutsideLeftRight
+LFTests.test_LF_MovesDoesNotScrollOutsideLeftRight
+NELTests.test_NEL_MovesDoesNotScrollOutsideLeftRight
+REPTests.test_REP_RespectsLeftRightMargins
+RITests.test_RI_MovesDoesNotScrollOutsideLeftRight
+SCORCTests.test_SaveRestoreCursor_WorksInLRM
+SDTests.test_SD_BigScrollLeftRightAndTopBottomScrollRegion
+SDTests.test_SD_LeftRightAndTopBottomScrollRegion
+SDTests.test_SD_OutsideLeftRightScrollRegion
+SDTests.test_SD_RespectsLeftRightScrollRegion
+SUTests.test_SU_BigScrollLeftRightAndTopBottomScrollRegion
+SUTests.test_SU_LeftRightAndTopBottomScrollRegion
+SUTests.test_SU_OutsideLeftRightScrollRegion
+SUTests.test_SU_RespectsLeftRightScrollRegion
+VPATests.test_VPA_IgnoresOriginMode
+VPRTests.test_VPR_IgnoresOriginMode
+VTTests.test_VT_MovesDoesNotScrollOutsideLeftRight
+
+# Identity: DA1 and DA2 report a VT220 on purpose (EscapeEmitter); esctest
+# wants a VT525. DECID (ESC Z) is not answered.
+DA2Tests.test_DA2_0
+DA2Tests.test_DA2_NoParameter
+DATests.test_DA_0
+DATests.test_DA_NoParameter
+DECIDTests.test_DECID_Basic
+
+# DECRQM: ANSI modes the terminal doesn't know are reported as not recognized
+# (0), where xterm says permanently reset (4) or reset (2). DEC private modes
+# are answered by the app layer (ssh_service.dart), which this harness
+# doesn't run.
+DECRQMTests.test_DECRQM_ANSI_EBM
+DECRQMTests.test_DECRQM_ANSI_FEAM
+DECRQMTests.test_DECRQM_ANSI_FETM
+DECRQMTests.test_DECRQM_ANSI_GATM
+DECRQMTests.test_DECRQM_ANSI_HEM
+DECRQMTests.test_DECRQM_ANSI_KAM
+DECRQMTests.test_DECRQM_ANSI_MATM
+DECRQMTests.test_DECRQM_ANSI_PUM
+DECRQMTests.test_DECRQM_ANSI_SATM
+DECRQMTests.test_DECRQM_ANSI_SRM
+DECRQMTests.test_DECRQM_ANSI_SRTM
+DECRQMTests.test_DECRQM_ANSI_TSM
+DECRQMTests.test_DECRQM_ANSI_TTM
+DECRQMTests.test_DECRQM_ANSI_VEM
+DECRQMTests.test_DECRQM_DEC_DECAWM
+DECRQMTests.test_DECRQM_DEC_DECBKM
+DECRQMTests.test_DECRQM_DEC_DECCKM
+DECRQMTests.test_DECRQM_DEC_DECCOLM
+DECRQMTests.test_DECRQM_DEC_DECHCCM
+DECRQMTests.test_DECRQM_DEC_DECHEBM
+DECRQMTests.test_DECRQM_DEC_DECLRMM
+DECRQMTests.test_DECRQM_DEC_DECNKM
+DECRQMTests.test_DECRQM_DEC_DECNRCM
+DECRQMTests.test_DECRQM_DEC_DECOM
+DECRQMTests.test_DECRQM_DEC_DECPEX
+DECRQMTests.test_DECRQM_DEC_DECPFF
+DECRQMTests.test_DECRQM_DEC_DECSCLM
+DECRQMTests.test_DECRQM_DEC_DECSCNM
+DECRQMTests.test_DECRQM_DEC_DECTCEM
+
+# DECRQSS for settings the terminal doesn't track.
+DECRQSSTests.test_DECRQSS_DECSACE
+DECRQSSTests.test_DECRQSS_DECSASD
+DECRQSSTests.test_DECRQSS_DECSCL
+DECRQSSTests.test_DECRQSS_DECSCUSR
+DECRQSSTests.test_DECRQSS_DECSLPP
+DECRQSSTests.test_DECRQSS_DECSLRM
+DECRQSSTests.test_DECRQSS_DECSNLS
+DECRQSSTests.test_DECRQSS_DECSSDT
+
+# DSR: only CSI 5 n and CSI 6 n are answered, not the DEC private reports.
+DECDSRTests.test_DECDSR_DECCKSR
+DECDSRTests.test_DECDSR_DECMSR
+DECDSRTests.test_DECDSR_DSRDECLocatorStatus
+DECDSRTests.test_DECDSR_DSRDataIntegrity
+DECDSRTests.test_DECDSR_DSRKeyboard
+DECDSRTests.test_DECDSR_DSRMultipleSessionStatus
+DECDSRTests.test_DECDSR_DSRPrinterPort
+DECDSRTests.test_DECDSR_DSRUDKLocked
+DECDSRTests.test_DECDSR_LocatorType
+
+# Colours: OSC 4, 5, 10-19 and 104-119 are handled by the app layer, which this
+# harness doesn't run, or not at all.
+ChangeColorTests.test_ChangeColor_CIELab
+ChangeColorTests.test_ChangeColor_CIELuv
+ChangeColorTests.test_ChangeColor_CIEXYZ
+ChangeColorTests.test_ChangeColor_CIEuvY
+ChangeColorTests.test_ChangeColor_CIExyY
+ChangeColorTests.test_ChangeColor_Hash12
+ChangeColorTests.test_ChangeColor_Hash3
+ChangeColorTests.test_ChangeColor_Hash6
+ChangeColorTests.test_ChangeColor_Hash9
+ChangeColorTests.test_ChangeColor_Multiple
+ChangeColorTests.test_ChangeColor_RGB
+ChangeColorTests.test_ChangeColor_RGBI
+ChangeColorTests.test_ChangeColor_TekHVC
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIELab
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIELuv
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIEXYZ
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIEuvY
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIExyY
+ChangeDynamicColorTests.test_ChangeDynamicColor_Hash12
+ChangeDynamicColorTests.test_ChangeDynamicColor_Hash3
+ChangeDynamicColorTests.test_ChangeDynamicColor_Hash6
+ChangeDynamicColorTests.test_ChangeDynamicColor_Hash9
+ChangeDynamicColorTests.test_ChangeDynamicColor_Multiple
+ChangeDynamicColorTests.test_ChangeDynamicColor_RGB
+ChangeDynamicColorTests.test_ChangeDynamicColor_RGBI
+ChangeDynamicColorTests.test_ChangeDynamicColor_TekHVC
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIELab
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIELuv
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIEXYZ
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIEuvY
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIExyY
+ChangeSpecialColorTests.test_ChangeSpecialColor_Hash12
+ChangeSpecialColorTests.test_ChangeSpecialColor_Hash3
+ChangeSpecialColorTests.test_ChangeSpecialColor_Hash6
+ChangeSpecialColorTests.test_ChangeSpecialColor_Hash9
+ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple
+ChangeSpecialColorTests.test_ChangeSpecialColor_Multiple2
+ChangeSpecialColorTests.test_ChangeSpecialColor_RGB
+ChangeSpecialColorTests.test_ChangeSpecialColor_RGBI
+ChangeSpecialColorTests.test_ChangeSpecialColor_TekHVC
+ResetColorTests.test_ResetColor_All
+ResetColorTests.test_ResetColor_Standard
+ResetSpecialColorTests.test_ResetSpecialColor_Dynamic
+ResetSpecialColorTests.test_ResetSpecialColor_Multiple
+ResetSpecialColorTests.test_ResetSpecialColor_Multiple2
+ResetSpecialColorTests.test_ResetSpecialColor_Single
+ResetSpecialColorTests.test_ResetSpecialColor_Single2
+
+# Not implemented: 132 columns (DECCOLM, DECSET 40), DECSET 41 (the more(1)
+# fix) and conformance levels (DECSCL).
+DECSCLTests.test_DECSCL_Level2DoesntSupportDECRQM
+DECSCLTests.test_DECSCL_Level4_SupportsDECSLRMDoesntSupportDECNCSM
+DECSETTests.test_DECSET_Allow80To132
+DECSETTests.test_DECSET_DECCOLM
+DECSETTests.test_DECSET_MoreFix
+RISTests.test_RIS_ResetDECCOLM
+
+# Window operations (CSI Ps t) other than resizing and the size report, the
+# title stack, title reports (off on purpose: a program could inject the
+# title as input), title modes and DECSLPP.
+RISTests.test_RIS_ResetTitleMode
+XtermWinopsTests.test_XtermWinops_DECSLPP
+XtermWinopsTests.test_XtermWinops_Fullscreen
+XtermWinopsTests.test_XtermWinops_IconifyDeiconfiy
+XtermWinopsTests.test_XtermWinops_MaximizeWindow_Horizontally
+XtermWinopsTests.test_XtermWinops_MaximizeWindow_HorizontallyAndVertically
+XtermWinopsTests.test_XtermWinops_MaximizeWindow_Vertically
+XtermWinopsTests.test_XtermWinops_MoveToXY
+XtermWinopsTests.test_XtermWinops_MoveToXY_Defaults
+XtermWinopsTests.test_XtermWinops_PushIconAndWindow_PopIcon
+XtermWinopsTests.test_XtermWinops_PushIconAndWindow_PopIconAndWindow
+XtermWinopsTests.test_XtermWinops_PushIconAndWindow_PopWindow
+XtermWinopsTests.test_XtermWinops_PushIconThenWindowThenPopBoth
+XtermWinopsTests.test_XtermWinops_PushIcon_PopIcon
+XtermWinopsTests.test_XtermWinops_PushMultiplePopMultiple_Icon
+XtermWinopsTests.test_XtermWinops_PushMultiplePopMultiple_Window
+XtermWinopsTests.test_XtermWinops_PushWindow_PopWindow
+XtermWinopsTests.test_XtermWinops_ReportIconLabel
+XtermWinopsTests.test_XtermWinops_ReportWindowLabel
+XtermWinopsTests.test_XtermWinops_ResizeChars_BothParameters
+XtermWinopsTests.test_XtermWinops_ResizeChars_DefaultHeight
+XtermWinopsTests.test_XtermWinops_ResizeChars_DefaultWidth
+XtermWinopsTests.test_XtermWinops_ResizeChars_ZeroHeight
+XtermWinopsTests.test_XtermWinops_ResizeChars_ZeroWidth
+XtermWinopsTests.test_XtermWinops_ResizePixels_BothParameters
+XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedHeight
+XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedWidth
+XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroHeight
+XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroWidth

@@ -111,6 +111,13 @@ abstract class EscapeHandler {
   /// (`CSI ? 999 ; Ps n`).
   void sendVisibilityReport();
 
+  /// Answers DECRQCRA (`CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y`); [params] are
+  /// the request's parameters in that order.
+  void sendRectangularAreaChecksum(List<int> params);
+
+  /// XTCHECKSUM (`CSI Ps # y`): selects how DECRQCRA computes its checksum.
+  void setChecksumExtension(int bits);
+
   void setMargins(int i, [int? bottom]);
 
   void cursorNextLine(int amount);
