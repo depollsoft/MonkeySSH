@@ -67,6 +67,10 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	// Placements that do not move the client's cursor keep it known.
 	for _, command := range []string{
 		"a=T,f=32,s=1,v=1,C=1", "a=T,f=32,s=1,v=1,U=1", "a=d,d=a", "a=q,i=1",
+		// Kitty reads U as set for any non-zero value, and a placement
+		// relative to a parent never moves the cursor.
+		"a=T,f=32,s=1,v=1,U=2", "a=p,i=2,p=1,P=1,Q=1,H=3",
+		"a=T,i=2,f=32,s=1,v=1,P=1",
 	} {
 		s.Write([]byte("\x1b[3;4H\x1b_G" + command + ";/wAA/w==\x1b\\"))
 		if got := report(); got != "\x1b[3;4R" {
