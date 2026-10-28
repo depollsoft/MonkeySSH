@@ -180,7 +180,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   // Keeps the snippets panel, and the folder it shows, when folding or
   // turning the device moves it into another layout.
-  final _snippetsPanelKey = GlobalKey();
+  final _snippetsPanelKey = GlobalKey<_SnippetsPanelState>();
 
   // Home's tabs, by _selectedIndex.
   static const _homeTabs = <_HomeTab>[
@@ -514,57 +514,67 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   ///
   /// As in native apps, Settings and the tab bar stand in the vertical bar
   /// beside the status cluster, and the lists get the whole height; the panel
-  /// headers name the tab. Across a [fold], held like a book or open flat,
-  /// the selected panel takes the left page and live connections the right
-  /// one, so the tabs skip Connections. Each page is about the size of the
-  /// outer display.
+  /// headers name the tab. The selected panel's add action is a key just
+  /// above the tabs, in reach of the thumb, in place of its header button.
+  /// Across a [fold], held like a book or open flat, the selected panel takes
+  /// the left page and live connections the right one, so the tabs skip
+  /// Connections. Each page is about the size of the outer display.
   Widget _buildVerticalBarLayout(SystemVerticalBar bar, DisplayFold? fold) {
     final (:indexes, :selected) = _visibleTabs(
       showsConnectionsTab: fold == null,
     );
+    final panelIndex = indexes[selected];
+    // A tab bar stays put under the keyboard, as on any iPhone.
+    final column = resolveVerticalBarColumn(
+      bar,
+      MediaQuery.of(context),
+      avoidsKeyboard: false,
+    );
+    // A short bar, as beside a Live Activity in landscape, gives way in
+    // order so the tabs stay reachable: the add key first, whose button
+    // returns to the panel header, then the tab labels, then Settings. None
+    // of it depends on the tab, so switching to Connections, which has no
+    // add action, leaves the rest of the rail where it was.
+    final room = column.height - verticalBarItemExtent - verticalBarItemGap;
+    final showsAddKey =
+        VerticalBarTabs.extentFor(indexes.length) +
+            verticalBarItemExtent +
+            verticalBarItemGap <=
+        room;
+    final showsLabels = VerticalBarTabs.extentFor(indexes.length) <= room;
+    final showsSettings =
+        VerticalBarTabs.extentFor(indexes.length, showsLabels: false) <= room;
+    final addAction = showsAddKey ? _addAction(panelIndex) : null;
     // Without a tab bar across the bottom, the lists end above the home
     // indicator themselves.
-    final content = SafeArea(child: _buildContent(index: indexes[selected]));
+    final content = SafeArea(
+      child: _buildContent(index: panelIndex, showsAddButtons: !showsAddKey),
+    );
     return Scaffold(
       resizeToAvoidBottomInset: false,
       body: VerticalBarRailPortal(
-        rail: (context) {
-          // A tab bar stays put under the keyboard, as on any iPhone.
-          final column = resolveVerticalBarColumn(
-            bar,
-            MediaQuery.of(context),
-            avoidsKeyboard: false,
-          );
-          // A short bar, as beside a Live Activity in landscape, drops the
-          // tab labels first, then Settings, so the tabs stay reachable.
-          final room =
-              column.height - verticalBarItemExtent - verticalBarItemGap;
-          final showsLabels = VerticalBarTabs.extentFor(indexes.length) <= room;
-          final showsSettings =
-              VerticalBarTabs.extentFor(indexes.length, showsLabels: false) <=
-              room;
-          return VerticalBarRail(
-            bar: bar,
-            avoidsKeyboard: false,
-            leading: [if (showsSettings) _buildSettingsButton()],
-            trailing: [
-              VerticalBarTabs(
-                tabs: [
-                  for (final index in indexes)
-                    VerticalBarTab(
-                      icon: _homeTabs[index].icon,
-                      selectedIcon: _homeTabs[index].selectedIcon,
-                      label: _homeTabs[index].label,
-                    ),
-                ],
-                selectedIndex: selected,
-                showsLabels: showsLabels,
-                onSelected: (tab) =>
-                    setState(() => _selectedIndex = indexes[tab]),
-              ),
-            ],
-          );
-        },
+        rail: (context) => VerticalBarRail(
+          bar: bar,
+          avoidsKeyboard: false,
+          leading: [if (showsSettings) _buildSettingsButton()],
+          trailing: [
+            if (addAction != null) _buildAddKey(context, addAction),
+            VerticalBarTabs(
+              tabs: [
+                for (final index in indexes)
+                  VerticalBarTab(
+                    icon: _homeTabs[index].icon,
+                    selectedIcon: _homeTabs[index].selectedIcon,
+                    label: _homeTabs[index].label,
+                  ),
+              ],
+              selectedIndex: selected,
+              showsLabels: showsLabels,
+              onSelected: (tab) =>
+                  setState(() => _selectedIndex = indexes[tab]),
+            ),
+          ],
+        ),
         child: fold == null
             ? content
             : DisplayFoldSpread(
@@ -629,6 +639,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     tooltip: 'Settings',
     onPressed: () => context.push('/settings'),
   );
+
+  /// The add action of the panel at [index] in [_homeTabs], which the
+  /// vertical bar holds as a key in place of the panel header's button.
+  /// Connections has none.
+  _AddAction? _addAction(int index) => switch (index) {
+    0 => (tooltip: 'Add host', onPressed: () => _addHost(context)),
+    2 => (tooltip: 'Add key', onPressed: () => _addKey(context)),
+    3 => (
+      tooltip: 'Add snippet',
+      onPressed: () => _snippetsPanelKey.currentState?._addSnippet(),
+    ),
+    _ => null,
+  };
+
+  /// The key for [action], filled in the accent like the header button it
+  /// replaces: it is the screen's one primary action.
+  Widget _buildAddKey(BuildContext context, _AddAction action) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return IconButton(
+      icon: const Icon(Icons.add),
+      tooltip: action.tooltip,
+      onPressed: action.onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: colorScheme.primary,
+        foregroundColor: colorScheme.onPrimary,
+        shape: const CircleBorder(),
+      ),
+    );
+  }
 
   /// The phone layout, with an app bar across the top and a tab bar across
   /// the bottom.
@@ -826,25 +865,38 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
   }
 
-  Widget _buildContent({int? index}) => Column(
+  /// The panel at [index] in [_homeTabs], or the selected one. Without
+  /// [showsAddButtons], its header leaves out the add button, whose action
+  /// the vertical bar holds.
+  Widget _buildContent({int? index, bool showsAddButtons = true}) => Column(
     children: [
       const _TelemetryOptInPromptCard(),
       Expanded(
         child: switch (index ?? _selectedIndex) {
-          0 => const HostsPanel(),
+          0 => HostsPanel(showsAddButton: showsAddButtons),
           // Arrows, Return and Esc drive the list from a hardware keyboard.
           1 => const KeyboardListNavigation(
             autofocus: true,
             child: _ConnectionsPanel(),
           ),
-          2 => const _KeysPanel(),
-          3 => SnippetsPanel(key: _snippetsPanelKey),
-          _ => const HostsPanel(),
+          2 => _KeysPanel(showsAddButton: showsAddButtons),
+          3 => SnippetsPanel(
+            key: _snippetsPanelKey,
+            showsAddButton: showsAddButtons,
+          ),
+          _ => HostsPanel(showsAddButton: showsAddButtons),
         },
       ),
     ],
   );
 }
+
+/// A panel's add action: what it is called and what it does.
+typedef _AddAction = ({String tooltip, VoidCallback onPressed});
+
+void _addHost(BuildContext context) => context.push('/hosts/add');
+
+void _addKey(BuildContext context) => context.push('/keys/add');
 
 /// The fold home's vertical bar layout splits into two pages at: a vertical
 /// one, half open like a book or open flat.
@@ -1072,7 +1124,11 @@ class _TelemetryOptInPromptCard extends ConsumerWidget {
 /// Panel for displaying and managing hosts inline.
 class HostsPanel extends ConsumerWidget {
   /// Creates a [HostsPanel].
-  const HostsPanel({super.key});
+  const HostsPanel({super.key, this.showsAddButton = true});
+
+  /// Whether the header shows the Add Host button. Home leaves it out while
+  /// the vertical bar holds the action.
+  final bool showsAddButton;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1090,12 +1146,13 @@ class HostsPanel extends ConsumerWidget {
               tooltip: 'Import ssh_config',
               onTap: () => context.push('/hosts/import-ssh-config'),
             ),
-            _ActionButton(
-              icon: Icons.add,
-              label: 'Add Host',
-              onTap: () => context.push('/hosts/add'),
-              primary: true,
-            ),
+            if (showsAddButton)
+              _ActionButton(
+                icon: Icons.add,
+                label: 'Add Host',
+                onTap: () => _addHost(context),
+                primary: true,
+              ),
           ],
         ),
 
@@ -2213,7 +2270,10 @@ class _SmallIconButton extends StatelessWidget {
 }
 
 class _KeysPanel extends ConsumerWidget {
-  const _KeysPanel();
+  const _KeysPanel({this.showsAddButton = true});
+
+  /// Whether the header shows the Add Key button.
+  final bool showsAddButton;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -2226,12 +2286,13 @@ class _KeysPanel extends ConsumerWidget {
         PanelHeader(
           title: 'keys',
           actions: [
-            _ActionButton(
-              icon: Icons.add,
-              label: 'Add Key',
-              onTap: () => context.push('/keys/add'),
-              primary: true,
-            ),
+            if (showsAddButton)
+              _ActionButton(
+                icon: Icons.add,
+                label: 'Add Key',
+                onTap: () => _addKey(context),
+                primary: true,
+              ),
           ],
         ),
 
@@ -2499,7 +2560,11 @@ class _KeyRow extends ConsumerWidget {
 /// Panel for displaying and managing snippets inline.
 class SnippetsPanel extends ConsumerStatefulWidget {
   /// Creates a [SnippetsPanel].
-  const SnippetsPanel({super.key});
+  const SnippetsPanel({super.key, this.showsAddButton = true});
+
+  /// Whether the header shows the Add Snippet button. Home leaves it out
+  /// while the vertical bar holds the action.
+  final bool showsAddButton;
 
   @override
   ConsumerState<SnippetsPanel> createState() => _SnippetsPanelState();
@@ -2521,8 +2586,8 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Header bar. A narrow panel, such as iPhone Duo's outer display
-        // beside its vertical bar, keeps only the primary action labelled,
-        // like the hosts header.
+        // beside its vertical bar, shows New Folder as an icon, like the
+        // hosts header's import.
         LayoutBuilder(
           builder: (context, constraints) => PanelHeader(
             title: 'snippets',
@@ -2539,14 +2604,15 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
                   label: 'New Folder',
                   onTap: () => unawaited(_createFolder(context)),
                 ),
-                const SizedBox(width: 8),
+                if (widget.showsAddButton) const SizedBox(width: 8),
               ],
-              _ActionButton(
-                icon: Icons.add,
-                label: 'Add Snippet',
-                onTap: () => _addSnippet(context),
-                primary: true,
-              ),
+              if (widget.showsAddButton)
+                _ActionButton(
+                  icon: Icons.add,
+                  label: 'Add Snippet',
+                  onTap: _addSnippet,
+                  primary: true,
+                ),
             ],
           ),
         ),
@@ -2575,7 +2641,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     );
   }
 
-  void _addSnippet(BuildContext context) {
+  void _addSnippet() {
     context.push(
       '/snippets/add',
       extra: SnippetEditPrefill(folderId: _selectedFolderId),
@@ -2862,7 +2928,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
                 ? 'Save commands you keep retyping — {{variables}} and all.'
                 : 'Nothing in this folder yet — add one or pick another above.',
             primaryLabel: 'Add Snippet',
-            onPrimary: () => _addSnippet(context),
+            onPrimary: _addSnippet,
           ),
         ),
       );

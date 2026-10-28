@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
@@ -21,6 +22,7 @@ import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/terminal_preview.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
+import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
@@ -42,6 +44,7 @@ import 'package:monkeyssh/domain/services/transfer_intent_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
+import 'package:monkeyssh/presentation/screens/snippet_edit_screen.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_list_navigation.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
@@ -767,6 +770,8 @@ void main() {
         tester.getRect(find.text('Add Host')).right,
         lessThanOrEqualTo(466 - 84),
       );
+      // Without a vertical bar, Add Host stays in the panel header.
+      expect(find.byTooltip('Add host'), findsNothing);
     });
 
     testWidgets('keeps the wide sidebar whole beside a side strip', (
@@ -1023,12 +1028,37 @@ void main() {
       features: <DisplayFeature>[],
     );
 
+    // The routes home's add actions open, each a page naming its location
+    // and the snippet folder it was opened for.
+    GoRouter addRouter(HomeScreenTab initialTab) {
+      Widget opened(GoRouterState state) => Text(
+        'opened ${state.uri} '
+        '${(state.extra as SnippetEditPrefill?)?.folderId}',
+      );
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => HomeScreen(initialTab: initialTab),
+          ),
+          for (final path in ['/hosts/add', '/keys/add', '/snippets/add'])
+            GoRoute(
+              path: path,
+              builder: (context, state) => Scaffold(body: opened(state)),
+            ),
+        ],
+      );
+      addTearDown(router.dispose);
+      return router;
+    }
+
     Future<ValueNotifier<_DuoPose>> pumpInPose(
       WidgetTester tester,
       _DuoPose pose, {
       List overrides = const [],
       HomeScreenTab initialTab = HomeScreenTab.hosts,
       TextScaler textScaler = TextScaler.noScaling,
+      GoRouter? router,
     }) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -1037,6 +1067,20 @@ void main() {
         ..devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final current = ValueNotifier(pose);
+      Widget withPose(BuildContext context, Widget? navigator) =>
+          ValueListenableBuilder(
+            valueListenable: current,
+            builder: (context, pose, _) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                size: pose.size,
+                padding: pose.padding,
+                viewPadding: pose.padding,
+                displayFeatures: pose.features,
+                textScaler: textScaler,
+              ),
+              child: SystemVerticalBarScope(bar: pose.bar, child: navigator!),
+            ),
+          );
 
       await tester.pumpWidget(
         buildMobileHomeScreen(
@@ -1054,22 +1098,12 @@ void main() {
             ),
             ...overrides,
           ],
-          child: MaterialApp(
-            builder: (context, navigator) => ValueListenableBuilder(
-              valueListenable: current,
-              builder: (context, pose, _) => MediaQuery(
-                data: MediaQuery.of(context).copyWith(
-                  size: pose.size,
-                  padding: pose.padding,
-                  viewPadding: pose.padding,
-                  displayFeatures: pose.features,
-                  textScaler: textScaler,
-                ),
-                child: SystemVerticalBarScope(bar: pose.bar, child: navigator!),
-              ),
-            ),
-            home: HomeScreen(initialTab: initialTab),
-          ),
+          child: router == null
+              ? MaterialApp(
+                  builder: withPose,
+                  home: HomeScreen(initialTab: initialTab),
+                )
+              : MaterialApp.router(builder: withPose, routerConfig: router),
         ),
       );
       await tester.pump();
@@ -1085,6 +1119,12 @@ void main() {
       current.value = pose;
       await tester.pump();
     }
+
+    // A panel header's filled add button, apart from the empty state's.
+    Finder headerAddButton() => find.descendant(
+      of: find.byType(PanelHeader),
+      matching: find.textContaining('Add '),
+    );
 
     List<String> tabLabels(WidgetTester tester) => [
       for (final tab
@@ -1220,6 +1260,9 @@ void main() {
           tester.getRect(find.byType(PanelHeader)).left,
           greaterThanOrEqualTo(84),
         );
+        // The add key would need 4 pt more, so Add Host stays in the header.
+        expect(find.byTooltip('Add host'), findsNothing);
+        expect(headerAddButton(), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );
@@ -1264,9 +1307,7 @@ void main() {
       semantics.dispose();
     });
 
-    testWidgets('keeps the chosen snippet folder as the device folds', (
-      tester,
-    ) async {
+    _MockSnippetRepository snippetsInFolder() {
       final snippetRepository = _MockSnippetRepository();
       when(snippetRepository.watchAll).thenAnswer(
         (_) => Stream.value([
@@ -1284,12 +1325,224 @@ void main() {
           ),
         ]),
       );
+      return snippetRepository;
+    }
+
+    Future<void> openRoute(WidgetTester tester, Finder control) async {
+      await tester.tap(control);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+    }
+
+    Future<void> goBack(WidgetTester tester, GoRouter router) async {
+      router.pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+    }
+
+    testWidgets('holds the add action in a filled key just above the tabs', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final router = addRouter(HomeScreenTab.hosts);
+      await pumpInPose(
+        tester,
+        closed,
+        router: router,
+        overrides: [
+          snippetRepositoryProvider.overrideWithValue(snippetsInFolder()),
+        ],
+      );
+      final colorScheme = Theme.of(tester.element(find.byType(HomeScreen)))
+          .colorScheme;
+
+      for (final (tab, name, route) in [
+        ('Hosts', 'Add host', '/hosts/add'),
+        ('Keys', 'Add key', '/keys/add'),
+        ('Snippets', 'Add snippet', '/snippets/add'),
+      ]) {
+        await tester.tap(find.text(tab));
+        await tester.pump();
+
+        final key = find.byTooltip(name);
+        expect(key.hitTestable(), findsOneWidget, reason: tab);
+        expect(headerAddButton(), findsNothing, reason: tab);
+        final rect = tester.getRect(key);
+        expect(rect.size, const Size.square(verticalBarItemExtent));
+        expect(
+          rect.bottom,
+          tester.getRect(find.byType(VerticalBarTabs)).top - verticalBarItemGap,
+          reason: tab,
+        );
+        expect(rect.center.dx, verticalBar.itemColumn.center.dx);
+        expect(
+          tester.getSemantics(key),
+          isSemantics(tooltip: name, isButton: true, hasTapAction: true),
+        );
+        // Filled in the accent, like the header button it replaces.
+        expect(
+          tester
+              .widget<Material>(
+                find.ancestor(of: key, matching: find.byType(Material)).first,
+              )
+              .color,
+          colorScheme.primary,
+        );
+        expect(
+          IconTheme.of(
+            tester.element(
+              find.descendant(of: key, matching: find.byIcon(Icons.add)),
+            ),
+          ).color,
+          colorScheme.onPrimary,
+        );
+
+        await openRoute(tester, key);
+        expect(find.text('opened $route null'), findsOneWidget, reason: tab);
+        await goBack(tester, router);
+      }
+
+      // A snippet added from the key goes in the folder on show, as one
+      // added from the header does.
+      await tester.ensureVisible(find.text('Deploy (1)'));
+      await tester.tap(find.text('Deploy (1)'));
+      await tester.pump();
+      await openRoute(tester, find.byTooltip('Add snippet'));
+      expect(find.text('opened /snippets/add 1'), findsOneWidget);
+      await goBack(tester, router);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
+
+    testWidgets('leaves the add key out on Connections without moving the '
+        'rail', (tester) async {
+      await pumpInPose(tester, closed);
+      final tabs = tester.getRect(find.byType(VerticalBarTabs));
+      final settings = tester.getRect(find.byTooltip('Settings'));
+      expect(find.byTooltip('Add host'), findsOneWidget);
+
+      await tester.tap(find.text('Connections'));
+      await tester.pump();
+
+      expect(find.byTooltip(RegExp('^Add ')), findsNothing);
+      expect(headerAddButton(), findsNothing);
+      expect(tester.getRect(find.byType(VerticalBarTabs)), tabs);
+      expect(
+        tester
+            .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+            .showsLabels,
+        isTrue,
+      );
+      expect(tester.getRect(find.byTooltip('Settings')), settings);
+    });
+
+    for (final (name, pose) in [('book', book), ('flat', flat)]) {
+      testWidgets('adds to the left page across a $name fold', (tester) async {
+        final router = addRouter(HomeScreenTab.connections);
+        await pumpInPose(tester, pose, router: router);
+
+        // Connections has the right page, so the key adds hosts, as the
+        // left page shows them.
+        final addHost = find.byTooltip('Add host');
+        expect(addHost.hitTestable(), findsOneWidget);
+        expect(
+          tester.getRect(addHost).bottom,
+          tester.getRect(find.byType(VerticalBarTabs)).top - verticalBarItemGap,
+        );
+        expect(
+          tester.getRect(addHost).center.dx,
+          innerBar.itemColumn.center.dx,
+        );
+        expect(headerAddButton(), findsNothing);
+
+        await tester.tap(find.text('Keys'));
+        await tester.pump();
+        await openRoute(tester, find.byTooltip('Add key'));
+        expect(find.text('opened /keys/add null'), findsOneWidget);
+      });
+    }
+
+    testWidgets('gives up the add key first in a short bar, returning its '
+        'button to the header', (tester) async {
+      _DuoPose shortened(double height) => (
+        size: closed.size,
+        padding: closed.padding,
+        bar: SystemVerticalBar(
+          edge: SystemVerticalBarEdge.right,
+          itemColumn: Rect.fromLTRB(396, 644 - height, 440, 644),
+        ),
+        features: const <DisplayFeature>[],
+      );
+      final pose = await pumpInPose(tester, closed);
+      // Settings, the key and the labelled tabs take 354 pt; the labelled
+      // tabs and Settings 302 pt; the bare tabs and Settings 246 pt.
+      for (final (height, showsKey, showsLabels, showsSettings) in [
+        (354.0, true, true, true),
+        (353.0, false, true, true),
+        (301.0, false, false, true),
+        (245.0, false, false, false),
+      ]) {
+        await changePose(tester, pose, shortened(height));
+        final reason = 'at $height pt';
+        expect(
+          find.byTooltip('Add host').hitTestable(),
+          showsKey ? findsOneWidget : findsNothing,
+          reason: reason,
+        );
+        expect(
+          headerAddButton(),
+          showsKey ? findsNothing : findsOneWidget,
+          reason: reason,
+        );
+        expect(
+          tester
+              .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+              .showsLabels,
+          showsLabels,
+          reason: reason,
+        );
+        expect(tester.getRect(find.byType(VerticalBarTabs)).bottom, 644);
+        expect(
+          find.byTooltip('Settings').hitTestable(),
+          showsSettings ? findsOneWidget : findsNothing,
+          reason: reason,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    test('fills the add key legibly in every built-in theme', () {
+      for (final (name, theme) in [
+        ('default dark', FluttyTheme.dark),
+        ('default light', FluttyTheme.light),
+        for (final terminalTheme in TerminalThemes.all)
+          (
+            terminalTheme.id,
+            FluttyTheme.fromTerminalTheme(
+              terminalTheme,
+              brightness: terminalTheme.isDark
+                  ? Brightness.dark
+                  : Brightness.light,
+            ),
+          ),
+      ]) {
+        expect(
+          contrastRatio(theme.colorScheme.onPrimary, theme.colorScheme.primary),
+          greaterThanOrEqualTo(3),
+          reason: name,
+        );
+      }
+    });
+
+    testWidgets('keeps the chosen snippet folder as the device folds', (
+      tester,
+    ) async {
       final pose = await pumpInPose(
         tester,
         closed,
         initialTab: HomeScreenTab.snippets,
         overrides: [
-          snippetRepositoryProvider.overrideWithValue(snippetRepository),
+          snippetRepositoryProvider.overrideWithValue(snippetsInFolder()),
         ],
         // The test font sets every glyph a full em wide, so the snippets
         // header needs a smaller scale to fit the book's 455 pt page, as it
