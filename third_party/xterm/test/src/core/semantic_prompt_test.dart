@@ -403,6 +403,21 @@ void main() {
       expect(terminal.promptClickInput(const CellOffset(3, 0)), '\x1b[D' * 7);
     });
 
+    test('a cursor with a wrap pending is after the last column', () {
+      // "$ abcd" fills the row; the cursor waits past "d".
+      final terminal = prompt('cl=line', 'abcd', width: 6);
+      expect(terminal.buffer.isWrapPending, isTrue);
+      expect(terminal.promptClickInput(const CellOffset(2, 0)), '\x1b[D' * 4);
+      expect(terminal.promptClickInput(const CellOffset(5, 0)), '\x1b[D');
+      final special = prompt('cl=line;special_key=1', 'abcd', width: 6);
+      expect(
+        special.promptClickInput(const CellOffset(3, 0)),
+        '\x1b[1;1u' * 3,
+      );
+      final multiple = prompt('cl=m', 'abcd', width: 6);
+      expect(multiple.promptClickInput(const CellOffset(2, 0)), '\x1b[D' * 4);
+    });
+
     test('cl=v moves to the line start, then up or down, then right', () {
       final terminal = _terminal(height: 8);
       terminal.write('${_mark('133;A;cl=v')}\$ ${_mark('133;B')}abcd\r\nxy');

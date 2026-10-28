@@ -83,6 +83,11 @@ class Buffer {
   /// screen, starting from 0.
   int get cursorY => _cursorY;
 
+  /// Whether a wrap is pending: the glyph just printed filled the row and the
+  /// cursor sits past it until the next one wraps. [cursorX] reports the last
+  /// column then.
+  bool get isWrapPending => _cursorX >= viewWidth;
+
   /// Index of the first line in the scroll region.
   int get marginTop => _marginTop;
 

@@ -112,9 +112,9 @@
    }
   ],
   "expect": [
-   "- |out1",
-   "- |out2",
-   "P |$ ls",
+   "- |out1|oooo",
+   "- |out2|oooo",
+   "P |$ ls|ppii",
    "P |$ ls|ppii",
    "- ||",
    "- ||",
@@ -214,8 +214,8 @@
    }
   ],
   "expect": [
-   "P |$ abcdefgh",
-   "C+|ijk",
+   "P |$ abcdefgh|ppiiiiiiii",
+   "C+|ijk|iii",
    "- |1|o",
    "- |2|o",
    "P |$ |pp",
@@ -279,6 +279,66 @@
    "- ||",
    "- ||",
    "cursor 3,1 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "a prompt scrolled into the scrollback comes back with its input",
+  "size": [
+   10,
+   2
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijklmnopqrstuv"
+   },
+   {
+    "resize": [
+     10,
+     4
+    ]
+   }
+  ],
+  "expect": [
+   "P |$ abcdefgh|ppiiiiiiii",
+   "C+|ijklmnopqr|iiiiiiiiii",
+   "C+|stuv|iiii",
+   "- ||",
+   "cursor 4,2 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "scrollback keeps cell contents through a reflow",
+  "size": [
+   10,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijklmnopqr\r\n\u001b]133;C\u0007out1\r\nout2\r\n\u001b]133;D;0\u0007\u001b]133;A\u0007> \u001b]133;B\u0007x"
+   },
+   {
+    "resize": [
+     7,
+     3
+    ]
+   },
+   {
+    "resize": [
+     12,
+     8
+    ]
+   }
+  ],
+  "expect": [
+   "P |$ abcdefghij|ppiiiiiiiiii",
+   "C+|klmnopqr|iiiiiiii",
+   "- |out1|oooo",
+   "- |out2|oooo",
+   "P |> x|ppi",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,4 i click=0 cl=- special=false redraw=true aid=-"
   ]
  }
 ]

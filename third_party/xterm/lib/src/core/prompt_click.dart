@@ -55,7 +55,12 @@ extension TerminalPromptClick on Terminal {
       return null;
     }
     final click = CellOffset(clickX, position.y);
-    final cursor = CellOffset(buffer.cursorX, buffer.absoluteCursorY);
+    // With a wrap pending the cursor is past the character in the last
+    // column, not on it.
+    final cursor = CellOffset(
+      buffer.isWrapPending ? width : buffer.cursorX,
+      buffer.absoluteCursorY,
+    );
 
     // The input lines of the prompt, each a row and the rows wrapping from
     // it, as the input characters on them.
