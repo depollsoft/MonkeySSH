@@ -7,7 +7,9 @@ import 'package:xterm/xterm.dart';
 /// The MonkeyMux screen model runs the same cases
 /// (remote/monkeymux/vtscreen_prompt_test.go), so the two agree on the
 /// semantic prompt marks, the content of every cell and what ED 2 at a prompt
-/// keeps.
+/// keeps. A case with a `frame` is a window the client attaches to after its
+/// first `replayAfter` steps: the client receives the model's replay (the
+/// recorded frame) in their place and must then track the model.
 const fixturePath =
     '../../remote/monkeymux/testdata/semantic_prompt_parity.json';
 
@@ -47,6 +49,28 @@ List<String> dumpSemanticPrompt(Terminal terminal) {
   return out;
 }
 
+/// Runs [testCase] on a client terminal and returns it.
+Terminal runSemanticParityCase(Map<String, dynamic> testCase) {
+  final size = (testCase['size'] as List).cast<int>();
+  final terminal = Terminal(maxLines: 1000);
+  terminal.resize(size[0], size[1]);
+  var steps = testCase['steps'] as List;
+  final frame = testCase['frame'] as String?;
+  if (frame != null) {
+    terminal.write(frame);
+    steps = steps.sublist(testCase['replayAfter'] as int);
+  }
+  for (final step in steps) {
+    final map = step as Map<String, dynamic>;
+    if (map['write'] != null) terminal.write(map['write'] as String);
+    if (map['resize'] != null) {
+      final resize = (map['resize'] as List).cast<int>();
+      terminal.resize(resize[0], resize[1]);
+    }
+  }
+  return terminal;
+}
+
 void main() {
   final file = File(fixturePath);
   if (!file.existsSync()) {
@@ -57,18 +81,10 @@ void main() {
   for (final raw in cases) {
     final testCase = raw as Map<String, dynamic>;
     test(testCase['name'], () {
-      final size = (testCase['size'] as List).cast<int>();
-      final terminal = Terminal(maxLines: 1000);
-      terminal.resize(size[0], size[1]);
-      for (final step in testCase['steps'] as List) {
-        final map = step as Map<String, dynamic>;
-        if (map['write'] != null) terminal.write(map['write'] as String);
-        if (map['resize'] != null) {
-          final resize = (map['resize'] as List).cast<int>();
-          terminal.resize(resize[0], resize[1]);
-        }
-      }
-      expect(dumpSemanticPrompt(terminal), testCase['expect']);
+      expect(
+        dumpSemanticPrompt(runSemanticParityCase(testCase)),
+        testCase['expect'],
+      );
     });
   }
 }

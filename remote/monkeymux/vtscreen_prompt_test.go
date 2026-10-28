@@ -17,6 +17,10 @@ type semanticParityCase struct {
 		Resize *[2]int `json:"resize"`
 	} `json:"steps"`
 	Expect []string `json:"expect"`
+	// A case with a Frame is a window the client attaches to after the
+	// first ReplayAfter steps: Frame is the replay the model sends then.
+	ReplayAfter int    `json:"replayAfter"`
+	Frame       string `json:"frame"`
 }
 
 // dumpSemanticPrompt is dumpSemanticPrompt in
@@ -75,9 +79,8 @@ func dumpSemanticPrompt(s *terminalScreen) []string {
 	return out
 }
 
-func runSemanticParityCase(c semanticParityCase) *terminalScreen {
-	s := newTerminalScreen(c.Size[0], c.Size[1])
-	for _, step := range c.Steps {
+func runSemanticParitySteps(s *terminalScreen, c semanticParityCase, from, to int) {
+	for _, step := range c.Steps[from:to] {
 		if step.Write != "" {
 			s.Write([]byte(step.Write))
 		}
@@ -85,6 +88,11 @@ func runSemanticParityCase(c semanticParityCase) *terminalScreen {
 			s.Resize(step.Resize[0], step.Resize[1])
 		}
 	}
+}
+
+func runSemanticParityCase(c semanticParityCase) *terminalScreen {
+	s := newTerminalScreen(c.Size[0], c.Size[1])
+	runSemanticParitySteps(s, c, 0, len(c.Steps))
 	return s
 }
 
@@ -105,6 +113,22 @@ func TestSemanticPromptParityWithClient(t *testing.T) {
 			got := dumpSemanticPrompt(runSemanticParityCase(c))
 			if strings.Join(got, "\n") != strings.Join(c.Expect, "\n") {
 				t.Fatalf("model differs from the client\n got:\n%s\nwant:\n%s",
+					strings.Join(got, "\n"), strings.Join(c.Expect, "\n"))
+			}
+			if c.Frame == "" {
+				return
+			}
+			// The client in this case was painted from the model's frame.
+			s := newTerminalScreen(c.Size[0], c.Size[1])
+			runSemanticParitySteps(s, c, 0, c.ReplayAfter)
+			if frame := activeWindowReplayPrefix + string(s.RenderFrame()); frame != c.Frame {
+				t.Fatalf("the frame changed; record it again in the fixture:\n%q", frame)
+			}
+			replica := newTerminalScreen(c.Size[0], c.Size[1])
+			replica.Write([]byte(c.Frame))
+			runSemanticParitySteps(replica, c, c.ReplayAfter, len(c.Steps))
+			if got := dumpSemanticPrompt(replica); strings.Join(got, "\n") != strings.Join(c.Expect, "\n") {
+				t.Fatalf("a model painted from the frame differs\n got:\n%s\nwant:\n%s",
 					strings.Join(got, "\n"), strings.Join(c.Expect, "\n"))
 			}
 		})
