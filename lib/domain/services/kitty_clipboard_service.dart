@@ -251,6 +251,19 @@ class KittyClipboardPasteRead {
   final bool useAttachmentFlow;
 }
 
+/// What became of a paste event.
+enum KittyClipboardPasteEventResult {
+  /// The event was written to the program.
+  sent,
+
+  /// The paste no longer targeted the same window or input when its turn
+  /// came, so nothing was written.
+  skipped,
+
+  /// The event could not be written, for example because the shell is gone.
+  failed,
+}
+
 /// How long the one-time password of a paste event stays valid. The spec
 /// asks for a short timeout; the program's read normally follows within one
 /// round trip.
@@ -379,23 +392,42 @@ class KittyClipboardHandler {
 
   /// Announces a paste to a program that set mode 5522: the types in
   /// [snapshot] and a one-time password its read can use to fetch them
-  /// without a prompt. Completes with whether the event was written.
-  Future<bool> sendPasteEvent(KittyClipboardSnapshot snapshot) {
-    final completer = Completer<bool>();
+  /// without a prompt.
+  ///
+  /// The event waits behind any request still being answered, so
+  /// [stillTargeted] is asked again right before it is written: when the
+  /// user has moved to another window or typed meanwhile, the event (and
+  /// with it the password) is not sent at all.
+  Future<KittyClipboardPasteEventResult> sendPasteEvent(
+    KittyClipboardSnapshot snapshot, {
+    bool Function()? stillTargeted,
+  }) {
+    final completer = Completer<KittyClipboardPasteEventResult>();
     _enqueue(() async {
       try {
-        completer.complete(_sendPasteEventNow(snapshot));
+        completer.complete(_sendPasteEventNow(snapshot, stillTargeted));
       } on Object {
-        completer.complete(false);
+        completer.complete(KittyClipboardPasteEventResult.failed);
         rethrow;
       }
     });
     return completer.future;
   }
 
-  bool _sendPasteEventNow(KittyClipboardSnapshot snapshot) {
+  KittyClipboardPasteEventResult _sendPasteEventNow(
+    KittyClipboardSnapshot snapshot,
+    bool Function()? stillTargeted,
+  ) {
     if (_disposed) {
-      return false;
+      return KittyClipboardPasteEventResult.failed;
+    }
+    if (stillTargeted != null && !stillTargeted()) {
+      _logger.info(
+        'terminal.clipboard',
+        'kitty_paste_event_skipped',
+        fields: {'connectionId': connectionId?.call()},
+      );
+      return KittyClipboardPasteEventResult.skipped;
     }
     final password = _newPassword();
     _pruneGrants();
@@ -429,7 +461,9 @@ class KittyClipboardHandler {
         'sent': sent,
       },
     );
-    return sent;
+    return sent
+        ? KittyClipboardPasteEventResult.sent
+        : KittyClipboardPasteEventResult.failed;
   }
 
   /// Drops any open write and every paste grant.
@@ -603,30 +637,31 @@ class KittyClipboardHandler {
         return;
       }
       final contents = <KittyClipboardEntry>[];
+      // The budget covers the whole answer, so a type requested under
+      // several names (text/plain and UTF8_STRING) counts each time.
+      var total = 0;
+      void serve(String mime, Uint8List? data) {
+        if (data != null && total + data.length <= kittyClipboardMaxReadBytes) {
+          contents.add((mime: mime, data: data));
+          total += data.length;
+        }
+      }
+
       List<String>? types;
       if (grant != null) {
         if (listing) {
           types = grant.snapshot.mimeTypes;
         }
         for (final mime in mimes) {
-          final data = _snapshotData(grant.snapshot, mime);
-          if (data != null) {
-            contents.add((mime: mime, data: data));
-          }
+          serve(mime, _snapshotData(grant.snapshot, mime));
         }
       } else {
         try {
           if (listing) {
             types = await _platform.availableTypes();
           }
-          var total = 0;
           for (final mime in mimes) {
-            final data = await _platform.read(mime);
-            if (data != null &&
-                total + data.length <= kittyClipboardMaxReadBytes) {
-              contents.add((mime: mime, data: data));
-              total += data.length;
-            }
+            serve(mime, await _platform.read(mime));
           }
         } on PlatformException {
           // What was read so far is still served; a type the platform failed

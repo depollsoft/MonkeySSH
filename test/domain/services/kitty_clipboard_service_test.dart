@@ -1,5 +1,6 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -17,6 +18,7 @@ class _FakePlatform implements KittyClipboardPlatform {
   final stored = <String, Uint8List>{};
   bool failWrite = false;
   bool throwOnRead = false;
+  Future<Uint8List?>? pendingRead;
   final written = <List<KittyClipboardEntry>>[];
 
   @override
@@ -26,6 +28,11 @@ class _FakePlatform implements KittyClipboardPlatform {
   Future<Uint8List?> read(String mime) async {
     if (throwOnRead) {
       throw PlatformException(code: 'denied');
+    }
+    final pending = pendingRead;
+    if (pending != null) {
+      pendingRead = null;
+      return pending;
     }
     return stored[mime];
   }
@@ -323,7 +330,10 @@ void main() {
         'image/png': Uint8List.fromList([0x89, 0x50, 0x4E, 0x47]),
         'text/plain': utf8.encode('pasted'),
       });
-      expect(await harness.handler.sendPasteEvent(snapshot), isTrue);
+      expect(
+        await harness.handler.sendPasteEvent(snapshot),
+        KittyClipboardPasteEventResult.sent,
+      );
       final packets = await harness.packets();
       expect(packets, hasLength(3));
       final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
@@ -378,14 +388,63 @@ void main() {
       expect(await harness.packets(), [status('read', 'EPERM')]);
     });
 
+    test('keep an answer from the snapshot within the read budget', () async {
+      final harness = _Harness()..canRead = false;
+      final text = Uint8List(kittyClipboardMaxReadBytes ~/ 2 + 1);
+      final snapshot = KittyClipboardSnapshot({'text/plain': text});
+      expect(
+        await harness.handler.sendPasteEvent(snapshot),
+        KittyClipboardPasteEventResult.sent,
+      );
+      final event = await harness.packets();
+      final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+          .firstMatch(event.first)!
+          .group(1)!;
+
+      // Both names resolve to the same text; only the first fits.
+      harness.osc(
+        'type=read:pw=$password:name=${b64(kittyClipboardPasteEventName)}'
+        ';${b64('text/plain UTF8_STRING')}',
+      );
+      final packets = await harness.packets();
+      final mimes = {
+        for (final packet in packets)
+          ?RegExp(':mime=([A-Za-z0-9+/=]+)').firstMatch(packet)?.group(1),
+      };
+      expect(mimes, {b64('text/plain')});
+      expect(packets.last, status('read', 'DONE'));
+    });
+
     test('report a closed connection', () async {
       final harness = _Harness()..connected = false;
       expect(
         await harness.handler.sendPasteEvent(
           KittyClipboardSnapshot({'text/plain': utf8.encode('x')}),
         ),
-        isFalse,
+        KittyClipboardPasteEventResult.failed,
       );
+    });
+
+    test('recheck their target once earlier requests are answered', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      harness.platform.pendingRead = blockedRead.future;
+      harness.osc('type=read;${b64('text/plain')}');
+
+      // The paste waits behind the read; the user moves to another window
+      // before the read is answered.
+      var targeted = true;
+      final result = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+        stillTargeted: () => targeted,
+      );
+      targeted = false;
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await result, KittyClipboardPasteEventResult.skipped);
+      final packets = await harness.packets();
+      expect(packets, hasLength(3));
+      expect(packets.join(), isNot(contains(':pw=')));
     });
   });
 
