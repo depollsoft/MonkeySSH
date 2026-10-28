@@ -258,3 +258,19 @@ func TestKittyTransientImagesAreEvictedFirst(t *testing.T) {
 		t.Fatal("an older non-transient image was evicted before the transient one")
 	}
 }
+
+func TestKittyErrorRepliesAreTerminalResponses(t *testing.T) {
+	for payload, want := range map[string]bool{
+		"Gi=1;OK":                         true,
+		"Gi=1;ENOTSUP: graphics disabled": true,
+		"Gi=2,p=3;ENOPARENT: parent image not found": true,
+		"Gi=2;EINVAL":    true,
+		"Gi=2;ERROR":     true,
+		"Gi=2;Elsewhere": false,
+		"Ga=t,i=2;AAAA":  false,
+	} {
+		if got := isTerminalResponseKitty([]byte(payload)); got != want {
+			t.Fatalf("isTerminalResponseKitty(%q) = %v, want %v", payload, got, want)
+		}
+	}
+}

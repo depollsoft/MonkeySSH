@@ -16221,9 +16221,25 @@ func isTerminalResponseKitty(payload []byte) bool {
 		return false
 	}
 	response := payload[separator+1:]
-	return bytes.HasPrefix(response, []byte("OK")) ||
-		bytes.HasPrefix(response, []byte("ERROR")) ||
-		bytes.HasPrefix(response, []byte("ENOTSUP"))
+	return bytes.HasPrefix(response, []byte("OK")) || isKittyErrorCode(response)
+}
+
+// isKittyErrorCode reports a Kitty graphics error reply: an errno-style code
+// (E and capitals, such as EINVAL, ENOENT or ENOPARENT), then the end or a
+// colon and its message.
+func isKittyErrorCode(response []byte) bool {
+	if len(response) < 2 || response[0] != 'E' {
+		return false
+	}
+	for _, b := range response[1:] {
+		if b == ':' {
+			return true
+		}
+		if b < 'A' || b > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func isReplayUnsafeOscQuery(payload []byte) bool {
