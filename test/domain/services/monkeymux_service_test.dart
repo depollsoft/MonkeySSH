@@ -1402,6 +1402,113 @@ void main() {
     });
   });
 
+  group('MonkeyMux client visibility', () {
+    setUpAll(() => registerFallbackValue(Uint8List(0)));
+
+    Future<
+      ({
+        MonkeyMuxService service,
+        SshSession session,
+        List<Map<String, Object?>> requests,
+        StreamController<Uint8List> output,
+      })
+    >
+    start({
+      required List<String> capabilities,
+      required int connectionId,
+    }) async {
+      final client = _MockSshClient();
+      final installer = _MockMonkeyMuxInstaller();
+      final session = _buildSession(client, connectionId: connectionId);
+      final output = StreamController<Uint8List>();
+      final control = _buildSilentControlSession(output);
+      final requests = <Map<String, Object?>>[];
+      when(() => installer.ensureInstalled(session))
+          .thenAnswer((_) async => _fakeInstallation);
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((_) async => control);
+      when(() => control.write(any())).thenAnswer((invocation) {
+        final data = invocation.positionalArguments.single as List<int>;
+        final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+        requests.add(request);
+        final hello = jsonEncode({
+          'type': 'hello',
+          'status': 'ok',
+          'version': '0.1.240',
+          'capabilities': capabilities,
+        });
+        final response = jsonEncode({
+          'id': request['id'],
+          'type': request['type'] == 'client_visibility'
+              ? 'client_visibility'
+              : 'window_list',
+          'status': 'ok',
+          'windows': const <Object?>[],
+        });
+        scheduleMicrotask(
+          () => output.add(
+            Uint8List.fromList(utf8.encode('$hello\n$response\n')),
+          ),
+        );
+      });
+      final service = MonkeyMuxService(
+        installer: installer,
+        agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+      )..watchWindowChanges(session, 'work');
+      addTearDown(() async {
+        await output.close();
+        await service.clearCache(connectionId);
+      });
+      expect(await service.listWindows(session, 'work'), isEmpty);
+      return (
+        service: service,
+        session: session,
+        requests: requests,
+        output: output,
+      );
+    }
+
+    List<Object?> visibilityRequests(List<Map<String, Object?>> requests) =>
+        requests
+            .where((request) => request['type'] == 'client_visibility')
+            .map((request) => request['hidden'] ?? false)
+            .toList();
+
+    test('sends the state on connect, then each change once', () async {
+      final (:service, :session, :requests, :output) = await start(
+        capabilities: ['client-visibility'],
+        connectionId: 941,
+      );
+      await pumpEventQueue();
+      final sentOnConnect = visibilityRequests(requests).length;
+      expect(sentOnConnect, greaterThan(0));
+      expect(
+        requests.firstWhere(
+          (request) => request['type'] == 'client_visibility',
+        )['clientId'],
+        session.monkeyMuxClientId,
+      );
+
+      service
+        ..setClientHidden(session, 'work', hidden: true)
+        ..setClientHidden(session, 'work', hidden: true);
+      await pumpEventQueue();
+      service.setClientHidden(session, 'work', hidden: false);
+      await pumpEventQueue();
+      expect(visibilityRequests(requests).skip(sentOnConnect), [true, false]);
+    });
+
+    test('sends nothing to a server without the capability', () async {
+      final (:service, :session, :requests, :output) = await start(
+        capabilities: ['inject-input-bracketed-paste'],
+        connectionId: 942,
+      );
+      service.setClientHidden(session, 'work', hidden: true);
+      await pumpEventQueue();
+      expect(visibilityRequests(requests), isEmpty);
+    });
+  });
+
   group('MonkeyMux control channel timeout', () {
     setUpAll(() => registerFallbackValue(Uint8List(0)));
 

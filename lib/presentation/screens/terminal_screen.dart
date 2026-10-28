@@ -93,6 +93,7 @@ import '../../domain/services/tmux_service.dart';
 import '../controllers/acp_chat_actions_controller.dart';
 import '../controllers/system_keyboard_visibility_controller.dart';
 import '../controllers/terminal_session_controller.dart';
+import '../controllers/terminal_visibility_controller.dart';
 import '../models/app_platform_file.dart';
 import '../providers/connection_actions.dart';
 import '../providers/entity_list_providers.dart';
@@ -939,6 +940,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _terminalScrollResetGeneration = 0;
   TerminalHyperlinkTracker? _terminalHyperlinkTracker;
   late final TerminalSessionController _sessionController;
+  late final _terminalVisibility = TerminalVisibilityController(
+    onSessionVisibilityChanged: _handleSessionVisibilityChanged,
+  );
   bool _showsTerminalMetadata = false;
   bool _isTmuxActive = false;
   bool _tmuxOwnershipConfirmed = false;
@@ -1981,6 +1985,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       },
     );
     _terminal = Terminal(maxLines: 10000);
+    _terminalVisibility.lifecycleState =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     _terminalController = TerminalController();
     _terminalScrollController = ScrollController()
       ..addListener(_handleTerminalScroll);
@@ -4859,6 +4865,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             sharedClipboardEnabled && sharedClipboardLocalReadEnabled;
       _terminal.removeListener(_onTerminalStateChanged);
       _terminal = sessionTerminal;
+      _terminalVisibility.show(_terminal, session);
       _terminalHyperlinkTracker = session.terminalHyperlinkTracker;
       _observeSessionMetadata(session);
       _isUsingAltBuffer = _terminal.isUsingAltBuffer;
@@ -6070,6 +6077,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       suppressAutoScroll: true,
     );
     WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _handleSessionVisibilityChanged(
+    SshSession session, {
+    required bool visible,
+  }) {
+    final sessionName = session.remoteMuxSessionName;
+    if (session.remoteMuxBackend != RemoteMuxBackend.monkeyMux ||
+        sessionName == null ||
+        sessionName.trim().isEmpty) {
+      return;
+    }
+    _monkeyMuxService.setClientHidden(session, sessionName, hidden: !visible);
   }
 
   void _claimActiveMonkeyMuxClientFocus() {
@@ -11571,6 +11591,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       _terminal = terminal;
+      _terminalVisibility.show(_terminal, session);
       _terminalHyperlinkTracker = session.terminalHyperlinkTracker;
       _isUsingAltBuffer = _terminal.isUsingAltBuffer;
       _terminalReportsMouseWheel = _terminal.mouseMode.reportScroll;
@@ -11922,6 +11943,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // never removed blind.
     _settleWorktreeLaunch(launched: true);
     WidgetsBinding.instance.removeObserver(this);
+    _terminalVisibility.dispose();
     _pasteUploadProgress.dispose();
     _creatingWorktree.dispose();
     // Provider notifications must wait until the widget tree finishes unmounting.
@@ -11976,6 +11998,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _terminalVisibility.lifecycleState = state;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       _terminalFocusRestoreGeneration += 1;
@@ -12060,6 +12083,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // Covered by an opaque route, the terminal is off stage.
+    _terminalVisibility.onstage = TickerMode.valuesOf(context).enabled;
     // Reload theme when system brightness changes
     final brightness = _resolveTerminalThemeBrightness();
     final didBrightnessChange = _lastThemeDependencyBrightness != brightness;

@@ -145,6 +145,11 @@ class MonkeyMuxServerStatus {
   bool get supportsBracketedPasteControlInput =>
       capabilities.contains('inject-input-bracketed-paste');
 
+  /// Whether the server takes `client_visibility`, which drives its windows'
+  /// visibility reports (DEC private mode 2033).
+  bool get supportsClientVisibility =>
+      capabilities.contains('client-visibility');
+
   /// Whether this server differs from the app-bundled helper version.
   bool needsUpdate(String bundledVersion) {
     final runningVersion = version?.trim();
@@ -534,7 +539,15 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         _cacheWindows(key, windows);
         _scheduleAgentMetadataRefresh(session, sessionName, key, windows);
       },
-      onServerStatus: (status) => state.serverStatus = status,
+      onServerStatus: (status) {
+        state.serverStatus = status;
+        // A new observer may reach a server that has not heard this client's
+        // visibility yet, or that still has an old one. Later changes reach
+        // it through [setClientHidden].
+        if (!identical(state.clientVisibilityObserver, state.observer)) {
+          _sendClientVisibility(session, sessionName, state);
+        }
+      },
       onWindowSnapshot: (window) {
         final cachedWindows = state.windows;
         final forceAgentMetadataRefresh =
@@ -852,6 +865,68 @@ class MonkeyMuxService implements RemoteMultiplexerService {
               ?.observer
               ?.isControlChannelReady ??
           false);
+
+  /// Tells the server whether this app's view of the attached terminal is
+  /// hidden (the app is in the background, or another screen or session
+  /// covers the terminal), so the windows' visibility reports (DEC private
+  /// mode 2033) follow what the user can see.
+  ///
+  /// The state is kept and sent over the live control channel, now or once it
+  /// connects, to servers that support it.
+  void setClientHidden(
+    SshSession session,
+    String sessionName, {
+    required bool hidden,
+  }) {
+    if (isAppReviewDemoSession(session)) {
+      return;
+    }
+    final state = _stateFor(
+      _MonkeyMuxWatchKey(session.connectionId, sessionName),
+    );
+    if (state.clientHidden == hidden) {
+      return;
+    }
+    state.clientHidden = hidden;
+    _sendClientVisibility(session, sessionName, state);
+  }
+
+  void _sendClientVisibility(
+    SshSession session,
+    String sessionName,
+    _MonkeyMuxSessionState state,
+  ) {
+    final observer = state.observer;
+    if (observer == null ||
+        observer.isDisposed ||
+        !(state.serverStatus?.supportsClientVisibility ?? false)) {
+      return;
+    }
+    final hidden = state.clientHidden;
+    state.clientVisibilityObserver = observer;
+    unawaited(
+      observer
+          .runCommand({
+            'type': 'client_visibility',
+            'clientId': session.monkeyMuxClientId,
+            if (hidden) 'hidden': true,
+          }, priority: SshExecPriority.low)
+          .then<void>(
+            (_) {},
+            onError: (Object error) {
+              DiagnosticsLogService.instance.debug(
+                'monkeymux.visibility',
+                'send_failed',
+                fields: {
+                  'connectionId': session.connectionId,
+                  'hidden': hidden,
+                  'errorType': error.runtimeType.toString(),
+                },
+              );
+            },
+          ),
+    );
+  }
 
   /// Makes this app terminal the active MonkeyMux client and applies its size.
   Future<bool> focusClient(
@@ -1510,6 +1585,13 @@ class MonkeyMuxService implements RemoteMultiplexerService {
 /// dozen parallel maps.
 class _MonkeyMuxSessionState {
   _MonkeyMuxWindowChangeObserver? observer;
+
+  /// Whether this app's view of the attached terminal is hidden; see
+  /// [MonkeyMuxService.setClientHidden].
+  bool clientHidden = false;
+
+  /// The observer [clientHidden] was last sent through.
+  Object? clientVisibilityObserver;
   List<TmuxWindow>? windows;
   MonkeyMuxServerStatus? serverStatus;
   Future<List<TmuxWindow>>? windowListRequest;
