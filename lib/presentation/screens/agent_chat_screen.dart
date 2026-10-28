@@ -12,6 +12,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -866,18 +867,28 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       child: SizedBox(
         key: const ValueKey('acp-composer-controls'),
         height: 44,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          itemCount: selectors.length,
-          separatorBuilder: (_, _) =>
-              const SizedBox(width: FluttyTheme.spacingXs),
-          itemBuilder: (context, index) {
-            final selector = selectors[index];
-            return _AcpQuickSelector(
-              key: selector.label == 'Permission'
-                  ? const ValueKey('permission-mode-pill')
-                  : ValueKey(selector.label),
-              selector: selector,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final labelMaxWidth = _AcpQuickSelector.labelMaxWidthFor(
+              context,
+              selectors,
+              rowWidth: constraints.maxWidth,
+            );
+            return ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: selectors.length,
+              separatorBuilder: (_, _) =>
+                  const SizedBox(width: _AcpQuickSelector.gap),
+              itemBuilder: (context, index) {
+                final selector = selectors[index];
+                return _AcpQuickSelector(
+                  key: selector.label == 'Permission'
+                      ? const ValueKey('permission-mode-pill')
+                      : ValueKey(selector.label),
+                  selector: selector,
+                  labelMaxWidth: labelMaxWidth,
+                );
+              },
             );
           },
         ),
@@ -2284,9 +2295,73 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
 enum _AcpQuickMenuAction { showAll, showScoped }
 
 class _AcpQuickSelector extends StatefulWidget {
-  const _AcpQuickSelector({required this.selector, super.key});
+  const _AcpQuickSelector({
+    required this.selector,
+    required this.labelMaxWidth,
+    super.key,
+  });
 
   final AcpQuickSelectorData selector;
+
+  /// Widest the label is set before it ends in an ellipsis.
+  final double labelMaxWidth;
+
+  /// Space between two pills in the composer's row.
+  static const double gap = FluttyTheme.spacingXs;
+
+  /// Widest a label is set while the row is full.
+  static const double _labelBaseMaxWidth = 110;
+
+  static const EdgeInsets _padding = EdgeInsets.only(left: 10, right: 6);
+  static const double _chevronSize = 18;
+
+  /// The pill's padding and chevron beside its label.
+  static double get _chromeWidth =>
+      _padding.horizontal + FluttyTheme.spacingXs + _chevronSize;
+
+  static String _labelOf(AcpQuickSelectorData selector) =>
+      [...selector.choices, ...selector.hiddenChoices]
+          .where((choice) => choice.value == selector.currentValue)
+          .firstOrNull
+          ?.label ??
+      selector.currentValue;
+
+  static TextStyle? _labelStyle(ThemeData theme) =>
+      theme.textTheme.labelMedium?.copyWith(
+        color: theme.colorScheme.onSurface,
+        fontSize: 12,
+        height: 1.15,
+        fontWeight: FontWeight.w600,
+      );
+
+  /// How wide the labels of [selectors] may grow in a row [rowWidth] wide.
+  /// Labels stop at [_labelBaseMaxWidth] while the pills fill the row; room
+  /// the row has left is shared among the labels that are cut short, so a
+  /// long model name shows in full when there is space for it.
+  static double labelMaxWidthFor(
+    BuildContext context,
+    List<AcpQuickSelectorData> selectors, {
+    required double rowWidth,
+  }) {
+    final style = _labelStyle(Theme.of(context));
+    final textScaler = MediaQuery.textScalerOf(context);
+    var used = gap * (selectors.length - 1);
+    var cut = 0;
+    for (final selector in selectors) {
+      final painter = TextPainter(
+        text: TextSpan(text: _labelOf(selector), style: style),
+        textDirection: Directionality.of(context),
+        textScaler: textScaler,
+        maxLines: 1,
+      )..layout();
+      used += _chromeWidth + math.min(painter.width, _labelBaseMaxWidth);
+      if (painter.width > _labelBaseMaxWidth) cut++;
+      painter.dispose();
+    }
+    final room = rowWidth - used;
+    if (cut == 0 || !room.isFinite || room <= 0) return _labelBaseMaxWidth;
+    return _labelBaseMaxWidth + room / cut;
+  }
 
   @override
   State<_AcpQuickSelector> createState() => _AcpQuickSelectorState();
@@ -2373,9 +2448,6 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
       ...selector.choices,
       ...selector.hiddenChoices,
     ];
-    final current = allChoices
-        .where((choice) => choice.value == selector.currentValue)
-        .firstOrNull;
     final hasScope = selector.hiddenChoices.isNotEmpty;
     final visibleChoices = _showAll ? allChoices : selector.choices;
     // Ink paints on its nearest Material, clipped only to that Material. A
@@ -2449,28 +2521,23 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
                 color: scheme.surfaceContainerHighest,
                 borderRadius: BorderRadius.circular(FluttyTheme.radiusMd),
               ),
-              padding: const EdgeInsets.only(left: 10, right: 6),
+              padding: _AcpQuickSelector._padding,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 110),
+                    constraints: BoxConstraints(maxWidth: widget.labelMaxWidth),
                     child: Text(
-                      current?.label ?? selector.currentValue,
+                      _AcpQuickSelector._labelOf(selector),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: scheme.onSurface,
-                        fontSize: 12,
-                        height: 1.15,
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: _AcpQuickSelector._labelStyle(theme),
                     ),
                   ),
                   const SizedBox(width: FluttyTheme.spacingXs),
                   Icon(
                     Icons.keyboard_arrow_down_rounded,
-                    size: 18,
+                    size: _AcpQuickSelector._chevronSize,
                     color: scheme.onSurfaceVariant,
                   ),
                 ],

@@ -1069,6 +1069,65 @@ void main() {
       expect(composer(tester).left, 8);
       expect(composer(tester).right, 382);
     });
+
+    const longModel = 'Claude Sonnet 4.5 (1M context)';
+    AcpSessionState modelSession({bool morePills = false}) => fakeAcpSession(
+      modelState: const AcpModelState(
+        currentModelId: 'sonnet',
+        availableModels: [AcpModelInfo(id: 'sonnet', name: longModel)],
+      ),
+      modeState: morePills
+          ? const AcpSessionModeState(
+              currentModeId: 'agent',
+              availableModes: [
+                AcpSessionMode(id: 'agent', name: 'Agent'),
+                AcpSessionMode(id: 'plan', name: 'Plan'),
+              ],
+            )
+          : null,
+    );
+
+    testWidgets('the model label grows into room the pill row has', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(951, 669));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession()]),
+          size: const Size(951, 669),
+          embedded: true,
+          preferredFontSize: 8,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final label = tester.widget<Text>(find.text(longModel));
+      final full = (TextPainter(
+        text: TextSpan(text: longModel, style: label.style),
+        textDirection: TextDirection.ltr,
+      )..layout()).width;
+      expect(full, greaterThan(110));
+      expect(tester.getSize(find.text(longModel)).width, closeTo(full, 0.01));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the model label stops at 110 pt in a full pill row', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(morePills: true)]),
+          embedded: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(longModel)).width, 110);
+      expect(tester.takeException(), isNull);
+    });
   });
 
   testWidgets('shows inline recovery when a live session fails', (
