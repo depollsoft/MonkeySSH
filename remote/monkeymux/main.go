@@ -693,8 +693,6 @@ type restoreWindowState struct {
 
 type muxServer struct {
 	agentSessionBindings agentSessionBindingState
-	// kittyReplyRoutes routes Kitty graphics replies; see kitty_replies.go.
-	kittyReplyRoutes kittyReplyRoutes
 
 	session         string
 	width           int
@@ -994,6 +992,7 @@ type muxWindow struct {
 	// place each command of the next chunk on the screen it ran on.
 	kittyScreenMode1047 bool
 	kittyScreenMode1049 bool
+	kittyTracking       kittyPlacementTracking
 }
 
 type terminalOutputParserState int
@@ -1131,11 +1130,6 @@ func (r *attachInputRouting) addUserInput(data []byte, bracketedPaste bool) {
 }
 
 type attachClient struct {
-	// kittyReplyRoutes routes the client's Kitty graphics replies, and
-	// kittyReplyCarry holds one cut off by a read; see kitty_replies.go.
-	kittyReplyRoutes *kittyReplyRoutes
-	kittyReplyCarry  []byte
-
 	conn         net.Conn
 	id           string
 	width        int
@@ -7058,6 +7052,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
 	}
+	window.snapshotKittyScreenLocked(chunk)
 	cursorReports, answered := window.appendHistoryReportingCursorLocked(
 		chunk,
 		cursorQueries,
@@ -7071,11 +7066,11 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	if window.observeKittyGraphicsLocked(chunk) {
 		s.enforceGlobalKittyImageBudgetLocked()
 	}
+	window.releaseKittyScreenSnapshotLocked()
 	if s.activeID == windowID {
 		attach = s.attachConn
 		shouldWrite = s.attachCountLocked() > 0
 		maxAttachSequence = s.nextAttachSequence
-		s.kittyReplyRoutes.note(windowID, chunk)
 	} else if terminalBell {
 		window.alert = true
 	}
@@ -8091,9 +8086,6 @@ func (c *attachClient) routeInput(data []byte) attachInputRouting {
 		previousInputUtf8Remaining,
 		leadingInputUtf8Prefix,
 	)
-	if c.kittyReplyRoutes != nil && !c.inputBracketedPasteActive {
-		data = c.takeKittyRepliesLocked(data, &result)
-	}
 	c.routeInputLocked(data, leadingInputUtf8Prefix, &result)
 	c.trackRepliesLocked(result.actions)
 	return result
@@ -9163,7 +9155,6 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var themeHintWindowID string
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
-	client.kittyReplyRoutes = &s.kittyReplyRoutes
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
 	client.kittyClipboardInput.owedUntil = &s.kittyClipboardRepliesOwedUntil
 	client.focusClaim = func(expectedFocusSequence uint64) {
@@ -14164,8 +14155,6 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
-			// A graphics command runs again silenced: the program already
-			// had its reply.
 			if silenced := silencedKittyReplayCommand(
 				data[i:sequenceEnd],
 			); silenced != nil {
@@ -14248,10 +14237,6 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 	case len(sequence) >= 1 && sequence[0] == 0x90:
 		payloadStart = 1
 		dcs = true
-	case len(sequence) >= 2 && sequence[0] == '\x1b' && sequence[1] == '_':
-		// Kitty graphics replies are routed by the image they name, not
-		// counted ahead; see kitty_replies.go.
-		return 0
 	default:
 		return 1
 	}
@@ -14512,8 +14497,10 @@ type kittyGraphicsEvent struct {
 	// the display command a placement event replays.
 	control   map[string]string
 	placement []byte
-	// offset is where the command starts in the scanned data.
+	// offset and end are where the command starts and ends in the scanned
+	// data.
 	offset int
+	end    int
 }
 
 // scanKittyTransmissions parses complete Kitty graphics events from the front of
@@ -14560,17 +14547,17 @@ func scanKittyTransmissions(
 			args := parseKittyControl(kittyControl(data, i, end))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, delete: true, control: args,
-				offset: i,
+				offset: i, end: end,
 			})
 		} else if buf != nil {
+			args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
-				offset: i,
+				control: args, offset: i,
 			})
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
 				// a=p after the image, since the root itself replays as a=t.
-				args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 				if args["a"] == "T" && kittyNonZero(args["P"]) &&
 					!kittyNonZero(args["U"]) {
 					if command := kittyRelativeCommandFromRoot(args); command != nil {
@@ -14721,6 +14708,7 @@ func (w *muxWindow) observeKittyGraphicsLocked(chunk []byte) bool {
 	}
 	if len(remainder) == 0 {
 		w.clearKittyGraphicsPendingLocked()
+		w.kittyTracking.modeCarry = kittyPartialModeChange(data)
 		return changed
 	}
 	w.kittyGraphicsPending = append(w.kittyGraphicsPending[:0], remainder...)
@@ -14845,7 +14833,11 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			continue
 		}
 		if event.delete {
-			if w.applyKittyImageDeleteLocked(event, screen.at(event.offset)) {
+			if w.applyKittyImageDeleteLocked(
+				event,
+				screen.at(event.offset),
+				w.kittyScreenAtLocked(data, event.offset, event.end),
+			) {
 				changed = true
 			}
 			continue
@@ -14899,6 +14891,14 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			// A retransmission replaces the image and every placement of it.
 			w.dropKittyImagePlacementsLocked(id)
 			w.storeKittyImageLocked(id, event.buf)
+			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
+				!kittyNonZero(event.control["P"]) {
+				w.noteKittyPhysicalPlacementLocked(
+					id,
+					kittyIDValue(event.control["p"]),
+					screen.at(event.offset),
+				)
+			}
 			changed = true
 		}
 	}
@@ -15006,6 +15006,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
 	w.kittyPlacements = nil
+	w.kittyTracking.physical = nil
 	return changed
 }
 

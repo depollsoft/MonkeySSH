@@ -216,7 +216,9 @@ if(!$__flResolved){$__flResolved='cmd'}
       ..onFullReset = _session._handleTerminalFullReset
       ..canResizeFromHost = _session._canTerminalResizeFromHost
       ..externalDecModeState = _externalDecModeState
-      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty;
+      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty
+      ..kittyGraphicsTransmissionReplies =
+          _session._kittyGraphicsTransmissionReplies;
     _session.terminalHyperlinkTracker.attach(_terminal!);
     _session.terminalCommandMarkTracker.attach(_terminal!);
     _terminal!.onPrivateOSC = _session._handlePrivateOsc;
@@ -912,7 +914,10 @@ if(!$__flResolved){$__flResolved='cmd'}
     if (terminal == null) {
       return;
     }
-    terminal.kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty;
+    terminal
+      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty
+      ..kittyGraphicsTransmissionReplies =
+          _session._kittyGraphicsTransmissionReplies;
   }
 
   void _finishShellTransition(SSHSession shell) {

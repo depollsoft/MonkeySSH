@@ -3646,10 +3646,18 @@ class SshSession {
     _plainProgramStatus = null;
     _muxProgramStatus = null;
     _muxProgramStatusReporter = false;
+    _runtime._syncKittyGraphicsAvailability();
     if (hadProgramStatus) _notifyMetadataChanged();
   }
 
   RemoteMuxBackend? _remoteMuxBackend;
+
+  /// Kitty graphics acknowledgements stay off behind a multiplexer, which
+  /// routes only the replies it expects; see
+  /// [Terminal.kittyGraphicsTransmissionReplies].
+  bool get _kittyGraphicsTransmissionReplies =>
+      remoteMuxBackend != RemoteMuxBackend.monkeyMux &&
+      remoteMuxBackend != RemoteMuxBackend.tmux;
 
   bool _canTerminalResizeFromHost() =>
       remoteMuxBackend == RemoteMuxBackend.monkeyMux;

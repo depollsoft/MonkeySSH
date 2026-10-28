@@ -332,11 +332,118 @@ func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
 	if len(window.kittyPlacements) != 1 {
 		t.Fatalf("d=c at the child kept %v", kittyPlacementKeys(window))
 	}
+	// A root that never showed a placeholder cell leaves its child unplaced
+	// on the client, so no position matches it.
 	window = kittyPlacementWindow(t, "H=1,V=1")
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=3\x1b\\" +
+			"\x1b_Ga=p,i=2,p=5,P=3,c=1,r=1\x1b\\" +
+			"\x1b_Ga=d\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 3/virtual 2/5]" {
+		t.Fatalf("d=a kept %s", got)
+	}
+	// One whose cells may only be in the scrollback could be anywhere:
+	// MonkeyMux cannot tell, so it drops the child.
+	window = kittyPlacementWindow(t, "H=1,V=1,c=1,r=1")
 	window.screen.Write([]byte("\x1b[2J"))
 	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d\x1b\\"))
+	if len(window.kittyPlacements) != 1 {
+		t.Fatalf("d=a kept a child it could not place: %v", kittyPlacementKeys(window))
+	}
+}
+
+// observeKittyChunk feeds chunk through the screen model and the graphics
+// tracking in the order handleWindowOutput does.
+func observeKittyChunk(window *muxWindow, chunk string) {
+	window.snapshotKittyScreenLocked([]byte(chunk))
+	window.screen.Write([]byte(chunk))
+	window.observeKittyGraphicsLocked([]byte(chunk))
+	window.releaseKittyScreenSnapshotLocked()
+}
+
+func TestKittyPositionalDeletesSeeTheScreenAtTheCommand(t *testing.T) {
+	// The child is at 0-based row 3, column 5: 1-based 4;6.
+	window := kittyPlacementWindow(t, "H=1,V=1,c=1,r=1")
+	observeKittyChunk(window, "\x1b[H\x1b_Ga=d,d=c\x1b\\\x1b[4;6H")
 	if len(window.kittyPlacements) != 2 {
-		t.Fatalf("d=a removed an unplaced child: %v", kittyPlacementKeys(window))
+		t.Fatalf("d=c at the home cell removed the child: %v",
+			kittyPlacementKeys(window))
+	}
+	observeKittyChunk(window, "\x1b[4;6H\x1b_Ga=d,d=c\x1b\\\x1b[10;10H")
+	if len(window.kittyPlacements) != 1 {
+		t.Fatalf("d=c at the child kept it: %v", kittyPlacementKeys(window))
+	}
+
+	// Without the screen at the command, MonkeyMux drops what may match.
+	window = kittyPlacementWindow(t, "H=1,V=1,c=1,r=1")
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d,d=c\x1b\\x"))
+	if len(window.kittyPlacements) != 1 {
+		t.Fatalf("an unresolved d=c kept the child: %v", kittyPlacementKeys(window))
+	}
+}
+
+func TestKittyNaturallySizedPlacementsAreDroppedWhenADeleteMayReachThem(t *testing.T) {
+	// Sized by its own pixels the child may span cells to the right of and
+	// below its first one: 1-based x=8 on its row could be one of them.
+	window := kittyPlacementWindow(t, "H=1,V=1")
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d,d=p,x=8,y=4\x1b\\"))
+	if len(window.kittyPlacements) != 1 {
+		t.Fatalf("a delete that may reach the child kept it: %v",
+			kittyPlacementKeys(window))
+	}
+	// Left of it can never be part of it.
+	window = kittyPlacementWindow(t, "H=1,V=1")
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d,d=p,x=5,y=4\x1b\\"))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("a delete left of the child removed it: %v",
+			kittyPlacementKeys(window))
+	}
+}
+
+func TestKittyScreenSwitchSplitAcrossChunks(t *testing.T) {
+	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
+	window.observeKittyGraphicsLocked([]byte("prompt\x1b[?1049"))
+	window.privateModes["1049"] = true
+	window.observeKittyGraphicsLocked([]byte(
+		"h\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1\x1b\\"))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("kept placements = %v", kittyPlacementKeys(window))
+	}
+	for _, p := range window.kittyPlacements {
+		if !p.alt {
+			t.Fatalf("placement %s kept for the main screen", p.key())
+		}
+	}
+}
+
+func TestKittyMissingParentPlacementIsARejection(t *testing.T) {
+	window := kittyPlacementWindow(t, "H=1")
+	window.observeKittyGraphicsLocked([]byte(
+		// Image 3 is stored but has no placement: ENOPARENT.
+		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=3\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/1]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	// Placed physically, image 3 is a parent the client accepts; no replay
+	// restores that, so the placement it replaced goes.
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=p,i=3,p=7\x1b\\\x1b_Ga=p,i=2,p=1,P=3,Q=7\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	// Once that physical placement is deleted by id it is a parent no more.
+	window = kittyPlacementWindow(t, "H=1")
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,i=3,p=7\x1b\\\x1b_Ga=d,d=i,i=3\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=3\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/1]" {
+		t.Fatalf("kept placements = %s", got)
 	}
 }
 
