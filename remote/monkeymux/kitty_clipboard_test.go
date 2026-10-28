@@ -547,3 +547,157 @@ func TestKittyClipboardLargeReplySurvivesArbitraryReadSplits(t *testing.T) {
 		t.Fatalf("routed %d bytes, want %d identical bytes", routed.Len(), restored.Len())
 	}
 }
+
+// A window that sends a whole write in one read still replaces the write
+// another window has open on the client, which must hear EBUSY: otherwise,
+// back on screen, it forwards the rest of its write into nothing and waits
+// forever.
+func TestKittyClipboardWriteCommittedInOneReadDisplacesOpenWrite(t *testing.T) {
+	server, first, second, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
+	waitForAttachOutput(t, attach, ".one")
+
+	server.mu.Lock()
+	server.activeID = "@2"
+	server.mu.Unlock()
+	server.handleWindowOutput("@2", []byte(
+		"\x1b]5522;type=write:id=two\x1b\\"+
+			"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"+
+			"\x1b]5522;type=wdata\x1b\\",
+	))
+	waitForAttachOutput(t, attach, "\x1b]5522;type=wdata\x1b\\")
+
+	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EBUSY:id=one\x1b\\" {
+		t.Fatalf("displaced writer got %q", got)
+	}
+	server.mu.Lock()
+	owner := server.kittyClipboardWriteWindow
+	state := first.kittyClipboard.write
+	server.mu.Unlock()
+	if owner != "" || state != kittyClipboardWriteRejected {
+		t.Fatalf("owner = %q, displaced state = %v; want none and rejected", owner, state)
+	}
+	if got := windowPtyOutput(t, second); got != "" {
+		t.Fatalf("new writer got %q", got)
+	}
+
+	// Back on screen, the displaced window's packets go nowhere.
+	server.mu.Lock()
+	server.activeID = "@1"
+	server.mu.Unlock()
+	attach.Reset()
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\done"))
+	if got := waitForAttachOutput(t, attach, "done"); got != "done" {
+		t.Fatalf("attach got %q, want the displaced write's packets dropped", got)
+	}
+}
+
+// maxKittyClipboardDataPacket is a spec-sized data packet: 4096 bytes before
+// base64, more than the 4096 bytes held for any other split OSC.
+func maxKittyClipboardDataPacket(random *rand.Rand) string {
+	data := make([]byte, 4096)
+	random.Read(data)
+	return "\x1b]5522;type=wdata:mime=" +
+		base64.StdEncoding.EncodeToString([]byte("image/png")) + ";" +
+		base64.StdEncoding.EncodeToString(data) + "\x1b\\"
+}
+
+// A packet split past the generic OSC carry used to leave the scan unchecked,
+// so a rejected writer's data reached the write another window has open.
+func TestKittyClipboardSplitPacketOfRejectedWriterIsDropped(t *testing.T) {
+	random := rand.New(rand.NewSource(14016))
+	for round := 0; round < 20; round++ {
+		server, first, second, attach := newKittyClipboardTestServer(t)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
+		// Window 2 opens a write while in the background and is refused.
+		server.handleWindowOutput("@2", []byte("\x1b]5522;type=write:id=two\x1b\\"))
+		if got := windowPtyOutput(t, second); got != "\x1b]5522;type=write:status=EBUSY:id=two\x1b\\" {
+			t.Fatalf("round %d: background writer got %q", round, got)
+		}
+		waitForAttachOutput(t, attach, ".one")
+
+		server.mu.Lock()
+		server.activeID = "@2"
+		server.mu.Unlock()
+		packet := maxKittyClipboardDataPacket(random)
+		split := oscBufferLimitBytes + 1 + random.Intn(len(packet)-oscBufferLimitBytes-1)
+		server.handleWindowOutput("@2", []byte("a"+packet[:split]))
+		server.handleWindowOutput("@2", []byte(packet[split:]+"b"))
+
+		got := waitForAttachOutput(t, attach, "b")
+		if strings.Contains(got, "type=wdata") {
+			t.Fatalf("round %d (split %d): the rejected writer's data reached the client", round, split)
+		}
+		if !strings.HasSuffix(got, "ab") {
+			t.Fatalf("round %d: attach got %q, want the surrounding output", round, got[len(got)-min(len(got), 40):])
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("round %d: open writer got %q", round, out)
+		}
+	}
+}
+
+// The owner's split packets still arrive whole and tagged-through unchanged.
+func TestKittyClipboardSplitPacketOfOpenWriteIsForwardedWhole(t *testing.T) {
+	random := rand.New(rand.NewSource(4096))
+	server, _, _, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=one\x1b\\"))
+	packet := maxKittyClipboardDataPacket(random)
+	split := oscBufferLimitBytes + 1 + random.Intn(len(packet)-oscBufferLimitBytes-1)
+	server.handleWindowOutput("@1", []byte(packet[:split]))
+	server.handleWindowOutput("@1", []byte(packet[split:]+"\x1b]5522;type=wdata\x1b\\"))
+
+	got := waitForAttachOutput(t, attach, "\x1b]5522;type=wdata\x1b\\")
+	if !strings.Contains(got, packet+"\x1b]5522;type=wdata\x1b\\") {
+		t.Fatal("the open write's split packet did not reach the client whole")
+	}
+}
+
+// A packet whose terminator has not come by the time it outgrows the carry
+// is dropped, and its write is refused, so the client never commits a write
+// with a gap.
+func TestKittyClipboardOversizedPacketIsDropped(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=big\x1b\\"))
+	waitForAttachOutput(t, attach, ".big")
+	attach.Reset()
+
+	huge := "\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;" +
+		strings.Repeat("QUFB", kittyClipboardPacketLimitBytes) + "\x1b\\"
+	for offset := 0; offset < len(huge); offset += 16 * 1024 {
+		server.handleWindowOutput("@1", []byte(huge[offset:min(offset+16*1024, len(huge))]))
+	}
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata\x1b\\after"))
+
+	if got := waitForAttachOutput(t, attach, "after"); got != "after" {
+		t.Fatalf("attach got %d bytes ending %q, want only the output after the packet", len(got), got[len(got)-min(len(got), 40):])
+	}
+	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EFBIG:id=big\x1b\\" {
+		t.Fatalf("writer got %q", got)
+	}
+}
+
+func TestKittyClipboardDiscardEndsAtTheTerminatorAcrossReads(t *testing.T) {
+	window := &muxWindow{id: "@1"}
+	window.kittyClipboard.discarding = true
+	if got := window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB\x1b")); got != nil {
+		t.Fatalf("got %q, want the packet's tail dropped", got)
+	}
+	if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("\\after"))); got != "after" {
+		t.Fatalf("got %q, want the output after ST", got)
+	}
+
+	// An ESC that starts another sequence ends the string and is kept.
+	window.kittyClipboard.discarding = true
+	window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB\x1b"))
+	if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("[1mx"))); got != "\x1b[1mx" {
+		t.Fatalf("got %q, want the cancelling sequence kept", got)
+	}
+	window.kittyClipboard.discarding = true
+	if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB\ay"))); got != "y" {
+		t.Fatalf("got %q, want the output after BEL", got)
+	}
+	if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("z"))); got != "z" {
+		t.Fatalf("got %q after the discard ended", got)
+	}
+}
