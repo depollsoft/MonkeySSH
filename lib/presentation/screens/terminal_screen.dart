@@ -2478,7 +2478,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _shouldSuppressMonkeyMuxTerminalControlInput(String output) =>
       shouldSuppressMonkeyMuxControlReport(
         isMonkeyMux: _activeMuxBackend == RemoteMuxBackend.monkeyMux,
-        isMouseReport: _terminalMouseReportOutputPattern.hasMatch(output),
+        // A prompt click is a report the shell asked for (OSC 133
+        // click_events), sent with mouse tracking off on purpose.
+        isMouseReport:
+            !isWritingPromptClick &&
+            _terminalMouseReportOutputPattern.hasMatch(output),
         isFocusReport: _terminalFocusReportOutputPattern.hasMatch(output),
         mouseReportingActive: _terminalReportsMouseWheelForScroll,
         focusReportingActive: _terminal.reportFocusMode,

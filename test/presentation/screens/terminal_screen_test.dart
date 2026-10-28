@@ -6,7 +6,8 @@ import 'dart:ui';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -6072,6 +6073,79 @@ void main() {
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]11;')));
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]4;')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets(
+      'a MonkeyMux shell prompt gets its click while stale mouse reports stay '
+      'suppressed',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        const sessionName = 'work';
+        const initialWindows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            id: '@0',
+            name: 'shell',
+            isActive: true,
+            currentCommand: 'zsh',
+            panePid: 100,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => initialWindows)
+              ..stubWindowEvents()
+              ..stubPaneContext()
+              ..stubThemeRefresh();
+
+        await muxFixture.pump(tester);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+
+        // fish asks for clicks with click_events=1; mouse tracking stays off.
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07> \x1b]133;B\x07ls -la',
+        );
+        await tester.pumpAndSettle();
+        String written() => shellWrites.map(String.fromCharCodes).join();
+
+        // A mouse report nothing asked for is still dropped.
+        shellWrites.clear();
+        session.terminal!.onOutput!('\x1b[<0;3;1M\x1b[<0;3;1m');
+        await tester.pump();
+        expect(written(), isNot(contains('\x1b[<')));
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        final row = session.terminal!.buffer.absoluteCursorY;
+        final target = render.localToGlobal(
+          render.getOffset(CellOffset(3, row)) +
+              render.cellSize.center(Offset.zero),
+        );
+        final isDesktop = defaultTargetPlatform == TargetPlatform.macOS;
+        await tester.tapAt(
+          target,
+          kind: isDesktop ? PointerDeviceKind.mouse : PointerDeviceKind.touch,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        final screenRow = row - session.terminal!.buffer.scrollBack + 1;
+        expect(written(), contains('\x1b[<0;4;${screenRow}M'));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+      }),
+    );
 
     testWidgets(
       'keeps IME text when a MonkeyMux command exits in the active window',
