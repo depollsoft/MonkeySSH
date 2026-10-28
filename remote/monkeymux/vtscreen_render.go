@@ -89,6 +89,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	out = s.appendTabStops(out)
 	withScrollback = withScrollback && s.scrollback.len() > 0
 	softWraps := s.renderedSoftWraps(g, withScrollback)
+	marks := s.semanticFrame(g)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}
@@ -117,9 +118,19 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			out = append(out, line.text...)
+			var inPrompt bool
+			out, inPrompt = marks.beginHistoryLine(out, i, line.prompt, i > 0 && line.wrapped)
+			if inPrompt {
+				// A line of the current prompt is painted from its cells, so
+				// its marks and cell contents travel with it.
+				cells = line.decode(&decoder, s.width)
+				out = renderVTCellsMarked(out, cells, marks)
+			} else {
+				out = append(out, line.text...)
+			}
 			prev = cells
 		}
+		out = marks.endHistory(out)
 		if g.wrapped[0] {
 			if prev == nil {
 				prev = decoder.decode(s.scrollback.at(history-1).text, s.width)
@@ -134,7 +145,6 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			out = append(out, "\r\n"...)
 		}
 	}
-	marks := s.semanticFrame(g)
 	for r, row := range g.rows {
 		softWrap := r > 0 && g.wrapped[r]
 		if softWrap {
