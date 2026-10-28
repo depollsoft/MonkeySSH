@@ -748,3 +748,46 @@ func TestKittyClipboardOversizedCancelledPacketKeepsFollowingOutput(t *testing.T
 		t.Fatalf("attach lost the output after the cancelling ESC: %q", got[max(0, len(got)-60):])
 	}
 }
+
+// A paste marker can be split across reads like anything else. A reply
+// after a split end marker still goes to its window, and a reply-shaped
+// sequence after a split start marker is still pasted text.
+func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
+	reply := "\x1b]5522;type=read:status=DONE:id=" + kittyClipboardTagWindow1 + "\x1b\\"
+	split := func(input string, at int) (string, []attachInputAction) {
+		var owed atomic.Int64
+		owed.Store(time.Now().Add(time.Minute).UnixNano())
+		client := newAttachClient(&recordingConn{}, controlMessage{})
+		client.kittyClipboardInput.owedUntil = &owed
+		client.inputDispatchMu.Lock()
+		defer client.inputDispatchMu.Unlock()
+		// As the attach read loop does: each read is split, then routed.
+		first, firstReplies := client.splitKittyClipboardRepliesLocked([]byte(input[:at]), time.Now())
+		client.routeInput(first)
+		second, secondReplies := client.splitKittyClipboardRepliesLocked([]byte(input[at:]), time.Now())
+		client.routeInput(second)
+		return string(first) + string(second), append(firstReplies, secondReplies...)
+	}
+	for _, markers := range []struct{ name, start, end string }{
+		{"7-bit", "\x1b[200~", "\x1b[201~"},
+		{"C1", "\x9b200~", "\x9b201~"},
+	} {
+		closed := markers.start + "text" + markers.end
+		for offset := 1; offset < len(markers.end); offset++ {
+			at := len(markers.start) + len("text") + offset
+			input, replies := split(closed+reply+"x", at)
+			if input != closed+"x" || len(replies) != 1 || replies[0].windowID != "@1" {
+				t.Fatalf("%s end marker split at %d: input %q, replies %+v; want the reply routed",
+					markers.name, offset, input, replies)
+			}
+		}
+		pasted := markers.start + reply + markers.end
+		for offset := 1; offset < len(markers.start); offset++ {
+			input, replies := split(pasted, offset)
+			if input != pasted || len(replies) != 0 {
+				t.Fatalf("%s start marker split at %d: input %q, replies %+v; want it all pasted",
+					markers.name, offset, input, replies)
+			}
+		}
+	}
+}

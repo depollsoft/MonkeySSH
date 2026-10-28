@@ -58,11 +58,7 @@ const (
 	kittyClipboardAmbiguousCarryTimeout = time.Second
 )
 
-var (
-	kittyClipboardOscIntroducer   = []byte("\x1b]" + kittyClipboardOscCode + ";")
-	kittyClipboardPasteStartInput = []byte("\x1b[200~")
-	kittyClipboardPasteEndInput   = []byte("\x1b[201~")
-)
+var kittyClipboardOscIntroducer = []byte("\x1b]" + kittyClipboardOscCode + ";")
 
 type kittyClipboardWriteState uint8
 
@@ -117,6 +113,11 @@ type kittyClipboardInputState struct {
 	owedUntil  *atomic.Int64
 	carry      []byte
 	generation uint64
+	// pasteActive tracks bracketed paste in the client's input as it arrives,
+	// and pasteMarkerCarry the start of a paste marker a read ended in, so a
+	// marker split across reads still opens or closes the paste.
+	pasteActive      bool
+	pasteMarkerCarry []byte
 }
 
 func isKittyClipboardOscPayload(payload []byte) bool {
@@ -547,18 +548,29 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	now time.Time,
 ) ([]byte, []attachInputAction) {
 	state := &c.kittyClipboardInput
-	if len(state.carry) > 0 {
+	c.activityMu.Lock()
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(data, c.inputUtf8Remaining)
+	c.activityMu.Unlock()
+	pasted := state.pastedRangesLocked(data, leadingUtf8Prefix)
+	if carried := len(state.carry); carried > 0 {
 		data = append(append([]byte(nil), state.carry...), data...)
 		state.carry = nil
 		state.generation++
+		for index := range pasted {
+			pasted[index][0] += carried
+			pasted[index][1] += carried
+		}
 	}
 	if bytes.IndexByte(data, '\x1b') < 0 {
 		return data, nil
 	}
 	owed := state.owedUntil != nil && now.UnixNano() < state.owedUntil.Load()
-	c.activityMu.Lock()
-	inPaste := c.inputBracketedPasteActive
-	c.activityMu.Unlock()
+	inPaste := func(index int) bool {
+		for len(pasted) > 0 && pasted[0][1] <= index {
+			pasted = pasted[1:]
+		}
+		return len(pasted) > 0 && pasted[0][0] <= index
+	}
 
 	var input []byte
 	var replies []attachInputAction
@@ -569,19 +581,10 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 		if data[index] != '\x1b' {
 			continue
 		}
-		rest := data[index:]
-		switch {
-		case bytes.HasPrefix(rest, kittyClipboardPasteStartInput):
-			inPaste = true
-			index += len(kittyClipboardPasteStartInput) - 1
-			continue
-		case bytes.HasPrefix(rest, kittyClipboardPasteEndInput):
-			inPaste = false
-			index += len(kittyClipboardPasteEndInput) - 1
-			continue
-		case inPaste:
+		if inPaste(index) {
 			continue
 		}
+		rest := data[index:]
 		if len(rest) < len(kittyClipboardOscIntroducer) {
 			if owed && bytes.HasPrefix(kittyClipboardOscIntroducer, rest) {
 				holdStart = index
@@ -633,6 +636,65 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	}
 	input = append(input, data[copyStart:end]...)
 	return input, replies
+}
+
+// pastedRangesLocked advances the bracketed paste tracking over one read of
+// a client's input and returns the [start, end) ranges of data that are
+// pasted text, markers included. It matches the markers as the input routing
+// does, 7-bit and C1, and remembers a marker split at the end of the read.
+// Requires inputDispatchMu.
+func (state *kittyClipboardInputState) pastedRangesLocked(
+	data []byte,
+	leadingUtf8Prefix int,
+) [][2]int {
+	scan := data
+	offset := 0
+	if carried := len(state.pasteMarkerCarry); carried > 0 {
+		scan = append(append([]byte(nil), state.pasteMarkerCarry...), data...)
+		offset = carried
+		leadingUtf8Prefix = 0
+	}
+	var ranges [][2]int
+	active := state.pasteActive
+	regionStart := 0
+	for position := 0; position <= len(scan); {
+		prefix := max(0, leadingUtf8Prefix-position)
+		if !active {
+			start := bracketedPasteStart(scan[position:], prefix)
+			if start.index < 0 {
+				break
+			}
+			regionStart = position + start.index
+			position += start.index + start.length
+			active = true
+			continue
+		}
+		end := bracketedPasteEnd(scan[position:], prefix)
+		if end.index < 0 {
+			ranges = append(ranges, [2]int{regionStart, len(scan)})
+			break
+		}
+		position += end.index + end.length
+		ranges = append(ranges, [2]int{regionStart, position})
+		active = false
+	}
+	state.pasteActive = active
+	sevenBit, eightBit := bracketedPasteStart7Bit, bracketedPasteStart8Bit
+	if active {
+		sevenBit, eightBit = bracketedPasteEnd7Bit, bracketedPasteEnd8Bit
+	}
+	suffix := bracketedPasteMarkerSuffixLength(scan, sevenBit, eightBit, leadingUtf8Prefix)
+	state.pasteMarkerCarry = append(state.pasteMarkerCarry[:0], scan[len(scan)-suffix:]...)
+
+	shifted := ranges[:0]
+	for _, pastedRange := range ranges {
+		pastedRange[0] = max(0, pastedRange[0]-offset)
+		pastedRange[1] -= offset
+		if pastedRange[1] > pastedRange[0] {
+			shifted = append(shifted, pastedRange)
+		}
+	}
+	return shifted
 }
 
 func (c *attachClient) scheduleKittyClipboardCarryFlushLocked() {
