@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"io"
+	"math/rand"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -455,5 +457,93 @@ func TestKittyPasteEventsModeIsTrackedAndReplayed(t *testing.T) {
 	window.observeTerminalModesLocked([]byte("\x1bc"))
 	if window.privateModes[kittyPasteEventsMode] {
 		t.Fatal("RIS kept 5522")
+	}
+}
+
+// A write sends its data as many packets of up to 4 KiB before base64, each
+// larger than the 4 KiB the output scan holds back for a split OSC. Whatever
+// the PTY read boundaries, every byte must reach the client in order, with
+// only the opening packet's id tagged.
+func TestKittyClipboardLargeWriteSurvivesArbitraryReadSplits(t *testing.T) {
+	random := rand.New(rand.NewSource(5522))
+	data := make([]byte, 1<<20)
+	random.Read(data)
+	mime := base64.StdEncoding.EncodeToString([]byte("image/png"))
+	var stream strings.Builder
+	stream.WriteString("\x1b]5522;type=write:id=big\x1b\\")
+	for offset := 0; offset < len(data); offset += 4096 {
+		end := min(offset+4096, len(data))
+		stream.WriteString("\x1b]5522;type=wdata:mime=" + mime + ";")
+		stream.WriteString(base64.StdEncoding.EncodeToString(data[offset:end]))
+		stream.WriteString("\x1b\\")
+	}
+	stream.WriteString("\x1b]5522;type=wdata\x1b\\")
+	input := stream.String()
+	want := strings.Replace(input, "id=big", "id="+kittyClipboardTagWindow1+".big", 1)
+
+	for round := 0; round < 3; round++ {
+		server, first, _, attach := newKittyClipboardTestServer(t)
+		for offset := 0; offset < len(input); {
+			end := min(offset+1+random.Intn(32*1024), len(input))
+			server.handleWindowOutput("@1", []byte(input[offset:end]))
+			offset = end
+		}
+		got := waitForAttachOutput(t, attach, "\x1b]5522;type=wdata\x1b\\")
+		if got != want {
+			t.Fatalf("round %d: client got %d bytes, want %d identical bytes", round, len(got), len(want))
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("round %d: window got %q", round, out)
+		}
+	}
+}
+
+// A large read answer reaches MonkeyMux through a PTY and a socket, so it is
+// split at arbitrary points. Every packet must still be routed whole, with
+// the user's own keystrokes between reads left alone.
+func TestKittyClipboardLargeReplySurvivesArbitraryReadSplits(t *testing.T) {
+	random := rand.New(rand.NewSource(2026))
+	data := make([]byte, 256<<10)
+	random.Read(data)
+	tag := ":id=" + kittyClipboardTagWindow2 + ".r"
+	mime := base64.StdEncoding.EncodeToString([]byte("image/png"))
+	var tagged, restored strings.Builder
+	packet := func(metadata string, payload string) {
+		tagged.WriteString("\x1b]5522;type=read:" + metadata + tag + payload + "\x1b\\")
+		restored.WriteString("\x1b]5522;type=read:" + metadata + ":id=r" + payload + "\x1b\\")
+	}
+	packet("status=OK", "")
+	for offset := 0; offset < len(data); offset += 4096 {
+		end := min(offset+4096, len(data))
+		packet("status=DATA:mime="+mime, ";"+base64.StdEncoding.EncodeToString(data[offset:end]))
+	}
+	packet("status=DONE", "")
+	input := tagged.String()
+
+	var owed atomic.Int64
+	client := newAttachClient(&recordingConn{}, controlMessage{})
+	client.kittyClipboardInput.owedUntil = &owed
+	owed.Store(time.Now().Add(time.Minute).UnixNano())
+	client.inputDispatchMu.Lock()
+	defer client.inputDispatchMu.Unlock()
+	var routed strings.Builder
+	var leftover strings.Builder
+	for offset := 0; offset < len(input); {
+		end := min(offset+1+random.Intn(8*1024), len(input))
+		rest, replies := client.splitKittyClipboardRepliesLocked([]byte(input[offset:end]), time.Now())
+		leftover.Write(rest)
+		for _, reply := range replies {
+			if reply.windowID != "@2" {
+				t.Fatalf("reply routed to %q", reply.windowID)
+			}
+			routed.Write(reply.data)
+		}
+		offset = end
+	}
+	if leftover.Len() != 0 {
+		t.Fatalf("%d bytes of the answer were left as user input", leftover.Len())
+	}
+	if routed.String() != restored.String() {
+		t.Fatalf("routed %d bytes, want %d identical bytes", routed.Len(), restored.Len())
 	}
 }
