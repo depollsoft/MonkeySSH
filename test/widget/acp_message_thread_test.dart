@@ -222,6 +222,42 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('scrolling a capped thread rebuilds none of its rows', (
+      tester,
+    ) async {
+      await pumpScrolled(tester, 1000);
+      await tester.pump(const Duration(seconds: 3));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(CustomScrollView)),
+      );
+      // Past the touch slop, so the frames below scroll.
+      await gesture.moveBy(const Offset(0, -30));
+      await tester.pump();
+      // Rows the list keeps built, including those in its cache extent.
+      final rows = find
+          .byType(AcpUserPromptView, skipOffstage: false)
+          .evaluate()
+          .toSet();
+      expect(rows, isNotEmpty);
+      final rebuilt = <Element>{};
+      debugOnRebuildDirtyWidget = (element, _) {
+        if (rows.contains(element)) rebuilt.add(element);
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+      final before = tester.getTopLeft(find.byKey(const ValueKey('a1'))).dy;
+      for (var frame = 0; frame < 5; frame++) {
+        await gesture.moveBy(const Offset(0, -4));
+        await tester.pump();
+      }
+      await gesture.up();
+
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('a1'))).dy,
+        lessThan(before),
+      );
+      expect(rebuilt, isEmpty);
+    });
+
     testWidgets('a viewport narrower than the cap keeps its layout', (
       tester,
     ) async {

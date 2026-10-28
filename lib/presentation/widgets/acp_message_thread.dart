@@ -1204,17 +1204,20 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
                 _scheduleStickyUpdate();
                 return false;
               },
-              child: CustomScrollView(
-                controller: _controller,
-                shrinkWrap: widget.shrinkWrap,
-                physics: widget.physics,
-                semanticChildCount: visibleTranscriptChildCount,
-                slivers: [
-                  SliverLayoutBuilder(
-                    builder: (context, constraints) => SliverPadding(
+              // The gutter follows the thread's width. A box LayoutBuilder
+              // reruns only when that changes; a sliver one would rerun on
+              // every scroll frame and rebuild every visible row with it.
+              child: LayoutBuilder(
+                builder: (context, constraints) => CustomScrollView(
+                  controller: _controller,
+                  shrinkWrap: widget.shrinkWrap,
+                  physics: widget.physics,
+                  semanticChildCount: visibleTranscriptChildCount,
+                  slivers: [
+                    SliverPadding(
                       padding: widget.padding.add(
                         EdgeInsets.symmetric(
-                          horizontal: _gutter(constraints.crossAxisExtent),
+                          horizontal: _gutter(constraints.maxWidth),
                         ),
                       ),
                       sliver: SliverList(
@@ -1250,8 +1253,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
