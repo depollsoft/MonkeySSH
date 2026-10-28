@@ -20,6 +20,7 @@ import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/core/mouse/handler.dart';
 import 'package:xterm/src/core/mouse/mode.dart';
 import 'package:xterm/src/core/platform.dart';
+import 'package:xterm/src/core/rect_checksum.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/core/tabs.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
@@ -180,6 +181,30 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// ConPTY, which removes the image transmission while preserving Unicode
   /// placeholder cells; reporting support there would produce permanent holes.
   bool kittyGraphicsEnabled = true;
+
+  /// Whether DECRQCRA (`CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y`) reports the
+  /// checksum of a screen area, and XTCHECKSUM (`CSI Ps # y`) may change how
+  /// it is computed.
+  ///
+  /// Off by default, and the app never turns it on: a program can checksum
+  /// one cell at a time and so read back everything on the screen, including
+  /// other programs' output. The esctest conformance harness turns it on,
+  /// because esctest reads the screen this way.
+  bool rectangularAreaChecksumEnabled = false;
+
+  int _defaultChecksumExtension = 0;
+
+  int _checksumExtension = 0;
+
+  /// The [ChecksumExtension] bits DECRQCRA uses until XTCHECKSUM changes them,
+  /// and again after RIS or DECSTR. Setting this also selects it, like
+  /// xterm's `checksumExtension` resource.
+  int get defaultChecksumExtension => _defaultChecksumExtension;
+
+  set defaultChecksumExtension(int bits) {
+    _defaultChecksumExtension = bits & ChecksumExtension.mask;
+    _checksumExtension = _defaultChecksumExtension;
+  }
 
   /// The `{imageId: sourceSignature}` of every Kitty image currently held across
   /// both the main and alternate screens (decoded or still pending).
@@ -799,6 +824,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _lineFeedMode = false; // LNM
     _bracketedPasteMode = false;
     _reportFocusMode = false;
+    _checksumExtension = _defaultChecksumExtension; // XTCHECKSUM
 
     notifyListeners();
   }
@@ -1204,6 +1230,25 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   void sendSize() {
     onOutput?.call(_emitter.size(viewHeight, viewWidth));
+  }
+
+  @override
+  void sendRectangularAreaChecksum(List<int> params) {
+    if (!rectangularAreaChecksumEnabled) return;
+    onOutput?.call(
+      rectangularAreaChecksumReport(
+        _buffer,
+        params,
+        extension: _checksumExtension,
+        originMode: _originMode,
+      ),
+    );
+  }
+
+  @override
+  void setChecksumExtension(int bits) {
+    if (!rectangularAreaChecksumEnabled) return;
+    _checksumExtension = bits & ChecksumExtension.mask;
   }
 
   @override
