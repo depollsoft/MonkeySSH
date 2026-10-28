@@ -6,6 +6,8 @@ type vtLine struct {
 	cells   []vtCell
 	wrapped bool
 	cursor  vtReflowCursor
+	// prompt is the line's semantic prompt row mark.
+	prompt uint8
 }
 
 // vtReflowCursor is the cursor's cell on a line being reflowed, carried along
@@ -30,12 +32,28 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 	out := make([]vtLine, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		r := vtLineReflow{oldWidth: oldWidth, newWidth: newWidth}
+		first := lines[i].prompt
+		marked := first != vtPromptNone
 		r.add(lines[i])
 		for i+1 < len(lines) && lines[i+1].wrapped {
 			i++
+			marked = marked || lines[i].prompt != vtPromptNone
 			r.add(lines[i])
 		}
-		out = append(out, r.finish()...)
+		// The line keeps its prompt mark on its first row; the rows it wraps
+		// onto continue it when any of its rows was part of a prompt.
+		reflowed := r.finish()
+		for j := range reflowed {
+			switch {
+			case j == 0:
+				reflowed[j].prompt = first
+			case marked:
+				reflowed[j].prompt = vtPromptContinuation
+			default:
+				reflowed[j].prompt = vtPromptNone
+			}
+		}
+		out = append(out, reflowed...)
 	}
 	for i := range out {
 		out[i].cells = vtCloseSplitGlyphs(resizeVTRow(out[i].cells, newWidth))

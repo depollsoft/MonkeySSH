@@ -1,0 +1,284 @@
+[
+ {
+  "name": "prompt input output",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line;aid=7\u0007$ \u001b]133;B\u0007ls -la\r\n\u001b]133;C\u0007total 0\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=1\u0007$ \u001b]133;B\u0007"
+   }
+  ],
+  "expect": [
+   "P |$ ls -la|ppiiiiii",
+   "- |total 0|ooooooo",
+   "P |$ |pp",
+   "- ||",
+   "- ||",
+   "cursor 2,2 i click=1 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "fresh line after unterminated output",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "partial\u001b]133;A\u0007$ \u001b]133;B\u0007x\u001b]133;L\u0007y"
+   }
+  ],
+  "expect": [
+   "- |partial|ooooooo",
+   "P |$ x|ppi",
+   "C |y|i",
+   "- ||",
+   "- ||",
+   "cursor 1,2 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "wrapped and multi-line input with a secondary prompt",
+  "size": [
+   8,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=m\u0007$ \u001b]133;B\u0007abcdefghij\r\n\u001b]133;P;k=s\u0007> \u001b]133;B\u0007kl\u001b]133;I\u0007\r\nzz"
+   }
+  ],
+  "expect": [
+   "P |$ abcdef|ppiiiiii",
+   "C+|ghij|iiii",
+   "C |> kl|ppii",
+   "- |zz|oo",
+   "- ||",
+   "- ||",
+   "cursor 2,3 o click=0 cl=multiple special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "fish output starts on the row the newline marked",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=1;special_key=1\u0007> \u001b]133;B\u0007ls\r\n\u001b]133;C\u0007a b c\r\n\u001b]133;D;0\u0007"
+   }
+  ],
+  "expect": [
+   "P |> ls|ppii",
+   "- |a b c|ooooo",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 0,2 o click=1 cl=- special=true redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "VS Code marks",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "out\u001b]633;A\u0007$ \u001b]633;B\u0007echo\u001b]633;H\u0007r\u001b]633;I\u0007\r\n\u001b]633;F\u0007> \u001b]633;G\u0007x\u001b]633;C\u0007"
+   }
+  ],
+  "expect": [
+   "P |out$ echor|oooppiiiip",
+   "C |> x|ppi",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,1 o click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "ctrl-l at a prompt keeps the screen as history",
+  "size": [
+   16,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out1\r\nout2\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ls"
+   }
+  ],
+  "expect": [
+   "- |out1",
+   "- |out2",
+   "P |$ ls",
+   "P |$ ls|ppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,0 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "a clear from a command erases in place",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007x\r\n\u001b]133;C\u0007out\u001b[H\u001b[2J"
+   }
+  ],
+  "expect": [
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 0,0 o click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "clear with ED 3 ends the open prompt",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "1\r\n2\r\n3\r\n4\r\n5\r\n\u001b]133;A\u0007$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b[3Jnew\r\nrow"
+   }
+  ],
+  "expect": [
+   "- |new|ooo",
+   "- |row|ooo",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,1 o click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "ED 2 on the alternate screen",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007\u001b[?1049h\u001b]133;A\u0007> \u001b[H\u001b[2J\u001b[?1049l"
+   }
+  ],
+  "expect": [
+   "P |$ |pp",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 2,0 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "reflow keeps marks",
+  "size": [
+   10,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijk\r\n\u001b]133;C\u00071\r\n2\r\n\u001b]133;D;0\u0007\u001b]133;A\u0007$ \u001b]133;B\u0007"
+   },
+   {
+    "resize": [
+     5,
+     4
+    ]
+   },
+   {
+    "resize": [
+     14,
+     6
+    ]
+   },
+   {
+    "resize": [
+     10,
+     3
+    ]
+   }
+  ],
+  "expect": [
+   "P |$ abcdefgh",
+   "C+|ijk",
+   "- |1|o",
+   "- |2|o",
+   "P |$ |pp",
+   "cursor 2,2 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "insert and delete lines move marks",
+  "size": [
+   12,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007a\r\n\u001b]133;C\u0007o\r\n\u001b]133;A\u0007$ \u001b]133;B\u0007b\u001b[1;1H\u001b[L\u001b[3;1H\u001b[2M\u001b[2;5r\u001b[5;1H\n\n\u001b[r"
+   }
+  ],
+  "expect": [
+   "- ||",
+   "- ||",
+   "- ||",
+   "C ||",
+   "C ||",
+   "- ||",
+   "cursor 0,0 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "RIS clears the prompt",
+  "size": [
+   12,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2;redraw=0\u0007$ \u001b]133;B\u0007ls\u001bcx"
+   }
+  ],
+  "expect": [
+   "- |x|o",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 1,0 o click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "name": "wide input",
+  "size": [
+   8,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007a界b界界c"
+   }
+  ],
+  "expect": [
+   "P |$ a界b界|ppiiii",
+   "C+|界c|ii",
+   "- ||",
+   "- ||",
+   "cursor 3,1 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ }
+]
