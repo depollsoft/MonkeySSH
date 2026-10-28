@@ -1410,9 +1410,8 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       return false;
     }
     final localPosition = renderTerminal.globalToLocal(globalPosition);
-    return widget.terminal.clickPrompt(
-      renderTerminal.getCellOffset(localPosition),
-    );
+    final cell = renderTerminal.getCellOffset(localPosition);
+    return writePromptClick(() => widget.terminal.clickPrompt(cell));
   }
 
   // A system-selection terminal keeps a collapsed selection where it was
