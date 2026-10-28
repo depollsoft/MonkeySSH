@@ -15,6 +15,7 @@ import 'package:xterm/src/core/escape/parser.dart';
 import 'package:xterm/src/core/input/handler.dart';
 import 'package:xterm/src/core/input/kitty_keyboard.dart';
 import 'package:xterm/src/core/input/keys.dart';
+import 'package:xterm/src/core/mode_report.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/core/mouse/handler.dart';
@@ -47,6 +48,15 @@ const _monkeyMuxSynchronizedOutputMode = 9002;
 // frame's bytes until its end marker has arrived; the core only tracks the
 // mode so DECRQM can advertise support.
 const _synchronizedOutputMode = 2026;
+
+// DECBKM: Backspace sends BS instead of DEL.
+const _backarrowKeyDecMode = 67;
+
+// Save cursor as in DECSC; tracked only so DECRQM can report it.
+const _saveCursorDecMode = 1048;
+
+// Visibility reports: https://rockorager.dev/misc/visibility-reports/
+const _visibilityReportsDecMode = 2033;
 
 /// [Terminal] is an interface to interact with command line applications. It
 /// translates escape sequences from the application into updates to the
@@ -282,6 +292,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   bool _bracketedPasteMode = false;
 
+  bool _backarrowKeyMode = false;
+
+  bool _saveCursorMode = false;
+
+  bool _reportVisibilityMode = false;
+
+  bool _visible = true;
+
   final _mainKittyKeyboardState = KittyKeyboardState();
 
   final _altKittyKeyboardState = KittyKeyboardState();
@@ -343,6 +361,48 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   bool get bracketedPasteMode => _bracketedPasteMode;
+
+  /// Whether DECBKM (DEC private mode 67) is set: Backspace sends BS (0x08)
+  /// instead of DEL (0x7f) in legacy key encoding.
+  bool get backarrowKeyMode => _backarrowKeyMode;
+
+  /// What an unmodified Backspace sends outside the Kitty keyboard protocol:
+  /// BS under DECBKM, DEL otherwise. Kitty key encoding ignores DECBKM, as in
+  /// kitty and Ghostty, so DEL is kept while Kitty flags are active.
+  String get backspaceInput =>
+      _backarrowKeyMode && kittyKeyboardFlags == 0 ? '\b' : '\x7f';
+
+  /// Whether DEC private mode 1048 (save cursor) was last set.
+  bool get saveCursorMode => _saveCursorMode;
+
+  /// Whether the program enabled visibility reports (DEC private mode 2033).
+  bool get reportVisibilityMode => _reportVisibilityMode;
+
+  /// Whether the view showing this terminal may be visible to the user.
+  ///
+  /// The host owns this: it sets false only when it knows the view is hidden
+  /// (the app is in the background, or another screen or session covers the
+  /// terminal), since visibility reports must say "not visible" only with
+  /// positive knowledge. While a program has visibility reports enabled, each
+  /// change sends it a report; setting the current value again sends nothing.
+  ///
+  /// https://rockorager.dev/misc/visibility-reports/
+  bool get visible => _visible;
+
+  set visible(bool value) {
+    if (_visible == value) {
+      return;
+    }
+    _visible = value;
+    if (_reportVisibilityMode) {
+      sendVisibilityReport();
+    }
+  }
+
+  /// Reports the DECRQM state ([ModeReportState]) of a DEC private mode the
+  /// terminal does not track itself, such as colour-scheme updates (2031) that
+  /// the host keeps, or null when the host does not know the mode either.
+  int? Function(int mode)? externalDecModeState;
 
   /// Whether Kitty keyboard progressive-enhancement flags are active.
   bool get kittyKeyboardMode => kittyKeyboardFlags != 0;
@@ -456,7 +516,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       return false;
     }
 
-    final output = inputHandler?.call(event);
+    var output = inputHandler?.call(event);
+    if (key == TerminalKey.backspace &&
+        _backarrowKeyMode &&
+        kittyKeyboardFlags == 0) {
+      output = _applyBackarrowKeyMode(output);
+    }
 
     if (output != null) {
       onOutput?.call(output);
@@ -466,6 +531,16 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
     return false;
   }
+
+  /// DECBKM swaps what Backspace and Ctrl+Backspace send in legacy encoding,
+  /// as in xterm and Ghostty: BS and DEL trade places, while other modified
+  /// forms (an Alt prefix, word deletion) are left alone. Kitty keyboard mode
+  /// ignores DECBKM, as kitty and Ghostty do.
+  static String? _applyBackarrowKeyMode(String? output) => switch (output) {
+        '\x7f' => '\b',
+        '\b' => '\x7f',
+        _ => output,
+      };
 
   /// Sends regular text input to the underlying program.
   ///
@@ -831,6 +906,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _cursorBlinkMode = false;
     _ansiMode = true; // DECANM
     _synchronizedOutput = false; // DEC mode 2026
+    _backarrowKeyMode = false; // DECBKM
+    _saveCursorMode = false;
+    // The view's visibility belongs to the host and survives the reset.
+    _reportVisibilityMode = false;
     _mainKittyKeyboardState.reset();
     _altKittyKeyboardState.reset();
 
@@ -934,23 +1013,17 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void sendModeReport(int mode) {
-    onOutput?.call(_emitter.modeReport(mode, _ansiModeValue(mode)));
+    onOutput?.call(
+      _emitter.modeReport(mode, ansiModeReportState(this, mode)),
+    );
   }
 
-  /// DECRQM state value for an ANSI mode: 1 set, 2 reset, 0 not recognized.
-  ///
-  /// Only the ANSI-mode form (`CSI Ps $ p`) is answered here. The DEC-private
-  /// form (`CSI ? Ps $ p`) is answered by the MonkeySSH app layer, so the core
-  /// must not reply to it (see [EscapeParser]).
-  int _ansiModeValue(int mode) {
-    switch (mode) {
-      case 4: // IRM - Insert/Replace
-        return _insertMode ? 1 : 2;
-      case 20: // LNM - Line Feed/New Line
-        return _lineFeedMode ? 1 : 2;
-      default:
-        return 0;
-    }
+  @override
+  void sendDecModeReport(int mode) {
+    final state = decModeReportState(this, mode) ??
+        externalDecModeState?.call(mode) ??
+        ModeReportState.notRecognized;
+    onOutput?.call(_emitter.decModeReport(mode, state));
   }
 
   @override
@@ -1104,7 +1177,29 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void sendCursorPosition() {
-    onOutput?.call(_emitter.cursorPosition(_buffer.cursorX, _buffer.cursorY));
+    final (row, column) = _cursorReportPosition();
+    onOutput?.call(_emitter.cursorPosition(column, row));
+  }
+
+  @override
+  void sendExtendedCursorPosition() {
+    final (row, column) = _cursorReportPosition();
+    onOutput?.call(_emitter.extendedCursorPosition(column, row));
+  }
+
+  /// The 1-based cursor row and column a cursor position report carries. In
+  /// origin mode the row counts from the top margin.
+  (int, int) _cursorReportPosition() {
+    var row = _buffer.cursorY;
+    if (_originMode) {
+      row = max(0, row - _buffer.marginTop);
+    }
+    return (row + 1, _buffer.cursorX + 1);
+  }
+
+  @override
+  void sendVisibilityReport() {
+    onOutput?.call(_emitter.visibilityReport(_visible));
   }
 
   @override
@@ -1322,6 +1417,16 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         _monkeyMuxSynchronizedOutput = enabled;
       case _synchronizedOutputMode:
         _synchronizedOutput = enabled;
+      case _backarrowKeyDecMode:
+        _backarrowKeyMode = enabled;
+      case _saveCursorDecMode:
+        _saveCursorMode = enabled;
+      case _visibilityReportsDecMode:
+        _reportVisibilityMode = enabled;
+        // Enabling always reports at once, even when already enabled.
+        if (enabled) {
+          sendVisibilityReport();
+        }
     }
   }
 

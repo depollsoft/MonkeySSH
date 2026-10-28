@@ -2168,17 +2168,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
-    test(
-      'normalizes cursor position reports to terminal protocol coordinates',
-      () {
-        expect(
-          normalizeTerminalOutputForRemoteShell('before\x1b[0;0Rafter'),
-          'before\x1b[1;1Rafter',
-        );
-        expect(normalizeTerminalOutputForRemoteShell('\x1b[4;7R'), '\x1b[5;8R');
-      },
-    );
-
     test('adapts insert mode output so xterm shifts existing cells', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
@@ -2514,97 +2503,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(light.response, '\x1b[?997;2n');
       expect(light.pendingInput, isEmpty);
-    });
-
-    test('answers DEC private mode report queries', () {
-      final result = buildTerminalWindowControlQueryResponses(
-        input:
-            'before\x1b[?1004\$p\x1b[?2004\$p\x1b[?1006\$p'
-            '\x1b[?2026\$pafter',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: true,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: true,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(
-        result.response,
-        '\x1b[?1004;1\$y'
-        '\x1b[?2004;2\$y'
-        '\x1b[?1006;1\$y'
-        '\x1b[?2026;2\$y',
-      );
-      expect(result.pendingInput, isEmpty);
-
-      final colorSchemeReset = buildTerminalWindowControlQueryResponses(
-        input: 'before\x1b[?2031\$pafter',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: false,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(colorSchemeReset.response, '\x1b[?2031;2\$y');
-    });
-
-    test('preserves split DEC private mode report queries across chunks', () {
-      final first = buildTerminalWindowControlQueryResponses(
-        input: 'before\x1b[?1004\$',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(first.response, isNull);
-      expect(first.pendingInput, '\x1b[?1004\$');
-
-      final second = buildTerminalWindowControlQueryResponses(
-        input: 'pafter',
-        pendingInput: first.pendingInput,
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(second.response, '\x1b[?1004;1\$y');
-      expect(second.pendingInput, isEmpty);
     });
 
     test('extracts color scheme update mode changes', () {

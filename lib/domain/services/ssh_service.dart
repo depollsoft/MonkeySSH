@@ -74,19 +74,6 @@ typedef TerminalWindowMetrics = ({
   int pixelHeight,
 });
 
-/// Terminal mode state used to answer DECRQM mode-status queries.
-typedef TerminalControlModeState = ({
-  bool reportFocusMode,
-  bool bracketedPasteMode,
-  bool colorSchemeUpdatesMode,
-  bool isUsingAltBuffer,
-  bool mouseTrackingMode,
-  bool mouseDragTrackingMode,
-  bool mouseMoveTrackingMode,
-  bool sgrMouseReportMode,
-  bool synchronizedOutputMode,
-});
-
 /// Upper bound on withheld synchronized-output bytes. A program that opens a
 /// transaction and streams inside it without ever closing it (or a redraw far
 /// larger than any real frame) is applied incrementally past this point rather
@@ -343,7 +330,6 @@ buildTerminalWindowControlQueryResponses({
   required String input,
   required String pendingInput,
   required TerminalWindowMetrics? metrics,
-  TerminalControlModeState? modeState,
   TerminalThemeData? theme,
 }) {
   final combinedInput = pendingInput + input;
@@ -355,22 +341,6 @@ buildTerminalWindowControlQueryResponses({
     final response = _buildTerminalWindowQueryResponse(primaryParam, metrics);
     if (response != null) {
       responses.write(response);
-    }
-  }
-
-  for (final match in _terminalModeReportQueryPattern.allMatches(
-    combinedInput,
-  )) {
-    final params = match.group(1)?.split(';') ?? const <String>[];
-    for (final param in params) {
-      final mode = int.tryParse(param);
-      if (mode == null) {
-        continue;
-      }
-      final response = _buildTerminalModeReportResponse(mode, modeState);
-      if (response != null) {
-        responses.write(response);
-      }
     }
   }
 
@@ -482,19 +452,6 @@ const terminalWin32InputModeEscapeKeyEvents =
 /// unmodified.
 String encodeTerminalInputForWin32InputMode(String data) =>
     data == '\x1b' ? terminalWin32InputModeEscapeKeyEvents : data;
-
-/// Normalizes terminal-generated output before it is sent to the remote shell.
-///
-/// xterm.dart currently emits cursor-position reports using its internal
-/// zero-based cursor coordinates. The terminal DSR wire protocol is one-based,
-/// and TUIs such as Codex can stall or mis-detect terminal state after receiving
-/// `CSI 0;0 R`.
-String normalizeTerminalOutputForRemoteShell(String data) =>
-    data.replaceAllMapped(_terminalCursorPositionReportPattern, (match) {
-      final row = int.parse(match.group(1)!);
-      final column = int.parse(match.group(2)!);
-      return '\x1b[${row + 1};${column + 1}R';
-    });
 
 /// Adapts remote terminal output so xterm.dart renders it correctly.
 ///
@@ -617,15 +574,11 @@ class TerminalXtermOutputDecoder {
 enum _TerminalSequenceState { escape, csi, string, intermediate }
 
 final _terminalWindowQueryPattern = RegExp(r'\x1b\[([0-9;?]*)t');
-final _terminalModeReportQueryPattern = RegExp(r'\x1b\[\?([0-9;]+)\$p');
 final _terminalThemeModeQueryPattern = RegExp(r'\x1b\[\?996n');
 final _terminalControlQueryPrefixPattern = RegExp(r'^\x1b(?:$|\[[0-9;?\$]*)$');
 final _terminalPrivateModeSetResetPattern = RegExp(r'\x1b\[\?([0-9;]+)([hl])');
 final _terminalOscOrDcsSequencePattern = RegExp(
   r'\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)',
-);
-final _terminalCursorPositionReportPattern = RegExp(
-  r'\x1b\[([0-9]+);([0-9]+)R',
 );
 final _terminalCsiNumericParamsPattern = RegExp(r'^[0-9;]*$');
 
@@ -654,66 +607,6 @@ String? _buildTerminalWindowQueryResponse(
   }
 }
 
-String? _buildTerminalModeReportResponse(
-  int mode,
-  TerminalControlModeState? modeState,
-) {
-  if (modeState == null) {
-    return switch (mode) {
-      1016 ||
-      2026 ||
-      2027 ||
-      2031 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-      _ => null,
-    };
-  }
-
-  return switch (mode) {
-    1000 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1002 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseDragTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1003 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseMoveTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1004 => _formatTerminalModeReport(
-      mode,
-      modeState.reportFocusMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1006 => _formatTerminalModeReport(
-      mode,
-      modeState.sgrMouseReportMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1049 => _formatTerminalModeReport(
-      mode,
-      modeState.isUsingAltBuffer ? _terminalModeSet : _terminalModeReset,
-    ),
-    2004 => _formatTerminalModeReport(
-      mode,
-      modeState.bracketedPasteMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2031 => _formatTerminalModeReport(
-      mode,
-      modeState.colorSchemeUpdatesMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2026 => _formatTerminalModeReport(
-      mode,
-      modeState.synchronizedOutputMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1016 || 2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-    _ => null,
-  };
-}
-
-const _terminalModeNotRecognized = 0;
-const _terminalModeSet = 1;
-const _terminalModeReset = 2;
-
 const _terminalEscape = '\x1b';
 const _terminalEscapeCodeUnit = 0x1B;
 const _terminalBellCodeUnit = 0x07;
@@ -733,9 +626,6 @@ const _terminalPrivateMarkerCodeUnit = 0x3E;
 const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
 const _terminalInsertBlankCharacterSequence = '\x1b[@';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
-
-String _formatTerminalModeReport(int mode, int status) =>
-    '\x1b[?$mode;$status\$y';
 
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;

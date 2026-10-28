@@ -341,6 +341,15 @@ class MockEscapeHandler extends _i1.Mock implements _i2.EscapeHandler {
       );
 
   @override
+  void sendDecModeReport(int? mode) => super.noSuchMethod(
+        Invocation.method(
+          #sendDecModeReport,
+          [mode],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   void sendTermcapReport(List<String>? capabilities) => super.noSuchMethod(
         Invocation.method(
           #sendTermcapReport,
@@ -371,6 +380,24 @@ class MockEscapeHandler extends _i1.Mock implements _i2.EscapeHandler {
   void sendCursorPosition() => super.noSuchMethod(
         Invocation.method(
           #sendCursorPosition,
+          [],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void sendExtendedCursorPosition() => super.noSuchMethod(
+        Invocation.method(
+          #sendExtendedCursorPosition,
+          [],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void sendVisibilityReport() => super.noSuchMethod(
+        Invocation.method(
+          #sendVisibilityReport,
           [],
         ),
         returnValueForMissingStub: null,

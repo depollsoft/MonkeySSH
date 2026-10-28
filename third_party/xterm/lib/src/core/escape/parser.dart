@@ -503,17 +503,15 @@ class EscapeParser {
     }
   }
 
-  /// `ESC [ ! p` Soft Terminal Reset (DECSTR) and `ESC [ Ps $ p` Request ANSI
-  /// Mode (DECRQM), which share the `p` final byte and are told apart by their
+  /// `ESC [ ! p` Soft Terminal Reset (DECSTR) and `ESC [ Ps $ p` Request Mode
+  /// (DECRQM), which share the `p` final byte and are told apart by their
   /// intermediate byte.
   ///
-  /// Only the ANSI-mode form (no prefix) is answered here. The DEC-private form
-  /// (`CSI ? Ps $ p`) is answered by the MonkeySSH app layer, which scans shell
-  /// output and has the extra state it needs (notably DEC mode 2031 colour
-  /// scheme updates); answering it here as well would send the program two
-  /// replies. The `$` intermediate distinguishes DECRQM from the other `p`
-  /// finals (`CSI ! p` DECSTR, `CSI Ps " p` DECSCL, `CSI > Ps p` XTSMPOINTER),
-  /// which fall through to [EscapeHandler.unknownCSI].
+  /// Both DECRQM forms are answered: the ANSI form (no prefix) and the DEC
+  /// private form (`CSI ? Ps $ p`). The `$` intermediate distinguishes DECRQM
+  /// from the other `p` finals (`CSI ! p` DECSTR, `CSI Ps " p` DECSCL,
+  /// `CSI > Ps p` XTSMPOINTER), which fall through to
+  /// [EscapeHandler.unknownCSI].
   ///
   /// https://vt100.net/docs/vt510-rm/DECRQM.html
   void _csiHandleRequestMode() {
@@ -533,12 +531,12 @@ class EscapeParser {
       return;
     }
 
+    final mode = _csi.params.isEmpty ? 0 : _csi.params[0];
     if (_csi.prefix == null) {
-      final mode = _csi.params.isEmpty ? 0 : _csi.params[0];
       handler.sendModeReport(mode);
-    } else if (_csi.prefix != Ascii.questionMark) {
-      // `?` (DEC private) is consumed without a reply so the app layer can
-      // answer it; any other prefix is an unrecognized `$ p` sequence.
+    } else if (_csi.prefix == Ascii.questionMark) {
+      handler.sendDecModeReport(mode);
+    } else {
       handler.unknownCSI(_csi.finalByte);
     }
   }
@@ -906,11 +904,23 @@ class EscapeParser {
     }
   }
 
-  /// `ESC [ Ps n` Device Status Report [Dispatch] (DSR)
+  /// `ESC [ Ps n` Device Status Report [Dispatch] (DSR), plus the DEC forms
+  /// `ESC [ ? 6 n` (DECXCPR) and `ESC [ ? 998 n` (visibility query).
   ///
   /// https://terminalguide.namepad.de/seq/csi_sn/
   void _csiHandleDeviceStatusReport() {
     if (_csi.params.isEmpty) return;
+
+    if (_csi.prefix == Ascii.questionMark) {
+      switch (_csi.params[0]) {
+        case 6:
+          return handler.sendExtendedCursorPosition();
+        case 998:
+          return handler.sendVisibilityReport();
+      }
+      return;
+    }
+    if (_csi.prefix != null) return;
 
     switch (_csi.params[0]) {
       case 5:
@@ -1244,6 +1254,8 @@ class EscapeParser {
         }
         return;
       case 1048:
+        // Also reported as a mode, so DECRQM can answer for it.
+        handler.setUnknownDecMode(mode, enabled);
         if (enabled) {
           return handler.saveCursor();
         } else {

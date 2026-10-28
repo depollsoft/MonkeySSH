@@ -5137,10 +5137,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
     _terminalEnterPacer = enterPacer;
 
-    void handleTerminalOutput(String data) {
+    void handleTerminalOutput(String output) {
       // Enter keystroke CRLF collapse lives in sendTerminalEnterInput so paste
       // and other producers of exact "\r\n" are not rewritten here.
-      final output = normalizeTerminalOutputForRemoteShell(data);
 
       if (_shouldSuppressMonkeyMuxTerminalControlInput(output)) {
         DiagnosticsLogService.instance.debug(
