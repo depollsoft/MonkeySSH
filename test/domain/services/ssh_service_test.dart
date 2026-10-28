@@ -36,6 +36,8 @@ import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
 import 'package:monkeyssh/domain/services/port_forward_browser_service.dart';
@@ -442,6 +444,28 @@ void _stubSessionStreams(_MockExecSession session, {String stdout = ''}) {
   when(() => session.stderr).thenAnswer((_) => const Stream.empty());
   when(() => session.done).thenAnswer((_) => Future<void>.value());
   when(session.close).thenAnswer((_) {});
+}
+
+class _FakeKittyClipboardPlatform implements KittyClipboardPlatform {
+  final stored = <String, Uint8List>{};
+
+  @override
+  Future<List<String>> availableTypes() async => stored.keys.toList();
+
+  @override
+  Future<Uint8List?> read(String mime) async => stored[mime];
+
+  @override
+  Future<List<String>?> write(List<KittyClipboardEntry> entries) async {
+    stored
+      ..clear()
+      ..addAll({for (final entry in entries) entry.mime: entry.data});
+    return [for (final entry in entries) entry.mime];
+  }
+
+  @override
+  Future<KittyClipboardPasteRead> readPasteSnapshot() async =>
+      KittyClipboardPasteRead.snapshot(KittyClipboardSnapshot(stored));
 }
 
 class _FakeHostKeySocket implements SSHSocket, HostKeySource {
@@ -2533,6 +2557,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: true,
           synchronizedOutputMode: false,
+          kittyPasteEventsMode: false,
         ),
       );
 
@@ -2559,10 +2584,36 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
           synchronizedOutputMode: false,
+          kittyPasteEventsMode: false,
         ),
       );
 
       expect(colorSchemeReset.response, '\x1b[?2031;2\$y');
+    });
+
+    test('reports kitty paste events mode 5522', () {
+      TerminalControlModeState modeState({required bool pasteEvents}) => (
+        reportFocusMode: false,
+        bracketedPasteMode: false,
+        colorSchemeUpdatesMode: false,
+        isUsingAltBuffer: false,
+        mouseTrackingMode: false,
+        mouseDragTrackingMode: false,
+        mouseMoveTrackingMode: false,
+        sgrMouseReportMode: false,
+        synchronizedOutputMode: false,
+        kittyPasteEventsMode: pasteEvents,
+      );
+
+      for (final (pasteEvents, status) in [(true, 1), (false, 2)]) {
+        final result = buildTerminalWindowControlQueryResponses(
+          input: '\x1b[?5522\$p',
+          pendingInput: '',
+          metrics: null,
+          modeState: modeState(pasteEvents: pasteEvents),
+        );
+        expect(result.response, '\x1b[?5522;$status\$y');
+      }
     });
 
     test('preserves split DEC private mode report queries across chunks', () {
@@ -2580,6 +2631,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
           synchronizedOutputMode: false,
+          kittyPasteEventsMode: false,
         ),
       );
 
@@ -2600,6 +2652,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           mouseMoveTrackingMode: false,
           sgrMouseReportMode: false,
           synchronizedOutputMode: false,
+          kittyPasteEventsMode: false,
         ),
       );
 
@@ -3783,6 +3836,40 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         '\x1b]1337;ReportCellSize=17.00;8.00\x1b\\',
       );
     });
+
+    test(
+      'answers kitty clipboard requests under the OSC 52 settings',
+      () async {
+        final opened = await openShell();
+        final platform = _FakeKittyClipboardPlatform();
+        String b64(String value) => base64Encode(utf8.encode(value));
+        opened.session
+          ..kittyClipboard.platform = platform
+          ..debugHandlePrivateOsc('5522', ['type=read:id=r', b64('text/plain')])
+          ..debugHandlePrivateOsc('5522', const ['type=write:id=w']);
+        await opened.session.kittyClipboard.idle;
+        expect(opened.shellWrites.map(utf8.decode), [
+          '\x1b]5522;type=read:status=EPERM:id=r\x1b\\',
+          '\x1b]5522;type=write:status=EPERM:id=w\x1b\\',
+        ]);
+
+        opened.shellWrites.clear();
+        opened.session
+          ..clipboardSharingEnabled = true
+          ..debugHandlePrivateOsc('5522', const ['type=write:id=w'])
+          ..debugHandlePrivateOsc('5522', [
+            'type=wdata:mime=${b64('text/plain')}',
+            b64('copied'),
+          ])
+          ..debugHandlePrivateOsc('5522', const ['type=wdata']);
+        await opened.session.kittyClipboard.idle;
+        expect(
+          utf8.decode(opened.shellWrites.single),
+          '\x1b]5522;type=write:status=DONE:id=w\x1b\\',
+        );
+        expect(utf8.decode(platform.stored['text/plain']!), 'copied');
+      },
+    );
 
     test('answers OSC 7501 feature detection only in a plain shell', () async {
       final opened = await openShell();

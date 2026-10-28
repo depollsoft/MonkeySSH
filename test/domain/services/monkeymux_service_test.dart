@@ -659,6 +659,32 @@ void main() {
       },
     );
 
+    test('maps kitty paste events mode 5522 from private modes', () {
+      Map<String, Object?> snapshot(Map<String, bool>? modes) => {
+        'id': '@1',
+        'index': 0,
+        'name': 'Editor',
+        'active': true,
+        'privateModes': ?modes,
+      };
+
+      expect(
+        parseMonkeyMuxWindowSnapshotForTesting(snapshot({'5522': true}))!
+            .terminalKittyPasteEventsMode,
+        isTrue,
+      );
+      expect(
+        parseMonkeyMuxWindowSnapshotForTesting(snapshot({'5522': false}))!
+            .terminalKittyPasteEventsMode,
+        isFalse,
+      );
+      expect(
+        parseMonkeyMuxWindowSnapshotForTesting(snapshot(null))!
+            .terminalKittyPasteEventsMode,
+        isNull,
+      );
+    });
+
     test('uses explicit helper bracketed paste mode when present', () {
       final window = parseMonkeyMuxWindowSnapshotForTesting({
         'id': '@1',

@@ -2359,6 +2359,76 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets(
+      'pastes as a kitty paste event when the program set mode 5522',
+      (tester) async {
+        String b64(String value) => base64Encode(utf8.encode(value));
+        final png = Uint8List.fromList([
+          0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 7, //
+        ]);
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'caption'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        const pasteboard = MethodChannel('pasteboard');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          pasteboard,
+          (call) async => switch (call.method) {
+            'files' => <String>[],
+            'image' => png,
+            _ => null,
+          },
+        );
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger
+            ..setMockMethodCallHandler(SystemChannels.platform, null)
+            ..setMockMethodCallHandler(pasteboard, null);
+        });
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        session.terminal!.write('\x1b[?2004;5522h');
+        shellWrites.clear();
+
+        await tester.ensureVisible(find.byTooltip('Paste'));
+        await tester.tap(find.byTooltip('Paste'));
+        await tester.pumpAndSettle();
+
+        // The program gets the clipboard's types, not the text, and the image
+        // is not uploaded.
+        final event = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(),
+        );
+        expect(event, startsWith('\x1b]5522;type=read:status=OK:pw='));
+        expect(event, contains(b64('image/png text/plain\n')));
+        expect(event, isNot(contains('caption')));
+        expect(event, isNot(contains('\x1b[200~')));
+
+        // It then reads the image with the event's one-time password.
+        final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+            .firstMatch(event)!
+            .group(1)!;
+        shellWrites.clear();
+        session.debugHandlePrivateOsc('5522', [
+          'type=read:pw=$password:name=${b64('Paste event')}',
+          b64('image/png'),
+        ]);
+        await tester.pumpAndSettle();
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          contains(';${base64Encode(png)}\x1b\\'),
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
     Future<void> openTerminalOverflowMenu(WidgetTester tester) async {
       await tester.tap(find.byIcon(Icons.more_vert));
       await tester.pumpAndSettle();

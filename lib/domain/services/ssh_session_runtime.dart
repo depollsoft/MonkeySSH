@@ -1672,6 +1672,7 @@ if(!$__flResolved){$__flResolved='cmd'}
     mouseMoveTrackingMode: terminal.mouseMode == MouseMode.upDownScrollMove,
     sgrMouseReportMode: terminal.mouseReportMode == MouseReportMode.sgr,
     synchronizedOutputMode: terminal.synchronizedOutputMode,
+    kittyPasteEventsMode: terminal.kittyPasteEventsMode,
   );
 
   void _scheduleTerminalPreviewRefresh() {

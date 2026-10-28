@@ -640,6 +640,50 @@ void registerTerminalScreenSelectionTests() {
       });
     });
 
+    group('shouldSendTerminalKittyPasteEvent', () {
+      test('a plain shell follows the terminal mode', () {
+        for (final mode in [true, false]) {
+          expect(
+            shouldSendTerminalKittyPasteEvent(
+              isMuxActive: false,
+              muxBackend: RemoteMuxBackend.tmux,
+              terminalKittyPasteEventsMode: mode,
+              activeWindowKittyPasteEventsMode: null,
+            ),
+            mode,
+          );
+        }
+      });
+
+      test('MonkeyMux trusts only the window snapshot', () {
+        bool send({required bool terminal, required bool? window}) =>
+            shouldSendTerminalKittyPasteEvent(
+              isMuxActive: true,
+              muxBackend: RemoteMuxBackend.monkeyMux,
+              terminalKittyPasteEventsMode: terminal,
+              activeWindowKittyPasteEventsMode: window,
+            );
+        expect(send(terminal: false, window: true), isTrue);
+        // Right after a window switch the terminal can still carry the
+        // previous window's mode.
+        expect(send(terminal: true, window: false), isFalse);
+        // An older server does not report the mode.
+        expect(send(terminal: true, window: null), isFalse);
+      });
+
+      test('tmux never sends paste events', () {
+        expect(
+          shouldSendTerminalKittyPasteEvent(
+            isMuxActive: true,
+            muxBackend: RemoteMuxBackend.tmux,
+            terminalKittyPasteEventsMode: true,
+            activeWindowKittyPasteEventsMode: true,
+          ),
+          isFalse,
+        );
+      });
+    });
+
     group('inheritTerminalBracketedPasteModeFromMuxWindow', () {
       test('applies known active mux window bracketed paste mode locally', () {
         final terminal = Terminal();
@@ -919,6 +963,7 @@ void registerTerminalScreenSelectionTests() {
           bracketedPasteMode: true,
           bracketedPasteModeKnown: true,
           activeWindowKey: '#0',
+          kittyPasteEventsMode: null,
         ));
         expect(terminal.bracketedPasteMode, isTrue);
 
@@ -950,6 +995,7 @@ void registerTerminalScreenSelectionTests() {
             bracketedPasteMode: false,
             bracketedPasteModeKnown: true,
             activeWindowKey: '#0',
+            kittyPasteEventsMode: null,
           ),
         );
 
@@ -965,9 +1011,35 @@ void registerTerminalScreenSelectionTests() {
             bracketedPasteMode: true,
             bracketedPasteModeKnown: false,
             activeWindowKey: '#0',
+            kittyPasteEventsMode: null,
           ),
         );
       });
+
+      test(
+        'reports kitty paste events of the refreshed active window',
+        () async {
+          final refreshed =
+              await refreshTerminalBracketedPasteModeFromMuxWindows(
+                terminal: Terminal(),
+                loadWindows: () async => const [
+                  TmuxWindow(
+                    index: 0,
+                    name: 'shell',
+                    isActive: false,
+                    terminalKittyPasteEventsMode: false,
+                  ),
+                  TmuxWindow(
+                    index: 1,
+                    name: 'editor',
+                    isActive: true,
+                    terminalKittyPasteEventsMode: true,
+                  ),
+                ],
+              );
+          expect(refreshed.kittyPasteEventsMode, isTrue);
+        },
+      );
 
       test('returns the stable id for the refreshed active window', () async {
         final terminal = Terminal();
@@ -989,6 +1061,7 @@ void registerTerminalScreenSelectionTests() {
             bracketedPasteMode: true,
             bracketedPasteModeKnown: true,
             activeWindowKey: '@9',
+            kittyPasteEventsMode: null,
           ),
         );
       });
