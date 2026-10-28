@@ -23,7 +23,7 @@ type semanticParityCase struct {
 // third_party/xterm/test/src/core/semantic_prompt_parity_test.dart.
 func dumpSemanticPrompt(s *terminalScreen) []string {
 	var out []string
-	row := func(cells []vtCell, wrapped bool, prompt uint8, withContent bool) string {
+	row := func(cells []vtCell, wrapped bool, prompt uint8) string {
 		mark := map[uint8]string{vtPromptNone: "-", vtPromptPrimary: "P", vtPromptContinuation: "C"}[prompt]
 		wrap := " "
 		if wrapped {
@@ -41,21 +41,18 @@ func dumpSemanticPrompt(s *terminalScreen) []string {
 			text.WriteRune(r)
 			content.WriteByte("oip"[cells[x].sem])
 		}
-		if !withContent {
-			return mark + wrap + "|" + text.String()
-		}
 		return mark + wrap + "|" + text.String() + "|" + content.String()
 	}
 	if !s.altActive {
 		var decoder vtLineDecoder
 		for i := range s.scrollback.len() {
 			line := s.scrollback.at(i)
-			out = append(out, row(decoder.decode(line.text, s.width), line.wrapped, line.prompt, false))
+			out = append(out, row(line.decode(&decoder, s.width), line.wrapped, line.prompt))
 		}
 	}
 	g := s.grid()
 	for r, cells := range g.rows {
-		out = append(out, row(cells, g.wrapped[r], g.prompt[r], true))
+		out = append(out, row(cells, g.wrapped[r], g.prompt[r]))
 	}
 	st := s.semantic()
 	eol := ""
@@ -165,6 +162,22 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 				t.Fatalf("frame lost the prompt\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 		})
+	}
+}
+
+// A prompt row that scrolled into the scrollback and came back with a taller
+// screen keeps its input, so a frame still marks it as input.
+func TestRenderFrameKeepsInputRestoredFromScrollback(t *testing.T) {
+	s := newTerminalScreen(10, 2)
+	s.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "abcdefghijklmnopqrstuv"))
+	s.Resize(10, 4)
+	if got := s.main.rows[0][2].sem; got != vtSemInput {
+		t.Fatalf("restored row cell content = %d, want input", got)
+	}
+	want := dumpSemanticPrompt(s)
+	got := dumpSemanticPrompt(replayFrame(s))
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("frame lost the restored input\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

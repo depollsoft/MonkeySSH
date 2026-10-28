@@ -12,9 +12,9 @@ const fixturePath =
     '../../remote/monkeymux/testdata/semantic_prompt_parity.json';
 
 /// One line per buffer line, scrollback first: the row mark, `+` for a
-/// soft-wrapped row, the text and, for screen rows, each cell's content
-/// (`o`utput, `i`nput, `p`rompt); then the cursor, its content and the
-/// active screen's prompt options.
+/// soft-wrapped row, the text and each cell's content (`o`utput, `i`nput,
+/// `p`rompt); then the cursor, its content and the active screen's prompt
+/// options.
 List<String> dumpSemanticPrompt(Terminal terminal) {
   final buffer = terminal.buffer;
   final out = <String>[];
@@ -35,9 +35,7 @@ List<String> dumpSemanticPrompt(Terminal terminal) {
       content.write('oip'[line.getSemanticContent(x)]);
     }
     final wrap = line.isWrapped ? '+' : ' ';
-    out.add(
-      y < buffer.scrollBack ? '$mark$wrap|$text' : '$mark$wrap|$text|$content',
-    );
+    out.add('$mark$wrap|$text|$content');
   }
   final state = buffer.semanticPrompt;
   out.add(

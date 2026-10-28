@@ -300,6 +300,34 @@ func (s *terminalScreen) scrollClearAtPrompt() {
 	}
 }
 
+// vtScrollbackSem keeps the semantic content of a row entering the
+// scrollback, up to its last cell that is not output, or nil when every cell
+// is: a prompt that scrolls away and comes back with a taller screen is still
+// a prompt and its input, as the client keeps it.
+func vtScrollbackSem(row []vtCell) []uint8 {
+	end := len(row)
+	for end > 0 && row[end-1].sem == vtSemOutput {
+		end--
+	}
+	if end == 0 {
+		return nil
+	}
+	sem := make([]uint8, end)
+	for i, cell := range row[:end] {
+		sem[i] = cell.sem
+	}
+	return sem
+}
+
+// decode turns a scrollback line back into cells, semantic content included.
+func (l *vtScrollbackLine) decode(decoder *vtLineDecoder, width int) []vtCell {
+	cells := decoder.decode(l.text, width)
+	for i := 0; i < len(l.sem) && i < len(cells); i++ {
+		cells[i].sem = l.sem[i]
+	}
+	return cells
+}
+
 func vtRowHasText(row []vtCell) bool {
 	for _, cell := range row {
 		if cell.r != 0 || len(cell.comb) > 0 {

@@ -190,9 +190,15 @@ type vtScrollback struct {
 type vtScrollbackLine struct {
 	text    []byte
 	wrapped bool
-	// prompt is the line's semantic prompt row mark (vtPromptNone, ...).
+	// prompt is the line's semantic prompt row mark (vtPromptNone, ...), and
+	// sem the semantic content of its cells (vtScrollbackSem), which the
+	// rendered text cannot carry.
 	prompt uint8
+	sem    []uint8
 }
+
+// size is what the line counts against vtScrollbackByteLimit.
+func (l *vtScrollbackLine) size() int { return len(l.text) + len(l.sem) }
 
 func (b *vtScrollback) len() int { return b.n }
 
@@ -211,13 +217,13 @@ func (b *vtScrollback) push(line vtScrollbackLine) {
 	}
 	b.n++
 	*b.at(b.n - 1) = line
-	b.bytes += len(line.text)
+	b.bytes += line.size()
 }
 
 // popFront evicts the oldest line.
 func (b *vtScrollback) popFront() {
 	line := b.at(0)
-	b.bytes -= len(line.text)
+	b.bytes -= line.size()
 	*line = vtScrollbackLine{}
 	b.head = (b.head + 1) % len(b.lines)
 	b.n--
@@ -229,7 +235,7 @@ func (b *vtScrollback) popBack() vtScrollbackLine {
 	out := *line
 	*line = vtScrollbackLine{}
 	b.n--
-	b.bytes -= len(out.text)
+	b.bytes -= out.size()
 	return out
 }
 
@@ -749,7 +755,7 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 	var decoder vtLineDecoder
 	for i := restore - 1; i >= 0; i-- {
 		line := s.scrollback.popBack()
-		rows[i] = decoder.decode(line.text, width)
+		rows[i] = line.decode(&decoder, width)
 		wrapped[i] = line.wrapped
 		prompt[i] = line.prompt
 	}
@@ -778,7 +784,7 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	var decoder vtLineDecoder
 	for i := range history {
 		line := s.scrollback.at(i)
-		lines = append(lines, vtLine{cells: decoder.decode(line.text, s.width), wrapped: line.wrapped, prompt: line.prompt})
+		lines = append(lines, vtLine{cells: line.decode(&decoder, s.width), wrapped: line.wrapped, prompt: line.prompt})
 	}
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i], prompt: g.prompt[i]})
@@ -906,7 +912,12 @@ func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool, prompt uint8
 }
 
 func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool, prompt uint8) {
-	s.scrollback.push(vtScrollbackLine{text: renderVTCells(make([]byte, 0, 64), row), wrapped: wrapped, prompt: prompt})
+	s.scrollback.push(vtScrollbackLine{
+		text:    renderVTCells(make([]byte, 0, 64), row),
+		wrapped: wrapped,
+		prompt:  prompt,
+		sem:     vtScrollbackSem(row),
+	})
 }
 
 // trimScrollback drops the oldest lines beyond the line and byte limits. The
