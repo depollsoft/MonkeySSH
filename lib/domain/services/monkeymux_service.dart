@@ -299,11 +299,14 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       seconds: 10,
     ),
     @visibleForTesting Duration? controlResponseTimeout,
+    @visibleForTesting
+    Duration clientVisibilityRetryDelay = const Duration(seconds: 2),
     bool Function() isAppBackgrounded = _appIsBackgrounded,
   }) : _installer = installer,
        _agentSessionMetadataPeriodicRefreshInterval =
            agentSessionMetadataPeriodicRefreshInterval,
        _controlResponseTimeout = controlResponseTimeout,
+       _clientVisibilityRetryDelay = clientVisibilityRetryDelay,
        _isAppBackgrounded = isAppBackgrounded;
 
   final MonkeyMuxInstallerService _installer;
@@ -315,6 +318,9 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   /// Overrides the per-command control-response timeout in tests. When null,
   /// production timeouts based on the command type are used.
   final Duration? _controlResponseTimeout;
+
+  /// How long a failed client_visibility send waits before it is retried.
+  final Duration _clientVisibilityRetryDelay;
 
   static final _states = <_MonkeyMuxWatchKey, _MonkeyMuxSessionState>{};
   static const _agentSessionMetadataFreshTtl = Duration(seconds: 5);
@@ -541,12 +547,10 @@ class MonkeyMuxService implements RemoteMultiplexerService {
       },
       onServerStatus: (status) {
         state.serverStatus = status;
-        // A new observer may reach a server that has not heard this client's
-        // visibility yet, or that still has an old one. Later changes reach
-        // it through [setClientHidden].
-        if (!identical(state.clientVisibilityObserver, state.observer)) {
-          _sendClientVisibility(session, sessionName, state);
-        }
+        // Each control connection says hello once. The server behind it may
+        // not have heard this client's visibility, or may hold an old one: the
+        // observer outlives reconnections and server replacements.
+        _syncClientVisibility(session, sessionName, state);
       },
       onWindowSnapshot: (window) {
         final cachedWindows = state.windows;
@@ -872,7 +876,8 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   /// mode 2033) follow what the user can see.
   ///
   /// The state is kept and sent over the live control channel, now or once it
-  /// connects, to servers that support it.
+  /// connects, to servers that support it. It is sent again on every new
+  /// control connection, and after a failed send.
   void setClientHidden(
     SshSession session,
     String sessionName, {
@@ -883,50 +888,85 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     }
     final state = _stateFor(
       _MonkeyMuxWatchKey(session.connectionId, sessionName),
-    );
-    if (state.clientHidden == hidden) {
-      return;
-    }
-    state.clientHidden = hidden;
-    _sendClientVisibility(session, sessionName, state);
+    )..clientHidden = hidden;
+    _syncClientVisibility(session, sessionName, state);
   }
 
-  void _sendClientVisibility(
+  /// Sends [_MonkeyMuxSessionState.clientHidden] unless the current control
+  /// connection has acknowledged it or is already sending it.
+  void _syncClientVisibility(
     SshSession session,
     String sessionName,
     _MonkeyMuxSessionState state,
   ) {
     final observer = state.observer;
+    final connection = observer?.controlConnection;
     if (observer == null ||
         observer.isDisposed ||
+        connection == null ||
         !(state.serverStatus?.supportsClientVisibility ?? false)) {
       return;
     }
-    final hidden = state.clientHidden;
-    state.clientVisibilityObserver = observer;
+    final target = (connection: connection, hidden: state.clientHidden);
+    if (state.clientVisibilityAcknowledged == target ||
+        state.clientVisibilityInFlight == target) {
+      return;
+    }
+    state
+      ..clientVisibilityInFlight = target
+      ..cancelClientVisibilityRetry();
+    void settle() {
+      if (state.clientVisibilityInFlight == target) {
+        state.clientVisibilityInFlight = null;
+      }
+    }
+
     unawaited(
       observer
           .runCommand({
             'type': 'client_visibility',
             'clientId': session.monkeyMuxClientId,
-            if (hidden) 'hidden': true,
+            if (target.hidden) 'hidden': true,
           }, priority: SshExecPriority.low)
           .then<void>(
-            (_) {},
+            (_) {
+              settle();
+              state
+                ..clientVisibilityAcknowledged = target
+                ..clientVisibilityFailures = 0;
+              // The state may have changed while this was in flight.
+              _syncClientVisibility(session, sessionName, state);
+            },
             onError: (Object error) {
+              settle();
               DiagnosticsLogService.instance.debug(
                 'monkeymux.visibility',
                 'send_failed',
                 fields: {
                   'connectionId': session.connectionId,
-                  'hidden': hidden,
+                  'hidden': target.hidden,
+                  'failures': state.clientVisibilityFailures + 1,
                   'errorType': error.runtimeType.toString(),
                 },
               );
+              // A dropped channel resends on its next hello; a failure on a
+              // live one retries a few times.
+              if (++state.clientVisibilityFailures <=
+                  _clientVisibilityMaxRetries) {
+                state.clientVisibilityRetry = Timer(
+                  _clientVisibilityRetryDelay,
+                  () {
+                    state.clientVisibilityRetry = null;
+                    _syncClientVisibility(session, sessionName, state);
+                  },
+                );
+              }
             },
           ),
     );
   }
+
+  static const _clientVisibilityMaxRetries = 3;
 
   /// Makes this app terminal the active MonkeyMux client and applies its size.
   Future<bool> focusClient(
@@ -1590,8 +1630,19 @@ class _MonkeyMuxSessionState {
   /// [MonkeyMuxService.setClientHidden].
   bool clientHidden = false;
 
-  /// The observer [clientHidden] was last sent through.
-  Object? clientVisibilityObserver;
+  /// The visibility a control connection acknowledged, and the one being sent.
+  ({Object connection, bool hidden})? clientVisibilityAcknowledged;
+  ({Object connection, bool hidden})? clientVisibilityInFlight;
+
+  /// Consecutive failed sends, and the timer that retries the last one.
+  int clientVisibilityFailures = 0;
+  Timer? clientVisibilityRetry;
+
+  void cancelClientVisibilityRetry() {
+    clientVisibilityRetry?.cancel();
+    clientVisibilityRetry = null;
+  }
+
   List<TmuxWindow>? windows;
   MonkeyMuxServerStatus? serverStatus;
   Future<List<TmuxWindow>>? windowListRequest;
@@ -1628,6 +1679,7 @@ class _MonkeyMuxSessionState {
   }
 
   Future<void> dispose() async {
+    cancelClientVisibilityRetry();
     appReviewDemo?.dispose();
     appReviewDemo = null;
     runtimeToken = null;
@@ -1997,6 +2049,9 @@ class _MonkeyMuxWindowChangeObserver {
 
   bool get isControlChannelReady =>
       !_disposed && !_controller.isClosed && _controlSession != null;
+
+  /// The current control connection; a reconnection replaces it.
+  Object? get controlConnection => _controlSession;
 
   /// Whether this observer has been torn down and can no longer run commands.
   bool get isDisposed => _disposed;

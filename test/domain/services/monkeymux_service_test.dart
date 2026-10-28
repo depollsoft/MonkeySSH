@@ -1435,103 +1435,128 @@ void main() {
       ({
         MonkeyMuxService service,
         SshSession session,
-        List<Map<String, Object?>> requests,
-        StreamController<Uint8List> output,
+        _FakeVisibilityServer server,
       })
     >
     start({
       required List<String> capabilities,
       required int connectionId,
+      Duration retryDelay = const Duration(hours: 1),
     }) async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
       final session = _buildSession(client, connectionId: connectionId);
-      final output = StreamController<Uint8List>();
-      final control = _buildSilentControlSession(output);
-      final requests = <Map<String, Object?>>[];
+      final server = _FakeVisibilityServer(capabilities: capabilities);
       when(() => installer.ensureInstalled(session))
           .thenAnswer((_) async => _fakeInstallation);
       when(() => client.execute(any(), pty: any(named: 'pty')))
-          .thenAnswer((_) async => control);
-      when(() => control.write(any())).thenAnswer((invocation) {
-        final data = invocation.positionalArguments.single as List<int>;
-        final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
-        requests.add(request);
-        final hello = jsonEncode({
-          'type': 'hello',
-          'status': 'ok',
-          'version': '0.1.240',
-          'capabilities': capabilities,
-        });
-        final response = jsonEncode({
-          'id': request['id'],
-          'type': request['type'] == 'client_visibility'
-              ? 'client_visibility'
-              : 'window_list',
-          'status': 'ok',
-          'windows': const <Object?>[],
-        });
-        scheduleMicrotask(
-          () => output.add(
-            Uint8List.fromList(utf8.encode('$hello\n$response\n')),
-          ),
-        );
-      });
+          .thenAnswer((_) async => server.connect());
       final service = MonkeyMuxService(
         installer: installer,
         agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
-      )..watchWindowChanges(session, 'work');
+        clientVisibilityRetryDelay: retryDelay,
+      );
+      final events = service.watchWindowChanges(session, 'work').listen((_) {});
       addTearDown(() async {
-        await output.close();
+        await events.cancel();
         await service.clearCache(connectionId);
+        for (final output in server.outputs) {
+          await output.close();
+        }
       });
       expect(await service.listWindows(session, 'work'), isEmpty);
-      return (
-        service: service,
-        session: session,
-        requests: requests,
-        output: output,
-      );
+      await pumpEventQueue();
+      return (service: service, session: session, server: server);
     }
 
-    List<Object?> visibilityRequests(List<Map<String, Object?>> requests) =>
-        requests
-            .where((request) => request['type'] == 'client_visibility')
-            .map((request) => request['hidden'] ?? false)
-            .toList();
-
     test('sends the state on connect, then each change once', () async {
-      final (:service, :session, :requests, :output) = await start(
+      final (:service, :session, :server) = await start(
         capabilities: ['client-visibility'],
         connectionId: 941,
       );
-      await pumpEventQueue();
-      final sentOnConnect = visibilityRequests(requests).length;
-      expect(sentOnConnect, greaterThan(0));
-      expect(
-        requests.firstWhere(
-          (request) => request['type'] == 'client_visibility',
-        )['clientId'],
-        session.monkeyMuxClientId,
-      );
+      expect(server.requests, [(0, false)]);
 
       service
         ..setClientHidden(session, 'work', hidden: true)
         ..setClientHidden(session, 'work', hidden: true);
       await pumpEventQueue();
-      service.setClientHidden(session, 'work', hidden: false);
+      service
+        ..setClientHidden(session, 'work', hidden: false)
+        ..setClientHidden(session, 'work', hidden: false);
       await pumpEventQueue();
-      expect(visibilityRequests(requests).skip(sentOnConnect), [true, false]);
+      expect(server.requests, [(0, false), (0, true), (0, false)]);
+    });
+
+    test(
+      'resends a failed change, and the state on every reconnection',
+      () async {
+        final (:service, :session, :server) = await start(
+          capabilities: ['client-visibility'],
+          connectionId: 943,
+        );
+        service.setClientHidden(session, 'work', hidden: true);
+        await pumpEventQueue();
+
+        // Coming back to the foreground fails after the server took the hide.
+        server.failVisibility = true;
+        service.setClientHidden(session, 'work', hidden: false);
+        await pumpEventQueue();
+        // The same state again is not taken as already sent.
+        service.setClientHidden(session, 'work', hidden: false);
+        await pumpEventQueue();
+        expect(server.requests, [
+          (0, false),
+          (0, true),
+          (0, false),
+          (0, false),
+        ]);
+
+        // A new control connection gets the state, though the observer is the
+        // same one.
+        server
+          ..failVisibility = false
+          ..dropConnection();
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        await pumpEventQueue();
+        expect(server.connections, hasLength(2));
+        expect(server.requests.last, (1, false));
+        final sent = server.requests.length;
+
+        server.dropConnection();
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        await pumpEventQueue();
+        expect(server.connections, hasLength(3));
+        expect(server.requests.skip(sent), [(2, false)]);
+      },
+    );
+
+    test('retries a failed send on a live connection', () async {
+      final (:service, :session, :server) = await start(
+        capabilities: ['client-visibility'],
+        connectionId: 944,
+        retryDelay: const Duration(milliseconds: 10),
+      );
+      server.failVisibility = true;
+      service.setClientHidden(session, 'work', hidden: true);
+      await pumpEventQueue();
+      server.failVisibility = false;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+      expect(server.requests, [(0, false), (0, true), (0, true)]);
+
+      // Acknowledged, it is not sent again.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(server.requests, hasLength(3));
     });
 
     test('sends nothing to a server without the capability', () async {
-      final (:service, :session, :requests, :output) = await start(
+      final (:service, :session, :server) = await start(
         capabilities: ['inject-input-bracketed-paste'],
         connectionId: 942,
       );
       service.setClientHidden(session, 'work', hidden: true);
       await pumpEventQueue();
-      expect(visibilityRequests(requests), isEmpty);
+      expect(server.requests, isEmpty);
     });
   });
 
@@ -2523,4 +2548,62 @@ void _respondToControlError(
     'error': 'stale request failed',
   });
   stdoutController.add(Uint8List.fromList(utf8.encode('$response\n')));
+}
+
+/// A server whose control connections each say hello once, as the real
+/// one does, and answer every request, or fail the client_visibility
+/// requests while [failVisibility] is set. [requests] records each
+/// client_visibility request's hidden flag with its connection's number.
+class _FakeVisibilityServer {
+  _FakeVisibilityServer({required this.capabilities});
+
+  final List<String> capabilities;
+  final requests = <(int, bool)>[];
+  final connections = <Completer<void>>[];
+  final outputs = <StreamController<Uint8List>>[];
+  bool failVisibility = false;
+
+  SSHSession connect() {
+    final connection = connections.length;
+    final done = Completer<void>();
+    late final StreamController<Uint8List> output;
+    void send(Object message) =>
+        output.add(Uint8List.fromList(utf8.encode('${jsonEncode(message)}\n')));
+    output = StreamController<Uint8List>(
+      onListen: () => send({
+        'type': 'hello',
+        'status': 'ok',
+        'version': '0.1.240',
+        'capabilities': capabilities,
+      }),
+    );
+    connections.add(done);
+    outputs.add(output);
+    final control = _buildSilentControlSession(output);
+    when(() => control.done).thenAnswer((_) => done.future);
+    when(() => control.write(any())).thenAnswer((invocation) {
+      final data = invocation.positionalArguments.single as List<int>;
+      final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+      final visibility = request['type'] == 'client_visibility';
+      if (visibility) {
+        requests.add((connection, request['hidden'] == true));
+      }
+      scheduleMicrotask(
+        () => send(
+          visibility && failVisibility
+              ? {'id': request['id'], 'type': 'error', 'error': 'boom'}
+              : {
+                  'id': request['id'],
+                  'type': visibility ? 'client_visibility' : 'window_list',
+                  'status': 'ok',
+                  'windows': const <Object?>[],
+                },
+        ),
+      );
+    });
+    return control;
+  }
+
+  /// Drops the current control connection, as a network blip does.
+  void dropConnection() => connections.last.complete();
 }
