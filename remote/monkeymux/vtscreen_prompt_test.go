@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 type semanticParityCase struct {
@@ -190,5 +191,35 @@ func TestSemanticPromptCloneAndReset(t *testing.T) {
 	}
 	if c.main.prompt[0] != vtPromptPrimary || c.semantic().cursorKeys != vtCursorKeysLine || c.main.rows[0][2].sem != vtSemInput {
 		t.Fatalf("clone lost the prompt: %v %+v", c.main.prompt, *c.semantic())
+	}
+}
+
+// TestSemanticPromptMarksReachAttachedClients checks that a window's OSC 133
+// and 633 marks, options included, reach attached clients in live output and
+// survive the replay filter, while the window's model applies them.
+func TestSemanticPromptMarksReachAttachedClients(t *testing.T) {
+	server := newMuxServer("test")
+	server.windows = []*muxWindow{{id: "@1", index: 0, lastActivity: time.Now()}}
+	server.activeID = "@1"
+	conn := &recordingConn{}
+	registerTestAttachClient(t, server, conn, "client", 80, 24)
+
+	output := osc133("A;click_events=1;cl=line;special_key=1;redraw=0;aid=42") + "$ " + osc133("B") +
+		"ls\r\n" + osc133("C;cmdline_url=ls") + "out\r\n" + osc133("D;0") +
+		"\x1b]633;A\x07$ \x1b]633;B\x07"
+	// A mark split across reads still arrives whole.
+	server.handleWindowOutput("@1", []byte(output[:12]))
+	server.handleWindowOutput("@1", []byte(output[12:]))
+	waitForRecordedOutput(t, conn, output)
+
+	if replay := string(stripTerminalQueriesFromReplay([]byte(output))); replay != output {
+		t.Fatalf("replay filter changed the marks: %q", replay)
+	}
+	server.mu.Lock()
+	screen := server.windows[0].screenLocked()
+	prompt, content := screen.main.prompt[2], screen.semMain.content
+	server.mu.Unlock()
+	if prompt != vtPromptPrimary || content != vtSemInput {
+		t.Fatalf("model prompt row %d, content %d", prompt, content)
 	}
 }
