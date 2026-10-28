@@ -182,6 +182,18 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// placeholder cells; reporting support there would produce permanent holes.
   bool kittyGraphicsEnabled = true;
 
+  /// Whether graphics transmissions and placements (`a=t`, `a=T`, `a=p`) get
+  /// Kitty's full set of replies: OK acknowledgements and their errors.
+  ///
+  /// Turn this off behind a multiplexer (MonkeyMux, tmux). It routes the
+  /// replies it expects back to the window that asked, and it cannot know
+  /// whether a transmission will be answered: `q=1` silences only OK. With
+  /// this off the terminal answers graphics commands only where it always
+  /// has, so no reply can arrive that the multiplexer would type into the
+  /// wrong window: queries, animation commands, a transmission by image
+  /// number (whose reply carries the id it was given) and storage failures.
+  bool kittyGraphicsTransmissionReplies = true;
+
   /// The `{imageId: sourceSignature}` of every Kitty image currently held across
   /// both the main and alternate screens (decoded or still pending).
   ///
@@ -2319,6 +2331,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (_graphicsResponseSuppressed(args, success: error == null)) {
       return;
     }
+    if (!kittyGraphicsTransmissionReplies) {
+      final reply = _multiplexedGraphicsReply(args, error, imageId: imageId);
+      if (reply != null) onOutput?.call(reply);
+      return;
+    }
     final id = imageId ?? int.tryParse(args['i'] ?? '') ?? 0;
     final number = int.tryParse(args['I'] ?? '') ?? 0;
     if (id <= 0 && number <= 0) {
@@ -2956,10 +2973,59 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     );
   }
 
+  /// The reply a graphics command gets with [kittyGraphicsTransmissionReplies]
+  /// off, or null for none: the replies the terminal sent before Kitty's
+  /// acknowledgements were added, in the form it sent them. Queries,
+  /// animation commands and disabled-graphics errors are answered whether or
+  /// not they name an image; a transmission only for its image number or a
+  /// storage failure; a placement or delete never.
+  String? _multiplexedGraphicsReply(
+    Map<String, String> args,
+    String? error, {
+    int? imageId,
+  }) {
+    final number = int.tryParse(args['I'] ?? '') ?? 0;
+    String reply(List<String> control) =>
+        '\x1b_G${control.join(',')};${error ?? 'OK'}\x1b\\';
+    final echoed = <String>[
+      if (args['i'] case final id? when id.isNotEmpty) 'i=$id',
+      if (args['I'] case final n? when n.isNotEmpty) 'I=$n',
+    ];
+    if (error != null && error.startsWith('ENOTSUP')) {
+      return reply(echoed);
+    }
+    switch (args['a'] ?? 't') {
+      case 'q':
+      case 'f':
+      case 'c':
+        return reply(echoed);
+      case 'a':
+        // Animation control has only ever answered a missing image.
+        return error != null && error.startsWith('ENOENT')
+            ? reply(echoed)
+            : null;
+      case 't':
+      case 'T':
+        if (error == null && number > 0 && imageId != null) {
+          return reply(['I=$number', 'i=$imageId']);
+        }
+        return error != null && error.startsWith('ENOSPC')
+            ? reply(echoed)
+            : null;
+      default:
+        return null;
+    }
+  }
+
   /// Answers a query (`a=q`): the image is loaded and checked like a real
   /// transmission, then discarded. As in Kitty, a query without an image id
   /// gets no reply, and the reply carries only that id.
   void _respondToGraphicsQuery(Map<String, String> args, Uint8List data) {
+    if (!kittyGraphicsTransmissionReplies) {
+      // A multiplexer expects one reply for every query, as before.
+      _respondToGraphics(args, _graphicsQueryError(args, data));
+      return;
+    }
     final imageId = int.tryParse(args['i'] ?? '') ?? 0;
     if (imageId <= 0) {
       return;

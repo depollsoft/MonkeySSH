@@ -14027,6 +14027,16 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
+			if silenced := silencedKittyReplayCommand(
+				data[i:sequenceEnd],
+			); silenced != nil {
+				if output == nil {
+					output = make([]byte, 0, len(data)+4)
+				}
+				output = append(output, data[copyStart:i]...)
+				output = append(output, silenced...)
+				copyStart = sequenceEnd
+			}
 			i = sequenceEnd
 			continue
 		}

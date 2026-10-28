@@ -1005,7 +1005,7 @@ void main() {
       );
       expect(bomb.length, lessThan(16 * 1024));
       expect(inflateZlibData(bomb, maxBytes: 4), isNull);
-      
+
       expect(inflateZlibData(bomb)!.length, 8 << 20);
 
       final responses = <String>[];
@@ -1054,6 +1054,58 @@ void main() {
       terminal.write('\x1b_Ga=q,i=1,f=100;${base64.encode(png)}\x1b\\');
       expect(responses.single, startsWith('\x1b_Gi=1;EINVAL'));
     });
+  });
+
+  group('behind a multiplexer', () {
+    Terminal multiplexed(List<String> responses) =>
+        _terminal(responses: responses)
+          ..kittyGraphicsTransmissionReplies = false;
+
+    testWidgets('transmissions and placements send no acknowledgements', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final responses = <String>[];
+        final terminal = multiplexed(responses);
+        final png = await _pngBase64(2, 2);
+        terminal
+          ..write('\x1b_Ga=T,i=1,f=100;$png\x1b\\')
+          ..write('\x1b_Ga=t,i=2,f=32,s=1,v=1;$_pixel\x1b\\')
+          ..write('\x1b_Ga=t,i=3,f=42,s=1,v=1;$_pixel\x1b\\')
+          ..write('\x1b_Ga=t,i=4,f=100;${base64.encode([1, 2])}\x1b\\')
+          ..write('\x1b_Ga=p,i=2,p=1\x1b\\')
+          ..write('\x1b_Ga=p,i=99\x1b\\')
+          ..write('\x1b_Ga=p,i=2,I=5\x1b\\')
+          ..write('\x1b_Ga=d,d=i,i=2\x1b\\');
+        await _until(() => terminal.graphics.imageById(1) != null);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(responses, isEmpty);
+      });
+    });
+
+    test(
+      'queries, numbers and animation commands still get their replies',
+      () async {
+        final responses = <String>[];
+        final terminal = multiplexed(responses);
+        terminal
+          ..write('\x1b_Ga=t,I=5,f=32,s=1,v=1;$_pixel\x1b\\')
+          ..write('\x1b_Ga=q,i=31,s=1,v=1,f=24;AAAA\x1b\\')
+          ..write('\x1b_Ga=q,s=1,v=1,f=24;AAAA\x1b\\')
+          ..write('\x1b_Ga=q,i=31,I=9,f=24;AAAA\x1b\\')
+          ..write('\x1b_Ga=a,i=99,s=3\x1b\\');
+        await _until(() => responses.length >= 5);
+        final assigned = terminal.graphics.imageIdForNumber(5);
+        expect(responses, [
+          '\x1b_GI=5,i=$assigned;OK\x1b\\',
+          '\x1b_Gi=31;OK\x1b\\',
+          '\x1b_G;OK\x1b\\',
+          '\x1b_Gi=31,I=9;'
+              'EINVAL: image ID and number are mutually exclusive\x1b\\',
+          '\x1b_Gi=99;ENOENT: image not found\x1b\\',
+        ]);
+      },
+    );
   });
 
   group('reset and storage', () {
