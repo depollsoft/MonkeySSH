@@ -199,7 +199,7 @@ const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
 const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?67l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -217,6 +217,8 @@ var (
 		"2004",
 		"2031",
 		"67",
+		"5",
+		"12",
 	}
 	postReplayPrivateModes = []string{
 		"7",
@@ -230,6 +232,8 @@ var (
 		"2004",
 		"2031",
 		"67",
+		"5",
+		"12",
 	}
 	groupedReplayPrivateModes = [][]string{
 		{"1047", "1049"},
@@ -253,6 +257,8 @@ var (
 		"2004": {},
 		"2031": {},
 		"67":   {},
+		"5":    {},
+		"12":   {},
 	}
 )
 
@@ -16975,13 +16981,14 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 // so the next replay does not re-enable what the terminal already reset.
 // DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
 // and focus reporting to their power-up values; RIS also leaves the alternate
-// screen and resets mouse reporting and the keyboard encodings. Neither
-// touches colour-scheme updates (2031), which the client keeps outside its
-// terminal state, or ConPTY's win32-input-mode.
+// screen and resets mouse reporting, the keyboard encodings, DECBKM, reverse
+// video, cursor blink and visibility reports. Neither touches colour-scheme
+// updates (2031), which the client keeps outside its terminal state, or
+// ConPTY's win32-input-mode.
 func (w *muxWindow) resetTerminalModesLocked(full bool) {
 	modes := []string{"1", "6", "7", "1004", "2004"}
 	if full {
-		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67")
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67", "5", "12")
 		w.resetKeyboardModesLocked()
 		w.resetVisibilityReportsLocked()
 	}

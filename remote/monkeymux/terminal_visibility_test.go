@@ -172,6 +172,26 @@ func TestClientVisibilityIsACapability(t *testing.T) {
 	}
 }
 
+// A window's display modes are replayed for it and reset for the next one,
+// so they do not leak into another window and its DECRQM answers.
+func TestReverseVideoAndCursorBlinkAreTrackedPerWindow(t *testing.T) {
+	window := &muxWindow{id: "@1", lastActivity: time.Now()}
+	window.observeTerminalModesLocked([]byte("\x1b[?5h\x1b[?12h"))
+	if got := string(terminalModePostReplaySequence(window)); !strings.Contains(got, "\x1b[?5h") ||
+		!strings.Contains(got, "\x1b[?12h") {
+		t.Fatalf("post replay = %q, want reverse video and blink restored", got)
+	}
+	for _, reset := range []string{"\x1b[?5l", "\x1b[?12l"} {
+		if !strings.Contains(activeWindowReplayPrefix, reset) {
+			t.Fatalf("the replay prefix does not contain %q", reset)
+		}
+	}
+	window.observeTerminalModesLocked([]byte("\x1bc"))
+	if window.privateModes["5"] || window.privateModes["12"] {
+		t.Fatal("RIS kept reverse video or blink")
+	}
+}
+
 func TestBackarrowKeyModeIsTrackedAndReplayed(t *testing.T) {
 	window := &muxWindow{id: "@1", lastActivity: time.Now()}
 	window.observeTerminalModesLocked([]byte("\x1b[?67h"))
