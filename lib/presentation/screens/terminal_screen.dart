@@ -12489,23 +12489,40 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 1
         ? systemVerticalBar
         : null;
-    final verticalBarControls = verticalBar == null
-        ? const <TerminalVerticalBarControl>{}
-        : resolveTerminalVerticalBarControls(
-            available: {
-              TerminalVerticalBarControl.menu,
-              TerminalVerticalBarControl.extraKeys,
-              TerminalVerticalBarControl.files,
-              if (isMobile) TerminalVerticalBarControl.keyboard,
-              if (impliesBack) TerminalVerticalBarControl.back,
-              if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
-            },
+    final keyControlsAvailable = {
+      TerminalVerticalBarControl.menu,
+      TerminalVerticalBarControl.extraKeys,
+      TerminalVerticalBarControl.files,
+      if (isMobile) TerminalVerticalBarControl.keyboard,
+      if (impliesBack) TerminalVerticalBarControl.back,
+      if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
+    };
+    // Propped up like a laptop, the top page tilts away, so the title bar
+    // keeps only the host line and its controls stand in a row of keys on
+    // the bottom page.
+    final showsProppedControls =
+        verticalBar == null && terminalFoldLayout == TerminalFoldLayout.propped;
+    // The controls standing as keys outside the title bar, or null when the
+    // title bar holds them all.
+    final keyControls = verticalBar != null
+        ? resolveTerminalVerticalBarControls(
+            available: keyControlsAvailable,
             capacity: verticalBarItemCapacity(
               resolveVerticalBarColumn(verticalBar, MediaQuery.of(context)),
             ),
-          );
-    bool leftOutOfVerticalBar(TerminalVerticalBarControl control) =>
-        verticalBar != null && !verticalBarControls.contains(control);
+          )
+        : showsProppedControls
+        ? resolveTerminalVerticalBarControls(
+            available: keyControlsAvailable,
+            capacity: _ProppedTerminalControls.capacityFor(
+              MediaQuery.sizeOf(context).width -
+                  MediaQuery.paddingOf(context).horizontal,
+              theme.platform,
+            ),
+          )
+        : null;
+    bool leftOutOfKeys(TerminalVerticalBarControl control) =>
+        keyControls != null && !keyControls.contains(control);
     // Without a title bar a line names the host. Held like a book, it heads
     // the navigator's page instead, so the terminal keeps its page's height.
     final showsIdentityLine =
@@ -12531,10 +12548,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         background: background,
       ),
     );
-    // Listed in the order the bar stacks them.
+    // The controls left out of the keys, in the order the keys stand.
     final railOverflowMenuItems = <Widget>[
       // Back pops through the screen's guards, as the key does.
-      if (impliesBack && leftOutOfVerticalBar(TerminalVerticalBarControl.back))
+      if (impliesBack && leftOutOfKeys(TerminalVerticalBarControl.back))
         MenuItemButton(
           style: TerminalMenuStyles.itemButtonStyle(context),
           leadingIcon: Icon(
@@ -12547,28 +12564,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ),
         ),
       if (showsMuxWindowsControl &&
-          leftOutOfVerticalBar(TerminalVerticalBarControl.muxWindows))
+          leftOutOfKeys(TerminalVerticalBarControl.muxWindows))
         _terminalRailOverflowMenuItem(
           context: context,
           button: muxWindowsButton,
           icon: Icons.window_outlined,
           label: 'Windows',
         ),
-      if (leftOutOfVerticalBar(TerminalVerticalBarControl.files))
+      if (leftOutOfKeys(TerminalVerticalBarControl.files))
         _terminalRailOverflowMenuItem(
           context: context,
           button: browseFilesButton,
           icon: Icons.folder_outlined,
           label: 'Browse Files',
         ),
-      if (leftOutOfVerticalBar(TerminalVerticalBarControl.extraKeys))
+      if (leftOutOfKeys(TerminalVerticalBarControl.extraKeys))
         _terminalRailOverflowMenuItem(
           context: context,
           button: extraKeysButton,
           icon: Icons.keyboard_command_key_rounded,
           label: _showKeyboardToolbar ? 'Hide Extra Keys' : 'Show Extra Keys',
         ),
-      if (isMobile && leftOutOfVerticalBar(TerminalVerticalBarControl.keyboard))
+      if (isMobile && leftOutOfKeys(TerminalVerticalBarControl.keyboard))
         _terminalRailOverflowMenuItem(
           context: context,
           button: keyboardButton,
@@ -12774,6 +12791,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         },
       ),
     );
+    // The keys standing outside the title bar, in the vertical bar from top
+    // to bottom or in the propped row from left to right: Back first and the
+    // keyboard key last, nearest the thumb.
+    final leadingKeys = <Widget>[
+      if (keyControls?.contains(TerminalVerticalBarControl.back) ?? false)
+        const BackButton(),
+    ];
+    final trailingKeys = <Widget>[
+      if (keyControls != null) ...[
+        if (keyControls.contains(TerminalVerticalBarControl.muxWindows))
+          muxWindowsButton,
+        if (keyControls.contains(TerminalVerticalBarControl.files))
+          browseFilesButton,
+        if (keyControls.contains(TerminalVerticalBarControl.extraKeys))
+          extraKeysButton,
+        if (keyControls.contains(TerminalVerticalBarControl.menu)) overflowMenu,
+        if (keyControls.contains(TerminalVerticalBarControl.keyboard))
+          keyboardButton,
+      ],
+    ];
     final terminalBody = Builder(
       builder: (bodyContext) {
         final showsKeyboardToolbar =
@@ -12857,6 +12894,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               onShowKeyboard: () => showsNativeAgent
                   ? _toggleNativeComposerKeyboard(false)
                   : _toggleSystemKeyboard(false),
+              controls: showsProppedControls
+                  ? _ProppedTerminalControls(
+                      leading: leadingKeys,
+                      trailing: trailingKeys,
+                    )
+                  : null,
             );
           case TerminalFoldLayout.none:
             break;
@@ -12894,6 +12937,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ? null
           : AppBar(
               titleSpacing: 8,
+              // Propped up, Back stands in the row of keys with the actions.
+              automaticallyImplyLeading: !showsProppedControls,
               title: terminalFoldLayout == TerminalFoldLayout.book
                   // The title stays on the navigator's page, off the fold.
                   ? ConstrainedBox(
@@ -12914,13 +12959,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     )
                   : terminalBarTitle,
               bottom: terminalBarBottom,
-              actions: [
-                if (showsMuxWindowsControl) muxWindowsButton,
-                browseFilesButton,
-                if (isMobile) keyboardButton,
-                extraKeysButton,
-                overflowMenu,
-              ],
+              actions: showsProppedControls
+                  ? null
+                  : [
+                      if (showsMuxWindowsControl) muxWindowsButton,
+                      browseFilesButton,
+                      if (isMobile) keyboardButton,
+                      extraKeysButton,
+                      overflowMenu,
+                    ],
             ),
       body: verticalBar == null
           ? terminalBody
@@ -12988,34 +13035,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           : VerticalBarRailPortal(
               rail: (context) => VerticalBarRail(
                 bar: verticalBar,
-                leading: [
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.back,
-                  ))
-                    const BackButton(),
-                ],
-                trailing: [
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.muxWindows,
-                  ))
-                    muxWindowsButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.files,
-                  ))
-                    browseFilesButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.extraKeys,
-                  ))
-                    extraKeysButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.menu,
-                  ))
-                    overflowMenu,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.keyboard,
-                  ))
-                    keyboardButton,
-                ],
+                leading: leadingKeys,
+                trailing: trailingKeys,
               ),
               child: scaffold,
             ),
@@ -13175,9 +13196,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Lays the connection screen out across a fold running left to right.
   ///
   /// The terminal fills the top page and never reaches past the fold, so it
-  /// stays readable while the device is propped up. The mux navigator takes
-  /// the bottom page above the keyboard toolbar. A tall system keyboard
-  /// shrinks the navigator first and only then the terminal.
+  /// stays readable while the device is propped up. The screen's [controls]
+  /// stand just below the fold, and the mux navigator takes the rest of the
+  /// bottom page above the keyboard toolbar. A tall system keyboard shrinks
+  /// the navigator first; once it covers the bottom page the controls ride
+  /// on it, and only then does the terminal shrink.
   Widget _buildProppedTerminalLayout(
     BuildContext bodyContext,
     DisplayFold fold,
@@ -13190,6 +13213,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required bool showsMuxNavigator,
     required double bodyTop,
     required VoidCallback onShowKeyboard,
+    Widget? controls,
   }) {
     // The connection route fills the window, so the fold's window
     // coordinates map onto the body once shifted by where it starts.
@@ -13223,6 +13247,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ),
             ),
           ),
+          // After the terminal and before the navigator, as focus traverses.
+          if (controls != null)
+            LayoutId(
+              id: _ProppedTerminalSlot.controls,
+              child: MediaQuery(data: pageMediaQuery, child: controls),
+            ),
           LayoutId(
             id: _ProppedTerminalSlot.navigator,
             child: MediaQuery(
@@ -13243,7 +13273,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       : LayoutBuilder(
                           builder: (context, constraints) {
                             // Without room for a row, the navigator leaves
-                            // focus and semantics, and the app bar offers
+                            // focus and semantics, and the keys offer
                             // Windows in its place.
                             final covered =
                                 constraints.maxHeight <
@@ -18165,7 +18195,95 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 }
 
-enum _ProppedTerminalSlot { terminal, navigator, toolbar }
+enum _ProppedTerminalSlot { terminal, controls, navigator, toolbar }
+
+/// The connection screen's controls while it is propped up like a laptop: a
+/// row of keys in the vertical bar's style, with Back at its start and the
+/// keyboard key at its end, nearest the thumb.
+///
+/// It stands just below the fold, and above the keyboard while that covers
+/// the bottom page, so the controls stay one reach from the keys.
+class _ProppedTerminalControls extends StatelessWidget {
+  const _ProppedTerminalControls({
+    required this.leading,
+    required this.trailing,
+  });
+
+  /// Keys at the start of the row.
+  final List<Widget> leading;
+
+  /// Keys at the end of the row, listed from start to end.
+  final List<Widget> trailing;
+
+  /// Space kept between the keys and the window's sides.
+  static const double sidePadding = 12;
+
+  /// The size of one key: the smallest touch target the platform allows,
+  /// so Android's tabletop posture gets 48 dp keys.
+  static double keyExtent(TargetPlatform platform) =>
+      muxNavigatorMinTouchTarget(platform);
+
+  /// How many keys fit across [width].
+  static int capacityFor(double width, TargetPlatform platform) => max(
+    0,
+    ((width - 2 * sidePadding + verticalBarItemGap) /
+            (keyExtent(platform) + verticalBarItemGap))
+        .floor(),
+  );
+
+  static List<Widget> _spaced(List<Widget> keys) => [
+    for (final (index, key) in keys.indexed) ...[
+      if (index > 0) const SizedBox(width: verticalBarItemGap),
+      key,
+    ],
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final extent = keyExtent(theme.platform);
+    return Material(
+      color: theme.colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        minimum: const EdgeInsets.symmetric(horizontal: sidePadding),
+        // The gutter keeps the keys clear of the crease above or below.
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            vertical: displayFoldContentGutter,
+          ),
+          child: VerticalBarButtonTheme(
+            child: Builder(
+              builder: (context) {
+                final size = WidgetStatePropertyAll(Size.square(extent));
+                return IconButtonTheme(
+                  data: IconButtonThemeData(
+                    style: IconButtonTheme.of(context).style?.copyWith(
+                      fixedSize: size,
+                      minimumSize: size,
+                      maximumSize: size,
+                    ),
+                  ),
+                  child: SizedBox(
+                    height: extent,
+                    child: Row(
+                      children: [
+                        ..._spaced(leading),
+                        const Spacer(),
+                        ..._spaced(trailing),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// The bottom page of a fold propped up like a laptop when the session has
 /// no window navigator for it: a keyboard deck. A tap raises the system
@@ -18228,8 +18346,8 @@ class _TerminalKeyboardDeck extends StatelessWidget {
   }
 }
 
-/// Stacks the terminal above the fold and the navigator and keyboard toolbar
-/// below it.
+/// Stacks the terminal above the fold, and the controls, navigator and
+/// keyboard toolbar below it.
 class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
   _ProppedTerminalLayoutDelegate({
     required this.topPageHeight,
@@ -18272,12 +18390,35 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
       );
     }
     final aboveToolbar = max(0, size.height - toolbarHeight).toDouble();
+    final bottomPageTop = topPageHeight + foldThickness;
+    // The controls head the bottom page while they fit there. A keyboard that
+    // leaves them no room pushes them up to ride on it and the toolbar, and
+    // they never straddle the fold.
+    var controlsTop = bottomPageTop;
+    var controlsBottom = bottomPageTop;
+    if (hasChild(_ProppedTerminalSlot.controls)) {
+      final controlsHeight = layoutChild(
+        _ProppedTerminalSlot.controls,
+        BoxConstraints.tightFor(width: size.width),
+      ).height;
+      if (bottomPageTop + controlsHeight > aboveToolbar) {
+        controlsTop = max(
+          0,
+          min(aboveToolbar, topPageHeight) - controlsHeight,
+        ).toDouble();
+      }
+      controlsBottom = controlsTop + controlsHeight;
+      positionChild(_ProppedTerminalSlot.controls, Offset(0, controlsTop));
+    }
+    final controlsAboveFold = controlsTop < bottomPageTop;
     // The last terminal row stays a gutter clear of the crease. A keyboard
-    // taller than the bottom page pushes the toolbar above the fold; the
-    // terminal then ends at the toolbar instead.
+    // taller than the bottom page pushes the toolbar, or the controls on it,
+    // above the fold; the terminal then ends there instead.
     final terminalHeight = max(
       0,
-      min(topPageHeight - displayFoldContentGutter, aboveToolbar),
+      controlsAboveFold
+          ? controlsTop
+          : min(topPageHeight - displayFoldContentGutter, aboveToolbar),
     ).toDouble();
     final terminalSize = Size(size.width, terminalHeight);
     layoutChild(
@@ -18287,7 +18428,10 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
     positionChild(_ProppedTerminalSlot.terminal, Offset.zero);
     onTerminalSize(terminalSize);
 
-    final navigatorTop = min(topPageHeight + foldThickness, aboveToolbar);
+    final navigatorTop = min(
+      controlsAboveFold ? bottomPageTop : controlsBottom,
+      aboveToolbar,
+    );
     layoutChild(
       _ProppedTerminalSlot.navigator,
       BoxConstraints.tight(Size(size.width, aboveToolbar - navigatorTop)),

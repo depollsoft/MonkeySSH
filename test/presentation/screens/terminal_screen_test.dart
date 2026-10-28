@@ -80,6 +80,8 @@ import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
+import 'package:monkeyssh/presentation/widgets/display_fold.dart'
+    show displayFoldContentGutter;
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
@@ -12751,18 +12753,213 @@ void main() {
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-    testWidgets('offers Windows in the app bar while the keyboard covers a '
-        'propped navigator', (tester) async {
+    // iPhone Duo's inner display held upright and propped up like a laptop.
+    void useProppedDisplay(WidgetTester tester, {bool keyboard = false}) {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      tester.view
+        // The keyboard covers the home indicator, and its inset reaches the
+        // top of the fold.
+        ..padding = FakeViewPadding(top: 82, bottom: keyboard ? 0 : 34)
+        ..viewPadding = const FakeViewPadding(top: 82, bottom: 34)
+        ..viewInsets = FakeViewPadding(bottom: keyboard ? 951 - 455.5 : 0);
+      if (keyboard) {
+        final controller = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: true);
+        addTearDown(() => controller.debugSetVisible(visible: null));
+      }
+    }
+
+    // The propped row's keys from left to right, keyboard key last.
+    List<Rect> proppedKeyRects(WidgetTester tester, List<String> tooltips) {
+      final rects = [
+        for (final tooltip in tooltips) tester.getRect(find.byTooltip(tooltip)),
+      ];
+      for (final (index, rect) in rects.indexed) {
+        final reason = tooltips[index];
+        expect(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byTooltip(reason),
+          ),
+          findsNothing,
+          reason: reason,
+        );
+        expect(find.byTooltip(reason).hitTestable(), findsOneWidget);
+        expect(rect.center.dy, rects.first.center.dy, reason: reason);
+        if (index > 0) {
+          expect(
+            rect.left,
+            greaterThan(rects[index - 1].right),
+            reason: reason,
+          );
+        }
+      }
+      // The keyboard key is nearest the thumb.
+      expect(rects.last.right, 669 - 12);
+      return rects;
+    }
+
+    FocusNode keyFocus(WidgetTester tester, String tooltip) => Focus.of(
+      tester.element(
+        find.descendant(
+          of: find.byTooltip(tooltip),
+          matching: find.byWidgetPredicate(
+            (widget) => widget is Icon || widget is BackButtonIcon,
+          ),
+        ),
+      ),
+    );
+
+    testWidgets(
+      'stands the propped controls in a row of keys below the '
+      'fold, before the window navigator',
+      (tester) async {
+        useProppedDisplay(tester);
+        await pumpTmuxScreen(tester, _MockTmuxService());
+
+        // The title bar keeps only the host line.
+        final appBar = find.byType(AppBar);
+        expect(
+          find.descendant(
+            of: appBar,
+            matching: find.text('Terminal test host'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: appBar, matching: find.byType(IconButton)),
+          findsNothing,
+        );
+        // The navigator shows on its page, so Windows needs no key.
+        expect(find.byTooltip('tmux windows'), findsNothing);
+
+        final platform = Theme.of(tester.element(find.byType(TerminalScreen)))
+            .platform;
+        final target = platform == TargetPlatform.iOS ? 44.0 : 48.0;
+        const tooltips = [
+          'Browse files',
+          'Hide extra keys',
+          'Show menu',
+          'Show system keyboard',
+        ];
+        final keys = proppedKeyRects(tester, tooltips);
+        final handle = tester.getRect(
+          find.byKey(const ValueKey('tmux-handle-bar')),
+        );
+        for (final (index, key) in keys.indexed) {
+          expect(key.size, Size.square(target), reason: tooltips[index]);
+        }
+        // The row stays clear of the crease, and the navigator takes the rest
+        // of the page.
+        expect(keys.first.top, 495.5 + displayFoldContentGutter);
+        expect(handle.top, keys.first.bottom + displayFoldContentGutter);
+        expect(
+          tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+          lessThanOrEqualTo(455.5),
+        );
+
+        // VoiceOver and Tab reach the keys after the terminal and before the
+        // windows.
+        expect(
+          tester.semantics.simulatedAccessibilityTraversal(),
+          containsAllInOrder([
+            predicate<SemanticsNode>(
+              (node) => node.label.contains('Terminal test host'),
+            ),
+            for (final tooltip in tooltips)
+              isSemantics(tooltip: tooltip, isButton: true),
+            predicate<SemanticsNode>((node) => node.label.contains('shell')),
+          ]),
+        );
+        final files = keyFocus(tester, 'Browse files')..requestFocus();
+        await tester.pump();
+        files.previousFocus();
+        await tester.pump();
+        expect(
+          FocusManager.instance.primaryFocus?.context
+              ?.findAncestorWidgetOfExactType<MonkeyTerminalView>(),
+          isNotNull,
+          reason: 'the terminal comes before the keys',
+        );
+        final keyboardKey = keyFocus(tester, 'Show system keyboard')
+          ..requestFocus();
+        await tester.pump();
+        keyboardKey.nextFocus();
+        await tester.pump();
+        expect(
+          FocusManager.instance.primaryFocus?.context
+              ?.findAncestorWidgetOfExactType<ListTile>(),
+          isNotNull,
+          reason: 'a window row comes after the keys',
+        );
+        await tester.pump(const Duration(seconds: 3));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets('moves Back into the propped row of keys', (tester) async {
+      useProppedDisplay(tester);
+      await tester.pumpWidget(
+        buildScreen(
+          child: const MaterialApp(home: Scaffold(body: Text('hosts'))),
+        ),
+      );
+      // A pushed screen, so Back applies.
+      unawaited(
+        tester
+            .state<NavigatorState>(find.byType(Navigator))
+            .push(
+              MaterialPageRoute<void>(
+                builder: (_) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              ),
+            ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byType(BackButton),
+        ),
+        findsNothing,
+      );
+      final back = tester.getRect(find.byTooltip('Back'));
+      final files = tester.getRect(find.byTooltip('Browse files'));
+      // Back starts the row, as it heads the vertical bar.
+      expect(back.left, 12);
+      expect(back.center.dy, files.center.dy);
+      expect(back.top, greaterThanOrEqualTo(495.5));
+
+      await tester.tap(find.byTooltip('Back'));
+      for (var frame = 0; frame < 4; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+      expect(find.byType(TerminalScreen), findsNothing);
+      expect(find.text('hosts'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('offers Windows among the propped keys while the keyboard '
+        'covers the navigator', (tester) async {
       useFoldedDisplay(
         tester,
         size: const Size(669, 951),
         fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
       );
       await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
-      final windowsAction = find.descendant(
-        of: find.byType(AppBar),
-        matching: find.byTooltip('tmux windows'),
-      );
+      final windowsAction = find.byTooltip('tmux windows');
       expect(windowsAction, findsNothing);
 
       // A window row takes keyboard focus.
@@ -12797,7 +12994,21 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(windowsAction, findsOneWidget);
+      // The keys ride on the extra keys, one reach from the keyboard.
+      final keys = proppedKeyRects(tester, [
+        'tmux windows',
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      final toolbar = tester.getRect(find.byType(KeyboardToolbar));
+      expect(toolbar.bottom, 455.5);
+      expect(keys.first.bottom, toolbar.top - displayFoldContentGutter);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(keys.first.top),
+      );
       expect(
         Focus.of(tester.element(find.text('shell'))).canRequestFocus,
         isFalse,
@@ -12833,6 +13044,15 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       expect(find.byType(BottomSheet), findsNothing);
+
+      // So does the Windows key.
+      await tester.tap(windowsAction);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
 
       // With the keyboard gone the page shows the windows again.
       tester.view.viewInsets = FakeViewPadding.zero;
@@ -13135,9 +13355,17 @@ void main() {
 
       final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
       expect(terminalRect.bottom, lessThanOrEqualTo(475));
+      // The keys head the bottom page, and the deck takes the rest.
+      final keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Show system keyboard',
+      ]);
+      expect(keys.first.top, 475 + displayFoldContentGutter);
       final deck = find.text('tap to type');
       expect(deck, findsOneWidget);
-      expect(tester.getRect(deck).top, greaterThan(475));
+      expect(tester.getRect(deck).top, greaterThan(keys.first.bottom));
       // The accessible name holds the visible text.
       expect(
         tester.getSemantics(find.bySemanticsLabel('Tap to type')),
@@ -13167,10 +13395,63 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('tap to type'), findsNothing);
+      // The keys ride on the extra keys, above the fold.
+      final keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      expect(
+        keys.first.bottom,
+        lessThanOrEqualTo(tester.getRect(find.byType(KeyboardToolbar)).top),
+      );
       expect(
         tester.getRect(find.byType(MonkeyTerminalView)).bottom,
-        lessThanOrEqualTo(475),
+        lessThanOrEqualTo(keys.first.top),
       );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps Fn and the keyboard key above a keyboard that covers '
+        'the propped page', (tester) async {
+      useProppedDisplay(tester, keyboard: true);
+      await pumpScreen(tester);
+
+      var keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      final toolbar = tester.getRect(find.byType(KeyboardToolbar));
+      expect(toolbar.bottom, 455.5);
+      expect(keys.first.bottom, toolbar.top - displayFoldContentGutter);
+
+      // Without the extra keys, the keys sit on the keyboard, clear of the
+      // crease.
+      await tester.tap(find.byTooltip('Hide extra keys'));
+      await tester.pump();
+      expect(find.byType(KeyboardToolbar), findsNothing);
+      keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Show extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      expect(keys.first.bottom, 455.5 - displayFoldContentGutter);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(keys.first.top),
+      );
+
+      tester.testTextInput.log.clear();
+      await tester.tap(find.byTooltip('Hide system keyboard'));
+      await tester.pump();
+      expect(
+        tester.testTextInput.log.map((call) => call.method),
+        contains('TextInput.hide'),
+      );
+      await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     group('with a system vertical bar', () {

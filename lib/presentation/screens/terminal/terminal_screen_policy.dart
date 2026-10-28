@@ -723,9 +723,10 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
       : TmuxBarPlacement.bottomOverlay;
 }
 
-/// A control the connection screen puts in the system vertical bar, listed
-/// in the order the bar keeps them when it runs short of room. The menu
-/// takes the controls the bar leaves out, so it stays while any key fits.
+/// A control the connection screen stands as a key outside its title bar,
+/// in the system vertical bar or, propped up, in the row below the fold.
+/// Listed in the order the keys are kept when they run short of room. The
+/// menu takes the controls left out, so it stays while any key fits.
 enum TerminalVerticalBarControl {
   /// Shows or hides the system keyboard. It sits just above the keyboard.
   keyboard,
@@ -747,7 +748,8 @@ enum TerminalVerticalBarControl {
   muxWindows,
 }
 
-/// Chooses the [available] controls the vertical bar has room for.
+/// Chooses the [available] controls the vertical bar, or the propped row,
+/// has room for.
 ///
 /// The bar holds [capacity] controls, fewer while the keyboard covers its
 /// lower part or a Live Activity lengthens the status cluster above them.
@@ -781,8 +783,9 @@ enum TerminalFoldLayout {
   book,
 
   /// Propped up like a laptop: the terminal fills the top page to read at a
-  /// distance; the bottom page, where the hands rest, holds the keyboard
-  /// toolbar above the window navigator or, without one, a keyboard deck.
+  /// distance; the bottom page, where the hands rest, holds the screen's
+  /// controls, then the window navigator or, without one, a keyboard deck,
+  /// and the keyboard toolbar.
   propped,
 }
 
