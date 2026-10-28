@@ -677,8 +677,6 @@ type restoreWindowState struct {
 
 type muxServer struct {
 	agentSessionBindings agentSessionBindingState
-	// kittyReplyRoutes routes Kitty graphics replies; see kitty_replies.go.
-	kittyReplyRoutes kittyReplyRoutes
 
 	session         string
 	width           int
@@ -1100,11 +1098,6 @@ func (r *attachInputRouting) addUserInput(data []byte, bracketedPaste bool) {
 }
 
 type attachClient struct {
-	// kittyReplyRoutes routes the client's Kitty graphics replies, and
-	// kittyReplyCarry holds one cut off by a read; see kitty_replies.go.
-	kittyReplyRoutes *kittyReplyRoutes
-	kittyReplyCarry  []byte
-
 	conn         net.Conn
 	id           string
 	width        int
@@ -7040,7 +7033,6 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		attach = s.attachConn
 		shouldWrite = s.attachCountLocked() > 0
 		maxAttachSequence = s.nextAttachSequence
-		s.kittyReplyRoutes.note(windowID, chunk)
 	} else if terminalBell {
 		window.alert = true
 	}
@@ -8047,9 +8039,6 @@ func (c *attachClient) routeInput(data []byte) attachInputRouting {
 		previousInputUtf8Remaining,
 		leadingInputUtf8Prefix,
 	)
-	if c.kittyReplyRoutes != nil && !c.inputBracketedPasteActive {
-		data = c.takeKittyRepliesLocked(data, &result)
-	}
 	c.routeInputLocked(data, leadingInputUtf8Prefix, &result)
 	c.trackRepliesLocked(result.actions)
 	return result
@@ -9117,7 +9106,6 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var themeHintWindowID string
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
-	client.kittyReplyRoutes = &s.kittyReplyRoutes
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
 	client.focusClaim = func(expectedFocusSequence uint64) {
 		s.focusAttachClientIfUnchanged(client, expectedFocusSequence)
@@ -14039,18 +14027,6 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
-			// A graphics command runs again silenced: the program already
-			// had its reply.
-			if silenced := silencedKittyReplayCommand(
-				data[i:sequenceEnd],
-			); silenced != nil {
-				if output == nil {
-					output = make([]byte, 0, len(data)+4)
-				}
-				output = append(output, data[copyStart:i]...)
-				output = append(output, silenced...)
-				copyStart = sequenceEnd
-			}
 			i = sequenceEnd
 			continue
 		}
@@ -14123,10 +14099,6 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 	case len(sequence) >= 1 && sequence[0] == 0x90:
 		payloadStart = 1
 		dcs = true
-	case len(sequence) >= 2 && sequence[0] == '\x1b' && sequence[1] == '_':
-		// Kitty graphics replies are routed by the image they name, not
-		// counted ahead; see kitty_replies.go.
-		return 0
 	default:
 		return 1
 	}
