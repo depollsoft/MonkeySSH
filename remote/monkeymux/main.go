@@ -13936,6 +13936,7 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 }
 
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
+	chunk = w.skipDiscardedKittyClipboardOscLocked(chunk)
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
 		return chunk
 	}
@@ -14018,7 +14019,8 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		payloadStart := i + 2
 		payloadEnd, terminatorLength, ok := findOscTerminator(data[payloadStart:])
 		if !ok {
-			if w.storeAttachPartialOscLocked(data[i:]) {
+			if w.storeAttachPartialOscLocked(data[i:]) ||
+				w.discardKittyClipboardOscLocked(data[payloadStart:]) {
 				if output == nil {
 					return data[:i]
 				}
@@ -14070,7 +14072,7 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 }
 
 func (w *muxWindow) storeAttachPartialOscLocked(data []byte) bool {
-	if len(data) > oscBufferLimitBytes {
+	if len(data) > attachPartialOscLimitBytes(data) {
 		w.attachOscBuffer = nil
 		return false
 	}

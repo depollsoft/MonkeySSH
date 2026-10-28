@@ -66,6 +66,7 @@ import '../../domain/services/diagnostics_log_service.dart';
 import '../../domain/services/git_working_tree_service.dart';
 import '../../domain/services/host_cli_launch_preferences_service.dart';
 import '../../domain/services/host_notification_prefs_reader.dart';
+import '../../domain/services/kitty_clipboard_service.dart';
 import '../../domain/services/local_notification_service.dart';
 import '../../domain/services/monetization_service.dart';
 import '../../domain/services/monkeymux_installer_service.dart';
@@ -16805,8 +16806,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return true;
     }
     _followLiveOutput();
-    _terminalUserInputGeneration++;
-    final sent = await session.kittyClipboard.sendPasteEvent(snapshot);
+    final pasteGeneration = ++_terminalUserInputGeneration;
+    final result = await session.kittyClipboard.sendPasteEvent(
+      snapshot,
+      // The event can wait behind a clipboard request still being answered;
+      // by then the user may have moved to another window or typed.
+      stillTargeted: () =>
+          mounted &&
+          _terminalUserInputGeneration == pasteGeneration &&
+          _terminalPasteModeOwnsCurrentContext(pasteMode) &&
+          _terminalPasteModeTargetsCurrentWindow(pasteMode),
+    );
+    if (result == KittyClipboardPasteEventResult.skipped) {
+      if (mounted) {
+        _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
+      }
+      return true;
+    }
     unawaited(
       ref
           .read(telemetryServiceProvider)
@@ -16820,7 +16836,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _terminalController.clearSelection();
     _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-    if (!sent) {
+    if (result == KittyClipboardPasteEventResult.failed) {
       _showClipboardMessage('Paste failed because the connection is closed.');
     }
     return true;

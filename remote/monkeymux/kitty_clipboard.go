@@ -40,10 +40,12 @@ const (
 	// client that answers OSC 5522.
 	capabilityHintKeyKittyClipboard = "osc5522"
 
-	// kittyClipboardReplyLimitBytes bounds a reply held while it is split
-	// across reads of a client's input. A data packet carries at most 4 KiB
-	// before base64, about 5.5 KiB on the wire.
-	kittyClipboardReplyLimitBytes = 64 << 10
+	// kittyClipboardPacketLimitBytes bounds one OSC 5522 packet held whole
+	// while it is split across reads, in a window's output or a client's
+	// input. A data packet carries at most 4 KiB before base64, about 5.5 KiB
+	// on the wire with its metadata; the rest is headroom. A window's packet
+	// past this is dropped rather than forwarded unchecked.
+	kittyClipboardPacketLimitBytes = 64 << 10
 
 	// kittyClipboardRepliesOwedGrace is how long after a request is forwarded,
 	// or a reply passes through, the client is assumed to be sending replies.
@@ -99,6 +101,14 @@ type kittyClipboardWindowState struct {
 	// forwarded notes that a request went to the client, which now owes a
 	// reply.
 	forwarded bool
+	// claimedWrite notes that a write was opened on the clients, replacing
+	// any other window's open write there, even if this read also ended it.
+	claimedWrite bool
+	// discarding drops the rest of a packet too large to hold whole, up to
+	// its terminator; discardEscape notes a read that ended on the ESC that
+	// may start that terminator.
+	discarding    bool
+	discardEscape bool
 }
 
 // kittyClipboardInputState holds a client's input that may be the start of
@@ -153,6 +163,98 @@ func (s *muxServer) kittyClipboardRouteLocked(window *muxWindow) kittyClipboardR
 		primary:  s.attachConn,
 		client:   s.attachClients[s.attachConn],
 	}
+}
+
+// attachPartialOscLimitBytes is how much of an OSC split across reads the
+// live stream holds back. An OSC 5522 packet is held whole, so its routing
+// (tagging, rejection, primary-only delivery) applies to all of it rather
+// than to whatever arrived in the read that completed it.
+func attachPartialOscLimitBytes(partial []byte) int {
+	if bytes.HasPrefix(partial, kittyClipboardOscIntroducer) {
+		return kittyClipboardPacketLimitBytes
+	}
+	return oscBufferLimitBytes
+}
+
+// discardKittyClipboardOscLocked drops a window's OSC 5522 packet that
+// outgrew kittyClipboardPacketLimitBytes before its terminator arrived,
+// given the packet's payload so far. The write it belongs to cannot complete
+// on the client any more and is answered EFBIG. Reports false for any other
+// OSC. Requires the server's mu.
+func (w *muxWindow) discardKittyClipboardOscLocked(payload []byte) bool {
+	if !isKittyClipboardOscPayload(payload) {
+		return false
+	}
+	state := &w.kittyClipboard
+	state.discarding = true
+	state.discardEscape = false
+	body := payload[len(kittyClipboardOscCode)+1:]
+	rawMetadata, _, _ := bytes.Cut(body, []byte(";"))
+	metadata, ok := parseKittyClipboardMetadata(string(rawMetadata))
+	if !ok {
+		return true
+	}
+	switch metadata.op {
+	case "write":
+		state.writeID = sanitizeKittyClipboardID(metadata.id)
+		state.write = kittyClipboardWriteRejected
+	case "wdata", "walias":
+		if state.write != kittyClipboardWriteForwarding {
+			return true
+		}
+		state.write = kittyClipboardWriteRejected
+	default:
+		// A read has no error status for a malformed request.
+		return true
+	}
+	state.replies = append(
+		state.replies,
+		kittyClipboardStatusReply("write", "EFBIG", state.writeID)...,
+	)
+	return true
+}
+
+// skipDiscardedKittyClipboardOscLocked removes from a window's next output
+// the rest of a packet discardKittyClipboardOscLocked dropped. Requires the
+// server's mu.
+func (w *muxWindow) skipDiscardedKittyClipboardOscLocked(chunk []byte) []byte {
+	state := &w.kittyClipboard
+	if !state.discarding {
+		return chunk
+	}
+	if state.discardEscape {
+		state.discardEscape = false
+		state.discarding = false
+		if len(chunk) > 0 && chunk[0] == '\\' {
+			return chunk[1:]
+		}
+		// The ESC started something else, which also ends the string: give
+		// it back.
+		return append([]byte{'\x1b'}, chunk...)
+	}
+	for index := 0; index < len(chunk); index++ {
+		switch chunk[index] {
+		case '\a':
+			state.discarding = false
+			return chunk[index+1:]
+		case 0x9c:
+			if !isUtf8ContinuationAt(chunk, index) {
+				state.discarding = false
+				return chunk[index+1:]
+			}
+		case '\x1b':
+			if index+1 >= len(chunk) {
+				state.discardEscape = true
+				return nil
+			}
+			state.discarding = false
+			if chunk[index+1] == '\\' {
+				return chunk[index+2:]
+			}
+			return chunk[index:]
+		}
+	}
+	return nil
 }
 
 // kittyClipboardMetadata is the part of an OSC 5522 packet's metadata
@@ -308,6 +410,7 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 		state.write = kittyClipboardWriteForwarding
 		state.writePrimary = state.route.primary
 		state.forwarded = true
+		state.claimedWrite = true
 		return tagged()
 	case "wdata", "walias":
 		switch state.write {
@@ -340,10 +443,11 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 // recorded for one read of window. A write that is open on the clients but
 // whose window left the screen, or whose client stopped being primary, can
 // no longer complete, and is answered EBUSY even if this read carried none
-// of its packets: a packet too large for the output scan passes through it
-// unseen, so it must not be forwarded later with a gap before it. A window
-// that opens a write takes the clients' only slot from any other window.
-// Returns the replies MonkeyMux owes window itself. Requires s.mu.
+// of its packets, so the rest of it is never forwarded with a gap before
+// it. A window that opens a write takes the clients' only slot from any
+// other window, which is answered EBUSY, even when the new write also ends
+// in the same read. Returns the replies MonkeyMux owes window itself.
+// Requires s.mu.
 func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time.Time) []byte {
 	state := &window.kittyClipboard
 	if state.write == kittyClipboardWriteForwarding &&
@@ -351,7 +455,7 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 		state.write = kittyClipboardWriteRejected
 		state.replies = append(state.replies, kittyClipboardStatusReply("write", "EBUSY", state.writeID)...)
 	}
-	if state.write == kittyClipboardWriteForwarding {
+	if state.claimedWrite {
 		if owner := s.kittyClipboardWriteWindow; owner != "" && owner != window.id {
 			if other := s.windowByIDLocked(owner); other != nil &&
 				other.kittyClipboard.write == kittyClipboardWriteForwarding {
@@ -363,7 +467,9 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 			}
 		}
 		s.kittyClipboardWriteWindow = window.id
-	} else if s.kittyClipboardWriteWindow == window.id {
+	}
+	if state.write != kittyClipboardWriteForwarding &&
+		s.kittyClipboardWriteWindow == window.id {
 		s.kittyClipboardWriteWindow = ""
 	}
 	if state.forwarded {
@@ -372,6 +478,7 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 	replies := state.replies
 	state.replies = nil
 	state.forwarded = false
+	state.claimedWrite = false
 	state.route = kittyClipboardRoute{}
 	return replies
 }
@@ -478,7 +585,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 		}
 		payloadEnd, terminatorLength, complete := findOscTerminator(rest[2:])
 		if !complete {
-			if len(rest) <= kittyClipboardReplyLimitBytes {
+			if len(rest) <= kittyClipboardPacketLimitBytes {
 				holdStart = index
 				break
 			}
