@@ -675,24 +675,47 @@ const kittyRelativePlacementDepthLimit = 8;
   required double cellWidth,
   required double cellHeight,
   required int availableColumns,
+}) =>
+    terminalImageSpanSize(
+      cols: placement.cols,
+      rows: placement.rows,
+      xOffset: placement.cellXOffset(cellWidth),
+      yOffset: placement.cellYOffset(cellHeight),
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+      availableColumns: availableColumns,
+    );
+
+/// [terminalImagePlacementSize] for a cell span [cols] x [rows] (0 for a side
+/// the image sizes) and in-cell offsets already kept inside the first cell.
+({double width, double height}) terminalImageSpanSize({
+  required int cols,
+  required int rows,
+  required double xOffset,
+  required double yOffset,
+  required double sourceWidth,
+  required double sourceHeight,
+  required double cellWidth,
+  required double cellHeight,
+  required int availableColumns,
 }) {
-  final xOffset = placement.cellXOffset(cellWidth);
-  final yOffset = placement.cellYOffset(cellHeight);
-  final spanWidth = placement.cols * cellWidth - xOffset;
-  final spanHeight = placement.rows * cellHeight - yOffset;
-  if (placement.cols > 0 && placement.rows > 0) {
+  final spanWidth = cols * cellWidth - xOffset;
+  final spanHeight = rows * cellHeight - yOffset;
+  if (cols > 0 && rows > 0) {
     return (width: spanWidth, height: spanHeight);
   }
   if (sourceWidth <= 0 || sourceHeight <= 0) {
     return (
-      width: math.max(1, placement.cols) * cellWidth,
-      height: math.max(1, placement.rows) * cellHeight,
+      width: math.max(1, cols) * cellWidth,
+      height: math.max(1, rows) * cellHeight,
     );
   }
-  if (placement.cols > 0) {
+  if (cols > 0) {
     return (width: spanWidth, height: sourceHeight * spanWidth / sourceWidth);
   }
-  if (placement.rows > 0) {
+  if (rows > 0) {
     return (width: sourceWidth * spanHeight / sourceHeight, height: spanHeight);
   }
   final maxWidth = math.max(1, availableColumns) * cellWidth;

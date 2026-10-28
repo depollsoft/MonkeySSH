@@ -3278,11 +3278,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     buffer.setCursorX(wraps ? 0 : targetX);
   }
 
-  /// The image's size in cells as Kitty computes it to move the cursor: an
-  /// explicit `c`/`r` span, the other side following the source aspect ratio
-  /// (including the in-cell offset), or its natural pixel size (here scaled
-  /// down to fit the row, as it is drawn). [dimensions] is the source size,
-  /// null when unknown.
+  /// The cells an image covers as it is painted, to move the cursor past it:
+  /// an explicit `c`/`r` span, the other side following the source aspect
+  /// ratio, or its natural pixel size scaled down to fit the row, with the
+  /// in-cell offset applied as [terminalImageSpanSize] applies it.
+  /// [dimensions] is the source size, null when unknown.
   ({int cols, int rows}) _graphicsDisplaySpan(
     Map<String, String> args,
     GraphicsManager manager,
@@ -3302,33 +3302,33 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     }
     final cellWidth = manager.cellPixelWidth;
     final cellHeight = manager.cellPixelHeight;
-    final xOffset = (int.tryParse(args['X'] ?? '') ?? 0)
+    final double xOffset = (int.tryParse(args['X'] ?? '') ?? 0)
         .toDouble()
         .clamp(0.0, max(0.0, cellWidth - 1));
-    final yOffset = (int.tryParse(args['Y'] ?? '') ?? 0)
+    final double yOffset = (int.tryParse(args['Y'] ?? '') ?? 0)
         .toDouble()
         .clamp(0.0, max(0.0, cellHeight - 1));
-    int cells(double pixels, double cell) =>
-        pixels.isFinite && pixels > 0 ? (pixels / cell).ceil() : 1;
-    if (cols > 0) {
-      final width = cols * cellWidth + xOffset;
-      return (
-        cols: cols,
-        rows: cells(width * source.height / source.width, cellHeight),
-      );
-    }
-    if (rows > 0) {
-      final height = rows * cellHeight + yOffset;
-      return (
-        cols: cells(height * source.width / source.height, cellWidth),
-        rows: rows,
-      );
-    }
-    final maxWidth = max(1, buffer.viewWidth - column) * cellWidth;
-    final scale = source.width > maxWidth ? maxWidth / source.width : 1.0;
+    // The cells the image covers as it is painted: the offset moves it
+    // inside the first cell, and shrinks an explicit span rather than
+    // growing past it.
+    final size = terminalImageSpanSize(
+      cols: cols,
+      rows: rows,
+      xOffset: xOffset,
+      yOffset: yOffset,
+      sourceWidth: source.width,
+      sourceHeight: source.height,
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+      availableColumns: max(1, buffer.viewWidth - column),
+    );
+    int cells(double offset, double pixels, double cell) =>
+        pixels.isFinite && pixels > 0
+            ? max(1, ((offset + pixels) / cell).ceil())
+            : 1;
     return (
-      cols: cells(source.width * scale + xOffset, cellWidth),
-      rows: cells(source.height * scale + yOffset, cellHeight),
+      cols: cols > 0 ? cols : cells(xOffset, size.width, cellWidth),
+      rows: rows > 0 ? rows : cells(yOffset, size.height, cellHeight),
     );
   }
 

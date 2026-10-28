@@ -902,6 +902,29 @@ void main() {
       );
     });
 
+    test('the cursor moves past the image as it is painted, offset included',
+        () {
+      final terminal = _terminal();
+      // A square 2x2 image at 10x20 px cells.
+      terminal.write(
+        '\x1b_Ga=t,i=1,f=32,s=2,v=2,q=2;'
+        '${base64.encode(List<int>.filled(16, 255))}\x1b\\',
+      );
+
+      // c=2 with X=9: 11 px wide, so 11 px high, inside the first row.
+      terminal.write('\x1b_Ga=p,i=1,p=1,c=2,X=9,q=2\x1b\\');
+      expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (2, 0));
+      final narrow = _placementOf(terminal, 1, clientPlacementId: 1)!;
+      expect(
+        terminal.graphics.placementsInRows(terminal.buffer.lines, 1, 1),
+        isNot(contains(narrow)),
+      );
+
+      // r=2 with Y=19: 21 px high, so 21 px wide, into a third column.
+      terminal.write('\x1b[5;1H\x1b_Ga=p,i=1,p=2,r=2,Y=19,q=2\x1b\\');
+      expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (3, 5));
+    });
+
     test('consecutive tall images do not overlap', () {
       // An eight-row, full-width image in a five-row terminal: the cursor
       // ends up below it after four moves and four scrolls (Ghostty #13887).
