@@ -22,7 +22,7 @@ import sys
 import unicodedata
 import zlib
 
-UNICODE_VERSION = '16.0.0'
+UNICODE_VERSION = '17.0.0'
 ROOT = Path(__file__).resolve().parents[1]
 GO_PATH = ROOT / 'remote/monkeymux/runewidth_table.go'
 DART_PATH = ROOT / 'third_party/xterm/lib/src/utils/unicode_v11.dart'
