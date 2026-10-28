@@ -1033,6 +1033,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int? _pendingTerminalMouseTapPointer;
   Offset? _pendingTerminalMouseTapDownPosition;
   Duration? _pendingTerminalMouseTapDownTimestamp;
+  // A selection the tap found, which the tap dismisses rather than moving the
+  // shell's cursor in its prompt.
+  bool _pendingTerminalMouseTapHadSelection = false;
   final Set<int> _terminalOutputPauseTouchPointers = <int>{};
   TerminalTextUnderline? _hoveredTerminalPathUnderline;
   List<({String path, TerminalTextUnderline underline, Rect touchRect})>
@@ -15265,13 +15268,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (event.kind != PointerDeviceKind.touch ||
         !allowTap ||
         terminalViewState == null ||
-        !terminalViewState.shouldSendTerminalTapPointerInput) {
+        !(terminalViewState.shouldSendTerminalTapPointerInput ||
+            terminalViewState.canMoveTerminalPromptCursor)) {
       return;
     }
 
     _pendingTerminalMouseTapPointer = event.pointer;
     _pendingTerminalMouseTapDownPosition = event.position;
     _pendingTerminalMouseTapDownTimestamp = event.timeStamp;
+    _pendingTerminalMouseTapHadSelection =
+        _isNativeSelectionMode || _hasActiveSystemSelection;
   }
 
   void _handleTerminalMouseTapPointerMove(PointerMoveEvent event) {
@@ -15303,10 +15309,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final hadSelection = _pendingTerminalMouseTapHadSelection;
     _clearPendingTerminalMouseTap(event.pointer);
+    final terminalViewState = _terminalViewKey.currentState;
+    // Without mouse tracking, a tap on a shell prompt's input moves the
+    // shell's cursor there when the prompt asked for it (OSC 133).
     final forwarded =
-        _terminalViewKey.currentState?.sendTerminalPrimaryTap(event.position) ??
-        false;
+        (terminalViewState?.sendTerminalPrimaryTap(event.position) ?? false) ||
+        (!hadSelection &&
+            (terminalViewState?.moveTerminalPromptCursor(event.position) ??
+                false));
     if (forwarded) {
       // A clicked TUI such as Claude Code moves its own cursor, so the IME's
       // copy of the text before the cursor no longer applies; later edits and
@@ -15322,6 +15334,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingTerminalMouseTapPointer = null;
     _pendingTerminalMouseTapDownPosition = null;
     _pendingTerminalMouseTapDownTimestamp = null;
+    _pendingTerminalMouseTapHadSelection = false;
   }
 
   void _handleTerminalDoubleTapPointerDown(

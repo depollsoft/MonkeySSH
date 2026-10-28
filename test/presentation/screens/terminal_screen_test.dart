@@ -16958,6 +16958,102 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    testWidgets(
+      'a tap on a shell prompt input moves its cursor and shows the keyboard',
+      (tester) async {
+        await pumpScreen(tester);
+        // The shell asked for clicks to move its cursor with arrow keys.
+        session.terminal!.write(
+          'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+        );
+        await tester.pumpAndSettle();
+        expect(tester.testTextInput.isVisible, isFalse);
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x, int y) => render.localToGlobal(
+          render.getOffset(CellOffset(x, y)) +
+              render.cellSize.center(Offset.zero),
+        );
+        String written() => shellWrites.map(String.fromCharCodes).join();
+        // Test taps carry no timestamps, so later ones are spaced out to stay
+        // single taps.
+        Future<void> tapAt(Offset position, Duration at) async {
+          final gesture = await tester.createGesture();
+          await gesture.down(position, timeStamp: at);
+          await gesture.up(timeStamp: at);
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+
+        shellWrites.clear();
+        await tapAt(cell(2, 1), Duration.zero);
+        expect(written(), '\x1b[D' * 7);
+        expect(tester.testTextInput.isVisible, isTrue);
+
+        // Output above the prompt is not its input.
+        shellWrites.clear();
+        await tapAt(cell(1, 0), const Duration(seconds: 1));
+        expect(written(), isEmpty);
+
+        tester.testTextInput.updateEditingValue(
+          _editingValue('hello', selectionOffset: 5),
+        );
+        await tester.pump();
+        shellWrites.clear();
+        await tapAt(cell(4, 1), const Duration(seconds: 2));
+        expect(written(), '\x1b[D' * 5);
+        // The shell moves its cursor, so the IME's text before it is stale.
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
+        expect(
+          client.currentTextEditingValue,
+          const TextEditingValue(
+            text: _deleteDetectionMarker,
+            selection: TextSelection.collapsed(offset: 2),
+          ),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tap that dismisses a selection leaves the prompt cursor alone',
+      (tester) async {
+        await pumpScreen(tester);
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07\$ \x1b]133;B\x07alpha beta',
+        );
+        await tester.pumpAndSettle();
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x) => render.localToGlobal(
+          render.getOffset(CellOffset(x, 0)) +
+              render.cellSize.center(Offset.zero),
+        );
+        await tester.longPressAt(cell(3));
+        await tester.pumpAndSettle();
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+
+        shellWrites.clear();
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        // The next tap reports the click, as fish asks with click_events=1.
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(
+          shellWrites.map(String.fromCharCodes).join(),
+          '\x1b[<0;9;1M\x1b[<0;9;1m',
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('toolbar Ctrl state flows into the screen IME handler', (
       tester,
     ) async {
