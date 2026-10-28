@@ -142,9 +142,12 @@ func (s *terminalScreen) semantic() *vtSemanticState {
 	return &s.semMain
 }
 
-// isSemanticPromptOSC reports an OSC payload that is a shell integration mark.
+// isSemanticPromptOSC reports an OSC payload that is a shell integration mark
+// ("133;" or "633;"). The parser asks for every byte of a long OSC, such as an
+// inline image, so it compares bytes rather than calling into bytes.
 func isSemanticPromptOSC(head []byte) bool {
-	return bytes.HasPrefix(head, []byte("133;")) || bytes.HasPrefix(head, []byte("633;"))
+	return len(head) >= 4 && head[3] == ';' && head[2] == '3' && head[1] == '3' &&
+		(head[0] == '1' || head[0] == '6')
 }
 
 // promptKind is the row mark an OSC 133 command's k= option names: i (the
