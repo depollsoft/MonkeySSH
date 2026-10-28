@@ -69,6 +69,33 @@ void registerAcpTranscriptToolsTests() {
     setUp(() => FluttyTheme.debugUseSystemFonts = true);
     tearDown(() => FluttyTheme.debugUseSystemFonts = false);
 
+    testWidgets('bar lines its contents up with a centred reading column', (
+      tester,
+    ) async {
+      final search = AcpTranscriptSearchController()..open();
+      addTearDown(search.dispose);
+      Future<(Rect, Rect)> layout({required double gutter}) async {
+        await tester.pumpWidget(
+          _app(AcpTranscriptSearchBar(controller: search, gutter: gutter)),
+        );
+        return (
+          tester.getRect(
+            find.byKey(const ValueKey('acp-transcript-search-bar')),
+          ),
+          tester.getRect(
+            find.byKey(const ValueKey('acp-transcript-search-field')),
+          ),
+        );
+      }
+
+      final (flushBar, flushField) = await layout(gutter: 0);
+      final (bar, field) = await layout(gutter: 40);
+      expect(field.left, flushField.left + 40);
+      expect(field.right, flushField.right - 40);
+      // The bar itself still spans the pane.
+      expect(bar, flushBar);
+    });
+
     testWidgets('bar shows the count, the match context and navigates', (
       tester,
     ) async {

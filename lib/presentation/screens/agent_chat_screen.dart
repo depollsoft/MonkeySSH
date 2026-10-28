@@ -1527,6 +1527,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                               maintainFocusability: true,
                               child: AcpTranscriptSearchBar(
                                 controller: _search,
+                                gutter: gutter,
                               ),
                             ),
                           // The take-over sits on the composer it unlocks, in
@@ -1538,6 +1539,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                 'acp-chat-writer-lease-banner',
                               ),
                               writer: writer,
+                              gutter: gutter,
                               busy: _takingOver,
                               failed: _takeOverFailed,
                               onTakeOver: () => unawaited(_takeOver()),
