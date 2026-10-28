@@ -296,6 +296,39 @@ void main() {
       });
     });
 
+    testWidgets('the old image keeps painting while its replacement decodes', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final terminal = _terminal();
+        final red = await _pngBase64(2, 2);
+        final blue = await _pngBase64(2, 2, color: const Color(0xFF0000FF));
+        terminal.write('\x1b_Ga=T,i=5,f=100,c=2,r=1,q=2;$red\x1b\\');
+        await _until(() => terminal.graphics.hasPlacements);
+        final old = terminal.graphics.imageById(5);
+
+        // Hold every decode slot so the replacement cannot finish yet.
+        for (var i = 0; i < 3; i++) {
+          await terminalGraphicsDecodeGate.acquire();
+        }
+        try {
+          terminal.write(
+            '\x1b[6;1H\x1b_Ga=T,i=5,f=100,c=2,r=1,q=2;$blue\x1b\\',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(identical(terminal.graphics.imageById(5), old), isTrue);
+          expect(_placementOf(terminal, 5)!.row, 0);
+        } finally {
+          for (var i = 0; i < 3; i++) {
+            terminalGraphicsDecodeGate.release();
+          }
+        }
+        await _until(() => _placementOf(terminal, 5)?.row == 5);
+        expect(terminal.graphics.placements, hasLength(1));
+        expect(identical(terminal.graphics.imageById(5), old), isFalse);
+      });
+    });
+
     test('a=t with an existing id drops the placements of the old image', () {
       final terminal = _terminal();
       _store(terminal, 5);

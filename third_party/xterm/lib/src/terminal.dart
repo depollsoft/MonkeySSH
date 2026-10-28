@@ -2368,17 +2368,22 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     final signature = terminalGraphicsSourceSignature(data);
 
     // Retransmitting an image id replaces the image: Kitty deletes the old one
-    // with every placement before loading the new data, so a load that fails
-    // leaves no stale image behind. Identical bytes keep the decoded data.
-    if (explicitImageId != null) {
-      manager.replaceImageForRetransmission(
-        explicitImageId,
-        keepData: manager.hasImageWithSignature(explicitImageId, signature) ||
-            manager.hasPendingWithSignature(explicitImageId, signature),
-      );
+    // with every placement as the new data starts loading, so a load that
+    // fails leaves no stale image behind. Commands on the same image wait for
+    // this one, so the old image is only dropped once the outcome is known,
+    // just before the new one is stored: it keeps painting while the new one
+    // decodes, where a synchronous Kitty would show no gap either.
+    void replaceOldImage({required bool keepData}) {
+      if (explicitImageId != null) {
+        manager.replaceImageForRetransmission(
+          explicitImageId,
+          keepData: keepData,
+        );
+      }
     }
 
     void fail(String error) {
+      replaceOldImage(keepData: false);
       _rollbackGraphicsImageNumberReservation(manager, imageNumberReservation);
       anchor?.dispose();
       _respondToGraphics(args, error, imageId: imageId);
@@ -2435,6 +2440,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // compositing. The signature guards against an app that updates an id with
     // new content (different bytes -> miss -> decode).
     if (imageId != null && manager.hasImageWithSignature(imageId, signature)) {
+      replaceOldImage(keepData: true);
       manager.imageById(imageId); // keep retained and bump LRU access
       observer?.call(
         payloadBytes: payload.length,
@@ -2485,6 +2491,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           fail(payloadError);
           return null;
         }
+        replaceOldImage(keepData: false);
         final sourceDimensions = _graphicsPayloadDimensions(args, payload);
         manager.storePendingImage(
           imageId,
@@ -2500,6 +2507,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           mappedImageId: imageNumberReservation?.imageId,
           previousImageId: imageNumberReservation?.previousImageId,
         );
+      } else {
+        replaceOldImage(keepData: true);
       }
       if (!manager.hasPendingImage(imageId)) {
         _rollbackGraphicsImageNumberReservation(
@@ -2534,6 +2543,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       inflateMicros: inflateMicros,
       imageNumberReservation: imageNumberReservation,
       fail: fail,
+      replaceOldImage: () => replaceOldImage(keepData: false),
     );
   }
 
@@ -2552,6 +2562,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     required int inflateMicros,
     required _GraphicsImageNumberReservation? imageNumberReservation,
     required void Function(String error) fail,
+    required void Function() replaceOldImage,
   }) async {
     final observer = terminalGraphicsDecodeObserver;
     final decodeStopwatch = observer == null ? null : (Stopwatch()..start());
@@ -2587,6 +2598,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       return;
     }
 
+    replaceOldImage();
     final storedImageId = imageId == null
         ? manager.storeDecodedImage(
             decoded,
