@@ -246,8 +246,8 @@ class KittyClipboardPasteRead {
   /// The representations to announce, when [useAttachmentFlow] is false.
   final KittyClipboardSnapshot? snapshot;
 
-  /// Whether the clipboard holds files or an oversized image, which the
-  /// upload flow handles instead.
+  /// Whether the clipboard holds files, or an image the protocol cannot
+  /// carry, which the upload flow handles instead.
   final bool useAttachmentFlow;
 }
 
