@@ -1970,6 +1970,43 @@ class GraphicsManager {
   /// Whether image [id] has been transmitted but not yet decoded.
   bool hasPendingImage(int id) => _pendingImages.containsKey(id);
 
+  /// The source size of image [id], decoded or pending, and the size its
+  /// pixels are kept at: the decoded size, or for a pending image the size
+  /// the decoder will keep (see [terminalDecodedImageSize]). Placement
+  /// geometry is computed in the kept size, so an image covers the same
+  /// cells before and after its decode. Null when the image or its size is
+  /// unknown.
+  ({int sourceWidth, int sourceHeight, int width, int height})? imageGeometry(
+    int id,
+  ) {
+    final image = _images[id];
+    if (image != null) {
+      return (
+        sourceWidth: image.sourceWidth,
+        sourceHeight: image.sourceHeight,
+        width: image.image.width,
+        height: image.image.height,
+      );
+    }
+    final pending = _pendingImages[id];
+    if (pending == null ||
+        pending.sourceWidth <= 0 ||
+        pending.sourceHeight <= 0) {
+      return null;
+    }
+    final kept = terminalDecodedImageSize(
+      pending.sourceWidth,
+      pending.sourceHeight,
+      format: pending.format,
+    );
+    return (
+      sourceWidth: pending.sourceWidth,
+      sourceHeight: pending.sourceHeight,
+      width: kept.width,
+      height: kept.height,
+    );
+  }
+
   /// Intrinsic dimensions retained for a pending encoded image, if known.
   ({int width, int height})? pendingImageDimensions(int id) {
     final pending = _pendingImages[id];
@@ -3340,13 +3377,12 @@ class GraphicsManager {
   ({double width, double height})? _placementSourceSize(
     TerminalImagePlacement placement,
   ) {
-    final image = _images[placement.imageId];
-    final pending = _pendingImages[placement.imageId];
-    final sourceWidth = image?.sourceWidth ?? pending?.sourceWidth ?? 0;
-    final sourceHeight = image?.sourceHeight ?? pending?.sourceHeight ?? 0;
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
+    final geometry = imageGeometry(placement.imageId);
+    if (geometry == null) {
       return null;
     }
+    final sourceWidth = geometry.sourceWidth;
+    final sourceHeight = geometry.sourceHeight;
 
     final left = placement.srcX.clamp(0, sourceWidth).toDouble();
     final top = placement.srcY.clamp(0, sourceHeight).toDouble();
@@ -3364,11 +3400,10 @@ class GraphicsManager {
       return null;
     }
 
-    final decoded = image?.image;
+    // In the kept pixels, as the painter sizes it.
     return (
-      width: logicalWidth * (decoded == null ? 1 : decoded.width / sourceWidth),
-      height:
-          logicalHeight * (decoded == null ? 1 : decoded.height / sourceHeight),
+      width: logicalWidth * geometry.width / sourceWidth,
+      height: logicalHeight * geometry.height / sourceHeight,
     );
   }
 
@@ -3838,6 +3873,34 @@ void _disposeDecodedTerminalImage(DecodedTerminalImage decoded) {
 /// while bounding each decode to ~6.5 MB.
 const _maxDecodedImageDimension = 1280;
 
+/// Format standing for any encoded container in [terminalDecodedImageSize].
+const _encodedImageFormat = 100;
+
+/// The size the decoder keeps an image of [width] x [height] source pixels
+/// in Kitty [format] at: raw pixels (`f=24`, `f=32`) as they are, an encoded
+/// image scaled down to [_maxDecodedImageDimension] on its longest side.
+/// Placement geometry uses it before the decode as well as after, so the
+/// cursor, row lookups and painting all size an image the same way.
+({int width, int height}) terminalDecodedImageSize(
+  int width,
+  int height, {
+  required int format,
+}) {
+  final longest = math.max(width, height);
+  if (format == 24 ||
+      format == 32 ||
+      longest <= _maxDecodedImageDimension ||
+      width <= 0 ||
+      height <= 0) {
+    return (width: width, height: height);
+  }
+  final scale = _maxDecodedImageDimension / longest;
+  return (
+    width: (width * scale).round().clamp(1, _maxDecodedImageDimension),
+    height: (height * scale).round().clamp(1, _maxDecodedImageDimension),
+  );
+}
+
 /// Maximum number of frames decoded from one encoded animation.
 const _maxDecodedAnimationFrames = 256;
 
@@ -3962,17 +4025,14 @@ Future<DecodedTerminalImage?> _decodeEncodedImageSequenceBounded(
     final srcHeight = descriptor.height;
     int? targetWidth;
     int? targetHeight;
-    final longest = srcWidth > srcHeight ? srcWidth : srcHeight;
-    if (longest > _maxDecodedImageDimension && longest > 0) {
-      final scale = _maxDecodedImageDimension / longest;
-      targetWidth = (srcWidth * scale).round().clamp(
-            1,
-            _maxDecodedImageDimension,
-          );
-      targetHeight = (srcHeight * scale).round().clamp(
-            1,
-            _maxDecodedImageDimension,
-          );
+    final kept = terminalDecodedImageSize(
+      srcWidth,
+      srcHeight,
+      format: _encodedImageFormat,
+    );
+    if (kept.width != srcWidth || kept.height != srcHeight) {
+      targetWidth = kept.width;
+      targetHeight = kept.height;
     }
     final codec = await descriptor.instantiateCodec(
       targetWidth: targetWidth,
