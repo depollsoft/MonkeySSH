@@ -964,6 +964,7 @@ type muxWindow struct {
 	// place each command of the next chunk on the screen it ran on.
 	kittyScreenMode1047 bool
 	kittyScreenMode1049 bool
+	kittyTracking       kittyPlacementTracking
 }
 
 type terminalOutputParserState int
@@ -7016,6 +7017,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
 	}
+	window.snapshotKittyScreenLocked(chunk)
 	cursorReports, answered := window.appendHistoryReportingCursorLocked(
 		chunk,
 		cursorQueries,
@@ -7029,6 +7031,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	if window.observeKittyGraphicsLocked(chunk) {
 		s.enforceGlobalKittyImageBudgetLocked()
 	}
+	window.releaseKittyScreenSnapshotLocked()
 	if s.activeID == windowID {
 		attach = s.attachConn
 		shouldWrite = s.attachCountLocked() > 0
@@ -14360,8 +14363,10 @@ type kittyGraphicsEvent struct {
 	// the display command a placement event replays.
 	control   map[string]string
 	placement []byte
-	// offset is where the command starts in the scanned data.
+	// offset and end are where the command starts and ends in the scanned
+	// data.
 	offset int
+	end    int
 }
 
 // scanKittyTransmissions parses complete Kitty graphics events from the front of
@@ -14408,17 +14413,17 @@ func scanKittyTransmissions(
 			args := parseKittyControl(kittyControl(data, i, end))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, delete: true, control: args,
-				offset: i,
+				offset: i, end: end,
 			})
 		} else if buf != nil {
+			args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
-				offset: i,
+				control: args, offset: i,
 			})
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
 				// a=p after the image, since the root itself replays as a=t.
-				args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 				if args["a"] == "T" && kittyNonZero(args["P"]) &&
 					!kittyNonZero(args["U"]) {
 					if command := kittyRelativeCommandFromRoot(args); command != nil {
@@ -14569,6 +14574,7 @@ func (w *muxWindow) observeKittyGraphicsLocked(chunk []byte) bool {
 	}
 	if len(remainder) == 0 {
 		w.clearKittyGraphicsPendingLocked()
+		w.kittyTracking.modeCarry = kittyPartialModeChange(data)
 		return changed
 	}
 	w.kittyGraphicsPending = append(w.kittyGraphicsPending[:0], remainder...)
@@ -14693,7 +14699,11 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			continue
 		}
 		if event.delete {
-			if w.applyKittyImageDeleteLocked(event, screen.at(event.offset)) {
+			if w.applyKittyImageDeleteLocked(
+				event,
+				screen.at(event.offset),
+				w.kittyScreenAtLocked(data, event.offset, event.end),
+			) {
 				changed = true
 			}
 			continue
@@ -14747,6 +14757,14 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			// A retransmission replaces the image and every placement of it.
 			w.dropKittyImagePlacementsLocked(id)
 			w.storeKittyImageLocked(id, event.buf)
+			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
+				!kittyNonZero(event.control["P"]) {
+				w.noteKittyPhysicalPlacementLocked(
+					id,
+					kittyIDValue(event.control["p"]),
+					screen.at(event.offset),
+				)
+			}
 			changed = true
 		}
 	}
@@ -14854,6 +14872,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
 	w.kittyPlacements = nil
+	w.kittyTracking.physical = nil
 	return changed
 }
 

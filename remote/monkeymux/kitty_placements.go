@@ -29,6 +29,35 @@ const maxRetainedKittyPlacements = 256
 // eight parent links in a relative placement chain.
 const kittyRelativePlacementDepthLimit = 8
 
+// kittyPlacementTracking is the state, beyond the kept placements, that
+// MonkeyMux needs to follow the client's placements through window output.
+type kittyPlacementTracking struct {
+	// modeCarry is the start of an alternate-screen mode change cut off at
+	// the end of the last output, which the next output completes.
+	modeCarry []byte
+	// physical lists the physical placements the window made, which a replay
+	// never restores but a relative placement can name as its parent. A
+	// delete MonkeyMux cannot resolve leaves them listed, so a relative
+	// placement naming one is taken as accepted and is not kept.
+	physical []kittyPhysicalPlacement
+	// chunk, chunkScreen and chunkWritten give the screen model as it stood
+	// at a positional delete in the output being observed: a copy taken
+	// before chunk was written, advanced to each delete in turn.
+	chunk        []byte
+	chunkScreen  *terminalScreen
+	chunkWritten int
+}
+
+// kittyPhysicalPlacement is a physical placement a window made.
+type kittyPhysicalPlacement struct {
+	imageID     string
+	placementID string
+	alt         bool
+}
+
+// maxTrackedKittyPhysicalPlacements bounds the physical placements listed.
+const maxTrackedKittyPhysicalPlacements = 512
+
 // kittyRetainedPlacement is one kept virtual or relative placement.
 type kittyRetainedPlacement struct {
 	// imageID is the retained image the placement shows.
@@ -176,6 +205,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 	case parentImage == "":
 		// A physical placement: it replaces any kept placement with the
 		// same image and placement id, and is not kept itself.
+		w.noteKittyPhysicalPlacementLocked(imageID, placementID, alt)
 		if placementID == "" {
 			return false
 		}
@@ -197,14 +227,18 @@ func (w *muxWindow) observeKittyPlacementLocked(
 		alt,
 	)
 	if !ok {
-		if !w.kittyImageKnownLocked(parentImage, alt) {
-			// The client has no such parent image either: it answers
+		if !w.kittyPhysicalParentLocked(
+			parentImage,
+			kittyIDValue(args["Q"]),
+			alt,
+		) {
+			// The client has no such parent placement either: it answers
 			// ENOPARENT and keeps the placement it had.
 			return false
 		}
 		// The parent is a physical placement, which no replay restores, so
-		// neither can this placement be. It still replaces a kept one with
-		// the same ids on the client.
+		// neither can this placement be. It replaces a kept one with the
+		// same ids on the client, so that one goes.
 		changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 			return p.key() == key && p.alt == alt
 		})
@@ -240,18 +274,59 @@ func kittyIntValue(value string) int {
 	return int(n)
 }
 
-// kittyImageKnownLocked reports whether the client could hold imageID: it is
-// retained, or a kept placement on the screen shows it.
-func (w *muxWindow) kittyImageKnownLocked(imageID string, alt bool) bool {
-	if _, ok := w.kittyImages[imageID]; ok {
-		return true
+// noteKittyPhysicalPlacementLocked lists a physical placement the window made
+// (a=p, or a=T, without U= or P=); the same image and placement id replace it.
+func (w *muxWindow) noteKittyPhysicalPlacementLocked(
+	imageID, placementID string,
+	alt bool,
+) {
+	t := &w.kittyTracking
+	if placementID != "" {
+		for _, p := range t.physical {
+			if p.imageID == imageID && p.placementID == placementID && p.alt == alt {
+				return
+			}
+		}
 	}
-	for _, p := range w.kittyPlacements {
-		if p.imageID == imageID && p.alt == alt {
+	t.physical = append(t.physical, kittyPhysicalPlacement{
+		imageID:     imageID,
+		placementID: placementID,
+		alt:         alt,
+	})
+	if len(t.physical) > maxTrackedKittyPhysicalPlacements {
+		t.physical = t.physical[1:]
+	}
+}
+
+// kittyPhysicalParentLocked reports whether a physical placement listed on the
+// screen could be the parent P=/Q= names: one with that placement id, or any
+// when Q= is absent.
+func (w *muxWindow) kittyPhysicalParentLocked(
+	parentImage, parentPlacement string,
+	alt bool,
+) bool {
+	for _, p := range w.kittyTracking.physical {
+		if p.imageID == parentImage && p.alt == alt &&
+			(parentPlacement == "" || p.placementID == parentPlacement) {
 			return true
 		}
 	}
 	return false
+}
+
+// forgetKittyPhysicalPlacementsLocked unlists the physical placements match
+// selects, for the deletes and replacements MonkeyMux can resolve exactly.
+func (w *muxWindow) forgetKittyPhysicalPlacementsLocked(
+	match func(kittyPhysicalPlacement) bool,
+) {
+	t := &w.kittyTracking
+	kept := t.physical[:0]
+	for _, p := range t.physical {
+		if !match(p) {
+			kept = append(kept, p)
+		}
+	}
+	t.physical = kept
 }
 
 // kittyPlacementParentLocked finds the kept placement a relative placement's
@@ -369,9 +444,12 @@ func (w *muxWindow) removeOrphanedKittyPlacementsLocked() bool {
 // the relative placements that hang off them: the image was retransmitted,
 // which replaces it and every placement it had, or it is gone.
 func (w *muxWindow) dropKittyImagePlacementsLocked(imageID string) bool {
-	if len(w.kittyPlacements) == 0 {
+	if len(w.kittyPlacements) == 0 && len(w.kittyTracking.physical) == 0 {
 		return false
 	}
+	w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
+		return p.imageID == imageID
+	})
 	rootVirtual := kittyRootPlacementKey(imageID)
 	changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 		return p.imageID == imageID || p.parent == rootVirtual
@@ -383,25 +461,25 @@ func (w *muxWindow) dropKittyImagePlacementsLocked(imageID string) bool {
 // placements of the screen it ran on, matching them as the client does: by
 // image id, number or id range with the virtual placement included, by
 // z-index, and by position for relative placements, which sit at the
-// placeholder cells of their virtual root in the screen model plus their
-// offsets. A relative placement whose root shows no placeholder cell is not
-// placed, so no position matches it. The span is c= by r= cells, or one cell
-// when the image sizes it, which MonkeyMux cannot work out.
+// placeholder cells of their virtual root plus their offsets. screen is the
+// screen model as it stood at the command, or nil when MonkeyMux cannot tell.
+//
+// Where MonkeyMux cannot know whether the client matched a relative
+// placement, it drops it: a reattach then shows the placement missing, where
+// keeping it could bring back an image the client deleted. That covers a
+// position delete without the screen at the command, an image sized by its
+// own pixels (a side without c= or r= may reach any further cell), and a
+// virtual root whose placeholder cells are only in the scrollback.
 func (w *muxWindow) observeKittyPlacementDeleteLocked(
 	args map[string]string,
 	alt bool,
+	screen *terminalScreen,
 ) bool {
-	if len(w.kittyPlacements) == 0 {
-		return false
-	}
 	selector := strings.ToLower(args["d"])
 	if selector == "" {
 		selector = "a"
 	}
 	placementID := kittyIDValue(args["p"])
-	x, hasX := kittyCellValue(args["x"])
-	y, hasY := kittyCellValue(args["y"])
-	z := kittyIntValue(args["z"])
 	var match func(kittyRetainedPlacement) bool
 	switch selector {
 	case "i", "n":
@@ -409,6 +487,10 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 		if imageID == "" {
 			return false
 		}
+		w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
+			return p.alt == alt && p.imageID == imageID &&
+				(placementID == "" || p.placementID == placementID)
+		})
 		// The virtual placement an image's own transmission made goes too
 		// when the delete covers it, and with it the placements hanging off.
 		_, rootPlacementID := w.kittyRootIsVirtual(imageID)
@@ -431,54 +513,86 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 			id, err := strconv.ParseUint(imageID, 10, 32)
 			return err == nil && id >= first && id <= last
 		}
+		w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
+			return p.alt == alt && inRange(p.imageID)
+		})
 		match = func(p kittyRetainedPlacement) bool {
 			image, rooted := strings.CutPrefix(p.parent, "root:")
 			return inRange(p.imageID) || (rooted && inRange(image))
 		}
 	case "z":
+		z := kittyIntValue(args["z"])
 		match = func(p kittyRetainedPlacement) bool {
 			return !p.virtual() && p.z == z
 		}
 	case "a", "c", "p", "q", "x", "y":
-		screen := w.screen
-		if screen == nil {
-			return false
-		}
-		if selector == "c" {
-			row, col := screen.CursorPosition()
-			x, y, hasX, hasY = col, row, true, true
-		}
-		_, height := screen.Size()
-		match = func(p kittyRetainedPlacement) bool {
-			if p.virtual() || (selector == "q" && p.z != z) {
-				return false
-			}
-			col, row, placed := w.kittyPlacementCellLocked(p)
-			if !placed {
-				return false
-			}
-			lastCol := col + max(1, p.cols) - 1
-			lastRow := row + max(1, p.rows) - 1
-			coversX := hasX && x >= col && x <= lastCol
-			coversY := hasY && y >= row && y <= lastRow
-			switch selector {
-			case "a":
-				return lastRow >= 0 && row < height
-			case "x":
-				return coversX
-			case "y":
-				return coversY
-			default:
-				return coversX && coversY
-			}
-		}
+		match = w.kittyPositionalDeleteMatch(selector, args, screen)
 	default:
+		return false
+	}
+	if len(w.kittyPlacements) == 0 {
 		return false
 	}
 	changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 		return p.alt == alt && match(p)
 	})
 	return w.removeOrphanedKittyPlacementsLocked() || changed
+}
+
+// kittyPositionalDeleteMatch returns whether a positional delete removes a
+// kept relative placement on the client, or may: see
+// observeKittyPlacementDeleteLocked for when MonkeyMux cannot tell.
+func (w *muxWindow) kittyPositionalDeleteMatch(
+	selector string,
+	args map[string]string,
+	screen *terminalScreen,
+) func(kittyRetainedPlacement) bool {
+	if screen == nil {
+		return func(p kittyRetainedPlacement) bool {
+			return !p.virtual() && (selector != "q" ||
+				p.z == kittyIntValue(args["z"]))
+		}
+	}
+	x, hasX := kittyCellValue(args["x"])
+	y, hasY := kittyCellValue(args["y"])
+	if selector == "c" {
+		row, col := screen.CursorPosition()
+		x, y, hasX, hasY = col, row, true, true
+	}
+	z := kittyIntValue(args["z"])
+	_, height := screen.Size()
+	seen := make(map[string]bool)
+	for _, id := range screen.PlaceholderImageIDs() {
+		seen[id] = true
+	}
+	return func(p kittyRetainedPlacement) bool {
+		if p.virtual() || (selector == "q" && p.z != z) {
+			return false
+		}
+		col, row, root, placed := w.kittyPlacementCellLocked(p, screen)
+		if !placed {
+			// No placeholder cell of the root on screen. If it has none at
+			// all the client has not placed this one either; one in the
+			// scrollback could still put it anywhere.
+			return seen[root]
+		}
+		// A side the image sizes by its pixels may reach any further cell.
+		openRight, openDown := p.cols <= 0, p.rows <= 0
+		lastCol := col + max(1, p.cols) - 1
+		lastRow := row + max(1, p.rows) - 1
+		coversX := hasX && x >= col && (openRight || x <= lastCol)
+		coversY := hasY && y >= row && (openDown || y <= lastRow)
+		switch selector {
+		case "a":
+			return row < height && (openDown || lastRow >= 0)
+		case "x":
+			return coversX
+		case "y":
+			return coversY
+		default:
+			return coversX && coversY
+		}
+	}
 }
 
 // kittyCellValue reads a 1-based Kitty cell coordinate as a 0-based one.
@@ -492,15 +606,16 @@ func kittyCellValue(value string) (int, bool) {
 
 // kittyPlacementCellLocked resolves a kept relative placement to the screen
 // cell the client puts it at: the top-left placeholder cell of its virtual
-// root in the screen model, plus every offset on the way down.
+// root in screen, plus every offset on the way down. root is the root image.
 func (w *muxWindow) kittyPlacementCellLocked(
 	p kittyRetainedPlacement,
-) (col, row int, placed bool) {
+	screen *terminalScreen,
+) (col, row int, root string, placed bool) {
 	col, row = p.horizontal, p.vertical
 	link := p.parent
 	for depth := 0; depth <= kittyRelativePlacementDepthLimit; depth++ {
 		if image, ok := strings.CutPrefix(link, "root:"); ok {
-			return w.kittyVirtualOriginLocked(image, col, row)
+			return kittyVirtualOrigin(screen, image, col, row)
 		}
 		var parent *kittyRetainedPlacement
 		for index := range w.kittyPlacements {
@@ -511,31 +626,98 @@ func (w *muxWindow) kittyPlacementCellLocked(
 			}
 		}
 		if parent == nil {
-			return 0, 0, false
+			return 0, 0, "", false
 		}
 		if parent.virtual() {
-			return w.kittyVirtualOriginLocked(parent.imageID, col, row)
+			return kittyVirtualOrigin(screen, parent.imageID, col, row)
 		}
 		col += parent.horizontal
 		row += parent.vertical
 		link = parent.parent
 	}
-	return 0, 0, false
+	return 0, 0, "", false
 }
 
-func (w *muxWindow) kittyVirtualOriginLocked(
+func kittyVirtualOrigin(
+	screen *terminalScreen,
 	imageID string,
 	col, row int,
-) (int, int, bool) {
+) (int, int, string, bool) {
 	id, err := strconv.ParseUint(imageID, 10, 32)
-	if err != nil || w.screen == nil {
-		return 0, 0, false
+	if err != nil {
+		return 0, 0, imageID, false
 	}
-	originCol, originRow, ok := w.screen.PlaceholderOrigin(uint32(id))
+	originCol, originRow, ok := screen.PlaceholderOrigin(uint32(id))
 	if !ok {
-		return 0, 0, false
+		return 0, 0, imageID, false
 	}
-	return originCol + col, originRow + row, true
+	return originCol + col, originRow + row, imageID, true
+}
+
+// snapshotKittyScreenLocked copies the screen model before chunk is written
+// to it, when chunk deletes placements by position and some are kept, so the
+// delete can be matched against the screen as it stood at the command.
+func (w *muxWindow) snapshotKittyScreenLocked(chunk []byte) {
+	t := &w.kittyTracking
+	t.chunk, t.chunkScreen, t.chunkWritten = nil, nil, 0
+	if len(w.kittyPlacements) == 0 || w.screen == nil ||
+		!kittyChunkHasPositionalDelete(chunk) {
+		return
+	}
+	t.chunk, t.chunkScreen = chunk, w.screen.Clone()
+}
+
+// releaseKittyScreenSnapshotLocked drops the copy snapshotKittyScreenLocked
+// took once the chunk has been observed.
+func (w *muxWindow) releaseKittyScreenSnapshotLocked() {
+	t := &w.kittyTracking
+	t.chunk, t.chunkScreen, t.chunkWritten = nil, nil, 0
+}
+
+// kittyScreenAtLocked returns the screen model as it stood at the graphics
+// command at offset in data (end is where the command ends), or nil when it
+// cannot be known. A command that ends the output saw the model as it is
+// now; an earlier one needs the copy taken before the output, advanced to it.
+func (w *muxWindow) kittyScreenAtLocked(data []byte, offset, end int) *terminalScreen {
+	if end >= len(data) {
+		return w.screen
+	}
+	t := &w.kittyTracking
+	if t.chunkScreen == nil || len(t.chunk) > len(data) ||
+		!bytes.Equal(data[len(data)-len(t.chunk):], t.chunk) {
+		return nil
+	}
+	start := offset - (len(data) - len(t.chunk))
+	if start < t.chunkWritten {
+		return nil
+	}
+	t.chunkScreen.Write(t.chunk[t.chunkWritten:start])
+	t.chunkWritten = start
+	return t.chunkScreen
+}
+
+// kittyChunkHasPositionalDelete reports whether data holds a graphics delete
+// that selects placements by position.
+func kittyChunkHasPositionalDelete(data []byte) bool {
+	for index := 0; ; {
+		start := bytes.Index(data[index:], []byte("\x1b_G"))
+		if start < 0 {
+			return false
+		}
+		start += index
+		end := start + 3
+		for end < len(data) && data[end] != ';' && data[end] != '\x1b' {
+			end++
+		}
+		args := parseKittyControl(string(data[start+3 : end]))
+		if args["a"] == "d" {
+			switch strings.ToLower(args["d"]) {
+			case "", "a", "c", "p", "q", "x", "y":
+				return true
+			}
+		}
+		index = end
+	}
 }
 
 // applyKittyImageDeleteLocked applies a delete command (a=d) to the retained
@@ -549,8 +731,9 @@ func (w *muxWindow) kittyVirtualOriginLocked(
 func (w *muxWindow) applyKittyImageDeleteLocked(
 	event kittyGraphicsEvent,
 	alt bool,
+	screen *terminalScreen,
 ) bool {
-	changed := w.observeKittyPlacementDeleteLocked(event.control, alt)
+	changed := w.observeKittyPlacementDeleteLocked(event.control, alt, screen)
 	switch event.control["d"] {
 	case "I", "N":
 		if kittyIDValue(event.control["p"]) != "" {
@@ -606,8 +789,9 @@ func kittyScreenModeChanges(data []byte) []kittyScreenModeChange {
 			for _, param := range bytes.Split(data[start+3:end], []byte{';'}) {
 				mode, err := strconv.Atoi(string(param))
 				if err == nil && (mode == 1047 || mode == 1049) {
+					// It takes effect at its final byte.
 					changes = append(changes, kittyScreenModeChange{
-						offset: start,
+						offset: end,
 						mode:   mode,
 						set:    final == 'h',
 					})
@@ -628,7 +812,42 @@ type kittyScreenTracker struct {
 }
 
 func (w *muxWindow) newKittyScreenTrackerLocked(data []byte) *kittyScreenTracker {
-	return &kittyScreenTracker{w: w, changes: kittyScreenModeChanges(data)}
+	// A mode change cut off at the end of the last output completes here:
+	// scan it with this output and place it at offset 0.
+	carry := w.kittyTracking.modeCarry
+	w.kittyTracking.modeCarry = nil
+	scanned := data
+	if len(carry) > 0 {
+		scanned = append(append([]byte(nil), carry...), data...)
+	}
+	changes := kittyScreenModeChanges(scanned)
+	for index := range changes {
+		changes[index].offset = max(0, changes[index].offset-len(carry))
+	}
+	return &kittyScreenTracker{w: w, changes: changes}
+}
+
+// maxKittyModeCarryBytes bounds a cut-off mode change held for the next
+// output.
+const maxKittyModeCarryBytes = 32
+
+// kittyPartialModeChange returns the start of a DEC private mode change that
+// data ends inside (ESC, ESC [, ESC [ ? and its parameters), or nil.
+func kittyPartialModeChange(data []byte) []byte {
+	start := bytes.LastIndexByte(data, '\x1b')
+	if start < 0 || len(data)-start > maxKittyModeCarryBytes {
+		return nil
+	}
+	tail := data[start:]
+	for index, b := range tail[1:] {
+		switch {
+		case index == 0 && b == '[', index == 1 && b == '?':
+		case index >= 2 && (b >= '0' && b <= '9' || b == ';'):
+		default:
+			return nil
+		}
+	}
+	return append([]byte(nil), tail...)
 }
 
 // at returns whether the alternate screen is up at offset in the chunk.
@@ -666,6 +885,9 @@ func (w *muxWindow) setKittyPlacementScreenLocked(alt bool) {
 		return
 	}
 	w.kittyPlacementsAlt = alt
+	w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
+		return p.alt
+	})
 	if w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 		return p.alt && !p.virtual()
 	}) {
