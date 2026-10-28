@@ -20,6 +20,7 @@ import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/core/mouse/handler.dart';
 import 'package:xterm/src/core/mouse/mode.dart';
 import 'package:xterm/src/core/platform.dart';
+import 'package:xterm/src/core/semantic_prompt.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/core/tabs.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
@@ -848,6 +849,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _mainBuffer.eraseDisplay();
     _mainBuffer.graphics.clear();
     _altBuffer.clear();
+    _mainBuffer.semanticPrompt.reset();
+    _altBuffer.semanticPrompt.reset();
     for (final buffer in [_mainBuffer, _altBuffer]) {
       buffer.setCursor(0, 0);
       buffer.resetVerticalMargins();
@@ -1143,12 +1146,17 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void eraseDisplay() {
+    _buffer.scrollClearAtPrompt();
     _buffer.eraseDisplay();
   }
 
   @override
   void eraseScrollbackOnly() {
     _buffer.clearScrollback();
+    // MonkeyMux clears both screens and their scrollback before replaying a
+    // window, so a prompt or input left open by the window shown before must
+    // not mark what the replay writes. The screen model does the same.
+    _buffer.semanticPrompt.resetCursor();
   }
 
   @override
@@ -1521,6 +1529,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void unknownOSC(String ps, List<String> pt) {
+    if (ps == '133' || ps == '633') {
+      applySemanticPromptOsc(_buffer, ps, pt);
+    }
     onPrivateOSC?.call(ps, pt);
   }
 

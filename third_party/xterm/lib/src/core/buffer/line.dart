@@ -19,6 +19,29 @@ const _cellContent = 3;
 
 const _cellUnderlineColor = 4;
 
+/// The cell's [SemanticContent] lives in two bits of the attribute word, above
+/// the [CellAttr] bits. [BufferLine.getCellData] leaves them out, so painters
+/// and anything else comparing attributes never see them.
+const _cellSemanticShift = 16;
+
+const _cellSemanticMask = 3 << _cellSemanticShift;
+
+/// What OSC 133 shell integration marked a row as, as Ghostty marks its rows.
+enum SemanticPromptRow {
+  /// Nothing, as far as the terminal knows: command output, or no shell
+  /// integration at all.
+  none,
+
+  /// A primary prompt starts on this row (`OSC 133 ; A` or `P`, kinds `i` and
+  /// `r`).
+  prompt,
+
+  /// The row continues a prompt or the input after it: a secondary prompt
+  /// (`k=s` or `k=c`), or a row that a wrap or newline reached while a prompt
+  /// or its input was being written.
+  continuation,
+}
+
 class BufferLine with IndexedItem {
   BufferLine(
     this._length, {
@@ -32,6 +55,11 @@ class BufferLine with IndexedItem {
   Uint32List get data => _data;
 
   var isWrapped = false;
+
+  /// The shell-integration mark of this row. It moves with the row, is
+  /// cleared when an erase clears the whole row, and a reflow keeps it on
+  /// the first row of the line and marks the rest as continuations.
+  var semanticPrompt = SemanticPromptRow.none;
 
   int get length => _length;
 
@@ -59,11 +87,17 @@ class BufferLine with IndexedItem {
     return _data[index * _cellSize + _cellContent] >> CellContent.widthShift;
   }
 
+  /// The [SemanticContent] the cell at [index] was written with.
+  int getSemanticContent(int index) {
+    return (_data[index * _cellSize + _cellAttributes] & _cellSemanticMask) >>
+        _cellSemanticShift;
+  }
+
   void getCellData(int index, CellData cellData) {
     final offset = index * _cellSize;
     cellData.foreground = _data[offset + _cellForeground];
     cellData.background = _data[offset + _cellBackground];
-    cellData.flags = _data[offset + _cellAttributes];
+    cellData.flags = _data[offset + _cellAttributes] & ~_cellSemanticMask;
     cellData.content = _data[offset + _cellContent];
     cellData.underlineColor = _data[offset + _cellUnderlineColor];
   }
@@ -77,11 +111,19 @@ class BufferLine with IndexedItem {
     setContent(index, char | (width << CellContent.widthShift));
   }
 
-  void setCell(int index, int char, int witdh, CursorStyle style) {
+  /// Writes a cell. [semanticContent] is the [SemanticContent] in force.
+  void setCell(
+    int index,
+    int char,
+    int witdh,
+    CursorStyle style, [
+    int semanticContent = SemanticContent.output,
+  ]) {
     final offset = index * _cellSize;
     _data[offset + _cellForeground] = style.foreground;
     _data[offset + _cellBackground] = style.background;
-    _data[offset + _cellAttributes] = style.attrs;
+    _data[offset + _cellAttributes] =
+        style.attrs | (semanticContent << _cellSemanticShift);
     _data[offset + _cellContent] = char | (witdh << CellContent.widthShift);
     _data[offset + _cellUnderlineColor] = style.underlineColor;
   }

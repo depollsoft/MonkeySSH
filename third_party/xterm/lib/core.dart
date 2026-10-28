@@ -21,5 +21,7 @@ export 'src/core/mouse/button_state.dart';
 export 'src/core/mouse/handler.dart';
 export 'src/core/mouse/mode.dart';
 export 'src/core/platform.dart';
+export 'src/core/prompt_click.dart';
+export 'src/core/semantic_prompt.dart';
 export 'src/core/state.dart';
 export 'src/terminal.dart';
