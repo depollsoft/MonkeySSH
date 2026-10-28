@@ -317,6 +317,54 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Thomas Dickey's esctest2 conformance suite against the vendored terminal,
+  # as Ghostty runs it against its core (third_party/xterm/test/esctest). It
+  # compares no pixels, so it runs on Linux and leaves the macOS pool alone.
+  # esctest2 is GPL-2.0, so the pinned commit is fetched here, never vendored.
+  esctest:
+    name: Terminal Conformance (esctest)
+    needs: changes
+    if: needs.changes.outputs.third_party == 'true' && github.event_name != 'push'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch esctest2
+        id: esctest-fetch
+        background: true
+        run: bash third_party/xterm/test/esctest/fetch_esctest.sh "$RUNNER_TEMP/esctest2"
+
+      - uses: subosito/flutter-action@v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Wait for esctest2
+        wait: esctest-fetch
+
+      - name: Run esctest
+        working-directory: third_party/xterm
+        env:
+          ESCTEST_DIR: ${{ runner.temp }}/esctest2
+          ESCTEST_OUT: ${{ runner.temp }}/esctest
+        run: |
+          flutter pub get
+          flutter test --no-pub test/esctest
+
+      - name: Upload esctest logs
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          compression-level: 0
+          name: esctest-logs
+          path: ${{ runner.temp }}/esctest/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # ---------------------------------------------------------------------------
   # MonkeyMux helper (Go) — a standalone module under remote/monkeymux that is
   # shipped to remote hosts as the prebuilt binaries in assets/monkeymux/.
@@ -859,7 +907,7 @@ jobs:
   ci:
     name: CI
     if: ${{ always() && !cancelled() }}
-    needs: [changes, monkeymux-assets, check, tooling, test, terminal-test, go-test, functions-test, build-android, build-ios, build-macos, build-windows, build-linux]
+    needs: [changes, monkeymux-assets, check, tooling, test, terminal-test, esctest, go-test, functions-test, build-android, build-ios, build-macos, build-windows, build-linux]
     runs-on: ubicloud-standard-4
     timeout-minutes: 2
     steps:
@@ -871,6 +919,7 @@ jobs:
           TOOLING_RESULT: ${{ needs.tooling.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TERMINAL_TEST_RESULT: ${{ needs.terminal-test.result }}
+          ESCTEST_RESULT: ${{ needs.esctest.result }}
           GO_TEST_RESULT: ${{ needs.go-test.result }}
           FUNCTIONS_TEST_RESULT: ${{ needs.functions-test.result }}
           ANDROID_RESULT: ${{ needs.build-android.result }}
@@ -887,6 +936,7 @@ jobs:
             "tooling:$TOOLING_RESULT" \
             "test:$TEST_RESULT" \
             "terminal-test:$TERMINAL_TEST_RESULT" \
+            "esctest:$ESCTEST_RESULT" \
             "go-test:$GO_TEST_RESULT" \
             "functions-test:$FUNCTIONS_TEST_RESULT" \
             "build-android:$ANDROID_RESULT" \
