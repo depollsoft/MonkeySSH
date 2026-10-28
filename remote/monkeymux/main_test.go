@@ -1905,8 +1905,10 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	)
 	client.clipViewport = true
 
-	server.handleWindowOutput("@1", []byte("\x1b["))
-	waitForRecordedOutput(t, conn, "\x1b[")
+	// A bare "\x1b[" could still become a visibility-report sequence, which
+	// is held until it ends (terminal_visibility.go), so split after a digit.
+	server.handleWindowOutput("@1", []byte("\x1b[0"))
+	waitForRecordedOutput(t, conn, "\x1b[0")
 
 	server.resizeForClient("primary", 100, 30, false)
 	server.mu.Lock()
@@ -1915,11 +1917,11 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	if width != 100 || height != 30 {
 		t.Fatalf("desired size = %dx%d, want pending 100x30", width, height)
 	}
-	if got := conn.String(); got != "\x1b[" {
+	if got := conn.String(); got != "\x1b[0" {
 		t.Fatalf("mid-sequence output = %q, want no injected viewport CSI", got)
 	}
 
-	server.handleWindowOutput("@1", []byte("0mX"))
+	server.handleWindowOutput("@1", []byte("mX"))
 
 	waitForRecordedOutput(t, conn, "\x1b[0mX\x1b[?8;30;100t")
 	server.mu.Lock()

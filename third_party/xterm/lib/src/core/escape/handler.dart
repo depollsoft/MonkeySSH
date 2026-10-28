@@ -89,6 +89,9 @@ abstract class EscapeHandler {
   /// Answers DECRQM for an ANSI mode (`CSI Ps $ p`).
   void sendModeReport(int mode);
 
+  /// Answers DECRQM for a DEC private mode (`CSI ? Ps $ p`).
+  void sendDecModeReport(int mode);
+
   /// Answers XTGETTCAP (`DCS + q <hex> ST`) for the given hex-encoded
   /// terminfo/termcap capability names.
   void sendTermcapReport(List<String> capabilities);
@@ -100,6 +103,13 @@ abstract class EscapeHandler {
   void sendOperatingStatus();
 
   void sendCursorPosition();
+
+  /// `CSI ? 6 n` Extended Cursor Position Report (DECXCPR).
+  void sendExtendedCursorPosition();
+
+  /// `CSI ? 998 n`: reports whether the view may be visible
+  /// (`CSI ? 999 ; Ps n`).
+  void sendVisibilityReport();
 
   void setMargins(int i, [int? bottom]);
 

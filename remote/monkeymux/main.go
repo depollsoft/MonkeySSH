@@ -199,7 +199,7 @@ const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
 const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -216,6 +216,9 @@ var (
 		"1007",
 		"2004",
 		"2031",
+		"67",
+		"5",
+		"12",
 	}
 	postReplayPrivateModes = []string{
 		"7",
@@ -228,6 +231,9 @@ var (
 		"1007",
 		"2004",
 		"2031",
+		"67",
+		"5",
+		"12",
 	}
 	groupedReplayPrivateModes = [][]string{
 		{"1047", "1049"},
@@ -250,6 +256,9 @@ var (
 		"1049": {},
 		"2004": {},
 		"2031": {},
+		"67":   {},
+		"5":    {},
+		"12":   {},
 	}
 )
 
@@ -287,6 +296,7 @@ var capabilities = []string{
 	"acp-window-v1",
 	"native-acp-upgrade-handoff-v1",
 	"push-v1",
+	"client-visibility",
 }
 
 var (
@@ -532,6 +542,9 @@ type controlMessage struct {
 	ImageIDs []string `json:"imageIds,omitempty"`
 	// Push carries the push_* operation fields (push_notify.go).
 	Push *pushControlRequest `json:"push,omitempty"`
+	// Hidden is client_visibility's state: true while the client's view of
+	// the attached terminal is hidden.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 type controlResponse struct {
@@ -768,6 +781,9 @@ type muxServer struct {
 	// push holds push notification state, created on first use.
 	push     *pushNotifier
 	pushOnce sync.Once
+	// hiddenClientIDs names the attach clients whose view is hidden
+	// (terminal_visibility.go). Guarded by mu.
+	hiddenClientIDs map[string]struct{}
 }
 
 type muxWindow struct {
@@ -956,6 +972,8 @@ type muxWindow struct {
 	kittyGraphicsPending     []byte
 	kittyGraphicsPendingScan int
 	kittyGraphicsPendingTerm int
+	// visibility holds visibility-report state (terminal_visibility.go).
+	visibility windowVisibility
 }
 
 type terminalOutputParserState int
@@ -6741,6 +6759,7 @@ func (s *muxServer) createWindowWithStarter(
 		s.lastActiveID = s.activeID
 	}
 	s.activeID = window.id
+	s.refreshWindowVisibilityLocked()
 	// Seed the Kitty image cache from any restored history so an image shown
 	// before a server restart can still be replayed on the next reattach.
 	if window.observeKittyGraphicsLocked(window.history) {
@@ -6982,6 +7001,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.programStatusStepping = true
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
+	window.visibility.potentiallyVisible = s.windowPotentiallyVisibleLocked(window)
 	wasAlert := window.alert
 	wasNotificationOscSeq := window.notificationOscSeq
 	// PTY output may contain real work even during a resize redraw pause.
@@ -7053,6 +7073,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint,
 	)
 	programStatusReplies := window.takeProgramStatusRepliesLocked()
+	visibilityReplies := window.takeVisibilityRepliesLocked()
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -7173,6 +7194,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 	if len(programStatusReplies) > 0 {
 		s.queueWindowReply(window, programStatusReplies)
+	}
+	if len(visibilityReplies) > 0 {
+		s.queueWindowReply(window, visibilityReplies)
 	}
 	if len(themeHintData) > 0 {
 		s.queueWindowReply(window, themeHintData)
@@ -7362,6 +7386,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 			}
 		}
 	}
+	s.refreshWindowVisibilityLocked()
 	snapshots := s.snapshotsLocked()
 	// Commit an idle shutdown under the same lock that retired the last
 	// window, so a start admitted before this point keeps the server and one
@@ -9041,6 +9066,8 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		return
 	}
 	delete(s.attachClients, client.conn)
+	s.forgetClientVisibilityLocked(client.id)
+	s.refreshWindowVisibilityLocked()
 	// Its read loop has ended, so the replies it holds can only go down; its
 	// input worker forgets it once they have.
 	if client.holdsReceivedReplies() {
@@ -9159,6 +9186,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	client.focusSequence.Store(s.nextFocusSequence)
 	s.attachClients[conn] = client
 	s.attachConn = conn
+	s.refreshWindowVisibilityLocked()
 	if themeHint := hintDataFromString(hello.Data, themeHintLimitBytes); len(themeHint) > 0 {
 		s.themeHint = append(s.themeHint[:0], themeHint...)
 	}
@@ -9532,6 +9560,15 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			return
 		}
 		client.send(controlResponse{ID: request.ID, Type: "input_injected", Status: "ok"})
+	case "client_visibility":
+		if strings.TrimSpace(request.ClientID) == "" {
+			client.sendError(request, errors.New("missing client id"))
+			return
+		}
+		s.mu.Lock()
+		s.setClientHiddenLocked(request.ClientID, request.Hidden)
+		s.mu.Unlock()
+		client.send(controlResponse{ID: request.ID, Type: "client_visibility", Status: "ok"})
 	case "focus_changed":
 		s.focusAttachClientByID(request.ClientID, request.Width, request.Height, false)
 		s.sendThemeHint(request.Data)
@@ -10176,6 +10213,7 @@ func (s *muxServer) selectWindowWithoutReplay(windowID string) error {
 	if s.activeID != windowID {
 		s.lastActiveID = s.activeID
 		s.activeID = windowID
+		s.refreshWindowVisibilityLocked()
 	}
 	window.alert = false
 	window.notificationOscs = nil
@@ -10270,6 +10308,7 @@ func (s *muxServer) selectWindowWithSkip(
 	if s.activeID != windowID {
 		s.lastActiveID = s.activeID
 		s.activeID = windowID
+		s.refreshWindowVisibilityLocked()
 	}
 	window.alert = false
 	window.notificationOscs = nil
@@ -10429,6 +10468,7 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 	process = window.proc
 	windowPty = window.pty
 	s.reindexWindowsLocked()
+	s.refreshWindowVisibilityLocked()
 	snapshots = s.snapshotsLocked()
 	shouldShutdown = openCount <= 1 || len(snapshots) == 0
 	s.mu.Unlock()
@@ -11463,6 +11503,7 @@ func privateModesForRestore(privateModes map[string]bool) map[string]bool {
 	}
 	for _, mode := range []string{
 		"1", "1000", "1002", "1003", "1004", "1006", "1007", "2004", "2031",
+		"67",
 	} {
 		delete(copied, mode)
 	}
@@ -13144,6 +13185,9 @@ func (w *muxWindow) appendHistoryReportingCursorLocked(
 		if !ok {
 			break
 		}
+		if string(chunk[query[0]:query[1]]) == extendedCursorPositionQuery {
+			report = extendedCursorPositionReport(report)
+		}
 		reports = append(reports, report...)
 		answered++
 	}
@@ -13896,6 +13940,33 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 			}
 			break
 		}
+		if data[i+1] == '[' {
+			// Visibility reports belong to MonkeyMux (terminal_visibility.go):
+			// the mode, its query and its DECRQM never reach the terminal.
+			end := csiSequenceEnd(data, i+2)
+			if end < 0 {
+				if visibilityCsiMayFollow(data[i:]) &&
+					w.storeAttachPartialOscLocked(data[i:]) {
+					if output == nil {
+						return data[:i]
+					}
+					output = append(output, data[copyStart:i]...)
+					return output
+				}
+				i++
+				continue
+			}
+			if replacement, ok := visibilityCsiReplacement(data[i : end+1]); ok {
+				if output == nil {
+					output = make([]byte, 0, len(data))
+				}
+				output = append(output, data[copyStart:i]...)
+				output = append(output, replacement...)
+				copyStart = end + 1
+				i = end + 1
+				continue
+			}
+		}
 		if data[i+1] != ']' {
 			i++
 			continue
@@ -14000,6 +14071,16 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 		}
 		if !recognized {
 			i++
+			continue
+		}
+		if replacement, ok := visibilityCsiReplacement(data[i:sequenceEnd]); ok {
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			output = append(output, replacement...)
+			copyStart = sequenceEnd
+			i = sequenceEnd
 			continue
 		}
 		shouldStrip := isQuery ||
@@ -14154,6 +14235,9 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 // resize and draw nothing until the answer arrives.
 const cursorPositionQuery = "\x1b[6n"
 
+// extendedCursorPositionQuery is DECXCPR, answered as CSI ? row ; col ; 1 R.
+const extendedCursorPositionQuery = "\x1b[?6n"
+
 // redrawHeldCursorQueriesLocked returns the byte ranges of the cursor position
 // queries in chunk that MonkeyMux answers itself from the screen model, because
 // a redraw pause is holding this window's output from the attached terminal.
@@ -14198,7 +14282,8 @@ func (w *muxWindow) redrawHeldCursorQueriesLocked(chunk []byte) [][2]int {
 			continue
 		}
 		if isQuery {
-			if string(chunk[i:end]) != cursorPositionQuery {
+			if query := string(chunk[i:end]); query != cursorPositionQuery &&
+				query != extendedCursorPositionQuery {
 				break
 			}
 			queries = append(queries, [2]int{i, end})
@@ -16858,6 +16943,10 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 		}
 		final := data[end]
 		switch final {
+		case 'n', 'p':
+			w.observeVisibilityCsiLocked(string(data[escapeIndex+2:end]), final)
+		}
+		switch final {
 		case 'u':
 			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
 		case 'm':
@@ -16892,14 +16981,16 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 // so the next replay does not re-enable what the terminal already reset.
 // DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
 // and focus reporting to their power-up values; RIS also leaves the alternate
-// screen and resets mouse reporting and the keyboard encodings. Neither
-// touches colour-scheme updates (2031), which the client keeps outside its
-// terminal state, or ConPTY's win32-input-mode.
+// screen and resets mouse reporting, the keyboard encodings, DECBKM, reverse
+// video, cursor blink and visibility reports. Neither touches colour-scheme
+// updates (2031), which the client keeps outside its terminal state, or
+// ConPTY's win32-input-mode.
 func (w *muxWindow) resetTerminalModesLocked(full bool) {
 	modes := []string{"1", "6", "7", "1004", "2004"}
 	if full {
-		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67", "5", "12")
 		w.resetKeyboardModesLocked()
+		w.resetVisibilityReportsLocked()
 	}
 	for _, mode := range modes {
 		if _, ok := w.privateModes[mode]; ok {
@@ -17073,6 +17164,10 @@ func (w *muxWindow) storePartialPendingTerminalQueryLocked(data []byte) {
 }
 
 func (w *muxWindow) setPrivateModeLocked(mode string, enabled bool) {
+	if isVisibilityReportsMode(mode) {
+		w.setVisibilityReportsLocked(enabled)
+		return
+	}
 	if mode == "25" {
 		w.cursorVisible = enabled
 		w.cursorVisibilityKnown = true

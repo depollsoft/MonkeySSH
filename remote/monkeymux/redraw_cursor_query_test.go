@@ -373,6 +373,18 @@ func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
 	}
 }
 
+// DECXCPR (CSI ? 6 n) is answered the way the app's terminal answers it.
+func TestRedrawPauseAnswersExtendedCursorPositionQuery(t *testing.T) {
+	server, window, pty, _ := newRedrawCursorQueryTestServer(t)
+
+	server.handleWindowOutput("@1", []byte("\x1b[3;7H"+extendedCursorPositionQuery+cursorPositionQuery))
+	waitForWindowReplies(t, window)
+
+	if got := pty.String(); got != "\x1b[?3;7;1R\x1b[3;7R" {
+		t.Fatalf("window got %q, want a DECXCPR then a CPR", got)
+	}
+}
+
 // A redraw that only moves the cursor would normally be replaced by the frame
 // from before the pause, but the program has been told the moved position, so
 // the client must end up there too.
