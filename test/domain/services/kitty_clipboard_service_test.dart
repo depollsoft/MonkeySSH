@@ -208,6 +208,25 @@ void main() {
       },
     );
 
+    test('answer noncanonical base64 padding with EINVAL', () async {
+      final harness = _Harness()
+        ..osc('type=write:id=a')
+        ..osc('type=wdata:mime=${b64('text/plain')};AB==')
+        ..osc('type=write:id=b')
+        ..osc('type=wdata:mime=AB==;${b64('x')}')
+        ..osc('type=write:id=c')
+        ..osc('type=walias:mime=${b64('text/plain')};AB==')
+        // A read has no error status; it is ignored.
+        ..osc('type=read:id=r;AB==')
+        ..osc('type=read:id=s:pw=AB==:name=${b64('x')};${b64('.')}');
+
+      expect(await harness.packets(), [
+        status('write', 'EINVAL', id: 'a'),
+        status('write', 'EINVAL', id: 'b'),
+        status('write', 'EINVAL', id: 'c'),
+      ]);
+    });
+
     test('refuses a write over the size limit with EFBIG', () async {
       final harness = _Harness(maxWriteBytes: 4)
         ..osc('type=write')

@@ -85,6 +85,20 @@ void main() {
       }
     });
 
+    test('nonzero padding bits are rejected, never thrown', () {
+      for (final value in ['AB==', 'ABC=', 'YWJjAB==']) {
+        expect(decodeKittyClipboardBase64(value), isNull, reason: value);
+        expect(KittyClipboardBase64Stream().feed(value), isNull, reason: value);
+      }
+      final split = KittyClipboardBase64Stream();
+      expect(split.feed('YWJjA'), isNotNull);
+      expect(split.feed('B=='), isNull);
+      expect(
+        parseKittyClipboardMetadata('type=wdata:mime=AB==')!.metadata,
+        isNull,
+      );
+    });
+
     test('a stream restarts after padding and rejects bad data', () {
       final stream = KittyClipboardBase64Stream();
       expect(utf8.decode(stream.feed('YQ==YWI=')!), 'aab');
