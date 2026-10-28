@@ -245,12 +245,22 @@ final _paddedQuantum = RegExp(r'^[A-Za-z0-9+/]{2}(?:==|[A-Za-z0-9+/]=)$');
 /// Decodes [value] as strict RFC 4648 base64, as the spec requires: only the
 /// standard alphabet, no whitespace, and correct padding. Returns null for
 /// anything else. Dart's own decoder also accepts the URL-safe alphabet and
-/// percent-encoded padding, which the spec forbids.
+/// percent-encoded padding, which the spec forbids, and throws for a final
+/// quantum whose padding bits are not zero (`AB==`), which the pattern lets
+/// through.
 Uint8List? decodeKittyClipboardBase64(String value) {
   if (!_strictBase64.hasMatch(value)) {
     return null;
   }
-  return base64.decode(value);
+  return _tryDecodeBase64(value);
+}
+
+Uint8List? _tryDecodeBase64(String value) {
+  try {
+    return base64.decode(value);
+  } on FormatException {
+    return null;
+  }
 }
 
 /// Decodes the base64 stream of one MIME type split over many `wdata`
@@ -292,14 +302,24 @@ class KittyClipboardBase64Stream {
       )) {
         return null;
       }
-      decoded.add(base64.decode(combined.substring(segmentStart, quantumEnd)));
+      final segment = _tryDecodeBase64(
+        combined.substring(segmentStart, quantumEnd),
+      );
+      if (segment == null) {
+        return null;
+      }
+      decoded.add(segment);
       segmentStart = quantumEnd;
       searchFrom = quantumEnd;
     }
     if (segmentStart < completeLength) {
-      decoded.add(
-        base64.decode(combined.substring(segmentStart, completeLength)),
+      final segment = _tryDecodeBase64(
+        combined.substring(segmentStart, completeLength),
       );
+      if (segment == null) {
+        return null;
+      }
+      decoded.add(segment);
     }
     _carry = carry;
     return decoded.takeBytes();
