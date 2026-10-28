@@ -969,6 +969,108 @@ void main() {
     expect(find.text('ready when you are'), findsOneWidget);
   });
 
+  group('reading column', () {
+    /// The transcript's content column, from the thread's padding.
+    Rect transcriptColumn(WidgetTester tester) {
+      final viewport = tester.getRect(find.byType(CustomScrollView));
+      final padding = tester
+          .widget<SliverPadding>(
+            find.descendant(
+              of: find.byType(AcpMessageThread),
+              matching: find.byType(SliverPadding),
+            ),
+          )
+          .padding
+          .resolve(TextDirection.ltr);
+      return Rect.fromLTRB(
+        viewport.left + padding.left,
+        viewport.top,
+        viewport.right - padding.right,
+        viewport.bottom,
+      );
+    }
+
+    Rect composer(WidgetTester tester) =>
+        tester.getRect(find.byKey(const ValueKey('acp-composer-surface')));
+
+    for (final (size, embedded) in [
+      (const Size(951, 669), true),
+      (const Size(1366, 1024), false),
+    ]) {
+      testWidgets(
+        'a ${size.width.toInt()} pt chat reads in a centred column the '
+        'composer shares',
+        (tester) async {
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          await tester.binding.setSurfaceSize(size);
+          final session = fakeAcpSession(
+            timeline: fakeAcpTimeline('Hello from the agent'),
+          );
+          // At 8 pt the test font's 1 em characters give a measure narrower
+          // than either window.
+          await tester.pumpWidget(
+            _wrap(
+              FakeAcpSessionManager(sessions: [session]),
+              size: size,
+              embedded: embedded,
+              preferredFontSize: 8,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final context = tester.element(find.byType(AcpMessageThread));
+          final letterSpacing =
+              Theme.of(context).textTheme.bodyMedium?.letterSpacing ?? 0;
+          final measure = acpReadingMeasure(context);
+          // 70 characters of 15 pt prose, zoomed from 14 pt to 8 pt.
+          expect(
+            measure,
+            closeTo(
+              kAcpReadingMeasureCharacters * (15 * 8 / 14 + letterSpacing),
+              0.01,
+            ),
+          );
+
+          final viewport = tester.getRect(find.byType(CustomScrollView));
+          final column = transcriptColumn(tester);
+          expect(column.width, closeTo(measure, 0.01));
+          expect(
+            column.left - viewport.left,
+            closeTo(viewport.right - column.right, 0.01),
+          );
+          expect(column.left - viewport.left, greaterThan(12));
+          // The scroll view still spans the pane.
+          expect(viewport.width, greaterThan(measure + 100));
+
+          // The composer's box sits 4 pt outside the text, as on a phone.
+          expect(composer(tester).left, closeTo(column.left - 4, 0.01));
+          expect(composer(tester).right, closeTo(column.right + 4, 0.01));
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
+    testWidgets('a phone keeps the full-width transcript and composer', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      final session = fakeAcpSession(
+        timeline: fakeAcpTimeline('Hello from the agent'),
+      );
+      await tester.pumpWidget(
+        _wrap(FakeAcpSessionManager(sessions: [session]), embedded: true),
+      );
+      await tester.pumpAndSettle();
+
+      final column = transcriptColumn(tester);
+      expect(column.left, 12);
+      expect(column.right, 378);
+      expect(composer(tester).left, 8);
+      expect(composer(tester).right, 382);
+    });
+  });
+
   testWidgets('shows inline recovery when a live session fails', (
     tester,
   ) async {

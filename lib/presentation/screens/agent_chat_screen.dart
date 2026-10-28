@@ -1440,6 +1440,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                   bottom: !widget.embedded,
                   child: LayoutBuilder(
                     builder: (context, constraints) {
+                      // A wide chat reads in a centred column about 70
+                      // characters wide. The composer, the banners' text and
+                      // the floating buttons line up with it.
+                      final measure = acpReadingMeasure(context);
+                      final gutter = acpColumnGutter(
+                        constraints.maxWidth,
+                        maxContentWidth: measure,
+                      );
                       final composerVisible =
                           !(_search.isOpen &&
                               (_search.fieldFocused ||
@@ -1448,9 +1456,15 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                   kAgentChatSearchFoldsComposerBelow);
                       return Column(
                         children: [
-                          ?_buildBanner(session, activity),
+                          ?_buildBanner(session, activity, gutter: gutter),
                           Expanded(
-                            child: _buildTranscript(session, entries, unread),
+                            child: _buildTranscript(
+                              session,
+                              entries,
+                              unread,
+                              measure: measure,
+                              gutter: gutter,
+                            ),
                           ),
                           // Search steers the scroll position while it is open,
                           // and a short chat has no room for both bars; the
@@ -1458,15 +1472,24 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                           if (unread != null &&
                               !_unread.digestDismissed &&
                               !_search.isOpen)
-                            AcpUnreadDigestBar(
-                              state: unread,
-                              onJump: () => setState(_unread.jumpToDivider),
-                              onDismiss: () => setState(_unread.dismissDigest),
+                            Padding(
+                              padding: EdgeInsets.symmetric(horizontal: gutter),
+                              child: AcpUnreadDigestBar(
+                                state: unread,
+                                onJump: () => setState(_unread.jumpToDivider),
+                                onDismiss: () =>
+                                    setState(_unread.dismissDigest),
+                              ),
                             ),
                           if (prompts.isNotEmpty ||
                               session.pendingElicitations.isNotEmpty ||
                               session.awaitingElicitations.isNotEmpty)
-                            _buildPendingPanel(session, prompts, toolTitles),
+                            _buildPendingPanel(
+                              session,
+                              prompts,
+                              toolTitles,
+                              gutter: gutter,
+                            ),
                           // Search sits just above the composer, in thumb reach.
                           // In a short chat (a phone with its keyboard up) the
                           // composer folds away while the search field has
@@ -1524,14 +1547,21 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
                                   setState(() => _composerFocused = focused);
                                 }
                               },
-                              child: AcpComposer(
-                                controller: _composer,
-                                attachmentActions: _attachmentActions(session),
-                                focusController:
-                                    widget.composerFocusController ??
-                                    _ownComposerFocusController,
-                                controls: _buildQuickConfigControls(session),
-                                useBottomSafeArea: !widget.embedded,
+                              child: Padding(
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: gutter,
+                                ),
+                                child: AcpComposer(
+                                  controller: _composer,
+                                  attachmentActions: _attachmentActions(
+                                    session,
+                                  ),
+                                  focusController:
+                                      widget.composerFocusController ??
+                                      _ownComposerFocusController,
+                                  controls: _buildQuickConfigControls(session),
+                                  useBottomSafeArea: !widget.embedded,
+                                ),
                               ),
                             ),
                           ),
@@ -1617,14 +1647,19 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     );
   }
 
-  Widget? _buildBanner(AcpSessionState session, AcpStatusDisplay activity) {
+  Widget? _buildBanner(
+    AcpSessionState session,
+    AcpStatusDisplay activity, {
+    required double gutter,
+  }) {
     // A read-only chat explains itself beside the composer instead.
     if (session.remoteWriter != null) return null;
     if (session.status != AcpConnectionStatus.ready) {
-      return _buildSessionStatusBanner(session);
+      return _buildSessionStatusBanner(session, gutter: gutter);
     }
     if (!activity.isReady && activity.label != 'working') {
       return _SessionStatusBanner(
+        gutter: gutter,
         message: switch (activity.label) {
           'sending' => 'sending prompt',
           'cancelling' => 'cancelling current turn',
@@ -1645,8 +1680,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Widget _buildTranscript(
     AcpSessionState session,
     List<ui.AcpTimelineEntry> entries,
-    AcpUnreadState? unread,
-  ) => Stack(
+    AcpUnreadState? unread, {
+    required double measure,
+    required double gutter,
+  }) => Stack(
     children: [
       if (entries.isEmpty)
         _AcpEmptyConversation(
@@ -1664,6 +1701,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
             child: AcpMessageThread(
               entries: entries,
               controller: _scroll,
+              maxContentWidth: measure,
               followTail: _autoScroll,
               searchFocus: _search.focus,
               onStickyPromptTap: _handleStickyPromptTap,
@@ -1704,7 +1742,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       // would sit over the newest match.
       if (_showJumpToLatest && !_search.isOpen)
         Positioned(
-          right: FluttyTheme.spacingMd,
+          right: FluttyTheme.spacingMd + gutter,
           bottom: FluttyTheme.spacingMd,
           child: SizedBox.square(
             dimension: 44,
@@ -1722,13 +1760,14 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
   Widget _buildPendingPanel(
     AcpSessionState session,
     List<AcpPermissionPrompt> prompts,
-    Map<String, String> toolTitles,
-  ) => ConstrainedBox(
+    Map<String, String> toolTitles, {
+    required double gutter,
+  }) => ConstrainedBox(
     constraints: BoxConstraints(
       maxHeight: MediaQuery.sizeOf(context).height * 0.34,
     ),
     child: SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: FluttyTheme.spacingMd),
+      padding: EdgeInsets.symmetric(horizontal: FluttyTheme.spacingMd + gutter),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1740,7 +1779,10 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
     ),
   );
 
-  Widget _buildSessionStatusBanner(AcpSessionState session) {
+  Widget _buildSessionStatusBanner(
+    AcpSessionState session, {
+    required double gutter,
+  }) {
     final status = session.status;
     final transitioning =
         status == AcpConnectionStatus.idle ||
@@ -1785,6 +1827,7 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
       AcpConnectionStatus.ready => ('ready', Icons.check_circle_outline),
     };
     return _SessionStatusBanner(
+      gutter: gutter,
       message: needsSignIn ? 'agent sign-in required' : message,
       icon: needsSignIn ? Icons.lock_outline : icon,
       transitioning: transitioning,
@@ -2440,8 +2483,11 @@ class _AcpQuickSelectorState extends State<_AcpQuickSelector> {
   }
 }
 
+/// A status strip across the top of the chat. The strip spans the chat;
+/// [gutter] lines its content up with the reading column.
 class _SessionStatusBanner extends StatelessWidget {
   const _SessionStatusBanner({
+    required this.gutter,
     required this.message,
     required this.icon,
     required this.transitioning,
@@ -2452,6 +2498,7 @@ class _SessionStatusBanner extends StatelessWidget {
     this.onAction,
   });
 
+  final double gutter;
   final String message;
   final IconData icon;
   final bool transitioning;
@@ -2475,8 +2522,8 @@ class _SessionStatusBanner extends StatelessWidget {
           border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: FluttyTheme.spacingMd,
+          padding: EdgeInsets.symmetric(
+            horizontal: FluttyTheme.spacingMd + gutter,
             vertical: FluttyTheme.spacingSm,
           ),
           child: Column(

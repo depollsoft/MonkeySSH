@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -35,6 +36,66 @@ const double kAcpThreadStickyPromptMinHeight = 2 * _stickyPromptHeight;
 /// Shortest viewport that shows the prompt navigation, which is three
 /// 48 pt buttons tall.
 const double kAcpThreadPromptNavigationMinHeight = 160;
+
+/// Characters of transcript prose a line holds at most on a wide screen: the
+/// middle of the 65–75 character measure DESIGN.md sets for body text.
+const int kAcpReadingMeasureCharacters = 70;
+
+/// Size of the transcript's prose, which [AcpMarkdown] and the user prompt
+/// set on the theme's body style.
+const double _proseFontSize = 15;
+
+/// Ordinary prose whose average character width stands for the transcript's.
+/// Real text mixes narrow spaces and punctuation with its letters, so this is
+/// truer than the lowercase alphabet or the width of "0" (CSS's `ch`): in
+/// Inter, a measure built from those holds about 80 and 93 characters.
+const String _measureSample =
+    'The agent finished the change, ran the tests, and left a short summary '
+    'of what it touched and why.';
+
+({TextStyle style, TextScaler scaler, double width})? _lastReadingMeasure;
+
+/// Width of [kAcpReadingMeasureCharacters] characters of transcript prose in
+/// [context]'s theme and at its text scale, so the reading column grows with
+/// the chat's zoom and the user's text size.
+double acpReadingMeasure(BuildContext context) {
+  final style = (Theme.of(context).textTheme.bodyMedium ?? const TextStyle())
+      .copyWith(fontSize: _proseFontSize);
+  final scaler = MediaQuery.textScalerOf(context);
+  final last = _lastReadingMeasure;
+  if (last != null && last.style == style && last.scaler == scaler) {
+    return last.width;
+  }
+  final painter = TextPainter(
+    text: TextSpan(text: _measureSample, style: style),
+    textDirection: TextDirection.ltr,
+    textScaler: scaler,
+    maxLines: 1,
+  )..layout();
+  final width =
+      painter.width / _measureSample.length * kAcpReadingMeasureCharacters;
+  painter.dispose();
+  _lastReadingMeasure = (style: style, scaler: scaler, width: width);
+  return width;
+}
+
+/// Default padding around a thread's content.
+const EdgeInsets kAcpMessageThreadPadding = EdgeInsets.symmetric(
+  horizontal: 12,
+  vertical: FluttyTheme.spacingSm,
+);
+
+/// Space added to either side of content at most [maxContentWidth] wide, with
+/// [padding] around it, to centre it in [width]. Zero when it fills [width]
+/// or [maxContentWidth] is null.
+double acpColumnGutter(
+  double width, {
+  required double? maxContentWidth,
+  EdgeInsetsGeometry padding = kAcpMessageThreadPadding,
+}) {
+  if (maxContentWidth == null || !width.isFinite) return 0;
+  return math.max(0, (width - padding.horizontal - maxContentWidth) / 2);
+}
 
 /// The transcript child a search wants revealed and highlighted.
 @immutable
@@ -99,10 +160,8 @@ class AcpMessageThread extends StatefulWidget {
     required this.entries,
     super.key,
     this.controller,
-    this.padding = const EdgeInsets.symmetric(
-      horizontal: 12,
-      vertical: FluttyTheme.spacingSm,
-    ),
+    this.padding = kAcpMessageThreadPadding,
+    this.maxContentWidth,
     this.shrinkWrap = false,
     this.physics,
     this.footer,
@@ -129,6 +188,13 @@ class AcpMessageThread extends StatefulWidget {
 
   /// Padding around the list content.
   final EdgeInsetsGeometry padding;
+
+  /// Widest the content grows inside [padding]. A wider viewport splits the
+  /// rest evenly to either side, so the content sits in a centred column
+  /// while the scroll view, and its scrollbar, still span the viewport. The
+  /// pinned prompt summary and the prompt navigation keep to that column.
+  /// Null fills the width.
+  final double? maxContentWidth;
 
   /// Whether the list shrink-wraps its content.
   final bool shrinkWrap;
@@ -1144,38 +1210,44 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
                 physics: widget.physics,
                 semanticChildCount: visibleTranscriptChildCount,
                 slivers: [
-                  SliverPadding(
-                    padding: widget.padding,
-                    sliver: SliverList(
-                      key: _sliverListKey,
-                      delegate: SliverChildBuilderDelegate(
-                        _buildListChild,
-                        childCount: childCount,
-                        findChildIndexCallback: (key) {
-                          if (key ==
-                              const ValueKey<String>(
-                                'acp-earlier-transcript',
-                              )) {
-                            return _hasEarlierTranscript ? 0 : null;
-                          }
-                          if (key ==
-                              const ValueKey<String>(
-                                'acp-message-thread-footer',
-                              )) {
-                            return widget.footer == null
-                                ? null
-                                : childCount - 1;
-                          }
-                          if (key is! ValueKey<String>) return null;
-                          final absoluteIndex = _childIndexByKey[key.value];
-                          if (absoluteIndex == null ||
-                              absoluteIndex < _renderStartChildIndex) {
-                            return null;
-                          }
-                          return absoluteIndex -
-                              _renderStartChildIndex +
-                              _leadingWindowChildCount;
-                        },
+                  SliverLayoutBuilder(
+                    builder: (context, constraints) => SliverPadding(
+                      padding: widget.padding.add(
+                        EdgeInsets.symmetric(
+                          horizontal: _gutter(constraints.crossAxisExtent),
+                        ),
+                      ),
+                      sliver: SliverList(
+                        key: _sliverListKey,
+                        delegate: SliverChildBuilderDelegate(
+                          _buildListChild,
+                          childCount: childCount,
+                          findChildIndexCallback: (key) {
+                            if (key ==
+                                const ValueKey<String>(
+                                  'acp-earlier-transcript',
+                                )) {
+                              return _hasEarlierTranscript ? 0 : null;
+                            }
+                            if (key ==
+                                const ValueKey<String>(
+                                  'acp-message-thread-footer',
+                                )) {
+                              return widget.footer == null
+                                  ? null
+                                  : childCount - 1;
+                            }
+                            if (key is! ValueKey<String>) return null;
+                            final absoluteIndex = _childIndexByKey[key.value];
+                            if (absoluteIndex == null ||
+                                absoluteIndex < _renderStartChildIndex) {
+                              return null;
+                            }
+                            return absoluteIndex -
+                                _renderStartChildIndex +
+                                _leadingWindowChildCount;
+                          },
+                        ),
                       ),
                     ),
                   ),
@@ -1187,6 +1259,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final height = constraints.maxHeight;
+                final gutter = _gutter(constraints.maxWidth);
                 _stickyPromptFits = height >= kAcpThreadStickyPromptMinHeight;
                 return Stack(
                   children: [
@@ -1197,6 +1270,7 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
                         right: 0,
                         child: _StickyUserPromptSummary(
                           summary: acpUserPromptSummary(stickyPrompt),
+                          gutter: gutter,
                           onTap: () => _navigateToPrompt(stickyIndex),
                         ),
                       ),
@@ -1206,8 +1280,8 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
                         child: Align(
                           alignment: Alignment.centerRight,
                           child: Padding(
-                            padding: const EdgeInsets.only(
-                              right: FluttyTheme.spacingSm,
+                            padding: EdgeInsets.only(
+                              right: FluttyTheme.spacingSm + gutter,
                             ),
                             child: _UserPromptNavigation(
                               visible: _promptNavigationVisible,
@@ -1231,6 +1305,12 @@ class _AcpMessageThreadState extends State<AcpMessageThread> {
       ),
     );
   }
+
+  double _gutter(double width) => acpColumnGutter(
+    width,
+    maxContentWidth: widget.maxContentWidth,
+    padding: widget.padding,
+  );
 }
 
 class _UserPromptNavigation extends StatelessWidget {
@@ -1352,10 +1432,17 @@ class _UserPromptNavigationButtonSlot extends StatelessWidget {
   );
 }
 
+/// The prompt summary pinned across the top of the viewport. The strip spans
+/// the viewport; [gutter] lines its text up with the transcript's column.
 class _StickyUserPromptSummary extends StatelessWidget {
-  const _StickyUserPromptSummary({required this.summary, required this.onTap});
+  const _StickyUserPromptSummary({
+    required this.summary,
+    required this.gutter,
+    required this.onTap,
+  });
 
   final String summary;
+  final double gutter;
   final VoidCallback onTap;
 
   @override
@@ -1382,7 +1469,7 @@ class _StickyUserPromptSummary extends StatelessWidget {
                 key: const ValueKey('acp-sticky-user-prompt'),
                 height: 44,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  padding: EdgeInsets.symmetric(horizontal: 12 + gutter),
                   child: Row(
                     children: [
                       Icon(
