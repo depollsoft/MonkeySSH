@@ -5,8 +5,7 @@
 # a comment. Groups marked BUG are behaviour that differs from xterm in a way
 # programs can see; the rest is missing or deliberately left out.
 #
-# The harness runs the terminal without the app layer, apart from turning
-# cursor position reports one-based as the app does.
+# The harness runs the terminal without the app layer.
 
 # BUG: IND, LF, VT, FF and NEL on the last row scroll the whole screen when
 # the cursor is below the scroll region. xterm moves nothing (Buffer.index).
@@ -150,9 +149,7 @@ DECSERATests.test_DECSERA_ignoresMargins
 DECSERATests.test_DECSERA_overlyLargeSourceClippedToScreenSize
 DECSERATests.test_DECSERA_respectsOriginMode
 
-# Not implemented: left/right margins (DECLRMM, DECSLRM). Some of these also
-# need cursor position reports relative to the margins under origin mode
-# (DECOM), which this terminal reports from the top left of the screen.
+# Not implemented: left/right margins (DECLRMM, DECSLRM).
 BSTests.test_BS_StopsAtLeftMargin
 CHATests.test_CHA_RespectsOriginMode
 CHTTests.test_CHT_IgnoresScrollingRegion
@@ -201,7 +198,6 @@ SUTests.test_SU_BigScrollLeftRightAndTopBottomScrollRegion
 SUTests.test_SU_LeftRightAndTopBottomScrollRegion
 SUTests.test_SU_OutsideLeftRightScrollRegion
 SUTests.test_SU_RespectsLeftRightScrollRegion
-VPATests.test_VPA_IgnoresOriginMode
 VPRTests.test_VPR_IgnoresOriginMode
 VTTests.test_VT_MovesDoesNotScrollOutsideLeftRight
 
@@ -213,39 +209,19 @@ DATests.test_DA_0
 DATests.test_DA_NoParameter
 DECIDTests.test_DECID_Basic
 
-# DECRQM: ANSI modes the terminal doesn't know are reported as not recognized
-# (0), where xterm says permanently reset (4) or reset (2). DEC private modes
-# are answered by the app layer (ssh_service.dart), which this harness
-# doesn't run.
-DECRQMTests.test_DECRQM_ANSI_EBM
-DECRQMTests.test_DECRQM_ANSI_FEAM
-DECRQMTests.test_DECRQM_ANSI_FETM
-DECRQMTests.test_DECRQM_ANSI_GATM
-DECRQMTests.test_DECRQM_ANSI_HEM
+# DECRQM for modes the terminal doesn't implement (KAM, 132 columns, left/right
+# margins, national replacement sets, ...), or reports differently from xterm
+# (SRM is permanently set here, as in Ghostty).
 DECRQMTests.test_DECRQM_ANSI_KAM
-DECRQMTests.test_DECRQM_ANSI_MATM
-DECRQMTests.test_DECRQM_ANSI_PUM
-DECRQMTests.test_DECRQM_ANSI_SATM
 DECRQMTests.test_DECRQM_ANSI_SRM
-DECRQMTests.test_DECRQM_ANSI_SRTM
-DECRQMTests.test_DECRQM_ANSI_TSM
-DECRQMTests.test_DECRQM_ANSI_TTM
-DECRQMTests.test_DECRQM_ANSI_VEM
-DECRQMTests.test_DECRQM_DEC_DECAWM
-DECRQMTests.test_DECRQM_DEC_DECBKM
-DECRQMTests.test_DECRQM_DEC_DECCKM
 DECRQMTests.test_DECRQM_DEC_DECCOLM
 DECRQMTests.test_DECRQM_DEC_DECHCCM
 DECRQMTests.test_DECRQM_DEC_DECHEBM
 DECRQMTests.test_DECRQM_DEC_DECLRMM
-DECRQMTests.test_DECRQM_DEC_DECNKM
 DECRQMTests.test_DECRQM_DEC_DECNRCM
-DECRQMTests.test_DECRQM_DEC_DECOM
 DECRQMTests.test_DECRQM_DEC_DECPEX
 DECRQMTests.test_DECRQM_DEC_DECPFF
 DECRQMTests.test_DECRQM_DEC_DECSCLM
-DECRQMTests.test_DECRQM_DEC_DECSCNM
-DECRQMTests.test_DECRQM_DEC_DECTCEM
 
 # DECRQSS for settings the terminal doesn't track.
 DECRQSSTests.test_DECRQSS_DECSACE
