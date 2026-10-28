@@ -252,6 +252,7 @@ class Buffer {
     if (regionHeight <= 0) return;
     final count = lines < regionHeight ? lines : regionHeight;
     if (count <= 0) return;
+    final images = _beginImageScroll(top, bottom, count);
     for (var i = bottom - count + 1; i <= bottom; i++) {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
@@ -260,6 +261,7 @@ class Buffer {
       for (var i = top; i <= bottom - count; i++) this.lines[i],
     ];
     this.lines.reassignRange(top, reordered);
+    graphics.endRegionScroll(this.lines, images);
     _endContinuation(top + count);
     _endContinuation(bottom + 1);
   }
@@ -305,6 +307,7 @@ class Buffer {
       _endContinuation(absoluteMarginBottom + 1);
       return;
     }
+    final images = _beginImageScroll(top, bottom, -count);
     for (var i = top; i < top + count; i++) {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
@@ -313,9 +316,21 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     this.lines.reassignRange(top, reordered);
+    graphics.endRegionScroll(this.lines, images);
     _endContinuation(top);
     _endContinuation(bottom + 1);
   }
+
+  /// Lets Kitty images in the scroll region move with its text, clipped to the
+  /// region; see [GraphicsManager.beginRegionScroll].
+  GraphicsRegionScroll? _beginImageScroll(int top, int bottom, int delta) =>
+      graphics.beginRegionScroll(
+        lines,
+        top: top,
+        bottom: bottom,
+        delta: delta,
+        hasMargins: _marginTop != 0 || _marginBottom != viewHeight - 1,
+      );
 
   /// https://vt100.net/docs/vt100-ug/chapter3.html#IND IND – Index
   ///
