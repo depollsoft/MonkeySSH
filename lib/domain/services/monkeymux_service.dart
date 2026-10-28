@@ -877,7 +877,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   ///
   /// The state is kept and sent over the live control channel, now or once it
   /// connects, to servers that support it. It is sent again on every new
-  /// control connection, and after a failed send.
+  /// control connection, and after a failed or timed-out send.
   void setClientHidden(
     SshSession session,
     String sessionName, {
@@ -892,8 +892,14 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     _syncClientVisibility(session, sessionName, state);
   }
 
-  /// Sends [_MonkeyMuxSessionState.clientHidden] unless the current control
-  /// connection has acknowledged it or is already sending it.
+  /// Sends [_MonkeyMuxSessionState.clientHidden] unless the latest send on the
+  /// current control connection carried the same state and has not failed.
+  ///
+  /// The server applies a connection's sends in order, so it ends at the
+  /// latest one unless that one failed. Only the latest send counts: an older
+  /// one acknowledged or timing out late says nothing about the server's
+  /// state. A failed or timed-out latest send leaves the state unknown, so the
+  /// current one is sent again.
   void _syncClientVisibility(
     SshSession session,
     String sessionName,
@@ -907,50 +913,55 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         !(state.serverStatus?.supportsClientVisibility ?? false)) {
       return;
     }
-    final target = (connection: connection, hidden: state.clientHidden);
-    if (state.clientVisibilityAcknowledged == target ||
-        state.clientVisibilityInFlight == target) {
+    final hidden = state.clientHidden;
+    final latest = state.clientVisibilityLatest;
+    if (latest != null &&
+        identical(latest.connection, connection) &&
+        latest.hidden == hidden &&
+        !state.clientVisibilityLatestFailed) {
       return;
     }
+    final send = (
+      connection: connection,
+      hidden: hidden,
+      serial: ++state.clientVisibilitySerial,
+    );
     state
-      ..clientVisibilityInFlight = target
+      ..clientVisibilityLatest = send
+      ..clientVisibilityLatestFailed = false
       ..cancelClientVisibilityRetry();
-    void settle() {
-      if (state.clientVisibilityInFlight == target) {
-        state.clientVisibilityInFlight = null;
-      }
-    }
+    bool isLatest() => state.clientVisibilityLatest?.serial == send.serial;
 
     unawaited(
       observer
           .runCommand({
             'type': 'client_visibility',
             'clientId': session.monkeyMuxClientId,
-            if (target.hidden) 'hidden': true,
+            if (hidden) 'hidden': true,
           }, priority: SshExecPriority.low)
           .then<void>(
             (_) {
-              settle();
-              state
-                ..clientVisibilityAcknowledged = target
-                ..clientVisibilityFailures = 0;
-              // The state may have changed while this was in flight.
-              _syncClientVisibility(session, sessionName, state);
+              if (isLatest()) {
+                state.clientVisibilityFailures = 0;
+              }
             },
             onError: (Object error) {
-              settle();
+              if (!isLatest()) {
+                return;
+              }
+              state.clientVisibilityLatestFailed = true;
               DiagnosticsLogService.instance.debug(
                 'monkeymux.visibility',
                 'send_failed',
                 fields: {
                   'connectionId': session.connectionId,
-                  'hidden': target.hidden,
+                  'hidden': hidden,
                   'failures': state.clientVisibilityFailures + 1,
                   'errorType': error.runtimeType.toString(),
                 },
               );
               // A dropped channel resends on its next hello; a failure on a
-              // live one retries a few times.
+              // live one retries a few times. Any later change sends at once.
               if (++state.clientVisibilityFailures <=
                   _clientVisibilityMaxRetries) {
                 state.clientVisibilityRetry = Timer(
@@ -1630,9 +1641,11 @@ class _MonkeyMuxSessionState {
   /// [MonkeyMuxService.setClientHidden].
   bool clientHidden = false;
 
-  /// The visibility a control connection acknowledged, and the one being sent.
-  ({Object connection, bool hidden})? clientVisibilityAcknowledged;
-  ({Object connection, bool hidden})? clientVisibilityInFlight;
+  /// The latest client_visibility send, whether it is still in flight or
+  /// acknowledged, and whether it failed (leaving the server's state unknown).
+  ({Object connection, bool hidden, int serial})? clientVisibilityLatest;
+  bool clientVisibilityLatestFailed = false;
+  int clientVisibilitySerial = 0;
 
   /// Consecutive failed sends, and the timer that retries the last one.
   int clientVisibilityFailures = 0;

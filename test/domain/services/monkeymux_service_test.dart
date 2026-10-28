@@ -1442,6 +1442,7 @@ void main() {
       required List<String> capabilities,
       required int connectionId,
       Duration retryDelay = const Duration(hours: 1),
+      Duration? responseTimeout,
     }) async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
@@ -1454,6 +1455,7 @@ void main() {
       final service = MonkeyMuxService(
         installer: installer,
         agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+        controlResponseTimeout: responseTimeout,
         clientVisibilityRetryDelay: retryDelay,
       );
       final events = service.watchWindowChanges(session, 'work').listen((_) {});
@@ -1527,6 +1529,58 @@ void main() {
         await pumpEventQueue();
         expect(server.connections, hasLength(3));
         expect(server.requests.skip(sent), [(2, false)]);
+      },
+    );
+
+    test(
+      'a hide answered late cannot hold back the foreground update',
+      () async {
+        final (:service, :session, :server) = await start(
+          capabilities: ['client-visibility'],
+          connectionId: 945,
+          retryDelay: const Duration(milliseconds: 10),
+          responseTimeout: const Duration(milliseconds: 200),
+        );
+        expect(server.requests, [(0, false)]);
+
+        // The server applies the hide, but its answer is late.
+        server.holdVisibility = true;
+        service.setClientHidden(session, 'work', hidden: true);
+        await pumpEventQueue();
+        expect(server.hidden, isTrue);
+
+        // Back in the foreground before the hide times out: the visible state
+        // the server acknowledged earlier no longer describes it.
+        service.setClientHidden(session, 'work', hidden: false);
+        await pumpEventQueue();
+        expect(server.requests, [(0, false), (0, true), (0, false)]);
+        expect(server.hidden, isFalse);
+
+        // Both time out on a channel that stays busy, so it is not recycled;
+        // the unanswered foreground update is sent again.
+        server.sendEvent();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        server
+          ..sendEvent()
+          ..holdVisibility = false;
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        await pumpEventQueue();
+        expect(server.connections, hasLength(1));
+        expect(server.requests, [
+          (0, false),
+          (0, true),
+          (0, false),
+          (0, false),
+        ]);
+        expect(server.hidden, isFalse);
+
+        // The late answers change nothing.
+        server.releaseHeld();
+        await pumpEventQueue();
+        service.setClientHidden(session, 'work', hidden: false);
+        await pumpEventQueue();
+        expect(server.requests, hasLength(4));
+        expect(server.hidden, isFalse);
       },
     );
 
@@ -2551,9 +2605,11 @@ void _respondToControlError(
 }
 
 /// A server whose control connections each say hello once, as the real
-/// one does, and answer every request, or fail the client_visibility
-/// requests while [failVisibility] is set. [requests] records each
-/// client_visibility request's hidden flag with its connection's number.
+/// one does, and answer every request. While [failVisibility] is set it fails
+/// client_visibility requests; while [holdVisibility] is set it applies them
+/// but holds their answers until [releaseHeld]. [requests] records each
+/// client_visibility request's hidden flag with its connection's number, and
+/// [hidden] the state the server applied last.
 class _FakeVisibilityServer {
   _FakeVisibilityServer({required this.capabilities});
 
@@ -2561,7 +2617,10 @@ class _FakeVisibilityServer {
   final requests = <(int, bool)>[];
   final connections = <Completer<void>>[];
   final outputs = <StreamController<Uint8List>>[];
+  final _held = <void Function()>[];
   bool failVisibility = false;
+  bool holdVisibility = false;
+  bool hidden = false;
 
   SSHSession connect() {
     final connection = connections.length;
@@ -2587,22 +2646,46 @@ class _FakeVisibilityServer {
       final visibility = request['type'] == 'client_visibility';
       if (visibility) {
         requests.add((connection, request['hidden'] == true));
+        if (!failVisibility) {
+          hidden = request['hidden'] == true;
+        }
       }
-      scheduleMicrotask(
-        () => send(
-          visibility && failVisibility
-              ? {'id': request['id'], 'type': 'error', 'error': 'boom'}
-              : {
-                  'id': request['id'],
-                  'type': visibility ? 'client_visibility' : 'window_list',
-                  'status': 'ok',
-                  'windows': const <Object?>[],
-                },
-        ),
+      void answer() => send(
+        visibility && failVisibility
+            ? {'id': request['id'], 'type': 'error', 'error': 'boom'}
+            : {
+                'id': request['id'],
+                'type': visibility ? 'client_visibility' : 'window_list',
+                'status': 'ok',
+                'windows': const <Object?>[],
+              },
       );
+      if (visibility && holdVisibility) {
+        _held.add(answer);
+      } else {
+        scheduleMicrotask(answer);
+      }
     });
     return control;
   }
+
+  /// Answers the held requests, late.
+  void releaseHeld() {
+    for (final answer in _held) {
+      answer();
+    }
+    _held.clear();
+  }
+
+  /// Sends an unsolicited event on the current connection, so the channel
+  /// does not look silent.
+  void sendEvent() => outputs.last.add(
+    Uint8List.fromList(
+      utf8.encode(
+        '${jsonEncode({'type': 'window_removed', 'status': 'ok'})}\n',
+      ),
+    ),
+  );
 
   /// Drops the current control connection, as a network blip does.
   void dropConnection() => connections.last.complete();
