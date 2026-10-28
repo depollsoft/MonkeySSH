@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:archive/archive.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/src/core/kitty_graphics_validation.dart';
@@ -920,6 +921,138 @@ void main() {
       _store(terminal, 1);
       terminal.write('\x1b[1;7H\x1b_Ga=p,i=1,c=4,r=2,q=2\x1b\\');
       expect((terminal.buffer.cursorX, terminal.buffer.cursorY), (0, 2));
+    });
+  });
+
+  group('review fixes', () {
+    test('a region scroll keeps the column insertions moved an image to', () {
+      final terminal = _terminal();
+      _store(terminal, 1);
+      terminal.write('\x1b[1;6H\x1b_Ga=p,i=1,c=1,r=1,C=1,q=2\x1b\\');
+      expect(_placementOf(terminal, 1)!.col, 5);
+      // Two cells inserted before the anchor move it to column 7.
+      terminal.write('\x1b[1;1H\x1b[2@');
+      expect(_placementOf(terminal, 1)!.col, 7);
+
+      terminal.write('\x1b[T');
+      final moved = _placementOf(terminal, 1)!;
+      expect((col: moved.col, row: moved.row), (col: 7, row: 1));
+    });
+
+    testWidgets('a queued virtual placement lands on the screen it named', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final terminal = _terminal();
+        final png = await _pngBase64(400, 400);
+        for (var i = 0; i < 3; i++) {
+          await terminalGraphicsDecodeGate.acquire();
+        }
+        try {
+          terminal
+            ..write('\x1b_Ga=T,i=1,f=100,c=1,r=1,C=1,q=2;$png\x1b\\')
+            ..write('\x1b_Ga=p,i=1,U=1,c=2,r=2,q=2\x1b\\')
+            ..write('\x1b[?1049h');
+        } finally {
+          for (var i = 0; i < 3; i++) {
+            terminalGraphicsDecodeGate.release();
+          }
+        }
+        // The decode finishes while the alternate screen is up.
+        final main = terminal.mainBuffer.graphics;
+        await _until(() => main.virtualPlacementById(1) != null);
+        expect(terminal.isUsingAltBuffer, isTrue);
+        expect(main.virtualPlacementById(1), isNotNull);
+        expect(terminal.altBuffer.graphics.virtualPlacementById(1), isNull);
+      });
+    });
+
+    testWidgets('a queued virtual placement keeps the image its I= named', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final terminal = _terminal();
+        final png = await _pngBase64(400, 400);
+        for (var i = 0; i < 3; i++) {
+          await terminalGraphicsDecodeGate.acquire();
+        }
+        late int first;
+        late int second;
+        try {
+          terminal
+            ..write('\x1b_Ga=T,I=5,f=100,c=1,r=1,C=1,q=2;$png\x1b\\')
+            ..write('\x1b_Ga=p,I=5,U=1,c=2,r=2,q=2\x1b\\');
+          first = terminal.graphics.imageIdForNumber(5)!;
+          terminal.write('\x1b_Ga=t,I=5,f=32,s=1,v=1,q=2;$_pixel\x1b\\');
+          second = terminal.graphics.imageIdForNumber(5)!;
+        } finally {
+          for (var i = 0; i < 3; i++) {
+            terminalGraphicsDecodeGate.release();
+          }
+        }
+        await _until(
+          () => terminal.graphics.virtualPlacementById(first) != null,
+        );
+        expect(terminal.graphics.virtualPlacementById(first), isNotNull);
+        expect(terminal.graphics.virtualPlacementById(second), isNull);
+      });
+    });
+
+    test('compressed data never inflates past what it may hold', () {
+      // 8 MiB of zeros compresses to a few kilobytes.
+      final bomb = Uint8List.fromList(
+        const ZLibEncoder().encode(Uint8List(8 << 20)),
+      );
+      expect(bomb.length, lessThan(16 * 1024));
+      expect(inflateZlibData(bomb, maxBytes: 4), isNull);
+      
+      expect(inflateZlibData(bomb)!.length, 8 << 20);
+
+      final responses = <String>[];
+      final terminal = _terminal(responses: responses);
+      terminal.write(
+        '\x1b_Ga=t,i=1,f=32,s=1,v=1,o=z;${base64.encode(bomb)}\x1b\\',
+      );
+      expect(responses.single, startsWith('\x1b_Gi=1;EINVAL'));
+      expect(terminal.graphics.hasPendingImage(1), isFalse);
+    });
+
+    test('a PNG query stops inflating at the declared image size', () {
+      Uint8List chunk(String type, List<int> data) {
+        final body = Uint8List.fromList([...utf8.encode(type), ...data]);
+        return (BytesBuilder()
+              ..add(
+                  (ByteData(4)..setUint32(0, data.length)).buffer.asUint8List())
+              ..add(body)
+              ..add(
+                (ByteData(4)..setUint32(0, _crc32(body))).buffer.asUint8List(),
+              ))
+            .takeBytes();
+      }
+
+      // A CRC-correct 1x1 RGBA PNG whose image data inflates to 8 MiB.
+      final header = (ByteData(13)
+            ..setUint32(0, 1)
+            ..setUint32(4, 1)
+            ..setUint8(8, 8)
+            ..setUint8(9, 6))
+          .buffer
+          .asUint8List();
+      final png = Uint8List.fromList([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+        ...chunk('IHDR', header),
+        ...chunk('IDAT', const ZLibEncoder().encode(Uint8List(8 << 20))),
+        ...chunk('IEND', const []),
+      ]);
+      expect(
+        kittyGraphicsPayloadError(kittyGraphicsFormatPng, png, deep: true),
+        isNotNull,
+      );
+
+      final responses = <String>[];
+      final terminal = _terminal(responses: responses);
+      terminal.write('\x1b_Ga=q,i=1,f=100;${base64.encode(png)}\x1b\\');
+      expect(responses.single, startsWith('\x1b_Gi=1;EINVAL'));
     });
   });
 

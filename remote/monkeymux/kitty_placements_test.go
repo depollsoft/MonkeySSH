@@ -112,14 +112,12 @@ func TestKittyPlacementsGoWithTheirParents(t *testing.T) {
 		return window
 	}
 	for name, command := range map[string]string{
-		"delete by id":       "\x1b_Ga=d,d=i,i=1\x1b\\",
-		"delete by range":    "\x1b_Ga=d,d=r,x=1,y=1\x1b\\",
-		"retransmit":         "\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\",
-		"physical re-place":  "\x1b_Ga=p,i=2,p=1\x1b\\\x1b_Ga=p,i=1,p=9\x1b\\",
-		"positional delete":  "\x1b_Ga=d,d=p,x=1,y=1\x1b\\",
-		"free the image":     "\x1b_Ga=d,d=I,i=1\x1b\\",
-		"free a range":       "\x1b_Ga=d,d=R,x=1,y=2\x1b\\",
-		"delete all visible": "\x1b_Ga=d\x1b\\",
+		"delete by id":      "\x1b_Ga=d,d=i,i=1\x1b\\",
+		"delete by range":   "\x1b_Ga=d,d=r,x=1,y=1\x1b\\",
+		"retransmit":        "\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\",
+		"physical re-place": "\x1b_Ga=p,i=2,p=1\x1b\\\x1b_Ga=p,i=1,p=9\x1b\\",
+		"free the image":    "\x1b_Ga=d,d=I,i=1\x1b\\",
+		"free a range":      "\x1b_Ga=d,d=R,x=1,y=2\x1b\\",
 	} {
 		t.Run(name, func(t *testing.T) {
 			window := setup()
@@ -196,7 +194,8 @@ func TestKittyPlacementsOnARootVirtualPlacementGoWithIt(t *testing.T) {
 func TestKittyAlternateScreenPlacementsFollowTheClientClears(t *testing.T) {
 	window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": true}}
 	window.observeKittyGraphicsLocked([]byte(
-		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b[?1049h" +
+			"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
 			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
 			"\x1b_Ga=p,U=1,i=1\x1b\\" +
 			"\x1b_Ga=p,i=2,p=1,P=1\x1b\\"))
@@ -211,7 +210,7 @@ func TestKittyAlternateScreenPlacementsFollowTheClientClears(t *testing.T) {
 	}
 	// Leaving the alternate screen clears its relative placements on the
 	// client; its virtual placements survive.
-	window.observeKittyGraphicsLocked([]byte("x"))
+	window.observeKittyGraphicsLocked([]byte("\x1b[?1049l"))
 	if got := kittyPlacementKeys(window); fmt.Sprint(got) != "[1/virtual]" {
 		t.Fatalf("kept placements = %v", got)
 	}
@@ -272,5 +271,138 @@ func TestKittyErrorRepliesAreTerminalResponses(t *testing.T) {
 		if got := isTerminalResponseKitty([]byte(payload)); got != want {
 			t.Fatalf("isTerminalResponseKitty(%q) = %v, want %v", payload, got, want)
 		}
+	}
+}
+
+// kittyPlacementWindow is a window whose screen model shows image 1 through
+// Unicode placeholder cells from row 3, column 5 (0-based 2, 4), with a
+// virtual placement and image 2 placed relative to it.
+func kittyPlacementWindow(t *testing.T, child string) *muxWindow {
+	t.Helper()
+	window := &muxWindow{id: "@1", screen: newTerminalScreen(80, 24)}
+	window.screen.Write([]byte(
+		"\x1b[38;5;1m\x1b[3;5H\U0010EEEE\U0010EEEE\x1b[4;5H\U0010EEEE\x1b[m",
+	))
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1," + child + "\x1b\\"))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("kept placements = %v", kittyPlacementKeys(window))
+	}
+	return window
+}
+
+func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
+	// The child sits one column right and one row down of the placeholder
+	// origin (2, 4): 0-based row 3, columns 5 and 6, so 1-based y=4, x=6..7.
+	for _, tc := range []struct {
+		name    string
+		command string
+		removed bool
+	}{
+		{"another z-index", "d=z,z=9", false},
+		{"its z-index", "d=z,z=3", true},
+		{"a cell it covers", "d=p,x=7,y=4", true},
+		{"a cell beside it", "d=p,x=8,y=4", false},
+		{"a cell and the wrong z", "d=q,x=6,y=4,z=0", false},
+		{"a cell and its z", "d=q,x=6,y=4,z=3", true},
+		{"its column", "d=x,x=6", true},
+		{"another row", "d=y,y=3", false},
+		{"everything visible", "d=a", true},
+		{"everything visible, freeing", "d=A", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := kittyPlacementWindow(t, "H=1,V=1,c=2,r=1,z=3")
+			window.observeKittyGraphicsLocked([]byte(
+				"\x1b_Ga=d," + tc.command + "\x1b\\"))
+			kept := len(window.kittyPlacements) == 2
+			if kept == tc.removed {
+				t.Fatalf("after %s kept placements = %v", tc.command,
+					kittyPlacementKeys(window))
+			}
+		})
+	}
+
+	// The cursor cell, and a child whose root shows no placeholder cell.
+	window := kittyPlacementWindow(t, "H=1,V=1")
+	window.screen.Write([]byte("\x1b[4;6H"))
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d,d=c\x1b\\"))
+	if len(window.kittyPlacements) != 1 {
+		t.Fatalf("d=c at the child kept %v", kittyPlacementKeys(window))
+	}
+	window = kittyPlacementWindow(t, "H=1,V=1")
+	window.screen.Write([]byte("\x1b[2J"))
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d\x1b\\"))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("d=a removed an unplaced child: %v", kittyPlacementKeys(window))
+	}
+}
+
+func TestKittyDeletesOnTheOtherScreenKeepPlacements(t *testing.T) {
+	window := kittyPlacementWindow(t, "H=1,V=1")
+	window.privateModes = map[string]bool{"1049": true}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b[?1049h\x1b_Ga=d,d=i,i=2\x1b\\"))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("an alternate-screen delete removed main-screen placements: %v",
+			kittyPlacementKeys(window))
+	}
+}
+
+func TestKittyRejectedParentKeepsThePlacement(t *testing.T) {
+	window := kittyPlacementWindow(t, "H=1")
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,i=3,p=1,P=2,Q=1\x1b\\" +
+			// Image 999 does not exist: the client answers ENOPARENT and
+			// keeps placement 2/1, and 3/1 under it.
+			"\x1b_Ga=p,i=2,p=1,P=999\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/1 3/1]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+}
+
+func TestKittyReparentedPlacementsReplayParentsFirst(t *testing.T) {
+	window := &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1\x1b\\" +
+			"\x1b_Ga=p,i=3,p=1,P=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=3,Q=1\x1b\\"))
+
+	replay := string(window.kittyPlacementReplayLocked())
+	parent := strings.Index(replay, "a=p,i=3,p=1,P=1")
+	child := strings.Index(replay, "a=p,i=2,p=1,P=3,Q=1")
+	if parent < 0 || child < 0 || child < parent {
+		t.Fatalf("reparented child replayed before its parent: %q", replay)
+	}
+}
+
+func TestKittyPlacementsKeepTheScreenEachCommandRanOn(t *testing.T) {
+	// Main-screen placements and the switch to the alternate screen arrive in
+	// one chunk: the placements belong to the main screen.
+	window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": true}}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1\x1b\\" +
+			"\x1b[?1049h" +
+			"\x1b_Ga=p,U=1,i=2\x1b\\"))
+	for _, p := range window.kittyPlacements {
+		if want := p.imageID == "2" && p.virtual(); p.alt != want {
+			t.Fatalf("placement %s kept for alt=%v", p.key(), p.alt)
+		}
+	}
+	// Back on the main screen the client still has them.
+	window.privateModes["1049"] = false
+	window.observeKittyGraphicsLocked([]byte("\x1b[?1049l"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/1 2/virtual]" {
+		t.Fatalf("kept placements = %s", got)
 	}
 }

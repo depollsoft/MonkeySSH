@@ -693,6 +693,8 @@ type restoreWindowState struct {
 
 type muxServer struct {
 	agentSessionBindings agentSessionBindingState
+	// kittyReplyRoutes routes Kitty graphics replies; see kitty_replies.go.
+	kittyReplyRoutes kittyReplyRoutes
 
 	session         string
 	width           int
@@ -988,6 +990,10 @@ type muxWindow struct {
 	// kitty_placements.go), and the screen they were last reconciled with.
 	kittyPlacements    []kittyRetainedPlacement
 	kittyPlacementsAlt bool
+	// The alternate-screen modes as of the last graphics observed, which
+	// place each command of the next chunk on the screen it ran on.
+	kittyScreenMode1047 bool
+	kittyScreenMode1049 bool
 }
 
 type terminalOutputParserState int
@@ -1125,6 +1131,11 @@ func (r *attachInputRouting) addUserInput(data []byte, bracketedPaste bool) {
 }
 
 type attachClient struct {
+	// kittyReplyRoutes routes the client's Kitty graphics replies, and
+	// kittyReplyCarry holds one cut off by a read; see kitty_replies.go.
+	kittyReplyRoutes *kittyReplyRoutes
+	kittyReplyCarry  []byte
+
 	conn         net.Conn
 	id           string
 	width        int
@@ -7064,6 +7075,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		attach = s.attachConn
 		shouldWrite = s.attachCountLocked() > 0
 		maxAttachSequence = s.nextAttachSequence
+		s.kittyReplyRoutes.note(windowID, chunk)
 	} else if terminalBell {
 		window.alert = true
 	}
@@ -8079,6 +8091,9 @@ func (c *attachClient) routeInput(data []byte) attachInputRouting {
 		previousInputUtf8Remaining,
 		leadingInputUtf8Prefix,
 	)
+	if c.kittyReplyRoutes != nil && !c.inputBracketedPasteActive {
+		data = c.takeKittyRepliesLocked(data, &result)
+	}
 	c.routeInputLocked(data, leadingInputUtf8Prefix, &result)
 	c.trackRepliesLocked(result.actions)
 	return result
@@ -9148,6 +9163,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var themeHintWindowID string
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
+	client.kittyReplyRoutes = &s.kittyReplyRoutes
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
 	client.kittyClipboardInput.owedUntil = &s.kittyClipboardRepliesOwedUntil
 	client.focusClaim = func(expectedFocusSequence uint64) {
@@ -14148,6 +14164,18 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
+			// A graphics command runs again silenced: the program already
+			// had its reply.
+			if silenced := silencedKittyReplayCommand(
+				data[i:sequenceEnd],
+			); silenced != nil {
+				if output == nil {
+					output = make([]byte, 0, len(data)+4)
+				}
+				output = append(output, data[copyStart:i]...)
+				output = append(output, silenced...)
+				copyStart = sequenceEnd
+			}
 			i = sequenceEnd
 			continue
 		}
@@ -14220,6 +14248,10 @@ func terminalQuerySequenceResponseCount(sequence []byte) int {
 	case len(sequence) >= 1 && sequence[0] == 0x90:
 		payloadStart = 1
 		dcs = true
+	case len(sequence) >= 2 && sequence[0] == '\x1b' && sequence[1] == '_':
+		// Kitty graphics replies are routed by the image they name, not
+		// counted ahead; see kitty_replies.go.
+		return 0
 	default:
 		return 1
 	}
@@ -14480,6 +14512,8 @@ type kittyGraphicsEvent struct {
 	// the display command a placement event replays.
 	control   map[string]string
 	placement []byte
+	// offset is where the command starts in the scanned data.
+	offset int
 }
 
 // scanKittyTransmissions parses complete Kitty graphics events from the front of
@@ -14526,10 +14560,12 @@ func scanKittyTransmissions(
 			args := parseKittyControl(kittyControl(data, i, end))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, delete: true, control: args,
+				offset: i,
 			})
 		} else if buf != nil {
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
+				offset: i,
 			})
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
@@ -14539,7 +14575,7 @@ func scanKittyTransmissions(
 					!kittyNonZero(args["U"]) {
 					if command := kittyRelativeCommandFromRoot(args); command != nil {
 						events = append(events, kittyGraphicsEvent{
-							control: args, placement: command,
+							control: args, placement: command, offset: i,
 						})
 					}
 				}
@@ -14549,10 +14585,11 @@ func scanKittyTransmissions(
 			if args["a"] == "p" && args["i"] != "" && args["I"] != "" {
 				events = append(events, kittyGraphicsEvent{
 					id: args["i"], imageNumber: args["I"], mappingOnly: true,
+					offset: i,
 				})
 			} else if args["a"] == "p" {
 				events = append(events, kittyGraphicsEvent{
-					control: args, placement: data[i:end],
+					control: args, placement: data[i:end], offset: i,
 				})
 			}
 		}
@@ -14673,7 +14710,7 @@ func (w *muxWindow) observeKittyGraphicsLocked(chunk []byte) bool {
 	}
 
 	events, consumed := scanKittyTransmissions(data)
-	changed := w.applyKittyGraphicsEventsLocked(events)
+	changed := w.applyKittyGraphicsEventsLocked(events, data)
 
 	remainder := data[consumed:]
 	if len(remainder) > maxKittyGraphicsPendingBytes {
@@ -14791,18 +14828,24 @@ func resyncKittyGraphicsData(data []byte, scan int) []byte {
 
 func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	events []kittyGraphicsEvent,
+	data []byte,
 ) bool {
 	changed := false
-	w.reconcileKittyPlacementScreenLocked()
+	screen := w.newKittyScreenTrackerLocked(data)
+	defer screen.finish()
 	for _, event := range events {
 		if event.placement != nil {
-			if w.observeKittyPlacementLocked(event.control, event.placement) {
+			if w.observeKittyPlacementLocked(
+				event.control,
+				event.placement,
+				screen.at(event.offset),
+			) {
 				changed = true
 			}
 			continue
 		}
 		if event.delete {
-			if w.applyKittyImageDeleteLocked(event) {
+			if w.applyKittyImageDeleteLocked(event, screen.at(event.offset)) {
 				changed = true
 			}
 			continue

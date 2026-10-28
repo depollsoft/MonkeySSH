@@ -206,6 +206,13 @@ int _pngChannels(int colorType) => switch (colorType) {
       _ => 0,
     };
 
+/// Largest image data a query's PNG check inflates; a bigger image is only
+/// checked structurally, so a query never decodes much on the UI thread.
+const _maxCheckedPngImageDataBytes = 16 * 1024 * 1024;
+
+/// Extra bytes accepted after a PNG's last scanline, as decoders ignore them.
+const _pngImageDataSlackBytes = 1024;
+
 bool _pngImageDataComplete(
   Uint8List compressed, {
   required int width,
@@ -213,12 +220,6 @@ bool _pngImageDataComplete(
   required int bitsPerPixel,
   required bool interlaced,
 }) {
-  final List<int> inflated;
-  try {
-    inflated = const ZLibDecoder().decodeBytes(compressed);
-  } catch (_) {
-    return false;
-  }
   int scanlines(int passWidth, int passHeight) =>
       passWidth <= 0 || passHeight <= 0
           ? 0
@@ -243,6 +244,21 @@ bool _pngImageDataComplete(
         math.max(0, (height - pass[1] + pass[3] - 1) ~/ pass[3]),
       );
     }
+  }
+  if (expected > _maxCheckedPngImageDataBytes) {
+    return true;
+  }
+  // The scanlines the header declares bound the inflate, so image data that
+  // expands past them (a small file of compressed zeros, say) is rejected as
+  // soon as it does rather than decoded in full.
+  final List<int> inflated;
+  try {
+    inflated = const ZLibDecoder().decodeBytes(
+      compressed,
+      maxOutputSize: expected + _pngImageDataSlackBytes,
+    );
+  } catch (_) {
+    return false;
   }
   return inflated.length >= expected;
 }
