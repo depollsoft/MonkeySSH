@@ -80,6 +80,16 @@ abstract class CellColor {
   static const rgb = 3 << typeShift;
 }
 
+/// What shell integration (OSC 133 semantic prompts) says a cell holds: the
+/// prompt, the user's input, or anything else, which counts as command output.
+/// A cell takes the kind in force when it is written; an erased cell is
+/// output again.
+abstract class SemanticContent {
+  static const output = 0;
+  static const input = 1;
+  static const prompt = 2;
+}
+
 abstract class CellContent {
   static const codepointMask = 0x1fffff;
 

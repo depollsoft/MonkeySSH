@@ -9,6 +9,7 @@ import 'package:xterm/src/core/charset.dart';
 import 'package:xterm/src/core/cursor.dart';
 import 'package:xterm/src/core/graphics_manager.dart';
 import 'package:xterm/src/core/reflow.dart';
+import 'package:xterm/src/core/semantic_prompt.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 import 'package:xterm/src/utils/unicode_v11.dart';
@@ -27,6 +28,9 @@ class Buffer {
   /// Kitty-graphics-protocol images placed in this buffer. Each buffer (main and
   /// alternate) keeps its own set so images do not leak between them.
   final GraphicsManager graphics = GraphicsManager();
+
+  /// Shell integration (OSC 133) state of this screen.
+  final semanticPrompt = SemanticPromptState();
 
   Buffer(
     this.terminal, {
@@ -152,13 +156,19 @@ class Buffer {
       line.eraseCell(_cursorX - 1, terminal.cursor);
     }
     graphics.removePlaceholderAt(line, _cursorX);
-    line.setCell(_cursorX, codePoint, cellWidth, terminal.cursor);
+    line.setCell(
+      _cursorX,
+      codePoint,
+      cellWidth,
+      terminal.cursor,
+      semanticPrompt.content,
+    );
     _cursorX++;
 
     // A one-column screen has no room for the second half.
     if (cellWidth == 2 && _cursorX < viewWidth) {
       graphics.removePlaceholderAt(line, _cursorX);
-      line.setCell(_cursorX, 0, 0, terminal.cursor);
+      line.setCell(_cursorX, 0, 0, terminal.cursor, semanticPrompt.content);
       _cursorX++;
     }
     return true;
@@ -184,6 +194,7 @@ class Buffer {
     for (var i = absoluteCursorY + 1; i < height; i++) {
       final line = lines[i];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -196,6 +207,7 @@ class Buffer {
     for (var i = 0; i < _cursorY; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -205,6 +217,7 @@ class Buffer {
     for (var i = 0; i < viewHeight; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -332,6 +345,7 @@ class Buffer {
       } else {
         moveCursorY(1);
       }
+      semanticPrompt.afterIndex(currentLine);
       return;
     }
 
@@ -350,6 +364,7 @@ class Buffer {
       // there're still lines so we simply move cursor down.
       moveCursorY(1);
     }
+    semanticPrompt.afterIndex(currentLine);
   }
 
   void lineFeed() {

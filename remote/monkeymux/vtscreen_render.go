@@ -134,14 +134,17 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			out = append(out, "\r\n"...)
 		}
 	}
+	marks := s.semanticFrame(g)
 	for r, row := range g.rows {
-		if r > 0 && g.wrapped[r] {
+		softWrap := r > 0 && g.wrapped[r]
+		if softWrap {
 			out = appendVTSoftWrap(out, g.rows[r-1], row, true)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
+		out = marks.beginRow(out, r, softWrap)
 		before := len(out)
-		out = renderVTCells(out, row)
+		out = renderVTCellsMarked(out, row, marks)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
 		if len(out) != before || full {
 			out = append(out, "\x1b[0m"...)
@@ -155,6 +158,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			}
 		}
 	}
+	out = marks.finish(out)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7l"...)
 	}
@@ -345,6 +349,12 @@ func appendVTCharsets(out []byte, g0Graphics, g1Graphics, shiftOut bool) []byte 
 // alike, so a repainted or restored row has to keep it. Never-written default
 // cells at the end of the row are left out.
 func renderVTCells(out []byte, row []vtCell) []byte {
+	return renderVTCellsMarked(out, row, nil)
+}
+
+// renderVTCellsMarked is renderVTCells with the semantic prompt marks of the
+// prompt being painted, if any, put before the written cells they change.
+func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byte {
 	end := len(row)
 	for end > 0 && row[end-1].isDefaultUnwritten() {
 		end--
@@ -375,6 +385,7 @@ func renderVTCells(out []byte, row []vtCell) []byte {
 			i = run
 			continue
 		}
+		out = marks.cell(out, cell.sem)
 		if cell.attrs != current {
 			out = appendVTSGR(out, cell.attrs)
 			current = cell.attrs

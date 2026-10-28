@@ -100,6 +100,10 @@ type terminalScreen struct {
 	kittyPending          vtKittyPlaceholder
 	kittyLast             vtKittyPlaceholder
 
+	// Semantic prompt (OSC 133) state of each screen; see vtscreen_prompt.go.
+	semMain vtSemanticState
+	semAlt  vtSemanticState
+
 	parser vtParser
 }
 
@@ -186,6 +190,8 @@ type vtScrollback struct {
 type vtScrollbackLine struct {
 	text    []byte
 	wrapped bool
+	// prompt is the line's semantic prompt row mark (vtPromptNone, ...).
+	prompt uint8
 }
 
 func (b *vtScrollback) len() int { return b.n }
@@ -248,7 +254,11 @@ type vtGrid struct {
 	// above it, as BufferLine.isWrapped does in the client: autowrap sets it
 	// and erasing the row clears it. A width change reflows the main grid
 	// along it.
-	wrapped     []bool
+	wrapped []bool
+	// prompt[i] is the semantic prompt mark of rows[i] (vtPromptNone, ...),
+	// as BufferLine.semanticPrompt in the client: it moves with the row and
+	// an erase of the whole row clears it.
+	prompt      []uint8
 	cursorRow   int
 	cursorCol   int
 	pendingWrap bool
@@ -274,6 +284,8 @@ type vtCell struct {
 	r     rune
 	comb  []rune
 	width uint8
+	// sem is what the cell was written as (vtSemOutput, ...).
+	sem   uint8
 	attrs vtAttrs
 }
 
@@ -335,7 +347,7 @@ func newTerminalScreen(width, height int) *terminalScreen {
 }
 
 func newVTGrid(width, height int) vtGrid {
-	g := vtGrid{rows: make([][]vtCell, height), wrapped: make([]bool, height)}
+	g := vtGrid{rows: make([][]vtCell, height), wrapped: make([]bool, height), prompt: make([]uint8, height)}
 	for i := range g.rows {
 		g.rows[i] = newVTRow(width)
 	}
@@ -386,6 +398,8 @@ func (s *terminalScreen) Reset() {
 	// a frame rendered after RIS still reproduces those cells.
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
+	s.semMain = vtSemanticState{}
+	s.semAlt = vtSemanticState{}
 	s.resetState()
 }
 
@@ -547,6 +561,7 @@ func (g vtGrid) clone() vtGrid {
 		c.rows[i] = cloneVTRow(row)
 	}
 	c.wrapped = append([]bool(nil), g.wrapped...)
+	c.prompt = append([]uint8(nil), g.prompt...)
 	return c
 }
 
@@ -620,6 +635,7 @@ func (s *terminalScreen) resizeMain(width, height int) {
 	for len(g.rows) < height {
 		g.rows = append(g.rows, newVTRow(s.width))
 		g.wrapped = append(g.wrapped, false)
+		g.prompt = append(g.prompt, vtPromptNone)
 	}
 	// The cursor's cell, past the last column when a wrap is pending, for
 	// the reflow to carry along.
@@ -654,17 +670,20 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 		if fromTop > 0 {
 			g.rows = g.rows[fromTop:]
 			g.wrapped = g.wrapped[fromTop:]
+			g.prompt = g.prompt[fromTop:]
 			g.cursorRow -= fromTop
 			drop -= fromTop
 		}
 		if drop > 0 {
 			g.rows = g.rows[:len(g.rows)-drop]
 			g.wrapped = g.wrapped[:len(g.wrapped)-drop]
+			g.prompt = g.prompt[:len(g.prompt)-drop]
 		}
 	}
 	for len(g.rows) < height {
 		g.rows = append(g.rows, newVTRow(width))
 		g.wrapped = append(g.wrapped, false)
+		g.prompt = append(g.prompt, vtPromptNone)
 	}
 	s.clampVTCursor(g, width, height)
 }
@@ -707,14 +726,17 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 		case belowCursor && vtRowReclaimable(g.rows[last]):
 			g.rows = g.rows[:last]
 			g.wrapped = g.wrapped[:last]
+			g.prompt = g.prompt[:last]
 		case g.cursorRow > 0:
-			s.pushScrollback(g.rows[0], g.wrapped[0])
+			s.pushScrollback(g.rows[0], g.wrapped[0], g.prompt[0])
 			g.rows = g.rows[1:]
 			g.wrapped = g.wrapped[1:]
+			g.prompt = g.prompt[1:]
 			g.cursorRow--
 		default:
 			g.rows = g.rows[:last]
 			g.wrapped = g.wrapped[:last]
+			g.prompt = g.prompt[:last]
 		}
 	}
 	restore := min(height-len(g.rows), s.scrollback.len())
@@ -723,14 +745,17 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 	}
 	rows := make([][]vtCell, restore, height)
 	wrapped := make([]bool, restore, height)
+	prompt := make([]uint8, restore, height)
 	var decoder vtLineDecoder
 	for i := restore - 1; i >= 0; i-- {
 		line := s.scrollback.popBack()
 		rows[i] = decoder.decode(line.text, width)
 		wrapped[i] = line.wrapped
+		prompt[i] = line.prompt
 	}
 	g.rows = append(rows, g.rows...)
 	g.wrapped = append(wrapped, g.wrapped...)
+	g.prompt = append(prompt, g.prompt...)
 	g.cursorRow += restore
 }
 
@@ -753,10 +778,10 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	var decoder vtLineDecoder
 	for i := range history {
 		line := s.scrollback.at(i)
-		lines = append(lines, vtLine{cells: decoder.decode(line.text, s.width), wrapped: line.wrapped})
+		lines = append(lines, vtLine{cells: decoder.decode(line.text, s.width), wrapped: line.wrapped, prompt: line.prompt})
 	}
 	for i, row := range g.rows {
-		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i]})
+		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i], prompt: g.prompt[i]})
 	}
 	lines[history+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
 	lines = vtReflow(lines, s.width, width)
@@ -768,14 +793,16 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	// storage too, or rows a widening no longer needs stay allocated there.
 	s.scrollback.clear()
 	for _, line := range lines[:screenStart] {
-		s.appendScrollback(line.cells, line.wrapped)
+		s.appendScrollback(line.cells, line.wrapped, line.prompt)
 	}
 	s.trimScrollback()
 	g.rows = make([][]vtCell, height)
 	g.wrapped = make([]bool, height)
+	g.prompt = make([]uint8, height)
 	for i, line := range lines[screenStart:] {
 		g.rows[i] = line.cells
 		g.wrapped[i] = line.wrapped
+		g.prompt[i] = line.prompt
 	}
 	for i, line := range lines {
 		if !line.cursor.set {
@@ -873,13 +900,13 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 	return out
 }
 
-func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool) {
-	s.appendScrollback(row, wrapped)
+func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool, prompt uint8) {
+	s.appendScrollback(row, wrapped, prompt)
 	s.trimScrollback()
 }
 
-func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool) {
-	s.scrollback.push(vtScrollbackLine{text: renderVTCells(make([]byte, 0, 64), row), wrapped: wrapped})
+func (s *terminalScreen) appendScrollback(row []vtCell, wrapped bool, prompt uint8) {
+	s.scrollback.push(vtScrollbackLine{text: renderVTCells(make([]byte, 0, 64), row), wrapped: wrapped, prompt: prompt})
 }
 
 // trimScrollback drops the oldest lines beyond the line and byte limits. The
@@ -1089,6 +1116,7 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 		row := g.rows[g.cursorRow]
 		col := g.cursorCol
 		count := n - i
+		sem := s.semantic().content
 		if count > s.width-col {
 			count = s.width - col
 		}
@@ -1096,7 +1124,7 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 			row[col-1] = blankedHalf(row[col-1])
 		}
 		for j := 0; j < count; j++ {
-			row[col+j] = vtCell{r: rune(data[i+j]), width: 1, attrs: s.attrs}
+			row[col+j] = vtCell{r: rune(data[i+j]), width: 1, sem: sem, attrs: s.attrs}
 		}
 		if col+count < len(row) && row[col+count].width == 0 {
 			row[col+count] = blankedHalf(row[col+count])
@@ -1241,7 +1269,8 @@ func (s *terminalScreen) step(b byte) {
 			p.state = vtGround
 			s.endStringEarly()
 		default:
-			if len(p.oscHead) < vtOSCHeadLimit {
+			if len(p.oscHead) < vtOSCHeadLimit ||
+				(len(p.oscHead) < vtSemanticOSCLimit && isSemanticPromptOSC(p.oscHead)) {
 				p.oscHead = append(p.oscHead, b)
 			}
 		}
@@ -1318,6 +1347,9 @@ const vtOSCHeadLimit = 16
 func (s *terminalScreen) endOSC() {
 	if bytes.HasPrefix(s.parser.oscHead, []byte("1337;File=")) {
 		s.cursorKnown = false
+	}
+	if isSemanticPromptOSC(s.parser.oscHead) {
+		s.applySemanticPromptOSC(s.parser.oscHead)
 	}
 	s.parser.oscHead = s.parser.oscHead[:0]
 }
@@ -1673,6 +1705,7 @@ func (s *terminalScreen) index() {
 		g.cursorRow++
 	}
 	g.pendingWrap = false
+	s.semanticAfterIndex()
 }
 
 func (s *terminalScreen) reverseIndex() {
@@ -1709,7 +1742,7 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	// frame rendered from this model. A region that starts lower drops them.
 	if !s.altActive && top == 0 {
 		for i := 0; i < n; i++ {
-			s.pushScrollback(g.rows[top+i], g.wrapped[top+i])
+			s.pushScrollback(g.rows[top+i], g.wrapped[top+i], g.prompt[top+i])
 		}
 	}
 	// Recycle the rows leaving the region as the fresh rows entering it, so
@@ -1717,9 +1750,11 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 	recycled := s.recycleRows(g.rows[top : top+n])
 	copy(g.rows[top:bottom+1], g.rows[top+n:bottom+1])
 	copy(g.wrapped[top:bottom+1], g.wrapped[top+n:bottom+1])
+	copy(g.prompt[top:bottom+1], g.prompt[top+n:bottom+1])
 	for i := 0; i < n; i++ {
 		g.rows[bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[bottom-n+1+i] = false
+		g.prompt[bottom-n+1+i] = vtPromptNone
 	}
 	// Rows leaving a region at the top of the main screen stay right above
 	// it in the scrollback; otherwise the row moved to the top follows a
@@ -1756,9 +1791,11 @@ func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
 	recycled := s.recycleRows(g.rows[bottom+1-n : bottom+1])
 	copy(g.rows[top+n:bottom+1], g.rows[top:bottom+1-n])
 	copy(g.wrapped[top+n:bottom+1], g.wrapped[top:bottom+1-n])
+	copy(g.prompt[top+n:bottom+1], g.prompt[top:bottom+1-n])
 	for i := 0; i < n; i++ {
 		g.rows[top+i] = s.clearRow(recycled[i])
 		g.wrapped[top+i] = false
+		g.prompt[top+i] = vtPromptNone
 	}
 	g.endContinuation(top + n)
 	g.endContinuation(bottom + 1)
@@ -1876,14 +1913,15 @@ func (s *terminalScreen) print(r rune) {
 	if width == 1 && row[col].width == 2 && col+1 < len(row) {
 		row[col+1] = blankedHalf(row[col+1])
 	}
-	row[col] = vtCell{r: r, width: uint8(width), attrs: s.attrs}
+	sem := s.semantic().content
+	row[col] = vtCell{r: r, width: uint8(width), sem: sem, attrs: s.attrs}
 	s.lastPrinted = r
 	// A one-column screen has no room for the second half.
 	if width == 2 && col+1 < len(row) {
 		if col+2 < len(row) && row[col+1].width == 2 {
 			row[col+2] = blankedHalf(row[col+2])
 		}
-		row[col+1] = vtCell{width: 0, attrs: s.attrs}
+		row[col+1] = vtCell{width: 0, sem: sem, attrs: s.attrs}
 	}
 	if col+width >= s.width {
 		g.cursorCol = s.width - 1
@@ -2225,6 +2263,7 @@ func (s *terminalScreen) screenAlignment() {
 		}
 		// Every row is written anew, so none continues the one above.
 		g.wrapped[r] = false
+		g.prompt[r] = vtPromptNone
 	}
 	s.top = 0
 	s.bottom = s.height - 1
@@ -2265,17 +2304,21 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		for r := g.cursorRow + 1; r < s.height; r++ {
 			s.clearRow(g.rows[r])
 			g.wrapped[r] = false
+			g.prompt[r] = vtPromptNone
 		}
 	case 1:
 		s.eraseLine(1)
 		for r := 0; r < g.cursorRow; r++ {
 			s.clearRow(g.rows[r])
 			g.wrapped[r] = false
+			g.prompt[r] = vtPromptNone
 		}
 	case 2:
+		s.scrollClearAtPrompt()
 		for r := range g.rows {
 			s.clearRow(g.rows[r])
 			g.wrapped[r] = false
+			g.prompt[r] = vtPromptNone
 		}
 	case 3:
 		// Only the main screen has a scrollback; on the alternate screen
@@ -2283,6 +2326,8 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		if !s.altActive {
 			s.scrollback = vtScrollback{}
 		}
+		// A replay prefix ends with it, so the client ends an open prompt.
+		s.semantic().resetCursor()
 	}
 	g.pendingWrap = false
 }
@@ -2415,9 +2460,11 @@ func (s *terminalScreen) deleteLines(n int) {
 	recycled := s.recycleRows(g.rows[g.cursorRow : g.cursorRow+n])
 	copy(g.rows[g.cursorRow:s.bottom+1], g.rows[g.cursorRow+n:s.bottom+1])
 	copy(g.wrapped[g.cursorRow:s.bottom+1], g.wrapped[g.cursorRow+n:s.bottom+1])
+	copy(g.prompt[g.cursorRow:s.bottom+1], g.prompt[g.cursorRow+n:s.bottom+1])
 	for i := 0; i < n; i++ {
 		g.rows[s.bottom-n+1+i] = s.clearRow(recycled[i])
 		g.wrapped[s.bottom-n+1+i] = false
+		g.prompt[s.bottom-n+1+i] = vtPromptNone
 	}
 	g.endContinuation(g.cursorRow)
 	g.endContinuation(s.bottom + 1)

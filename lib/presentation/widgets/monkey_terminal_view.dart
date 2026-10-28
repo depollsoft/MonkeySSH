@@ -37,6 +37,7 @@ import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/core/mouse/mode.dart';
+import 'package:xterm/src/core/prompt_click.dart';
 import 'package:xterm/src/terminal.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/cursor_type.dart';
@@ -1291,6 +1292,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       key: ValueKey<int>(widget.scrollResetGeneration),
       terminalView: this,
       terminalController: _controller,
+      onSingleTapUp: _onSingleTapUp,
       onTapDown: _onTapDown,
       onDoubleTapDown: widget.onDoubleTapDown != null ? _onDoubleTapDown : null,
       suppressLongPressDragSelection: widget.suppressLongPressDragSelection,
@@ -1388,8 +1390,57 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         renderTerminal.cellSize;
   }
 
+  /// Whether a tap could move the shell's cursor inside its prompt: the
+  /// prompt asked for clicks (OSC 133 `click_events` or `cl`) and no mouse
+  /// tracking takes the tap instead.
+  bool get canMoveTerminalPromptCursor =>
+      !widget.readOnly &&
+      !widget.terminal.isUsingAltBuffer &&
+      widget.terminal.mouseMode == MouseMode.none &&
+      widget.terminal.buffer.semanticPrompt.handlesClicks;
+
+  /// Moves the shell's cursor to the tapped cell when the tap is on the input
+  /// of the prompt the cursor is at, the prompt asked for it, nothing is
+  /// selected and the viewport shows the bottom of the terminal. Returns
+  /// whether it sent the input that moves the cursor.
+  bool moveTerminalPromptCursor(Offset globalPosition) {
+    if (!canMoveTerminalPromptCursor ||
+        _hasSelection ||
+        renderTerminal.isScrolledBack) {
+      return false;
+    }
+    final localPosition = renderTerminal.globalToLocal(globalPosition);
+    return widget.terminal.clickPrompt(
+      renderTerminal.getCellOffset(localPosition),
+    );
+  }
+
+  // A system-selection terminal keeps a collapsed selection where it was
+  // last tapped, which selects nothing.
+  bool get _hasSelection {
+    final selection = _controller.selection;
+    return selection != null && !selection.isCollapsed;
+  }
+
+  bool _tapDownHadSelection = false;
+
+  // A primary click the terminal did not report as a mouse event. Touch taps
+  // on a system-selection (mobile) terminal are left to the screen, which
+  // tells them from its own gestures.
+  void _onSingleTapUp(TapUpDetails details) {
+    final hadSelection = _tapDownHadSelection;
+    _tapDownHadSelection = false;
+    if (hadSelection ||
+        (widget.useSystemSelection &&
+            details.kind == PointerDeviceKind.touch)) {
+      return;
+    }
+    moveTerminalPromptCursor(details.globalPosition);
+  }
+
   void _onTapDown(TapDownDetails details) {
     _stopTouchScrollInertia();
+    _tapDownHadSelection = _hasSelection;
     if (_controller.selection != null) {
       _controller.clearSelection();
     } else if (!widget.useSystemSelection) {
@@ -4410,6 +4461,11 @@ class MonkeyRenderTerminal extends RenderBox
   );
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
+
+  /// Whether the viewport is scrolled back from the bottom by half a row or
+  /// more.
+  bool get isScrolledBack =>
+      _maxScrollExtent - _scrollOffset >= _painter.cellSize.height / 2;
 
   Offset get cursorOffset => Offset(
     _contentOrigin.dx + (_terminal.buffer.cursorX * _painter.cellSize.width),
