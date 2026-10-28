@@ -137,10 +137,10 @@ void main() {
       expect(output, ['\x1b[5;8R']);
     });
 
-    test('DECXCPR adds the page and keeps the ? prefix', () {
+    test('DECXCPR keeps the ? prefix and, like a VT220 xterm, has no page', () {
       final (:terminal, :output) = _terminal();
       terminal.write('\x1b[3;4H\x1b[?6n');
-      expect(output, ['\x1b[?3;4;1R']);
+      expect(output, ['\x1b[?3;4R']);
     });
 
     test('a pending wrap reports the last column', () {
@@ -154,7 +154,7 @@ void main() {
     test('origin mode reports the row from the top margin', () {
       final (:terminal, :output) = _terminal();
       terminal.write('\x1b[5;20r\x1b[?6h\x1b[2;3H\x1b[6n\x1b[?6n');
-      expect(output, ['\x1b[2;3R', '\x1b[?2;3;1R']);
+      expect(output, ['\x1b[2;3R', '\x1b[?2;3R']);
     });
 
     test('other prefixed status reports are not answered as plain DSR', () {

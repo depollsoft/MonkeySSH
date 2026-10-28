@@ -88,9 +88,11 @@ class EscapeEmitter {
   }
 
   /// Extended cursor position report (DECXCPR) for the 1-based column [x] and
-  /// row [y]. The terminal has a single page, so the page is always 1.
+  /// row [y]. xterm adds the page only at VT level 4 and above; this terminal
+  /// identifies as a VT220 (see [secondaryDeviceAttributes]), so it leaves the
+  /// page out, as xterm does at that level.
   String extendedCursorPosition(int x, int y) {
-    return '\x1b[?$y;$x;1R';
+    return '\x1b[?$y;${x}R';
   }
 
   /// Visibility report: `CSI ? 999 ; 1 n` while the view may be visible,

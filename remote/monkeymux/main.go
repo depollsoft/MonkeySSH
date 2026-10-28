@@ -14235,7 +14235,7 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 // resize and draw nothing until the answer arrives.
 const cursorPositionQuery = "\x1b[6n"
 
-// extendedCursorPositionQuery is DECXCPR, answered as CSI ? row ; col ; 1 R.
+// extendedCursorPositionQuery is DECXCPR, answered as CSI ? row ; col R.
 const extendedCursorPositionQuery = "\x1b[?6n"
 
 // redrawHeldCursorQueriesLocked returns the byte ranges of the cursor position

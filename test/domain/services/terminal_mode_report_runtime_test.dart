@@ -88,7 +88,7 @@ void main() {
       await start();
 
       await feed('\x1b[2;5H\x1b[6n\x1b[?6n');
-      expect(writes.join(), '\x1b[2;5R\x1b[?2;5;1R');
+      expect(writes.join(), '\x1b[2;5R\x1b[?2;5R');
     });
 
     test('answers visibility queries from the terminal', () async {

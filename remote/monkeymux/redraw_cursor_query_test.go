@@ -380,7 +380,7 @@ func TestRedrawPauseAnswersExtendedCursorPositionQuery(t *testing.T) {
 	server.handleWindowOutput("@1", []byte("\x1b[3;7H"+extendedCursorPositionQuery+cursorPositionQuery))
 	waitForWindowReplies(t, window)
 
-	if got := pty.String(); got != "\x1b[?3;7;1R\x1b[3;7R" {
+	if got := pty.String(); got != "\x1b[?3;7R\x1b[3;7R" {
 		t.Fatalf("window got %q, want a DECXCPR then a CPR", got)
 	}
 }
