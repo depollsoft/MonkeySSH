@@ -16,6 +16,7 @@ var attachInputModePrivateModes = []int{
 	1004, // focus reporting
 	2004, // bracketed paste
 	1,    // application cursor keys
+	67,   // DECBKM: Backspace sends BS
 }
 
 const attachCursorVisibleMode = 25
