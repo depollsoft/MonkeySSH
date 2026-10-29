@@ -857,6 +857,37 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     onFullReset?.call();
   }
 
+  /// Hands the terminal to a new program after the one that owned it ended
+  /// without restoring it, keeping what is on screen.
+  ///
+  /// A command run in place of a login shell can end with its modes still
+  /// set, for instance a MonkeyMux attach dropped before it could write its
+  /// exit sequences. The shell started after it would then receive focus,
+  /// mouse and Kitty keyboard reports it never asked for. This leaves the
+  /// alternate screen as `CSI ? 1049 l` does and resets every mode [fullReset]
+  /// resets, plus an open MonkeyMux synchronized redraw, whose server is gone.
+  /// Unlike [fullReset] it erases nothing and keeps the cursor position and
+  /// the tab stops, so the program's last output on the main screen stays.
+  void resetForNextProgram() {
+    if (isUsingAltBuffer) {
+      useMainBuffer();
+      restoreCursor();
+    }
+    _mouseMode = MouseMode.none;
+    _mouseReportMode = MouseReportMode.normal;
+    _altBufferMouseScrollMode = false;
+    _reverseDisplayMode = false; // DECSCNM
+    _cursorBlinkMode = false;
+    _ansiMode = true; // DECANM
+    _synchronizedOutput = false; // DEC mode 2026
+    _monkeyMuxSynchronizedOutput = false; // DEC mode 9002
+    _mainKittyKeyboardState.reset();
+    _altKittyKeyboardState.reset();
+    // Last: it resets the saved cursor that leaving the alternate screen used,
+    // and notifies listeners.
+    softReset();
+  }
+
   @override
   void unkownEscape(int char) {
     // no-op

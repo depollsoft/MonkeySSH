@@ -845,6 +845,12 @@ if(!$__flResolved){$__flResolved='cmd'}
       fields: {'connectionId': _session.connectionId},
     );
     _drainTerminalParseBacklogNow();
+    // The command is gone, so the replies its last output asked for have no
+    // reader, and the modes it left on have no owner. Both would reach the
+    // login shell as typed input, such as the focus report `^[[O` the screen
+    // sends when it drops focus on this transition.
+    _pendingReplacementInput.clear();
+    _terminal?.resetForNextProgram();
     _resetShellChannelState();
 
     final stdoutSubscription = _shellStdoutSubscription;

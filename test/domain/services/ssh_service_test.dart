@@ -3294,6 +3294,108 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(shellDoneEvents, hasLength(1));
     });
 
+    // A MonkeyMux attach the server dropped ends without writing its exit
+    // sequences. The login shell that replaces it must not inherit the
+    // attach's modes or answers: zsh echoed the focus report the screen sent
+    // on this transition as `^[[O` ahead of its first prompt.
+    test(
+      'hands the login shell a terminal the ended command no longer holds',
+      () async {
+        final client = _MockSshClient();
+        final startupShell = _MockExecSession();
+        final loginShell = _MockExecSession();
+        final startupStdout = StreamController<Uint8List>();
+        final loginStdout = StreamController<Uint8List>();
+        final startupDone = Completer<void>();
+        final loginDone = Completer<void>();
+        final loginOpen = Completer<SSHSession>();
+        final loginWrites = <List<int>>[];
+        final session = _testSession(
+          client,
+          hostId: 2,
+          hostname: 'example.com',
+        );
+        const pty = SSHPtyConfig(width: 120, height: 30);
+
+        var executeCount = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) {
+              executeCount += 1;
+              return executeCount == 1
+                  ? Future.value(startupShell)
+                  : loginOpen.future;
+            });
+        when(() => startupShell.stdout).thenAnswer((_) => startupStdout.stream);
+        when(() => startupShell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => startupShell.done).thenAnswer((_) => startupDone.future);
+        when(() => startupShell.write(any())).thenAnswer((_) {});
+        when(startupShell.close).thenAnswer((_) {});
+        when(() => loginShell.stdout).thenAnswer((_) => loginStdout.stream);
+        when(() => loginShell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => loginShell.done).thenAnswer((_) => loginDone.future);
+        when(() => loginShell.write(any())).thenAnswer((invocation) {
+          loginWrites.add(
+            List<int>.from(invocation.positionalArguments.single as List<int>),
+          );
+        });
+        when(loginShell.close).thenAnswer((_) {});
+
+        addTearDown(() async {
+          await session.closeShell(waitForStreams: false);
+          await startupStdout.close();
+          await loginStdout.close();
+          if (!startupDone.isCompleted) {
+            startupDone.complete();
+          }
+          if (!loginDone.isCompleted) {
+            loginDone.complete();
+          }
+        });
+
+        await session.getShell(
+          pty: pty,
+          command: 'monkeymux attach work',
+          returnToLoginShell: true,
+        );
+        final terminal = session.getOrCreateTerminal();
+        var focusModeAtCompletion = true;
+        final commandCompletedSubscription = session.shellCommandCompletedStream
+            .listen((_) => focusModeAtCompletion = terminal.reportFocusMode);
+        addTearDown(commandCompletedSubscription.cancel);
+
+        // The attach's last output: an agent pane's screen and input modes, and
+        // a frame cut off by the drop. The runtime holds an open synchronized
+        // frame until it ends, so its device attributes query is only answered
+        // once the attach is gone.
+        startupStdout.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\x1b[?1049h\x1b[?1004h\x1b[?1002h\x1b[?2004h'
+              '\x1b[?2026hagent\x1b[c',
+            ),
+          ),
+        );
+        startupDone.complete();
+        await untilCalled(
+          () => client.execute(
+            any(that: contains('COLORTERM=truecolor')),
+            pty: pty,
+          ),
+        );
+
+        expect(focusModeAtCompletion, isFalse);
+        expect(terminal.isUsingAltBuffer, isFalse);
+        expect(terminal.reportFocusMode, isFalse);
+        expect(terminal.mouseMode, MouseMode.none);
+        expect(terminal.bracketedPasteMode, isFalse);
+
+        session.writeToShell('typed');
+        loginOpen.complete(loginShell);
+        expect(await session.getShell(), same(loginShell));
+        expect(loginWrites.map(utf8.decode).join(), 'typed');
+      },
+    );
+
     test(
       'falls back to shell request when truecolor bootstrap is rejected',
       () async {

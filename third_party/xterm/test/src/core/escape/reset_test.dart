@@ -300,6 +300,65 @@ void main() {
     });
   });
 
+  group('resetForNextProgram', () {
+    test('leaves the alternate screen and keeps the main one as it was', () {
+      final terminal = newTerminal();
+      terminal.write('main text');
+      final x = terminal.buffer.cursorX;
+      terminal.write('\x1b[?1049h\x1b[10;20Halt text');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.isUsingAltBuffer, isFalse);
+      expect(terminal.buffer.getText(), contains('main text'));
+      expect(terminal.buffer.getText(), isNot(contains('alt text')));
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, 0);
+    });
+
+    test('keeps the main screen and the cursor when it is already shown', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[3;4H\x1b7'); // a stale DECSC
+      terminal.write('\x1b[1;1Hhello\r\nworld');
+      final x = terminal.buffer.cursorX;
+      final y = terminal.buffer.cursorY;
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.buffer.getText(), contains('hello'));
+      expect(terminal.buffer.getText(), contains('world'));
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, y);
+    });
+
+    test('switches off every mode a program sets for its own input', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[=5u'); // Kitty keyboard flags, main screen
+      terminal.write('\x1b[?1049h');
+      terminal.write('\x1b[>1u'); // Kitty keyboard flags, alternate screen
+      terminal.write('\x1b[?1002h\x1b[?1006h\x1b[?1007h'); // mouse
+      terminal
+          .write('\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b='); // focus, paste, keys
+      terminal.write('\x1b[?25l\x1b[?2026h\x1b[?9002h');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.mouseMode, MouseMode.none);
+      expect(terminal.mouseReportMode, MouseReportMode.normal);
+      expect(terminal.altBufferMouseScrollMode, isFalse);
+      expect(terminal.reportFocusMode, isFalse);
+      expect(terminal.bracketedPasteMode, isFalse);
+      expect(terminal.cursorKeysMode, isFalse);
+      expect(terminal.appKeypadMode, isFalse);
+      expect(terminal.cursorVisibleMode, isTrue);
+      expect(terminal.synchronizedOutputMode, isFalse);
+      expect(terminal.isMonkeyMuxSynchronizedOutputOpen, isFalse);
+      expect(terminal.kittyKeyboardFlags, 0);
+      terminal.write('\x1b[?1049h');
+      expect(terminal.kittyKeyboardFlags, 0);
+    });
+  });
+
   group('the byte stream /usr/bin/reset writes', () {
     test('leaves no literal garbage behind', () {
       final terminal = newTerminal();
