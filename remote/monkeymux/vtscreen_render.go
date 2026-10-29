@@ -85,6 +85,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	withScrollback = withScrollback && s.scrollback.len() > 0
 	softWraps := s.renderedSoftWraps(g, withScrollback)
 	marks := s.semanticFrame(g)
+	out = marks.begin(out)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}

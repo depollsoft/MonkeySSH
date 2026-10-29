@@ -260,3 +260,45 @@ func TestSemanticPromptMarksReachAttachedClients(t *testing.T) {
 		t.Fatalf("model prompt row %d, content %d", prompt, content)
 	}
 }
+
+// The cursor can be in a prompt or its input on a row the model does not
+// mark, after the prompt row was deleted under it or erased above it, or
+// when VS Code marked the content alone. A frame must leave the row
+// unmarked on the client and still carry the content and the options in
+// force, whatever prompt the client showed before. (A frame carries the
+// marks of the prompt the cursor is at only, so these cases keep no other.)
+func TestRenderFrameLeavesUnmarkedPromptRowsUnmarked(t *testing.T) {
+	cases := []struct {
+		name   string
+		size   [2]int
+		output string
+	}{
+		{"continuation deleted under the cursor", [2]int{20, 5},
+			osc133("P;k=s") + "\x1b[M" + "text" + "\x1b[H\x1b[J"},
+		{"prompt deleted under the cursor", [2]int{20, 5},
+			"out\r\n" + osc133("A;cl=line;click_events=1") + "$ \x1b[M" + "abc"},
+		{"prompt erased above the cursor", [2]int{20, 5},
+			osc133("A;cl=m") + "$ " + osc133("B") + "ls\x1b[4;3H\x1b[1J" + "x"},
+		{"cursor above a continuation", [2]int{20, 5},
+			"\r\n\r\n" + osc133("P;k=s") + "> " + osc133("B") + "x\x1b[3;1H"},
+		{"VS Code input alone", [2]int{20, 5}, "$ \x1b]633;B\x07ls"},
+		{"VS Code prompt alone", [2]int{20, 5}, "\x1b]633;H\x07$ "},
+		{"ED 1 at a continuation", [2]int{20, 5},
+			osc133("A;special_key=1") + "$ " + osc133("B") + "ls\r\nmore\x1b[1J"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTerminalScreen(c.size[0], c.size[1])
+			s.Write([]byte(osc133("C") + "out\r\n" + osc133("D;0") + c.output))
+			want := strings.Join(dumpSemanticPrompt(s), "\n")
+			for _, before := range []string{"", osc133("A;cl=w;click_events=2;aid=old") + "$ "} {
+				replica := newTerminalScreen(c.size[0], c.size[1])
+				replica.Write([]byte(before + "\x1b[?6l\x1b[r\x1b[0m" + terminalAllScreensClearSequence))
+				replica.Write(s.RenderFrame())
+				if got := strings.Join(dumpSemanticPrompt(replica), "\n"); got != want {
+					t.Fatalf("painted after %q:\n%s\nwant:\n%s", before, got, want)
+				}
+			}
+		})
+	}
+}

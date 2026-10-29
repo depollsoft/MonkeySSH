@@ -513,3 +513,135 @@ func TestKittyPlacementsKeepTheScreenEachCommandRanOn(t *testing.T) {
 		t.Fatalf("kept placements = %s", got)
 	}
 }
+
+func TestKittyReplayCarriesTheVirtualRootOfARelativePlacement(t *testing.T) {
+	// Image 1's own transmission makes the virtual root, which has no
+	// placeholder cell yet, and four newer images push it out of the
+	// recency replay.
+	window := &muxWindow{id: "@1"}
+	stream := "\x1b_Ga=T,U=1,i=1,c=2,r=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+		"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"
+	for id := 3; id <= 6; id++ {
+		stream += fmt.Sprintf("\x1b_Ga=t,i=%d,%s\x1b\\", id, kittyPixelRoot)
+	}
+	window.observeKittyGraphicsLocked([]byte(stream))
+
+	followUp := kittyReplayFollowUp(t, window)
+	child := strings.Index(followUp, "a=p,i=2,p=1,P=1")
+	root := strings.Index(followUp, "a=t,U=1,i=1")
+	if child < 0 {
+		t.Fatalf("relative placement not replayed: %q", followUp)
+	}
+	if root < 0 || root > child {
+		t.Fatalf("the virtual root's image does not precede its child: %q", followUp)
+	}
+}
+
+func TestKittyKeptPlacementsKeepOnlyTheKeysAReplayNeeds(t *testing.T) {
+	window := &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\"))
+	// A display command has no payload, and its control keys are numbers:
+	// whatever else it carries is not kept, however large.
+	padding := strings.Repeat("A", 1<<20)
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=p,U=1,i=1,c=0002,r=1,q=1;" + padding + "\x1b\\" +
+			"\x1b_Ga=p,i=2,p=3,P=1,H=-1,c=1,r=1,junk=" + padding + "\x1b\\"))
+
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/3]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	for _, p := range window.kittyPlacements {
+		if len(p.command) > 128 {
+			t.Fatalf("placement %s keeps a %d-byte command", p.key(), len(p.command))
+		}
+	}
+	replay := string(window.kittyPlacementReplayLocked())
+	want := "\x1b_Ga=p,U=1,i=1,c=2,r=1,q=2\x1b\\" +
+		"\x1b_Ga=p,i=2,p=3,P=1,H=-1,c=1,r=1,q=2\x1b\\"
+	if replay != want {
+		t.Fatalf("replay = %q, want %q", replay, want)
+	}
+}
+
+func TestKittyDeletedRootVirtualPlacementStaysDeleted(t *testing.T) {
+	for _, tc := range []struct{ name, setup, delete string }{
+		{"by id", "", "\x1b_Ga=d,d=i,i=1\x1b\\"},
+		{"by its placement id", "", "\x1b_Ga=d,d=i,i=1,p=5\x1b\\"},
+		{"by range", "", "\x1b_Ga=d,d=r,x=1,y=1\x1b\\"},
+		// A display command replaced the root's virtual placement; deleting
+		// the replacement leaves the image with none.
+		{"after a replacement", "\x1b_Ga=p,U=1,i=1,p=6,c=1,r=1\x1b\\", "\x1b_Ga=d,d=i,i=1,p=6\x1b\\"},
+	} {
+		for _, alt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s alt=%v", tc.name, alt), func(t *testing.T) {
+				window := &muxWindow{id: "@1", privateModes: map[string]bool{"1049": alt}}
+				enter := ""
+				if alt {
+					enter = "\x1b[?1049h"
+				}
+				window.observeKittyGraphicsLocked([]byte(enter +
+					"\x1b_Ga=T,U=1,i=1,p=5,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+					"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" + tc.setup + tc.delete +
+					// The client has no placement of image 1 left to hang
+					// this one off, and rejects it.
+					"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+
+				if got := kittyPlacementKeys(window); len(got) != 0 {
+					t.Fatalf("kept placements = %v", got)
+				}
+				// A reattach must not bring the deleted virtual placement back.
+				images, _ := window.kittyImageReplaySelectionLocked(nil)
+				replay := string(images) + kittyReplayFollowUp(t, window)
+				if strings.Contains(replay, "U=1") || strings.Contains(replay, "a=p") {
+					t.Fatalf("replay restores deleted placements: %q", replay)
+				}
+				if !strings.Contains(replay, "a=t,i=1,") {
+					t.Fatalf("replay lost image 1: %q", replay)
+				}
+			})
+		}
+	}
+
+	// A delete naming another placement leaves the root's virtual one.
+	window := &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=T,U=1,i=1,p=5,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=d,d=i,i=1,p=7\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[2/1]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	if images, _ := window.kittyImageReplaySelectionLocked(nil); !strings.Contains(string(images), "a=t,U=1,i=1,") {
+		t.Fatalf("replay lost the root's virtual placement: %q", images)
+	}
+}
+
+func TestKittyRootVirtualPlacementFollowsTheClient(t *testing.T) {
+	// Once a display command replaces the root's virtual placement, the
+	// root's placement id names nothing on the client.
+	window := &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=T,U=1,i=1,p=5,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=1,p=6,c=2,r=1\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1,Q=5,c=1,r=1\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	// A virtual placement with a parent is rejected, so its image's own
+	// transmission makes none.
+	window = &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=3," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,U=1,i=3,c=1,r=1\x1b\\" +
+			"\x1b_Ga=T,U=1,P=3,i=1,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[3/virtual]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+}

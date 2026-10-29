@@ -77,7 +77,8 @@ type kittyRetainedPlacement struct {
 	horizontal, vertical int
 	cols, rows           int
 	z                    int
-	// command is the a=p command replayed for it, with replies silenced.
+	// command is the a=p command replayed for it, with replies silenced
+	// (kittyPlacementReplayCommand).
 	command []byte
 }
 
@@ -122,34 +123,52 @@ func kittyIDValue(value string) string {
 	return strings.TrimLeft(value, "0")
 }
 
-// kittyPlacementCommandKeys are the display keys a relative placement made by
-// an a=T root keeps when it is replayed as an a=p command.
+// kittyPlacementCommandKeys are the keys a replay needs to make a kept
+// placement again: its kind and parent, where it sits and the part of the
+// image it shows. The image key (i=, else I=) goes after U=.
 var kittyPlacementCommandKeys = []string{
 	"p", "P", "Q", "H", "V", "c", "r", "x", "y", "w", "h", "X", "Y", "z",
 }
 
-// kittyRelativeCommandFromRoot builds the a=p command that replays the
-// relative placement an a=T root with P= makes. Only a root with an explicit
-// image id can be placed again by id.
-func kittyRelativeCommandFromRoot(args map[string]string) []byte {
-	id := kittyIDValue(args["i"])
-	if id == "" {
-		return nil
-	}
-	var out bytes.Buffer
-	out.WriteString("\x1b_Ga=p,i=")
-	out.WriteString(id)
-	for _, key := range kittyPlacementCommandKeys {
-		if value, ok := args[key]; ok && value != "" {
-			out.WriteString("," + key + "=" + value)
+// kittyPlacementReplayCommand builds the a=p command that replays a kept
+// placement, with replies silenced, from the keys of the command that made
+// it: a display command, or an a=T root with P=. It keeps only the keys in
+// kittyPlacementCommandKeys, each as the number the client reads from it,
+// so a kept placement costs a few bytes whatever its command carried; a
+// display command has no payload.
+func kittyPlacementReplayCommand(args map[string]string) []byte {
+	out := []byte("\x1b_Ga=p")
+	appendKey := func(key string) {
+		value, ok := args[key]
+		if !ok {
+			return
 		}
+		// The client reads every key as an integer, and one it cannot read
+		// as absent.
+		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return
+		}
+		out = append(out, ',')
+		out = append(out, key...)
+		out = append(out, '=')
+		out = strconv.AppendInt(out, n, 10)
 	}
-	out.WriteString(",q=2\x1b\\")
-	return out.Bytes()
+	appendKey("U")
+	if kittyIDValue(args["i"]) != "" {
+		appendKey("i")
+	} else {
+		appendKey("I")
+	}
+	for _, key := range kittyPlacementCommandKeys {
+		appendKey(key)
+	}
+	return append(out, ",q=2\x1b\\"...)
 }
 
 // kittyRootIsVirtual reports whether the retained root transmission of
-// imageID also made a virtual placement, and its placement id.
+// imageID also made a virtual placement, and its placement id. The client
+// makes none for a virtual placement with a parent.
 func (w *muxWindow) kittyRootIsVirtual(imageID string) (bool, string) {
 	root := w.kittyImages[imageID]
 	end := kittyApcEnd(root, 0)
@@ -157,7 +176,45 @@ func (w *muxWindow) kittyRootIsVirtual(imageID string) (bool, string) {
 		return false, ""
 	}
 	args := parseKittyControl(kittyControl(root, 0, end))
-	return kittyNonZero(args["U"]), kittyIDValue(args["p"])
+	return kittyNonZero(args["U"]) && !kittyNonZero(args["P"]),
+		kittyIDValue(args["p"])
+}
+
+// kittyVirtualPlacementIDLocked returns the placement id of the virtual
+// placement the client keeps for imageID on a screen: it keeps one per
+// image, the latest made, which is a kept one when a display command
+// replaced the one the image's own transmission made.
+func (w *muxWindow) kittyVirtualPlacementIDLocked(imageID string, alt bool) string {
+	for _, p := range w.kittyPlacements {
+		if p.virtual() && p.imageID == imageID && p.alt == alt {
+			return p.placementID
+		}
+	}
+	_, placementID := w.kittyRootIsVirtual(imageID)
+	return placementID
+}
+
+// forgetKittyRootVirtualPlacementLocked follows a delete of the virtual
+// placement imageID's own transmission made: the retained root stops
+// carrying U=, so a replay no longer makes the placement again and no
+// relative placement can hang off it. It reports whether the root changed.
+func (w *muxWindow) forgetKittyRootVirtualPlacementLocked(imageID string) bool {
+	if virtual, _ := w.kittyRootIsVirtual(imageID); !virtual {
+		return false
+	}
+	root := w.kittyImages[imageID]
+	control := kittyControl(root, 0, kittyApcEnd(root, 0))
+	var kept []string
+	for _, pair := range strings.Split(control, ",") {
+		if key, _, _ := strings.Cut(pair, "="); key != "U" {
+			kept = append(kept, pair)
+		}
+	}
+	rewritten := make([]byte, 0, len(root))
+	rewritten = append(rewritten, root[:3]...)
+	rewritten = append(rewritten, strings.Join(kept, ",")...)
+	w.kittyImages[imageID] = append(rewritten, root[3+len(control):]...)
+	return true
 }
 
 // kittyPlacementImageIDLocked resolves the image a placement command names:
@@ -173,15 +230,14 @@ func (w *muxWindow) kittyPlacementImageIDLocked(args map[string]string) string {
 }
 
 // observeKittyPlacementLocked records a display command (a=p) or the
-// placement an a=T root with P= makes. command is what replays it. It reports
-// whether the retained set changed.
+// placement an a=T root with P= makes, given its keys. It reports whether the
+// retained set changed.
 func (w *muxWindow) observeKittyPlacementLocked(
 	args map[string]string,
-	command []byte,
 	alt bool,
 ) bool {
 	imageID := w.kittyPlacementImageIDLocked(args)
-	if imageID == "" || len(command) == 0 {
+	if imageID == "" {
 		return false
 	}
 	placementID := kittyIDValue(args["p"])
@@ -198,7 +254,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 			imageID:     imageID,
 			placementID: placementID,
 			alt:         alt,
-			command:     rewriteKittyReplayCommand(command, false),
+			command:     kittyPlacementReplayCommand(args),
 		})
 		w.removeOrphanedKittyPlacementsLocked()
 		return true
@@ -259,7 +315,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 		cols:        kittyIntValue(args["c"]),
 		rows:        kittyIntValue(args["r"]),
 		z:           kittyIntValue(args["z"]),
-		command:     rewriteKittyReplayCommand(command, false),
+		command:     kittyPlacementReplayCommand(args),
 	})
 	w.removeOrphanedKittyPlacementsLocked()
 	return true
@@ -337,13 +393,16 @@ func (w *muxWindow) kittyPlacementParentLocked(
 	parentImage, parentPlacement string,
 	alt bool,
 ) (string, bool) {
+	replaced := false
 	for _, p := range w.kittyPlacements {
 		if p.imageID == parentImage && p.alt == alt &&
 			(parentPlacement == "" || p.placementID == parentPlacement) {
 			return p.key(), true
 		}
+		replaced = replaced || (p.virtual() && p.imageID == parentImage && p.alt == alt)
 	}
-	if virtual, placementID := w.kittyRootIsVirtual(parentImage); virtual &&
+	// A kept virtual placement of the image replaced the root's own.
+	if virtual, placementID := w.kittyRootIsVirtual(parentImage); virtual && !replaced &&
 		(parentPlacement == "" || parentPlacement == placementID) {
 		return kittyRootPlacementKey(parentImage), true
 	}
@@ -481,6 +540,7 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 	}
 	placementID := kittyIDValue(args["p"])
 	var match func(kittyRetainedPlacement) bool
+	rootChanged := false
 	switch selector {
 	case "i", "n":
 		imageID := w.kittyPlacementImageIDLocked(args)
@@ -492,11 +552,13 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 				(placementID == "" || p.placementID == placementID)
 		})
 		// The virtual placement an image's own transmission made goes too
-		// when the delete covers it, and with it the placements hanging off.
-		_, rootPlacementID := w.kittyRootIsVirtual(imageID)
+		// when the delete covers the image's virtual placement, and with it
+		// the placements hanging off.
 		rootVirtual := ""
-		if placementID == "" || placementID == rootPlacementID {
+		if placementID == "" ||
+			placementID == w.kittyVirtualPlacementIDLocked(imageID, alt) {
 			rootVirtual = kittyRootPlacementKey(imageID)
+			rootChanged = w.forgetKittyRootVirtualPlacementLocked(imageID)
 		}
 		match = func(p kittyRetainedPlacement) bool {
 			return (p.imageID == imageID &&
@@ -516,6 +578,11 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 		w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
 			return p.alt == alt && inRange(p.imageID)
 		})
+		for _, id := range w.kittyImageOrder {
+			if inRange(id) {
+				rootChanged = w.forgetKittyRootVirtualPlacementLocked(id) || rootChanged
+			}
+		}
 		match = func(p kittyRetainedPlacement) bool {
 			image, rooted := strings.CutPrefix(p.parent, "root:")
 			return inRange(p.imageID) || (rooted && inRange(image))
@@ -531,12 +598,12 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 		return false
 	}
 	if len(w.kittyPlacements) == 0 {
-		return false
+		return rootChanged
 	}
 	changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 		return p.alt == alt && match(p)
 	})
-	return w.removeOrphanedKittyPlacementsLocked() || changed
+	return w.removeOrphanedKittyPlacementsLocked() || changed || rootChanged
 }
 
 // kittyPositionalDeleteMatch returns whether a positional delete removes a
@@ -926,13 +993,18 @@ func (w *muxWindow) kittyPlacementReplayLocked() []byte {
 }
 
 // kittyPlacementImageIDsLocked returns the images the kept placements of the
-// shown screen display, which a replay must carry for them to be placed.
+// shown screen display, which a replay must carry for them to be placed, and
+// the images whose own transmission made the virtual root of one: without
+// that root the client rejects the placement.
 func (w *muxWindow) kittyPlacementImageIDsLocked() []string {
 	alt := w.alternateScreenModeActiveLocked()
 	var ids []string
 	for _, p := range w.kittyPlacements {
 		if p.alt == alt {
 			ids = append(ids, p.imageID)
+			if root, ok := strings.CutPrefix(p.parent, "root:"); ok {
+				ids = append(ids, root)
+			}
 		}
 	}
 	return ids

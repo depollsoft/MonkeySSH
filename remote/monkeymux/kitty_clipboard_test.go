@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,6 +18,18 @@ const (
 	kittyClipboardTagWindow1 = "mmx4031"
 	kittyClipboardTagWindow2 = "mmx4032"
 )
+
+// oweKittyClipboardReplies makes client owe a reply, as a request forwarded
+// to it does.
+func oweKittyClipboardReplies(client *attachClient) {
+	client.kittyClipboardInput.outstanding.Add(1)
+	client.kittyClipboardInput.owedUntil.Store(time.Now().Add(time.Minute).UnixNano())
+}
+
+func kittyClipboardRepliesOwed(client *attachClient) bool {
+	state := &client.kittyClipboardInput
+	return state.outstanding.Load() > 0 && time.Now().UnixNano() < state.owedUntil.Load()
+}
 
 func newKittyClipboardTestServer(t *testing.T) (*muxServer, *muxWindow, *muxWindow, *recordingConn) {
 	t.Helper()
@@ -94,7 +105,10 @@ func TestKittyClipboardRequestFromOnScreenWindowIsTaggedForPrimaryOnly(t *testin
 	if out := windowPtyOutput(t, first); out != "" {
 		t.Fatalf("window got %q, want no local answer for a forwarded request", out)
 	}
-	if server.kittyClipboardRepliesOwedUntil.Load() <= time.Now().UnixNano() {
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	if !kittyClipboardRepliesOwed(client) {
 		t.Fatal("replies were not marked owed after a forwarded request")
 	}
 }
@@ -278,9 +292,7 @@ func TestKittyClipboardSplitLeavesPasteEventsAndPastedTextAsInput(t *testing.T) 
 }
 
 func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
-	var owed atomic.Int64
 	client := newAttachClient(&recordingConn{}, controlMessage{})
-	client.kittyClipboardInput.owedUntil = &owed
 	client.inputDispatchMu.Lock()
 	defer client.inputDispatchMu.Unlock()
 	reply := "\x1b]5522;type=read:status=DONE:id=" + kittyClipboardTagWindow1 + "\x1b\\"
@@ -291,7 +303,7 @@ func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
 		t.Fatalf("input = %q, want the Escape key kept", input)
 	}
 
-	owed.Store(time.Now().Add(time.Minute).UnixNano())
+	oweKittyClipboardReplies(client)
 	for split := 1; split < len(reply); split++ {
 		first, replies := client.splitKittyClipboardRepliesLocked([]byte("x"+reply[:split]), time.Now())
 		if string(first) != "x" || len(replies) != 0 {
@@ -312,10 +324,8 @@ func TestKittyClipboardSplitHoldsRepliesSplitAcrossReads(t *testing.T) {
 }
 
 func TestKittyClipboardAmbiguousCarryIsReleasedAfterTimeout(t *testing.T) {
-	var owed atomic.Int64
-	owed.Store(time.Now().Add(time.Minute).UnixNano())
 	client := newAttachClient(&recordingConn{}, controlMessage{})
-	client.kittyClipboardInput.owedUntil = &owed
+	oweKittyClipboardReplies(client)
 	// As handleAttach wires it: input the routing holds and later releases.
 	client.inputPassthrough = func(data []byte) {
 		client.enqueueInputActions([]attachInputAction{{
@@ -520,10 +530,8 @@ func TestKittyClipboardLargeReplySurvivesArbitraryReadSplits(t *testing.T) {
 	packet("status=DONE", "")
 	input := tagged.String()
 
-	var owed atomic.Int64
 	client := newAttachClient(&recordingConn{}, controlMessage{})
-	client.kittyClipboardInput.owedUntil = &owed
-	owed.Store(time.Now().Add(time.Minute).UnixNano())
+	oweKittyClipboardReplies(client)
 	client.inputDispatchMu.Lock()
 	defer client.inputDispatchMu.Unlock()
 	var routed strings.Builder
@@ -755,10 +763,8 @@ func TestKittyClipboardOversizedCancelledPacketKeepsFollowingOutput(t *testing.T
 func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
 	reply := "\x1b]5522;type=read:status=DONE:id=" + kittyClipboardTagWindow1 + "\x1b\\"
 	split := func(input string, at int) (string, []attachInputAction) {
-		var owed atomic.Int64
-		owed.Store(time.Now().Add(time.Minute).UnixNano())
 		client := newAttachClient(&recordingConn{}, controlMessage{})
-		client.kittyClipboardInput.owedUntil = &owed
+		oweKittyClipboardReplies(client)
 		client.inputDispatchMu.Lock()
 		defer client.inputDispatchMu.Unlock()
 		// As the attach read loop does: each read is split, then routed.
@@ -789,5 +795,340 @@ func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
 					markers.name, offset, input, replies)
 			}
 		}
+	}
+}
+
+// CAN and SUB cancel an OSC wherever they come, as in the screen model: the
+// output after them is ordinary output, whether the packet was being
+// discarded for its size or was still short enough to hold.
+func TestKittyClipboardPacketCancelledByCanOrSubKeepsFollowingOutput(t *testing.T) {
+	for _, cancel := range []string{"\x18", "\x1a"} {
+		// Oversized: the discard must stop at the cancel.
+		server, first, _, attach := newKittyClipboardTestServer(t)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;"+
+			strings.Repeat("QUFB", kittyClipboardPacketLimitBytes/4+16)))
+		server.handleWindowOutput("@1", []byte("QUFB"+cancel+"VISIBLE\r\n"))
+		server.handleWindowOutput("@1", []byte("tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\r\ntail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got[max(0, len(got)-60):])
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("cancel %q: window got %q", cancel, out)
+		}
+
+		// Short, and terminated later: the cancelled request is no request.
+		server, first, _, attach = newKittyClipboardTestServer(t)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg=="+cancel+"VISIBLE\x1b\\tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\x1b\\tail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got)
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("cancel %q: window got %q", cancel, out)
+		}
+
+		// Split across reads, from a window whose requests are refused.
+		server, _, second, attach := newKittyClipboardTestServer(t)
+		server.mu.Lock()
+		server.activeID = "@2"
+		server.attachClients[attach].capabilityHint = nil
+		server.mu.Unlock()
+		server.handleWindowOutput("@2", []byte("\x1b]5522;type=write:id=w"))
+		server.handleWindowOutput("@2", []byte(cancel+"VISIBLE\x1b\\tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\x1b\\tail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got)
+		}
+		if out := windowPtyOutput(t, second); out != "" {
+			t.Fatalf("cancel %q: refused window got %q", cancel, out)
+		}
+	}
+}
+
+func TestKittyClipboardDiscardEndsAtCanOrSub(t *testing.T) {
+	for _, cancel := range []byte{0x18, 0x1a} {
+		window := &muxWindow{id: "@1"}
+		window.kittyClipboard.discarding = true
+		if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB" + string(cancel) + "x\x1b\\y"))); got != "x\x1b\\y" {
+			t.Fatalf("cancel %q: got %q, want the output after it", cancel, got)
+		}
+		if window.kittyClipboard.discarding {
+			t.Fatalf("cancel %q: still discarding", cancel)
+		}
+	}
+}
+
+// A read can still go to the client that received the start of a query
+// after focus moved on. A write opened in it belongs to that client: the
+// rest of the write must not go to the new primary, which has no open write
+// and would drop it.
+func TestKittyClipboardWriteStaysWithTheClientItWentTo(t *testing.T) {
+	server, first, _, attachA := newKittyClipboardTestServer(t)
+	attachB := &recordingConn{}
+	clientB := registerTestAttachClient(t, server, attachB, "second", 80, 24)
+	clientB.capabilityHint = []byte(kittyClipboardHintFixture)
+	server.mu.Lock()
+	server.attachConn = attachA
+	server.mu.Unlock()
+
+	// A receives the start of a query, then B takes focus.
+	server.handleWindowOutput("@1", []byte("\x1b[>"))
+	waitForAttachOutput(t, attachA, "\x1b[>")
+	server.focusAttachClient(clientB, 0, 0, false)
+
+	server.handleWindowOutput("@1", []byte("c\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attachA, "c\x1b]5522;type=write:id="+kittyClipboardTagWindow1+".w\x1b\\")
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\done"))
+	waitForAttachOutput(t, attachB, "done")
+
+	for name, attach := range map[string]*recordingConn{"A": attachA, "B": attachB} {
+		if got := attach.String(); strings.Contains(got, "wdata") {
+			t.Fatalf("client %s got the rest of a write it may not hold: %q", name, got)
+		}
+	}
+	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EBUSY:id=w\x1b\\" {
+		t.Fatalf("window got %q, want the split write refused", got)
+	}
+}
+
+// startKittyClipboardInputWorker runs the input worker of attach's client,
+// as handleAttach does, so its replies reach their windows and its
+// departure is noticed once they have.
+func startKittyClipboardInputWorker(t *testing.T, server *muxServer, attach *recordingConn) *attachClient {
+	t.Helper()
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	go server.runAttachInputActions(client)
+	return client
+}
+
+func waitForWindowPtyOutput(t *testing.T, window *muxWindow, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := windowPtyOutput(t, window)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("window got %q, want %q", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A request whose client goes away before answering it is answered EBUSY at
+// once: on a phone the primary client vanishing mid-request is how a
+// session usually ends, and the program would otherwise wait for its own
+// timeout.
+func TestKittyClipboardRequestsOfADepartedClientAreAnsweredBusy(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=r1\x1b\\"+
+			"\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".r1")
+
+	server.removeAttachClient(client)
+	waitForWindowPtyOutput(t, first,
+		"\x1b]5522;type=read:status=EBUSY:id=r1\x1b\\"+
+			"\x1b]5522;type=write:status=EBUSY:id=w\x1b\\")
+
+	// The rest of the write has nowhere to go, and is not answered again.
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata\x1b\\more"))
+	waitForWindowReplies(t, first)
+	if got := windowPtyOutput(t, first); strings.Count(got, "type=write") != 1 {
+		t.Fatalf("window got %q, want the write answered once", got)
+	}
+}
+
+// Replies the client sent before it went away still reach the window, ahead
+// of the EBUSY for what it left unanswered, and a request it finished is
+// not answered again.
+func TestKittyClipboardDepartedClientRepliesComeFirst(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=done\x1b\\"+
+			"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=half\x1b\\"))
+	waitForAttachOutput(t, attach, ".half")
+
+	tag := ":id=" + kittyClipboardTagWindow1
+	client.inputDispatchMu.Lock()
+	_, replies := client.splitKittyClipboardRepliesLocked([]byte(
+		"\x1b]5522;type=read:status=OK"+tag+".done\x1b\\"+
+			"\x1b]5522;type=read:status=DONE"+tag+".done\x1b\\"+
+			"\x1b]5522;type=read:status=OK"+tag+".half\x1b\\"), time.Now())
+	client.enqueueInputActions(replies)
+	client.inputDispatchMu.Unlock()
+	server.removeAttachClient(client)
+
+	waitForWindowPtyOutput(t, first,
+		"\x1b]5522;type=read:status=OK:id=done\x1b\\"+
+			"\x1b]5522;type=read:status=DONE:id=done\x1b\\"+
+			"\x1b]5522;type=read:status=OK:id=half\x1b\\"+
+			"\x1b]5522;type=read:status=EBUSY:id=half\x1b\\")
+}
+
+// A write the client already refused is not answered again when MonkeyMux
+// later drops the rest of it.
+func TestKittyClipboardAnsweredWriteIsNotAnsweredAgain(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attach, ".w")
+
+	client.inputDispatchMu.Lock()
+	_, replies := client.splitKittyClipboardRepliesLocked([]byte(
+		"\x1b]5522;type=write:status=EPERM:id="+kittyClipboardTagWindow1+".w\x1b\\"), time.Now())
+	client.enqueueInputActions(replies)
+	client.inputDispatchMu.Unlock()
+	want := "\x1b]5522;type=write:status=EPERM:id=w\x1b\\"
+	waitForWindowPtyOutput(t, first, want)
+
+	server.mu.Lock()
+	server.activeID = "@2"
+	server.mu.Unlock()
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
+	server.removeAttachClient(client)
+	time.Sleep(20 * time.Millisecond)
+	if got := windowPtyOutput(t, first); got != want {
+		t.Fatalf("window got %q, want only the client's answer", got)
+	}
+}
+
+// The Escape key, a lone ESC in a read, is held back only while a reply is
+// owed, since only then can it start one. Once the client has finished
+// answering, it goes straight to the window, however recent the request.
+func TestKittyClipboardEscapeIsNotHeldOnceRepliesAreDone(t *testing.T) {
+	restore := stubForegroundResize(t)
+	defer restore()
+	server := newMuxServer("kitty-clipboard-escape")
+	window := &muxWindow{id: "@1", pty: &recordingPty{}, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	input, writer := io.Pipe()
+	attach := &recordingConn{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.handleAttach(attach, bufio.NewReader(input), controlMessage{
+			Width:          80,
+			Height:         24,
+			CapabilityHint: kittyClipboardHintFixture,
+		})
+	}()
+	defer func() {
+		_ = writer.Close()
+		_ = input.Close()
+		<-done
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		server.mu.Lock()
+		attached := server.attachConn != nil
+		server.mu.Unlock()
+		if attached {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("attach never became primary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waitForEscape := func(prefix string, within time.Duration) {
+		t.Helper()
+		if _, err := writer.Write([]byte("\x1b")); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(within)
+		for window.pty.(*recordingPty).String() != prefix+"\x1b" {
+			if time.Now().After(deadline) {
+				t.Fatalf("window got %q within %v, want %q",
+					window.pty.(*recordingPty).String(), within, prefix+"\x1b")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".r")
+	reply := "\x1b]5522;type=read:status=OK:id=" + kittyClipboardTagWindow1 + ".r\x1b\\" +
+		"\x1b]5522;type=read:status=DONE:id=" + kittyClipboardTagWindow1 + ".r\x1b\\"
+	if _, err := writer.Write([]byte(reply)); err != nil {
+		t.Fatal(err)
+	}
+	answered := "\x1b]5522;type=read:status=OK:id=r\x1b\\\x1b]5522;type=read:status=DONE:id=r\x1b\\"
+	deadline = time.Now().Add(2 * time.Second)
+	for window.pty.(*recordingPty).String() != answered {
+		if time.Now().After(deadline) {
+			t.Fatalf("window got %q, want %q", window.pty.(*recordingPty).String(), answered)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waitForEscape(answered, kittyClipboardAmbiguousCarryTimeout/2)
+}
+
+// A client owes replies from a request until its final reply, and a request
+// it never answers stops holding the Escape key back after the grace.
+func TestKittyClipboardRepliesAreOwedOnlyWhileARequestIsOpen(t *testing.T) {
+	server, _, _, attach := newKittyClipboardTestServer(t)
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	finish := func(reply string) {
+		t.Helper()
+		client.inputDispatchMu.Lock()
+		_, replies := client.splitKittyClipboardRepliesLocked([]byte(reply), time.Now())
+		client.inputDispatchMu.Unlock()
+		for _, action := range replies {
+			server.finishKittyClipboardReply(client, action.windowID, action.data)
+		}
+	}
+	tag := ":id=" + kittyClipboardTagWindow1
+
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\"))
+	if !kittyClipboardRepliesOwed(client) {
+		t.Fatal("a forwarded read owes no reply")
+	}
+	finish("\x1b]5522;type=read:status=OK" + tag + ".r\x1b\\")
+	finish("\x1b]5522;type=read:status=DATA" + tag + ".r:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\")
+	if !kittyClipboardRepliesOwed(client) {
+		t.Fatal("a read stopped owing replies before DONE")
+	}
+	finish("\x1b]5522;type=read:status=DONE" + tag + ".r\x1b\\")
+	if kittyClipboardRepliesOwed(client) {
+		t.Fatal("a finished read still owes replies")
+	}
+
+	// A write owes its reply from the write packet through the commit.
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"+
+		"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\"))
+	if !kittyClipboardRepliesOwed(client) {
+		t.Fatal("a committed write owes no reply")
+	}
+	finish("\x1b]5522;type=write:status=DONE" + tag + ".w\x1b\\")
+	if kittyClipboardRepliesOwed(client) {
+		t.Fatal("a finished write still owes replies")
+	}
+
+	// A request the client ignores holds a trailing ESC back only for the
+	// grace after it went out.
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=lost;!!\x1b\\"))
+	client.inputDispatchMu.Lock()
+	held, _ := client.splitKittyClipboardRepliesLocked([]byte("x\x1b"), time.Now())
+	later, _ := client.splitKittyClipboardRepliesLocked([]byte("y\x1b"),
+		time.Now().Add(kittyClipboardRepliesOwedGrace+time.Second))
+	client.inputDispatchMu.Unlock()
+	if string(held) != "x" || string(later) != "\x1by\x1b" {
+		t.Fatalf("input = %q then %q, want the ESC held, then given back with the next", held, later)
+	}
+
+	// A window that closes stops counting.
+	server.mu.Lock()
+	server.retireWindowLocked(server.windowByIDLocked("@1"))
+	server.mu.Unlock()
+	if got := client.kittyClipboardInput.outstanding.Load(); got != 0 {
+		t.Fatalf("outstanding = %d after the window closed", got)
 	}
 }

@@ -706,10 +706,8 @@ type muxServer struct {
 	detachedReplyClients map[*attachClient]struct{}
 
 	// kittyClipboardWriteWindow is the window whose OSC 5522 write is open on
-	// the attached clients; kittyClipboardRepliesOwedUntil is when they are
-	// last expected to be sending OSC 5522 replies (unix nanoseconds).
-	kittyClipboardWriteWindow      string
-	kittyClipboardRepliesOwedUntil atomic.Int64
+	// the attached clients.
+	kittyClipboardWriteWindow string
 
 	mu                               sync.Mutex
 	resizeMu                         sync.Mutex
@@ -7329,6 +7327,7 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.releaseRedrawForwardingStateLocked()
 	window.clearKittyGraphicsPendingLocked()
 	window.clearKittyImagesLocked()
+	window.forgetKittyClipboardRequestsLocked()
 	window.history = nil
 	window.screen = nil
 	window.oscBuffer = nil
@@ -9156,7 +9155,6 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
-	client.kittyClipboardInput.owedUntil = &s.kittyClipboardRepliesOwedUntil
 	client.focusClaim = func(expectedFocusSequence uint64) {
 		s.focusAttachClientIfUnchanged(client, expectedFocusSequence)
 	}
@@ -9326,6 +9324,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 		client.discardInputActions()
 		s.mu.Lock()
 		delete(s.detachedReplyClients, client)
+		s.failKittyClipboardRequestsLocked(client)
 		s.mu.Unlock()
 	}()
 	for {
@@ -9334,6 +9333,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			return
 		}
 		if action.kittyClipboardReply {
+			s.finishKittyClipboardReply(client, action.windowID, action.data)
 			_ = s.writeWindow(action.windowID, action.data)
 			continue
 		}
@@ -14024,6 +14024,17 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 			continue
 		}
 		payloadStart := i + 2
+		if resume, cancelled := kittyClipboardOscCancelled(data[payloadStart:]); cancelled {
+			// The terminal abandons the packet there and goes on with what
+			// follows as ordinary output.
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			copyStart = payloadStart + resume
+			i = copyStart
+			continue
+		}
 		payloadEnd, terminatorLength, ok := findOscTerminator(data[payloadStart:])
 		if !ok {
 			if w.storeAttachPartialOscLocked(data[i:]) ||
@@ -14493,10 +14504,10 @@ type kittyGraphicsEvent struct {
 	animation   bool
 	delete      bool
 	mappingOnly bool
-	// control holds the keys of a delete or a placement event; placement is
-	// the display command a placement event replays.
+	// control holds the keys of a delete or a placement event; placement
+	// marks a display command, or the relative placement an a=T root makes.
 	control   map[string]string
-	placement []byte
+	placement bool
 	// offset and end are where the command starts and ends in the scanned
 	// data.
 	offset int
@@ -14558,13 +14569,13 @@ func scanKittyTransmissions(
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
 				// a=p after the image, since the root itself replays as a=t.
+				// Only a root with an explicit image id can be placed again
+				// by id.
 				if args["a"] == "T" && kittyNonZero(args["P"]) &&
-					!kittyNonZero(args["U"]) {
-					if command := kittyRelativeCommandFromRoot(args); command != nil {
-						events = append(events, kittyGraphicsEvent{
-							control: args, placement: command, offset: i,
-						})
-					}
+					!kittyNonZero(args["U"]) && kittyIDValue(args["i"]) != "" {
+					events = append(events, kittyGraphicsEvent{
+						control: args, placement: true, offset: i,
+					})
 				}
 			}
 		} else {
@@ -14576,7 +14587,7 @@ func scanKittyTransmissions(
 				})
 			} else if args["a"] == "p" {
 				events = append(events, kittyGraphicsEvent{
-					control: args, placement: data[i:end], offset: i,
+					control: args, placement: true, offset: i,
 				})
 			}
 		}
@@ -14822,10 +14833,9 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	screen := w.newKittyScreenTrackerLocked(data)
 	defer screen.finish()
 	for _, event := range events {
-		if event.placement != nil {
+		if event.placement {
 			if w.observeKittyPlacementLocked(
 				event.control,
-				event.placement,
 				screen.at(event.offset),
 			) {
 				changed = true

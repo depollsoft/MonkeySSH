@@ -385,10 +385,16 @@ func (s *terminalScreen) promptRows() (history, start, end int, ok bool) {
 // away, and resizes it the way the model does. A frame paints onto a client
 // whose replay prefix ended any open prompt (CSI 3 J), so the lines before the
 // prompt need nothing. Only marks without side effects are used: A at a line
-// start (no fresh line there), P, B and I; never C or D, which the app takes
-// for a command starting or finishing. So nothing is emitted unless the cursor
-// is in a prompt or its input, and cells written as output inside the prompt
-// take the content in force.
+// start (no fresh line there), P, B, I and VS Code's H; never C or D, which
+// the app takes for a command starting or finishing. So nothing is emitted
+// unless the cursor is in a prompt or its input, and cells written as output
+// inside the prompt take the content in force.
+//
+// A row is marked only where the model marks it. The cursor can be in a
+// prompt on a row the model leaves unmarked (the prompt row was deleted
+// under it, or erased, or VS Code marked only the content), and then the
+// prompt's options travel on an A that the frame erases again before it
+// paints anything (begin).
 type vtSemanticFrame struct {
 	state *vtSemanticState
 	grid  *vtGrid
@@ -403,6 +409,9 @@ type vtSemanticFrame struct {
 	inPrompt bool
 	mark     uint8
 	emitted  uint8
+	// unmarked is set when the prompt's first line is a grid row the model
+	// does not mark.
+	unmarked bool
 }
 
 // semanticFrame returns the marks to paint g with, or nil.
@@ -416,7 +425,22 @@ func (s *terminalScreen) semanticFrame(g *vtGrid) *vtSemanticFrame {
 	}
 	return &vtSemanticFrame{
 		state: &s.semMain, grid: g, history: history, start: start, end: end, first: true,
+		unmarked: history < 0 && g.prompt[start] == vtPromptNone,
 	}
+}
+
+// begin is called before anything is painted, with the client's screen and
+// scrollback blank. For a prompt whose first line is unmarked it sets the
+// prompt's options with an A, whose mark ED 2 erases again (on a blank
+// screen it scrolls nothing into the scrollback) and whose content CSI 3 J
+// ends, as the replay prefix did.
+func (f *vtSemanticFrame) begin(out []byte) []byte {
+	if f == nil || !f.unmarked {
+		return out
+	}
+	out = append(out, "\x1b[H\x1b]133;A"...)
+	out = f.state.appendOptions(out)
+	return append(out, "\x07\x1b[2J\x1b[3J"...)
 }
 
 // beginHistoryLine is called with the cursor at the start of scrollback line
@@ -459,6 +483,9 @@ func (f *vtSemanticFrame) beginLine(out []byte, inPrompt bool, mark uint8, wrapp
 	}
 	f.mark = mark
 	switch {
+	case f.first && f.unmarked:
+		// begin set the options already; the line keeps no mark.
+		f.first = false
 	case f.first:
 		// A primary prompt resets the client's options, which the model's
 		// replace; a continuation line is marked so after it.
@@ -488,11 +515,7 @@ func (f *vtSemanticFrame) cell(out []byte, sem uint8) []byte {
 	case vtSemInput:
 		out = append(out, "\x1b]133;B\x07"...)
 	case vtSemPrompt:
-		if f.mark == vtPromptPrimary {
-			out = append(out, "\x1b]133;P;k=i\x07"...)
-		} else {
-			out = append(out, "\x1b]133;P;k=s\x07"...)
-		}
+		out = appendVTPromptContent(out, f.mark)
 	default:
 		return out
 	}
@@ -500,17 +523,35 @@ func (f *vtSemanticFrame) cell(out []byte, sem uint8) []byte {
 	return out
 }
 
-// finish leaves the client writing input when the model is, whatever the
-// last painted cell was.
+// appendVTPromptContent makes the next cells prompt on a line with mark, and
+// marks the line as P does: VS Code's H sets the content alone, for a line
+// the model leaves unmarked.
+func appendVTPromptContent(out []byte, mark uint8) []byte {
+	switch mark {
+	case vtPromptPrimary:
+		return append(out, "\x1b]133;P;k=i\x07"...)
+	case vtPromptContinuation:
+		return append(out, "\x1b]133;P;k=s\x07"...)
+	}
+	return append(out, "\x1b]633;H\x07"...)
+}
+
+// finish leaves the client writing the prompt or input the model is,
+// whatever the last painted cell was. The cursor's row is painted already,
+// so only the content is set, never a mark.
 func (f *vtSemanticFrame) finish(out []byte) []byte {
-	if f == nil || f.state.content != vtSemInput {
+	if f == nil {
 		return out
 	}
-	if f.state.eolInput {
+	switch {
+	case f.state.content == vtSemPrompt && f.emitted != vtSemPrompt:
+		return append(out, "\x1b]633;H\x07"...)
+	case f.state.content != vtSemInput:
+		return out
+	case f.state.eolInput:
 		return append(out, "\x1b]133;I\x07"...)
-	}
-	if f.emitted != vtSemInput {
-		out = append(out, "\x1b]133;B\x07"...)
+	case f.emitted != vtSemInput:
+		return append(out, "\x1b]133;B\x07"...)
 	}
 	return out
 }
