@@ -14,7 +14,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
-import 'package:xterm/src/utils/unicode_v11.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../data/database/database.dart';
@@ -455,14 +454,10 @@ const terminalWin32InputModeEscapeKeyEvents =
 String encodeTerminalInputForWin32InputMode(String data) =>
     data == '\x1b' ? terminalWin32InputModeEscapeKeyEvents : data;
 
-/// Adapts remote terminal output so xterm.dart renders it correctly.
+/// Adapts remote terminal output so xterm.dart renders it correctly, retaining
+/// split escape sequences until complete.
 ///
-/// xterm.dart 4.0.0 tracks IRM (`CSI 4 h/l`) but does not shift existing cells
-/// when printable characters arrive while the mode is active. Injecting ICH
-/// before each printable cell preserves behavior from editors such as nano,
-/// while the decoder retains split escape sequences until complete.
-///
-/// xterm.dart also treats private `CSI > ... m` keyboard modifier controls as
+/// xterm.dart treats private `CSI > ... m` keyboard modifier controls as
 /// SGR attributes. Dropping those controls prevents TUIs such as OpenCode from
 /// accidentally enabling underline/bold while painting spaces.
 class TerminalXtermOutputDecoder {
@@ -470,7 +465,6 @@ class TerminalXtermOutputDecoder {
   _TerminalSequenceState? _state;
   bool _previousEscape = false;
   String _pendingSurrogate = '';
-  bool _insertMode = false;
 
   /// Number of code units retained until a sequence or surrogate completes.
   int get pendingCodeUnits => _sequence.length + _pendingSurrogate.length;
@@ -479,18 +473,17 @@ class TerminalXtermOutputDecoder {
   @visibleForTesting
   int materializedSequenceCodeUnits = 0;
 
-  /// Discards partial output and resets insert mode for a new shell.
+  /// Discards partial output for a new shell.
   void reset() {
     _sequence.clear();
     _state = null;
     _previousEscape = false;
     _pendingSurrogate = '';
-    _insertMode = false;
     materializedSequenceCodeUnits = 0;
   }
 
   /// Adapts the next chunk of remote output.
-  ({String output, bool insertMode}) add({required String input}) {
+  String add({required String input}) {
     final combinedInput = _pendingSurrogate.isEmpty
         ? input
         : _pendingSurrogate + input;
@@ -510,7 +503,6 @@ class TerminalXtermOutputDecoder {
         _sequence.clear();
         if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
           output.write(sequence);
-          _insertMode = _terminalInsertModeUpdate(sequence) ?? _insertMode;
         }
         continue;
       }
@@ -529,15 +521,10 @@ class TerminalXtermOutputDecoder {
       }
       final rune = _terminalRuneAt(combinedInput, cursor);
       final runeLength = _terminalRuneLength(rune);
-      if (_insertMode) {
-        for (var cell = 0; cell < unicodeV11.wcwidth(rune); cell++) {
-          output.write(_terminalInsertBlankCharacterSequence);
-        }
-      }
       output.write(combinedInput.substring(cursor, cursor + runeLength));
       cursor += runeLength;
     }
-    return (output: output.toString(), insertMode: _insertMode);
+    return output.toString();
   }
 
   void _scanSequenceCodeUnit(int codeUnit) {
@@ -619,54 +606,12 @@ const _terminalSosIntroducerCodeUnit = 0x58;
 const _terminalPmIntroducerCodeUnit = 0x5E;
 const _terminalApcIntroducerCodeUnit = 0x5F;
 const _terminalStringTerminatorCodeUnit = 0x5C;
-const _terminalInsertMode = 4;
-const _terminalSetModeFinalCodeUnit = 0x68;
-const _terminalResetModeFinalCodeUnit = 0x6C;
-const _terminalSoftResetFinalCodeUnit = 0x70;
-const _terminalFullResetFinalCodeUnit = 0x63;
 const _terminalPrivateMarkerCodeUnit = 0x3E;
 const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
-const _terminalInsertBlankCharacterSequence = '\x1b[@';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
 
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;
-
-bool? _terminalInsertModeUpdate(String sequence) {
-  if (sequence.length < 2 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit) {
-    return null;
-  }
-  if (sequence.length == 2 &&
-      sequence.codeUnitAt(1) == _terminalFullResetFinalCodeUnit) {
-    return false;
-  }
-  if (sequence.length < 4 ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-    return null;
-  }
-
-  final finalCodeUnit = sequence.codeUnitAt(sequence.length - 1);
-  final params = sequence.substring(2, sequence.length - 1);
-  if (finalCodeUnit == _terminalSoftResetFinalCodeUnit &&
-      (params == '!' || params.endsWith('"'))) {
-    return false;
-  }
-  if (finalCodeUnit != _terminalSetModeFinalCodeUnit &&
-      finalCodeUnit != _terminalResetModeFinalCodeUnit) {
-    return null;
-  }
-
-  if (params.startsWith('?')) {
-    return null;
-  }
-  for (final param in params.split(';')) {
-    if (int.tryParse(param) == _terminalInsertMode) {
-      return finalCodeUnit == _terminalSetModeFinalCodeUnit;
-    }
-  }
-  return null;
-}
 
 bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
   if (sequence.length < 4 ||

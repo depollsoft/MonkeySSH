@@ -72,9 +72,9 @@ type terminalScreen struct {
 	decoderInString bool
 	lastByteESC     bool
 	// afterAbandon records that an ESC abandoned the sequence before it. The
-	// app's output decoder can misframe the sequence that ESC starts (in
-	// insert mode it injects ICH into its parameters), so that one cannot
-	// make the cursor known.
+	// output decoder of older app versions can misframe the sequence that ESC
+	// starts (in insert mode it injects ICH into its parameters), so that one
+	// cannot make the cursor known.
 	afterAbandon bool
 
 	savedMain vtSavedCursor

@@ -1510,8 +1510,8 @@ if(!$__flResolved){$__flResolved='cmd'}
     // mode change (for example ConPTY's win32-input-mode request) is answered
     // under the new mode.
     _trackTerminalControlModeUpdates(slice);
-    if (terminalOutput.output.isNotEmpty) {
-      terminal.writeSilently(terminalOutput.output);
+    if (terminalOutput.isNotEmpty) {
+      terminal.writeSilently(terminalOutput);
     }
     _respondToTerminalWindowControlQueries(slice, terminal);
   }

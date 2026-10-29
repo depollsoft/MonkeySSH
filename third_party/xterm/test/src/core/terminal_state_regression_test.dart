@@ -349,4 +349,42 @@ void main() {
       expect(terminal.buffer.cursorY, 1);
     });
   });
+
+  group('insert mode', () {
+    test('a glyph pushes the rest of the row right', () {
+      final terminal = Terminal()..resize(10, 2);
+      terminal.write('abcdef\r\x1b[3C\x1b[4hXY\x1b[4lZ');
+      expect(terminal.lines[0].getText(), 'abcXYZef');
+    });
+
+    test('a pending wrap is taken before the insert', () {
+      final terminal = Terminal()..resize(5, 3);
+      terminal.write('\x1b[4habcdef');
+      expect(terminal.lines[0].getText(), 'abcde');
+      expect(terminal.lines[1].getText(), 'f');
+      expect(terminal.lines[1].isWrapped, isTrue);
+    });
+
+    test('a wide glyph pushes two cells and a zero-width one none', () {
+      final terminal = Terminal()..resize(8, 2);
+      terminal.write('abcdef\r\x1b[4h\u231Ae\u0301');
+      expect(terminal.lines[0].getText(), '\u231Aeabcde');
+      expect(terminal.buffer.cursorX, 3);
+    });
+
+    test('RIS and DECSTR end it', () {
+      for (final reset in ['\x1bc', '\x1b[!p']) {
+        final terminal = Terminal()..resize(5, 2);
+        terminal.write('\x1b[4h${reset}abc\rX');
+        expect(terminal.lines[0].getText(), 'Xbc', reason: reset);
+      }
+    });
+
+    test('ICH drops a pending wrap', () {
+      final terminal = Terminal()..resize(5, 3);
+      terminal.write('abcde\x1b[@f');
+      expect(terminal.lines[0].getText(), 'abcdf');
+      expect(terminal.buffer.cursorY, 0);
+    });
+  });
 }

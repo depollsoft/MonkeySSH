@@ -159,6 +159,11 @@ class Buffer {
         _cursorX = viewWidth - 2;
       }
     }
+    if (terminal.insertMode) {
+      // IRM: the glyph pushes the rest of the row right, after any pending
+      // wrap above, so a full row keeps its last cell.
+      insertBlankChars(cellWidth);
+    }
 
     final line = currentLine;
     // Overwriting the second half of a wide glyph blanks its first half;
@@ -544,8 +549,10 @@ class Buffer {
     }
   }
 
+  /// ICH. Like xterm, it drops a pending wrap.
   void insertBlankChars(int count) {
-    currentLine.insertCells(cursorX, count, terminal.cursor);
+    _cursorX = cursorX;
+    currentLine.insertCells(_cursorX, count, terminal.cursor);
   }
 
   void insertLines(int count) {

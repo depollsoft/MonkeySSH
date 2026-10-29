@@ -2197,31 +2197,41 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
-    test('adapts insert mode output so xterm shifts existing cells', () {
+    test('passes insert mode through for the terminal to shift cells', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(input: 'abcdef\r\x1b[3C\x1b[4hXY');
+      const input = 'abcdef\r\x1b[3C\x1b[4hXY';
+      final output = decoder.add(input: input);
 
-      terminal.write(result.output);
+      terminal.write(output);
 
       expect(decoder.pendingCodeUnits, 0);
-      expect(result.insertMode, isTrue);
+      expect(output, input);
       expect(terminal.lines[0].getText(0, 8), 'abcXYdef');
+    });
+
+    test('keeps the last cell of a full row in insert mode', () {
+      final terminal = Terminal(maxLines: 100)..resize(5, 2);
+      final decoder = TerminalXtermOutputDecoder();
+
+      terminal.write(decoder.add(input: '\x1b[4habcdef'));
+
+      expect(terminal.lines[0].getText(), 'abcde');
+      expect(terminal.lines[1].getText().trimRight(), 'f');
     });
 
     test('adapts split insert mode sequences across chunks', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
       final first = decoder.add(input: 'abcdef\r\x1b[3C\x1b[');
-      terminal.write(first.output);
+      terminal.write(first);
 
       expect(decoder.pendingCodeUnits, '\x1b['.length);
       final second = decoder.add(input: '4hZ\x1b[4lQ');
-      terminal.write(second.output);
+      terminal.write(second);
 
       expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isFalse);
-      expect(second.output, '\x1b[4h\x1b[@Z\x1b[4lQ');
+      expect(second, '\x1b[4hZ\x1b[4lQ');
       expect(terminal.lines[0].getText(0, 7), 'abcZQef');
     });
 
@@ -2233,14 +2243,11 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         // Leave the final backslash for a separate call to split ST.
         for (var offset = 0; offset < apc.length - 1; offset += sliceSize) {
           final end = (offset + sliceSize).clamp(0, apc.length - 1);
-          expect(
-            decoder.add(input: apc.substring(offset, end)).output,
-            isEmpty,
-          );
+          expect(decoder.add(input: apc.substring(offset, end)), isEmpty);
           expect(decoder.pendingCodeUnits, end);
           expect(decoder.materializedSequenceCodeUnits, 0);
         }
-        expect(decoder.add(input: r'\').output, apc);
+        expect(decoder.add(input: r'\'), apc);
         expect(decoder.pendingCodeUnits, 0);
         expect(decoder.materializedSequenceCodeUnits, apc.length);
       }
@@ -2248,9 +2255,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('retains a surrogate split across input chunks', () {
       final decoder = TerminalXtermOutputDecoder();
-      expect(decoder.add(input: '\x1b[4h\uD83D').output, '\x1b[4h');
+      expect(decoder.add(input: '\x1b[4h\uD83D'), '\x1b[4h');
       expect(decoder.pendingCodeUnits, 1);
-      expect(decoder.add(input: '\uDC4DZ').output, '\x1b[@\x1b[@👍\x1b[@Z');
+      expect(decoder.add(input: '\uDC4DZ'), '👍Z');
       expect(decoder.pendingCodeUnits, 0);
     });
 
@@ -2288,8 +2295,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             final end = offset + sliceSize > stream.length
                 ? stream.length
                 : offset + sliceSize;
-            final result = decoder.add(input: stream.substring(offset, end));
-            terminal.write(result.output);
+            terminal.write(decoder.add(input: stream.substring(offset, end)));
           }
 
           expect(
@@ -2309,64 +2315,15 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
-    for (final (name, input, output) in [
-      (
-        'OSC payload',
-        '\x1b[4h\x1b]0;nano title\x07Z',
-        '\x1b[4h\x1b]0;nano title\x07\x1b[@Z',
-      ),
-      (
-        // A skin-tone modifier takes no cell of its own: like the MonkeyMux
-        // screen model and host width libraries, the buffer keeps the pair
-        // in the base emoji's two columns.
-        'emoji modifier',
-        '\x1b[4h\u{1F44D}\u{1F3FD}Z',
-        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\u{1F3FD}\x1b[@Z',
-      ),
-    ]) {
-      test('insert mode preserves $name', () {
-        final decoder = TerminalXtermOutputDecoder();
-        final result = decoder.add(input: input);
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isTrue);
-        expect(result.output, output);
-      });
-    }
-
     test('strips private CSI modifier controls that xterm treats as SGR', () {
       final decoder = TerminalXtermOutputDecoder();
       final first = decoder.add(input: 'before\x1b[>4;');
       expect(decoder.pendingCodeUnits, '\x1b[>4;'.length);
       final second = decoder.add(input: '1mafter');
 
-      expect(first.output, 'before');
-      expect(second.output, 'after');
+      expect(first, 'before');
+      expect(second, 'after');
       expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isFalse);
-    });
-
-    test('clears tracked insert mode on terminal reset sequences', () {
-      final decoder = TerminalXtermOutputDecoder();
-      for (final reset in ['\x1bc', '\x1b[!p']) {
-        final result = decoder.add(input: '\x1b[4hA${reset}B');
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isFalse);
-        expect(result.output, '\x1b[4h\x1b[@A${reset}B');
-      }
-    });
-
-    test('does not inject insert blanks into DCS payloads', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final first = decoder.add(input: '\x1b[4h\x1bP1+r');
-
-      expect(decoder.pendingCodeUnits, '\x1bP1+r'.length);
-      final second = decoder.add(input: 'abc\x1b\\Z');
-
-      expect(first.output, '\x1b[4h');
-      expect(first.insertMode, isTrue);
-      expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isTrue);
-      expect(second.output, '\x1bP1+rabc\x1b\\\x1b[@Z');
     });
 
     test('insert mode shifts by the cell width the buffer uses', () {
@@ -2374,7 +2331,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final terminal = Terminal(maxLines: 100)..resize(20, 2);
       final decoder = TerminalXtermOutputDecoder();
       terminal.write(
-        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}').output,
+        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}'),
       );
 
       expect(terminal.buffer.cursorX, 5);
