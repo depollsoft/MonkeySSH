@@ -14006,6 +14006,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       onInsertText: isMobile ? null : _confirmDesktopInsertedText,
       onPasteText: _pasteClipboard,
       onUserInput: _handleTerminalUserInput,
+      onPromptCursorMove:
+          _terminalTextInputController.resetImeForExternalCursorMove,
       onTapDown: (_, _) => _claimActiveMonkeyMuxClientFocus(),
     );
 
@@ -15316,10 +15318,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }) {
     _clearPendingTerminalMouseTap();
     final terminalViewState = _terminalViewKey.currentState;
-    if (event.kind != PointerDeviceKind.touch ||
-        !allowTap ||
+    // A terminal that takes the tap itself (desktop) would see it twice.
+    if (!allowTap ||
+        event.buttons != kPrimaryButton ||
         terminalViewState == null ||
-        !(terminalViewState.shouldSendTerminalTapPointerInput ||
+        !terminalViewState.leavesTapToParent(event.kind) ||
+        !((event.kind == PointerDeviceKind.touch &&
+                terminalViewState.shouldSendTerminalTapPointerInput) ||
             terminalViewState.canMoveTerminalPromptCursor)) {
       return;
     }
@@ -15343,8 +15348,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _handleTerminalMouseTapPointerUp(PointerUpEvent event) {
-    if (event.kind != PointerDeviceKind.touch ||
-        _terminalDoubleTapConsumedPointer == event.pointer) {
+    if (_terminalDoubleTapConsumedPointer == event.pointer) {
       _clearPendingTerminalMouseTap(event.pointer);
       return;
     }
@@ -15363,18 +15367,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final hadSelection = _pendingTerminalMouseTapHadSelection;
     _clearPendingTerminalMouseTap(event.pointer);
     final terminalViewState = _terminalViewKey.currentState;
-    // Without mouse tracking, a tap on a shell prompt's input moves the
-    // shell's cursor there when the prompt asked for it (OSC 133).
-    final forwarded =
-        (terminalViewState?.sendTerminalPrimaryTap(event.position) ?? false) ||
-        (!hadSelection &&
-            (terminalViewState?.moveTerminalPromptCursor(event.position) ??
-                false));
-    if (forwarded) {
+    if (terminalViewState == null) {
+      return;
+    }
+    // The system selection owns mouse clicks, so only a touch tap is a click
+    // for mouse tracking.
+    if (event.kind == PointerDeviceKind.touch &&
+        terminalViewState.sendTerminalPrimaryTap(event.position)) {
       // A clicked TUI such as Claude Code moves its own cursor, so the IME's
       // copy of the text before the cursor no longer applies; later edits and
       // suggestions would otherwise replace the wrong characters.
       _terminalTextInputController.resetImeForExternalCursorMove();
+    } else if (!hadSelection) {
+      // Without mouse tracking, a tap on a shell prompt's input moves the
+      // shell's cursor there when the prompt asked for it (OSC 133). The view
+      // resets the IME for it, as for a click.
+      terminalViewState.moveTerminalPromptCursor(event.position);
     }
   }
 

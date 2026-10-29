@@ -10,11 +10,18 @@ void main() {
   late List<String> output;
   late Terminal terminal;
   late TerminalController controller;
+  late List<String> events;
   final viewKey = GlobalKey<MonkeyTerminalViewState>();
 
   setUp(() {
     output = <String>[];
-    terminal = Terminal(onOutput: output.add);
+    events = <String>[];
+    terminal = Terminal(
+      onOutput: (data) {
+        output.add(data);
+        events.add('output');
+      },
+    );
     controller = TerminalController();
   });
 
@@ -37,6 +44,8 @@ void main() {
             scrollController: scrollController,
             useSystemSelection: useSystemSelection,
             hardwareKeyboardOnly: true,
+            onUserInput: () => events.add('input'),
+            onPromptCursorMove: () => events.add('cursor moved'),
           ),
         ),
       ),
@@ -65,6 +74,9 @@ void main() {
 
     await click(tester, cellCenter(2, terminal.buffer.absoluteCursorY));
     expect(output.join(), '\x1b[D' * 7);
+    // The move is user input, so a paste or upload still pending sees it, and
+    // an input method learns that the text before the cursor changed.
+    expect(events, ['input', 'output', 'cursor moved']);
   });
 
   testWidgets('a click outside the prompt input sends nothing', (tester) async {
@@ -74,7 +86,25 @@ void main() {
     await click(tester, cellCenter(1, 0));
     await click(tester, cellCenter(0, 1));
     await click(tester, cellCenter(3, 3));
+    // A click on the cell the cursor is at moves nothing either.
+    await click(tester, cellCenter(4, 1));
     expect(output, isEmpty);
+    expect(events, isEmpty);
+  });
+
+  testWidgets('a touch tap moves the cursor once on a desktop terminal', (
+    tester,
+  ) async {
+    terminal.write('${_prompt}echo hi');
+    await pumpView(tester);
+    final view = viewKey.currentState!;
+    expect(view.leavesTapToParent(PointerDeviceKind.touch), isFalse);
+    expect(view.leavesTapToParent(PointerDeviceKind.mouse), isFalse);
+
+    await tester.tapAt(cellCenter(2, 0));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(output.join(), '\x1b[D' * 7);
+    expect(events, ['input', 'output', 'cursor moved']);
   });
 
   testWidgets('mouse tracking takes the click instead', (tester) async {
@@ -128,10 +158,15 @@ void main() {
       'screen', (tester) async {
     terminal.write('${_prompt}ls -la');
     await pumpView(tester, useSystemSelection: true);
+    expect(
+      viewKey.currentState!.leavesTapToParent(PointerDeviceKind.touch),
+      isTrue,
+    );
 
     await tester.tapAt(cellCenter(2, 0));
     await tester.pump(const Duration(milliseconds: 400));
     expect(output, isEmpty);
+    expect(events, isEmpty);
 
     // The screen calls in once it has told the tap from its own gestures.
     expect(
@@ -139,6 +174,25 @@ void main() {
       isTrue,
     );
     expect(output.join(), '\x1b[D' * 6);
+    expect(events, ['input', 'output', 'cursor moved']);
+  });
+
+  testWidgets('mouse clicks on a system-selection terminal are left to the '
+      'screen', (tester) async {
+    terminal.write('${_prompt}ls -la');
+    await pumpView(tester, useSystemSelection: true);
+    expect(
+      viewKey.currentState!.leavesTapToParent(PointerDeviceKind.mouse),
+      isTrue,
+    );
+    expect(
+      viewKey.currentState!.leavesTapToParent(PointerDeviceKind.stylus),
+      isFalse,
+    );
+
+    // The selection takes the click.
+    await click(tester, cellCenter(2, 0));
+    expect(output, isEmpty);
   });
 
   testWidgets('prompts that did not ask for clicks keep plain taps', (

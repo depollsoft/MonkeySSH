@@ -17162,6 +17162,76 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    testWidgets('a touch tap on a desktop terminal reaches the program once', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write(
+        'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+      );
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      Offset cell(int x, int y) => render.localToGlobal(
+        render.getOffset(CellOffset(x, y)) +
+            render.cellSize.center(Offset.zero),
+      );
+      String written() => shellWrites.map(String.fromCharCodes).join();
+
+      shellWrites.clear();
+      await tester.tapAt(cell(2, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[D' * 7);
+
+      // With mouse tracking on, the tap is one click.
+      session.terminal!.write('\x1b[?1000h\x1b[?1006h');
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      await tester.tapAt(cell(4, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[<0;5;2M\x1b[<0;5;2m');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a mouse click on a shell prompt input keeps the IME in step', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write('\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi');
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      final target = render.localToGlobal(
+        render.getOffset(const CellOffset(4, 0)) +
+            render.cellSize.center(Offset.zero),
+      );
+      await tester.tapAt(target);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.testTextInput.updateEditingValue(
+        _editingValue('hello', selectionOffset: 5),
+      );
+      await tester.pump();
+
+      // A trackpad or mouse on a tablet with the soft keyboard up.
+      shellWrites.clear();
+      await tester.tapAt(target, kind: PointerDeviceKind.mouse);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[D' * 5);
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
+      expect(
+        client.currentTextEditingValue,
+        const TextEditingValue(
+          text: _deleteDetectionMarker,
+          selection: TextSelection.collapsed(offset: 2),
+        ),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets(
       'a tap that dismisses a selection leaves the prompt cursor alone',
       (tester) async {
@@ -17191,6 +17261,25 @@ void main() {
         await tester.tapAt(cell(8));
         await tester.pump(const Duration(milliseconds: 400));
         expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;9;1M');
+
+        // So does a mouse click, unless it dismisses a selection made with
+        // the mouse.
+        final drag = await tester.startGesture(
+          cell(0),
+          kind: PointerDeviceKind.mouse,
+        );
+        await drag.moveTo(cell(6));
+        await drag.up();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+        shellWrites.clear();
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;4;1M');
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
