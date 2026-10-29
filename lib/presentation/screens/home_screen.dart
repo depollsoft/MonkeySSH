@@ -1258,6 +1258,8 @@ class HostsPanel extends ConsumerWidget {
     WidgetRef ref,
     List<Host> hosts,
   ) => ReorderableListView.builder(
+    // Keeps its place when home changes layout or tab and builds it anew.
+    key: const PageStorageKey('home-hosts'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     buildDefaultDragHandles: false,
     itemCount: hosts.length,
@@ -2061,6 +2063,7 @@ class _ConnectionsPanel extends ConsumerWidget {
                   ),
                 )
               : ListView.builder(
+                  key: const PageStorageKey('home-connections'),
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   itemCount: connectionIds.length + 1,
                   itemBuilder: (context, index) {
@@ -2351,6 +2354,7 @@ class _KeysPanel extends ConsumerWidget {
     WidgetRef ref,
     List<SshKey> keys,
   ) => ListView.builder(
+    key: const PageStorageKey('home-keys'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     itemCount: keys.length,
     itemBuilder: (context, index) {
@@ -2951,6 +2955,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     List<Snippet> visibleSnippets,
     Map<int, String> folderNames,
   ) => ReorderableListView.builder(
+    key: const PageStorageKey('home-snippets'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     buildDefaultDragHandles: false,
     itemCount: visibleSnippets.length,

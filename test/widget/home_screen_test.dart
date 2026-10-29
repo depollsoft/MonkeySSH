@@ -1059,6 +1059,7 @@ void main() {
       HomeScreenTab initialTab = HomeScreenTab.hosts,
       TextScaler textScaler = TextScaler.noScaling,
       GoRouter? router,
+      List<Host> hosts = const [],
     }) async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -1090,9 +1091,7 @@ void main() {
             activeSessionsProvider.overrideWith(
               _TestActiveSessionsNotifier.new,
             ),
-            allHostsProvider.overrideWith(
-              (ref) => Stream.value(const <Host>[]),
-            ),
+            allHostsProvider.overrideWith((ref) => Stream.value(hosts)),
             allKeysProvider.overrideWith(
               (ref) => Stream.value(const <SshKey>[]),
             ),
@@ -1324,6 +1323,61 @@ void main() {
       expect(find.byTooltip('Settings').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
       semantics.dispose();
+    });
+
+    testWidgets('keeps the hosts list where it was across layouts and tabs', (
+      tester,
+    ) async {
+      final pose = await pumpInPose(
+        tester,
+        closed,
+        hosts: [
+          for (var index = 0; index < 40; index += 1)
+            _buildHost(id: index + 1, label: 'Host $index', sortOrder: index),
+        ],
+      );
+      await tester.pump();
+      double offset() => tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ReorderableListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position
+          .pixels;
+      await tester.drag(
+        find.byType(ReorderableListView),
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      final scrolled = offset();
+      expect(scrolled, greaterThan(0));
+
+      // Opened like a book, then beside a bar too short for the tabs.
+      await changePose(tester, pose, book);
+      expect(offset(), scrolled);
+      await changePose(tester, pose, (
+        size: outerLandscape.size,
+        padding: outerLandscape.padding,
+        bar: const SystemVerticalBar(
+          edge: SystemVerticalBarEdge.left,
+          itemColumn: Rect.fromLTRB(26, 264, 70, 432),
+        ),
+        features: const <DisplayFeature>[],
+      ));
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(offset(), scrolled);
+
+      await changePose(tester, pose, closed);
+      await tester.tap(find.text('Keys'));
+      await tester.pump();
+      await tester.tap(find.text('Hosts'));
+      await tester.pump();
+      expect(offset(), scrolled);
+      expect(tester.takeException(), isNull);
     });
 
     _MockSnippetRepository snippetsInFolder() {
