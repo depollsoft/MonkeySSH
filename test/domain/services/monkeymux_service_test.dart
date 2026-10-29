@@ -1443,10 +1443,12 @@ void main() {
       required int connectionId,
       Duration retryDelay = const Duration(hours: 1),
       Duration? responseTimeout,
+      bool terminalViewHidden = false,
     }) async {
       final client = _MockSshClient();
       final installer = _MockMonkeyMuxInstaller();
-      final session = _buildSession(client, connectionId: connectionId);
+      final session = _buildSession(client, connectionId: connectionId)
+        ..terminalViewHidden = terminalViewHidden;
       final server = _FakeVisibilityServer(capabilities: capabilities);
       when(() => installer.ensureInstalled(session))
           .thenAnswer((_) async => _fakeInstallation);
@@ -1601,6 +1603,35 @@ void main() {
       // Acknowledged, it is not sent again.
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(server.requests, hasLength(3));
+    });
+
+    test('a session hidden before it attached connects hidden', () async {
+      final (:service, :session, :server) = await start(
+        capabilities: ['client-visibility'],
+        connectionId: 946,
+        terminalViewHidden: true,
+      );
+      expect(server.requests, [(0, true)]);
+      expect(server.hidden, isTrue);
+    });
+
+    test('a cleared cache keeps the session hidden on reconnect', () async {
+      final (:service, :session, :server) = await start(
+        capabilities: ['client-visibility'],
+        connectionId: 947,
+      );
+      service.setClientHidden(session, 'work', hidden: true);
+      await pumpEventQueue();
+      expect(server.requests, [(0, false), (0, true)]);
+
+      // A reconnection while in the background starts over with new state.
+      await service.clearCache(947);
+      final events = service.watchWindowChanges(session, 'work').listen((_) {});
+      addTearDown(events.cancel);
+      expect(await service.listWindows(session, 'work'), isEmpty);
+      await pumpEventQueue();
+      expect(server.requests.last, (1, true));
+      expect(server.hidden, isTrue);
     });
 
     test('sends nothing to a server without the capability', () async {

@@ -3695,6 +3695,13 @@ class SshSession {
   /// Whether the attached MonkeyMux server publishes its shared PTY grid size.
   bool monkeyMuxViewportClippingEnabled = false;
 
+  /// Whether no app screen shows this session's terminal: the app is in the
+  /// background, or each screen that shows the session is covered or shows
+  /// something in the terminal's place. Kept with the session, so a
+  /// multiplexer it attaches to later, or over a new control connection,
+  /// learns it.
+  bool terminalViewHidden = false;
+
   /// Whether OSC 52 clipboard sharing is enabled for this session.
   bool clipboardSharingEnabled;
 

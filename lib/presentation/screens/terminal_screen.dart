@@ -6113,13 +6113,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session, {
     required bool visible,
   }) {
+    // Kept on the session for a MonkeyMux attach that lands later.
+    session.terminalViewHidden = !visible;
+    _syncMonkeyMuxClientVisibility(session);
+  }
+
+  /// Tells MonkeyMux whether [session]'s terminal is hidden
+  /// ([SshSession.terminalViewHidden]): on each change, and once the session
+  /// is attached to MonkeyMux. Each new control connection is told again by
+  /// the service.
+  void _syncMonkeyMuxClientVisibility(SshSession session) {
     final sessionName = session.remoteMuxSessionName;
     if (session.remoteMuxBackend != RemoteMuxBackend.monkeyMux ||
         sessionName == null ||
         sessionName.trim().isEmpty) {
       return;
     }
-    _monkeyMuxService.setClientHidden(session, sessionName, hidden: !visible);
+    _monkeyMuxService.setClientHidden(
+      session,
+      sessionName,
+      hidden: session.terminalViewHidden,
+    );
   }
 
   void _claimActiveMonkeyMuxClientFocus() {
@@ -8019,6 +8033,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       session
         ..remoteMuxBackend = command.backend
         ..remoteMuxSessionName = command.sessionName;
+      _syncMonkeyMuxClientVisibility(session);
       if (muxContextChanged) {
         _muxVersion = null;
       }
@@ -8664,6 +8679,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         session
           ..remoteMuxBackend = muxBackend
           ..remoteMuxSessionName = sessionName;
+        _syncMonkeyMuxClientVisibility(session);
         if (muxBackend == RemoteMuxBackend.monkeyMux) {
           _markMonkeyMuxReconnectEstablished(session, sessionName);
         }

@@ -875,9 +875,10 @@ class MonkeyMuxService implements RemoteMultiplexerService {
   /// covers the terminal), so the windows' visibility reports (DEC private
   /// mode 2033) follow what the user can see.
   ///
-  /// The state is kept and sent over the live control channel, now or once it
-  /// connects, to servers that support it. It is sent again on every new
-  /// control connection, and after a failed or timed-out send.
+  /// The state is kept on the session ([SshSession.terminalViewHidden]) and
+  /// sent over the live control channel, now or once it connects, to servers
+  /// that support it. It is sent again on every new control connection, even
+  /// after a cache clear, and after a failed or timed-out send.
   void setClientHidden(
     SshSession session,
     String sessionName, {
@@ -886,13 +887,15 @@ class MonkeyMuxService implements RemoteMultiplexerService {
     if (isAppReviewDemoSession(session)) {
       return;
     }
-    final state = _stateFor(
-      _MonkeyMuxWatchKey(session.connectionId, sessionName),
-    )..clientHidden = hidden;
-    _syncClientVisibility(session, sessionName, state);
+    session.terminalViewHidden = hidden;
+    _syncClientVisibility(
+      session,
+      sessionName,
+      _stateFor(_MonkeyMuxWatchKey(session.connectionId, sessionName)),
+    );
   }
 
-  /// Sends [_MonkeyMuxSessionState.clientHidden] unless the latest send on the
+  /// Sends [SshSession.terminalViewHidden] unless the latest send on the
   /// current control connection carried the same state and has not failed.
   ///
   /// The server applies a connection's sends in order, so it ends at the
@@ -913,7 +916,7 @@ class MonkeyMuxService implements RemoteMultiplexerService {
         !(state.serverStatus?.supportsClientVisibility ?? false)) {
       return;
     }
-    final hidden = state.clientHidden;
+    final hidden = session.terminalViewHidden;
     final latest = state.clientVisibilityLatest;
     if (latest != null &&
         identical(latest.connection, connection) &&
@@ -1636,10 +1639,6 @@ class MonkeyMuxService implements RemoteMultiplexerService {
 /// dozen parallel maps.
 class _MonkeyMuxSessionState {
   _MonkeyMuxWindowChangeObserver? observer;
-
-  /// Whether this app's view of the attached terminal is hidden; see
-  /// [MonkeyMuxService.setClientHidden].
-  bool clientHidden = false;
 
   /// The latest client_visibility send, whether it is still in flight or
   /// acknowledged, and whether it failed (leaving the server's state unknown).

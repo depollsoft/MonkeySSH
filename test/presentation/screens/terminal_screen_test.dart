@@ -10895,6 +10895,17 @@ void main() {
           .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
       when(() => tmuxService.prefetchInstalledAgentTools(session))
           .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
       await pumpScreen(
         tester,
         tmuxService: tmuxService,
@@ -10904,6 +10915,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(AgentChatScreen), findsOneWidget);
       expect(session.terminal!.visible, isFalse);
+      // The chat replaced the terminal before the attach was detected, and
+      // MonkeyMux still learns it once it is.
+      expect(hiddenStates.last, isTrue);
 
       tester
           .widget<AgentChatScreen>(find.byType(AgentChatScreen))
@@ -10911,6 +10925,61 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(AgentChatScreen), findsNothing);
       expect(session.terminal!.visible, isTrue);
+      expect(hiddenStates.last, isFalse);
+    });
+
+    testWidgets('MonkeyMux learns the app went away before the attach landed', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final windows = Completer<List<TmuxWindow>>();
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work'))
+          .thenAnswer((_) => windows.future);
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(session.remoteMuxBackend, isNot(RemoteMuxBackend.monkeyMux));
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      windows.complete(const [
+        TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(session.remoteMuxBackend, RemoteMuxBackend.monkeyMux);
+      expect(hiddenStates, [true]);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(hiddenStates.last, isFalse);
     });
 
     testWidgets('Pi handle follows live model-provider changes', (
