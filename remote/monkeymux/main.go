@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.247"
+	monkeyMuxVersion                  = "0.1.248"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -1495,7 +1495,12 @@ func attachCommand(args []string) {
 
 	modes := newAttachModeTracker(os.Stdout)
 	attachOut := attachOutputWriter(modes)
-	copyErr := relayAttachOutput(attachOut, conn, attachOutputBufferLimitBytes)
+	copyErr := relayAttachOutput(
+		attachOut,
+		conn,
+		attachOutputBufferLimitBytes,
+		attachOutputQueryWait,
+	)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
 	// buffers, e.g. the Windows win32-input-mode request stripper).

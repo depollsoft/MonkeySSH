@@ -43,7 +43,7 @@ func attachRelayTestOutput(size int) []byte {
 func startAttachRelay(t *testing.T, dst io.Writer, src io.Reader, limit int) <-chan error {
 	t.Helper()
 	result := make(chan error, 1)
-	go func() { result <- relayAttachOutput(dst, src, limit) }()
+	go func() { result <- relayAttachOutput(dst, src, limit, attachOutputQueryWait) }()
 	return result
 }
 
@@ -113,6 +113,69 @@ func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
 	}
 }
 
+// A query the terminal has not seen for queryWait would be answered after the
+// server stopped waiting for it, and the server would type the reply into the
+// pane. The relay stops reading ahead instead, so the server's write timeout
+// ends the attach as it did before the relay.
+func TestRelayAttachOutputStopsReadingAheadOfAnOverdueQuery(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	terminal := &stalledWriter{release: make(chan struct{})}
+	const queryWait = 100 * time.Millisecond
+	result := make(chan error, 1)
+	go func() {
+		result <- relayAttachOutput(
+			terminal,
+			client,
+			attachOutputBufferLimitBytes,
+			queryWait,
+		)
+	}()
+
+	if err := writeAttachConnection(server, []byte("frame\x1b[c")); err != nil {
+		t.Fatalf("server write of the query: %v", err)
+	}
+	time.Sleep(queryWait + 50*time.Millisecond)
+	err := writeAttachConnection(server, attachRelayTestOutput(256*1024))
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("server write behind an overdue query = %v, want a timeout", err)
+	}
+	close(terminal.release)
+	_ = server.Close()
+	if err := awaitAttachRelay(t, result); err != nil {
+		t.Fatalf("relay: %v", err)
+	}
+	if got := terminal.bytes(); !bytes.HasPrefix(got, []byte("frame\x1b[c")) {
+		t.Fatalf("terminal got %q first, want the query frame", got[:min(len(got), 16)])
+	}
+}
+
+func TestAttachQueryScannerFindsQueriesSplitAcrossReads(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		pieces []string
+		want   []bool
+	}{
+		{"plain output", []string{"agent output", "\x1b[1mbold\x1b[0m"}, []bool{false, false}},
+		{"whole query", []string{"\x1b[c"}, []bool{true}},
+		{"CSI split", []string{"text\x1b[", "6n"}, []bool{false, true}},
+		{"OSC split", []string{"\x1b]11;", "?\x1b\\"}, []bool{false, true}},
+		{"title is not a query", []string{"\x1b]0;ti", "tle\x07"}, []bool{false, false}},
+		{"trailing ESC", []string{"text\x1b", "[c"}, []bool{false, true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var scanner attachQueryScanner
+			for i, piece := range test.pieces {
+				if got := scanner.scan([]byte(piece)); got != test.want[i] {
+					t.Fatalf("piece %d %q: query = %v, want %v", i, piece, got, test.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestRelayAttachOutputReturnsTheWriteError(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
@@ -151,6 +214,7 @@ func TestRelayAttachOutputWritesWhatItReadBeforeAReadError(t *testing.T) {
 		&terminal,
 		&failingAttachSource{data: []byte("last frame"), err: readErr},
 		attachOutputBufferLimitBytes,
+		attachOutputQueryWait,
 	)
 	if !errors.Is(err, readErr) {
 		t.Fatalf("relay = %v, want the read error", err)
