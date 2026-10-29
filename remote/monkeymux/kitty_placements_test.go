@@ -513,3 +513,27 @@ func TestKittyPlacementsKeepTheScreenEachCommandRanOn(t *testing.T) {
 		t.Fatalf("kept placements = %s", got)
 	}
 }
+
+func TestKittyReplayCarriesTheVirtualRootOfARelativePlacement(t *testing.T) {
+	// Image 1's own transmission makes the virtual root, which has no
+	// placeholder cell yet, and four newer images push it out of the
+	// recency replay.
+	window := &muxWindow{id: "@1"}
+	stream := "\x1b_Ga=T,U=1,i=1,c=2,r=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+		"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"
+	for id := 3; id <= 6; id++ {
+		stream += fmt.Sprintf("\x1b_Ga=t,i=%d,%s\x1b\\", id, kittyPixelRoot)
+	}
+	window.observeKittyGraphicsLocked([]byte(stream))
+
+	followUp := kittyReplayFollowUp(t, window)
+	child := strings.Index(followUp, "a=p,i=2,p=1,P=1")
+	root := strings.Index(followUp, "a=t,U=1,i=1")
+	if child < 0 {
+		t.Fatalf("relative placement not replayed: %q", followUp)
+	}
+	if root < 0 || root > child {
+		t.Fatalf("the virtual root's image does not precede its child: %q", followUp)
+	}
+}

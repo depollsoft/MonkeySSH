@@ -926,13 +926,18 @@ func (w *muxWindow) kittyPlacementReplayLocked() []byte {
 }
 
 // kittyPlacementImageIDsLocked returns the images the kept placements of the
-// shown screen display, which a replay must carry for them to be placed.
+// shown screen display, which a replay must carry for them to be placed, and
+// the images whose own transmission made the virtual root of one: without
+// that root the client rejects the placement.
 func (w *muxWindow) kittyPlacementImageIDsLocked() []string {
 	alt := w.alternateScreenModeActiveLocked()
 	var ids []string
 	for _, p := range w.kittyPlacements {
 		if p.alt == alt {
 			ids = append(ids, p.imageID)
+			if root, ok := strings.CutPrefix(p.parent, "root:"); ok {
+				ids = append(ids, root)
+			}
 		}
 	}
 	return ids
