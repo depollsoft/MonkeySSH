@@ -903,8 +903,9 @@ class _StoreScreenshotFlowState extends ConsumerState<_StoreScreenshotFlow> {
       _selectedScene.isEmpty || _selectedScene == name;
 
   /// Asks the capture driver to move the hinge, then waits until the app's
-  /// window holds that pose. The driver presses Device Hub's preset; when the
-  /// window comes out turned the wrong way, this asks it to rotate as well.
+  /// window holds that pose. The driver sets one of Device Hub's presets;
+  /// when the window comes out turned the wrong way, this asks it to rotate
+  /// as well.
   Future<void> _setDuoPose(_DuoPose pose) async {
     if (_duoPoseReached(pose)) return;
     debugPrintSynchronously(
