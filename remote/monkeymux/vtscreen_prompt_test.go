@@ -192,6 +192,10 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 			osc133("P;k=s") + "$ " + osc133("B") + "abcdefghijklmnop"},
 		{"secondary prompt first on the screen", [2]int{20, 3}, osc133("A;click_events=2") + "top\r\n" +
 			osc133("P;k=s") + "$ " + osc133("B") + "a\x1b[H\x1b[1J\x1b[2;3H"},
+		// The frame reprints the last glyph of the scrollback to wrap onto
+		// the screen, and that glyph is prompt text.
+		{"prompt text wrapping from the scrollback", [2]int{10, 3}, osc133("A;click_events=2") + "topline!!!x\r\n$ " +
+			osc133("B") + "abcdefghijkl"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

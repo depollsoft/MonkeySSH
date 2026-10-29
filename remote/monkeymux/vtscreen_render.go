@@ -126,15 +126,18 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			}
 			prev = cells
 		}
-		out = marks.endHistory(out)
 		if g.wrapped[0] {
 			if prev == nil {
 				prev = decoder.decode(s.scrollback.at(history-1).text, s.width)
 			}
+			// The wrap reprints the last glyph, which keeps the content the
+			// line ended with, so the prompt's marks end after it.
 			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
 			// Erased for the same reason; the row is painted below.
 			out = appendVTCSICount(out, s.width, 'X')
+			out = marks.endHistory(out)
 		} else {
+			out = marks.endHistory(out)
 			out = append(out, "\x1b[0m\r\n"...)
 		}
 		for i := 1; i < s.height; i++ {

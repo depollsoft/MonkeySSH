@@ -463,10 +463,11 @@ func (f *vtSemanticFrame) beginHistoryLine(out []byte, i int, mark uint8, wrappe
 	return f.beginLine(out, inPrompt, mark, wrapped), inPrompt
 }
 
-// endHistory is called after the last scrollback line, before the newline
-// that leads to the grid and the newlines that push the scrollback above it.
-// Input that ends with its line (I) lets that newline end it, so those
-// newlines do not mark the rows they reach as continuing the prompt.
+// endHistory is called after the last scrollback line, and after the soft
+// wrap that leads to the grid if there is one, before the newlines that push
+// the scrollback above it. Input that ends with its line (I) lets the first
+// newline end it, so those newlines do not mark the rows they reach as
+// continuing the prompt.
 func (f *vtSemanticFrame) endHistory(out []byte) []byte {
 	if f == nil || f.emitted == vtSemOutput {
 		return out
