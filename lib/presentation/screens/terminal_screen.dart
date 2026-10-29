@@ -16471,12 +16471,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Pastes the clipboard into the terminal. [promptText], when given, is
   /// pasted instead of the clipboard, through the same review.
   Future<void> _pasteClipboard({String? promptText}) async {
-    final inputGeneration = _terminalUserInputGeneration;
+    var inputGeneration = _terminalUserInputGeneration;
     try {
-      if (promptText == null &&
-          _mayPasteAsKittyPasteEvent() &&
-          await _pasteClipboardAsKittyPasteEvent(inputGeneration)) {
-        return;
+      if (promptText == null && _mayPasteAsKittyPasteEvent()) {
+        final usualPathGeneration = await _pasteClipboardAsKittyPasteEvent(
+          inputGeneration,
+        );
+        if (usualPathGeneration == null) {
+          return;
+        }
+        inputGeneration = usualPathGeneration;
       }
       if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
@@ -16766,36 +16770,56 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// 5522): it gets the clipboard's MIME types and reads the one it wants,
   /// and an image travels in-band instead of being uploaded over SFTP.
   ///
-  /// Returns false when the paste should take the usual text or attachment
-  /// path instead: the mode is off once settled, or the clipboard holds files
-  /// or an image too large for the protocol.
-  Future<bool> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
+  /// Returns null when the paste was dealt with here. Otherwise it should
+  /// take the usual text or attachment path, which checks for intervening
+  /// input against the returned input generation: the mode is off once
+  /// settled or was turned off before the event went out, or the clipboard
+  /// holds files or an image too large for the protocol.
+  Future<int?> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
     final pasteMode = await _resolveSettledTerminalPasteMode();
     if (pasteMode == null || !mounted) {
       if (mounted) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       }
-      return true;
+      return null;
     }
     final session = pasteMode.session;
     if (session == null ||
         !pasteMode.sendsKittyPasteEvents ||
         !_terminalPasteModeOwnsCurrentContext(pasteMode) ||
         !_terminalPasteModeCanUseResolvedState(pasteMode)) {
-      return false;
+      return inputGeneration;
     }
+    // The program can turn paste events off (`CSI ? 5522 l`) while the
+    // clipboard is read or the event waits its turn. The terminal sees that
+    // first. MonkeyMux decides by the window's mode, which the terminal
+    // follows for the active window (unless it never had it) and the window
+    // list reports once it refreshes.
+    final terminal = pasteMode.terminal;
+    final terminalHadMode = terminal.kittyPasteEventsMode;
+    bool stillEnabled() {
+      if (!pasteMode.isMuxActive) {
+        return terminal.kittyPasteEventsMode;
+      }
+      return (!terminalHadMode || terminal.kittyPasteEventsMode) &&
+          resolveTmuxBarActiveWindowKittyPasteEventsMode(
+                _currentTmuxWindowsSnapshot,
+              ) !=
+              false;
+    }
+
     final clipboard = await session.kittyClipboard.platform.readPasteSnapshot();
     final snapshot = clipboard.snapshot;
     if (clipboard.useAttachmentFlow || snapshot == null) {
-      return false;
+      return inputGeneration;
     }
     if (!mounted) {
-      return true;
+      return null;
     }
     if (snapshot.isEmpty) {
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage('Clipboard is empty');
-      return true;
+      return null;
     }
     if (!_terminalPasteModeOwnsCurrentContext(pasteMode) ||
         !_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
@@ -16805,7 +16829,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         fields: {'connectionId': _connectionId},
       );
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return true;
+      return null;
     }
     if (_terminalUserInputGeneration != inputGeneration) {
       DiagnosticsLogService.instance.warning(
@@ -16815,25 +16839,34 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage('Paste canceled because terminal input changed.');
-      return true;
+      return null;
+    }
+    if (!stillEnabled()) {
+      return inputGeneration;
     }
     _followLiveOutput();
     final pasteGeneration = ++_terminalUserInputGeneration;
     final result = await session.kittyClipboard.sendPasteEvent(
       snapshot,
       // The event can wait behind a clipboard request still being answered;
-      // by then the user may have moved to another window or typed.
+      // by then the user may have moved to another window or typed, or the
+      // program turned paste events off.
       stillTargeted: () =>
           mounted &&
           _terminalUserInputGeneration == pasteGeneration &&
           _terminalPasteModeOwnsCurrentContext(pasteMode) &&
           _terminalPasteModeTargetsCurrentWindow(pasteMode),
+      stillEnabled: stillEnabled,
     );
     if (result == KittyClipboardPasteEventResult.skipped) {
       if (mounted) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       }
-      return true;
+      return null;
+    }
+    if (result == KittyClipboardPasteEventResult.disabled) {
+      // Nothing was sent, and no other input came since the event was due.
+      return pasteGeneration;
     }
     unawaited(
       ref
@@ -16844,14 +16877,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ),
     );
     if (!mounted) {
-      return true;
+      return null;
     }
     _terminalController.clearSelection();
     _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
     if (result == KittyClipboardPasteEventResult.failed) {
       _showClipboardMessage('Paste failed because the connection is closed.');
     }
-    return true;
+    return null;
   }
 
   Future<void> _pastePickedMedia() async {

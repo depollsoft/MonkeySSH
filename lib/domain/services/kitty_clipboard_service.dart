@@ -262,6 +262,10 @@ enum KittyClipboardPasteEventResult {
 
   /// The event could not be written, for example because the shell is gone.
   failed,
+
+  /// The program turned paste events (mode 5522) off before the event's turn
+  /// came, so nothing was written and the paste should take the usual path.
+  disabled,
 }
 
 /// How long the one-time password of a paste event stays valid. The spec
@@ -405,15 +409,19 @@ class KittyClipboardHandler {
   /// The event waits behind any request still being answered, so
   /// [stillTargeted] is asked again right before it is written: when the
   /// user has moved to another window or typed meanwhile, the event (and
-  /// with it the password) is not sent at all.
+  /// with it the password) is not sent at all. Nor is it when [stillEnabled]
+  /// says the program has turned paste events off since.
   Future<KittyClipboardPasteEventResult> sendPasteEvent(
     KittyClipboardSnapshot snapshot, {
     bool Function()? stillTargeted,
+    bool Function()? stillEnabled,
   }) {
     final completer = Completer<KittyClipboardPasteEventResult>();
     _enqueue(() async {
       try {
-        completer.complete(_sendPasteEventNow(snapshot, stillTargeted));
+        completer.complete(
+          _sendPasteEventNow(snapshot, stillTargeted, stillEnabled),
+        );
       } on Object {
         completer.complete(KittyClipboardPasteEventResult.failed);
         rethrow;
@@ -425,6 +433,7 @@ class KittyClipboardHandler {
   KittyClipboardPasteEventResult _sendPasteEventNow(
     KittyClipboardSnapshot snapshot,
     bool Function()? stillTargeted,
+    bool Function()? stillEnabled,
   ) {
     if (_disposed) {
       return KittyClipboardPasteEventResult.failed;
@@ -437,6 +446,14 @@ class KittyClipboardHandler {
         fields: {'connectionId': connectionId?.call()},
       );
       return KittyClipboardPasteEventResult.skipped;
+    }
+    if (stillEnabled != null && !stillEnabled()) {
+      _logger.info(
+        'terminal.clipboard',
+        'kitty_paste_event_disabled',
+        fields: {'connectionId': connectionId?.call()},
+      );
+      return KittyClipboardPasteEventResult.disabled;
     }
     final password = _newPassword();
     _pruneGrants();

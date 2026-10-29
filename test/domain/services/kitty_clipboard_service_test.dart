@@ -522,6 +522,27 @@ void main() {
       expect(packets, hasLength(3));
       expect(packets.join(), isNot(contains(':pw=')));
     });
+
+    test('are not sent once the program turned them off', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      harness.platform.pendingRead = blockedRead.future;
+      harness.osc('type=read;${b64('text/plain')}');
+
+      var enabled = true;
+      final result = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+        stillTargeted: () => true,
+        stillEnabled: () => enabled,
+      );
+      enabled = false;
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await result, KittyClipboardPasteEventResult.disabled);
+      final packets = await harness.packets();
+      expect(packets, hasLength(3));
+      expect(packets.join(), isNot(contains(':pw=')));
+    });
   });
 
   group('a replaced shell channel', () {

@@ -54,6 +54,8 @@ import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
@@ -388,6 +390,43 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
 }
 
 class _FakeSshSession extends Fake implements SshSession {}
+
+/// A clipboard whose program reads or paste snapshot wait until [release].
+class _BlockingKittyClipboardPlatform implements KittyClipboardPlatform {
+  Completer<void>? _readGate;
+  Completer<void>? _snapshotGate;
+
+  void blockRead() => _readGate = Completer<void>();
+
+  void blockSnapshot() => _snapshotGate = Completer<void>();
+
+  void release() {
+    _readGate?.complete();
+    _snapshotGate?.complete();
+  }
+
+  @override
+  Future<List<String>> availableTypes() async => const ['text/plain'];
+
+  @override
+  Future<Uint8List?> read(String mime) async {
+    await _readGate?.future;
+    return utf8.encode('clip');
+  }
+
+  @override
+  Future<List<String>?> write(List<KittyClipboardEntry> entries) async => [
+    for (final entry in entries) entry.mime,
+  ];
+
+  @override
+  Future<KittyClipboardPasteRead> readPasteSnapshot() async {
+    await _snapshotGate?.future;
+    return KittyClipboardPasteRead.snapshot(
+      KittyClipboardSnapshot({'text/plain': utf8.encode('caption')}),
+    );
+  }
+}
 
 class _MockTmuxService extends Mock implements TmuxService {
   String? detectedVersionValue;
@@ -2429,6 +2468,77 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
+
+    for (final whileQueued in [false, true]) {
+      testWidgets(
+        'pastes normally when the program turns paste events off first, '
+        'whileQueued=$whileQueued',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async => call.method == 'files' ? <String>[] : null,
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpScreen(
+            tester,
+            sharedClipboard: true,
+            sharedClipboardLocalRead: true,
+          );
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          if (whileQueued) {
+            // The paste event waits behind the program's own clipboard read.
+            platform.blockRead();
+            session.debugHandlePrivateOsc('5522', [
+              'type=read:id=r',
+              b64('text/plain'),
+            ]);
+          } else {
+            platform.blockSnapshot();
+          }
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(written, contains('\x1b[200~caption\x1b[201~'));
+          expect(
+            find.text('Paste canceled because terminal input changed.'),
+            findsNothing,
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
 
     Future<void> openTerminalOverflowMenu(WidgetTester tester) async {
       await tester.tap(find.byIcon(Icons.more_vert));
