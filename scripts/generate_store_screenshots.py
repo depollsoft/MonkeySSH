@@ -2221,7 +2221,8 @@ def _duo_hingectl() -> Path | None:
     configured = os.environ.get('STORE_SCREENSHOT_DUO_HINGECTL')
     if configured == '':
         return None
-    tool = Path(configured or DEFAULT_DUO_HINGECTL).expanduser()
+    # Absolute, so a relative path runs that file rather than a PATH lookup.
+    tool = Path(configured or DEFAULT_DUO_HINGECTL).expanduser().absolute()
     if tool.is_file():
         return tool
     if configured:

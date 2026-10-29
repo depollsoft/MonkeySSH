@@ -227,6 +227,14 @@ class DuoCaptureTest(unittest.TestCase):
             missing = str(Path(directory) / 'missing')
             with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': str(tool)}):
                 self.assertEqual(capture._duo_hingectl(), tool)
+            # A relative path names that file, not a command on PATH.
+            previous = Path.cwd()
+            capture.os.chdir(directory)
+            try:
+                with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': './hingectl'}):
+                    self.assertEqual(capture._duo_hingectl(), Path.cwd() / 'hingectl')
+            finally:
+                capture.os.chdir(previous)
             # Empty picks Device Hub.
             with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': ''}):
                 self.assertIsNone(capture._duo_hingectl())
