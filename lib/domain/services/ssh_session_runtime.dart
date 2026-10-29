@@ -946,6 +946,9 @@ if(!$__flResolved){$__flResolved='cmd'}
   void _resetShellChannelState() {
     _clearPendingShellOutput();
     _session._resetShellRuntimeMetadata();
+    // Replies the closed channel's program still waits for must not reach
+    // whatever shell comes next.
+    _session.kittyClipboard.abandonChannel();
     _terminalWindowQueryPendingInput = '';
     _terminalTmuxPassthroughDecoder.reset();
     _terminalControlModeUpdatePendingInput = '';

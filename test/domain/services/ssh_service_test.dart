@@ -448,12 +448,17 @@ void _stubSessionStreams(_MockExecSession session, {String stdout = ''}) {
 
 class _FakeKittyClipboardPlatform implements KittyClipboardPlatform {
   final stored = <String, Uint8List>{};
+  Future<Uint8List?>? pendingRead;
 
   @override
   Future<List<String>> availableTypes() async => stored.keys.toList();
 
   @override
-  Future<Uint8List?> read(String mime) async => stored[mime];
+  Future<Uint8List?> read(String mime) async {
+    final pending = pendingRead;
+    pendingRead = null;
+    return pending ?? stored[mime];
+  }
 
   @override
   Future<List<String>?> write(List<KittyClipboardEntry> entries) async {
@@ -3214,6 +3219,84 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       loginDone.complete();
       await pumpEventQueue();
       expect(shellDoneEvents, hasLength(1));
+    });
+
+    test('sends no kitty clipboard reply owed to a finished command to its login shell', () async {
+      final client = _MockSshClient();
+      final startupShell = _MockExecSession();
+      final loginShell = _MockExecSession();
+      final startupDone = Completer<void>();
+      final loginDone = Completer<void>();
+      final loginOpen = Completer<SSHSession>();
+      final startupWrites = <String>[];
+      final loginWrites = <String>[];
+      var executions = 0;
+      final session = _testSession(client, hostId: 2, hostname: 'example.com');
+      const pty = SSHPtyConfig(width: 120, height: 30);
+
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+        (_) =>
+            ++executions == 1 ? Future.value(startupShell) : loginOpen.future,
+      );
+      for (final (shell, done, writes) in [
+        (startupShell, startupDone, startupWrites),
+        (loginShell, loginDone, loginWrites),
+      ]) {
+        when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
+        when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => shell.done).thenAnswer((_) => done.future);
+        when(() => shell.write(any())).thenAnswer((invocation) {
+          writes.add(
+            utf8.decode(invocation.positionalArguments.single as List<int>),
+          );
+        });
+        when(shell.close).thenAnswer((_) {});
+      }
+      addTearDown(() async {
+        await session.closeShell(waitForStreams: false);
+        if (!startupDone.isCompleted) startupDone.complete();
+        if (!loginDone.isCompleted) loginDone.complete();
+      });
+
+      await session.getShell(
+        pty: pty,
+        command: 'monkeymux attach work',
+        returnToLoginShell: true,
+      );
+      String b64(String value) => base64Encode(utf8.encode(value));
+      final platform = _FakeKittyClipboardPlatform()
+        ..stored['text/plain'] = utf8.encode('clip');
+      final read = Completer<Uint8List?>();
+      platform.pendingRead = read.future;
+      session
+        ..clipboardSharingEnabled = true
+        ..localClipboardReadEnabled = true
+        ..kittyClipboard.platform = platform
+        ..debugHandlePrivateOsc('5522', ['type=read:id=r', b64('text/plain')]);
+      await pumpEventQueue();
+
+      // The attach ends; the read finishes while the login shell opens.
+      startupDone.complete();
+      await untilCalled(
+        () => client.execute(
+          any(that: contains('COLORTERM=truecolor')),
+          pty: pty,
+        ),
+      );
+      read.complete(utf8.encode('secret'));
+      await session.kittyClipboard.idle;
+      loginOpen.complete(loginShell);
+      expect(await session.getShell(), same(loginShell));
+      expect(startupWrites, isEmpty);
+      expect(loginWrites, isEmpty);
+
+      // The login shell's own requests are answered.
+      session.debugHandlePrivateOsc('5522', [
+        'type=read:id=n',
+        b64('text/plain'),
+      ]);
+      await session.kittyClipboard.idle;
+      expect(loginWrites.join(), contains(b64('clip')));
     });
 
     test(

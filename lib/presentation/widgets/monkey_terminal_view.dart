@@ -520,6 +520,7 @@ class MonkeyTerminalView extends StatefulWidget {
     this.onInsertText,
     this.onPasteText,
     this.onUserInput,
+    this.onPromptCursorMove,
     this.inlineUnderlines = const <TerminalTextUnderline>[],
     this.searchHits,
     this.bottomScrollClearance = 0,
@@ -660,6 +661,11 @@ class MonkeyTerminalView extends StatefulWidget {
 
   /// Called immediately before accepted user input is sent to the terminal.
   final VoidCallback? onUserInput;
+
+  /// Called after a click on a shell prompt moved the shell's cursor (see
+  /// [MonkeyTerminalViewState.moveTerminalPromptCursor]), so an input method
+  /// can drop the text it remembers before the old cursor.
+  final VoidCallback? onPromptCursorMove;
 
   /// Cell ranges that should be painted with inline text underlines.
   final List<TerminalTextUnderline> inlineUnderlines;
@@ -1401,8 +1407,10 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
 
   /// Moves the shell's cursor to the tapped cell when the tap is on the input
   /// of the prompt the cursor is at, the prompt asked for it, nothing is
-  /// selected and the viewport shows the bottom of the terminal. Returns
-  /// whether it sent the input that moves the cursor.
+  /// selected and the viewport shows the bottom of the terminal. The move is
+  /// user input ([MonkeyTerminalView.onUserInput]) that moves the cursor
+  /// under the input method ([MonkeyTerminalView.onPromptCursorMove]).
+  /// Returns whether it sent the input that moves the cursor.
   bool moveTerminalPromptCursor(Offset globalPosition) {
     if (!canMoveTerminalPromptCursor ||
         _hasSelection ||
@@ -1411,8 +1419,25 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
     }
     final localPosition = renderTerminal.globalToLocal(globalPosition);
     final cell = renderTerminal.getCellOffset(localPosition);
-    return writePromptClick(() => widget.terminal.clickPrompt(cell));
+    final input = widget.terminal.promptClickInput(cell);
+    if (input == null || input.isEmpty) {
+      return false;
+    }
+    widget.onUserInput?.call();
+    writePromptClick(() => widget.terminal.onOutput?.call(input));
+    widget.onPromptCursorMove?.call();
+    return true;
   }
+
+  /// Whether a primary tap of [kind] is left to the parent. A system-selection
+  /// terminal neither reports a touch tap as a mouse event nor moves the
+  /// prompt cursor for it, and its selection takes mouse clicks, so a parent
+  /// that tells taps from its own gestures forwards them with
+  /// [sendTerminalPrimaryTap] and [moveTerminalPromptCursor]. The terminal
+  /// handles every other tap itself, and the parent must not.
+  bool leavesTapToParent(PointerDeviceKind kind) =>
+      widget.useSystemSelection &&
+      (kind == PointerDeviceKind.touch || kind == PointerDeviceKind.mouse);
 
   // A system-selection terminal keeps a collapsed selection where it was
   // last tapped, which selects nothing.
@@ -1423,15 +1448,13 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
 
   bool _tapDownHadSelection = false;
 
-  // A primary click the terminal did not report as a mouse event. Touch taps
-  // on a system-selection (mobile) terminal are left to the screen, which
-  // tells them from its own gestures.
+  // A primary click the terminal did not report as a mouse event. Taps on a
+  // system-selection (mobile) terminal are left to the screen, which tells
+  // them from its own gestures; see [leavesTapToParent].
   void _onSingleTapUp(TapUpDetails details) {
     final hadSelection = _tapDownHadSelection;
     _tapDownHadSelection = false;
-    if (hadSelection ||
-        (widget.useSystemSelection &&
-            details.kind == PointerDeviceKind.touch)) {
+    if (hadSelection || leavesTapToParent(details.kind)) {
       return;
     }
     moveTerminalPromptCursor(details.globalPosition);

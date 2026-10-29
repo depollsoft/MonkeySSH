@@ -73,6 +73,22 @@ void main() {
       expect(reports, [_hidden, _visible]);
     });
 
+    test('hides the terminal while other content takes its place', () {
+      final (:terminal, :reports) = _reportingTerminal();
+      controller
+        ..show(terminal, _session(5))
+        ..showsTerminal = false;
+      expect(terminal.visible, isFalse);
+      expect(sessionChanges, [(5, true), (5, false)]);
+
+      // Unchanged, it reports nothing.
+      controller.showsTerminal = false;
+      expect(sessionChanges, hasLength(2));
+      controller.showsTerminal = true;
+      expect(reports, [_hidden, _visible]);
+      expect(sessionChanges.last, (5, true));
+    });
+
     test('hides the terminal and session it stops showing', () {
       final first = _reportingTerminal();
       final second = _reportingTerminal();

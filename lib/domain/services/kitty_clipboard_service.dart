@@ -262,6 +262,10 @@ enum KittyClipboardPasteEventResult {
 
   /// The event could not be written, for example because the shell is gone.
   failed,
+
+  /// The program turned paste events (mode 5522) off before the event's turn
+  /// came, so nothing was written and the paste should take the usual path.
+  disabled,
 }
 
 /// How long the one-time password of a paste event stays valid. The spec
@@ -302,6 +306,8 @@ class _PasteGrant {
 ///
 /// Requests are answered one at a time in arrival order, so a read that
 /// follows a write sees the written data and replies never interleave.
+/// Replies go only to the shell channel that asked ([abandonChannel]), and
+/// nothing queued touches the clipboard after [dispose].
 class KittyClipboardHandler {
   /// Creates a handler that answers through [sendReply].
   KittyClipboardHandler({
@@ -345,6 +351,12 @@ class KittyClipboardHandler {
   final _grants = <_PasteGrant>[];
   Future<void> _queue = Future<void>.value();
   bool _disposed = false;
+  // Decoded bytes of committed writes still waiting for their turn.
+  int _queuedWriteBytes = 0;
+  // The shell channel requests arrive on, and the one the queued task being
+  // answered arrived on; see [abandonChannel].
+  int _channel = 0;
+  int _taskChannel = 0;
 
   /// The clipboard adapter. Tests replace it.
   KittyClipboardPlatform get platform => _platform;
@@ -397,15 +409,19 @@ class KittyClipboardHandler {
   /// The event waits behind any request still being answered, so
   /// [stillTargeted] is asked again right before it is written: when the
   /// user has moved to another window or typed meanwhile, the event (and
-  /// with it the password) is not sent at all.
+  /// with it the password) is not sent at all. Nor is it when [stillEnabled]
+  /// says the program has turned paste events off since.
   Future<KittyClipboardPasteEventResult> sendPasteEvent(
     KittyClipboardSnapshot snapshot, {
     bool Function()? stillTargeted,
+    bool Function()? stillEnabled,
   }) {
     final completer = Completer<KittyClipboardPasteEventResult>();
     _enqueue(() async {
       try {
-        completer.complete(_sendPasteEventNow(snapshot, stillTargeted));
+        completer.complete(
+          _sendPasteEventNow(snapshot, stillTargeted, stillEnabled),
+        );
       } on Object {
         completer.complete(KittyClipboardPasteEventResult.failed);
         rethrow;
@@ -417,17 +433,27 @@ class KittyClipboardHandler {
   KittyClipboardPasteEventResult _sendPasteEventNow(
     KittyClipboardSnapshot snapshot,
     bool Function()? stillTargeted,
+    bool Function()? stillEnabled,
   ) {
     if (_disposed) {
       return KittyClipboardPasteEventResult.failed;
     }
-    if (stillTargeted != null && !stillTargeted()) {
+    // The paste was for the program on a shell channel that has since gone.
+    if (_taskChannelAbandoned || (stillTargeted != null && !stillTargeted())) {
       _logger.info(
         'terminal.clipboard',
         'kitty_paste_event_skipped',
         fields: {'connectionId': connectionId?.call()},
       );
       return KittyClipboardPasteEventResult.skipped;
+    }
+    if (stillEnabled != null && !stillEnabled()) {
+      _logger.info(
+        'terminal.clipboard',
+        'kitty_paste_event_disabled',
+        fields: {'connectionId': connectionId?.call()},
+      );
+      return KittyClipboardPasteEventResult.disabled;
     }
     final password = _newPassword();
     _pruneGrants();
@@ -466,12 +492,26 @@ class KittyClipboardHandler {
         : KittyClipboardPasteEventResult.failed;
   }
 
-  /// Drops any open write and every paste grant.
+  /// Drops any open write and every paste grant. Requests still queued are
+  /// neither answered nor carried out.
   void dispose() {
     _disposed = true;
     _dropWrite();
     _grants.clear();
   }
+
+  /// Forgets the shell channel that requests have arrived on, as when it
+  /// closed or another shell took its place: what is still owed to it is not
+  /// sent to the next one, which would read the replies as input. Its open
+  /// write and paste grants end with it; a write it already finished still
+  /// reaches the clipboard.
+  void abandonChannel() {
+    _channel++;
+    _dropWrite();
+    _grants.clear();
+  }
+
+  bool get _taskChannelAbandoned => _taskChannel != _channel;
 
   void _beginWrite(KittyClipboardMetadata metadata) {
     // A new write silently replaces an open one, as in kitty.
@@ -543,7 +583,23 @@ class KittyClipboardHandler {
       _logWrite(KittyClipboardStatus.invalid, typeCount: 0, bytes: bytes);
       return;
     }
+    // Writes waiting behind a slow request hold their data until their turn,
+    // so together they get the budget of one write.
+    if (bytes > maxWriteBytes - _queuedWriteBytes) {
+      _replyStatus(
+        KittyClipboardOperation.write,
+        KittyClipboardStatus.tooLarge,
+        write.id,
+      );
+      _logWrite(KittyClipboardStatus.tooLarge, typeCount: 0, bytes: bytes);
+      return;
+    }
+    _queuedWriteBytes += bytes;
     _enqueue(() async {
+      _queuedWriteBytes -= bytes;
+      if (_disposed) {
+        return;
+      }
       var status = KittyClipboardStatus.done;
       if (!canWrite()) {
         status = KittyClipboardStatus.permissionDenied;
@@ -615,7 +671,7 @@ class KittyClipboardHandler {
         ? null
         : _takeGrant(metadata.password, consume: mimes.isNotEmpty);
     _enqueue(() async {
-      if (_disposed) {
+      if (_disposed || _taskChannelAbandoned) {
         return;
       }
       if (grant == null && !canRead()) {
@@ -661,6 +717,10 @@ class KittyClipboardHandler {
             types = await _platform.availableTypes();
           }
           for (final mime in mimes) {
+            // Nobody is left to answer: stop reading the clipboard.
+            if (_disposed || _taskChannelAbandoned) {
+              return;
+            }
             serve(mime, await _platform.read(mime));
           }
         } on PlatformException {
@@ -671,7 +731,7 @@ class KittyClipboardHandler {
           // As above.
         }
       }
-      if (_disposed) {
+      if (_disposed || _taskChannelAbandoned) {
         return;
       }
       _send(
@@ -742,16 +802,22 @@ class KittyClipboardHandler {
   );
 
   void _enqueue(Future<void> Function() task) {
-    _queue = _queue.then((_) => task()).catchError((Object error) {
-      _logger.warning(
-        'terminal.clipboard',
-        'kitty_request_failed',
-        fields: {
-          'connectionId': connectionId?.call(),
-          'errorType': error.runtimeType,
-        },
-      );
-    });
+    final channel = _channel;
+    _queue = _queue
+        .then((_) {
+          _taskChannel = channel;
+          return task();
+        })
+        .catchError((Object error) {
+          _logger.warning(
+            'terminal.clipboard',
+            'kitty_request_failed',
+            fields: {
+              'connectionId': connectionId?.call(),
+              'errorType': error.runtimeType,
+            },
+          );
+        });
   }
 
   /// Answers from outside the queue, behind every reply already queued, so
@@ -789,7 +855,7 @@ class KittyClipboardHandler {
   }
 
   bool _sendBatch(String data) {
-    if (_disposed) {
+    if (_disposed || _taskChannelAbandoned) {
       return false;
     }
     return sendReply(data);

@@ -19,6 +19,7 @@ class _FakePlatform implements KittyClipboardPlatform {
   bool failWrite = false;
   bool throwOnRead = false;
   Future<Uint8List?>? pendingRead;
+  void Function()? onRead;
   final written = <List<KittyClipboardEntry>>[];
 
   @override
@@ -26,6 +27,7 @@ class _FakePlatform implements KittyClipboardPlatform {
 
   @override
   Future<Uint8List?> read(String mime) async {
+    onRead?.call();
     if (throwOnRead) {
       throw PlatformException(code: 'denied');
     }
@@ -269,6 +271,61 @@ void main() {
       expect(utf8.decode(harness.platform.stored['text/plain']!), 'new');
     });
 
+    test('refuses writes queued past the size limit with EFBIG', () async {
+      final harness = _Harness(maxWriteBytes: 8);
+      final blockedRead = Completer<Uint8List?>();
+      harness.platform.pendingRead = blockedRead.future;
+      harness.osc('type=read:id=r;${b64('text/plain')}');
+
+      // Each write fits on its own, but they wait behind the read together.
+      for (final (id, text) in [('a', 'abcde'), ('b', 'fgh'), ('c', 'ijk')]) {
+        harness
+          ..osc('type=write:id=$id')
+          ..osc('type=wdata:mime=${b64('text/plain')};${b64(text)}')
+          ..osc('type=wdata');
+      }
+      blockedRead.complete(utf8.encode('read'));
+
+      final packets = await harness.packets();
+      expect(packets.skip(3), [
+        status('write', 'DONE', id: 'a'),
+        status('write', 'DONE', id: 'b'),
+        status('write', 'EFBIG', id: 'c'),
+      ]);
+      expect(harness.platform.written, hasLength(2));
+
+      // Written, they no longer count against the next one.
+      harness
+        ..osc('type=write:id=d')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('lmnopqrs')}')
+        ..osc('type=wdata');
+      expect(await harness.packets(), [status('write', 'DONE', id: 'd')]);
+    });
+
+    test('a write queued before disposal leaves the clipboard alone', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      var reads = 0;
+      harness.platform
+        ..pendingRead = blockedRead.future
+        ..onRead = () => reads++;
+      harness
+        ..osc('type=read:id=r;${b64('text/plain image/png')}')
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('late')}')
+        ..osc('type=wdata');
+      await pumpEventQueue();
+
+      // The session disconnects while the read waits on the platform.
+      harness.handler.dispose();
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await harness.packets(), isEmpty);
+      expect(harness.platform.written, isEmpty);
+      // The read stops at the type it was waiting for.
+      expect(reads, 1);
+    });
+
     test('drops a write left idle', () {
       fakeAsync((async) {
         final harness = _Harness()
@@ -464,6 +521,92 @@ void main() {
       final packets = await harness.packets();
       expect(packets, hasLength(3));
       expect(packets.join(), isNot(contains(':pw=')));
+    });
+
+    test('are not sent once the program turned them off', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      harness.platform.pendingRead = blockedRead.future;
+      harness.osc('type=read;${b64('text/plain')}');
+
+      var enabled = true;
+      final result = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+        stillTargeted: () => true,
+        stillEnabled: () => enabled,
+      );
+      enabled = false;
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await result, KittyClipboardPasteEventResult.disabled);
+      final packets = await harness.packets();
+      expect(packets, hasLength(3));
+      expect(packets.join(), isNot(contains(':pw=')));
+    });
+  });
+
+  group('a replaced shell channel', () {
+    test('gets no reply still owed to the one before', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      var reads = 0;
+      harness.platform
+        ..pendingRead = blockedRead.future
+        ..onRead = () => reads++;
+      harness
+        ..osc('type=read:id=r;${b64('text/plain text/html')}')
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('copied')}')
+        ..osc('type=wdata');
+      final paste = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+      );
+      await pumpEventQueue();
+      expect(reads, 1);
+
+      // The command ends and a login shell takes its place.
+      harness.handler.abandonChannel();
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await paste, KittyClipboardPasteEventResult.skipped);
+      expect(await harness.packets(), isEmpty);
+      // The read stops at the type it was waiting for.
+      expect(reads, 1);
+      // The program's write still reaches the clipboard.
+      expect(utf8.decode(harness.platform.stored['text/plain']!), 'copied');
+
+      // The new channel's requests are answered.
+      harness.osc('type=read:id=n;${b64('text/plain')}');
+      expect(await harness.packets(), [
+        status('read', 'OK', id: 'n'),
+        dataPacket('text/plain', 'copied', id: 'n'),
+        status('read', 'DONE', id: 'n'),
+      ]);
+    });
+
+    test('ends the open write and the paste grants', () async {
+      final harness = _Harness();
+      harness.platform.stored['text/plain'] = utf8.encode('secret');
+      final paste = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+      );
+      expect(await paste, KittyClipboardPasteEventResult.sent);
+      final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+          .firstMatch((await harness.packets()).first)!
+          .group(1)!;
+      harness
+        ..canRead = false
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('half')}')
+        ..handler.abandonChannel()
+        ..osc('type=wdata')
+        ..osc(
+          'type=read:id=r:pw=$password'
+          ':name=${b64(kittyClipboardPasteEventName)};${b64('text/plain')}',
+        );
+
+      expect(await harness.packets(), [status('read', 'EPERM', id: 'r')]);
+      expect(harness.platform.written, isEmpty);
     });
   });
 

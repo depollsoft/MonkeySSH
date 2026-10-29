@@ -6113,13 +6113,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshSession session, {
     required bool visible,
   }) {
+    // Kept on the session for a MonkeyMux attach that lands later.
+    session.terminalViewHidden = !visible;
+    _syncMonkeyMuxClientVisibility(session);
+  }
+
+  /// Tells MonkeyMux whether [session]'s terminal is hidden
+  /// ([SshSession.terminalViewHidden]): on each change, and once the session
+  /// is attached to MonkeyMux. Each new control connection is told again by
+  /// the service.
+  void _syncMonkeyMuxClientVisibility(SshSession session) {
     final sessionName = session.remoteMuxSessionName;
     if (session.remoteMuxBackend != RemoteMuxBackend.monkeyMux ||
         sessionName == null ||
         sessionName.trim().isEmpty) {
       return;
     }
-    _monkeyMuxService.setClientHidden(session, sessionName, hidden: !visible);
+    _monkeyMuxService.setClientHidden(
+      session,
+      sessionName,
+      hidden: session.terminalViewHidden,
+    );
   }
 
   void _claimActiveMonkeyMuxClientFocus() {
@@ -8019,6 +8033,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       session
         ..remoteMuxBackend = command.backend
         ..remoteMuxSessionName = command.sessionName;
+      _syncMonkeyMuxClientVisibility(session);
       if (muxContextChanged) {
         _muxVersion = null;
       }
@@ -8664,6 +8679,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         session
           ..remoteMuxBackend = muxBackend
           ..remoteMuxSessionName = sessionName;
+        _syncMonkeyMuxClientVisibility(session);
         if (muxBackend == RemoteMuxBackend.monkeyMux) {
           _markMonkeyMuxReconnectEstablished(session, sessionName);
         }
@@ -12217,6 +12233,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       activeSessionsProvider.select(_selectTrackedConnectionState),
       _handleTrackedConnectionStateChange,
     );
+    // A native agent conversation takes the terminal's place, hiding it.
+    _terminalVisibility.showsTerminal =
+        _nativeAcpLaunchState == null && _activeNativeAcpSessionKey == null;
     final theme = Theme.of(context);
     final connectionState = ref.watch(
       activeSessionsProvider.select(_selectTrackedConnectionState),
@@ -14006,6 +14025,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       onInsertText: isMobile ? null : _confirmDesktopInsertedText,
       onPasteText: _pasteClipboard,
       onUserInput: _handleTerminalUserInput,
+      onPromptCursorMove:
+          _terminalTextInputController.resetImeForExternalCursorMove,
       onTapDown: (_, _) => _claimActiveMonkeyMuxClientFocus(),
     );
 
@@ -15316,10 +15337,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }) {
     _clearPendingTerminalMouseTap();
     final terminalViewState = _terminalViewKey.currentState;
-    if (event.kind != PointerDeviceKind.touch ||
-        !allowTap ||
+    // A terminal that takes the tap itself (desktop) would see it twice.
+    if (!allowTap ||
+        event.buttons != kPrimaryButton ||
         terminalViewState == null ||
-        !(terminalViewState.shouldSendTerminalTapPointerInput ||
+        !terminalViewState.leavesTapToParent(event.kind) ||
+        !((event.kind == PointerDeviceKind.touch &&
+                terminalViewState.shouldSendTerminalTapPointerInput) ||
             terminalViewState.canMoveTerminalPromptCursor)) {
       return;
     }
@@ -15343,8 +15367,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _handleTerminalMouseTapPointerUp(PointerUpEvent event) {
-    if (event.kind != PointerDeviceKind.touch ||
-        _terminalDoubleTapConsumedPointer == event.pointer) {
+    if (_terminalDoubleTapConsumedPointer == event.pointer) {
       _clearPendingTerminalMouseTap(event.pointer);
       return;
     }
@@ -15363,18 +15386,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final hadSelection = _pendingTerminalMouseTapHadSelection;
     _clearPendingTerminalMouseTap(event.pointer);
     final terminalViewState = _terminalViewKey.currentState;
-    // Without mouse tracking, a tap on a shell prompt's input moves the
-    // shell's cursor there when the prompt asked for it (OSC 133).
-    final forwarded =
-        (terminalViewState?.sendTerminalPrimaryTap(event.position) ?? false) ||
-        (!hadSelection &&
-            (terminalViewState?.moveTerminalPromptCursor(event.position) ??
-                false));
-    if (forwarded) {
+    if (terminalViewState == null) {
+      return;
+    }
+    // The system selection owns mouse clicks, so only a touch tap is a click
+    // for mouse tracking.
+    if (event.kind == PointerDeviceKind.touch &&
+        terminalViewState.sendTerminalPrimaryTap(event.position)) {
       // A clicked TUI such as Claude Code moves its own cursor, so the IME's
       // copy of the text before the cursor no longer applies; later edits and
       // suggestions would otherwise replace the wrong characters.
       _terminalTextInputController.resetImeForExternalCursorMove();
+    } else if (!hadSelection) {
+      // Without mouse tracking, a tap on a shell prompt's input moves the
+      // shell's cursor there when the prompt asked for it (OSC 133). The view
+      // resets the IME for it, as for a click.
+      terminalViewState.moveTerminalPromptCursor(event.position);
     }
   }
 
@@ -16463,12 +16490,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Pastes the clipboard into the terminal. [promptText], when given, is
   /// pasted instead of the clipboard, through the same review.
   Future<void> _pasteClipboard({String? promptText}) async {
-    final inputGeneration = _terminalUserInputGeneration;
+    var inputGeneration = _terminalUserInputGeneration;
     try {
-      if (promptText == null &&
-          _mayPasteAsKittyPasteEvent() &&
-          await _pasteClipboardAsKittyPasteEvent(inputGeneration)) {
-        return;
+      if (promptText == null && _mayPasteAsKittyPasteEvent()) {
+        final usualPathGeneration = await _pasteClipboardAsKittyPasteEvent(
+          inputGeneration,
+        );
+        if (usualPathGeneration == null) {
+          return;
+        }
+        inputGeneration = usualPathGeneration;
       }
       if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
@@ -16758,36 +16789,56 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// 5522): it gets the clipboard's MIME types and reads the one it wants,
   /// and an image travels in-band instead of being uploaded over SFTP.
   ///
-  /// Returns false when the paste should take the usual text or attachment
-  /// path instead: the mode is off once settled, or the clipboard holds files
-  /// or an image too large for the protocol.
-  Future<bool> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
+  /// Returns null when the paste was dealt with here. Otherwise it should
+  /// take the usual text or attachment path, which checks for intervening
+  /// input against the returned input generation: the mode is off once
+  /// settled or was turned off before the event went out, or the clipboard
+  /// holds files or an image too large for the protocol.
+  Future<int?> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
     final pasteMode = await _resolveSettledTerminalPasteMode();
     if (pasteMode == null || !mounted) {
       if (mounted) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       }
-      return true;
+      return null;
     }
     final session = pasteMode.session;
     if (session == null ||
         !pasteMode.sendsKittyPasteEvents ||
         !_terminalPasteModeOwnsCurrentContext(pasteMode) ||
         !_terminalPasteModeCanUseResolvedState(pasteMode)) {
-      return false;
+      return inputGeneration;
     }
+    // The program can turn paste events off (`CSI ? 5522 l`) while the
+    // clipboard is read or the event waits its turn. The terminal sees that
+    // first. MonkeyMux decides by the window's mode, which the terminal
+    // follows for the active window (unless it never had it) and the window
+    // list reports once it refreshes.
+    final terminal = pasteMode.terminal;
+    final terminalHadMode = terminal.kittyPasteEventsMode;
+    bool stillEnabled() {
+      if (!pasteMode.isMuxActive) {
+        return terminal.kittyPasteEventsMode;
+      }
+      return (!terminalHadMode || terminal.kittyPasteEventsMode) &&
+          resolveTmuxBarActiveWindowKittyPasteEventsMode(
+                _currentTmuxWindowsSnapshot,
+              ) !=
+              false;
+    }
+
     final clipboard = await session.kittyClipboard.platform.readPasteSnapshot();
     final snapshot = clipboard.snapshot;
     if (clipboard.useAttachmentFlow || snapshot == null) {
-      return false;
+      return inputGeneration;
     }
     if (!mounted) {
-      return true;
+      return null;
     }
     if (snapshot.isEmpty) {
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage('Clipboard is empty');
-      return true;
+      return null;
     }
     if (!_terminalPasteModeOwnsCurrentContext(pasteMode) ||
         !_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
@@ -16797,7 +16848,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         fields: {'connectionId': _connectionId},
       );
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
-      return true;
+      return null;
     }
     if (_terminalUserInputGeneration != inputGeneration) {
       DiagnosticsLogService.instance.warning(
@@ -16807,25 +16858,34 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       _showClipboardMessage('Paste canceled because terminal input changed.');
-      return true;
+      return null;
+    }
+    if (!stillEnabled()) {
+      return inputGeneration;
     }
     _followLiveOutput();
     final pasteGeneration = ++_terminalUserInputGeneration;
     final result = await session.kittyClipboard.sendPasteEvent(
       snapshot,
       // The event can wait behind a clipboard request still being answered;
-      // by then the user may have moved to another window or typed.
+      // by then the user may have moved to another window or typed, or the
+      // program turned paste events off.
       stillTargeted: () =>
           mounted &&
           _terminalUserInputGeneration == pasteGeneration &&
           _terminalPasteModeOwnsCurrentContext(pasteMode) &&
           _terminalPasteModeTargetsCurrentWindow(pasteMode),
+      stillEnabled: stillEnabled,
     );
     if (result == KittyClipboardPasteEventResult.skipped) {
       if (mounted) {
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
       }
-      return true;
+      return null;
+    }
+    if (result == KittyClipboardPasteEventResult.disabled) {
+      // Nothing was sent, and no other input came since the event was due.
+      return pasteGeneration;
     }
     unawaited(
       ref
@@ -16836,14 +16896,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ),
     );
     if (!mounted) {
-      return true;
+      return null;
     }
     _terminalController.clearSelection();
     _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
     if (result == KittyClipboardPasteEventResult.failed) {
       _showClipboardMessage('Paste failed because the connection is closed.');
     }
-    return true;
+    return null;
   }
 
   Future<void> _pastePickedMedia() async {
