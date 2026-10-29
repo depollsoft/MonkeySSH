@@ -375,10 +375,13 @@ func TestAttachCLIEndsCleanlyWhenItsReporterIsLost(t *testing.T) {
 							_, _ = io.WriteString(conn, ", last output")
 							return
 						}
-						// Stay up until the client leaves, as the server does.
+						// Stay up until the client leaves, as the server does. A
+						// read that ends on the deadline is not the client
+						// leaving.
 						_, _ = io.Copy(io.Discard, dec.Buffered())
-						_, _ = io.Copy(io.Discard, conn)
-						close(clientLeft)
+						if _, err := io.Copy(io.Discard, conn); err == nil {
+							close(clientLeft)
+						}
 					}()
 				}
 			}()
