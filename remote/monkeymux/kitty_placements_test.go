@@ -645,3 +645,47 @@ func TestKittyRootVirtualPlacementFollowsTheClient(t *testing.T) {
 		t.Fatalf("kept placements = %s", got)
 	}
 }
+
+// The client keeps placements per screen. A delete on the alternate screen
+// leaves the virtual placement a main-screen image's own transmission made,
+// and the placements hanging off it, for the main screen and its replay.
+func TestKittyAlternateScreenDeleteKeepsTheMainScreenRoot(t *testing.T) {
+	for _, delete := range []string{
+		"\x1b_Ga=d,d=i,i=1\x1b\\",
+		"\x1b_Ga=d,d=i,i=1,p=5\x1b\\",
+		"\x1b_Ga=d,d=r,x=1,y=1\x1b\\",
+	} {
+		window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
+		window.observeKittyGraphicsLocked([]byte(
+			"\x1b_Ga=T,U=1,i=1,p=5,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+				"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+				"\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+		window.privateModes["1049"] = true
+		window.observeKittyGraphicsLocked([]byte("\x1b[?1049h" + delete))
+		window.privateModes["1049"] = false
+		window.observeKittyGraphicsLocked([]byte("\x1b[?1049l"))
+
+		if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[2/1]" {
+			t.Fatalf("%q: kept placements = %s", delete, got)
+		}
+		images, _ := window.kittyImageReplaySelectionLocked(nil)
+		if !strings.Contains(string(images), "a=t,U=1,i=1,") {
+			t.Fatalf("%q: replay lost the root's virtual placement: %q", delete, images)
+		}
+		if followUp := kittyReplayFollowUp(t, window); !strings.Contains(followUp, "a=p,i=2,p=1,P=1,") {
+			t.Fatalf("%q: replay lost the relative placement: %q", delete, followUp)
+		}
+	}
+
+	// Nor can an alternate-screen placement hang off it: the client has no
+	// such parent there.
+	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=T,U=1,i=1,c=1,r=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\"))
+	window.privateModes["1049"] = true
+	window.observeKittyGraphicsLocked([]byte("\x1b[?1049h\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+	if got := kittyPlacementKeys(window); len(got) != 0 {
+		t.Fatalf("kept placements = %v", got)
+	}
+}

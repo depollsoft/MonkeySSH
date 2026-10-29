@@ -14949,6 +14949,7 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 		} else {
 			// A retransmission replaces the image and every placement of it.
 			w.dropKittyImagePlacementsLocked(id)
+			w.noteKittyRootScreenLocked(id, screen.at(event.offset))
 			w.storeKittyImageLocked(id, event.buf)
 			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
 				!kittyNonZero(event.control["P"]) {
@@ -15066,6 +15067,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageToken = nil
 	w.kittyPlacements = nil
 	w.kittyTracking.physical = nil
+	w.kittyTracking.rootAlt = nil
 	return changed
 }
 
