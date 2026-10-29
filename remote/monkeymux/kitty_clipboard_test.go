@@ -1489,7 +1489,8 @@ func (c *stalledWriteConn) Write(data []byte) (int, error) {
 
 // A read whose first client began answering before its write failed stays
 // with that client: the program gets the answer it started, ended EBUSY when
-// the client goes, and nothing of the client the output failed over to.
+// the client goes, and nothing of the client the output failed over to, even
+// a reply of that client's split across its reads.
 func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	clientB := startKittyClipboardInputWorker(t, server, attachB)
@@ -1518,8 +1519,16 @@ func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
 	close(attachA.release)
 	<-delivered
 	waitForAttachOutput(t, attachB, "id="+tag+";")
+	// The fallback client's answer, split after its first bytes, is still
+	// recognised as a reply and dropped rather than typed into the program.
+	clientB.inputDispatchMu.Lock()
+	input, _ := clientB.splitKittyClipboardRepliesLocked([]byte("\x1b]55"), time.Now())
+	clientB.inputDispatchMu.Unlock()
+	if len(input) != 0 {
+		t.Fatalf("part of the fallback client's reply went to the program as input: %q", input)
+	}
 	sendKittyClipboardReply(clientB,
-		"\x1b]5522;type=read:status=OK:id="+tag+"\x1b\\"+
+		"22;type=read:status=OK:id="+tag+"\x1b\\"+
 			"\x1b]5522;type=read:status=DATA:id="+tag+":mime=dGV4dC9wbGFpbg==;Qg==\x1b\\"+
 			"\x1b]5522;type=read:status=DONE:id="+tag+"\x1b\\")
 	<-workerA

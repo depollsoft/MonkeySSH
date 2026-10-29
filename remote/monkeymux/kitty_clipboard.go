@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -122,6 +123,10 @@ type kittyClipboardRequest struct {
 	// stays with it: the program can't take a second client's answer
 	// after part of the first one's.
 	replied bool
+	// bystanders are clients that got the read after that, when output
+	// failed over to them. Each owes a reply MonkeyMux drops, counted so a
+	// reply split across its reads is still recognised.
+	bystanders []*attachClient
 }
 
 // kittyClipboardDelivery is what one read of a window, or a redraw pause,
@@ -670,6 +675,9 @@ func (w *muxWindow) removeKittyClipboardRequestLocked(index int) {
 	if client := state.requests[index].client; client != nil {
 		client.kittyClipboardInput.outstanding.Add(-1)
 	}
+	for _, bystander := range state.requests[index].bystanders {
+		bystander.kittyClipboardInput.outstanding.Add(-1)
+	}
 	state.requests = append(state.requests[:index], state.requests[index+1:]...)
 }
 
@@ -760,6 +768,10 @@ func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, c
 		}
 		request := &state.requests[index]
 		if request.replied {
+			if request.client != client && !slices.Contains(request.bystanders, client) {
+				request.bystanders = append(request.bystanders, client)
+				client.kittyClipboardInput.outstanding.Add(1)
+			}
 			continue
 		}
 		if request.client != client {
@@ -956,7 +968,8 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	if bytes.IndexByte(data, '\x1b') < 0 {
 		return data, nil
 	}
-	owed := state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load()
+	recent := now.UnixNano() < state.owedUntil.Load()
+	owed := state.outstanding.Load() > 0 && recent
 	inPaste := func(index int) bool {
 		for len(pasted) > 0 && pasted[0][1] <= index {
 			pasted = pasted[1:]
@@ -978,7 +991,11 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 		}
 		rest := data[index:]
 		if len(rest) < len(kittyClipboardOscIntroducer) {
-			if owed && bytes.HasPrefix(kittyClipboardOscIntroducer, rest) {
+			// A lone ESC, or ESC ], can be a key press and waits only while a
+			// reply is owed. A longer start of the introducer can't be typed,
+			// so it waits after any recent request: the client may still
+			// answer one MonkeyMux has already settled.
+			if bytes.HasPrefix(kittyClipboardOscIntroducer, rest) && (owed || (recent && len(rest) > 2)) {
 				holdStart = index
 				ambiguous = true
 				break
