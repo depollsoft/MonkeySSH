@@ -14024,6 +14024,17 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 			continue
 		}
 		payloadStart := i + 2
+		if resume, cancelled := kittyClipboardOscCancelled(data[payloadStart:]); cancelled {
+			// The terminal abandons the packet there and goes on with what
+			// follows as ordinary output.
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			copyStart = payloadStart + resume
+			i = copyStart
+			continue
+		}
 		payloadEnd, terminatorLength, ok := findOscTerminator(data[payloadStart:])
 		if !ok {
 			if w.storeAttachPartialOscLocked(data[i:]) ||

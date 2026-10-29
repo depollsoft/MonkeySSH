@@ -177,22 +177,44 @@ func attachPartialOscLimitBytes(partial []byte) int {
 	return oscBufferLimitBytes
 }
 
+// kittyClipboardOscCancelled reports whether a window's OSC 5522 packet,
+// given its payload so far, is abandoned before any terminator, as the
+// screen model's parser abandons it, and where ordinary output resumes:
+// after a CAN or SUB, which end the string, or at an ESC that does not start
+// ST, which starts the next sequence. It reports false for any other OSC.
+func kittyClipboardOscCancelled(payload []byte) (resume int, cancelled bool) {
+	if !isKittyClipboardOscPayload(payload) {
+		return 0, false
+	}
+	for index := 0; index < len(payload); index++ {
+		switch payload[index] {
+		case '\a':
+			return 0, false
+		case 0x9c:
+			if !isUtf8ContinuationAt(payload, index) {
+				return 0, false
+			}
+		case 0x18, 0x1a:
+			return index + 1, true
+		case '\x1b':
+			if index+1 >= len(payload) || payload[index+1] == '\\' {
+				return 0, false
+			}
+			return index, true
+		}
+	}
+	return 0, false
+}
+
 // discardKittyClipboardOscLocked drops a window's OSC 5522 packet that
 // outgrew kittyClipboardPacketLimitBytes before its terminator arrived,
-// given the packet's payload so far. The write it belongs to cannot complete
-// on the client any more and is answered EFBIG. Reports false for any other
-// OSC. Requires the server's mu.
+// given the packet's payload so far, which kittyClipboardOscCancelled found
+// not cancelled. The write it belongs to cannot complete on the client any
+// more and is answered EFBIG. Reports false for any other OSC. Requires the
+// server's mu.
 func (w *muxWindow) discardKittyClipboardOscLocked(payload []byte) bool {
 	if !isKittyClipboardOscPayload(payload) {
 		return false
-	}
-	for index := 0; index+1 < len(payload); index++ {
-		// An ESC that does not start ST cancels the string, so what follows
-		// it is ordinary output: leave it all to the generic path, where the
-		// terminal drops the cancelled packet itself.
-		if payload[index] == '\x1b' && payload[index+1] != '\\' {
-			return false
-		}
 	}
 	state := &w.kittyClipboard
 	state.discarding = true
@@ -245,7 +267,8 @@ func (w *muxWindow) skipDiscardedKittyClipboardOscLocked(chunk []byte) []byte {
 	}
 	for index := 0; index < len(chunk); index++ {
 		switch chunk[index] {
-		case '\a':
+		case '\a', 0x18, 0x1a:
+			// BEL ends the string; CAN and SUB cancel it.
 			state.discarding = false
 			return chunk[index+1:]
 		case 0x9c:

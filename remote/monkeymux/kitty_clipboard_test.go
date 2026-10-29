@@ -791,3 +791,61 @@ func TestKittyClipboardSplitHonoursPasteMarkersSplitAcrossReads(t *testing.T) {
 		}
 	}
 }
+
+// CAN and SUB cancel an OSC wherever they come, as in the screen model: the
+// output after them is ordinary output, whether the packet was being
+// discarded for its size or was still short enough to hold.
+func TestKittyClipboardPacketCancelledByCanOrSubKeepsFollowingOutput(t *testing.T) {
+	for _, cancel := range []string{"\x18", "\x1a"} {
+		// Oversized: the discard must stop at the cancel.
+		server, first, _, attach := newKittyClipboardTestServer(t)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;"+
+			strings.Repeat("QUFB", kittyClipboardPacketLimitBytes/4+16)))
+		server.handleWindowOutput("@1", []byte("QUFB"+cancel+"VISIBLE\r\n"))
+		server.handleWindowOutput("@1", []byte("tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\r\ntail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got[max(0, len(got)-60):])
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("cancel %q: window got %q", cancel, out)
+		}
+
+		// Short, and terminated later: the cancelled request is no request.
+		server, first, _, attach = newKittyClipboardTestServer(t)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg=="+cancel+"VISIBLE\x1b\\tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\x1b\\tail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got)
+		}
+		if out := windowPtyOutput(t, first); out != "" {
+			t.Fatalf("cancel %q: window got %q", cancel, out)
+		}
+
+		// Split across reads, from a window whose requests are refused.
+		server, _, second, attach := newKittyClipboardTestServer(t)
+		server.mu.Lock()
+		server.activeID = "@2"
+		server.attachClients[attach].capabilityHint = nil
+		server.mu.Unlock()
+		server.handleWindowOutput("@2", []byte("\x1b]5522;type=write:id=w"))
+		server.handleWindowOutput("@2", []byte(cancel+"VISIBLE\x1b\\tail"))
+		if got := waitForAttachOutput(t, attach, "tail"); got != "VISIBLE\x1b\\tail" {
+			t.Fatalf("cancel %q: attach got %q", cancel, got)
+		}
+		if out := windowPtyOutput(t, second); out != "" {
+			t.Fatalf("cancel %q: refused window got %q", cancel, out)
+		}
+	}
+}
+
+func TestKittyClipboardDiscardEndsAtCanOrSub(t *testing.T) {
+	for _, cancel := range []byte{0x18, 0x1a} {
+		window := &muxWindow{id: "@1"}
+		window.kittyClipboard.discarding = true
+		if got := string(window.skipDiscardedKittyClipboardOscLocked([]byte("QUFB" + string(cancel) + "x\x1b\\y"))); got != "x\x1b\\y" {
+			t.Fatalf("cancel %q: got %q, want the output after it", cancel, got)
+		}
+		if window.kittyClipboard.discarding {
+			t.Fatalf("cancel %q: still discarding", cancel)
+		}
+	}
+}
