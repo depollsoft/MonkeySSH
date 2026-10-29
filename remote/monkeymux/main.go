@@ -1474,7 +1474,15 @@ func attachCommand(args []string) {
 		go func() {
 			select {
 			case <-reporter.failed:
-				// The server would wait for reports that can no longer come.
+			case <-reporter.done:
+				return
+			}
+			// A session that is ending closes this connection itself, after
+			// its last output, but the reporter may see its own close first.
+			// Otherwise the server would wait for reports that can no longer
+			// come.
+			select {
+			case <-time.After(socketTimeout):
 				_ = conn.Close()
 			case <-reporter.done:
 			}

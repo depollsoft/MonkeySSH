@@ -308,3 +308,103 @@ func TestAttachDeliveryReporterFailsWhenTheServerHangsUp(t *testing.T) {
 		t.Fatal("reporter did not fail after the server hung up")
 	}
 }
+
+// When the reporter's connection ends, the attach waits for the session to
+// close it: an ending session closes the control connections too, possibly
+// seen first, and its last output must still arrive. A session that stays up
+// without the reports gets the attach closed with a message that says why.
+func TestAttachCLIOutlivesALostReporterOnlyBriefly(t *testing.T) {
+	if os.Getenv("MONKEYMUX_ATTACH_REPORTER_LOST_TEST") == "1" {
+		attachCommand([]string{"--quiet", "--existing", "--width", "120", "--height", "40", "audit"})
+		os.Exit(0)
+	}
+	for _, test := range []struct {
+		name       string
+		sessionEnd bool
+		wantStdout string
+	}{
+		{name: "session_ends", sessionEnd: true, wantStdout: "first output, last output"},
+		{name: "session_stays", wantStdout: "first output"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := shortUnixSocketDir(t)
+			t.Setenv("XDG_RUNTIME_DIR", dir)
+			path, err := socketPath("audit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			var workers sync.WaitGroup
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					workers.Add(1)
+					go func() {
+						defer workers.Done()
+						defer conn.Close()
+						dec := json.NewDecoder(conn)
+						var hello controlMessage
+						if dec.Decode(&hello) != nil {
+							return
+						}
+						if hello.Role != "attach" {
+							// Answer the hello, then hang up on the reporter
+							// and on the --existing check alike.
+							_ = json.NewEncoder(conn).Encode(controlResponse{
+								Type:         "hello",
+								Status:       "ok",
+								Version:      monkeyMuxVersion,
+								Capabilities: []string{attachOutputDeliveryCapability},
+							})
+							return
+						}
+						_, _ = io.WriteString(conn, "first output")
+						if !test.sessionEnd {
+							select {
+							case <-stop:
+							case <-time.After(5 * time.Second):
+							}
+							return
+						}
+						time.Sleep(300 * time.Millisecond)
+						_, _ = io.WriteString(conn, ", last output")
+					}()
+				}
+			}()
+			defer func() { close(stop); listener.Close(); workers.Wait() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAttachCLIOutlivesALostReporterOnlyBriefly$")
+			cmd.Env = append(os.Environ(), "MONKEYMUX_ATTACH_REPORTER_LOST_TEST=1")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			started := time.Now()
+			err = cmd.Run()
+			if stdout.String() != test.wantStdout {
+				t.Fatalf("stdout = %q, want %q (stderr %q)", stdout.String(), test.wantStdout, stderr.String())
+			}
+			if test.sessionEnd {
+				if err != nil {
+					t.Fatalf("attach = %v, stderr = %q", err, stderr.String())
+				}
+				return
+			}
+			if err == nil || !bytes.Contains(stderr.Bytes(), []byte("reports output delivery")) {
+				t.Fatalf("attach = %v, stderr = %q", err, stderr.String())
+			}
+			if elapsed := time.Since(started); elapsed < socketTimeout {
+				t.Fatalf("attach closed after %v, before the %v grace", elapsed, socketTimeout)
+			}
+		})
+	}
+}
