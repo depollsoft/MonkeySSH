@@ -537,3 +537,31 @@ func TestKittyReplayCarriesTheVirtualRootOfARelativePlacement(t *testing.T) {
 		t.Fatalf("the virtual root's image does not precede its child: %q", followUp)
 	}
 }
+
+func TestKittyKeptPlacementsKeepOnlyTheKeysAReplayNeeds(t *testing.T) {
+	window := &muxWindow{id: "@1"}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\"))
+	// A display command has no payload, and its control keys are numbers:
+	// whatever else it carries is not kept, however large.
+	padding := strings.Repeat("A", 1<<20)
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=p,U=1,i=1,c=0002,r=1,q=1;" + padding + "\x1b\\" +
+			"\x1b_Ga=p,i=2,p=3,P=1,H=-1,c=1,r=1,junk=" + padding + "\x1b\\"))
+
+	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 2/3]" {
+		t.Fatalf("kept placements = %s", got)
+	}
+	for _, p := range window.kittyPlacements {
+		if len(p.command) > 128 {
+			t.Fatalf("placement %s keeps a %d-byte command", p.key(), len(p.command))
+		}
+	}
+	replay := string(window.kittyPlacementReplayLocked())
+	want := "\x1b_Ga=p,U=1,i=1,c=2,r=1,q=2\x1b\\" +
+		"\x1b_Ga=p,i=2,p=3,P=1,H=-1,c=1,r=1,q=2\x1b\\"
+	if replay != want {
+		t.Fatalf("replay = %q, want %q", replay, want)
+	}
+}

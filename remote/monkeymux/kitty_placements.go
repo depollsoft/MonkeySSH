@@ -77,7 +77,8 @@ type kittyRetainedPlacement struct {
 	horizontal, vertical int
 	cols, rows           int
 	z                    int
-	// command is the a=p command replayed for it, with replies silenced.
+	// command is the a=p command replayed for it, with replies silenced
+	// (kittyPlacementReplayCommand).
 	command []byte
 }
 
@@ -122,30 +123,47 @@ func kittyIDValue(value string) string {
 	return strings.TrimLeft(value, "0")
 }
 
-// kittyPlacementCommandKeys are the display keys a relative placement made by
-// an a=T root keeps when it is replayed as an a=p command.
+// kittyPlacementCommandKeys are the keys a replay needs to make a kept
+// placement again: its kind and parent, where it sits and the part of the
+// image it shows. The image key (i=, else I=) goes after U=.
 var kittyPlacementCommandKeys = []string{
 	"p", "P", "Q", "H", "V", "c", "r", "x", "y", "w", "h", "X", "Y", "z",
 }
 
-// kittyRelativeCommandFromRoot builds the a=p command that replays the
-// relative placement an a=T root with P= makes. Only a root with an explicit
-// image id can be placed again by id.
-func kittyRelativeCommandFromRoot(args map[string]string) []byte {
-	id := kittyIDValue(args["i"])
-	if id == "" {
-		return nil
-	}
-	var out bytes.Buffer
-	out.WriteString("\x1b_Ga=p,i=")
-	out.WriteString(id)
-	for _, key := range kittyPlacementCommandKeys {
-		if value, ok := args[key]; ok && value != "" {
-			out.WriteString("," + key + "=" + value)
+// kittyPlacementReplayCommand builds the a=p command that replays a kept
+// placement, with replies silenced, from the keys of the command that made
+// it: a display command, or an a=T root with P=. It keeps only the keys in
+// kittyPlacementCommandKeys, each as the number the client reads from it,
+// so a kept placement costs a few bytes whatever its command carried; a
+// display command has no payload.
+func kittyPlacementReplayCommand(args map[string]string) []byte {
+	out := []byte("\x1b_Ga=p")
+	appendKey := func(key string) {
+		value, ok := args[key]
+		if !ok {
+			return
 		}
+		// The client reads every key as an integer, and one it cannot read
+		// as absent.
+		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return
+		}
+		out = append(out, ',')
+		out = append(out, key...)
+		out = append(out, '=')
+		out = strconv.AppendInt(out, n, 10)
 	}
-	out.WriteString(",q=2\x1b\\")
-	return out.Bytes()
+	appendKey("U")
+	if kittyIDValue(args["i"]) != "" {
+		appendKey("i")
+	} else {
+		appendKey("I")
+	}
+	for _, key := range kittyPlacementCommandKeys {
+		appendKey(key)
+	}
+	return append(out, ",q=2\x1b\\"...)
 }
 
 // kittyRootIsVirtual reports whether the retained root transmission of
@@ -173,15 +191,14 @@ func (w *muxWindow) kittyPlacementImageIDLocked(args map[string]string) string {
 }
 
 // observeKittyPlacementLocked records a display command (a=p) or the
-// placement an a=T root with P= makes. command is what replays it. It reports
-// whether the retained set changed.
+// placement an a=T root with P= makes, given its keys. It reports whether the
+// retained set changed.
 func (w *muxWindow) observeKittyPlacementLocked(
 	args map[string]string,
-	command []byte,
 	alt bool,
 ) bool {
 	imageID := w.kittyPlacementImageIDLocked(args)
-	if imageID == "" || len(command) == 0 {
+	if imageID == "" {
 		return false
 	}
 	placementID := kittyIDValue(args["p"])
@@ -198,7 +215,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 			imageID:     imageID,
 			placementID: placementID,
 			alt:         alt,
-			command:     rewriteKittyReplayCommand(command, false),
+			command:     kittyPlacementReplayCommand(args),
 		})
 		w.removeOrphanedKittyPlacementsLocked()
 		return true
@@ -259,7 +276,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 		cols:        kittyIntValue(args["c"]),
 		rows:        kittyIntValue(args["r"]),
 		z:           kittyIntValue(args["z"]),
-		command:     rewriteKittyReplayCommand(command, false),
+		command:     kittyPlacementReplayCommand(args),
 	})
 	w.removeOrphanedKittyPlacementsLocked()
 	return true
