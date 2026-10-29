@@ -118,6 +118,10 @@ type kittyClipboardRequest struct {
 	client     *attachClient
 	delivering bool
 	open       bool
+	// replied notes that client has begun answering a read, which then
+	// stays with it: the program can't take a second client's answer
+	// after part of the first one's.
+	replied bool
 }
 
 // kittyClipboardDelivery is what one read of a window, or a redraw pause,
@@ -755,6 +759,9 @@ func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, c
 			continue
 		}
 		request := &state.requests[index]
+		if request.replied {
+			continue
+		}
 		if request.client != client {
 			if request.client != nil {
 				request.client.kittyClipboardInput.outstanding.Add(-1)
@@ -798,8 +805,17 @@ func (s *muxServer) settleKittyClipboardDelivery(
 		if index < 0 {
 			continue
 		}
-		state.requests[index].delivering = false
-		if !answers || state.requests[index].client != delivered {
+		request := &state.requests[index]
+		request.delivering = false
+		if request.replied {
+			// Its client finishes it, or fails it on leaving, unless it has
+			// gone already.
+			if request.client.kittyClipboardInput.departed.Load() {
+				replies = append(replies, window.failKittyClipboardRequestLocked(index)...)
+			}
+			continue
+		}
+		if !answers || request.client != delivered {
 			replies = append(replies, window.failKittyClipboardRequestLocked(index)...)
 		}
 	}
@@ -848,6 +864,8 @@ func (s *muxServer) takeKittyClipboardReply(
 	id := window.kittyClipboard.requests[index].id
 	if metadata.op == "write" || (metadata.status != "OK" && metadata.status != "DATA") {
 		window.removeKittyClipboardRequestLocked(index)
+	} else {
+		window.kittyClipboard.requests[index].replied = true
 	}
 	restored := "\x1b]" + kittyClipboardOscCode + ";" + metadata.withID(id)
 	if hasData {

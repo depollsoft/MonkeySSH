@@ -1487,6 +1487,45 @@ func (c *stalledWriteConn) Write(data []byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
+// A read whose first client began answering before its write failed stays
+// with that client: the program gets the answer it started, ended EBUSY when
+// the client goes, and nothing of the client the output failed over to.
+func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
+	server, first, _, attachB := newKittyClipboardTestServer(t)
+	clientB := startKittyClipboardInputWorker(t, server, attachB)
+	attachA := &stalledWriteConn{release: make(chan struct{})}
+	clientA := registerTestAttachClient(t, server, attachA, "stalled", 80, 24)
+	clientA.capabilityHint = []byte(kittyClipboardHintFixture)
+	workerA := make(chan struct{})
+	go func() {
+		defer close(workerA)
+		server.runAttachInputActions(clientA)
+	}()
+
+	delivered := make(chan struct{})
+	go func() {
+		defer close(delivered)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\\x1b[c"))
+	}()
+	waitForAttachOutput(t, &attachA.recordingConn, "\x1b[c")
+	tag := forwardedKittyClipboardTag(t, server, first, "r")
+	started := "\x1b]5522;type=read:status=OK:id=r\x1b\\" +
+		"\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==:id=r;QQ==\x1b\\"
+	sendKittyClipboardReply(clientA,
+		"\x1b]5522;type=read:status=OK:id="+tag+"\x1b\\"+
+			"\x1b]5522;type=read:status=DATA:id="+tag+":mime=dGV4dC9wbGFpbg==;QQ==\x1b\\")
+	waitForWindowPtyOutput(t, first, started)
+	close(attachA.release)
+	<-delivered
+	waitForAttachOutput(t, attachB, "id="+tag+";")
+	sendKittyClipboardReply(clientB,
+		"\x1b]5522;type=read:status=OK:id="+tag+"\x1b\\"+
+			"\x1b]5522;type=read:status=DATA:id="+tag+":mime=dGV4dC9wbGFpbg==;Qg==\x1b\\"+
+			"\x1b]5522;type=read:status=DONE:id="+tag+"\x1b\\")
+	<-workerA
+	waitForWindowPtyOutput(t, first, started+"\x1b]5522;type=read:status=EBUSY:id=r\x1b\\")
+}
+
 // A request whose write to one client failed after the client had read it
 // belongs to the client it failed over to. Replies the first client sent
 // before it went are not the program's: they must not reach it, interleave
