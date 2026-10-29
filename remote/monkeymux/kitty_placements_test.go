@@ -689,3 +689,42 @@ func TestKittyAlternateScreenDeleteKeepsTheMainScreenRoot(t *testing.T) {
 		t.Fatalf("kept placements = %v", got)
 	}
 }
+
+// A retained root replays the virtual placement it made for itself (U=1)
+// only onto the screen it was transmitted on, since the client keeps
+// placements per screen and MonkeyMux records the root's there. Replayed
+// while the other screen shows, it only stores the image, so a relative
+// placement under it there is rejected by the client as MonkeyMux rejects it.
+func TestKittyRootReplaysItsVirtualPlacementOnlyOnItsScreen(t *testing.T) {
+	window := &muxWindow{id: "@1", privateModes: map[string]bool{}}
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b_Ga=T,U=1,i=1,c=1,r=1," + kittyPixelRoot + "\x1b\\"))
+	window.privateModes["1049"] = true
+	window.observeKittyGraphicsLocked([]byte(
+		"\x1b[?1049h\x1b_Ga=T,U=1,i=2,c=1,r=1," + kittyPixelRoot + "\x1b\\"))
+
+	check := func(screen string, stored string, virtual string) {
+		t.Helper()
+		images, _ := window.kittyImageReplaySelectionLocked(nil)
+		repair, _ := window.kittyImageTransmissionsForLocked([]string{"1", "2"})
+		for name, replay := range map[string][]byte{"replay": images, "repair": repair} {
+			if !strings.Contains(string(replay), "\x1b_Ga=t,"+stored+",") {
+				t.Fatalf("%s on the %s screen: %q, want image %s stored without a virtual placement",
+					name, screen, replay, stored)
+			}
+			if !strings.Contains(string(replay), "\x1b_Ga=t,U=1,"+virtual+",") {
+				t.Fatalf("%s on the %s screen: %q, want image %s's virtual placement",
+					name, screen, replay, virtual)
+			}
+		}
+	}
+	check("alternate", "i=1", "i=2")
+	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=p,i=2,p=1,P=1,c=1,r=1\x1b\\"))
+	if got := kittyPlacementKeys(window); len(got) != 0 {
+		t.Fatalf("kept placements = %v", got)
+	}
+
+	window.privateModes["1049"] = false
+	window.observeKittyGraphicsLocked([]byte("\x1b[?1049l"))
+	check("main", "i=2", "i=1")
+}

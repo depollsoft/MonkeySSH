@@ -221,6 +221,30 @@ func (w *muxWindow) forgetKittyRootVirtualPlacementLocked(imageID string, alt bo
 	return true
 }
 
+// withoutKittyControlKey returns the Kitty command at the start of seq, with
+// any chunks that follow it, without key in its control data.
+func withoutKittyControlKey(seq []byte, key string) []byte {
+	apcEnd := kittyApcEnd(seq, 0)
+	if apcEnd < 0 {
+		return seq
+	}
+	controlEnd := apcEnd - 2 // before ST
+	if semi := bytes.IndexByte(seq[:apcEnd], ';'); semi >= 0 {
+		controlEnd = semi
+	}
+	parts := strings.Split(string(seq[3:controlEnd]), ",")
+	kept := parts[:0]
+	for _, part := range parts {
+		if name, _, _ := strings.Cut(part, "="); name != key {
+			kept = append(kept, part)
+		}
+	}
+	out := make([]byte, 0, len(seq))
+	out = append(out, seq[:3]...)
+	out = append(out, strings.Join(kept, ",")...)
+	return append(out, seq[controlEnd:]...)
+}
+
 // noteKittyRootScreenLocked records that imageID's retained root was
 // transmitted on the alternate screen, or on the main one.
 func (w *muxWindow) noteKittyRootScreenLocked(imageID string, alt bool) {
