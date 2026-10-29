@@ -883,3 +883,110 @@ func TestKittyClipboardWriteStaysWithTheClientItWentTo(t *testing.T) {
 		t.Fatalf("window got %q, want the split write refused", got)
 	}
 }
+
+// startKittyClipboardInputWorker runs the input worker of attach's client,
+// as handleAttach does, so its replies reach their windows and its
+// departure is noticed once they have.
+func startKittyClipboardInputWorker(t *testing.T, server *muxServer, attach *recordingConn) *attachClient {
+	t.Helper()
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	go server.runAttachInputActions(client)
+	return client
+}
+
+func waitForWindowPtyOutput(t *testing.T, window *muxWindow, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := windowPtyOutput(t, window)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("window got %q, want %q", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A request whose client goes away before answering it is answered EBUSY at
+// once: on a phone the primary client vanishing mid-request is how a
+// session usually ends, and the program would otherwise wait for its own
+// timeout.
+func TestKittyClipboardRequestsOfADepartedClientAreAnsweredBusy(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=r1\x1b\\"+
+			"\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".r1")
+
+	server.removeAttachClient(client)
+	waitForWindowPtyOutput(t, first,
+		"\x1b]5522;type=read:status=EBUSY:id=r1\x1b\\"+
+			"\x1b]5522;type=write:status=EBUSY:id=w\x1b\\")
+
+	// The rest of the write has nowhere to go, and is not answered again.
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata\x1b\\more"))
+	waitForWindowReplies(t, first)
+	if got := windowPtyOutput(t, first); strings.Count(got, "type=write") != 1 {
+		t.Fatalf("window got %q, want the write answered once", got)
+	}
+}
+
+// Replies the client sent before it went away still reach the window, ahead
+// of the EBUSY for what it left unanswered, and a request it finished is
+// not answered again.
+func TestKittyClipboardDepartedClientRepliesComeFirst(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=done\x1b\\"+
+			"\x1b]5522;type=read:mime=dGV4dC9wbGFpbg==:id=half\x1b\\"))
+	waitForAttachOutput(t, attach, ".half")
+
+	tag := ":id=" + kittyClipboardTagWindow1
+	client.inputDispatchMu.Lock()
+	_, replies := client.splitKittyClipboardRepliesLocked([]byte(
+		"\x1b]5522;type=read:status=OK"+tag+".done\x1b\\"+
+			"\x1b]5522;type=read:status=DONE"+tag+".done\x1b\\"+
+			"\x1b]5522;type=read:status=OK"+tag+".half\x1b\\"), time.Now())
+	client.enqueueInputActions(replies)
+	client.inputDispatchMu.Unlock()
+	server.removeAttachClient(client)
+
+	waitForWindowPtyOutput(t, first,
+		"\x1b]5522;type=read:status=OK:id=done\x1b\\"+
+			"\x1b]5522;type=read:status=DONE:id=done\x1b\\"+
+			"\x1b]5522;type=read:status=OK:id=half\x1b\\"+
+			"\x1b]5522;type=read:status=EBUSY:id=half\x1b\\")
+}
+
+// A write the client already refused is not answered again when MonkeyMux
+// later drops the rest of it.
+func TestKittyClipboardAnsweredWriteIsNotAnsweredAgain(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	client := startKittyClipboardInputWorker(t, server, attach)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attach, ".w")
+
+	client.inputDispatchMu.Lock()
+	_, replies := client.splitKittyClipboardRepliesLocked([]byte(
+		"\x1b]5522;type=write:status=EPERM:id="+kittyClipboardTagWindow1+".w\x1b\\"), time.Now())
+	client.enqueueInputActions(replies)
+	client.inputDispatchMu.Unlock()
+	want := "\x1b]5522;type=write:status=EPERM:id=w\x1b\\"
+	waitForWindowPtyOutput(t, first, want)
+
+	server.mu.Lock()
+	server.activeID = "@2"
+	server.mu.Unlock()
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
+	server.removeAttachClient(client)
+	time.Sleep(20 * time.Millisecond)
+	if got := windowPtyOutput(t, first); got != want {
+		t.Fatalf("window got %q, want only the client's answer", got)
+	}
+}

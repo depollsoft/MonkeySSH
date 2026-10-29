@@ -9326,6 +9326,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 		client.discardInputActions()
 		s.mu.Lock()
 		delete(s.detachedReplyClients, client)
+		s.failKittyClipboardRequestsLocked(client)
 		s.mu.Unlock()
 	}()
 	for {
@@ -9334,6 +9335,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			return
 		}
 		if action.kittyClipboardReply {
+			s.finishKittyClipboardReply(client, action.windowID, action.data)
 			_ = s.writeWindow(action.windowID, action.data)
 			continue
 		}
