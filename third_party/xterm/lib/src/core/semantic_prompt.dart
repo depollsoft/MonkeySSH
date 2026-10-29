@@ -132,15 +132,16 @@ class SemanticPromptState {
 }
 
 /// The prompt kind an `OSC 133` command names with `k=`, as the row mark it
-/// gives: `i` (the default) and `r` start a primary prompt, `c` and `s` a
-/// continuation.
+/// gives: `i` (the default) and `r` start a primary prompt, `c` a
+/// continuation and `s` a secondary prompt.
 SemanticPromptRow _promptKind(List<String> options) {
   for (final option in options) {
     if (option.length == 3 && option.startsWith('k=')) {
       switch (option[2]) {
         case 'c':
-        case 's':
           return SemanticPromptRow.continuation;
+        case 's':
+          return SemanticPromptRow.secondary;
         case 'i':
         case 'r':
           return SemanticPromptRow.prompt;
@@ -162,7 +163,7 @@ void applySemanticPromptOsc(Buffer buffer, String code, List<String> args) {
     // Its A does not start a fresh line.
     switch (args.first) {
       case 'A':
-        _startPrompt(buffer, const [], primary: true);
+        _startPrompt(buffer, const [], SemanticPromptRow.prompt);
       case 'B':
       case 'G':
       case 'I':
@@ -189,11 +190,7 @@ void applySemanticPromptOsc(Buffer buffer, String code, List<String> args) {
     case 'N':
       // N first ends a command with the same aid; nothing tracks commands.
       _freshLine(buffer);
-      _startPrompt(
-        buffer,
-        options,
-        primary: _promptKind(options) == SemanticPromptRow.prompt,
-      );
+      _startPrompt(buffer, options, _promptKind(options));
     case 'P':
       _markPrompt(buffer, _promptKind(options));
     case 'B':
@@ -220,17 +217,13 @@ void _freshLine(Buffer buffer) {
   buffer.index();
 }
 
-/// Starts a prompt. A primary prompt is a new one, so the options of the
-/// last prompt go; a continuation keeps them and takes any it names.
-void _startPrompt(Buffer buffer, List<String> options,
-    {required bool primary}) {
+/// Starts a prompt of kind [row]. A primary prompt is a new one, so the
+/// options of the last prompt go; any other keeps them and takes any it names.
+void _startPrompt(Buffer buffer, List<String> options, SemanticPromptRow row) {
   final state = buffer.semanticPrompt;
-  if (primary) state._resetOptions();
+  if (row == SemanticPromptRow.prompt) state._resetOptions();
   state._applyOptions(options);
-  _markPrompt(
-    buffer,
-    primary ? SemanticPromptRow.prompt : SemanticPromptRow.continuation,
-  );
+  _markPrompt(buffer, row);
 }
 
 void _markPrompt(Buffer buffer, SemanticPromptRow row) {
@@ -267,14 +260,14 @@ extension SemanticPromptBuffer on Buffer {
     if (!cursorIsAtPrompt) return null;
     final cursorRow = absoluteCursorY;
     var start = cursorRow;
-    while (lines[start].semanticPrompt == SemanticPromptRow.continuation &&
+    while (lines[start].semanticPrompt.continuesPrompt &&
         start > 0 &&
         lines[start - 1].semanticPrompt != SemanticPromptRow.none) {
       start--;
     }
     var end = cursorRow;
     while (end + 1 < lines.length &&
-        lines[end + 1].semanticPrompt == SemanticPromptRow.continuation) {
+        lines[end + 1].semanticPrompt.continuesPrompt) {
       end++;
     }
     return (start: start, end: end);

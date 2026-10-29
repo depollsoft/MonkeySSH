@@ -74,11 +74,17 @@ void main() {
       expect(state.redraw, isFalse);
       expect(state.aid, '42');
 
-      // A continuation keeps them and takes what it names.
+      // A secondary or continuation prompt keeps them and takes what it
+      // names.
       terminal.write('\r\n${_mark('133;A;k=s;cl=m')}');
       expect(state.clickEvents, 1);
       expect(state.cursorKeys, PromptCursorKeys.multiple);
       expect(state.aid, '42');
+      expect(terminal.buffer.currentLine.semanticPrompt,
+          SemanticPromptRow.secondary);
+      terminal.write('\r\n${_mark('133;A;k=c;cl=line')}');
+      expect(state.clickEvents, 1);
+      expect(state.cursorKeys, PromptCursorKeys.line);
       expect(terminal.buffer.currentLine.semanticPrompt,
           SemanticPromptRow.continuation);
 
@@ -105,8 +111,8 @@ void main() {
 
       // P names a secondary prompt; I's input ends with its line.
       terminal.write('\r\n${_mark('133;P;k=s')}> ${_mark('133;I')}x\r\ny');
-      expect(terminal.buffer.lines[3].semanticPrompt,
-          SemanticPromptRow.continuation);
+      expect(
+          terminal.buffer.lines[3].semanticPrompt, SemanticPromptRow.secondary);
       expect(_contents(terminal, 3, 3), [_p, _p, _i]);
       expect(terminal.buffer.lines[4].semanticPrompt, SemanticPromptRow.none);
       expect(_contents(terminal, 4, 1), [_o]);
@@ -405,6 +411,62 @@ void main() {
         secondary.promptClickInput(const CellOffset(3, 2)),
         '\x1b[<0;4;2M',
       );
+    });
+
+    test('click_events=2 counts a two-line prompt from its marked line', () {
+      // starship, powerlevel10k and tide print the prompt's lines with a
+      // newline and mark only the first: the second line continues it.
+      final terminal = _terminal(width: 40);
+      terminal.write(
+        '${_mark('133;A;click_events=2')}top\r\n\$ ${_mark('133;B')}abc',
+      );
+      expect(terminal.buffer.lines[1].semanticPrompt,
+          SemanticPromptRow.continuation);
+      expect(terminal.promptClickInput(const CellOffset(2, 1)), '\x1b[<0;3;2M');
+      // Ghostty's integrations mark every line after the first with P;k=s,
+      // kitty's mark the last line with A;k=s: each is a secondary prompt.
+      for (final secondary in ['133;P;k=s', '133;A;k=s']) {
+        final marked = _terminal(width: 40);
+        marked.write(
+          '${_mark('133;A;click_events=2')}top\r\n'
+          '${_mark(secondary)}\$ ${_mark('133;B')}abc',
+        );
+        expect(
+            marked.buffer.lines[1].semanticPrompt, SemanticPromptRow.secondary,
+            reason: secondary);
+        expect(
+          marked.promptClickInput(const CellOffset(2, 1)),
+          '\x1b[<0;3;1M',
+          reason: secondary,
+        );
+      }
+      // A continuation prompt (k=c, or VS Code's F) lets the line editor
+      // edit the lines above, so clicks still count from the first line.
+      for (final continuation in ['133;P;k=c', '633;F']) {
+        final marked = _terminal(width: 40);
+        marked.write(
+          '${_mark('133;A;click_events=2')}\$ ${_mark('133;B')}a\r\n'
+          '${_mark(continuation)}> ${_mark('133;B')}bc',
+        );
+        expect(
+          marked.promptClickInput(const CellOffset(2, 1)),
+          '\x1b[<0;3;2M',
+          reason: continuation,
+        );
+      }
+    });
+
+    test('cursor keys walk a two-line prompt however its lines are marked', () {
+      for (final second in ['', _mark('133;P;k=s'), _mark('133;A;k=s')]) {
+        final terminal = _terminal(width: 40);
+        terminal.write('${_mark('133;A;cl=m')}top\r\n$second\$ '
+            '${_mark('133;B')}abc');
+        expect(terminal.buffer.currentPromptRows, (start: 0, end: 1));
+        expect(
+            terminal.promptClickInput(const CellOffset(3, 1)), '\x1b[D\x1b[D');
+        // The first line is prompt text.
+        expect(terminal.promptClickInput(const CellOffset(1, 0)), isNull);
+      }
     });
 
     test('cursor keys count only input cells on a wrapped prompt', () {

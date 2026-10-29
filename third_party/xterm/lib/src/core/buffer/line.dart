@@ -36,10 +36,17 @@ enum SemanticPromptRow {
   /// `r`).
   prompt,
 
-  /// The row continues a prompt or the input after it: a secondary prompt
-  /// (`k=s` or `k=c`), or a row that a wrap or newline reached while a prompt
-  /// or its input was being written.
+  /// The row continues a prompt or the input after it: a row that a wrap or
+  /// newline reached while a prompt or its input was being written, or a
+  /// continuation prompt (`k=c`, VS Code's `OSC 633 ; F`).
   continuation,
+
+  /// The row continues a prompt as a secondary prompt (`k=s`), which kitty's
+  /// relative click events count rows from.
+  secondary;
+
+  /// Whether the row continues the prompt on the row above.
+  bool get continuesPrompt => this == continuation || this == secondary;
 }
 
 class BufferLine with IndexedItem {
