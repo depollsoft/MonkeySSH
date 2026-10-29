@@ -746,30 +746,30 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       }
       _pendingKittyPlaceholder = null;
     }
-    _PendingKittyPlaceholder? placeholderToBind;
+    if (!_buffer.writeChar(char)) {
+      return;
+    }
+    _precedingCodepoint = char;
     if (char == kittyGraphicsPlaceholderCodePoint) {
-      final line = _buffer.currentLine;
+      // Anchor to the cell the placeholder landed in, after any wrap or
+      // insert-mode shift the write made.
       final pending = _PendingKittyPlaceholder(
         foreground: _buffer.terminal.cursor.foreground,
         underlineColor: _buffer.terminal.cursor.underlineColor,
-        anchor: line.createAnchor(_buffer.cursorX),
+        anchor: _buffer.currentLine.createAnchor(
+          _buffer.isWrapPending ? _viewWidth - 1 : _buffer.cursorX - 1,
+        ),
         previous: _lastKittyPlaceholder,
       );
-      placeholderToBind = pending;
       _pendingKittyPlaceholder = pending;
       _lastKittyPlaceholder = pending;
-    }
-    if (_buffer.writeChar(char)) {
-      _precedingCodepoint = char;
-    }
-    if (placeholderToBind != null) {
-      placeholderToBind.bind(
+      pending.bind(
         _buffer.graphics.addPlaceholder(
-          imageId: placeholderToBind.imageId,
-          imageIdBitWidth: placeholderToBind.imageIdBitWidth,
-          anchor: placeholderToBind.anchor,
-          row: placeholderToBind.row,
-          col: placeholderToBind.col,
+          imageId: pending.imageId,
+          imageIdBitWidth: pending.imageIdBitWidth,
+          anchor: pending.anchor,
+          row: pending.row,
+          col: pending.col,
         ),
       );
     }

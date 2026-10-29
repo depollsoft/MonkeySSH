@@ -1985,6 +1985,34 @@ void main() {
     ]);
   });
 
+  testWidgets('Kitty Unicode placeholders anchor where they land', (
+    tester,
+  ) async {
+    final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
+    for (final (name, setup, x, y) in [
+      ('insert mode', 'abc\r\x1b[4h', 0, 0),
+      ('insert mode at the last column', '\x1b[1;10H\x1b[4h', 9, 0),
+      ('a pending wrap', '\x1b[1;10Hz', 0, 1),
+    ]) {
+      final terminal = Terminal()..resize(10, 3);
+      terminal.write('$setup\x1b[38;5;42m$placeholder\u0305\u0305');
+
+      final placeholders = terminal.graphics.placeholders;
+      expect(placeholders, hasLength(1), reason: name);
+      expect(placeholders.single.anchor.x, x, reason: name);
+      expect(
+        placeholders.single.anchor.line,
+        same(terminal.buffer.lines[y]),
+        reason: name,
+      );
+      expect(
+        terminal.buffer.lines[y].getCodePoint(x),
+        kittyGraphicsPlaceholderCodePoint,
+        reason: name,
+      );
+    }
+  });
+
   testWidgets('placeholders survive the image decode that backs them', (
     tester,
   ) async {
