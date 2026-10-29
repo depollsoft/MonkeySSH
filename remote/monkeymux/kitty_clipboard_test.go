@@ -1405,3 +1405,67 @@ func TestKittyClipboardOldestRequestPastTheLimitIsAnsweredBusy(t *testing.T) {
 		t.Fatalf("client owes %d replies, want %d", got, maxTrackedKittyClipboardRequests)
 	}
 }
+
+// The rest of a write forwarded while a redraw pause holds it belongs to the
+// write's client like the write itself: when it reaches no client, here
+// because the window left the screen before the pause ended, the write can
+// never complete and is answered EBUSY, even though the held packets
+// committed it.
+func TestKittyClipboardWriteContinuationThatReachesNoClientIsAnsweredBusy(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
+	server.mu.Lock()
+	first.redrawForwardingPaused = true
+	first.redrawForwardingGeneration = 1
+	first.redrawForwardingPrimaryConn = attach
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\"))
+	server.mu.Lock()
+	server.activeID = "@2"
+	server.mu.Unlock()
+
+	server.resumePausedAttachForwarding("@1", 1)
+
+	waitForWindowPtyOutput(t, first, "\x1b]5522;type=write:status=EBUSY:id=w\x1b\\")
+	if got := attach.String(); strings.Contains(got, "wdata") {
+		t.Fatalf("attach got %q", got)
+	}
+	if got := client.kittyClipboardInput.outstanding.Load(); got != 0 {
+		t.Fatalf("client owes %d replies, want 0", got)
+	}
+	server.mu.Lock()
+	owner := server.kittyClipboardWriteWindow
+	server.mu.Unlock()
+	if owner != "" {
+		t.Fatalf("write owner = %q, want none", owner)
+	}
+}
+
+// The rest of a write held by a redraw pause that reaches the write's own
+// client leaves the write to that client to answer.
+func TestKittyClipboardWriteContinuationHeldByARedrawPauseIsLeftToItsClient(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".1")
+	server.mu.Lock()
+	first.redrawForwardingPaused = true
+	first.redrawForwardingGeneration = 1
+	first.redrawForwardingPrimaryConn = attach
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata\x1b\\"))
+
+	server.resumePausedAttachForwarding("@1", 1)
+
+	waitForAttachOutput(t, attach, "\x1b]5522;type=wdata\x1b\\")
+	if got := client.kittyClipboardInput.outstanding.Load(); got != 1 {
+		t.Fatalf("client owes %d replies, want 1", got)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if out := windowPtyOutput(t, first); out != "" {
+		t.Fatalf("window got %q, want the client to answer", out)
+	}
+}
