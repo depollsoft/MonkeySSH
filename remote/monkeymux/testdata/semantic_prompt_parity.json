@@ -753,5 +753,45 @@
    "S |  ab|opii",
    "cursor 4,2 i click=2 cl=- special=false redraw=true aid=-"
   ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "S |> abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a line feed back onto a secondary prompt keeps it",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;A;k=s\u0007> \u001b]133;B\u0007abc\u001b[A\n"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |out|ooo",
+   "P |$ abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a line feed back onto a primary prompt keeps it",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007$ \u001b]133;B\u0007abc\u001b[A\n"
+   }
+  ]
  }
 ]

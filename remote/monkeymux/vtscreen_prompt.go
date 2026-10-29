@@ -265,6 +265,8 @@ func (s *terminalScreen) endInput() {
 
 // semanticAfterIndex runs after every index: a row reached while a prompt or
 // its input is written continues it, unless the input ended with its line.
+// A row the prompt already marked keeps its mark: the shell moved up and back
+// down without repainting it.
 func (s *terminalScreen) semanticAfterIndex() {
 	st := s.semantic()
 	if st.content == vtSemOutput {
@@ -275,7 +277,9 @@ func (s *terminalScreen) semanticAfterIndex() {
 		return
 	}
 	g := s.grid()
-	g.prompt[g.cursorRow] = vtPromptContinuation
+	if g.prompt[g.cursorRow] == vtPromptNone {
+		g.prompt[g.cursorRow] = vtPromptContinuation
+	}
 }
 
 // scrollClearAtPrompt keeps the screen as history when ED 2 clears it at a
