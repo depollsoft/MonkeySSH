@@ -744,3 +744,38 @@ func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
 		})
 	}
 }
+
+// Mode 1049 saves origin mode with the cursor. A replay behind the
+// alternate screen enters it again, and that entry must save what the
+// model saved, so the exit restores the same origin mode in client and
+// model, whatever the alternate screen did with it.
+func TestActiveReplayKeepsTheOriginModeAlternateScreenEntrySaved(t *testing.T) {
+	for _, test := range []struct{ name, main, alt string }{
+		{"saved on, now off", "\x1b[?6h\x1b[3;4H", "\x1b[?6l"},
+		{"saved on in a region", "\x1b[2;5r\x1b[?6h\x1b[2;3H", "\x1b[r\x1b[?6l"},
+		{"saved off, now on", "\x1b[?6l\x1b[3;4H", "\x1b[3;5r\x1b[?6h"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newMuxServer("test")
+			window := &muxWindow{id: "@1", screenWidth: 20, screenHeight: 6, lastActivity: time.Now()}
+			server.windows = []*muxWindow{window}
+			server.activeID = "@1"
+			output := "shell line\r\n\x1b[1m" + test.main + "\x1b[?1049h\x1b[H" + test.alt + "alternate app"
+			window.observeTerminalModesLocked([]byte(output))
+			window.appendHistoryLocked([]byte(output))
+
+			client := newTerminalScreen(20, 6)
+			client.Write(server.activeReplayLocked())
+			exit := []byte("\x1b[?1049lY\x1b[2;5r\x1b[1;1HX")
+			model := window.screenLocked().Clone()
+			model.Write(exit)
+			client.Write(exit)
+			if got, want := client.TextRows(), model.TextRows(); !slices.Equal(got, want) {
+				t.Fatalf("main screen after exit = %q, want %q", got, want)
+			}
+			if client.originMode != model.originMode {
+				t.Fatalf("origin mode after exit = %v, want %v", client.originMode, model.originMode)
+			}
+		})
+	}
+}

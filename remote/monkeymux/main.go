@@ -237,8 +237,12 @@ var (
 		"5",
 		"12",
 	}
-	groupedReplayPrivateModes = [][]string{
-		{"1047", "1049"},
+	// alternateScreenReplayPrivateModes are replayed as a group ahead of
+	// every other mode: entering the alternate screen with 1049 saves the
+	// cursor, origin mode included, which must be the state the main screen
+	// frame staged (RenderMainScreen) rather than the mode the window has now.
+	alternateScreenReplayPrivateModes = []string{"1047", "1049"}
+	groupedReplayPrivateModes         = [][]string{
 		{"1000", "1002", "1003"},
 	}
 	// conPtySwallowedThemeQueryKeys are the theme-query keys whose queries
@@ -11630,7 +11634,12 @@ func terminalModeReplaySequence(
 	privateModes []string,
 	includeApplicationKeypad bool,
 ) []byte {
-	var replay []byte
+	replay := appendGroupedPrivateModeReplay(
+		nil,
+		window,
+		privateModes,
+		alternateScreenReplayPrivateModes,
+	)
 	for _, mode := range privateModes {
 		if groupedReplayPrivateMode(mode) {
 			continue
@@ -11712,6 +11721,9 @@ func appendPrivateModeReplay(replay []byte, mode string, enabled bool) []byte {
 }
 
 func groupedReplayPrivateMode(mode string) bool {
+	if containsString(alternateScreenReplayPrivateModes, mode) {
+		return true
+	}
 	for _, group := range groupedReplayPrivateModes {
 		if containsString(group, mode) {
 			return true
