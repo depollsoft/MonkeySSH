@@ -1022,12 +1022,13 @@ void main() {
           final letterSpacing =
               Theme.of(context).textTheme.bodyMedium?.letterSpacing ?? 0;
           final measure = acpReadingMeasure(context);
-          // 70 characters of 15 pt prose, zoomed from 14 pt to 8 pt.
+          // 70 characters of 15 pt prose, zoomed from 14 pt to 8 pt. Linux
+          // snaps each glyph's advance to 1/16 pt.
           expect(
             measure,
             closeTo(
               kAcpReadingMeasureCharacters * (15 * 8 / 14 + letterSpacing),
-              0.01,
+              kAcpReadingMeasureCharacters / 16,
             ),
           );
 
