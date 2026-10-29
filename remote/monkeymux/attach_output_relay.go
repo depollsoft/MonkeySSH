@@ -1,42 +1,44 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
+	// attachOutputDeliveryCapability marks a server that takes attach_delivered
+	// reports and starts a query's reply grace when the client's terminal has
+	// been written the query, not when the attach socket took it.
+	attachOutputDeliveryCapability = "attach-output-delivery"
+	// attachDeliveredRequest is the control request that carries a report.
+	attachDeliveredRequest = "attach_delivered"
 	// attachOutputBufferLimitBytes bounds the server output an attach client
 	// holds while its terminal is not accepting writes. It matches the server's
 	// own per-client queue limit, past which the server drops a client anyway.
 	attachOutputBufferLimitBytes = attachWriteQueueLimitBytes
-	// attachOutputQueryWait is how long a terminal query may wait in the relay
-	// before it stops reading ahead. The server takes a reply that comes later
-	// than terminalResponseFocusGrace for typed input, and a stalled client is
-	// dropped attachWriteTimeout after its socket fills.
-	attachOutputQueryWait = terminalResponseFocusGrace - attachWriteTimeout
-	// attachQueryScanCarryLimitBytes bounds the unfinished control string kept
-	// between reads. Queries are short; a longer string is an image or a title.
-	attachQueryScanCarryLimitBytes = 4096
 )
 
 // relayAttachOutput copies server output to the local terminal through a
-// buffer, so the session socket keeps draining while a terminal write waits.
+// buffer of up to limit bytes. It writes the output in pieces of at most
+// attachWriteChunkBytes and, when delivered is set, calls it after each piece
+// with the number of output bytes the terminal has been written.
 //
-// Over SSH that write waits whenever the channel stalls: a phone moving
-// between networks, or a jump host on a slow link. A plain copy then stops
-// reading the socket, and the server drops a client whose socket refuses
-// output for attachWriteTimeout, so a stall of about a second ended the
-// attach. Reading pauses while limit bytes are waiting to be written.
-//
-// It also pauses once a terminal query has waited queryWait without reaching
-// the terminal. The server counts a query as delivered when the socket takes
-// it, and routes a reply that comes after its grace period to the pane as
-// typed input. Reading ahead past such a query would only keep the attach
-// alive for the reply to arrive too late, so the server's write timeout
-// applies again, as it did before the relay.
+// A limit above one piece keeps the session socket draining while a terminal
+// write waits. Over SSH that write waits whenever the channel stalls (a phone
+// moving between networks, a jump host on a slow link), and the server drops
+// a client whose socket refuses output for attachWriteTimeout. Reading ahead
+// also lets the socket take a query long before the terminal sees it, so it
+// needs a server that times the query's reply from the delivered reports
+// (attach-output-delivery). Without one, limit is 1 and this copies the way
+// io.Copy does, reading only once everything read has been written.
 //
 // It returns nil once src reports io.EOF and everything read before it has
 // been written, and otherwise the first read or write error.
@@ -44,44 +46,28 @@ func relayAttachOutput(
 	dst io.Writer,
 	src io.Reader,
 	limit int,
-	queryWait time.Duration,
+	delivered func(uint64),
 ) error {
 	var (
 		mu      sync.Mutex
 		changed = sync.NewCond(&mu)
 		pending []byte
-		// held counts pending plus the chunk the writer is writing.
+		// held counts pending plus the piece the writer is writing.
 		held    int
 		readErr error
 		// writeFailed stops the reader once nothing will drain the buffer.
 		writeFailed bool
-		// pendingQueryAt is when the first query in pending was read, and
-		// writingQueryAt the same for the chunk being written; zero for none.
-		pendingQueryAt time.Time
-		writingQueryAt time.Time
 	)
-	queryOverdue := func() bool {
-		oldest := writingQueryAt
-		if oldest.IsZero() {
-			oldest = pendingQueryAt
-		}
-		return !oldest.IsZero() && time.Since(oldest) >= queryWait
-	}
 	go func() {
 		buf := make([]byte, attachWriteChunkBytes)
-		var queries attachQueryScanner
 		for {
 			n, err := src.Read(buf)
-			query := queries.scan(buf[:n])
 			mu.Lock()
 			pending = append(pending, buf[:n]...)
 			held += n
-			if query && pendingQueryAt.IsZero() {
-				pendingQueryAt = time.Now()
-			}
 			readErr = err
 			changed.Broadcast()
-			for err == nil && !writeFailed && (held >= limit || queryOverdue()) {
+			for err == nil && held >= limit && !writeFailed {
 				changed.Wait()
 			}
 			stop := err != nil || writeFailed
@@ -91,74 +77,140 @@ func relayAttachOutput(
 			}
 		}
 	}()
+	var written uint64
 	for {
 		mu.Lock()
 		for len(pending) == 0 && readErr == nil {
 			changed.Wait()
 		}
-		chunk := pending
-		pending = nil
-		writingQueryAt = pendingQueryAt
-		pendingQueryAt = time.Time{}
+		size := min(len(pending), attachWriteChunkBytes)
+		// The reader appends past the end of pending, never into this piece.
+		piece := pending[:size:size]
+		pending = pending[size:]
+		if len(pending) == 0 {
+			pending = nil
+		}
 		err := readErr
 		mu.Unlock()
-		if len(chunk) == 0 {
+		if size == 0 {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
 		}
-		if _, writeErr := dst.Write(chunk); writeErr != nil {
+		if _, writeErr := dst.Write(piece); writeErr != nil {
 			mu.Lock()
 			writeFailed = true
 			changed.Broadcast()
 			mu.Unlock()
 			return writeErr
 		}
+		written += uint64(size)
+		if delivered != nil {
+			delivered(written)
+		}
 		mu.Lock()
-		held -= len(chunk)
-		writingQueryAt = time.Time{}
+		held -= size
 		changed.Broadcast()
 		mu.Unlock()
 	}
 }
 
-// attachQueryScanner reports whether attach output, read in arbitrary pieces,
-// holds a terminal query, counting the queries the server expects replies to.
-type attachQueryScanner struct {
-	// carry is an unfinished control string from the previous piece.
-	carry []byte
+// attachDeliveryReporter sends a server attach_delivered reports for one
+// attach connection over a control connection of its own. Reports coalesce:
+// each one carries the latest offset, sent as soon as the previous one is
+// written.
+type attachDeliveryReporter struct {
+	token     string
+	session   string
+	conn      net.Conn
+	encoder   *json.Encoder
+	delivered atomic.Uint64
+	pending   chan struct{}
+	// failed closes when a report cannot be sent, after which the server
+	// would wait for one forever.
+	failed    chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
-func (s *attachQueryScanner) scan(piece []byte) bool {
-	data := piece
-	leadingUtf8Prefix := 0
-	if len(s.carry) > 0 {
-		data = append(s.carry, piece...)
-		s.carry = nil
-	} else {
-		// Continuation bytes that end a character the previous piece began.
-		for leadingUtf8Prefix < len(data) &&
-			data[leadingUtf8Prefix]&0xc0 == 0x80 {
-			leadingUtf8Prefix++
-		}
+// openAttachDeliveryReporter connects a reporter, or returns nil when the
+// server does not take reports or cannot be reached.
+func openAttachDeliveryReporter(session string) *attachDeliveryReporter {
+	conn, err := dialSession(session)
+	if err != nil {
+		return nil
 	}
-	found := false
-	for index := 0; index < len(data); {
-		end, query, incomplete, recognized :=
-			terminalQuerySequenceAtWithUtf8Prefix(data, index, leadingUtf8Prefix)
-		if incomplete {
-			if len(data)-index <= attachQueryScanCarryLimitBytes {
-				s.carry = append([]byte(nil), data[index:]...)
+	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
+	encoder := json.NewEncoder(conn)
+	decoder := json.NewDecoder(conn)
+	var hello controlResponse
+	if encoder.Encode(controlMessage{Role: "control", Session: session}) != nil ||
+		decoder.Decode(&hello) != nil ||
+		!slices.Contains(hello.Capabilities, attachOutputDeliveryCapability) {
+		_ = conn.Close()
+		return nil
+	}
+	_ = conn.SetDeadline(time.Time{})
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		_ = conn.Close()
+		return nil
+	}
+	reporter := &attachDeliveryReporter{
+		token:   hex.EncodeToString(token),
+		session: session,
+		conn:    conn,
+		encoder: encoder,
+		pending: make(chan struct{}, 1),
+		failed:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	// The server also sends every control client its window changes; nothing
+	// here needs them, but they must be read.
+	go func() {
+		for {
+			var discard json.RawMessage
+			if decoder.Decode(&discard) != nil {
+				return
 			}
-			break
 		}
-		if !recognized {
-			index++
-			continue
+	}()
+	go reporter.run()
+	return reporter
+}
+
+func (r *attachDeliveryReporter) run() {
+	for {
+		select {
+		case <-r.pending:
+		case <-r.done:
+			return
 		}
-		found = found || query
-		index = end
+		if err := r.encoder.Encode(controlMessage{
+			Type:        attachDeliveredRequest,
+			Session:     r.session,
+			AttachToken: r.token,
+			Delivered:   r.delivered.Load(),
+		}); err != nil {
+			close(r.failed)
+			return
+		}
 	}
-	return found
+}
+
+// report records that the terminal has been written offset bytes.
+func (r *attachDeliveryReporter) report(offset uint64) {
+	r.delivered.Store(offset)
+	select {
+	case r.pending <- struct{}{}:
+	default:
+	}
+}
+
+func (r *attachDeliveryReporter) close() {
+	r.closeOnce.Do(func() {
+		close(r.done)
+		_ = r.conn.Close()
+	})
 }

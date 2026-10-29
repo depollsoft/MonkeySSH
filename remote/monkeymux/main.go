@@ -63,7 +63,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.248"
+	monkeyMuxVersion                  = "0.1.249"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -287,6 +287,7 @@ var capabilities = []string{
 	"acp-window-v1",
 	"native-acp-upgrade-handoff-v1",
 	"push-v1",
+	attachOutputDeliveryCapability,
 }
 
 var (
@@ -532,6 +533,12 @@ type controlMessage struct {
 	ImageIDs []string `json:"imageIds,omitempty"`
 	// Push carries the push_* operation fields (push_notify.go).
 	Push *pushControlRequest `json:"push,omitempty"`
+	// AttachToken names one attach connection, in its hello and in the
+	// attach_delivered reports its client sends over a control connection of
+	// its own; Delivered is how many bytes of that attach's output the
+	// client's terminal has been written (attach-output-delivery).
+	AttachToken string `json:"attachToken,omitempty"`
+	Delivered   uint64 `json:"delivered,omitempty"`
 }
 
 type controlResponse struct {
@@ -1138,6 +1145,16 @@ type attachClient struct {
 	replayedWindowID                      string
 	replayedOutputGeneration              uint64
 
+	// deliveryToken is set for a client that reports the output its terminal
+	// has been written (attach-output-delivery). Its writer then records, in
+	// undeliveredQueryEnds, the output offset just past each query it sends,
+	// and the replies the query is owed do not expire until a report covers
+	// that offset: the client reads ahead of its terminal, so the socket
+	// taking a query says nothing about when the terminal sees it.
+	deliveryToken        string
+	outputOffset         uint64
+	undeliveredQueryEnds []uint64
+
 	// replyTrackMu guards a per-window count of the replies this client still
 	// owes to queries: written to it but still queued, sent and awaited until
 	// awaitedRepliesUntil, or received but not yet written to the window. It
@@ -1433,11 +1450,31 @@ func attachCommand(args []string) {
 		fatal(err)
 	}
 
+	// Reading ahead of the terminal needs a server that waits for delivery
+	// before it times a reply; an older one gets the plain copy it expects.
+	reporter := openAttachDeliveryReporter(session)
 	conn, err := dialSession(session)
 	if err != nil {
 		fatal(err)
 	}
 	defer conn.Close()
+	outputLimit := 1
+	var outputDelivered func(uint64)
+	attachToken := ""
+	if reporter != nil {
+		defer reporter.close()
+		outputLimit = attachOutputBufferLimitBytes
+		outputDelivered = reporter.report
+		attachToken = reporter.token
+		go func() {
+			select {
+			case <-reporter.failed:
+				// The server would wait for reports that can no longer come.
+				_ = conn.Close()
+			case <-reporter.done:
+			}
+		}()
+	}
 
 	hello := controlMessage{
 		Role:           "attach",
@@ -1449,6 +1486,7 @@ func attachCommand(args []string) {
 		CapabilityHint: string(capabilityHint),
 		NoPrefix:       *noPrefix,
 		ClipViewport:   *clipViewport,
+		AttachToken:    attachToken,
 	}
 	if !*quiet {
 		fmt.Fprintf(
@@ -1495,12 +1533,7 @@ func attachCommand(args []string) {
 
 	modes := newAttachModeTracker(os.Stdout)
 	attachOut := attachOutputWriter(modes)
-	copyErr := relayAttachOutput(
-		attachOut,
-		conn,
-		attachOutputBufferLimitBytes,
-		attachOutputQueryWait,
-	)
+	copyErr := relayAttachOutput(attachOut, conn, outputLimit, outputDelivered)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
 	// buffers, e.g. the Windows win32-input-mode request stripper).
@@ -7454,6 +7487,7 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
 		capabilityHint:  hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes),
+		deliveryToken:   strings.TrimSpace(hello.AttachToken),
 		queueReady:      make(chan struct{}, 1),
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
@@ -7482,9 +7516,10 @@ func (c *attachClient) writeLoop() {
 			}
 		}
 		if write.responseWindowID != "" && write.responseCount > 0 {
-			c.expectTerminalResponses(
+			c.expectTerminalResponsesUntilDelivered(
 				write.responseWindowID,
 				write.responseCount,
+				c.outputOffset+uint64(len(write.data)),
 			)
 			select {
 			case <-c.done:
@@ -7500,6 +7535,7 @@ func (c *attachClient) writeLoop() {
 			c.close()
 			return
 		}
+		c.outputOffset += uint64(len(write.data))
 	}
 }
 
@@ -7886,8 +7922,10 @@ func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
 	}
 	c.awaitedRepliesUntil = c.terminalResponseUntil
 	// Bracketed paste input renews the client's wait before it checks the
-	// deadline, so a paste in progress keeps the replies owed.
-	c.awaitedRepliesHeld = c.inputBracketedPasteActive
+	// deadline, so a paste in progress keeps the replies owed, as does a query
+	// the client's terminal has not been written yet.
+	c.awaitedRepliesHeld = c.inputBracketedPasteActive ||
+		len(c.undeliveredQueryEnds) > 0
 	for _, action := range routed {
 		if !action.userInput && action.windowID != "" {
 			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
@@ -7935,6 +7973,19 @@ func addReplyCount(counts map[string]int, windowID string, delta int) map[string
 }
 
 func (c *attachClient) expectTerminalResponses(windowID string, count int) {
+	c.expectTerminalResponsesUntilDelivered(windowID, count, 0)
+}
+
+// expectTerminalResponsesUntilDelivered expects count replies for windowID to
+// a query that ends at output offset deliveredAt. For a client that reports
+// delivery, the replies stay expected past the usual grace until a report
+// covers that offset; zero, or a client that does not report, starts the
+// grace now as expectTerminalResponses does.
+func (c *attachClient) expectTerminalResponsesUntilDelivered(
+	windowID string,
+	count int,
+	deliveredAt uint64,
+) {
 	if c == nil || windowID == "" {
 		return
 	}
@@ -7950,8 +8001,7 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	var passthrough func([]byte)
 	inputLocked := false
 	c.activityMu.Lock()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		if len(c.terminalResponseCarry) > 0 ||
 			len(c.terminalResponsePasteStartCarry) > 0 {
 			c.inputMu.Lock()
@@ -7990,6 +8040,9 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 			c.terminalResponseWindows,
 			windowID,
 		)
+	}
+	if c.deliveryToken != "" && deliveredAt > 0 {
+		c.undeliveredQueryEnds = append(c.undeliveredQueryEnds, deliveredAt)
 	}
 	if len(c.terminalResponseCarry) > 0 ||
 		len(c.terminalResponsePasteStartCarry) > 0 {
@@ -8099,8 +8152,7 @@ func (c *attachClient) routeInputLocked(
 		return
 	}
 	now := time.Now()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		combined := make(
 			[]byte,
 			0,
@@ -8609,6 +8661,39 @@ func (c *attachClient) hasExpectedTerminalResponseLocked() bool {
 		len(c.terminalResponseWindows) > 0
 }
 
+// terminalResponsesExpiredLocked reports whether the replies this client owes
+// have run past their grace, so input is the user's again. Never while a query
+// it sent has not reached the terminal: the reply cannot have come yet.
+func (c *attachClient) terminalResponsesExpiredLocked(now time.Time) bool {
+	return !c.terminalResponseUntil.IsZero() &&
+		now.After(c.terminalResponseUntil) &&
+		len(c.undeliveredQueryEnds) == 0
+}
+
+// markOutputDelivered records that the client's terminal has been written the
+// first offset bytes of its attach output. The queries that ends deliver get
+// their reply grace from now.
+func (c *attachClient) markOutputDelivered(offset uint64) {
+	c.activityMu.Lock()
+	defer c.activityMu.Unlock()
+	delivered := 0
+	for delivered < len(c.undeliveredQueryEnds) &&
+		c.undeliveredQueryEnds[delivered] <= offset {
+		delivered++
+	}
+	if delivered == 0 {
+		return
+	}
+	c.undeliveredQueryEnds = c.undeliveredQueryEnds[delivered:]
+	if len(c.undeliveredQueryEnds) == 0 {
+		c.undeliveredQueryEnds = nil
+	}
+	if c.hasExpectedTerminalResponseLocked() {
+		c.renewTerminalResponseDeadlineLocked()
+	}
+	c.trackRepliesLocked(nil)
+}
+
 func (c *attachClient) resetTerminalResponseStateLocked() {
 	c.terminalResponseCarry = nil
 	c.terminalResponseCarryGeneration++
@@ -8683,8 +8768,7 @@ func (c *attachClient) resolveAmbiguousTerminalResponseInput(
 	c.terminalResponseCarry = nil
 	c.terminalResponsePasteStartCarry = nil
 	c.terminalResponseCarryGeneration++
-	if !c.terminalResponseUntil.IsZero() &&
-		time.Now().After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(time.Now()) {
 		c.resetTerminalResponseStateLocked()
 	}
 	c.trackRepliesLocked(nil)
@@ -8797,6 +8881,23 @@ func terminalViewportTransitionSafe(window *muxWindow) bool {
 
 func (s *muxServer) primaryAttachClientLocked() *attachClient {
 	return s.attachClients[s.attachConn]
+}
+
+// attachClientByDeliveryToken finds the attach connection whose hello carried
+// token.
+func (s *muxServer) attachClientByDeliveryToken(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, client := range s.attachClients {
+		if client.deliveryToken == token {
+			return client
+		}
+	}
+	return nil
 }
 
 func (s *muxServer) attachClientByIDLocked(clientID string) *attachClient {
@@ -9442,6 +9543,12 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		client.send(controlResponse{ID: request.ID, Type: "window_closed", Status: "ok"})
 		if shouldShutdown {
 			go s.closeIfIdle()
+		}
+	case attachDeliveredRequest:
+		// A client reports after every write to its terminal, so this is not
+		// answered: the reply would only be read and dropped.
+		if attach := s.attachClientByDeliveryToken(request.AttachToken); attach != nil {
+			attach.markOutputDelivered(request.Delivered)
 		}
 	case "resize":
 		if request.Width <= 0 || request.Height <= 0 {

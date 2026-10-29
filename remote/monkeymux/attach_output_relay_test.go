@@ -40,10 +40,16 @@ func attachRelayTestOutput(size int) []byte {
 	return data
 }
 
-func startAttachRelay(t *testing.T, dst io.Writer, src io.Reader, limit int) <-chan error {
+func startAttachRelay(
+	t *testing.T,
+	dst io.Writer,
+	src io.Reader,
+	limit int,
+	delivered func(uint64),
+) <-chan error {
 	t.Helper()
 	result := make(chan error, 1)
-	go func() { result <- relayAttachOutput(dst, src, limit, attachOutputQueryWait) }()
+	go func() { result <- relayAttachOutput(dst, src, limit, delivered) }()
 	return result
 }
 
@@ -58,6 +64,11 @@ func awaitAttachRelay(t *testing.T, result <-chan error) error {
 	}
 }
 
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // A terminal that stops accepting output for longer than the server's write
 // timeout must not get the attach dropped: the server's writes keep landing
 // while the relay holds them, and the terminal receives all of it, in order,
@@ -67,7 +78,7 @@ func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
 	defer server.Close()
 	defer client.Close()
 	terminal := &stalledWriter{release: make(chan struct{})}
-	result := startAttachRelay(t, terminal, client, attachOutputBufferLimitBytes)
+	result := startAttachRelay(t, terminal, client, attachOutputBufferLimitBytes, nil)
 
 	output := attachRelayTestOutput(1024 * 1024)
 	stall := time.AfterFunc(attachWriteTimeout+500*time.Millisecond, func() {
@@ -88,6 +99,30 @@ func TestRelayAttachOutputKeepsSocketDrainingWhileTerminalStalls(t *testing.T) {
 	}
 }
 
+// With a limit of 1, for a server that cannot take delivery reports, the
+// relay reads nothing ahead, so a stalled terminal still stalls the server's
+// writes as a plain copy would.
+func TestRelayAttachOutputWithoutReadAheadCopiesLikeIoCopy(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	terminal := &stalledWriter{release: make(chan struct{})}
+	result := startAttachRelay(t, terminal, client, 1, nil)
+
+	err := writeAttachConnection(server, attachRelayTestOutput(4*attachWriteChunkBytes))
+	if !isTimeout(err) {
+		t.Fatalf("server write to a stalled plain copy = %v, want a timeout", err)
+	}
+	close(terminal.release)
+	_ = server.Close()
+	if err := awaitAttachRelay(t, result); err != nil {
+		t.Fatalf("relay: %v", err)
+	}
+	if got := len(terminal.bytes()); got > 2*attachWriteChunkBytes {
+		t.Fatalf("plain copy held %d bytes, want at most one read ahead of the terminal", got)
+	}
+}
+
 // Past its limit the relay stops reading, so a terminal that never drains
 // still reaches the server's write timeout instead of growing the client.
 func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
@@ -96,11 +131,10 @@ func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
 	defer client.Close()
 	terminal := &stalledWriter{release: make(chan struct{})}
 	const limit = 64 * 1024
-	result := startAttachRelay(t, terminal, client, limit)
+	result := startAttachRelay(t, terminal, client, limit, nil)
 
 	err := writeAttachConnection(server, attachRelayTestOutput(4*limit))
-	var netErr net.Error
-	if !errors.As(err, &netErr) || !netErr.Timeout() {
+	if !isTimeout(err) {
 		t.Fatalf("server write past the relay limit = %v, want a timeout", err)
 	}
 	close(terminal.release)
@@ -113,66 +147,69 @@ func TestRelayAttachOutputStopsReadingAtItsLimit(t *testing.T) {
 	}
 }
 
-// A query the terminal has not seen for queryWait would be answered after the
-// server stopped waiting for it, and the server would type the reply into the
-// pane. The relay stops reading ahead instead, so the server's write timeout
-// ends the attach as it did before the relay.
-func TestRelayAttachOutputStopsReadingAheadOfAnOverdueQuery(t *testing.T) {
+// recordingWriter records, for each delivery report, how much the terminal
+// had been written when it came.
+type recordingWriter struct {
+	mu      sync.Mutex
+	written int
+	reports [][2]uint64
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.written += len(p)
+	return len(p), nil
+}
+
+func (w *recordingWriter) delivered(offset uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reports = append(w.reports, [2]uint64{offset, uint64(w.written)})
+}
+
+// Each report counts only what the terminal has been written, piece by piece,
+// so a query near the start of a long backlog is reported as soon as its own
+// piece is out.
+func TestRelayAttachOutputReportsDeliveryPerPiece(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
-	terminal := &stalledWriter{release: make(chan struct{})}
-	const queryWait = 100 * time.Millisecond
-	result := make(chan error, 1)
-	go func() {
-		result <- relayAttachOutput(
-			terminal,
-			client,
-			attachOutputBufferLimitBytes,
-			queryWait,
-		)
-	}()
+	terminal := &recordingWriter{}
+	result := startAttachRelay(
+		t,
+		terminal,
+		client,
+		attachOutputBufferLimitBytes,
+		terminal.delivered,
+	)
 
-	if err := writeAttachConnection(server, []byte("frame\x1b[c")); err != nil {
-		t.Fatalf("server write of the query: %v", err)
+	output := attachRelayTestOutput(5*attachWriteChunkBytes + 100)
+	if err := writeAttachConnection(server, output); err != nil {
+		t.Fatal(err)
 	}
-	time.Sleep(queryWait + 50*time.Millisecond)
-	err := writeAttachConnection(server, attachRelayTestOutput(256*1024))
-	var netErr net.Error
-	if !errors.As(err, &netErr) || !netErr.Timeout() {
-		t.Fatalf("server write behind an overdue query = %v, want a timeout", err)
-	}
-	close(terminal.release)
 	_ = server.Close()
 	if err := awaitAttachRelay(t, result); err != nil {
 		t.Fatalf("relay: %v", err)
 	}
-	if got := terminal.bytes(); !bytes.HasPrefix(got, []byte("frame\x1b[c")) {
-		t.Fatalf("terminal got %q first, want the query frame", got[:min(len(got), 16)])
+	terminal.mu.Lock()
+	defer terminal.mu.Unlock()
+	if len(terminal.reports) == 0 {
+		t.Fatal("no delivery reports")
 	}
-}
-
-func TestAttachQueryScannerFindsQueriesSplitAcrossReads(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		pieces []string
-		want   []bool
-	}{
-		{"plain output", []string{"agent output", "\x1b[1mbold\x1b[0m"}, []bool{false, false}},
-		{"whole query", []string{"\x1b[c"}, []bool{true}},
-		{"CSI split", []string{"text\x1b[", "6n"}, []bool{false, true}},
-		{"OSC split", []string{"\x1b]11;", "?\x1b\\"}, []bool{false, true}},
-		{"title is not a query", []string{"\x1b]0;ti", "tle\x07"}, []bool{false, false}},
-		{"trailing ESC", []string{"text\x1b", "[c"}, []bool{false, true}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var scanner attachQueryScanner
-			for i, piece := range test.pieces {
-				if got := scanner.scan([]byte(piece)); got != test.want[i] {
-					t.Fatalf("piece %d %q: query = %v, want %v", i, piece, got, test.want[i])
-				}
-			}
-		})
+	previous := uint64(0)
+	for _, report := range terminal.reports {
+		offset, written := report[0], report[1]
+		if offset != written {
+			t.Fatalf("report %d came with %d bytes written", offset, written)
+		}
+		if offset <= previous || offset-previous > attachWriteChunkBytes {
+			t.Fatalf("report %d after %d: want pieces of at most %d bytes", offset, previous, attachWriteChunkBytes)
+		}
+		previous = offset
+	}
+	if previous != uint64(len(output)) {
+		t.Fatalf("last report %d, want %d", previous, len(output))
 	}
 }
 
@@ -185,7 +222,7 @@ func TestRelayAttachOutputReturnsTheWriteError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sink.Close()
-	result := startAttachRelay(t, sink, client, attachOutputBufferLimitBytes)
+	result := startAttachRelay(t, sink, client, attachOutputBufferLimitBytes, nil)
 
 	go func() { _, _ = server.Write([]byte("output")) }()
 	if err := awaitAttachRelay(t, result); err == nil {
@@ -214,7 +251,7 @@ func TestRelayAttachOutputWritesWhatItReadBeforeAReadError(t *testing.T) {
 		&terminal,
 		&failingAttachSource{data: []byte("last frame"), err: readErr},
 		attachOutputBufferLimitBytes,
-		attachOutputQueryWait,
+		nil,
 	)
 	if !errors.Is(err, readErr) {
 		t.Fatalf("relay = %v, want the read error", err)
@@ -222,4 +259,112 @@ func TestRelayAttachOutputWritesWhatItReadBeforeAReadError(t *testing.T) {
 	if terminal.String() != "last frame" {
 		t.Fatalf("terminal got %q before the read error", terminal.String())
 	}
+}
+
+// A client that reads ahead of its terminal reports delivery, and the replies
+// a query is owed must not expire before the terminal has the query.
+func TestUndeliveredQueryKeepsItsRepliesExpected(t *testing.T) {
+	client := &attachClient{deliveryToken: "token"}
+	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
+	client.activityMu.Lock()
+	client.terminalResponseUntil = time.Now().Add(-time.Second)
+	client.trackRepliesLocked(nil)
+	client.activityMu.Unlock()
+
+	if !client.owesTerminalReplies("@1", time.Now()) {
+		t.Fatal("an undelivered query's reply is not owed")
+	}
+	routing := client.routeInput([]byte("\x1b[?62;4c"))
+	if len(routing.actions) != 1 ||
+		routing.actions[0].userInput || routing.actions[0].windowID != "@1" {
+		t.Fatalf("late reply to an undelivered query routed as %#v", routing.actions)
+	}
+}
+
+// Delivery starts the reply grace; once that has run out, input is the
+// user's again, as for a client that does not report.
+func TestDeliveredQueryRepliesExpireAfterTheirGrace(t *testing.T) {
+	client := &attachClient{deliveryToken: "token"}
+	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
+	client.expectTerminalResponsesUntilDelivered("@1", 1, 20)
+	client.activityMu.Lock()
+	client.terminalResponseUntil = time.Now().Add(-time.Second)
+	client.activityMu.Unlock()
+
+	client.markOutputDelivered(15)
+	client.activityMu.Lock()
+	undelivered := append([]uint64(nil), client.undeliveredQueryEnds...)
+	renewed := client.terminalResponseUntil.After(time.Now())
+	client.activityMu.Unlock()
+	if len(undelivered) != 1 || undelivered[0] != 20 {
+		t.Fatalf("undelivered after a report at 15 = %v, want [20]", undelivered)
+	}
+	if !renewed {
+		t.Fatal("delivery did not restart the reply grace")
+	}
+
+	client.markOutputDelivered(20)
+	client.activityMu.Lock()
+	client.terminalResponseUntil = time.Now().Add(-time.Second)
+	client.activityMu.Unlock()
+	routing := client.routeInput([]byte("x"))
+	if len(routing.actions) != 1 || !routing.actions[0].userInput {
+		t.Fatalf("input after the grace routed as %#v", routing.actions)
+	}
+}
+
+func TestClientWithoutDeliveryReportsExpiresAtTheUsualTime(t *testing.T) {
+	client := &attachClient{}
+	client.expectTerminalResponsesUntilDelivered("@1", 1, 10)
+	client.activityMu.Lock()
+	client.terminalResponseUntil = time.Now().Add(-time.Second)
+	client.activityMu.Unlock()
+
+	routing := client.routeInput([]byte("x"))
+	if len(routing.actions) != 1 || !routing.actions[0].userInput {
+		t.Fatalf("input after the grace routed as %#v", routing.actions)
+	}
+}
+
+// The writer records each query at the output offset just past it, counting
+// everything written to the client before it.
+func TestAttachWriterRecordsWhereEachQueryEnds(t *testing.T) {
+	server, peer := net.Pipe()
+	defer peer.Close()
+	client := newAttachClient(server, controlMessage{AttachToken: "token"})
+	defer client.close()
+	received := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(peer)
+		received <- data
+	}()
+
+	if _, ok := client.enqueueWrite([]byte("frame"), false, "", 0, nil); !ok {
+		t.Fatal("frame not queued")
+	}
+	completion, ok := client.enqueueWrite([]byte("\x1b[c"), true, "@1", 1, nil)
+	if !ok || !client.waitForWrite(completion) {
+		t.Fatal("query not written")
+	}
+	client.activityMu.Lock()
+	ends := append([]uint64(nil), client.undeliveredQueryEnds...)
+	client.activityMu.Unlock()
+	if len(ends) != 1 || ends[0] != uint64(len("frame\x1b[c")) {
+		t.Fatalf("query ends = %v, want [%d]", ends, len("frame\x1b[c"))
+	}
+
+	mux := &muxServer{attachClients: map[net.Conn]*attachClient{server: client}}
+	mux.handleControlRequest(nil, controlMessage{
+		Type:        attachDeliveredRequest,
+		AttachToken: "token",
+		Delivered:   ends[0],
+	})
+	client.activityMu.Lock()
+	left := len(client.undeliveredQueryEnds)
+	client.activityMu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d queries still undelivered after the report", left)
+	}
+	client.close()
+	<-received
 }
