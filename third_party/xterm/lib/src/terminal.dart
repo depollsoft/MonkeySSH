@@ -1683,7 +1683,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (!_graphicsActive) return;
     _graphicsActive = false;
 
-    final args = _graphicsArgs;
+    // A map of its own, so the generation stays this command's even if the
+    // caller passes the same map again.
+    final args = Map.of(_graphicsArgs);
     _graphicsCommandGeneration[args] = _programGeneration;
     final data = Uint8List.fromList(_graphicsData);
     _graphicsData.clear();
