@@ -127,9 +127,10 @@ type attachDeliveryReporter struct {
 	encoder   *json.Encoder
 	delivered atomic.Uint64
 	pending   chan struct{}
-	// failed closes when a report cannot be sent, after which the server
-	// would wait for one forever.
+	// failed closes when the control connection breaks before close, after
+	// which the server would wait for reports forever.
 	failed    chan struct{}
+	failOnce  sync.Once
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -167,11 +168,13 @@ func openAttachDeliveryReporter(session string) *attachDeliveryReporter {
 		done:    make(chan struct{}),
 	}
 	// The server also sends every control client its window changes; nothing
-	// here needs them, but they must be read.
+	// here needs them, but they must be read, and the connection ending
+	// before close means no report sent since has arrived.
 	go func() {
 		for {
 			var discard json.RawMessage
 			if decoder.Decode(&discard) != nil {
+				reporter.fail()
 				return
 			}
 		}
@@ -193,9 +196,18 @@ func (r *attachDeliveryReporter) run() {
 			AttachToken: r.token,
 			Delivered:   r.delivered.Load(),
 		}); err != nil {
-			close(r.failed)
+			r.fail()
 			return
 		}
+	}
+}
+
+func (r *attachDeliveryReporter) fail() {
+	select {
+	case <-r.done:
+		// Closed on purpose: the attach is over.
+	default:
+		r.failOnce.Do(func() { close(r.failed) })
 	}
 }
 

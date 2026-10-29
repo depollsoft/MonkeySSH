@@ -293,11 +293,11 @@ func TestDeliveredQueryRepliesExpireAfterTheirGrace(t *testing.T) {
 
 	client.markOutputDelivered(15)
 	client.activityMu.Lock()
-	undelivered := append([]uint64(nil), client.undeliveredQueryEnds...)
+	undelivered := append([]undeliveredQuery(nil), client.undeliveredQueries...)
 	renewed := client.terminalResponseUntil.After(time.Now())
 	client.activityMu.Unlock()
-	if len(undelivered) != 1 || undelivered[0] != 20 {
-		t.Fatalf("undelivered after a report at 15 = %v, want [20]", undelivered)
+	if len(undelivered) != 1 || undelivered[0].end != 20 {
+		t.Fatalf("undelivered after a report at 15 = %v, want one ending at 20", undelivered)
 	}
 	if !renewed {
 		t.Fatal("delivery did not restart the reply grace")
@@ -347,24 +347,67 @@ func TestAttachWriterRecordsWhereEachQueryEnds(t *testing.T) {
 		t.Fatal("query not written")
 	}
 	client.activityMu.Lock()
-	ends := append([]uint64(nil), client.undeliveredQueryEnds...)
+	queries := append([]undeliveredQuery(nil), client.undeliveredQueries...)
 	client.activityMu.Unlock()
-	if len(ends) != 1 || ends[0] != uint64(len("frame\x1b[c")) {
-		t.Fatalf("query ends = %v, want [%d]", ends, len("frame\x1b[c"))
+	if len(queries) != 1 || queries[0].end != uint64(len("frame\x1b[c")) {
+		t.Fatalf("undelivered queries = %v, want one ending at %d", queries, len("frame\x1b[c"))
 	}
 
 	mux := &muxServer{attachClients: map[net.Conn]*attachClient{server: client}}
 	mux.handleControlRequest(nil, controlMessage{
 		Type:        attachDeliveredRequest,
 		AttachToken: "token",
-		Delivered:   ends[0],
+		Delivered:   queries[0].end,
 	})
 	client.activityMu.Lock()
-	left := len(client.undeliveredQueryEnds)
+	left := len(client.undeliveredQueries)
 	client.activityMu.Unlock()
 	if left != 0 {
 		t.Fatalf("%d queries still undelivered after the report", left)
 	}
 	client.close()
 	<-received
+}
+
+// Queries the terminal has not been written cannot be unanswered, so a stall
+// that holds more than the outstanding limit of them, in batches whose grace
+// runs out in between, keeps the attach.
+func TestUndeliveredQueriesDoNotCountAsUnanswered(t *testing.T) {
+	client := newAttachClient(&recordingConn{}, controlMessage{AttachToken: "token"})
+	t.Cleanup(client.close)
+	end := uint64(0)
+	for batch := 0; batch < 3; batch++ {
+		for range terminalResponseMaxOutstanding / 2 {
+			end += 3
+			client.expectTerminalResponsesUntilDelivered("@1", 1, end)
+		}
+		client.activityMu.Lock()
+		client.terminalResponseUntil = time.Now().Add(-time.Second)
+		client.activityMu.Unlock()
+	}
+	if client.isClosed() {
+		t.Fatal("undelivered queries closed the attach")
+	}
+
+	// Once delivered they count, as they would have when written to a client
+	// that does not report.
+	client.markOutputDelivered(end)
+	if !client.isClosed() {
+		t.Fatal("more delivered queries than the outstanding limit kept the attach")
+	}
+}
+
+func TestUndeliveredQueriesHaveTheirOwnLimit(t *testing.T) {
+	client := newAttachClient(&recordingConn{}, controlMessage{AttachToken: "token"})
+	t.Cleanup(client.close)
+	for i := 1; i <= terminalResponseMaxUndelivered; i++ {
+		client.expectTerminalResponsesUntilDelivered("@1", 1, uint64(i))
+	}
+	if client.isClosed() {
+		t.Fatal("closed before the undelivered limit")
+	}
+	client.expectTerminalResponsesUntilDelivered("@1", 1, terminalResponseMaxUndelivered+1)
+	if !client.isClosed() {
+		t.Fatal("past the undelivered limit kept the attach")
+	}
 }

@@ -265,3 +265,46 @@ func TestAttachCLIReportsDeliveryToAServerThatTakesIt(t *testing.T) {
 		t.Fatalf("last report %d, want %d", last.Delivered, len(output))
 	}
 }
+
+// A reporter whose control connection the server ends must fail, so the
+// attach closes instead of leaving the server waiting for reports.
+func TestAttachDeliveryReporterFailsWhenTheServerHangsUp(t *testing.T) {
+	dir := shortUnixSocketDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	path, err := socketPath("audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var hello controlMessage
+		if json.NewDecoder(conn).Decode(&hello) != nil {
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(controlResponse{
+			Type:         "hello",
+			Status:       "ok",
+			Capabilities: []string{attachOutputDeliveryCapability},
+		})
+	}()
+
+	reporter := openAttachDeliveryReporter("audit")
+	if reporter == nil {
+		t.Fatal("no reporter for a server that takes reports")
+	}
+	defer reporter.close()
+	select {
+	case <-reporter.failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reporter did not fail after the server hung up")
+	}
+}

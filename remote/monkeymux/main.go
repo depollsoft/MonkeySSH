@@ -82,6 +82,9 @@ const (
 	attachWriteTimeout                = time.Second
 	attachTransitionTimeout           = 3 * time.Second
 	terminalResponseMaxOutstanding    = 64
+	// terminalResponseMaxUndelivered bounds the replies owed to queries a
+	// reporting client has read but its terminal has not been written yet.
+	terminalResponseMaxUndelivered    = 4096
 	attachWriteChunkBytes             = 32 * 1024
 	terminalResponseFocusGrace        = 2 * time.Second
 	focusInputCarryDelay              = 75 * time.Millisecond
@@ -1147,13 +1150,15 @@ type attachClient struct {
 
 	// deliveryToken is set for a client that reports the output its terminal
 	// has been written (attach-output-delivery). Its writer then records, in
-	// undeliveredQueryEnds, the output offset just past each query it sends,
-	// and the replies the query is owed do not expire until a report covers
-	// that offset: the client reads ahead of its terminal, so the socket
-	// taking a query says nothing about when the terminal sees it.
+	// undeliveredQueries, the output offset just past each query it sends,
+	// and the replies the query is owed do not expire, or count as missing,
+	// until a report covers that offset: the client reads ahead of its
+	// terminal, so the socket taking a query says nothing about when the
+	// terminal sees it. undeliveredResponses sums their replies.
 	deliveryToken        string
 	outputOffset         uint64
-	undeliveredQueryEnds []uint64
+	undeliveredQueries   []undeliveredQuery
+	undeliveredResponses int
 
 	// replyTrackMu guards a per-window count of the replies this client still
 	// owes to queries: written to it but still queued, sent and awaited until
@@ -1545,6 +1550,13 @@ func attachCommand(args []string) {
 	}
 	restoreTerminal()
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+		if reporter != nil && errors.Is(copyErr, net.ErrClosed) {
+			select {
+			case <-reporter.failed:
+				fatal(errors.New("lost the connection that reports output delivery to the session"))
+			default:
+			}
+		}
 		fatal(copyErr)
 	}
 	if !*quiet {
@@ -7893,6 +7905,14 @@ func (c *attachClient) deliversReplies() bool {
 	return !c.isClosed() || len(c.routedReplies) > 0
 }
 
+// undeliveredQuery is a query a reporting client has read but not yet
+// written to its terminal: where it ends in the output, and how many replies
+// it is owed.
+type undeliveredQuery struct {
+	end       uint64
+	responses int
+}
+
 func (c *attachClient) isClosed() bool {
 	select {
 	case <-c.done:
@@ -7925,7 +7945,7 @@ func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
 	// deadline, so a paste in progress keeps the replies owed, as does a query
 	// the client's terminal has not been written yet.
 	c.awaitedRepliesHeld = c.inputBracketedPasteActive ||
-		len(c.undeliveredQueryEnds) > 0
+		len(c.undeliveredQueries) > 0
 	for _, action := range routed {
 		if !action.userInput && action.windowID != "" {
 			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
@@ -8022,11 +8042,14 @@ func (c *attachClient) expectTerminalResponsesUntilDelivered(
 		}
 		c.resetTerminalResponseStateLocked()
 	}
-	outstanding := len(c.terminalResponseWindows)
-	if c.terminalResponseActiveWindow != "" {
-		outstanding++
+	deferred := c.deliveryToken != "" && deliveredAt > 0
+	tooMany := count > terminalResponseMaxOutstanding-c.deliveredResponsesLocked()
+	if deferred {
+		// Replies to a query the terminal does not have yet cannot be missing;
+		// they are checked against the outstanding limit once it is delivered.
+		tooMany = count > terminalResponseMaxUndelivered-c.undeliveredResponses
 	}
-	if count > terminalResponseMaxOutstanding-outstanding {
+	if tooMany {
 		c.activityMu.Unlock()
 		if inputLocked {
 			c.inputMu.Unlock()
@@ -8041,8 +8064,12 @@ func (c *attachClient) expectTerminalResponsesUntilDelivered(
 			windowID,
 		)
 	}
-	if c.deliveryToken != "" && deliveredAt > 0 {
-		c.undeliveredQueryEnds = append(c.undeliveredQueryEnds, deliveredAt)
+	if deferred {
+		c.undeliveredQueries = append(
+			c.undeliveredQueries,
+			undeliveredQuery{end: deliveredAt, responses: count},
+		)
+		c.undeliveredResponses += count
 	}
 	if len(c.terminalResponseCarry) > 0 ||
 		len(c.terminalResponsePasteStartCarry) > 0 {
@@ -8667,31 +8694,51 @@ func (c *attachClient) hasExpectedTerminalResponseLocked() bool {
 func (c *attachClient) terminalResponsesExpiredLocked(now time.Time) bool {
 	return !c.terminalResponseUntil.IsZero() &&
 		now.After(c.terminalResponseUntil) &&
-		len(c.undeliveredQueryEnds) == 0
+		len(c.undeliveredQueries) == 0
+}
+
+// deliveredResponsesLocked counts the expected replies to queries the
+// terminal has been written. A reply can come before the report that its
+// query was delivered, hence the floor.
+func (c *attachClient) deliveredResponsesLocked() int {
+	outstanding := len(c.terminalResponseWindows)
+	if c.terminalResponseActiveWindow != "" {
+		outstanding++
+	}
+	return max(outstanding-c.undeliveredResponses, 0)
 }
 
 // markOutputDelivered records that the client's terminal has been written the
 // first offset bytes of its attach output. The queries that ends deliver get
-// their reply grace from now.
+// their reply grace from now, and count toward the outstanding limit.
 func (c *attachClient) markOutputDelivered(offset uint64) {
 	c.activityMu.Lock()
-	defer c.activityMu.Unlock()
 	delivered := 0
-	for delivered < len(c.undeliveredQueryEnds) &&
-		c.undeliveredQueryEnds[delivered] <= offset {
+	for delivered < len(c.undeliveredQueries) &&
+		c.undeliveredQueries[delivered].end <= offset {
+		c.undeliveredResponses -= c.undeliveredQueries[delivered].responses
 		delivered++
 	}
 	if delivered == 0 {
+		c.activityMu.Unlock()
 		return
 	}
-	c.undeliveredQueryEnds = c.undeliveredQueryEnds[delivered:]
-	if len(c.undeliveredQueryEnds) == 0 {
-		c.undeliveredQueryEnds = nil
+	c.undeliveredQueries = c.undeliveredQueries[delivered:]
+	if len(c.undeliveredQueries) == 0 {
+		c.undeliveredQueries = nil
+	}
+	if c.deliveredResponsesLocked() > terminalResponseMaxOutstanding {
+		// As desynchronized as a client that does not report would be when
+		// writing the query that took it past the limit.
+		c.activityMu.Unlock()
+		c.close()
+		return
 	}
 	if c.hasExpectedTerminalResponseLocked() {
 		c.renewTerminalResponseDeadlineLocked()
 	}
 	c.trackRepliesLocked(nil)
+	c.activityMu.Unlock()
 }
 
 func (c *attachClient) resetTerminalResponseStateLocked() {
