@@ -167,7 +167,8 @@ func kittyPlacementReplayCommand(args map[string]string) []byte {
 }
 
 // kittyRootIsVirtual reports whether the retained root transmission of
-// imageID also made a virtual placement, and its placement id.
+// imageID also made a virtual placement, and its placement id. The client
+// makes none for a virtual placement with a parent.
 func (w *muxWindow) kittyRootIsVirtual(imageID string) (bool, string) {
 	root := w.kittyImages[imageID]
 	end := kittyApcEnd(root, 0)
@@ -175,7 +176,45 @@ func (w *muxWindow) kittyRootIsVirtual(imageID string) (bool, string) {
 		return false, ""
 	}
 	args := parseKittyControl(kittyControl(root, 0, end))
-	return kittyNonZero(args["U"]), kittyIDValue(args["p"])
+	return kittyNonZero(args["U"]) && !kittyNonZero(args["P"]),
+		kittyIDValue(args["p"])
+}
+
+// kittyVirtualPlacementIDLocked returns the placement id of the virtual
+// placement the client keeps for imageID on a screen: it keeps one per
+// image, the latest made, which is a kept one when a display command
+// replaced the one the image's own transmission made.
+func (w *muxWindow) kittyVirtualPlacementIDLocked(imageID string, alt bool) string {
+	for _, p := range w.kittyPlacements {
+		if p.virtual() && p.imageID == imageID && p.alt == alt {
+			return p.placementID
+		}
+	}
+	_, placementID := w.kittyRootIsVirtual(imageID)
+	return placementID
+}
+
+// forgetKittyRootVirtualPlacementLocked follows a delete of the virtual
+// placement imageID's own transmission made: the retained root stops
+// carrying U=, so a replay no longer makes the placement again and no
+// relative placement can hang off it. It reports whether the root changed.
+func (w *muxWindow) forgetKittyRootVirtualPlacementLocked(imageID string) bool {
+	if virtual, _ := w.kittyRootIsVirtual(imageID); !virtual {
+		return false
+	}
+	root := w.kittyImages[imageID]
+	control := kittyControl(root, 0, kittyApcEnd(root, 0))
+	var kept []string
+	for _, pair := range strings.Split(control, ",") {
+		if key, _, _ := strings.Cut(pair, "="); key != "U" {
+			kept = append(kept, pair)
+		}
+	}
+	rewritten := make([]byte, 0, len(root))
+	rewritten = append(rewritten, root[:3]...)
+	rewritten = append(rewritten, strings.Join(kept, ",")...)
+	w.kittyImages[imageID] = append(rewritten, root[3+len(control):]...)
+	return true
 }
 
 // kittyPlacementImageIDLocked resolves the image a placement command names:
@@ -354,13 +393,16 @@ func (w *muxWindow) kittyPlacementParentLocked(
 	parentImage, parentPlacement string,
 	alt bool,
 ) (string, bool) {
+	replaced := false
 	for _, p := range w.kittyPlacements {
 		if p.imageID == parentImage && p.alt == alt &&
 			(parentPlacement == "" || p.placementID == parentPlacement) {
 			return p.key(), true
 		}
+		replaced = replaced || (p.virtual() && p.imageID == parentImage && p.alt == alt)
 	}
-	if virtual, placementID := w.kittyRootIsVirtual(parentImage); virtual &&
+	// A kept virtual placement of the image replaced the root's own.
+	if virtual, placementID := w.kittyRootIsVirtual(parentImage); virtual && !replaced &&
 		(parentPlacement == "" || parentPlacement == placementID) {
 		return kittyRootPlacementKey(parentImage), true
 	}
@@ -498,6 +540,7 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 	}
 	placementID := kittyIDValue(args["p"])
 	var match func(kittyRetainedPlacement) bool
+	rootChanged := false
 	switch selector {
 	case "i", "n":
 		imageID := w.kittyPlacementImageIDLocked(args)
@@ -509,11 +552,13 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 				(placementID == "" || p.placementID == placementID)
 		})
 		// The virtual placement an image's own transmission made goes too
-		// when the delete covers it, and with it the placements hanging off.
-		_, rootPlacementID := w.kittyRootIsVirtual(imageID)
+		// when the delete covers the image's virtual placement, and with it
+		// the placements hanging off.
 		rootVirtual := ""
-		if placementID == "" || placementID == rootPlacementID {
+		if placementID == "" ||
+			placementID == w.kittyVirtualPlacementIDLocked(imageID, alt) {
 			rootVirtual = kittyRootPlacementKey(imageID)
+			rootChanged = w.forgetKittyRootVirtualPlacementLocked(imageID)
 		}
 		match = func(p kittyRetainedPlacement) bool {
 			return (p.imageID == imageID &&
@@ -533,6 +578,11 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 		w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
 			return p.alt == alt && inRange(p.imageID)
 		})
+		for _, id := range w.kittyImageOrder {
+			if inRange(id) {
+				rootChanged = w.forgetKittyRootVirtualPlacementLocked(id) || rootChanged
+			}
+		}
 		match = func(p kittyRetainedPlacement) bool {
 			image, rooted := strings.CutPrefix(p.parent, "root:")
 			return inRange(p.imageID) || (rooted && inRange(image))
@@ -548,12 +598,12 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 		return false
 	}
 	if len(w.kittyPlacements) == 0 {
-		return false
+		return rootChanged
 	}
 	changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 		return p.alt == alt && match(p)
 	})
-	return w.removeOrphanedKittyPlacementsLocked() || changed
+	return w.removeOrphanedKittyPlacementsLocked() || changed || rootChanged
 }
 
 // kittyPositionalDeleteMatch returns whether a positional delete removes a
