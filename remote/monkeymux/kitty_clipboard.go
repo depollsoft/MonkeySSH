@@ -809,13 +809,18 @@ func (s *muxServer) settleKittyClipboardDelivery(
 	}
 }
 
-// takeKittyClipboardReply resolves a reply on its way to window windowID by
-// the tag it carries. It returns the reply with the program's own id
-// restored, or nil when the tag names no open request of the window, as for
-// a request MonkeyMux has already answered. The final reply finishes the
-// request: a read is answered OK, then DATA packets, then DONE, or with an
-// error alone; a write gets a single reply.
-func (s *muxServer) takeKittyClipboardReply(windowID string, reply []byte) []byte {
+// takeKittyClipboardReply resolves a reply from client on its way to window
+// windowID by the tag it carries. It returns the reply with the program's own
+// id restored, or nil when the tag names no open request of the window that
+// belongs to client, as for a request MonkeyMux has already answered, or one
+// that failed over to another client after this one had read it. The final
+// reply finishes the request: a read is answered OK, then DATA packets, then
+// DONE, or with an error alone; a write gets a single reply.
+func (s *muxServer) takeKittyClipboardReply(
+	client *attachClient,
+	windowID string,
+	reply []byte,
+) []byte {
 	if len(reply) < 2 || !isKittyClipboardOscPayload(reply[2:]) {
 		return nil
 	}
@@ -836,7 +841,8 @@ func (s *muxServer) takeKittyClipboardReply(windowID string, reply []byte) []byt
 		return nil
 	}
 	index := window.kittyClipboardRequestIndexLocked(metadata.id)
-	if index < 0 || window.kittyClipboard.requests[index].op != metadata.op {
+	if index < 0 || window.kittyClipboard.requests[index].op != metadata.op ||
+		window.kittyClipboard.requests[index].client != client {
 		return nil
 	}
 	id := window.kittyClipboard.requests[index].id

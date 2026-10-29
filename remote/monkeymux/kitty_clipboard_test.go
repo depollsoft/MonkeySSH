@@ -282,8 +282,11 @@ func TestKittyClipboardReplyIsResolvedByItsTag(t *testing.T) {
 	waitForAttachOutput(t, attach, "type=write:id="+kittyClipboardTagWindow1+".2")
 	tag := kittyClipboardTagWindow1 + ".1"
 
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
 	take := func(reply string) string {
-		return string(server.takeKittyClipboardReply("@1", []byte(reply)))
+		return string(server.takeKittyClipboardReply(client, "@1", []byte(reply)))
 	}
 	if got := take("\x1b]5522;type=read:status=DATA:id=" + tag + ":mime=Lg==;dGV4dA==\x1b\\"); got != "\x1b]5522;type=read:status=DATA:mime=Lg==:id=x;dGV4dA==\x1b\\" {
 		t.Fatalf("reply = %q, want the program's id restored", got)
@@ -1121,7 +1124,7 @@ func TestKittyClipboardRepliesAreOwedOnlyWhileARequestIsOpen(t *testing.T) {
 		_, replies := client.splitKittyClipboardRepliesLocked([]byte(reply), time.Now())
 		client.inputDispatchMu.Unlock()
 		for _, action := range replies {
-			server.takeKittyClipboardReply(action.windowID, action.data)
+			server.takeKittyClipboardReply(client, action.windowID, action.data)
 		}
 	}
 	tag := ":id=" + kittyClipboardTagWindow1
@@ -1394,13 +1397,13 @@ func TestKittyClipboardOldestRequestPastTheLimitIsAnsweredBusy(t *testing.T) {
 	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+"."+strconv.Itoa(maxTrackedKittyClipboardRequests+1))
 	busy := "\x1b]5522;type=read:status=EBUSY:id=r0\x1b\\"
 	waitForWindowPtyOutput(t, first, busy)
-	if reply := server.takeKittyClipboardReply("@1", []byte(
-		"\x1b]5522;type=read:status=DONE:id="+kittyClipboardTagWindow1+".1\x1b\\")); reply != nil {
-		t.Fatalf("late reply = %q, want it dropped", reply)
-	}
 	server.mu.Lock()
 	client := server.attachClients[attach]
 	server.mu.Unlock()
+	if reply := server.takeKittyClipboardReply(client, "@1", []byte(
+		"\x1b]5522;type=read:status=DONE:id="+kittyClipboardTagWindow1+".1\x1b\\")); reply != nil {
+		t.Fatalf("late reply = %q, want it dropped", reply)
+	}
 	if got := client.kittyClipboardInput.outstanding.Load(); got != maxTrackedKittyClipboardRequests {
 		t.Fatalf("client owes %d replies, want %d", got, maxTrackedKittyClipboardRequests)
 	}
@@ -1468,4 +1471,61 @@ func TestKittyClipboardWriteContinuationHeldByARedrawPauseIsLeftToItsClient(t *t
 	if out := windowPtyOutput(t, first); out != "" {
 		t.Fatalf("window got %q, want the client to answer", out)
 	}
+}
+
+// stalledWriteConn is a client connection that takes the bytes of its first
+// write, then fails it once release is closed, as a connection does that
+// hits its write deadline partway through.
+type stalledWriteConn struct {
+	recordingConn
+	release chan struct{}
+}
+
+func (c *stalledWriteConn) Write(data []byte) (int, error) {
+	_, _ = c.recordingConn.Write(data)
+	<-c.release
+	return 0, io.ErrClosedPipe
+}
+
+// A request whose write to one client failed after the client had read it
+// belongs to the client it failed over to. Replies the first client sent
+// before it went are not the program's: they must not reach it, interleave
+// with the new client's, or finish the request.
+func TestKittyClipboardReplyFromAClientTheRequestLeftIsDropped(t *testing.T) {
+	server, first, _, attachB := newKittyClipboardTestServer(t)
+	startKittyClipboardInputWorker(t, server, attachB)
+	attachA := &stalledWriteConn{release: make(chan struct{})}
+	clientA := registerTestAttachClient(t, server, attachA, "stalled", 80, 24)
+	clientA.capabilityHint = []byte(kittyClipboardHintFixture)
+
+	delivered := make(chan struct{})
+	go func() {
+		defer close(delivered)
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\\x1b[c"))
+	}()
+	waitForAttachOutput(t, &attachA.recordingConn, "\x1b[c")
+	tag := forwardedKittyClipboardTag(t, server, first, "r")
+	sendKittyClipboardReply(clientA,
+		"\x1b]5522;type=read:status=OK:id="+tag+"\x1b\\"+
+			"\x1b]5522;type=read:status=DATA:id="+tag+":mime=dGV4dC9wbGFpbg==;QQ==\x1b\\"+
+			"\x1b]5522;type=read:status=DONE:id="+tag+"\x1b\\")
+	close(attachA.release)
+	<-delivered
+	waitForAttachOutput(t, attachB, "id="+tag+";")
+
+	departed := make(chan struct{})
+	go func() {
+		defer close(departed)
+		server.runAttachInputActions(clientA)
+	}()
+	<-departed
+	if out := windowPtyOutput(t, first); out != "" {
+		t.Fatalf("window got %q from the client the request left", out)
+	}
+
+	server.mu.Lock()
+	clientB := server.attachClients[attachB]
+	server.mu.Unlock()
+	sendKittyClipboardReply(clientB, "\x1b]5522;type=read:status=EPERM:id="+tag+"\x1b\\")
+	waitForWindowPtyOutput(t, first, "\x1b]5522;type=read:status=EPERM:id=r\x1b\\")
 }

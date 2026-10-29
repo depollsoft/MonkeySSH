@@ -9348,7 +9348,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			return
 		}
 		if action.kittyClipboardReply {
-			if reply := s.takeKittyClipboardReply(action.windowID, action.data); reply != nil {
+			if reply := s.takeKittyClipboardReply(client, action.windowID, action.data); reply != nil {
 				_ = s.writeWindow(action.windowID, reply)
 			}
 			continue
