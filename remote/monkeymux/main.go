@@ -11645,6 +11645,12 @@ func terminalModeReplaySequence(
 			continue
 		}
 		enabled, ok := window.privateModes[mode]
+		if mode == "6" && ok && window.screen != nil {
+			// DECRC restores origin mode without a DECSET, so the model knows
+			// whether it is on and the tracked flag may not. Only a window
+			// that set the mode can have it restored.
+			enabled = window.screen.originMode
+		}
 		if !ok {
 			continue
 		}

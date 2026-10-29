@@ -1419,9 +1419,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _reverseDisplayMode = enabled;
   }
 
+  /// DECOM. Setting or resetting it homes the cursor, to the top margin when
+  /// it is on, as in xterm and the MonkeyMux screen model. DECRC restores the
+  /// mode without moving the cursor again.
   @override
   void setOriginMode(bool enabled) {
     _originMode = enabled;
+    _buffer.setCursor(0, 0);
   }
 
   @override

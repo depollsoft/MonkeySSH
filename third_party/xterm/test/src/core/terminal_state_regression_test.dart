@@ -322,6 +322,17 @@ void main() {
       expect([row(terminal, 0), row(terminal, 1)], ['', ' Y']);
     });
 
+    test('DECSET and DECRST 6 home the cursor; DECRC does not', () {
+      final terminal = Terminal()..resize(10, 8);
+      terminal.write('\x1b[3;6r\x1b[5;5H\x1b[?6h');
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [0, 2]);
+      terminal.write('\x1b[2;4H\x1b7\x1b[?6l');
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [0, 0]);
+      terminal.write('\x1b8');
+      expect(terminal.originMode, isTrue);
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [3, 3]);
+    });
+
     test('DECSTBM reads a zero bottom as the last row and homes the cursor',
         () {
       final terminal = Terminal()..resize(5, 4);

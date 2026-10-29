@@ -779,3 +779,24 @@ func TestActiveReplayKeepsTheOriginModeAlternateScreenEntrySaved(t *testing.T) {
 		})
 	}
 }
+
+// DECRC restores origin mode without a DECSET, so the mode replay reads it
+// from the model rather than the tracked flag, which still says off here.
+func TestActiveReplayTakesOriginModeFromTheModel(t *testing.T) {
+	server := newMuxServer("test")
+	window := &muxWindow{id: "@1", screenWidth: 20, screenHeight: 6, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = "@1"
+	output := "\x1b[?1049h\x1b[3;5r\x1b[?6h\x1b7\x1b[?6l\x1b8full-screen app"
+	window.observeTerminalModesLocked([]byte(output))
+	window.appendHistoryLocked([]byte(output))
+	if window.privateModes["6"] || !window.screenLocked().originMode {
+		t.Fatalf("setup: tracked 6 = %v, model origin = %v", window.privateModes["6"], window.screenLocked().originMode)
+	}
+
+	client := newTerminalScreen(20, 6)
+	client.Write(server.activeReplayLocked())
+	if !client.originMode {
+		t.Fatal("the replay left origin mode off, but the model has it on")
+	}
+}
