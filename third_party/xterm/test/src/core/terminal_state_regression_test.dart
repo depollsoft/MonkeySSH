@@ -266,6 +266,8 @@ void main() {
       final terminal = Terminal()..resize(10, 1);
       terminal.write('A\x1bXsos\x1b\\B\x1b^pm\x1b\\C');
       expect(row(terminal, 0), 'ABC');
+      terminal.write('\x1b^pm\x07still pm\x1b\\D');
+      expect(row(terminal, 0), 'ABCD');
     });
 
     for (final save in ['\x1b7', '\x1b[s', '\x1b[?1048h']) {

@@ -125,8 +125,8 @@ class EscapeParser {
     'H'.charCode: _escHandleTabSet,
     'M'.charCode: _escHandleReverseIndex,
     'P'.charCode: _escHandleDCS, // DCS - XTGETTCAP (others skipped to ST)
-    'X'.charCode: _skipToStringTerminator, // SOS - ignored
-    '^'.charCode: _skipToStringTerminator, // PM - ignored
+    'X'.charCode: _skipPrivacyString, // SOS - ignored
+    '^'.charCode: _skipPrivacyString, // PM - ignored
     'c'.charCode: _escHandleFullReset, // RIS - Reset to Initial State
     // '#'.charCode: _unsupportedHandler,
     '('.charCode: _escHandleDesignateCharset0, //  SCS - G0
@@ -1613,7 +1613,7 @@ class EscapeParser {
 
   /// Skips an unrecognized string sequence up to ST, or to a CAN or SUB that
   /// cancels it. Returns false when the terminator has not arrived yet.
-  bool _skipToStringTerminator() {
+  bool _skipToStringTerminator({bool bellTerminates = true}) {
     while (true) {
       if (_queue.isEmpty) return false;
       final char = _queue.consume();
@@ -1623,9 +1623,14 @@ class EscapeParser {
         // Aborted counts as handled: the rolled-back ESC starts a new sequence.
         return terminator != _SeqParse.incomplete;
       }
-      if (char == Ascii.BEL) return true;
+      if (char == Ascii.BEL && bellTerminates) return true;
     }
   }
+
+  /// Skips an SOS or PM string. BEL doesn't end these in xterm, which keeps
+  /// it for OSC, so the payload stays hidden up to ST as in the MonkeyMux
+  /// screen model.
+  bool _skipPrivacyString() => _skipToStringTerminator(bellTerminates: false);
 }
 
 /// Maps an ASCII byte to its 6-bit base64 value, or -1 when the byte is not a
