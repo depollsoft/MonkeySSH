@@ -302,7 +302,8 @@ class _PasteGrant {
 ///
 /// Requests are answered one at a time in arrival order, so a read that
 /// follows a write sees the written data and replies never interleave.
-/// Nothing queued touches the clipboard after [dispose].
+/// Replies go only to the shell channel that asked ([abandonChannel]), and
+/// nothing queued touches the clipboard after [dispose].
 class KittyClipboardHandler {
   /// Creates a handler that answers through [sendReply].
   KittyClipboardHandler({
@@ -348,6 +349,10 @@ class KittyClipboardHandler {
   bool _disposed = false;
   // Decoded bytes of committed writes still waiting for their turn.
   int _queuedWriteBytes = 0;
+  // The shell channel requests arrive on, and the one the queued task being
+  // answered arrived on; see [abandonChannel].
+  int _channel = 0;
+  int _taskChannel = 0;
 
   /// The clipboard adapter. Tests replace it.
   KittyClipboardPlatform get platform => _platform;
@@ -424,7 +429,8 @@ class KittyClipboardHandler {
     if (_disposed) {
       return KittyClipboardPasteEventResult.failed;
     }
-    if (stillTargeted != null && !stillTargeted()) {
+    // The paste was for the program on a shell channel that has since gone.
+    if (_taskChannelAbandoned || (stillTargeted != null && !stillTargeted())) {
       _logger.info(
         'terminal.clipboard',
         'kitty_paste_event_skipped',
@@ -476,6 +482,19 @@ class KittyClipboardHandler {
     _dropWrite();
     _grants.clear();
   }
+
+  /// Forgets the shell channel that requests have arrived on, as when it
+  /// closed or another shell took its place: what is still owed to it is not
+  /// sent to the next one, which would read the replies as input. Its open
+  /// write and paste grants end with it; a write it already finished still
+  /// reaches the clipboard.
+  void abandonChannel() {
+    _channel++;
+    _dropWrite();
+    _grants.clear();
+  }
+
+  bool get _taskChannelAbandoned => _taskChannel != _channel;
 
   void _beginWrite(KittyClipboardMetadata metadata) {
     // A new write silently replaces an open one, as in kitty.
@@ -635,7 +654,7 @@ class KittyClipboardHandler {
         ? null
         : _takeGrant(metadata.password, consume: mimes.isNotEmpty);
     _enqueue(() async {
-      if (_disposed) {
+      if (_disposed || _taskChannelAbandoned) {
         return;
       }
       if (grant == null && !canRead()) {
@@ -682,7 +701,7 @@ class KittyClipboardHandler {
           }
           for (final mime in mimes) {
             // Nobody is left to answer: stop reading the clipboard.
-            if (_disposed) {
+            if (_disposed || _taskChannelAbandoned) {
               return;
             }
             serve(mime, await _platform.read(mime));
@@ -695,7 +714,7 @@ class KittyClipboardHandler {
           // As above.
         }
       }
-      if (_disposed) {
+      if (_disposed || _taskChannelAbandoned) {
         return;
       }
       _send(
@@ -766,16 +785,22 @@ class KittyClipboardHandler {
   );
 
   void _enqueue(Future<void> Function() task) {
-    _queue = _queue.then((_) => task()).catchError((Object error) {
-      _logger.warning(
-        'terminal.clipboard',
-        'kitty_request_failed',
-        fields: {
-          'connectionId': connectionId?.call(),
-          'errorType': error.runtimeType,
-        },
-      );
-    });
+    final channel = _channel;
+    _queue = _queue
+        .then((_) {
+          _taskChannel = channel;
+          return task();
+        })
+        .catchError((Object error) {
+          _logger.warning(
+            'terminal.clipboard',
+            'kitty_request_failed',
+            fields: {
+              'connectionId': connectionId?.call(),
+              'errorType': error.runtimeType,
+            },
+          );
+        });
   }
 
   /// Answers from outside the queue, behind every reply already queued, so
@@ -813,7 +838,7 @@ class KittyClipboardHandler {
   }
 
   bool _sendBatch(String data) {
-    if (_disposed) {
+    if (_disposed || _taskChannelAbandoned) {
       return false;
     }
     return sendReply(data);

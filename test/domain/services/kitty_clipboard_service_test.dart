@@ -524,6 +524,71 @@ void main() {
     });
   });
 
+  group('a replaced shell channel', () {
+    test('gets no reply still owed to the one before', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      var reads = 0;
+      harness.platform
+        ..pendingRead = blockedRead.future
+        ..onRead = () => reads++;
+      harness
+        ..osc('type=read:id=r;${b64('text/plain text/html')}')
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('copied')}')
+        ..osc('type=wdata');
+      final paste = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+      );
+      await pumpEventQueue();
+      expect(reads, 1);
+
+      // The command ends and a login shell takes its place.
+      harness.handler.abandonChannel();
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await paste, KittyClipboardPasteEventResult.skipped);
+      expect(await harness.packets(), isEmpty);
+      // The read stops at the type it was waiting for.
+      expect(reads, 1);
+      // The program's write still reaches the clipboard.
+      expect(utf8.decode(harness.platform.stored['text/plain']!), 'copied');
+
+      // The new channel's requests are answered.
+      harness.osc('type=read:id=n;${b64('text/plain')}');
+      expect(await harness.packets(), [
+        status('read', 'OK', id: 'n'),
+        dataPacket('text/plain', 'copied', id: 'n'),
+        status('read', 'DONE', id: 'n'),
+      ]);
+    });
+
+    test('ends the open write and the paste grants', () async {
+      final harness = _Harness();
+      harness.platform.stored['text/plain'] = utf8.encode('secret');
+      final paste = harness.handler.sendPasteEvent(
+        KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+      );
+      expect(await paste, KittyClipboardPasteEventResult.sent);
+      final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+          .firstMatch((await harness.packets()).first)!
+          .group(1)!;
+      harness
+        ..canRead = false
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('half')}')
+        ..handler.abandonChannel()
+        ..osc('type=wdata')
+        ..osc(
+          'type=read:id=r:pw=$password'
+          ':name=${b64(kittyClipboardPasteEventName)};${b64('text/plain')}',
+        );
+
+      expect(await harness.packets(), [status('read', 'EPERM', id: 'r')]);
+      expect(harness.platform.written, isEmpty);
+    });
+  });
+
   test('diagnostics carry no clipboard content or MIME types', () async {
     final harness = _Harness();
     harness.platform.stored['text/plain'] = utf8.encode('secret text');
