@@ -55,9 +55,10 @@ func (s *terminalScreen) RenderFrame() []byte {
 // alternate screen, so the application's exit finds the main screen the model
 // kept rather than a cleared one. The cursor is left where that exit puts it:
 // on the cursor mode 1049 saved on entry (home with the default rendition
-// once a DECSTR reset it), which the replayed 1049 entry saves again, or on
-// the main cursor for 47 and 1047. It is nil while the main screen shows;
-// RenderFrame paints it then.
+// once a DECSTR reset it), with the origin mode, rendition and charsets it
+// saved, all of which the replayed 1049 entry saves again, or on the main
+// cursor for 47 and 1047. It is nil while the main screen shows; RenderFrame
+// paints it then.
 func (s *terminalScreen) RenderMainScreen() []byte {
 	if s == nil || !s.altActive {
 		return nil
@@ -65,6 +66,11 @@ func (s *terminalScreen) RenderMainScreen() []byte {
 	g := &s.main
 	out := s.appendGridFrame(make([]byte, 0, 4096), g, true)
 	if saved := s.savedMain; s.altSavedCursor {
+		// DECSET 6 homes the cursor, so it goes first. The frame left the
+		// scroll region full, where an origin-relative row is the row.
+		if saved.originMode {
+			out = append(out, "\x1b[?6h"...)
+		}
 		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap)
 		out = appendVTSGR(out, saved.attrs)
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)

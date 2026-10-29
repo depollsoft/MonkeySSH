@@ -237,8 +237,12 @@ var (
 		"5",
 		"12",
 	}
-	groupedReplayPrivateModes = [][]string{
-		{"1047", "1049"},
+	// alternateScreenReplayPrivateModes are replayed as a group ahead of
+	// every other mode: entering the alternate screen with 1049 saves the
+	// cursor, origin mode included, which must be the state the main screen
+	// frame staged (RenderMainScreen) rather than the mode the window has now.
+	alternateScreenReplayPrivateModes = []string{"1047", "1049"}
+	groupedReplayPrivateModes         = [][]string{
 		{"1000", "1002", "1003"},
 	}
 	// conPtySwallowedThemeQueryKeys are the theme-query keys whose queries
@@ -932,6 +936,9 @@ type muxWindow struct {
 	// redrawForwardingAnsweredCursor records that MonkeyMux answered a cursor
 	// position query from the screen model during the current pause.
 	redrawForwardingAnsweredCursor bool
+	// redrawForwardingClipboard holds the OSC 5522 packets forwarded during
+	// the pause apart from the redraw; see forwardKittyClipboardLocked.
+	redrawForwardingClipboard kittyClipboardDelivery
 	// pendingTerminalQueries holds capability/status queries (device attributes,
 	// DSR, XTVERSION) the child emitted while no terminal was showing this window
 	// — e.g. an agent (Copilot CLI) relaunched during an upgrade restore, which
@@ -7098,7 +7105,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	)
 	programStatusReplies := window.takeProgramStatusRepliesLocked()
 	visibilityReplies := window.takeVisibilityRepliesLocked()
-	kittyClipboardReplies := s.settleKittyClipboardOutputLocked(window, now)
+	kittyClipboardReplies, clipboardDelivery :=
+		s.settleKittyClipboardOutputLocked(window, now)
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -7186,6 +7194,12 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		} else {
 			window.secondaryQueryPrimary = nil
 		}
+		if window.redrawForwardingPaused {
+			held := &window.redrawForwardingClipboard
+			held.packets = append(held.packets, clipboardDelivery.packets...)
+			held.tags = append(held.tags, clipboardDelivery.tags...)
+			clipboardDelivery = kittyClipboardDelivery{}
+		}
 		if len(forwarded) > 0 && window.redrawForwardingPaused {
 			window.redrawForwardingBuffer = append(
 				window.redrawForwardingBuffer,
@@ -7245,18 +7259,19 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 
 	if shouldWrite {
-		if len(forwarded) > 0 {
-			s.writeAttachOutputIfActive(
-				windowID,
-				attach,
-				forwarded,
-				failoverForwarded,
-				secondaryForwarded,
-				terminalQueries,
-				maxAttachSequence,
-				outputGeneration,
-			)
-		}
+		s.writeAttachOutputIfActive(
+			windowID,
+			attach,
+			forwarded,
+			failoverForwarded,
+			secondaryForwarded,
+			terminalQueries,
+			clipboardDelivery,
+			maxAttachSequence,
+			outputGeneration,
+		)
+	} else {
+		s.settleKittyClipboardDelivery(windowID, clipboardDelivery.tags, nil)
 	}
 	s.mu.Lock()
 	window = s.windowByIDLocked(windowID)
@@ -9333,8 +9348,9 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			return
 		}
 		if action.kittyClipboardReply {
-			s.finishKittyClipboardReply(client, action.windowID, action.data)
-			_ = s.writeWindow(action.windowID, action.data)
+			if reply := s.takeKittyClipboardReply(action.windowID, action.data); reply != nil {
+				_ = s.writeWindow(action.windowID, reply)
+			}
 			continue
 		}
 		if action.userInput {
@@ -11021,6 +11037,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		return
 	}
 	replay = window.redrawForwardingReplay
+	clipboard := window.redrawForwardingClipboard
 	buffered = window.redrawForwardingBuffer
 	failoverBuffered = window.redrawForwardingFailoverBuffer
 	secondaryBuffered = window.redrawForwardingSecondaryBuffer
@@ -11144,6 +11161,13 @@ func (s *muxServer) resumePausedAttachForwarding(
 			}
 		}
 	}
+	// The clipboard packets were held apart from the redraw, so they reach
+	// the client that takes the primary output whatever replaced or trimmed
+	// the redraw. They go first, where the pause began.
+	if len(clipboard.packets) > 0 {
+		buffered = append(append([]byte(nil), clipboard.packets...), buffered...)
+		failoverBuffered = append(append([]byte(nil), clipboard.packets...), failoverBuffered...)
+	}
 	window.releaseRedrawForwardingStateLocked()
 	refreshPendingFocus = s.pendingFocusRefreshConn != nil &&
 		s.pendingFocusRefreshConn == s.attachConn &&
@@ -11193,6 +11217,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		initialOutput,
 		clients,
 		queryData,
+		clipboard.tags,
 		func(*attachClient) ([]byte, []byte) {
 			return failoverOutput, secondaryOutput
 		},
@@ -11339,6 +11364,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingAnsweredCursor = false
+	w.redrawForwardingClipboard = kittyClipboardDelivery{}
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
 }
@@ -11608,7 +11634,12 @@ func terminalModeReplaySequence(
 	privateModes []string,
 	includeApplicationKeypad bool,
 ) []byte {
-	var replay []byte
+	replay := appendGroupedPrivateModeReplay(
+		nil,
+		window,
+		privateModes,
+		alternateScreenReplayPrivateModes,
+	)
 	for _, mode := range privateModes {
 		if groupedReplayPrivateMode(mode) {
 			continue
@@ -11690,6 +11721,9 @@ func appendPrivateModeReplay(replay []byte, mode string, enabled bool) []byte {
 }
 
 func groupedReplayPrivateMode(mode string) bool {
+	if containsString(alternateScreenReplayPrivateModes, mode) {
+		return true
+	}
 	for _, group := range groupedReplayPrivateModes {
 		if containsString(group, mode) {
 			return true
@@ -11824,10 +11858,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 	failoverPrimaryData []byte,
 	secondaryData []byte,
 	queryData []byte,
+	clipboard kittyClipboardDelivery,
 	maxAttachSequence uint64,
 	outputGeneration uint64,
 ) {
 	if len(primaryData) == 0 {
+		s.settleKittyClipboardDelivery(windowID, clipboard.tags, nil)
 		return
 	}
 	s.attachMu.Lock()
@@ -11836,6 +11872,7 @@ func (s *muxServer) writeAttachOutputIfActive(
 	if s.activeID != windowID {
 		s.mu.Unlock()
 		s.attachMu.Unlock()
+		s.settleKittyClipboardDelivery(windowID, clipboard.tags, nil)
 		return
 	}
 	clients := make([]*attachClient, 0, len(s.attachClients))
@@ -11856,10 +11893,16 @@ func (s *muxServer) writeAttachOutputIfActive(
 			break
 		}
 	}
+	// A replay never carries clipboard packets, so output it already covered
+	// still delivers them, whole sequences that are safe after it.
+	replayed := queryData
+	if len(clipboard.packets) > 0 {
+		replayed = append(append([]byte(nil), clipboard.packets...), queryData...)
+	}
 	data := primaryData
 	if primaryClient != nil &&
 		primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
-		data = queryData
+		data = replayed
 	}
 	// Every client can answer a query, but only the ones attached before this
 	// output was produced are missing it.
@@ -11881,10 +11924,11 @@ func (s *muxServer) writeAttachOutputIfActive(
 		data,
 		fallbacks,
 		queryData,
+		clipboard.tags,
 		func(client *attachClient) ([]byte, []byte) {
 			if client.sequence > maxAttachSequence ||
 				client.suppressesReplayedOutput(windowID, outputGeneration) {
-				return queryData, nil
+				return replayed, nil
 			}
 			return failoverPrimaryData, secondaryData
 		},
@@ -11898,7 +11942,10 @@ func (s *muxServer) writeAttachOutputIfActive(
 // order; primaryClient itself is skipped) whose failover write succeeds takes
 // over, and every other client gets its secondary output. fallbackData picks
 // both per client; an empty failover means the client already holds the
-// output and counts as delivered without a write.
+// output and counts as delivered without a write. The OSC 5522 requests
+// named by clipboardTags, whose packets only the primary and failover
+// output carry, are handed to each client before its write can start, and
+// belong to the one that takes the output.
 //
 // With queries pending, the primary's write is awaited before any fallback
 // is released: the conditional query writes are queued behind gates while
@@ -11911,6 +11958,7 @@ func (s *muxServer) deliverWithQueryFallback(
 	primaryData []byte,
 	fallbacks []*attachClient,
 	queryData []byte,
+	clipboardTags []string,
 	fallbackData func(client *attachClient) (failover []byte, secondary []byte),
 ) {
 	if len(queryData) > 0 {
@@ -11924,6 +11972,7 @@ func (s *muxServer) deliverWithQueryFallback(
 		var primaryCompletion <-chan error
 		primaryQueued := false
 		if primaryClient != nil {
+			s.handKittyClipboardRequests(windowID, clipboardTags, primaryClient)
 			primaryCompletion, primaryQueued =
 				primaryClient.enqueueWrite(
 					primaryData,
@@ -11973,19 +12022,28 @@ func (s *muxServer) deliverWithQueryFallback(
 		s.attachMu.Unlock()
 		primaryDelivered := primaryQueued &&
 			primaryClient.waitForWrite(primaryCompletion)
+		var delivered *attachClient
+		if primaryDelivered {
+			delivered = primaryClient
+		}
 		for _, fallback := range gated {
 			tryFallback := !primaryDelivered
+			if tryFallback {
+				s.handKittyClipboardRequests(windowID, clipboardTags, fallback.client)
+			}
 			fallback.queryGate.deliver.Store(tryFallback)
 			close(fallback.queryGate.done)
 			if tryFallback &&
 				fallback.client.waitForWrite(fallback.queryCompletion) {
 				primaryDelivered = true
+				delivered = fallback.client
 			}
 			if fallback.secondaryOutputGate != nil {
 				fallback.secondaryOutputGate.deliver.Store(!tryFallback)
 				close(fallback.secondaryOutputGate.done)
 			}
 		}
+		s.settleKittyClipboardDelivery(windowID, clipboardTags, delivered)
 		if !primaryDelivered {
 			s.redeliverTerminalQueries(
 				windowID,
@@ -11998,6 +12056,7 @@ func (s *muxServer) deliverWithQueryFallback(
 	}
 	var deliveredPrimary *attachClient
 	if primaryClient != nil {
+		s.handKittyClipboardRequests(windowID, clipboardTags, primaryClient)
 		if _, queued := primaryClient.enqueue(primaryData, false); queued {
 			deliveredPrimary = primaryClient
 		}
@@ -12010,6 +12069,7 @@ func (s *muxServer) deliverWithQueryFallback(
 			continue
 		}
 		failover, _ := fallbackData(client)
+		s.handKittyClipboardRequests(windowID, clipboardTags, client)
 		if _, queued := client.enqueue(failover, false); queued {
 			deliveredPrimary = client
 		}
@@ -12023,6 +12083,7 @@ func (s *muxServer) deliverWithQueryFallback(
 		}
 	}
 	s.attachMu.Unlock()
+	s.settleKittyClipboardDelivery(windowID, clipboardTags, deliveredPrimary)
 }
 
 func (s *muxServer) enqueuePrimaryAttachLocked(
@@ -14900,6 +14961,7 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 		} else {
 			// A retransmission replaces the image and every placement of it.
 			w.dropKittyImagePlacementsLocked(id)
+			w.noteKittyRootScreenLocked(id, screen.at(event.offset))
 			w.storeKittyImageLocked(id, event.buf)
 			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
 				!kittyNonZero(event.control["P"]) {
@@ -15017,6 +15079,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageToken = nil
 	w.kittyPlacements = nil
 	w.kittyTracking.physical = nil
+	w.kittyTracking.rootAlt = nil
 	return changed
 }
 

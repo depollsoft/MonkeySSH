@@ -1186,6 +1186,7 @@ func TestWindowOutputSkipsClientsThatJoinedAfterObservation(t *testing.T) {
 		[]byte("once"),
 		[]byte("once"),
 		nil,
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1222,6 +1223,7 @@ func TestTerminalQueryRetryCanUseClientThatJoinedAfterObservation(t *testing.T) 
 		[]byte("\x1b[c"),
 		nil,
 		[]byte("\x1b[c"),
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1269,6 +1271,7 @@ func TestLiveQueryWaitDoesNotHoldAttachLock(t *testing.T) {
 			[]byte("before\x1b[>qafter"),
 			[]byte("beforeafter"),
 			[]byte("\x1b[>q"),
+			kittyClipboardDelivery{},
 			primary.sequence,
 			0,
 		)
@@ -2250,6 +2253,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("new output"),
 		[]byte("new output"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -2267,6 +2271,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("next"),
 		[]byte("next"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		2,
 	)
@@ -2318,6 +2323,7 @@ func TestClientFocusReplayStillDeliversReplayedTerminalQuery(t *testing.T) {
 		query,
 		nil,
 		query,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -6669,8 +6675,8 @@ func TestAttachWriteSkipsStaleActiveWindowOutput(t *testing.T) {
 
 	stale := []byte("stale old output")
 	fresh := []byte("fresh new output")
-	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, ^uint64(0), 0)
-	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
 
 	waitForRecordedOutput(t, attach, "fresh new output")
 }
