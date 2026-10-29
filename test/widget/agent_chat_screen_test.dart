@@ -39,6 +39,7 @@ import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_permission_surface.dart';
 import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
+import 'package:monkeyssh/presentation/widgets/scroll_edge_fade.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
@@ -1128,6 +1129,56 @@ void main() {
 
       expect(tester.getSize(find.text(longModel)).width, 110);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a pill row wider than its box fades where it scrolls', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(morePills: true)]),
+          embedded: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final row = find.descendant(
+        of: find.byKey(const ValueKey('acp-composer-controls')),
+        matching: find.byType(ListView),
+      );
+      ScrollEdgeFadeState fade() =>
+          tester.state<ScrollEdgeFadeState>(find.byType(ScrollEdgeFade));
+      expect((fade().fadesStart, fade().fadesEnd), (false, true));
+
+      await tester.drag(row, const Offset(-60, 0));
+      await tester.pumpAndSettle();
+      expect((fade().fadesStart, fade().fadesEnd), (true, true));
+
+      await tester.drag(row, const Offset(-2000, 0));
+      await tester.pumpAndSettle();
+      expect((fade().fadesStart, fade().fadesEnd), (true, false));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a pill row that fits does not fade', (tester) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(951, 669));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession()]),
+          size: const Size(951, 669),
+          embedded: true,
+          preferredFontSize: 8,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final fade = tester.state<ScrollEdgeFadeState>(
+        find.byType(ScrollEdgeFade),
+      );
+      expect((fade.fadesStart, fade.fadesEnd), (false, false));
     });
   });
 

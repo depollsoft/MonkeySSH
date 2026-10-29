@@ -79,6 +79,7 @@ import '../widgets/acp_unread_digest_bar.dart';
 import '../widgets/acp_writer_lease_banner.dart';
 import '../widgets/brand_error_state.dart';
 import '../widgets/cursor_block.dart';
+import '../widgets/scroll_edge_fade.dart';
 import '../widgets/system_vertical_bar.dart';
 import '../widgets/terminal_overlay_focus.dart';
 import '../widgets/terminal_pinch_zoom_gesture_handler.dart';
@@ -874,21 +875,23 @@ class _AgentChatScreenState extends ConsumerState<AgentChatScreen> {
               selectors,
               rowWidth: constraints.maxWidth,
             );
-            return ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: selectors.length,
-              separatorBuilder: (_, _) =>
-                  const SizedBox(width: _AcpQuickSelector.gap),
-              itemBuilder: (context, index) {
-                final selector = selectors[index];
-                return _AcpQuickSelector(
-                  key: selector.label == 'Permission'
-                      ? const ValueKey('permission-mode-pill')
-                      : ValueKey(selector.label),
-                  selector: selector,
-                  labelMaxWidth: labelMaxWidth,
-                );
-              },
+            return ScrollEdgeFade(
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: selectors.length,
+                separatorBuilder: (_, _) =>
+                    const SizedBox(width: _AcpQuickSelector.gap),
+                itemBuilder: (context, index) {
+                  final selector = selectors[index];
+                  return _AcpQuickSelector(
+                    key: selector.label == 'Permission'
+                        ? const ValueKey('permission-mode-pill')
+                        : ValueKey(selector.label),
+                    selector: selector,
+                    labelMaxWidth: labelMaxWidth,
+                  );
+                },
+              ),
             );
           },
         ),
