@@ -881,13 +881,17 @@ void main() {
       pasteboardResults = {'image': png};
       clipboardText = 'text';
       var hasImages = true;
+      final anyImage = Uint8List.fromList([...png, 4]);
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(iosClipboard, (call) async {
             calls.add('clipboard.${call.method}');
-            return hasImages;
+            return call.method == 'hasImages' ? hasImages : anyImage;
           });
 
       expect(await platform.availableTypes(), ['image/png', 'text/plain']);
+      // The listed image is read from any item, as hasImages looks at all of
+      // them; the plugin's reader only sees the first.
+      expect(await platform.read('image/png'), anyImage);
       hasImages = false;
       expect(await platform.availableTypes(), ['text/plain']);
       expect(calls, contains('clipboard.hasImages'));

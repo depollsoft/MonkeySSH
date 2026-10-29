@@ -137,18 +137,24 @@ import UserNotifications
   }
 
   // Lets the kitty clipboard protocol list an image without reading it:
-  // hasImages, unlike reading the image, never shows the paste prompt.
+  // hasImages, unlike reading the image, never shows the paste prompt. It
+  // looks at every pasteboard item, so the image is read from any item too
+  // (UIPasteboard.image reads only the first).
   private func setupClipboardChannel(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(
       name: clipboardChannelName,
       binaryMessenger: registrar.messenger()
     )
     channel.setMethodCallHandler { call, result in
-      guard call.method == "hasImages" else {
+      switch call.method {
+      case "hasImages":
+        result(UIPasteboard.general.hasImages)
+      case "imagePng":
+        let png = UIPasteboard.general.images?.first?.pngData()
+        result(png.map { FlutterStandardTypedData(bytes: $0) })
+      default:
         result(FlutterMethodNotImplemented)
-        return
       }
-      result(UIPasteboard.general.hasImages)
     }
     clipboardChannel = channel
   }

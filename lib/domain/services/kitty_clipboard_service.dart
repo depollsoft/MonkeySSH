@@ -55,7 +55,8 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
           defaultTargetPlatform == TargetPlatform.windows);
 
   /// iOS reports whether the clipboard holds an image here, through
-  /// `UIPasteboard.hasImages`.
+  /// `UIPasteboard.hasImages`, and reads it as PNG from whichever item holds
+  /// it: the plugin's reader only looks at the first item.
   static const _iosClipboardChannel = MethodChannel(
     'xyz.depollsoft.monkeyssh/clipboard',
   );
@@ -65,8 +66,7 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
     final types = <String>[];
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
       // Reading the image would show the paste permission prompt, but
-      // hasImages, like hasStrings, never does. The plugin reads every
-      // image as PNG.
+      // hasImages, like hasStrings, never does. The image is read as PNG.
       if (await _iosClipboardHasImages()) {
         types.add('image/png');
       }
@@ -100,7 +100,7 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
       return html == null ? null : utf8.encode(html);
     }
     if (mime.startsWith('image/')) {
-      final image = await _readImage();
+      final image = await _readListedImage();
       if (image == null || kittyClipboardImageMime(image) != mime) {
         return null;
       }
@@ -149,6 +149,21 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
   Future<Uint8List?> _readImage() async {
     final image = await Pasteboard.image;
     return image == null || image.isEmpty ? null : image;
+  }
+
+  /// The image a listing advertises: on iOS from any item, like hasImages.
+  Future<Uint8List?> _readListedImage() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return _readImage();
+    }
+    try {
+      final image = await _iosClipboardChannel.invokeMethod<Uint8List>(
+        'imagePng',
+      );
+      return image == null || image.isEmpty ? null : image;
+    } on MissingPluginException {
+      return _readImage();
+    }
   }
 
   Future<String?> _readHtml() => Pasteboard.html;
