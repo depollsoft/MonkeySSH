@@ -3257,6 +3257,69 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     });
 
     test(
+      'a login shell after a finished command starts in replace mode',
+      () async {
+        final client = _MockSshClient();
+        final startupShell = _MockExecSession();
+        final loginShell = _MockExecSession();
+        final startupOutput = StreamController<Uint8List>();
+        final startupDone = Completer<void>();
+        final loginDone = Completer<void>();
+        final loginOpen = Completer<SSHSession>();
+        var executions = 0;
+        final session = _testSession(
+          client,
+          hostId: 2,
+          hostname: 'example.com',
+        );
+        const pty = SSHPtyConfig(width: 120, height: 30);
+
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+          (_) =>
+              ++executions == 1 ? Future.value(startupShell) : loginOpen.future,
+        );
+        when(() => startupShell.stdout).thenAnswer((_) => startupOutput.stream);
+        when(() => loginShell.stdout).thenAnswer((_) => const Stream.empty());
+        for (final (shell, done) in [
+          (startupShell, startupDone),
+          (loginShell, loginDone),
+        ]) {
+          when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
+          when(() => shell.done).thenAnswer((_) => done.future);
+          when(() => shell.write(any())).thenAnswer((_) {});
+          when(shell.close).thenAnswer((_) {});
+        }
+        addTearDown(() async {
+          await session.closeShell(waitForStreams: false);
+          await startupOutput.close();
+          if (!startupDone.isCompleted) startupDone.complete();
+          if (!loginDone.isCompleted) loginDone.complete();
+        });
+
+        await session.getShell(
+          pty: pty,
+          command: 'monkeymux attach work',
+          returnToLoginShell: true,
+        );
+        final terminal = session.getOrCreateTerminal();
+        startupOutput.add(utf8.encode('\x1b[4h'));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(terminal.insertMode, isTrue);
+
+        startupDone.complete();
+        await untilCalled(
+          () => client.execute(
+            any(that: contains('COLORTERM=truecolor')),
+            pty: pty,
+          ),
+        );
+        loginOpen.complete(loginShell);
+        expect(await session.getShell(), same(loginShell));
+        expect(terminal.insertMode, isFalse);
+      },
+    );
+
+    test(
       'falls back to shell request when truecolor bootstrap is rejected',
       () async {
         final client = _MockSshClient();

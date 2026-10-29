@@ -26,10 +26,8 @@ DECALNTests.test_DECALN_ClearsMargins
 DECALNTests.test_DECALN_FillsScreen
 DECALNTests.test_DECALN_MovesCursorHome
 
-# IRM: the terminal records the mode but doesn't shift cells. The app makes
-# up for it by inserting ICH before each printed cell
-# (TerminalXtermOutputDecoder in lib/domain/services/ssh_service.dart),
-# which this harness doesn't run.
+# IRM truncating at a right margin needs DECSLRM (left/right margins), which
+# the terminal doesn't implement.
 SMTests.test_SM_IRM_TruncatesAtRightMargin
 
 # Not implemented: reverse wraparound (DECSET 45 and 1045).

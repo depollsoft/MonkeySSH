@@ -1591,6 +1591,9 @@ if(!$__flResolved){$__flResolved='cmd'}
     _discardSynchronizedOutputHold();
     _lastTerminalParseNotifyAtMs = null;
     _terminalOutputDecoder.reset();
+    // Insert mode belongs to the program on the old channel; the next one
+    // starts in replace mode.
+    _terminal?.setInsertMode(false);
   }
 
   /// Drains any queued terminal parse backlog immediately, ignoring the frame
