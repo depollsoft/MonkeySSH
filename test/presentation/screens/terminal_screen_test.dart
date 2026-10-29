@@ -10854,6 +10854,65 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
 
+    testWidgets('a native agent conversation hides the terminal it replaces', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const bridgeId = '0123456789abcdef0123456789abcdef';
+      final key = fakeAcpKey(
+        hostId: host.id,
+        providerId: AcpBuiltinProviderIds.pi,
+        bridgeId: bridgeId,
+        acpSessionId: 'native-session',
+      );
+      final acpManager = FakeAcpSessionManager(
+        sessions: [fakeAcpSession(key: key, providerLabel: 'Pi')],
+      );
+      addTearDown(acpManager.dispose);
+      session.activeNativeAcpSessionKey = key;
+      addTearDown(() => session.activeNativeAcpSessionKey = null);
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: bridgeId,
+            nativeAcpProviderId: AcpBuiltinProviderIds.pi,
+          ),
+        ],
+      );
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        acpSessionManager: acpManager,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsOneWidget);
+      expect(session.terminal!.visible, isFalse);
+
+      tester
+          .widget<AgentChatScreen>(find.byType(AgentChatScreen))
+          .onExitEmbedded!();
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsNothing);
+      expect(session.terminal!.visible, isTrue);
+    });
+
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
     ) async {

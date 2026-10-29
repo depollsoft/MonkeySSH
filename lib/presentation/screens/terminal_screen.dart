@@ -12217,6 +12217,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       activeSessionsProvider.select(_selectTrackedConnectionState),
       _handleTrackedConnectionStateChange,
     );
+    // A native agent conversation takes the terminal's place, hiding it.
+    _terminalVisibility.showsTerminal =
+        _nativeAcpLaunchState == null && _activeNativeAcpSessionKey == null;
     final theme = Theme.of(context);
     final connectionState = ref.watch(
       activeSessionsProvider.select(_selectTrackedConnectionState),

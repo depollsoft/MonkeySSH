@@ -7,8 +7,9 @@ import '../../domain/services/ssh_service.dart';
 /// drives visibility reports (DEC private mode 2033), and tells the session's
 /// multiplexer through [onSessionVisibilityChanged].
 ///
-/// A terminal may be visible while the app is in the foreground and the screen
-/// is on stage: no opaque route covers it (`TickerMode` is enabled). Visibility
+/// A terminal may be visible while the app is in the foreground, the screen
+/// is on stage (no opaque route covers it: `TickerMode` is enabled) and the
+/// screen shows the terminal rather than something in its place. Visibility
 /// reports may say "hidden" only with positive knowledge, so an inactive app,
 /// which can still be on screen (split screen, a system sheet over it), counts
 /// as visible.
@@ -32,12 +33,14 @@ class TerminalVisibilityController {
 
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool _onstage = true;
+  bool _showsTerminal = true;
   Terminal? _terminal;
   SshSession? _session;
 
   /// Whether this screen may be visible to the user.
   bool get visible =>
       _onstage &&
+      _showsTerminal &&
       switch (_lifecycleState) {
         AppLifecycleState.resumed || AppLifecycleState.inactive => true,
         AppLifecycleState.hidden ||
@@ -61,6 +64,20 @@ class TerminalVisibilityController {
   /// (`TickerMode.valuesOf(context).enabled`).
   set onstage(bool value) {
     _onstage = value;
+    _apply();
+  }
+
+  /// Whether the screen shows the terminal, rather than other content in its
+  /// place such as a native agent conversation.
+  bool get showsTerminal => _showsTerminal;
+
+  /// Applies whether the screen shows the terminal. Screens set it on every
+  /// build, so only a change is applied.
+  set showsTerminal(bool value) {
+    if (_showsTerminal == value) {
+      return;
+    }
+    _showsTerminal = value;
     _apply();
   }
 
