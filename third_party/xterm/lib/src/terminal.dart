@@ -217,6 +217,12 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   bool _graphicsActive = false;
   Map<String, String> _graphicsArgs = const {};
   final List<int> _graphicsData = [];
+
+  /// Counts [resetForNextProgram] calls. A graphics command keeps the count
+  /// from when it ended, so one still decoding when its program ended does not
+  /// answer the program that follows.
+  int _programGeneration = 0;
+  final _graphicsCommandGeneration = Expando<int>();
   final Map<GraphicsManager, Map<String, Future<void>>> _graphicsOperations =
       {};
   _PendingKittyPlaceholder? _pendingKittyPlaceholder;
@@ -864,15 +870,28 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// set, for instance a MonkeyMux attach dropped before it could write its
   /// exit sequences. The shell started after it would then receive focus,
   /// mouse and Kitty keyboard reports it never asked for. This leaves the
-  /// alternate screen as `CSI ? 1049 l` does and resets every mode [fullReset]
-  /// resets, plus an open MonkeyMux synchronized redraw, whose server is gone.
+  /// alternate screen, with the cursor where the main screen left it, and
+  /// resets every mode [fullReset] resets, plus an open MonkeyMux
+  /// synchronized redraw, whose server is gone.
   /// Unlike [fullReset] it erases nothing and keeps the cursor position and
   /// the tab stops, so the program's last output on the main screen stays.
+  ///
+  /// The program's output may also have stopped partway through an escape
+  /// sequence or a chunked Kitty image. Both are dropped, so the next
+  /// program's output is not read as their remainder (an unterminated title
+  /// would swallow the shell's prompt) and its images are not refused. Images
+  /// it sent that are still decoding finish, but send it no reply.
   void resetForNextProgram() {
-    if (isUsingAltBuffer) {
-      useMainBuffer();
-      restoreCursor();
-    }
+    _programGeneration += 1;
+    _parser.reset();
+    graphicsCommandAbort();
+    _precedingCodepoint = 0;
+    _pendingKittyPlaceholder = null;
+    _lastKittyPlaceholder = null;
+    // The main screen kept its own cursor while the alternate one was shown,
+    // which is where `CSI ? 1049 l` would put it back too. Restoring the saved
+    // cursor instead would home it after `CSI ? 47 h`, which saves none.
+    useMainBuffer();
     _mouseMode = MouseMode.none;
     _mouseReportMode = MouseReportMode.normal;
     _altBufferMouseScrollMode = false;
@@ -883,8 +902,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _monkeyMuxSynchronizedOutput = false; // DEC mode 9002
     _mainKittyKeyboardState.reset();
     _altKittyKeyboardState.reset();
-    // Last: it resets the saved cursor that leaving the alternate screen used,
-    // and notifies listeners.
+    // Last: it notifies listeners.
     softReset();
   }
 
@@ -1666,6 +1684,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _graphicsActive = false;
 
     final args = _graphicsArgs;
+    _graphicsCommandGeneration[args] = _programGeneration;
     final data = Uint8List.fromList(_graphicsData);
     _graphicsData.clear();
 
@@ -2925,6 +2944,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     Map<String, String> args, {
     required bool success,
   }) {
+    final generation = _graphicsCommandGeneration[args];
+    if (generation != null && generation != _programGeneration) {
+      return true;
+    }
     final quiet = args['q'];
     return success ? quiet == '1' || quiet == '2' : quiet == '2';
   }

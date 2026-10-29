@@ -3296,11 +3296,12 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     // A MonkeyMux attach the server dropped ends without writing its exit
     // sequences. The login shell that replaces it must not inherit the
-    // attach's modes or answers: zsh echoed the focus report the screen sent
-    // on this transition as `^[[O` ahead of its first prompt.
-    test(
-      'hands the login shell a terminal the ended command no longer holds',
-      () async {
+    // attach's modes, answers or half-written sequences: zsh echoed the focus
+    // report the screen sent on this transition as `^[[O` ahead of its first
+    // prompt.
+    for (final screenOwnsOutput in [false, true]) {
+      test('hands the login shell a terminal the ended command no longer holds'
+          '${screenOwnsOutput ? ' (screen output handler)' : ''}', () async {
         final client = _MockSshClient();
         final startupShell = _MockExecSession();
         final loginShell = _MockExecSession();
@@ -3358,20 +3359,29 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           returnToLoginShell: true,
         );
         final terminal = session.getOrCreateTerminal();
+        // Stands in for the screen's handler, whose Enter pacer can hold
+        // replies and send them after the login shell has opened.
+        final screenOutput = <String>[];
+        final screenHandler = screenOutput.add;
+        if (screenOwnsOutput) {
+          terminal.onOutput = screenHandler;
+        }
         var focusModeAtCompletion = true;
         final commandCompletedSubscription = session.shellCommandCompletedStream
             .listen((_) => focusModeAtCompletion = terminal.reportFocusMode);
         addTearDown(commandCompletedSubscription.cancel);
 
-        // The attach's last output: an agent pane's screen and input modes, and
-        // a frame cut off by the drop. The runtime holds an open synchronized
-        // frame until it ends, so its device attributes query is only answered
-        // once the attach is gone.
+        // The attach's last output: an agent pane's screen and input modes,
+        // and a frame cut off by the drop partway through a title. The
+        // runtime holds an open synchronized frame until it ends, so its
+        // device attributes query (answered by the terminal) and its program
+        // status query (answered by the session) are only parsed once the
+        // attach is gone.
         startupStdout.add(
           Uint8List.fromList(
             utf8.encode(
               '\x1b[?1049h\x1b[?1004h\x1b[?1002h\x1b[?2004h'
-              '\x1b[?2026hagent\x1b[c',
+              '\x1b[?2026hagent\x1b[c\x1b]7501;?\x1b\\\x1b]0;agen',
             ),
           ),
         );
@@ -3388,13 +3398,22 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         expect(terminal.reportFocusMode, isFalse);
         expect(terminal.mouseMode, MouseMode.none);
         expect(terminal.bracketedPasteMode, isFalse);
+        if (screenOwnsOutput) {
+          expect(terminal.onOutput, same(screenHandler));
+        }
+        expect(screenOutput, isEmpty);
 
         session.writeToShell('typed');
         loginOpen.complete(loginShell);
         expect(await session.getShell(), same(loginShell));
         expect(loginWrites.map(utf8.decode).join(), 'typed');
-      },
-    );
+
+        loginStdout.add(Uint8List.fromList(utf8.encode('login prompt')));
+        await pumpEventQueue();
+        session.debugFlushPendingTerminalOutput();
+        expect(terminal.buffer.getText(), contains('login prompt'));
+      });
+    }
 
     test(
       'falls back to shell request when truecolor bootstrap is rejected',

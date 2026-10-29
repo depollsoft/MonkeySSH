@@ -26,6 +26,12 @@ class EscapeParser {
     _process();
   }
 
+  /// Drops a sequence still waiting for the rest of its bytes, so the next
+  /// [write] starts in the ground state.
+  void reset() {
+    _queue.reset();
+  }
+
   void _process() {
     while (_queue.isNotEmpty) {
       final tokenBegin = _queue.totalConsumed;

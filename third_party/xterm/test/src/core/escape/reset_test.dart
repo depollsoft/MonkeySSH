@@ -316,6 +316,19 @@ void main() {
       expect(terminal.buffer.cursorY, 0);
     });
 
+    test('leaves an alternate screen entered without saving the cursor', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[5;10Hmain text');
+      final x = terminal.buffer.cursorX;
+      terminal.write('\x1b[?1047h\x1b[2;2Halt text');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.isUsingAltBuffer, isFalse);
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, 4);
+    });
+
     test('keeps the main screen and the cursor when it is already shown', () {
       final terminal = newTerminal();
       terminal.write('\x1b[3;4H\x1b7'); // a stale DECSC
@@ -356,6 +369,41 @@ void main() {
       expect(terminal.kittyKeyboardFlags, 0);
       terminal.write('\x1b[?1049h');
       expect(terminal.kittyKeyboardFlags, 0);
+    });
+
+    test('drops a sequence the program never finished', () {
+      final terminal = newTerminal();
+      final titles = <String>[];
+      terminal.onTitleChange = titles.add;
+      terminal.write('\x1b]0;agen');
+
+      terminal.resetForNextProgram();
+      terminal.write('prompt %\x1b]0;shell\x07');
+
+      expect(terminal.buffer.getText(), contains('prompt %'));
+      expect(titles, ['shell']);
+    });
+
+    test('drops a chunked Kitty image the program never finished', () {
+      final terminal = newTerminal();
+      final pixel = base64.encode(const [0xFF, 0x00, 0x00, 0xFF]);
+      terminal.write('\x1b_Ga=T,f=32,s=1,v=1,i=7,q=2,m=1;$pixel\x1b\\');
+      const inlineArgs = {'a': 'T', 'f': '32', 's': '1', 'v': '1', 'q': '2'};
+      expect(
+        terminal.submitGraphicsCommand(inlineArgs, const []),
+        isFalse,
+        reason: 'the open transmission refuses other images',
+      );
+
+      terminal.resetForNextProgram();
+
+      expect(
+        terminal.submitGraphicsCommand(
+          inlineArgs,
+          const [0x00, 0xFF, 0x00, 0xFF],
+        ),
+        isTrue,
+      );
     });
   });
 
