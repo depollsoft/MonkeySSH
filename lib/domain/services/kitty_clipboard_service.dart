@@ -54,13 +54,23 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
           defaultTargetPlatform == TargetPlatform.android ||
           defaultTargetPlatform == TargetPlatform.windows);
 
+  /// iOS reports whether the clipboard holds an image here, through
+  /// `UIPasteboard.hasImages`.
+  static const _iosClipboardChannel = MethodChannel(
+    'xyz.depollsoft.monkeyssh/clipboard',
+  );
+
   @override
   Future<List<String>> availableTypes() async {
     final types = <String>[];
-    // Probing an image reads it, which on iOS shows the paste permission
-    // prompt, so iOS lists text only; a program can still ask for an image
-    // type by name. hasStrings never prompts.
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      // Reading the image would show the paste permission prompt, but
+      // hasImages, like hasStrings, never does. The plugin reads every
+      // image as PNG.
+      if (await _iosClipboardHasImages()) {
+        types.add('image/png');
+      }
+    } else {
       final image = await _readImage();
       final imageMime = image == null ? null : kittyClipboardImageMime(image);
       if (imageMime != null) {
@@ -123,6 +133,17 @@ class SystemKittyClipboardPlatform implements KittyClipboardPlatform {
       }
     }
     return null;
+  }
+
+  Future<bool> _iosClipboardHasImages() async {
+    try {
+      return await _iosClipboardChannel.invokeMethod<bool>('hasImages') ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
   }
 
   Future<Uint8List?> _readImage() async {

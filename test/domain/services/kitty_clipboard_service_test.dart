@@ -786,6 +786,7 @@ void main() {
   group('SystemKittyClipboardPlatform', () {
     TestWidgetsFlutterBinding.ensureInitialized();
     const pasteboard = MethodChannel('pasteboard');
+    const iosClipboard = MethodChannel('xyz.depollsoft.monkeyssh/clipboard');
     final png = Uint8List.fromList([
       0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, //
     ]);
@@ -821,6 +822,7 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         ..setMockMethodCallHandler(pasteboard, null)
+        ..setMockMethodCallHandler(iosClipboard, null)
         ..setMockMethodCallHandler(SystemChannels.platform, null);
     });
 
@@ -875,13 +877,26 @@ void main() {
 
     test('iOS lists types without reading the image', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const platform = SystemKittyClipboardPlatform();
       pasteboardResults = {'image': png};
       clipboardText = 'text';
+      var hasImages = true;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(iosClipboard, (call) async {
+            calls.add('clipboard.${call.method}');
+            return hasImages;
+          });
 
-      expect(await const SystemKittyClipboardPlatform().availableTypes(), [
-        'text/plain',
-      ]);
+      expect(await platform.availableTypes(), ['image/png', 'text/plain']);
+      hasImages = false;
+      expect(await platform.availableTypes(), ['text/plain']);
+      expect(calls, contains('clipboard.hasImages'));
       expect(calls, isNot(contains('pasteboard.image')));
+
+      // An app without the native channel lists text only.
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(iosClipboard, null);
+      expect(await platform.availableTypes(), ['text/plain']);
     });
 
     test('a write keeps text first, otherwise an image', () async {
