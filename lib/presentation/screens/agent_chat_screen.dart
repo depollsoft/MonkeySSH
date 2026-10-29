@@ -2341,8 +2341,9 @@ class _AcpQuickSelector extends StatefulWidget {
 
   /// How wide the labels of [selectors] may grow in a row [rowWidth] wide.
   /// Labels stop at [_labelBaseMaxWidth] while the pills fill the row; room
-  /// the row has left is shared among the labels that are cut short, so a
-  /// long model name shows in full when there is space for it.
+  /// the row has left goes to the labels that are cut short, those that need
+  /// least first, so a long model name shows in full when there is space for
+  /// it.
   static double labelMaxWidthFor(
     BuildContext context,
     List<AcpQuickSelectorData> selectors, {
@@ -2351,7 +2352,8 @@ class _AcpQuickSelector extends StatefulWidget {
     final style = _labelStyle(Theme.of(context));
     final textScaler = MediaQuery.textScalerOf(context);
     var used = gap * (selectors.length - 1);
-    var cut = 0;
+    // How much wider than the base each cut label is.
+    final overflows = <double>[];
     for (final selector in selectors) {
       final painter = TextPainter(
         text: TextSpan(text: _labelOf(selector), style: style),
@@ -2360,12 +2362,24 @@ class _AcpQuickSelector extends StatefulWidget {
         maxLines: 1,
       )..layout();
       used += _chromeWidth + math.min(painter.width, _labelBaseMaxWidth);
-      if (painter.width > _labelBaseMaxWidth) cut++;
+      if (painter.width > _labelBaseMaxWidth) {
+        overflows.add(painter.width - _labelBaseMaxWidth);
+      }
       painter.dispose();
     }
-    final room = rowWidth - used;
-    if (cut == 0 || !room.isFinite || room <= 0) return _labelBaseMaxWidth;
-    return _labelBaseMaxWidth + room / cut;
+    var room = rowWidth - used;
+    if (overflows.isEmpty || !room.isFinite || room <= 0) {
+      return _labelBaseMaxWidth;
+    }
+    // One cap serves every label, so a label shorter than it keeps only
+    // what it needs and leaves the rest to the longer ones.
+    overflows.sort();
+    for (final (index, overflow) in overflows.indexed) {
+      final share = room / (overflows.length - index);
+      if (overflow > share) return _labelBaseMaxWidth + share;
+      room -= overflow;
+    }
+    return _labelBaseMaxWidth + overflows.last;
   }
 
   @override

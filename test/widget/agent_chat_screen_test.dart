@@ -1073,21 +1073,27 @@ void main() {
     });
 
     const longModel = 'Claude Sonnet 4.5 (1M context)';
-    AcpSessionState modelSession({bool morePills = false}) => fakeAcpSession(
-      modelState: const AcpModelState(
-        currentModelId: 'sonnet',
-        availableModels: [AcpModelInfo(id: 'sonnet', name: longModel)],
-      ),
-      modeState: morePills
-          ? const AcpSessionModeState(
-              currentModeId: 'agent',
-              availableModes: [
-                AcpSessionMode(id: 'agent', name: 'Agent'),
-                AcpSessionMode(id: 'plan', name: 'Plan'),
-              ],
-            )
-          : null,
-    );
+    AcpSessionState modelSession({bool morePills = false, String? mode}) =>
+        fakeAcpSession(
+          modelState: const AcpModelState(
+            currentModelId: 'sonnet',
+            availableModels: [AcpModelInfo(id: 'sonnet', name: longModel)],
+          ),
+          modeState: mode != null
+              ? AcpSessionModeState(
+                  currentModeId: 'mode',
+                  availableModes: [AcpSessionMode(id: 'mode', name: mode)],
+                )
+              : morePills
+              ? const AcpSessionModeState(
+                  currentModeId: 'agent',
+                  availableModes: [
+                    AcpSessionMode(id: 'agent', name: 'Agent'),
+                    AcpSessionMode(id: 'plan', name: 'Plan'),
+                  ],
+                )
+              : null,
+        );
 
     testWidgets('the model label grows into room the pill row has', (
       tester,
@@ -1111,6 +1117,41 @@ void main() {
       )..layout()).width;
       expect(full, greaterThan(110));
       expect(tester.getSize(find.text(longModel)).width, closeTo(full, 0.01));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a label just over 110 pt leaves the model label the rest of '
+        'the room', (tester) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1366, 1024));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(mode: 'Plan review')]),
+          size: const Size(1366, 1024),
+          embedded: true,
+          preferredFontSize: 12,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      double fullWidth(String text) {
+        final label = tester.widget<Text>(find.text(text));
+        return (TextPainter(
+          text: TextSpan(text: text, style: label.style),
+          textDirection: TextDirection.ltr,
+        )..layout()).width;
+      }
+
+      // The row has room for both in full, but not for an even split of
+      // what is left: the mode label needs far less than half.
+      expect(fullWidth('Plan review'), greaterThan(110));
+      for (final text in ['Plan review', longModel]) {
+        expect(
+          tester.getSize(find.text(text)).width,
+          closeTo(fullWidth(text), 0.01),
+          reason: text,
+        );
+      }
       expect(tester.takeException(), isNull);
     });
 
