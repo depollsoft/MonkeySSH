@@ -1489,8 +1489,7 @@ func (c *stalledWriteConn) Write(data []byte) (int, error) {
 
 // A read whose first client began answering before its write failed stays
 // with that client: the program gets the answer it started, ended EBUSY when
-// the client goes, and nothing of the client the output failed over to, even
-// a reply of that client's split across its reads.
+// the client goes, and nothing of the client the output failed over to.
 func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
 	server, first, _, attachB := newKittyClipboardTestServer(t)
 	clientB := startKittyClipboardInputWorker(t, server, attachB)
@@ -1519,20 +1518,52 @@ func TestKittyClipboardReadStaysWithTheClientAnsweringIt(t *testing.T) {
 	close(attachA.release)
 	<-delivered
 	waitForAttachOutput(t, attachB, "id="+tag+";")
-	// The fallback client's answer, split after its first bytes, is still
-	// recognised as a reply and dropped rather than typed into the program.
-	clientB.inputDispatchMu.Lock()
-	input, _ := clientB.splitKittyClipboardRepliesLocked([]byte("\x1b]55"), time.Now())
-	clientB.inputDispatchMu.Unlock()
-	if len(input) != 0 {
-		t.Fatalf("part of the fallback client's reply went to the program as input: %q", input)
-	}
 	sendKittyClipboardReply(clientB,
-		"22;type=read:status=OK:id="+tag+"\x1b\\"+
+		"\x1b]5522;type=read:status=OK:id="+tag+"\x1b\\"+
 			"\x1b]5522;type=read:status=DATA:id="+tag+":mime=dGV4dC9wbGFpbg==;Qg==\x1b\\"+
 			"\x1b]5522;type=read:status=DONE:id="+tag+"\x1b\\")
 	<-workerA
 	waitForWindowPtyOutput(t, first, started+"\x1b]5522;type=read:status=EBUSY:id=r\x1b\\")
+}
+
+// A client that gets a read another client has begun answering owes a reply
+// MonkeyMux will drop, counted while the read is open so a reply it splits
+// across its reads is still recognised rather than typed into the program.
+func TestKittyClipboardBystanderOwesTheReadWhileItIsOpen(t *testing.T) {
+	server, first, _, attachB := newKittyClipboardTestServer(t)
+	clientA := registerTestAttachClient(t, server, &recordingConn{}, "answering", 80, 24)
+	server.mu.Lock()
+	clientB := server.attachClients[attachB]
+	clientA.kittyClipboardInput.outstanding.Add(1)
+	first.kittyClipboard.requests = append(first.kittyClipboard.requests, kittyClipboardRequest{
+		tag: "mmx1.1", op: "read", id: "r", client: clientA, delivering: true, replied: true,
+	})
+	server.mu.Unlock()
+
+	server.handKittyClipboardRequests("@1", []string{"mmx1.1", "mmx1.1"}, clientB)
+	server.handKittyClipboardRequests("@1", []string{"mmx1.1"}, clientA)
+	server.mu.Lock()
+	request := first.kittyClipboard.requests[0]
+	server.mu.Unlock()
+	if request.client != clientA || len(request.bystanders) != 1 || request.bystanders[0] != clientB {
+		t.Fatalf("request after the hand-offs: client %p, bystanders %v", request.client, request.bystanders)
+	}
+	if got := clientB.kittyClipboardInput.outstanding.Load(); got != 1 {
+		t.Fatalf("bystander owes %d replies, want 1", got)
+	}
+	clientB.inputDispatchMu.Lock()
+	input, _ := clientB.splitKittyClipboardRepliesLocked([]byte("\x1b]55"), time.Now())
+	clientB.inputDispatchMu.Unlock()
+	if len(input) != 0 {
+		t.Fatalf("the start of the bystander's reply went to the program: %q", input)
+	}
+
+	server.mu.Lock()
+	first.removeKittyClipboardRequestLocked(0)
+	server.mu.Unlock()
+	if a, b := clientA.kittyClipboardInput.outstanding.Load(), clientB.kittyClipboardInput.outstanding.Load(); a != 0 || b != 0 {
+		t.Fatalf("after the read ends the clients owe %d and %d replies, want 0", a, b)
+	}
 }
 
 // A request whose write to one client failed after the client had read it

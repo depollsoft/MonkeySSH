@@ -968,8 +968,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	if bytes.IndexByte(data, '\x1b') < 0 {
 		return data, nil
 	}
-	recent := now.UnixNano() < state.owedUntil.Load()
-	owed := state.outstanding.Load() > 0 && recent
+	owed := state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load()
 	inPaste := func(index int) bool {
 		for len(pasted) > 0 && pasted[0][1] <= index {
 			pasted = pasted[1:]
@@ -991,11 +990,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 		}
 		rest := data[index:]
 		if len(rest) < len(kittyClipboardOscIntroducer) {
-			// A lone ESC, or ESC ], can be a key press and waits only while a
-			// reply is owed. A longer start of the introducer can't be typed,
-			// so it waits after any recent request: the client may still
-			// answer one MonkeyMux has already settled.
-			if bytes.HasPrefix(kittyClipboardOscIntroducer, rest) && (owed || (recent && len(rest) > 2)) {
+			if owed && bytes.HasPrefix(kittyClipboardOscIntroducer, rest) {
 				holdStart = index
 				ambiguous = true
 				break
