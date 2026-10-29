@@ -889,7 +889,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void Function(String)? _terminalOutputHandler;
   TerminalEnterPacer? _terminalEnterPacer;
   // Snippet key sequences stop when either changes: a newer sequence, or a
-  // mux window switch, create or close.
+  // mux window switch, create or close (see [_terminalInputTarget]).
   int _snippetSequenceRun = 0;
   int _muxWindowChangeGeneration = 0;
   void Function(int, int, int, int)? _terminalResizeHandler;
@@ -16491,10 +16491,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// pasted instead of the clipboard, through the same review.
   Future<void> _pasteClipboard({String? promptText}) async {
     var inputGeneration = _terminalUserInputGeneration;
+    // Whatever path the paste takes, it goes only where it was asked for.
+    final inputTarget = _terminalInputTarget;
     try {
       if (promptText == null && _mayPasteAsKittyPasteEvent()) {
         final usualPathGeneration = await _pasteClipboardAsKittyPasteEvent(
           inputGeneration,
+          inputTarget,
         );
         if (usualPathGeneration == null) {
           return;
@@ -16504,7 +16507,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
-          await _pasteClipboardImage(imageBytes);
+          await _pasteClipboardImage(imageBytes, inputTarget: inputTarget);
           return;
         }
       }
@@ -16513,14 +16516,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ? await Pasteboard.files()
           : const <String>[];
       if (clipboardFiles.isNotEmpty) {
-        await _pasteClipboardFiles(clipboardFiles);
+        await _pasteClipboardFiles(clipboardFiles, inputTarget: inputTarget);
         return;
       }
 
       if (!_isAndroidPlatform && promptText == null) {
         final imageBytes = await Pasteboard.image;
         if (imageBytes != null && imageBytes.isNotEmpty) {
-          await _pasteClipboardImage(imageBytes);
+          await _pasteClipboardImage(imageBytes, inputTarget: inputTarget);
           return;
         }
       }
@@ -16549,7 +16552,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
         return;
       }
-      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
+          _terminalInputTarget != inputTarget) {
         _syncTerminalModesFromActiveMuxWindow();
         DiagnosticsLogService.instance.warning(
           'terminal.clipboard',
@@ -16667,7 +16671,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _restoreTerminalFocus(showSystemKeyboard: _isMobilePlatform);
         return;
       }
-      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+      if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
+          _terminalInputTarget != inputTarget) {
         _syncTerminalModesFromActiveMuxWindow();
         DiagnosticsLogService.instance.warning(
           'terminal.clipboard',
@@ -16794,7 +16799,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// input against the returned input generation: the mode is off once
   /// settled or was turned off before the event went out, or the clipboard
   /// holds files or an image too large for the protocol.
-  Future<int?> _pasteClipboardAsKittyPasteEvent(int inputGeneration) async {
+  Future<int?> _pasteClipboardAsKittyPasteEvent(
+    int inputGeneration,
+    Object inputTarget,
+  ) async {
     final pasteMode = await _resolveSettledTerminalPasteMode();
     if (pasteMode == null || !mounted) {
       if (mounted) {
@@ -16841,7 +16849,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return null;
     }
     if (!_terminalPasteModeOwnsCurrentContext(pasteMode) ||
-        !_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+        !_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
+        _terminalInputTarget != inputTarget) {
       DiagnosticsLogService.instance.warning(
         'terminal.clipboard',
         'paste_event_skipped_window_changed',
@@ -16874,7 +16883,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           mounted &&
           _terminalUserInputGeneration == pasteGeneration &&
           _terminalPasteModeOwnsCurrentContext(pasteMode) &&
-          _terminalPasteModeTargetsCurrentWindow(pasteMode),
+          _terminalPasteModeTargetsCurrentWindow(pasteMode) &&
+          _terminalInputTarget == inputTarget,
       stillEnabled: stillEnabled,
     );
     if (result == KittyClipboardPasteEventResult.skipped) {
@@ -17193,6 +17203,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     List<String> remotePaths, {
     required bool windows,
     required int inputGeneration,
+    required Object inputTarget,
     required _TerminalPasteMode? pasteMode,
   }) async {
     final pathCount = remotePaths
@@ -17215,7 +17226,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       );
       return result(sentCount);
     }
-    if (!_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+    if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
+        _terminalInputTarget != inputTarget) {
       _syncTerminalModesFromActiveMuxWindow();
       DiagnosticsLogService.instance.warning(
         'terminal.clipboard',
@@ -17304,7 +17316,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         if (!_terminalPasteModeOwnsCurrentContext(pasteMode)) {
           return TerminalAttachmentPasteStopReason.contextChanged;
         }
-        if (!_terminalPasteModeTargetsCurrentWindow(pasteMode)) {
+        if (!_terminalPasteModeTargetsCurrentWindow(pasteMode) ||
+            _terminalInputTarget != inputTarget) {
           _syncTerminalModesFromActiveMuxWindow();
           return TerminalAttachmentPasteStopReason.windowChanged;
         }
@@ -17344,7 +17357,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return result(sentCount);
   }
 
-  Future<void> _pasteClipboardFiles(List<String> clipboardFiles) async {
+  /// Uploads [clipboardFiles] and pastes their remote paths into
+  /// [inputTarget], the input target the paste was asked for in.
+  Future<void> _pasteClipboardFiles(
+    List<String> clipboardFiles, {
+    required Object inputTarget,
+  }) async {
     final shouldUpload = await _confirmClipboardUpload(
       title: 'Upload clipboard files?',
       message:
@@ -17385,6 +17403,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       itemLabelPlural: 'files',
       confirm: false,
       telemetrySource: 'clipboard_files',
+      inputTarget: inputTarget,
     );
   }
 
@@ -17435,11 +17454,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Uploads [imageBytes] and pastes its remote path into [inputTarget], the
+  /// input target the paste was asked for in, or by default the one current
+  /// once the upload is confirmed.
   Future<bool> _pasteClipboardImage(
     Uint8List imageBytes, {
     Duration? autoConfirmAfter,
     bool showKeyboardAfterPaste = true,
     String? uploadBaseDirectory,
+    Object? inputTarget,
   }) async {
     final shouldUpload = await _confirmClipboardUpload(
       title: 'Upload clipboard image?',
@@ -17455,6 +17478,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final inputGeneration = _terminalUserInputGeneration;
+    final target = inputTarget ?? _terminalInputTarget;
     final pasteMode = await _resolveSettledTerminalPasteMode();
     final uploadGeneration = _beginPasteUpload(
       TerminalPasteUploadProgress(
@@ -17496,6 +17520,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       [remotePath.path],
       windows: remotePath.windows,
       inputGeneration: inputGeneration,
+      inputTarget: target,
       pasteMode: pasteMode,
     );
     if (!mounted) {
@@ -17524,12 +17549,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return pathInserted;
   }
 
+  /// Uploads [selectedFiles] and pastes their remote paths into
+  /// [inputTarget] when given, otherwise into the input target current once
+  /// the upload is confirmed.
   Future<void> _pasteSelectedFiles(
     List<PlatformFile> selectedFiles, {
     required String itemLabelSingular,
     required String itemLabelPlural,
     bool confirm = true,
     String telemetrySource = 'picked_files',
+    Object? inputTarget,
   }) async {
     if (!mounted) {
       return;
@@ -17558,6 +17587,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final inputGeneration = _terminalUserInputGeneration;
+    final target = inputTarget ?? _terminalInputTarget;
     final pasteMode = await _resolveSettledTerminalPasteMode();
     final timestamp = DateTime.now();
     // Size the whole batch up front so the line reads as one upload rather
@@ -17624,6 +17654,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       remotePaths.paths,
       windows: remotePaths.windows,
       inputGeneration: inputGeneration,
+      inputTarget: target,
       pasteMode: pasteMode,
     );
     if (!mounted) {
@@ -17868,7 +17899,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// sequence starts.
   Future<void> _sendSnippetKeySequence(SnippetKeySequence sequence) async {
     final run = ++_snippetSequenceRun;
-    final target = _snippetInputTarget;
+    final target = _terminalInputTarget;
     // Typing, a toolbar key or a paste takes over the input line.
     final inputGeneration = _terminalUserInputGeneration;
     final windowKey = resolveTmuxBarActiveWindowKey(
@@ -17905,7 +17936,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 _currentTmuxWindowsSnapshot,
               ),
             ) &&
-            _snippetInputTarget == target,
+            _terminalInputTarget == target,
       );
       if (outcome == SnippetSendOutcome.stopped &&
           mounted &&
@@ -17921,7 +17952,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  Object get _snippetInputTarget => (
+  /// Where input started now would go: the connection, shell, terminal,
+  /// mux window and native session. Snippet key sequences and pastes that
+  /// outlast a change of it stop rather than reach the new target.
+  Object get _terminalInputTarget => (
     terminal: _terminal,
     shell: _shell,
     connectionId: _connectionId,
