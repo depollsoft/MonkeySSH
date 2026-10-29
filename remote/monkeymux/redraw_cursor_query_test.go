@@ -28,7 +28,8 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	// it known: the tail of a Codex frame, titles, queries, erases.
 	s.Write([]byte("\x1b[0;1m\x1b]0;title\x07\x1b[?25h\x1b[?2026l\x1b[>7u" +
 		"\x1b[=0;1u\x1b[2 q\x1b[>q\x1b[c\x1b[?2004h\x1b[?1000;1006h\x1b[K\x1b[J" +
-		"\x07\x1b=\x1b(0\x1b(B\x1b_Ga=t,f=32,s=1,v=1;/wAA/w==\x1b\\"))
+		"\x07\x1b=\x1b(0\x1b(B\x1b_Ga=t,f=32,s=1,v=1;/wAA/w==\x1b\\" +
+		"\x1bXsos\x1b\\\x1b^pm\x1b\\"))
 	if got := report(); got != "\x1b[7;9R" {
 		t.Fatalf("report after cursor-neutral output = %q, want 7;9", got)
 	}
@@ -42,7 +43,7 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		"\x1b[s", "\x1b[u", "\x1b[!p", "\x1b[2;10r", "\x1b[20h", "\x1b[4h", "\x1b[@", "\x1b[P",
 		"\x1b[X", "\x1b[L", "\x1b[S", "\x1b[?1049h\x1b[?1049l", "\x1b[?47h\x1b[?47l",
 		"\x1b[?1048h", "\x1b[?7l\x1b[?7h", "\x1b[?2C", "\x1b[2 A", "\x1b[?J",
-		"\x1bXsos\x1b\\", "\x1b^pm\x1b\\", "\x1bP$qm\x1b\\", "\x1b]0;a\x18b",
+		"\x1bP$qm\x1b\\", "\x1b]0;a\x18b",
 		"\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2;/wAA/w==\x1b\\",
 		"\x1b_Ga=p,i=7,r=2,c=2\x1b\\",
 		"\x1b_Ga=T,f=32,s=1,v=1\x9c",

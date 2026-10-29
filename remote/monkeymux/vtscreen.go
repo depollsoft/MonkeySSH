@@ -79,7 +79,6 @@ type terminalScreen struct {
 
 	savedMain vtSavedCursor
 	savedAlt  vtSavedCursor
-	scoCursor vtSavedCursor
 
 	lastPrinted rune
 
@@ -385,7 +384,6 @@ func (s *terminalScreen) resetState() {
 	s.shiftOut = false
 	s.savedMain = vtSavedCursor{}
 	s.savedAlt = vtSavedCursor{}
-	s.scoCursor = vtSavedCursor{}
 	s.parser = vtParser{}
 }
 
@@ -616,7 +614,7 @@ func (s *terminalScreen) Resize(width, height int) {
 	s.height = height
 	s.top = 0
 	s.bottom = height - 1
-	for _, saved := range []*vtSavedCursor{&s.savedMain, &s.savedAlt, &s.scoCursor} {
+	for _, saved := range []*vtSavedCursor{&s.savedMain, &s.savedAlt} {
 		// The client keeps a deferred wrap as the column past the old edge
 		// and clamps it like any other saved column, so a resize ends it.
 		if saved.pendingWrap {
@@ -1392,15 +1390,17 @@ func (p *vtParser) beginString(kind byte) {
 	p.apcTruncated = false
 }
 
-// endString finishes a skipped string. Only a Kitty graphics APC is read;
-// the app's terminal handles the others in ways the model does not follow
-// (it prints SOS and PM payloads), so they leave the cursor unknown.
+// endString finishes a skipped string. Only a Kitty graphics APC is read.
+// The app's terminal skips SOS and PM strings too, but answers some DCS
+// requests the model does not follow, so a DCS leaves the cursor unknown.
 func (s *terminalScreen) endString() {
 	p := &s.parser
 	kind, head, truncated := p.stringKind, p.apcHead, p.apcTruncated
 	p.beginString(0)
 	if kind != '_' {
-		s.cursorKnown = false
+		if kind == 'P' {
+			s.cursorKnown = false
+		}
 		return
 	}
 	if len(head) == 0 || head[0] != 'G' {
@@ -2201,12 +2201,11 @@ func (s *terminalScreen) csiDispatch(final byte) {
 			}
 		}
 	case 's':
-		s.scoCursor = vtSavedCursor{valid: true, row: g.cursorRow, col: g.cursorCol, pendingWrap: g.pendingWrap}
+		// SCOSC and SCORC are DECSC and DECRC in xterm and the client while
+		// left and right margins are off, which neither supports.
+		s.saveCursor()
 	case 'u':
-		if s.scoCursor.valid {
-			defer s.noteCursorRow(g.cursorRow)
-			s.restoreSavedPosition(g, s.scoCursor)
-		}
+		s.restoreCursor()
 	}
 }
 
@@ -2241,11 +2240,31 @@ func (s *terminalScreen) setPrivateMode(mode int, on bool) {
 			s.cursorOn = on
 		}
 	case 47:
-		s.switchScreen(on, false, false)
+		s.switchScreen(on, false)
+	case 1048:
+		if on {
+			s.saveCursor()
+		} else {
+			s.restoreCursor()
+		}
 	case 1047:
-		s.switchScreen(on, false, true)
+		// As in xterm and the client, 1047 clears the alternate screen on
+		// the way out, not the way in.
+		if !on {
+			s.clearAlt()
+		}
+		s.switchScreen(on, false)
 	case 1049:
-		s.switchScreen(on, true, true)
+		// The client saves and restores the cursor even when the screen
+		// doesn't change, as xterm does.
+		if on {
+			s.saveCursor()
+			s.clearAlt()
+			s.switchScreen(true, true)
+		} else {
+			s.switchScreen(false, false)
+			s.restoreCursor()
+		}
 	}
 }
 
@@ -2286,27 +2305,29 @@ func (s *terminalScreen) screenAlignment() {
 	g.pendingWrap = false
 }
 
-func (s *terminalScreen) switchScreen(toAlt bool, saveCursor bool, clear bool) {
+// switchScreen shows the alternate or the main screen; savedCursor records
+// that mode 1049 saved the main cursor on the way in. Each screen keeps its
+// own cursor, but switching leaves the cursor where it was, deferred wrap
+// included, as in xterm and the client.
+func (s *terminalScreen) switchScreen(toAlt bool, savedCursor bool) {
 	if toAlt == s.altActive {
 		return
 	}
+	from := s.grid()
+	s.altActive = toAlt
 	if toAlt {
-		if saveCursor {
-			s.saveCursor()
-		}
-		s.altActive = true
-		s.altSavedCursor = saveCursor
-		if clear {
-			s.alt = newVTGrid(s.width, s.height)
-		}
-		s.alt.cursorRow = s.main.cursorRow
-		s.alt.cursorCol = s.main.cursorCol
-		return
+		s.altSavedCursor = savedCursor
 	}
-	s.altActive = false
-	if saveCursor {
-		s.restoreCursor()
-	}
+	to := s.grid()
+	to.cursorRow, to.cursorCol, to.pendingWrap = from.cursorRow, from.cursorCol, from.pendingWrap
+}
+
+// clearAlt blanks the alternate screen, shown or not, keeping its cursor as
+// the client's clearAltBuffer does.
+func (s *terminalScreen) clearAlt() {
+	cleared := newVTGrid(s.width, s.height)
+	cleared.cursorRow, cleared.cursorCol, cleared.pendingWrap = s.alt.cursorRow, s.alt.cursorCol, s.alt.pendingWrap
+	s.alt = cleared
 }
 
 func (s *terminalScreen) eraseDisplay(mode int) {

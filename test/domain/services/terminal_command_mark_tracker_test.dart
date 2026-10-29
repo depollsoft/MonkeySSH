@@ -27,7 +27,7 @@ void main() {
 
     terminal.write('prompt\r\n');
     tracker.handlePrivateOsc('133', const ['C']);
-    terminal.useAltBuffer();
+    terminal.write('\x1b[?1049h\x1b[H');
 
     expect(tracker.markCount, 0);
     expect(tracker.previousMarkRow(4), isNull);
@@ -38,7 +38,7 @@ void main() {
     expect(tracker.debugMarkRows, [1, 2]);
     expect(tracker.previousMarkRow(1), 2);
 
-    terminal.useMainBuffer();
+    terminal.write('\x1b[?1049l');
     expect(tracker.markCount, 1);
     expect(tracker.debugMarkRows, [1]);
     expect(tracker.previousMarkRow(4), 1);

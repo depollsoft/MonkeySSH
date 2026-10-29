@@ -59,6 +59,12 @@ class Buffer {
 
   final _savedCursorStyle = CursorStyle();
 
+  var _savedOriginMode = false;
+
+  /// The origin mode [saveCursor] recorded, which DECRC restores along with
+  /// the position, as in xterm.
+  bool get savedOriginMode => _savedOriginMode;
+
   final charset = Charset();
 
   /// Width of the viewport in columns. Also the index of the last column.
@@ -369,19 +375,9 @@ class Buffer {
       return;
     }
 
-    // the cursor is not in the scrollable region
-    if (_cursorY >= viewHeight - 1) {
-      // we are at the bottom
-      if (isAltBuffer) {
-        scrollUp(1);
-      } else {
-        if (lines.isFull) {
-          graphics.removeGraphicsAnchoredToLine(lines[0]);
-        }
-        lines.push(_newEmptyLine());
-      }
-    } else {
-      // there're still lines so we simply move cursor down.
+    // Outside the scroll region the cursor moves down until the last row and
+    // nothing scrolls, as in xterm and the MonkeyMux screen model.
+    if (_cursorY < viewHeight - 1) {
       moveCursorY(1);
     }
     semanticPrompt.afterIndex(currentLine);
@@ -415,8 +411,10 @@ class Buffer {
     _cursorX = cursorX.clamp(0, viewWidth - 1);
   }
 
+  /// Moves the cursor [offset] columns. A pending wrap counts from the last
+  /// column, so BS and CUB from it land where they do in xterm.
   void moveCursorX(int offset) {
-    setCursorX(_cursorX + offset);
+    setCursorX(cursorX + offset);
   }
 
   /// Moves the cursor [offset] rows. A cursor inside the scroll region stops
@@ -448,7 +446,7 @@ class Buffer {
     _cursorY = cursorY.clamp(minY, maxY);
   }
 
-  /// Save cursor position, charmap and text attributes.
+  /// Save cursor position, origin mode, charmap and text attributes.
   void saveCursor() {
     _savedCursorX = _cursorX;
     _savedCursorY = _cursorY;
@@ -456,6 +454,7 @@ class Buffer {
     _savedCursorStyle.background = terminal.cursor.background;
     _savedCursorStyle.attrs = terminal.cursor.attrs;
     _savedCursorStyle.underlineColor = terminal.cursor.underlineColor;
+    _savedOriginMode = terminal.originMode;
     charset.save();
   }
 
@@ -488,6 +487,15 @@ class Buffer {
     _savedCursorX = 0;
     _savedCursorY = 0;
     _savedCursorStyle.reset();
+    _savedOriginMode = false;
+  }
+
+  /// Puts the cursor where [other]'s is, pending wrap included. Switching
+  /// screens with modes 47, 1047 and 1049 leaves the cursor where it was, as
+  /// in xterm, though each screen keeps its own.
+  void takeCursorFrom(Buffer other) {
+    _cursorX = other._cursorX;
+    _cursorY = other._cursorY;
   }
 
   /// Sets the vertical scrolling margin to [top] and [bottom].

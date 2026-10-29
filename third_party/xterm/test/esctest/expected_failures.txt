@@ -2,38 +2,9 @@
 #
 # esctest_test.dart fails on any failure not listed here and on any listed
 # test that passes, so this list only shrinks. One test per line; '#' starts
-# a comment. Groups marked BUG are behaviour that differs from xterm in a way
-# programs can see; the rest is missing or deliberately left out.
+# a comment. Each group says what is missing or deliberately left out.
 #
 # The harness runs the terminal without the app layer.
-
-# BUG: IND, LF, VT, FF and NEL on the last row scroll the whole screen when
-# the cursor is below the scroll region. xterm moves nothing (Buffer.index).
-DECSTBMTests.test_DECSTBM_CursorBelowRegionAtBottomTriesToScroll
-FFTests.test_FF_StopsAtBottomLineWhenBegunBelowScrollRegion
-INDTests.test_IND_StopsAtBottomLineWhenBegunBelowScrollRegion
-LFTests.test_LF_StopsAtBottomLineWhenBegunBelowScrollRegion
-NELTests.test_NEL_StopsAtBottomLineWhenBegunBelowScrollRegion
-VTTests.test_VT_StopsAtBottomLineWhenBegunBelowScrollRegion
-
-# BUG: BS from the pending-wrap position lands on the last column instead of
-# the one before it, as in xterm.
-BSTests.test_BS_CursorStartsInDoWrapPosition
-
-# BUG: DECSET 47 and 1047 move the cursor. Each screen keeps its own cursor,
-# but only 1049 should save and restore it.
-DECSETTests.test_DECSET_ALTBUF
-DECSETTests.test_DECSET_OPT_ALTBUF
-
-# BUG: PM (ESC ^) and SOS (ESC X) strings are printed instead of ignored.
-PMTests.test_PM_Basic
-SOSTests.test_SOS_Basic
-
-# BUG: DECRC and SCORC don't restore origin mode, which DECSC saves in xterm.
-# These also need left/right margins.
-DECRCTests.test_SaveRestoreCursor_ResetsOriginMode
-DECSETTiteInhibitTests.test_SaveRestoreCursor_ResetsOriginMode
-SCORCTests.test_SaveRestoreCursor_ResetsOriginMode
 
 # Not implemented: HPA (CSI Ps `), HPR (CSI Ps a) and VPR (CSI Ps e).
 HPATests.test_HPA_DefaultParams
@@ -45,11 +16,6 @@ HPRTests.test_HPR_StopsAtRightEdge
 VPRTests.test_VPR_DefaultParams
 VPRTests.test_VPR_DoesNotChangeColumn
 VPRTests.test_VPR_StopsAtBottomEdge
-
-# Not implemented: SCOSC and SCORC (CSI s, CSI u).
-SCORCTests.test_SaveRestoreCursor_Basic
-SCORCTests.test_SaveRestoreCursor_MoveToHomeWhenNotSaved
-SCORCTests.test_SaveRestoreCursor_Reset
 
 # Not implemented: XTSAVE and XTRESTORE (CSI ? Pm s, CSI ? Pm r).
 XtermSaveTests.test_XtermSave_SaveResetState
@@ -71,11 +37,13 @@ SMTests.test_SM_IRM_TruncatesAtRightMargin
 BSTests.test_BS_AfterNoWrappedInlines
 BSTests.test_BS_AfterOneWrappedInline
 BSTests.test_BS_ReverseWrapGoesToBottom
+BSTests.test_BS_ReverseWrapStartingInDoWrapPosition
 BSTests.test_BS_ReverseWrapWithLeftRight
 BSTests.test_BS_ReversewrapFromLeftEdgeToRightMargin
 BSTests.test_BS_WrapsInWraparoundMode
 CUBTests.test_CUB_AfterNoWrappedInlines
 CUBTests.test_CUB_AfterOneWrappedInline
+DECSETTests.test_DECSET_ReverseWraparoundLastCol_BS
 DECSETTests.test_DECSET_ReverseWraparound_BS
 DECSETTests.test_DECSET_ReverseWraparound_Multi
 

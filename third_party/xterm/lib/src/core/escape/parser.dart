@@ -125,6 +125,8 @@ class EscapeParser {
     'H'.charCode: _escHandleTabSet,
     'M'.charCode: _escHandleReverseIndex,
     'P'.charCode: _escHandleDCS, // DCS - XTGETTCAP (others skipped to ST)
+    'X'.charCode: _skipToStringTerminator, // SOS - ignored
+    '^'.charCode: _skipToStringTerminator, // PM - ignored
     'c'.charCode: _escHandleFullReset, // RIS - Reset to Initial State
     // '#'.charCode: _unsupportedHandler,
     '('.charCode: _escHandleDesignateCharset0, //  SCS - G0
@@ -428,6 +430,8 @@ class EscapeParser {
     'q'.codeUnitAt(0): _csiHandleRequestTerminalVersion,
     'p'.codeUnitAt(0): _csiHandleRequestMode,
     'r'.codeUnitAt(0): _csiHandleSetMargins,
+    's'.codeUnitAt(0): _csiHandleSaveCursor,
+    'u'.codeUnitAt(0): _csiHandleRestoreCursor,
     't'.codeUnitAt(0): _csiWindowManipulation,
     'y'.codeUnitAt(0): _csiHandleChecksum,
     'A'.codeUnitAt(0): _csiHandleCursorUp,
@@ -461,6 +465,25 @@ class EscapeParser {
   //     handler.cursorHorizontal(_csi.params[0]);
   //   }
   // }
+
+  /// `ESC [ s` Save Cursor (SCOSC). Without left and right margins xterm
+  /// runs DECSC here, so SCOSC and DECSC share one saved cursor.
+  void _csiHandleSaveCursor() {
+    if (_csi.prefix != null || _csi.intermediate != null) {
+      return handler.unknownCSI(_csi.finalByte);
+    }
+    handler.saveCursor();
+  }
+
+  /// `ESC [ u` Restore Cursor (SCORC), which runs DECRC as in xterm. The Kitty
+  /// keyboard requests that share the final byte carry a prefix and are
+  /// handled before this.
+  void _csiHandleRestoreCursor() {
+    if (_csi.prefix != null || _csi.intermediate != null) {
+      return handler.unknownCSI(_csi.finalByte);
+    }
+    handler.restoreCursor();
+  }
 
   /// `ESC [ Ps b` Repeat Previous Character (REP)
   ///

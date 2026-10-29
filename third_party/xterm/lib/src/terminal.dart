@@ -863,6 +863,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   void restoreCursor() {
     _buffer.restoreCursor();
+    _originMode = _buffer.savedOriginMode;
   }
 
   @override
@@ -1450,11 +1451,15 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void useAltBuffer() {
+    if (_buffer == _altBuffer) return;
+    _altBuffer.takeCursorFrom(_mainBuffer);
     _buffer = _altBuffer;
   }
 
   @override
   void useMainBuffer() {
+    if (_buffer == _mainBuffer) return;
+    _mainBuffer.takeCursorFrom(_altBuffer);
     _buffer = _mainBuffer;
   }
 

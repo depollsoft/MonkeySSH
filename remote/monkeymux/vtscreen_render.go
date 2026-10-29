@@ -26,11 +26,6 @@ func (s *terminalScreen) RenderFrame() []byte {
 	}
 	g := s.grid()
 	out := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
-	if sco := s.scoCursor; sco.valid {
-		// SCOSC state for a later CSI u.
-		out = appendVTCursor(out, g.rows[sco.row], sco.row, sco.col, sco.pendingWrap)
-		out = append(out, "\x1b[s"...)
-	}
 	out = s.appendSavedCursor(out, g, *s.saved())
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
