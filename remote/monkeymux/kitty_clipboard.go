@@ -33,9 +33,10 @@ import (
 // A request belongs to the client its packet is written to, which may not be
 // the one that was primary when the window produced it: the write can fail
 // over to another client, or wait out a redraw pause. A request whose packet
-// reaches no client that answers it is answered EBUSY. So is one whose
-// client goes away before its final reply, once the replies the client did
-// send have reached the window.
+// reaches no client that answers it is answered EBUSY, as is a write whose
+// later packets miss the client it went to. So is one whose client goes away
+// before its final reply, once the replies the client did send have reached
+// the window.
 
 const (
 	kittyClipboardOscCode = "5522"
@@ -122,7 +123,7 @@ type kittyClipboardRequest struct {
 // kittyClipboardDelivery is what one read of a window, or a redraw pause,
 // forwards to the client: its OSC 5522 packets, which are also inline in the
 // forwarded output unless a pause held them apart, and the tags of the
-// requests among them.
+// requests among them, including a write whose later packets they carry.
 type kittyClipboardDelivery struct {
 	packets []byte
 	tags    []string
@@ -544,8 +545,13 @@ func (w *muxWindow) kittyClipboardPacketLocked(payload []byte, terminator []byte
 		switch state.write {
 		case kittyClipboardWriteForwarding:
 			if forwarding && state.route.primary == state.writePrimary {
-				// The client answers a write it aborts at any packet.
+				// The client answers a write it aborts at any packet. The
+				// packet must reach the client the write went to, so its
+				// delivery is settled against that client.
 				state.forwarded = true
+				if index := w.openKittyClipboardWriteLocked(); index >= 0 {
+					state.delivery.tags = append(state.delivery.tags, state.requests[index].tag)
+				}
 				if commit {
 					state.write = kittyClipboardWriteNone
 					w.closeOpenKittyClipboardWriteLocked()
@@ -767,7 +773,8 @@ func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, c
 // requests named by tags, whose packets reached delivered, or no client when
 // it is nil. A request that reached no client able to answer it, because no
 // write succeeded, the client does not speak the protocol, or it has already
-// gone, is answered EBUSY.
+// gone, is answered EBUSY. So is a write whose later packets reached any
+// client but the one it was handed to, which cannot complete it.
 func (s *muxServer) settleKittyClipboardDelivery(
 	windowID string,
 	tags []string,
@@ -788,7 +795,7 @@ func (s *muxServer) settleKittyClipboardDelivery(
 	var replies []byte
 	for _, tag := range tags {
 		index := window.kittyClipboardRequestIndexLocked(tag)
-		if index < 0 || !state.requests[index].delivering {
+		if index < 0 {
 			continue
 		}
 		state.requests[index].delivering = false
@@ -802,13 +809,18 @@ func (s *muxServer) settleKittyClipboardDelivery(
 	}
 }
 
-// takeKittyClipboardReply resolves a reply on its way to window windowID by
-// the tag it carries. It returns the reply with the program's own id
-// restored, or nil when the tag names no open request of the window, as for
-// a request MonkeyMux has already answered. The final reply finishes the
-// request: a read is answered OK, then DATA packets, then DONE, or with an
-// error alone; a write gets a single reply.
-func (s *muxServer) takeKittyClipboardReply(windowID string, reply []byte) []byte {
+// takeKittyClipboardReply resolves a reply from client on its way to window
+// windowID by the tag it carries. It returns the reply with the program's own
+// id restored, or nil when the tag names no open request of the window that
+// belongs to client, as for a request MonkeyMux has already answered, or one
+// that failed over to another client after this one had read it. The final
+// reply finishes the request: a read is answered OK, then DATA packets, then
+// DONE, or with an error alone; a write gets a single reply.
+func (s *muxServer) takeKittyClipboardReply(
+	client *attachClient,
+	windowID string,
+	reply []byte,
+) []byte {
 	if len(reply) < 2 || !isKittyClipboardOscPayload(reply[2:]) {
 		return nil
 	}
@@ -829,7 +841,8 @@ func (s *muxServer) takeKittyClipboardReply(windowID string, reply []byte) []byt
 		return nil
 	}
 	index := window.kittyClipboardRequestIndexLocked(metadata.id)
-	if index < 0 || window.kittyClipboard.requests[index].op != metadata.op {
+	if index < 0 || window.kittyClipboard.requests[index].op != metadata.op ||
+		window.kittyClipboard.requests[index].client != client {
 		return nil
 	}
 	id := window.kittyClipboard.requests[index].id

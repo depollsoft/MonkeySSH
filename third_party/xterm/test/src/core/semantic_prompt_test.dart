@@ -456,6 +456,27 @@ void main() {
       }
     });
 
+    test('a line feed back onto a marked prompt row keeps its mark', () {
+      // The shell moves up a line and back down without repainting: the
+      // rows keep the marks the prompt gave them.
+      final terminal = _terminal(width: 40);
+      terminal.write(
+        '${_mark('133;A;click_events=2')}top\r\n'
+        '${_mark('133;A;k=s')}> ${_mark('133;B')}abc\x1b[A\n',
+      );
+      expect(
+          terminal.buffer.lines[1].semanticPrompt, SemanticPromptRow.secondary);
+      expect(terminal.promptClickInput(const CellOffset(3, 1)), '\x1b[<0;4;1M');
+      // A primary prompt row stays the start of its prompt.
+      final primary = _terminal(width: 40);
+      primary.write(
+        'out\r\n${_mark('133;A;click_events=2')}\$ ${_mark('133;B')}abc'
+        '\x1b[A\n',
+      );
+      expect(primary.buffer.lines[1].semanticPrompt, SemanticPromptRow.prompt);
+      expect(primary.buffer.currentPromptRows, (start: 1, end: 1));
+    });
+
     test('cursor keys walk a two-line prompt however its lines are marked', () {
       for (final second in ['', _mark('133;P;k=s'), _mark('133;A;k=s')]) {
         final terminal = _terminal(width: 40);

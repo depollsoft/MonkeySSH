@@ -9348,7 +9348,7 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 			return
 		}
 		if action.kittyClipboardReply {
-			if reply := s.takeKittyClipboardReply(action.windowID, action.data); reply != nil {
+			if reply := s.takeKittyClipboardReply(client, action.windowID, action.data); reply != nil {
 				_ = s.writeWindow(action.windowID, reply)
 			}
 			continue
@@ -15481,7 +15481,16 @@ func (w *muxWindow) kittyImageRootReplayLocked(id string) []byte {
 	if apcEnd < 0 {
 		return buf
 	}
-	number := parseKittyControl(kittyControl(buf, 0, apcEnd))["I"]
+	control := parseKittyControl(kittyControl(buf, 0, apcEnd))
+	// The client keeps placements per screen, and the root is replayed onto
+	// the screen the window shows: the virtual placement it made for itself
+	// goes only onto the screen it was made on (kittyRootIsVirtual). On the
+	// other the root only stores the image.
+	if kittyNonZero(control["U"]) &&
+		w.kittyTracking.rootAlt[id] != w.alternateScreenModeActiveLocked() {
+		buf = withoutKittyControlKey(buf, "U")
+	}
+	number := control["I"]
 	if number == "" || w.kittyImageNumberToID[number] == id {
 		return buf
 	}

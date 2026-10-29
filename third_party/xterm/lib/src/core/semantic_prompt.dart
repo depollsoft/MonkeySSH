@@ -29,8 +29,8 @@ enum PromptCursorKeys {
 /// `P` a prompt of any kind, `B` the input until `C`, `I` the input until the
 /// end of the line, `C` the command output, `D` the end of the command. A wrap
 /// or newline inside a prompt or its input marks the row it reaches as a
-/// continuation. The MonkeyMux screen model (remote/monkeymux/vtscreen_prompt.go)
-/// applies the same rules.
+/// continuation, unless the row has a mark already. The MonkeyMux screen model
+/// (remote/monkeymux/vtscreen_prompt.go) applies the same rules.
 class SemanticPromptState {
   /// The [SemanticContent] the next written cell takes.
   int content = SemanticContent.output;
@@ -120,14 +120,17 @@ class SemanticPromptState {
 
   /// Applied after every index (LF, IND, NEL, autowrap): a row reached while
   /// a prompt or its input is being written continues it, unless the input
-  /// was to end with its line.
+  /// was to end with its line. A row the prompt already marked keeps its
+  /// mark: the shell moved up and back down without repainting it.
   void afterIndex(BufferLine line) {
     if (content == SemanticContent.output) return;
     if (inputEndsAtEol) {
       resetCursor();
       return;
     }
-    line.semanticPrompt = SemanticPromptRow.continuation;
+    if (line.semanticPrompt == SemanticPromptRow.none) {
+      line.semanticPrompt = SemanticPromptRow.continuation;
+    }
   }
 }
 

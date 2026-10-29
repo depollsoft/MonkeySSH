@@ -1312,8 +1312,10 @@ func (s *terminalScreen) step(b byte) {
 			p.beginString(0)
 			s.endStringEarly()
 		case b == 0x07:
-			// The app's output decoder ends the string here and passes what
-			// follows on as output, which the model keeps skipping.
+			// The app's terminal ends a DCS or APC string here and prints
+			// what follows, which the model keeps skipping. It skips SOS
+			// and PM up to ST, as the model does, but this state does not
+			// tell those apart.
 			s.cursorKnown = false
 		default:
 			if p.apcCapture {
