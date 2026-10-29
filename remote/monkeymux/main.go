@@ -1471,22 +1471,6 @@ func attachCommand(args []string) {
 		outputLimit = attachOutputBufferLimitBytes
 		outputDelivered = reporter.report
 		attachToken = reporter.token
-		go func() {
-			select {
-			case <-reporter.failed:
-			case <-reporter.done:
-				return
-			}
-			// A session that is ending closes this connection itself, after
-			// its last output, but the reporter may see its own close first.
-			// Otherwise the server would wait for reports that can no longer
-			// come.
-			select {
-			case <-time.After(socketTimeout):
-				_ = conn.Close()
-			case <-reporter.done:
-			}
-		}()
 	}
 
 	hello := controlMessage{
@@ -1510,6 +1494,21 @@ func attachCommand(args []string) {
 	}
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
 		fatal(err)
+	}
+	if reporter != nil {
+		go func() {
+			select {
+			case <-reporter.failed:
+				// Without reports the server would wait for them forever, so
+				// hang up, but only this side: a session that is ending has
+				// closed the attach already, which may not be seen yet, and
+				// one that is not drops the client on this EOF and closes it.
+				// Either way the relay still reads everything the session
+				// sent, up to its own EOF.
+				closeAttachInput(conn)
+			case <-reporter.done:
+			}
+		}()
 	}
 
 	restoreRawTerminal := makeTerminalRaw()
@@ -1558,13 +1557,6 @@ func attachCommand(args []string) {
 	}
 	restoreTerminal()
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-		if reporter != nil && errors.Is(copyErr, net.ErrClosed) {
-			select {
-			case <-reporter.failed:
-				fatal(errors.New("lost the connection that reports output delivery to the session"))
-			default:
-			}
-		}
 		fatal(copyErr)
 	}
 	if !*quiet {

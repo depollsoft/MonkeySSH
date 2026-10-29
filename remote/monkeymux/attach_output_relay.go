@@ -127,7 +127,7 @@ type attachDeliveryReporter struct {
 	encoder   *json.Encoder
 	delivered atomic.Uint64
 	pending   chan struct{}
-	// failed closes when the control connection breaks before close, after
+	// failed closes when the control connection ends before close, after
 	// which the server would wait for reports forever.
 	failed    chan struct{}
 	failOnce  sync.Once
@@ -218,6 +218,16 @@ func (r *attachDeliveryReporter) report(offset uint64) {
 	case r.pending <- struct{}{}:
 	default:
 	}
+}
+
+// closeAttachInput ends the input the client sends on an attach connection
+// while leaving its output to be read to the end.
+func closeAttachInput(conn net.Conn) {
+	if halfCloser, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = halfCloser.CloseWrite()
+		return
+	}
+	_ = conn.Close()
 }
 
 func (r *attachDeliveryReporter) close() {
