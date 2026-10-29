@@ -19,6 +19,7 @@ class _FakePlatform implements KittyClipboardPlatform {
   bool failWrite = false;
   bool throwOnRead = false;
   Future<Uint8List?>? pendingRead;
+  void Function()? onRead;
   final written = <List<KittyClipboardEntry>>[];
 
   @override
@@ -26,6 +27,7 @@ class _FakePlatform implements KittyClipboardPlatform {
 
   @override
   Future<Uint8List?> read(String mime) async {
+    onRead?.call();
     if (throwOnRead) {
       throw PlatformException(code: 'denied');
     }
@@ -267,6 +269,61 @@ void main() {
 
       expect(await harness.packets(), [status('write', 'DONE', id: 'new')]);
       expect(utf8.decode(harness.platform.stored['text/plain']!), 'new');
+    });
+
+    test('refuses writes queued past the size limit with EFBIG', () async {
+      final harness = _Harness(maxWriteBytes: 8);
+      final blockedRead = Completer<Uint8List?>();
+      harness.platform.pendingRead = blockedRead.future;
+      harness.osc('type=read:id=r;${b64('text/plain')}');
+
+      // Each write fits on its own, but they wait behind the read together.
+      for (final (id, text) in [('a', 'abcde'), ('b', 'fgh'), ('c', 'ijk')]) {
+        harness
+          ..osc('type=write:id=$id')
+          ..osc('type=wdata:mime=${b64('text/plain')};${b64(text)}')
+          ..osc('type=wdata');
+      }
+      blockedRead.complete(utf8.encode('read'));
+
+      final packets = await harness.packets();
+      expect(packets.skip(3), [
+        status('write', 'DONE', id: 'a'),
+        status('write', 'DONE', id: 'b'),
+        status('write', 'EFBIG', id: 'c'),
+      ]);
+      expect(harness.platform.written, hasLength(2));
+
+      // Written, they no longer count against the next one.
+      harness
+        ..osc('type=write:id=d')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('lmnopqrs')}')
+        ..osc('type=wdata');
+      expect(await harness.packets(), [status('write', 'DONE', id: 'd')]);
+    });
+
+    test('a write queued before disposal leaves the clipboard alone', () async {
+      final harness = _Harness();
+      final blockedRead = Completer<Uint8List?>();
+      var reads = 0;
+      harness.platform
+        ..pendingRead = blockedRead.future
+        ..onRead = () => reads++;
+      harness
+        ..osc('type=read:id=r;${b64('text/plain image/png')}')
+        ..osc('type=write:id=w')
+        ..osc('type=wdata:mime=${b64('text/plain')};${b64('late')}')
+        ..osc('type=wdata');
+      await pumpEventQueue();
+
+      // The session disconnects while the read waits on the platform.
+      harness.handler.dispose();
+      blockedRead.complete(utf8.encode('read'));
+
+      expect(await harness.packets(), isEmpty);
+      expect(harness.platform.written, isEmpty);
+      // The read stops at the type it was waiting for.
+      expect(reads, 1);
     });
 
     test('drops a write left idle', () {

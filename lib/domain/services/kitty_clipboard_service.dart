@@ -302,6 +302,7 @@ class _PasteGrant {
 ///
 /// Requests are answered one at a time in arrival order, so a read that
 /// follows a write sees the written data and replies never interleave.
+/// Nothing queued touches the clipboard after [dispose].
 class KittyClipboardHandler {
   /// Creates a handler that answers through [sendReply].
   KittyClipboardHandler({
@@ -345,6 +346,8 @@ class KittyClipboardHandler {
   final _grants = <_PasteGrant>[];
   Future<void> _queue = Future<void>.value();
   bool _disposed = false;
+  // Decoded bytes of committed writes still waiting for their turn.
+  int _queuedWriteBytes = 0;
 
   /// The clipboard adapter. Tests replace it.
   KittyClipboardPlatform get platform => _platform;
@@ -466,7 +469,8 @@ class KittyClipboardHandler {
         : KittyClipboardPasteEventResult.failed;
   }
 
-  /// Drops any open write and every paste grant.
+  /// Drops any open write and every paste grant. Requests still queued are
+  /// neither answered nor carried out.
   void dispose() {
     _disposed = true;
     _dropWrite();
@@ -543,7 +547,23 @@ class KittyClipboardHandler {
       _logWrite(KittyClipboardStatus.invalid, typeCount: 0, bytes: bytes);
       return;
     }
+    // Writes waiting behind a slow request hold their data until their turn,
+    // so together they get the budget of one write.
+    if (bytes > maxWriteBytes - _queuedWriteBytes) {
+      _replyStatus(
+        KittyClipboardOperation.write,
+        KittyClipboardStatus.tooLarge,
+        write.id,
+      );
+      _logWrite(KittyClipboardStatus.tooLarge, typeCount: 0, bytes: bytes);
+      return;
+    }
+    _queuedWriteBytes += bytes;
     _enqueue(() async {
+      _queuedWriteBytes -= bytes;
+      if (_disposed) {
+        return;
+      }
       var status = KittyClipboardStatus.done;
       if (!canWrite()) {
         status = KittyClipboardStatus.permissionDenied;
@@ -661,6 +681,10 @@ class KittyClipboardHandler {
             types = await _platform.availableTypes();
           }
           for (final mime in mimes) {
+            // Nobody is left to answer: stop reading the clipboard.
+            if (_disposed) {
+              return;
+            }
             serve(mime, await _platform.read(mime));
           }
         } on PlatformException {
