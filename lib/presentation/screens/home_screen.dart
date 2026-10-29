@@ -480,16 +480,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final mediaQuery = MediaQuery.of(context);
     final verticalBar = SystemVerticalBarScope.maybeOf(context);
     if (verticalBar != null) {
-      return _buildVerticalBarLayout(
+      final layout = _buildVerticalBarLayout(
         verticalBar,
         _resolveSpreadFold(mediaQuery),
       );
+      if (layout != null) return layout;
     }
     final fold = resolveDisplayFold(mediaQuery);
     if (fold != null && fold.isVertical) {
       return _buildBookLayout(fold);
     }
-    final isWide = mediaQuery.size.width >= _mobileBreakpoint;
+    // Beside a vertical bar too short for the tabs, they run across the
+    // bottom instead.
+    final isWide =
+        verticalBar == null && mediaQuery.size.width >= _mobileBreakpoint;
 
     return isWide ? _buildDesktopLayout() : _buildMobileLayout();
   }
@@ -519,7 +523,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   /// Across a [fold], held like a book or open flat, the selected panel takes
   /// the left page and live connections the right one, so the tabs skip
   /// Connections. Each page is about the size of the outer display.
-  Widget _buildVerticalBarLayout(SystemVerticalBar bar, DisplayFold? fold) {
+  ///
+  /// Null when the bar is too short for even the tabs without labels; home
+  /// then lays out as it does without a vertical bar, with the tabs across
+  /// the bottom.
+  Widget? _buildVerticalBarLayout(SystemVerticalBar bar, DisplayFold? fold) {
     final (:indexes, :selected) = _visibleTabs(
       showsConnectionsTab: fold == null,
     );
@@ -535,6 +543,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     // returns to the panel header, then the tab labels, then Settings. None
     // of it depends on the tab, so switching to Connections, which has no
     // add action, leaves the rest of the rail where it was.
+    final compactTabsExtent = VerticalBarTabs.extentFor(
+      indexes.length,
+      showsLabels: false,
+    );
+    if (compactTabsExtent > column.height) return null;
     final room = column.height - verticalBarItemExtent - verticalBarItemGap;
     final showsAddKey =
         VerticalBarTabs.extentFor(indexes.length) +
@@ -542,8 +555,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             verticalBarItemGap <=
         room;
     final showsLabels = VerticalBarTabs.extentFor(indexes.length) <= room;
-    final showsSettings =
-        VerticalBarTabs.extentFor(indexes.length, showsLabels: false) <= room;
+    final showsSettings = compactTabsExtent <= room;
     final addAction = showsAddKey ? _addAction(panelIndex) : null;
     // Without a tab bar across the bottom, the lists end above the home
     // indicator themselves.

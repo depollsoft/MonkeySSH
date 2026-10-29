@@ -368,6 +368,54 @@ void main() {
       expect(pressed, ['Windows', 'export']);
     });
 
+    testWidgets('scrolls a long folded menu above the keyboard', (
+      tester,
+    ) async {
+      useOuterDisplay(tester);
+      const keyboardTop = 678.0 - 400;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 400);
+      await tester.pumpWidget(
+        pushes(
+          actions: [
+            for (var index = 0; index < 10; index += 1)
+              IconButton(
+                icon: const Icon(Icons.star_border),
+                tooltip: 'Action $index',
+                onPressed: () {},
+              ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Show menu'));
+      await tester.pumpAndSettle();
+
+      final panel = tester.getRect(
+        find.ancestor(
+          of: find.widgetWithText(MenuItemButton, 'Action 0'),
+          matching: find.byType(SingleChildScrollView),
+        ),
+      );
+      expect(panel.bottom, lessThanOrEqualTo(keyboardTop - 8));
+      await tester.scrollUntilVisible(
+        find.widgetWithText(MenuItemButton, 'Action 9'),
+        44,
+        scrollable: find.descendant(
+          of: find.ancestor(
+            of: find.widgetWithText(MenuItemButton, 'Action 0'),
+            matching: find.byType(SingleChildScrollView),
+          ),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      expect(
+        tester.getRect(find.widgetWithText(MenuItemButton, 'Action 9')).bottom,
+        lessThanOrEqualTo(panel.bottom),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('folds a popup action into the menu it opens beside', (
       tester,
     ) async {

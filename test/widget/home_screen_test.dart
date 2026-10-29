@@ -1303,6 +1303,25 @@ void main() {
           reason: 'at $top',
         );
       }
+
+      // In a bar too short for even those, the tabs run across the bottom.
+      await changePose(tester, pose, shortened(264));
+      expect(
+        432 - 264,
+        lessThan(VerticalBarTabs.extentFor(4, showsLabels: false)),
+      );
+      expect(find.byType(VerticalBarTabs), findsNothing);
+      for (final label in ['Hosts', 'Connections', 'Keys', 'Snippets']) {
+        expect(
+          find.descendant(
+            of: find.byType(NavigationBar),
+            matching: find.text(label),
+          ),
+          findsOne,
+          reason: label,
+        );
+      }
+      expect(find.byTooltip('Settings').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
       semantics.dispose();
     });

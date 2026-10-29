@@ -12889,7 +12889,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               bodyTop: verticalBar == null
                   ? Scaffold.of(bodyContext).appBarMaxHeight ?? 0
                   : MediaQuery.paddingOf(context).top +
-                        (showsIdentityLine ? _TerminalIdentityLine.height : 0) +
+                        (showsIdentityLine
+                            ? _TerminalIdentityLine.heightFor(
+                                MediaQuery.textScalerOf(context),
+                              )
+                            : 0) +
                         (terminalBarBottom?.preferredSize.height ?? 0),
               onShowKeyboard: () => showsNativeAgent
                   ? _toggleNativeComposerKeyboard(false)
@@ -18564,8 +18568,20 @@ class _TerminalIdentityLine extends StatelessWidget {
     this.statusGap = 8,
   });
 
-  /// The line's height.
-  static const double height = 28;
+  /// The line's least height, which holds the host's name at the default
+  /// text size.
+  static const double minHeight = 28;
+
+  static const double _titleFontSize = 13;
+
+  /// A set line height makes the line's height depend on the text scale
+  /// alone, so layouts can place the body below it before it lays out.
+  static const double _lineHeight = 1.3;
+
+  /// The line's height at [scaler]: [minHeight], or the host's name with
+  /// 4 pt above and below once larger text needs more.
+  static double heightFor(TextScaler scaler) =>
+      max(minHeight, scaler.scale(_titleFontSize) * _lineHeight + 8);
 
   final String title;
   final String subtitle;
@@ -18594,7 +18610,7 @@ class _TerminalIdentityLine extends StatelessWidget {
         message: subtitle.isEmpty ? title : '$title\n$subtitle',
         excludeFromSemantics: true,
         child: SizedBox(
-          height: height,
+          height: heightFor(MediaQuery.textScalerOf(context)),
           child: Row(
             children: [
               SizedBox(
@@ -18611,15 +18627,16 @@ class _TerminalIdentityLine extends StatelessWidget {
                       TextSpan(
                         text: title,
                         style: FluttyTheme.displayMono(
-                          fontSize: 13,
+                          fontSize: _titleFontSize,
                           color: colorScheme.onSurface,
-                        ),
+                        ).copyWith(height: _lineHeight),
                       ),
                       if (subtitle.isNotEmpty)
                         TextSpan(
                           text: '  $subtitle',
                           style: FluttyTheme.monoStyle.copyWith(
                             fontSize: 11,
+                            height: _lineHeight,
                             color: colorScheme.onSurfaceVariant,
                           ),
                         ),

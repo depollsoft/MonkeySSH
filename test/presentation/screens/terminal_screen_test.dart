@@ -13068,6 +13068,62 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('⌃⌘S moves focus into the navigator after a covered propped '
+        'session turns to a book', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 951 - 455.5);
+      final keyboard = SystemKeyboardVisibilityController.instance
+        ..debugSetVisible(visible: true);
+      addTearDown(() => keyboard.debugSetVisible(visible: null));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byTooltip('tmux windows'), findsOneWidget);
+
+      // Turned on its side, with the keyboard still up.
+      tester.view
+        ..physicalSize = const Size(951, 669)
+        ..viewInsets = const FakeViewPadding(bottom: 300)
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTWH(475, 0, 0, 669),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      await tester.pump();
+
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row on the book page has focus',
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('a flat fold keeps the single-page terminal layout', (
       tester,
     ) async {
@@ -13522,6 +13578,35 @@ void main() {
           tester.getRect(find.byTooltip('Show system keyboard')).bottom,
           column.bottom,
         );
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('grows the host line with large text', (tester) async {
+        useOuterDisplay(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await pumpScreen(tester, verticalBar: verticalBar);
+
+        final identity = find.bySemanticsLabel(
+          RegExp('^Terminal test host, Connected'),
+        );
+        final identityRect = tester.getRect(identity);
+        final text = tester.getRect(
+          find.descendant(
+            of: identity,
+            matching: find.textContaining(
+              'Terminal test host',
+              findRichText: true,
+            ),
+          ),
+        );
+        expect(identityRect.height, greaterThan(28));
+        expect(text.top, greaterThanOrEqualTo(identityRect.top));
+        expect(text.bottom, lessThanOrEqualTo(identityRect.bottom));
+        expect(
+          tester.getRect(find.byType(MonkeyTerminalView)).top,
+          greaterThanOrEqualTo(identityRect.bottom),
+        );
+        expect(tester.takeException(), isNull);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
       testWidgets('moves controls the keyboard leaves no room for into the '

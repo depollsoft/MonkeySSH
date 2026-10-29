@@ -894,13 +894,20 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
 
   /// The menu key holding [entries], styled like the app's other menus: the
   /// raised surface, a hairline, and 44 pt rows. A popup's items stand
-  /// between dividers.
+  /// between dividers. A menu taller than the room above the keyboard
+  /// scrolls there instead of running under it.
   static Widget _menuKey(BuildContext context, List<_MenuEntry> entries) =>
       MenuAnchor(
         style: TerminalMenuStyles.menuStyle(context).copyWith(
           side: WidgetStatePropertyAll(
             BorderSide(color: Theme.of(context).colorScheme.outline),
           ),
+        ),
+        reservedPadding: EdgeInsets.fromLTRB(
+          8,
+          8,
+          8,
+          8 + MediaQuery.viewInsetsOf(context).bottom,
         ),
         menuChildren: [
           for (final (index, entry) in entries.indexed) ...[
