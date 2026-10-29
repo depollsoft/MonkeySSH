@@ -1218,6 +1218,76 @@ void main() {
       });
     });
 
+    /// Writes [before], then [reset], while every decode slot is held, so
+    /// whatever [before] queued behind a decode is still waiting at the reset;
+    /// then lets the decodes finish.
+    Future<void> resetWhileQueued(
+      Terminal terminal,
+      String before, {
+      String reset = '\x1bc',
+    }) async {
+      for (var i = 0; i < 3; i++) {
+        await terminalGraphicsDecodeGate.acquire();
+      }
+      try {
+        terminal.write('$before$reset');
+      } finally {
+        for (var i = 0; i < 3; i++) {
+          terminalGraphicsDecodeGate.release();
+        }
+      }
+    }
+
+    testWidgets('a placement queued before a reset does not land after it', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final terminal = _terminal();
+        // The display command waits for the transmission's decode.
+        await resetWhileQueued(
+          terminal,
+          '\x1b_Ga=T,i=1,f=32,s=1,v=1,C=1,q=2;$_pixel\x1b\\'
+          '\x1b_Ga=p,i=1,c=4,r=4,C=1,q=2\x1b\\',
+        );
+        await _until(() => terminal.graphics.imageById(1) != null);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(terminal.graphics.imageById(1), isNotNull);
+        expect(terminal.graphics.placements, isEmpty);
+      });
+    });
+
+    testWidgets('a relative placement queued before a clear stays away', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final png = await _pngBase64(4, 4);
+        // A full reset, and the clear of the alternate screen on entering it.
+        for (final (screen, reset) in [
+          ('', '\x1bc'),
+          ('\x1b[?1049h', '\x1b[?1049l\x1b[?1049h'),
+        ]) {
+          final terminal = _terminal()..write(screen);
+          // The parent is a virtual placement, which a clear keeps.
+          _store(terminal, 1);
+          _store(terminal, 2);
+          terminal.write('\x1b_Ga=p,U=1,i=1,c=3,r=2,q=2\x1b\\');
+          await resetWhileQueued(
+            terminal,
+            '\x1b_Ga=T,i=3,f=100,C=1,q=2;$png\x1b\\'
+            '\x1b_Ga=p,i=2,P=1,H=1,V=1,c=1,r=1,q=2\x1b\\'
+            '\x1b_Ga=T,i=4,f=100,P=1,c=1,r=1,q=2;$png\x1b\\',
+            reset: reset,
+          );
+          // Both wait for every earlier operation, image 3's decode included.
+          final graphics = terminal.graphics;
+          await _until(() => graphics.hasPendingImage(4));
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          expect(graphics.virtualPlacementById(1), isNotNull, reason: reset);
+          expect(graphics.placements, isEmpty, reason: reset);
+        }
+      });
+    });
+
     test('the transient hint is read from N on transmission', () {
       final terminal = _terminal();
       terminal.write('\x1b_Ga=t,i=1,N=1,f=32,s=1,v=1,q=2;$_pixel\x1b\\');

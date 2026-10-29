@@ -383,6 +383,42 @@ void main() {
       expect(terminal.promptClickInput(const CellOffset(0, 4)), '\x1b[<0;1;2M');
     });
 
+    test('click_events=2 counts a wrapped prompt from its first row', () {
+      // "123456" / "78ab": the prompt text wraps, which starts no secondary
+      // prompt on the row it reaches.
+      final terminal = _terminal(width: 6);
+      terminal
+          .write('${_mark('133;A;click_events=2')}12345678${_mark('133;B')}ab');
+      expect(terminal.promptClickInput(const CellOffset(2, 1)), '\x1b[<0;3;2M');
+      // A wide glyph that does not fit wraps the same way.
+      final wide = _terminal(width: 6);
+      wide.write('${_mark('133;A;click_events=2')}12345界${_mark('133;B')}ab');
+      expect(wide.buffer.lines[1].isWrapped, isTrue);
+      expect(wide.promptClickInput(const CellOffset(2, 1)), '\x1b[<0;3;2M');
+      // A secondary prompt that wraps counts from its own first row.
+      final secondary = _terminal(width: 6, height: 8);
+      secondary.write(
+        '${_mark('133;A;click_events=2')}\$ ${_mark('133;B')}a\r\n'
+        '${_mark('133;P;k=s')}>>>>>>>> ${_mark('133;B')}b',
+      );
+      expect(
+        secondary.promptClickInput(const CellOffset(3, 2)),
+        '\x1b[<0;4;2M',
+      );
+    });
+
+    test('cursor keys count only input cells on a wrapped prompt', () {
+      for (final keys in ['line', 'm', 'v', 'w']) {
+        final terminal = _terminal(width: 6);
+        terminal.write('${_mark('133;A;cl=$keys')}12345678${_mark('133;B')}ab');
+        expect(
+          terminal.promptClickInput(const CellOffset(2, 1)),
+          '\x1b[D\x1b[D',
+          reason: 'cl=$keys',
+        );
+      }
+    });
+
     test('cl=m crosses line breaks with left and right', () {
       final terminal = _terminal(height: 8);
       terminal.write('${_mark('133;A;cl=m')}\$ ${_mark('133;B')}ab\r\ncde');
