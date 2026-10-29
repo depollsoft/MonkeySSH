@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,31 +15,35 @@ import (
 //
 // MonkeyMux forwards a window's requests to the attached client that answers
 // them and routes the replies back to that window, whatever window is on
-// screen by then. It gives each forwarded request an id naming its window
-// (the spec's multiplexer id), and takes replies carrying such an id out of
-// the client's input. A request the client cannot see, because its window is
-// in the background, no client is attached, or the attached client does not
-// speak the protocol, is answered EBUSY at once so the program is not left
-// waiting. Paste events (private mode 5522) carry no id and reach the window
-// on screen as ordinary input.
+// screen by then. It gives each forwarded request an id of its own (the
+// spec's multiplexer id): the window and a sequence number. Each window keeps
+// its open requests under those ids, and a reply reaches the program only
+// while the id it carries names one of them, so every request is answered
+// exactly once, by the client or by MonkeyMux. A request the client cannot
+// see, because its window is in the background, no client is attached, or
+// the attached client does not speak the protocol, is answered EBUSY at once
+// so the program is not left waiting. Paste events (private mode 5522) carry
+// no id and reach the window on screen as ordinary input.
 //
 // A write is a sequence of packets the client keeps as one open transaction,
 // so only one window's write can be open there at a time. The window that
 // starts a write takes that slot; a window that loses it, or that leaves the
 // screen mid-write, is answered EBUSY and the rest of its packets are dropped.
 //
-// Each window keeps the requests it forwarded until the client sends their
-// final reply. A client that goes away before then leaves them unanswered,
-// so MonkeyMux answers them EBUSY once the replies the client did send have
-// reached the window.
+// A request belongs to the client its packet is written to, which may not be
+// the one that was primary when the window produced it: the write can fail
+// over to another client, or wait out a redraw pause. A request whose packet
+// reaches no client that answers it is answered EBUSY. So is one whose
+// client goes away before its final reply, once the replies the client did
+// send have reached the window.
 
 const (
 	kittyClipboardOscCode = "5522"
 	kittyPasteEventsMode  = "5522"
 
 	// kittyClipboardWindowTagPrefix starts the id MonkeyMux gives a forwarded
-	// request: the prefix, the window id in hex, then "." and the program's
-	// own id when it sent one.
+	// request: the prefix, the window id in hex, then "." and the request's
+	// sequence number in the window.
 	kittyClipboardWindowTagPrefix = "mmx"
 
 	// capabilityHintKeyKittyClipboard is present in the capability hint of a
@@ -65,7 +70,7 @@ const (
 	kittyClipboardAmbiguousCarryTimeout = time.Second
 
 	// maxTrackedKittyClipboardRequests bounds the unanswered requests a
-	// window keeps; past it the oldest is forgotten.
+	// window keeps; past it the oldest is answered EBUSY.
 	maxTrackedKittyClipboardRequests = 64
 )
 
@@ -98,14 +103,29 @@ func (r kittyClipboardRoute) forwarding() bool {
 		r.client.answersKittyClipboard()
 }
 
-// kittyClipboardRequest is a read or write a window forwarded to client,
-// which owes it a final reply. open marks a write whose commit has not been
-// forwarded yet.
+// kittyClipboardRequest is a read or write a window forwarded under tag, with
+// the program's own id. client is the client its packet was handed to, which
+// owes it a final reply; nil until then. delivering marks a request whose
+// packet is still on its way: until the write carrying it is known to have
+// reached client, or to have failed over to another, client's departure
+// leaves it alone. open marks a write whose commit has not been forwarded
+// yet.
 type kittyClipboardRequest struct {
-	op     string
-	id     string
-	client *attachClient
-	open   bool
+	tag        string
+	op         string
+	id         string
+	client     *attachClient
+	delivering bool
+	open       bool
+}
+
+// kittyClipboardDelivery is what one read of a window, or a redraw pause,
+// forwards to the client: its OSC 5522 packets, which are also inline in the
+// forwarded output unless a pause held them apart, and the tags of the
+// requests among them.
+type kittyClipboardDelivery struct {
+	packets []byte
+	tags    []string
 }
 
 // kittyClipboardWindowState is a window's clipboard protocol state. Guarded
@@ -121,8 +141,12 @@ type kittyClipboardWindowState struct {
 	// forwarded notes that a packet of a request went to the client, which
 	// owes a reply.
 	forwarded bool
+	// delivery collects the packets the read being applied forwards.
+	delivery kittyClipboardDelivery
 	// requests are the forwarded requests not finished yet, oldest first.
+	// sequence numbered the last one's tag.
 	requests []kittyClipboardRequest
+	sequence uint64
 	// claimedWrite notes that a write was opened on the clients, replacing
 	// any other window's open write there, even if this read also ended it.
 	claimedWrite bool
@@ -143,8 +167,12 @@ type kittyClipboardInputState struct {
 	// unix nanoseconds. A reply is owed while both say so.
 	outstanding atomic.Int32
 	owedUntil   atomic.Int64
-	carry       []byte
-	generation  uint64
+	// departed is set once MonkeyMux has answered the requests the client
+	// left when it went away; a request handed to it later is answered the
+	// same way.
+	departed   atomic.Bool
+	carry      []byte
+	generation uint64
 	// pasteActive tracks bracketed paste in the client's input as it arrives,
 	// and pasteMarkerCarry the start of a paste marker a read ended in, so a
 	// marker split across reads still opens or closes the paste.
@@ -387,10 +415,10 @@ func (m kittyClipboardMetadata) withID(id string) string {
 }
 
 // sanitizeKittyClipboardID keeps the characters the spec allows in an id,
-// [a-zA-Z0-9-_+.], leaving room for the window tag in kitty's 512 limit.
+// [a-zA-Z0-9-_+.], up to kitty's 512 limit.
 func sanitizeKittyClipboardID(id string) string {
 	var builder strings.Builder
-	for index := 0; index < len(id) && builder.Len() < 480; index++ {
+	for index := 0; index < len(id) && builder.Len() < 512; index++ {
 		character := id[index]
 		switch {
 		case character >= 'a' && character <= 'z',
@@ -403,27 +431,30 @@ func sanitizeKittyClipboardID(id string) string {
 	return builder.String()
 }
 
-func kittyClipboardWindowTag(windowID string, id string) string {
-	tag := kittyClipboardWindowTagPrefix + hex.EncodeToString([]byte(windowID))
-	if id != "" {
-		tag += "." + id
-	}
-	return tag
+func kittyClipboardWindowTag(windowID string, sequence uint64) string {
+	return kittyClipboardWindowTagPrefix + hex.EncodeToString([]byte(windowID)) +
+		"." + strconv.FormatUint(sequence, 10)
 }
 
-// untagKittyClipboardID splits an id MonkeyMux gave a request into its window
-// and the program's own id.
-func untagKittyClipboardID(tag string) (windowID string, id string, ok bool) {
+// untagKittyClipboardID returns the window named by an id MonkeyMux gave a
+// request.
+func untagKittyClipboardID(tag string) (windowID string, ok bool) {
 	rest, found := strings.CutPrefix(tag, kittyClipboardWindowTagPrefix)
 	if !found {
-		return "", "", false
+		return "", false
 	}
-	encoded, id, _ := strings.Cut(rest, ".")
+	encoded, sequence, found := strings.Cut(rest, ".")
+	if !found {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(sequence, 10, 64); err != nil {
+		return "", false
+	}
 	decoded, err := hex.DecodeString(encoded)
 	if err != nil || len(decoded) == 0 {
-		return "", "", false
+		return "", false
 	}
-	return string(decoded), id, true
+	return string(decoded), true
 }
 
 func kittyClipboardStatusReply(op string, status string, id string) []byte {
@@ -434,11 +465,30 @@ func kittyClipboardStatusReply(op string, status string, id string) []byte {
 	return []byte(reply + "\x1b\\")
 }
 
-// forwardKittyClipboardLocked decides what the attached client receives for
+// forwardKittyClipboardLocked returns what the attached client receives, in
+// place in the window's output, for one OSC 5522 packet of this window; see
+// kittyClipboardPacketLocked. While redraw forwarding is paused the packet is
+// held apart from the redraw, which may be replaced by a frame painted from
+// the screen model, and goes out with whatever replaces it. Requires the
+// server's mu.
+func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byte) []byte {
+	packet := w.kittyClipboardPacketLocked(payload, terminator)
+	if len(packet) == 0 {
+		return nil
+	}
+	delivery := &w.kittyClipboard.delivery
+	delivery.packets = append(delivery.packets, packet...)
+	if w.redrawForwardingPaused {
+		return nil
+	}
+	return packet
+}
+
+// kittyClipboardPacketLocked decides what the attached client receives for
 // one OSC 5522 packet of this window: the packet with its id tagged, the
 // packet unchanged, or nothing when MonkeyMux answers it itself. terminator
 // is the packet's string terminator. Requires the server's mu.
-func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byte) []byte {
+func (w *muxWindow) kittyClipboardPacketLocked(payload []byte, terminator []byte) []byte {
 	state := &w.kittyClipboard
 	forwarding := state.route.forwarding()
 	body := string(payload[len(kittyClipboardOscCode)+1:])
@@ -450,9 +500,8 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 		packet = append(packet, payload...)
 		return append(packet, terminator...)
 	}
-	tagged := func() []byte {
-		packet := "\x1b]" + kittyClipboardOscCode + ";" +
-			metadata.withID(kittyClipboardWindowTag(w.id, sanitizeKittyClipboardID(metadata.id)))
+	tagged := func(tag string) []byte {
+		packet := "\x1b]" + kittyClipboardOscCode + ";" + metadata.withID(tag)
 		if hasData {
 			packet += ";" + data
 		}
@@ -476,8 +525,7 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 			return nil
 		}
 		state.forwarded = true
-		w.trackKittyClipboardRequestLocked("read", sanitizeKittyClipboardID(metadata.id))
-		return tagged()
+		return tagged(w.trackKittyClipboardRequestLocked("read", sanitizeKittyClipboardID(metadata.id)))
 	case "write":
 		// It replaces any open write, which the client never finishes.
 		w.forgetOpenKittyClipboardWriteLocked()
@@ -491,8 +539,7 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 		state.writePrimary = state.route.primary
 		state.forwarded = true
 		state.claimedWrite = true
-		w.trackKittyClipboardRequestLocked("write", state.writeID)
-		return tagged()
+		return tagged(w.trackKittyClipboardRequestLocked("write", state.writeID))
 	case "wdata", "walias":
 		switch state.write {
 		case kittyClipboardWriteForwarding:
@@ -528,9 +575,13 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 // of its packets, so the rest of it is never forwarded with a gap before
 // it. A window that opens a write takes the clients' only slot from any
 // other window, which is answered EBUSY, even when the new write also ends
-// in the same read. Returns the replies MonkeyMux owes window itself.
-// Requires s.mu.
-func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time.Time) []byte {
+// in the same read. Returns the replies MonkeyMux owes window itself, and
+// the packets the read forwards, for settleKittyClipboardDelivery once they
+// are written. Requires s.mu.
+func (s *muxServer) settleKittyClipboardOutputLocked(
+	window *muxWindow,
+	now time.Time,
+) ([]byte, kittyClipboardDelivery) {
 	state := &window.kittyClipboard
 	if state.write == kittyClipboardWriteForwarding &&
 		(!state.route.forwarding() || state.route.primary != state.writePrimary) {
@@ -547,43 +598,82 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 		}
 		s.kittyClipboardWriteWindow = window.id
 	}
-	if state.write != kittyClipboardWriteForwarding &&
-		s.kittyClipboardWriteWindow == window.id {
-		s.kittyClipboardWriteWindow = ""
-	}
+	s.releaseKittyClipboardWriteSlotLocked(window)
 	if state.forwarded {
 		noteKittyClipboardRepliesOwed(&state.route.client.kittyClipboardInput.owedUntil, now)
 	}
 	replies := state.replies
+	delivery := state.delivery
 	state.replies = nil
+	state.delivery = kittyClipboardDelivery{}
 	state.forwarded = false
 	state.claimedWrite = false
 	state.route = kittyClipboardRoute{}
-	return replies
+	return replies, delivery
 }
 
-// trackKittyClipboardRequestLocked records a request forwarded to the client
-// of the read being applied. Requires the server's mu.
-func (w *muxWindow) trackKittyClipboardRequestLocked(op string, id string) {
+// releaseKittyClipboardWriteSlotLocked frees the clients' write slot when
+// window holds it without an open write. Requires s.mu.
+func (s *muxServer) releaseKittyClipboardWriteSlotLocked(window *muxWindow) {
+	if window.kittyClipboard.write != kittyClipboardWriteForwarding &&
+		s.kittyClipboardWriteWindow == window.id {
+		s.kittyClipboardWriteWindow = ""
+	}
+}
+
+// trackKittyClipboardRequestLocked records a request the read being applied
+// forwards and returns the tag it goes out with. It belongs to no client
+// until its packet is handed to one. Past maxTrackedKittyClipboardRequests
+// the oldest is answered EBUSY, and its client's reply is then dropped.
+// Requires the server's mu.
+func (w *muxWindow) trackKittyClipboardRequestLocked(op string, id string) string {
 	state := &w.kittyClipboard
 	if len(state.requests) >= maxTrackedKittyClipboardRequests {
-		w.removeKittyClipboardRequestLocked(0)
+		state.replies = append(state.replies, w.failKittyClipboardRequestLocked(0)...)
 	}
+	state.sequence++
+	tag := kittyClipboardWindowTag(w.id, state.sequence)
 	state.requests = append(state.requests, kittyClipboardRequest{
-		op:     op,
-		id:     id,
-		client: state.route.client,
-		open:   op == "write",
+		tag:        tag,
+		op:         op,
+		id:         id,
+		delivering: true,
+		open:       op == "write",
 	})
-	state.route.client.kittyClipboardInput.outstanding.Add(1)
+	state.delivery.tags = append(state.delivery.tags, tag)
+	return tag
+}
+
+func (w *muxWindow) kittyClipboardRequestIndexLocked(tag string) int {
+	for index, request := range w.kittyClipboard.requests {
+		if request.tag == tag {
+			return index
+		}
+	}
+	return -1
 }
 
 // removeKittyClipboardRequestLocked forgets the window's request at index.
 // Requires the server's mu.
 func (w *muxWindow) removeKittyClipboardRequestLocked(index int) {
 	state := &w.kittyClipboard
-	state.requests[index].client.kittyClipboardInput.outstanding.Add(-1)
+	if client := state.requests[index].client; client != nil {
+		client.kittyClipboardInput.outstanding.Add(-1)
+	}
 	state.requests = append(state.requests[:index], state.requests[index+1:]...)
+}
+
+// failKittyClipboardRequestLocked forgets the window's request at index and
+// returns the EBUSY that answers it in place of the client. The rest of an
+// open write has nowhere to go, so it is dropped; the caller frees the
+// clients' write slot. Requires the server's mu.
+func (w *muxWindow) failKittyClipboardRequestLocked(index int) []byte {
+	request := w.kittyClipboard.requests[index]
+	if request.open {
+		w.kittyClipboard.write = kittyClipboardWriteRejected
+	}
+	w.removeKittyClipboardRequestLocked(index)
+	return kittyClipboardStatusReply(request.op, "EBUSY", request.id)
 }
 
 // forgetKittyClipboardRequestsLocked forgets every request of a window that
@@ -635,35 +725,55 @@ func (w *muxWindow) refuseKittyClipboardWriteLocked(status string) []byte {
 	return kittyClipboardStatusReply("write", status, state.writeID)
 }
 
-// kittyClipboardFinalReply reads a reply on its way to a window: its
-// operation and id, and whether it is the last the request gets. A read is
-// answered OK, then DATA packets, then DONE, or with an error alone; a write
-// gets a single reply.
-func kittyClipboardFinalReply(reply []byte) (op string, id string, final bool) {
-	if len(reply) < 2 || !isKittyClipboardOscPayload(reply[2:]) {
-		return "", "", false
+// handKittyClipboardRequests notes that the packets of window windowID's
+// requests named by tags are about to be written to client, which owes
+// their replies from then on: called before the write is queued, so a reply
+// split across the client's reads is held back from its first byte. A write
+// handed to another client than the one its window was writing to stays
+// with that client.
+func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, client *attachClient) {
+	if len(tags) == 0 || client == nil {
+		return
 	}
-	payloadEnd, _, ok := findOscTerminator(reply[2:])
-	if !ok {
-		return "", "", false
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window := s.windowByIDLocked(windowID)
+	if window == nil {
+		return
 	}
-	body := string(reply[2+len(kittyClipboardOscCode)+1 : 2+payloadEnd])
-	rawMetadata, _, _ := strings.Cut(body, ";")
-	metadata, ok := parseKittyClipboardMetadata(rawMetadata)
-	if !ok {
-		return "", "", false
+	state := &window.kittyClipboard
+	for _, tag := range tags {
+		index := window.kittyClipboardRequestIndexLocked(tag)
+		if index < 0 || !state.requests[index].delivering {
+			continue
+		}
+		request := &state.requests[index]
+		if request.client != client {
+			if request.client != nil {
+				request.client.kittyClipboardInput.outstanding.Add(-1)
+			}
+			request.client = client
+			client.kittyClipboardInput.outstanding.Add(1)
+		}
+		if request.open && state.write == kittyClipboardWriteForwarding {
+			state.writePrimary = client.conn
+		}
 	}
-	final = metadata.op == "write" ||
-		(metadata.op == "read" && metadata.status != "OK" && metadata.status != "DATA")
-	return metadata.op, metadata.id, final
+	noteKittyClipboardRepliesOwed(&client.kittyClipboardInput.owedUntil, now)
 }
 
-// finishKittyClipboardReply notes a reply from client on its way to window
-// windowID: the request a final reply answers is finished. Replies come in
-// the order of their requests, so it is the oldest one that matches.
-func (s *muxServer) finishKittyClipboardReply(client *attachClient, windowID string, reply []byte) {
-	op, id, final := kittyClipboardFinalReply(reply)
-	if !final {
+// settleKittyClipboardDelivery ends the delivery of window windowID's
+// requests named by tags, whose packets reached delivered, or no client when
+// it is nil. A request that reached no client able to answer it, because no
+// write succeeded, the client does not speak the protocol, or it has already
+// gone, is answered EBUSY.
+func (s *muxServer) settleKittyClipboardDelivery(
+	windowID string,
+	tags []string,
+	delivered *attachClient,
+) {
+	if len(tags) == 0 {
 		return
 	}
 	s.mu.Lock()
@@ -672,47 +782,85 @@ func (s *muxServer) finishKittyClipboardReply(client *attachClient, windowID str
 	if window == nil {
 		return
 	}
-	match := -1
-	for index, request := range window.kittyClipboard.requests {
-		if request.op != op || request.id != id {
+	answers := delivered != nil && delivered.answersKittyClipboard() &&
+		!delivered.kittyClipboardInput.departed.Load()
+	state := &window.kittyClipboard
+	var replies []byte
+	for _, tag := range tags {
+		index := window.kittyClipboardRequestIndexLocked(tag)
+		if index < 0 || !state.requests[index].delivering {
 			continue
 		}
-		if request.client == client {
-			match = index
-			break
-		}
-		if match < 0 {
-			match = index
+		state.requests[index].delivering = false
+		if !answers || state.requests[index].client != delivered {
+			replies = append(replies, window.failKittyClipboardRequestLocked(index)...)
 		}
 	}
-	if match >= 0 {
-		window.removeKittyClipboardRequestLocked(match)
+	s.releaseKittyClipboardWriteSlotLocked(window)
+	if len(replies) > 0 {
+		s.queueWindowReply(window, replies)
 	}
 }
 
-// failKittyClipboardRequestsLocked answers EBUSY every request forwarded to
+// takeKittyClipboardReply resolves a reply on its way to window windowID by
+// the tag it carries. It returns the reply with the program's own id
+// restored, or nil when the tag names no open request of the window, as for
+// a request MonkeyMux has already answered. The final reply finishes the
+// request: a read is answered OK, then DATA packets, then DONE, or with an
+// error alone; a write gets a single reply.
+func (s *muxServer) takeKittyClipboardReply(windowID string, reply []byte) []byte {
+	if len(reply) < 2 || !isKittyClipboardOscPayload(reply[2:]) {
+		return nil
+	}
+	payloadEnd, _, ok := findOscTerminator(reply[2:])
+	if !ok {
+		return nil
+	}
+	body := string(reply[2+len(kittyClipboardOscCode)+1 : 2+payloadEnd])
+	rawMetadata, data, hasData := strings.Cut(body, ";")
+	metadata, ok := parseKittyClipboardMetadata(rawMetadata)
+	if !ok || metadata.idIndex < 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window := s.windowByIDLocked(windowID)
+	if window == nil {
+		return nil
+	}
+	index := window.kittyClipboardRequestIndexLocked(metadata.id)
+	if index < 0 || window.kittyClipboard.requests[index].op != metadata.op {
+		return nil
+	}
+	id := window.kittyClipboard.requests[index].id
+	if metadata.op == "write" || (metadata.status != "OK" && metadata.status != "DATA") {
+		window.removeKittyClipboardRequestLocked(index)
+	}
+	restored := "\x1b]" + kittyClipboardOscCode + ";" + metadata.withID(id)
+	if hasData {
+		restored += ";" + data
+	}
+	return append([]byte(restored), reply[2+payloadEnd:]...)
+}
+
+// failKittyClipboardRequestsLocked answers EBUSY every request handed to
 // client, which has gone and whose input worker has written every reply it
-// received. Requires the server's mu.
+// received. A request still on its way is left to the delivery that carries
+// it, which may yet hand it to another client. Requires the server's mu.
 func (s *muxServer) failKittyClipboardRequestsLocked(client *attachClient) {
+	client.kittyClipboardInput.departed.Store(true)
 	for _, window := range s.windows {
 		state := &window.kittyClipboard
 		var replies []byte
 		for index := 0; index < len(state.requests); {
 			request := state.requests[index]
-			if request.client != client {
+			if request.client != client || request.delivering {
 				index++
 				continue
 			}
-			if request.open {
-				// The rest of the write has nowhere to go.
-				state.write = kittyClipboardWriteRejected
-				if s.kittyClipboardWriteWindow == window.id {
-					s.kittyClipboardWriteWindow = ""
-				}
-			}
-			window.removeKittyClipboardRequestLocked(index)
-			replies = append(replies, kittyClipboardStatusReply(request.op, "EBUSY", request.id)...)
+			replies = append(replies, window.failKittyClipboardRequestLocked(index)...)
 		}
+		s.releaseKittyClipboardWriteSlotLocked(window)
 		if len(replies) > 0 {
 			s.queueWindowReply(window, replies)
 		}
@@ -729,32 +877,25 @@ func noteKittyClipboardRepliesOwed(owedUntil *atomic.Int64, now time.Time) {
 	}
 }
 
-// untagKittyClipboardReply returns the window a reply is addressed to and the
-// reply's payload with the program's own id restored.
-func untagKittyClipboardReply(payload []byte) (string, []byte, bool) {
+// kittyClipboardReplyWindow returns the window a reply's payload is addressed
+// to by the id MonkeyMux gave its request.
+func kittyClipboardReplyWindow(payload []byte) (string, bool) {
 	if !isKittyClipboardOscPayload(payload) {
-		return "", nil, false
+		return "", false
 	}
 	body := string(payload[len(kittyClipboardOscCode)+1:])
-	rawMetadata, data, hasData := strings.Cut(body, ";")
+	rawMetadata, _, _ := strings.Cut(body, ";")
 	metadata, ok := parseKittyClipboardMetadata(rawMetadata)
 	if !ok || metadata.idIndex < 0 {
-		return "", nil, false
+		return "", false
 	}
-	windowID, id, ok := untagKittyClipboardID(metadata.id)
-	if !ok {
-		return "", nil, false
-	}
-	restored := kittyClipboardOscCode + ";" + metadata.withID(id)
-	if hasData {
-		restored += ";" + data
-	}
-	return windowID, []byte(restored), true
+	return untagKittyClipboardID(metadata.id)
 }
 
 // splitKittyClipboardRepliesLocked takes the OSC 5522 replies addressed to a
 // window out of a read of this client's input. It returns the rest of the
-// input, for the usual routing, and one action per reply. Pasted text is
+// input, for the usual routing, and one action per reply, which
+// takeKittyClipboardReply resolves on its way to the window. Pasted text is
 // never taken as a reply.
 //
 // A reply split across reads is held back until it is complete. So is a read
@@ -825,17 +966,12 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 			continue
 		}
 		sequenceLength := 2 + payloadEnd + terminatorLength
-		windowID, restored, addressed := untagKittyClipboardReply(rest[2 : 2+payloadEnd])
-		if addressed {
+		if windowID, addressed := kittyClipboardReplyWindow(rest[2 : 2+payloadEnd]); addressed {
 			input = append(input, data[copyStart:index]...)
-			reply := make([]byte, 0, len(restored)+terminatorLength+2)
-			reply = append(reply, "\x1b]"...)
-			reply = append(reply, restored...)
-			reply = append(reply, rest[2+payloadEnd:sequenceLength]...)
 			replies = append(replies, attachInputAction{
 				kittyClipboardReply: true,
 				windowID:            windowID,
-				data:                reply,
+				data:                append([]byte(nil), rest[:sequenceLength]...),
 			})
 			copyStart = index + sequenceLength
 			noteKittyClipboardRepliesOwed(&state.owedUntil, now)
