@@ -5479,7 +5479,13 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-    for (final interruption in ['none', 'typing', 'window', 'partial']) {
+    for (final interruption in [
+      'none',
+      'typing',
+      'window',
+      'windowBeforeConfirm',
+      'partial',
+    ]) {
       testWidgets('clipboard content URI upload handles $interruption', (
         tester,
       ) async {
@@ -5545,7 +5551,7 @@ void main() {
             null,
           );
         });
-        if (interruption == 'window') {
+        if (interruption.startsWith('window')) {
           await pumpTmuxScreen(
             tester,
             _MockTmuxService(),
@@ -5562,6 +5568,17 @@ void main() {
         await tester.tap(find.byTooltip('Paste'));
         await tester.pumpAndSettle();
         expect(find.text('Upload clipboard files?'), findsOneWidget);
+        if (interruption == 'windowBeforeConfirm') {
+          // The paste stays with the window it was asked for in, even when
+          // the upload is confirmed after the switch.
+          events.add(
+            const TmuxWindowListEvent([
+              TmuxWindow(index: 0, name: 'shell', isActive: false),
+              TmuxWindow(index: 1, name: 'agent', isActive: true),
+            ]),
+          );
+          await tester.pump();
+        }
         await tester.tap(find.text('Upload and paste'));
         await tester.pumpAndSettle();
         expect(uploaded, [
@@ -5599,7 +5616,7 @@ void main() {
         );
         expect(
           output,
-          interruption == 'typing' || interruption == 'window'
+          interruption == 'typing' || interruption.startsWith('window')
               ? isNot(contains('one.txt'))
               : contains('one.txt'),
         );
@@ -5611,6 +5628,85 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    for (final windowChange in ['none', 'away', 'awayAndBack']) {
+      testWidgets(
+        'a clipboard paste stops when the window changes while the clipboard '
+        'is read, windowChange=$windowChange',
+        (tester) async {
+          final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+          addTearDown(events.close);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpTmuxScreen(
+            tester,
+            _MockTmuxService(),
+            windowEvents: events.stream,
+          );
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          if (windowChange != 'none') {
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: false),
+                TmuxWindow(index: 1, name: 'agent', isActive: true),
+              ]),
+            );
+            await tester.pump();
+          }
+          if (windowChange == 'awayAndBack') {
+            // Coming back does not revive the paste: another window was
+            // shown in between.
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: true),
+                TmuxWindow(index: 1, name: 'agent', isActive: false),
+              ]),
+            );
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          expect(
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+            windowChange == 'none'
+                ? contains('caption')
+                : isNot(contains('caption')),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
     }
 
     testWidgets('shows the detected tmux version in terminal info', (
@@ -6183,6 +6279,127 @@ void main() {
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]11;')));
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]4;')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    for (final switchWindow in [false, true]) {
+      testWidgets(
+        'a kitty paste that falls back to a normal paste stays with its '
+        'MonkeyMux window, switchWindow=$switchWindow',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          final tmuxService = _MockTmuxService();
+          final monkeyMuxService = _MockMonkeyMuxService();
+          const sessionName = 'work';
+          TmuxWindow window(int index, {required bool active}) => TmuxWindow(
+            index: index,
+            id: '@$index',
+            name: index == 0 ? 'editor' : 'shell',
+            isActive: active,
+            terminalBracketedPasteMode: true,
+            terminalKittyPasteEventsMode: index == 0,
+          );
+          var windows = [window(0, active: true), window(1, active: false)];
+          host = _buildHost(
+            id: host.id,
+            tmuxSessionName: sessionName,
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          );
+          final muxFixture =
+              createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+                ..stubPrefetch()
+                ..stubForegroundClient()
+                ..stubWindows(() => windows)
+                ..stubWindowEvents()
+                ..stubPaneContext()
+                ..stubThemeRefresh();
+          when(
+            () => monkeyMuxService.refreshWindows(
+              session,
+              sessionName,
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async => windows);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+
+          await muxFixture.pump(tester);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..clipboardSharingEnabled = true
+            ..localClipboardReadEnabled = true
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          // The paste event waits behind the program's own clipboard read.
+          platform.blockRead();
+          session.debugHandlePrivateOsc('5522', [
+            'type=read:id=r',
+            b64('text/plain'),
+          ]);
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          // The program turns paste events off, so the paste falls back to
+          // text, and the user moves to the other window while the fallback
+          // reads the clipboard.
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pump();
+          await tester.pump();
+          if (switchWindow) {
+            windows = [window(0, active: false), window(1, active: true)];
+            muxFixture.windowEvents.add(TmuxWindowListEvent(windows));
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(
+            written,
+            switchWindow
+                ? isNot(contains('caption'))
+                : contains('\x1b[200~caption\x1b[201~'),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
 
     testWidgets(
       'a MonkeyMux shell prompt gets its click while stale mouse reports stay '

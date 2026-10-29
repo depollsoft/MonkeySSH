@@ -342,6 +342,154 @@ void main() {
     });
   });
 
+  group('requests behind a blocked platform call', () {
+    _Harness blocked(Completer<Uint8List?> read, {int maxWriteBytes = 64}) {
+      final harness = _Harness(maxWriteBytes: maxWriteBytes);
+      harness.platform.pendingRead = read.future;
+      harness.osc('type=read:id=r;${b64('text/plain')}');
+      return harness;
+    }
+
+    void emptyWrite(_Harness harness, String id) => harness
+      ..osc('type=write:id=$id')
+      ..osc('type=wdata');
+
+    test('past the pending limit, are answered EBUSY at once', () async {
+      final read = Completer<Uint8List?>();
+      final harness = blocked(read);
+      // The blocked read is the first pending request.
+      const queued = kittyClipboardMaxPendingRequests - 1;
+      for (var index = 0; index < queued + 5; index++) {
+        emptyWrite(harness, 'w$index');
+      }
+      await pumpEventQueue();
+
+      expect(harness.replies, [
+        for (var index = queued; index < queued + 5; index++)
+          status('write', 'EBUSY', id: 'w$index'),
+      ]);
+      harness.replies.clear();
+
+      read.complete(utf8.encode('read'));
+      final packets = await harness.packets();
+      expect(packets.skip(3), [
+        for (var index = 0; index < queued; index++)
+          status('write', 'DONE', id: 'w$index'),
+      ]);
+      expect(harness.platform.written, hasLength(queued));
+
+      // Once answered, they no longer count.
+      emptyWrite(harness, 'next');
+      expect(await harness.packets(), [status('write', 'DONE', id: 'next')]);
+    });
+
+    test('keep a refused write from queueing its reply', () async {
+      final read = Completer<Uint8List?>();
+      final harness = blocked(read, maxWriteBytes: 4);
+      const total = kittyClipboardMaxPendingRequests + 5;
+      for (var index = 0; index < total; index++) {
+        harness
+          ..osc('type=write:id=w$index')
+          ..osc('type=wdata:mime=${b64('text/plain')};${b64('hello')}');
+      }
+      await pumpEventQueue();
+
+      // The replies past the limit go out at once, as they are.
+      expect(harness.replies, [
+        for (
+          var index = kittyClipboardMaxPendingRequests - 1;
+          index < total;
+          index++
+        )
+          status('write', 'EFBIG', id: 'w$index'),
+      ]);
+      harness.replies.clear();
+
+      read.complete(utf8.encode('read'));
+      final packets = await harness.packets();
+      expect(packets.skip(3), [
+        for (
+          var index = 0;
+          index < kittyClipboardMaxPendingRequests - 1;
+          index++
+        )
+          status('write', 'EFBIG', id: 'w$index'),
+      ]);
+    });
+
+    test(
+      'reads past the limit are answered EBUSY and keep their grant',
+      () async {
+        final harness = _Harness();
+        final paste = harness.handler.sendPasteEvent(
+          KittyClipboardSnapshot({'text/plain': utf8.encode('pasted')}),
+        );
+        expect(await paste, KittyClipboardPasteEventResult.sent);
+        final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+            .firstMatch((await harness.packets()).first)!
+            .group(1)!;
+        String pasteRead(String id) =>
+            'type=read:id=$id:pw=$password'
+            ':name=${b64(kittyClipboardPasteEventName)};${b64('text/plain')}';
+
+        final read = Completer<Uint8List?>();
+        var reads = 0;
+        harness.platform
+          ..pendingRead = read.future
+          ..onRead = () => reads++;
+        harness.osc('type=read:id=r;${b64('text/plain')}');
+        await pumpEventQueue();
+        expect(reads, 1);
+        const queued = kittyClipboardMaxPendingRequests - 1;
+        for (var index = 0; index < queued; index++) {
+          harness.osc('type=read:id=q$index;${b64('.')}');
+        }
+        harness.osc(pasteRead('busy'));
+        await pumpEventQueue();
+
+        expect(harness.replies, [status('read', 'EBUSY', id: 'busy')]);
+        expect(reads, 1);
+        harness.replies.clear();
+
+        read.complete(utf8.encode('read'));
+        expect(await harness.packets(), hasLength(3 + 3 * queued));
+        expect(reads, 1);
+
+        harness.osc(pasteRead('retry'));
+        expect(await harness.packets(), [
+          status('read', 'OK', id: 'retry'),
+          dataPacket('text/plain', 'pasted', id: 'retry'),
+          status('read', 'DONE', id: 'retry'),
+        ]);
+      },
+    );
+
+    test('a replacing shell channel hears its refusal', () async {
+      final read = Completer<Uint8List?>();
+      final harness = blocked(read);
+      var reads = 0;
+      harness.platform.onRead = () => reads++;
+      await pumpEventQueue();
+      for (var index = 0; index < kittyClipboardMaxPendingRequests; index++) {
+        harness.osc('type=read:id=q$index;${b64('text/plain')}');
+      }
+      await pumpEventQueue();
+      harness.replies.clear();
+
+      // The new channel's request is refused on that channel, although the
+      // task being answered came from the old one.
+      harness.handler.abandonChannel();
+      harness.osc('type=read:id=late;${b64('text/plain')}');
+      expect(harness.replies, [status('read', 'EBUSY', id: 'late')]);
+      harness.replies.clear();
+
+      read.complete(utf8.encode('read'));
+      // The old channel's requests go unanswered and read nothing more.
+      expect(await harness.packets(), isEmpty);
+      expect(reads, 1);
+    });
+  });
+
   group('reads', () {
     test('follow the remote clipboard read setting', () async {
       final harness = _Harness()
