@@ -52,10 +52,12 @@ const (
 	// past this is dropped rather than forwarded unchecked.
 	kittyClipboardPacketLimitBytes = 64 << 10
 
-	// kittyClipboardRepliesOwedGrace is how long after a request is forwarded,
-	// or a reply passes through, the client is assumed to be sending replies.
-	// Only then is an input read that ends in a partial `ESC ] 5522 ;` held
-	// back, since outside it a lone trailing ESC is the Escape key.
+	// kittyClipboardRepliesOwedGrace is how long after a packet of a request
+	// is forwarded, or a reply passes through, a client that still owes a
+	// reply is assumed to be sending it. Only then is an input read that ends
+	// in a partial `ESC ] 5522 ;` held back, since otherwise a lone trailing
+	// ESC is the Escape key; a request the client never answers stops
+	// holding it back after this long.
 	kittyClipboardRepliesOwedGrace = 5 * time.Second
 
 	// kittyClipboardAmbiguousCarryTimeout releases input held back because
@@ -116,8 +118,8 @@ type kittyClipboardWindowState struct {
 	// replies collects the answers MonkeyMux gives itself while a read is
 	// applied, queued to the window afterwards.
 	replies []byte
-	// forwarded notes that a request went to the client, which now owes a
-	// reply.
+	// forwarded notes that a packet of a request went to the client, which
+	// owes a reply.
 	forwarded bool
 	// requests are the forwarded requests not finished yet, oldest first.
 	requests []kittyClipboardRequest
@@ -132,11 +134,17 @@ type kittyClipboardWindowState struct {
 }
 
 // kittyClipboardInputState holds a client's input that may be the start of
-// a reply split across reads. Guarded by the client's inputDispatchMu.
+// a reply split across reads. Guarded by the client's inputDispatchMu,
+// except the atomics, which MonkeyMux also updates under the server's mu.
 type kittyClipboardInputState struct {
-	owedUntil  *atomic.Int64
-	carry      []byte
-	generation uint64
+	// outstanding counts the requests forwarded to the client that it has
+	// not finished answering. owedUntil is kittyClipboardRepliesOwedGrace
+	// after a packet of one last went to it or a reply last came back, in
+	// unix nanoseconds. A reply is owed while both say so.
+	outstanding atomic.Int32
+	owedUntil   atomic.Int64
+	carry       []byte
+	generation  uint64
 	// pasteActive tracks bracketed paste in the client's input as it arrives,
 	// and pasteMarkerCarry the start of a paste marker a read ended in, so a
 	// marker split across reads still opens or closes the paste.
@@ -489,9 +497,10 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 		switch state.write {
 		case kittyClipboardWriteForwarding:
 			if forwarding && state.route.primary == state.writePrimary {
+				// The client answers a write it aborts at any packet.
+				state.forwarded = true
 				if commit {
 					state.write = kittyClipboardWriteNone
-					state.forwarded = true
 					w.closeOpenKittyClipboardWriteLocked()
 				}
 				return unchanged()
@@ -543,7 +552,7 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 		s.kittyClipboardWriteWindow = ""
 	}
 	if state.forwarded {
-		s.noteKittyClipboardRepliesOwed(now)
+		noteKittyClipboardRepliesOwed(&state.route.client.kittyClipboardInput.owedUntil, now)
 	}
 	replies := state.replies
 	state.replies = nil
@@ -558,7 +567,7 @@ func (s *muxServer) settleKittyClipboardOutputLocked(window *muxWindow, now time
 func (w *muxWindow) trackKittyClipboardRequestLocked(op string, id string) {
 	state := &w.kittyClipboard
 	if len(state.requests) >= maxTrackedKittyClipboardRequests {
-		state.requests = state.requests[1:]
+		w.removeKittyClipboardRequestLocked(0)
 	}
 	state.requests = append(state.requests, kittyClipboardRequest{
 		op:     op,
@@ -566,13 +575,23 @@ func (w *muxWindow) trackKittyClipboardRequestLocked(op string, id string) {
 		client: state.route.client,
 		open:   op == "write",
 	})
+	state.route.client.kittyClipboardInput.outstanding.Add(1)
 }
 
 // removeKittyClipboardRequestLocked forgets the window's request at index.
 // Requires the server's mu.
 func (w *muxWindow) removeKittyClipboardRequestLocked(index int) {
 	state := &w.kittyClipboard
+	state.requests[index].client.kittyClipboardInput.outstanding.Add(-1)
 	state.requests = append(state.requests[:index], state.requests[index+1:]...)
+}
+
+// forgetKittyClipboardRequestsLocked forgets every request of a window that
+// is closing. Requires the server's mu.
+func (w *muxWindow) forgetKittyClipboardRequestsLocked() {
+	for len(w.kittyClipboard.requests) > 0 {
+		w.removeKittyClipboardRequestLocked(0)
+	}
 }
 
 func (w *muxWindow) openKittyClipboardWriteLocked() int {
@@ -700,14 +719,7 @@ func (s *muxServer) failKittyClipboardRequestsLocked(client *attachClient) {
 	}
 }
 
-func (s *muxServer) noteKittyClipboardRepliesOwed(now time.Time) {
-	noteKittyClipboardRepliesOwed(&s.kittyClipboardRepliesOwedUntil, now)
-}
-
 func noteKittyClipboardRepliesOwed(owedUntil *atomic.Int64, now time.Time) {
-	if owedUntil == nil {
-		return
-	}
 	until := now.Add(kittyClipboardRepliesOwedGrace).UnixNano()
 	for {
 		current := owedUntil.Load()
@@ -746,8 +758,10 @@ func untagKittyClipboardReply(payload []byte) (string, []byte, bool) {
 // never taken as a reply.
 //
 // A reply split across reads is held back until it is complete. So is a read
-// ending in a bare prefix of `ESC ] 5522 ;` while replies are owed, released
-// after kittyClipboardAmbiguousCarryTimeout if nothing completes it.
+// ending in a bare prefix of `ESC ] 5522 ;` while the client owes a reply,
+// released after kittyClipboardAmbiguousCarryTimeout if nothing completes
+// it: from forwarding a request until its final reply, so the Escape key is
+// held back only while a reply can actually follow it.
 // Requires inputDispatchMu.
 func (c *attachClient) splitKittyClipboardRepliesLocked(
 	data []byte,
@@ -770,7 +784,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	if bytes.IndexByte(data, '\x1b') < 0 {
 		return data, nil
 	}
-	owed := state.owedUntil != nil && now.UnixNano() < state.owedUntil.Load()
+	owed := state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load()
 	inPaste := func(index int) bool {
 		for len(pasted) > 0 && pasted[0][1] <= index {
 			pasted = pasted[1:]
@@ -824,7 +838,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 				data:                reply,
 			})
 			copyStart = index + sequenceLength
-			noteKittyClipboardRepliesOwed(state.owedUntil, now)
+			noteKittyClipboardRepliesOwed(&state.owedUntil, now)
 		}
 		index += sequenceLength - 1
 	}

@@ -706,10 +706,8 @@ type muxServer struct {
 	detachedReplyClients map[*attachClient]struct{}
 
 	// kittyClipboardWriteWindow is the window whose OSC 5522 write is open on
-	// the attached clients; kittyClipboardRepliesOwedUntil is when they are
-	// last expected to be sending OSC 5522 replies (unix nanoseconds).
-	kittyClipboardWriteWindow      string
-	kittyClipboardRepliesOwedUntil atomic.Int64
+	// the attached clients.
+	kittyClipboardWriteWindow string
 
 	mu                               sync.Mutex
 	resizeMu                         sync.Mutex
@@ -7329,6 +7327,7 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.releaseRedrawForwardingStateLocked()
 	window.clearKittyGraphicsPendingLocked()
 	window.clearKittyImagesLocked()
+	window.forgetKittyClipboardRequestsLocked()
 	window.history = nil
 	window.screen = nil
 	window.oscBuffer = nil
@@ -9156,7 +9155,6 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	var sendFocusTransition bool
 	client := newAttachClient(conn, hello)
 	client.focusSequenceSnapshot = s.focusSequenceSnapshot
-	client.kittyClipboardInput.owedUntil = &s.kittyClipboardRepliesOwedUntil
 	client.focusClaim = func(expectedFocusSequence uint64) {
 		s.focusAttachClientIfUnchanged(client, expectedFocusSequence)
 	}
