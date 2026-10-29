@@ -153,16 +153,25 @@ func (c *attachClient) answersKittyClipboard() bool {
 }
 
 // kittyClipboardRouteLocked reports where window's requests can go for the
-// read being applied: to the primary attached client while the window is on
-// screen and that client speaks the protocol. Requires s.mu.
+// read being applied: to the attached client the read is forwarded to while
+// the window is on screen and that client speaks the protocol. That is the
+// primary client, unless a query split across reads is still open: the read
+// then goes to the client that received the query's start, as
+// handleWindowOutput sends it, so every packet goes where the rest of the
+// read goes. Requires s.mu.
 func (s *muxServer) kittyClipboardRouteLocked(window *muxWindow) kittyClipboardRoute {
 	if window == nil || !window.terminalOutputForwarding {
 		return kittyClipboardRoute{}
 	}
+	primary := s.attachConn
+	if len(window.secondaryQueryCarry) > 0 &&
+		s.isAttachConnectionLocked(window.secondaryQueryPrimary) {
+		primary = window.secondaryQueryPrimary
+	}
 	return kittyClipboardRoute{
 		onScreen: true,
-		primary:  s.attachConn,
-		client:   s.attachClients[s.attachConn],
+		primary:  primary,
+		client:   s.attachClients[primary],
 	}
 }
 

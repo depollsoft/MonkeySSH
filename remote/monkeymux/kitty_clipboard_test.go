@@ -849,3 +849,37 @@ func TestKittyClipboardDiscardEndsAtCanOrSub(t *testing.T) {
 		}
 	}
 }
+
+// A read can still go to the client that received the start of a query
+// after focus moved on. A write opened in it belongs to that client: the
+// rest of the write must not go to the new primary, which has no open write
+// and would drop it.
+func TestKittyClipboardWriteStaysWithTheClientItWentTo(t *testing.T) {
+	server, first, _, attachA := newKittyClipboardTestServer(t)
+	attachB := &recordingConn{}
+	clientB := registerTestAttachClient(t, server, attachB, "second", 80, 24)
+	clientB.capabilityHint = []byte(kittyClipboardHintFixture)
+	server.mu.Lock()
+	server.attachConn = attachA
+	server.mu.Unlock()
+
+	// A receives the start of a query, then B takes focus.
+	server.handleWindowOutput("@1", []byte("\x1b[>"))
+	waitForAttachOutput(t, attachA, "\x1b[>")
+	server.focusAttachClient(clientB, 0, 0, false)
+
+	server.handleWindowOutput("@1", []byte("c\x1b]5522;type=write:id=w\x1b\\"))
+	waitForAttachOutput(t, attachA, "c\x1b]5522;type=write:id="+kittyClipboardTagWindow1+".w\x1b\\")
+	server.handleWindowOutput("@1", []byte(
+		"\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\\x1b]5522;type=wdata\x1b\\done"))
+	waitForAttachOutput(t, attachB, "done")
+
+	for name, attach := range map[string]*recordingConn{"A": attachA, "B": attachB} {
+		if got := attach.String(); strings.Contains(got, "wdata") {
+			t.Fatalf("client %s got the rest of a write it may not hold: %q", name, got)
+		}
+	}
+	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EBUSY:id=w\x1b\\" {
+		t.Fatalf("window got %q, want the split write refused", got)
+	}
+}
