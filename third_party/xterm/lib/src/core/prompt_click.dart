@@ -191,9 +191,7 @@ extension TerminalPromptClick on Terminal {
     if (relative) {
       var top = promptStart;
       for (var y = position.y; y > promptStart; y--) {
-        final line = buffer.lines[y];
-        if (line.semanticPrompt == SemanticPromptRow.continuation &&
-            _showsPrompt(line)) {
+        if (_startsSecondaryPrompt(buffer.lines[y])) {
           top = y;
           break;
         }
@@ -207,9 +205,15 @@ extension TerminalPromptClick on Terminal {
     return '\x1b[<0;$column;${row}M';
   }
 
-  /// Whether a row shows prompt text: a secondary prompt rather than a row
-  /// the input wrapped or broke onto.
-  bool _showsPrompt(BufferLine line) {
+  /// Whether a row starts a secondary prompt: it continues the prompt on a
+  /// line of its own and shows prompt text. Rows that the prompt or input
+  /// soft-wrapped onto, and rows that the input broke onto, start none, as in
+  /// kitty, where only a `k=s` mark makes one.
+  bool _startsSecondaryPrompt(BufferLine line) {
+    if (line.semanticPrompt != SemanticPromptRow.continuation ||
+        line.isWrapped) {
+      return false;
+    }
     for (var x = 0; x < line.length && x < buffer.viewWidth; x++) {
       if (line.getSemanticContent(x) == SemanticContent.prompt) return true;
     }
