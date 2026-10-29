@@ -20,12 +20,22 @@ const (
 	vtSemPrompt
 )
 
-// Row marks, as SemanticPromptRow in the client.
+// Row marks, as SemanticPromptRow in the client: a continuation is a row a
+// wrap or newline reached inside a prompt or its input, or a continuation
+// prompt (k=c, VS Code's 633;F); a secondary prompt (k=s) is one that
+// relative click events count rows from.
 const (
 	vtPromptNone uint8 = iota
 	vtPromptPrimary
 	vtPromptContinuation
+	vtPromptSecondary
 )
+
+// vtContinuesPrompt reports a row mark that continues the prompt on the row
+// above (SemanticPromptRow.continuesPrompt in the client).
+func vtContinuesPrompt(mark uint8) bool {
+	return mark == vtPromptContinuation || mark == vtPromptSecondary
+}
 
 // The `cl` option values.
 const (
@@ -151,13 +161,15 @@ func isSemanticPromptOSC(head []byte) bool {
 }
 
 // promptKind is the row mark an OSC 133 command's k= option names: i (the
-// default) and r a primary prompt, c and s a continuation.
+// default) and r a primary prompt, c a continuation and s a secondary prompt.
 func promptKind(options [][]byte) uint8 {
 	for _, option := range options {
 		if len(option) == 3 && option[0] == 'k' && option[1] == '=' {
 			switch option[2] {
-			case 'c', 's':
+			case 'c':
 				return vtPromptContinuation
+			case 's':
+				return vtPromptSecondary
 			case 'i', 'r':
 				return vtPromptPrimary
 			}
@@ -176,7 +188,7 @@ func (s *terminalScreen) applySemanticPromptOSC(payload []byte) {
 		// VS Code's marks; its A does not start a fresh line.
 		switch string(args[0]) {
 		case "A":
-			s.startPrompt(nil, true)
+			s.startPrompt(nil, vtPromptPrimary)
 		case "B", "G", "I":
 			st.content, st.eolInput = vtSemInput, false
 		case "C":
@@ -194,7 +206,7 @@ func (s *terminalScreen) applySemanticPromptOSC(payload []byte) {
 	switch string(args[0]) {
 	case "A", "N":
 		s.freshLine()
-		s.startPrompt(options, promptKind(options) == vtPromptPrimary)
+		s.startPrompt(options, promptKind(options))
 	case "P":
 		s.markPrompt(promptKind(options))
 	case "B":
@@ -222,19 +234,16 @@ func (s *terminalScreen) freshLine() {
 	s.index()
 }
 
-// startPrompt starts a prompt. A primary one is a new prompt and drops the
-// options of the last; a continuation keeps them and takes those it names.
-func (s *terminalScreen) startPrompt(options [][]byte, primary bool) {
+// startPrompt starts a prompt of kind row. A primary one is a new prompt and
+// drops the options of the last; any other keeps them and takes those it
+// names.
+func (s *terminalScreen) startPrompt(options [][]byte, row uint8) {
 	st := s.semantic()
-	if primary {
+	if row == vtPromptPrimary {
 		st.resetOptions()
 	}
 	st.applyOptions(options)
-	if primary {
-		s.markPrompt(vtPromptPrimary)
-	} else {
-		s.markPrompt(vtPromptContinuation)
-	}
+	s.markPrompt(row)
 }
 
 func (s *terminalScreen) markPrompt(row uint8) {
@@ -360,18 +369,18 @@ func (s *terminalScreen) promptRows() (history, start, end int, ok bool) {
 		return -1, 0, 0, false
 	}
 	start = row
-	for g.prompt[start] == vtPromptContinuation && start > 0 && g.prompt[start-1] != vtPromptNone {
+	for vtContinuesPrompt(g.prompt[start]) && start > 0 && g.prompt[start-1] != vtPromptNone {
 		start--
 	}
 	end = row
-	for end+1 < len(g.rows) && g.prompt[end+1] == vtPromptContinuation {
+	for end+1 < len(g.rows) && vtContinuesPrompt(g.prompt[end+1]) {
 		end++
 	}
 	history = -1
-	if start == 0 && g.prompt[0] == vtPromptContinuation {
+	if start == 0 && vtContinuesPrompt(g.prompt[0]) {
 		for i := s.scrollback.len() - 1; i >= 0 && s.scrollback.at(i).prompt != vtPromptNone; i-- {
 			history = i
-			if s.scrollback.at(i).prompt != vtPromptContinuation {
+			if !vtContinuesPrompt(s.scrollback.at(i).prompt) {
 				break
 			}
 		}
@@ -454,10 +463,11 @@ func (f *vtSemanticFrame) beginHistoryLine(out []byte, i int, mark uint8, wrappe
 	return f.beginLine(out, inPrompt, mark, wrapped), inPrompt
 }
 
-// endHistory is called after the last scrollback line, before the newline
-// that leads to the grid and the newlines that push the scrollback above it.
-// Input that ends with its line (I) lets that newline end it, so those
-// newlines do not mark the rows they reach as continuing the prompt.
+// endHistory is called after the last scrollback line, and after the soft
+// wrap that leads to the grid if there is one, before the newlines that push
+// the scrollback above it. Input that ends with its line (I) lets the first
+// newline end it, so those newlines do not mark the rows they reach as
+// continuing the prompt.
 func (f *vtSemanticFrame) endHistory(out []byte) []byte {
 	if f == nil || f.emitted == vtSemOutput {
 		return out
@@ -488,19 +498,19 @@ func (f *vtSemanticFrame) beginLine(out []byte, inPrompt bool, mark uint8, wrapp
 		f.first = false
 	case f.first:
 		// A primary prompt resets the client's options, which the model's
-		// replace; a continuation line is marked so after it.
+		// replace; a line marked otherwise takes its mark after it.
 		f.first = false
 		out = append(out, "\x1b]133;A"...)
 		out = f.state.appendOptions(out)
 		out = append(out, '\x07')
-		if mark == vtPromptContinuation {
-			out = append(out, "\x1b]133;P;k=s\x07"...)
+		if mark != vtPromptPrimary {
+			out = appendVTPromptContent(out, mark)
 		}
 		f.emitted = vtSemPrompt
-	case !wrapped || f.emitted == vtSemOutput:
-		// A soft wrap inside the prompt marks the line on its own, unless the
-		// input in force ended with the line before.
-		out = append(out, "\x1b]133;P;k=s\x07"...)
+	case !wrapped || f.emitted == vtSemOutput || mark != vtPromptContinuation:
+		// A soft wrap inside the prompt marks the line a continuation on its
+		// own, unless output was in force; any other line or mark is set.
+		out = appendVTPromptContent(out, mark)
 		f.emitted = vtSemPrompt
 	}
 	return out
@@ -524,13 +534,17 @@ func (f *vtSemanticFrame) cell(out []byte, sem uint8) []byte {
 }
 
 // appendVTPromptContent makes the next cells prompt on a line with mark, and
-// marks the line as P does: VS Code's H sets the content alone, for a line
-// the model leaves unmarked.
+// marks the line as P does with the kind that gives mark exactly: k=c a
+// continuation, never the k=s secondary prompt that relative clicks count
+// from. VS Code's H sets the content alone, for a line the model leaves
+// unmarked.
 func appendVTPromptContent(out []byte, mark uint8) []byte {
 	switch mark {
 	case vtPromptPrimary:
 		return append(out, "\x1b]133;P;k=i\x07"...)
 	case vtPromptContinuation:
+		return append(out, "\x1b]133;P;k=c\x07"...)
+	case vtPromptSecondary:
 		return append(out, "\x1b]133;P;k=s\x07"...)
 	}
 	return append(out, "\x1b]633;H\x07"...)

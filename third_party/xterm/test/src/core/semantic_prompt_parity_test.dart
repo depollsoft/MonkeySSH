@@ -13,7 +13,8 @@ import 'package:xterm/xterm.dart';
 const fixturePath =
     '../../remote/monkeymux/testdata/semantic_prompt_parity.json';
 
-/// One line per buffer line, scrollback first: the row mark, `+` for a
+/// One line per buffer line, scrollback first: the row mark (`P`rompt,
+/// `C`ontinuation, `S`econdary prompt), `+` for a
 /// soft-wrapped row, the text and each cell's content (`o`utput, `i`nput,
 /// `p`rompt); then the cursor, its content and the active screen's prompt
 /// options.
@@ -26,6 +27,7 @@ List<String> dumpSemanticPrompt(Terminal terminal) {
       SemanticPromptRow.none => '-',
       SemanticPromptRow.prompt => 'P',
       SemanticPromptRow.continuation => 'C',
+      SemanticPromptRow.secondary => 'S',
     };
     final text = StringBuffer();
     final content = StringBuffer();

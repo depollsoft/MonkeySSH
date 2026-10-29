@@ -180,7 +180,9 @@ extension TerminalPromptClick on Terminal {
   /// `click_events` asks. Like kitty and Ghostty, no release follows: the
   /// shell moves the cursor on the press. Absolute rows count from the top of the
   /// screen; relative rows from the current prompt's top line, or, as kitty
-  /// does, from a secondary prompt at or above the clicked row.
+  /// does, from a secondary prompt (`k=s`) at or above the clicked row. Rows
+  /// the prompt or its input reached with a wrap or a newline start none: a
+  /// prompt of two lines that marks only the first counts from the first.
   String? _promptClickEvent(
     CellOffset position,
     int promptStart, {
@@ -191,7 +193,7 @@ extension TerminalPromptClick on Terminal {
     if (relative) {
       var top = promptStart;
       for (var y = position.y; y > promptStart; y--) {
-        if (_startsSecondaryPrompt(buffer.lines[y])) {
+        if (buffer.lines[y].semanticPrompt == SemanticPromptRow.secondary) {
           top = y;
           break;
         }
@@ -203,21 +205,6 @@ extension TerminalPromptClick on Terminal {
     }
     final column = position.x.clamp(0, buffer.viewWidth - 1) + 1;
     return '\x1b[<0;$column;${row}M';
-  }
-
-  /// Whether a row starts a secondary prompt: it continues the prompt on a
-  /// line of its own and shows prompt text. Rows that the prompt or input
-  /// soft-wrapped onto, and rows that the input broke onto, start none, as in
-  /// kitty, where only a `k=s` mark makes one.
-  bool _startsSecondaryPrompt(BufferLine line) {
-    if (line.semanticPrompt != SemanticPromptRow.continuation ||
-        line.isWrapped) {
-      return false;
-    }
-    for (var x = 0; x < line.length && x < buffer.viewWidth; x++) {
-      if (line.getSemanticContent(x) == SemanticContent.prompt) return true;
-    }
-    return false;
   }
 
   /// The bytes the key encoder sends for [key] pressed now: DECCKM picks

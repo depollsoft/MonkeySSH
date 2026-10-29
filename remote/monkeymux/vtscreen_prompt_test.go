@@ -28,7 +28,7 @@ type semanticParityCase struct {
 func dumpSemanticPrompt(s *terminalScreen) []string {
 	var out []string
 	row := func(cells []vtCell, wrapped bool, prompt uint8) string {
-		mark := map[uint8]string{vtPromptNone: "-", vtPromptPrimary: "P", vtPromptContinuation: "C"}[prompt]
+		mark := map[uint8]string{vtPromptNone: "-", vtPromptPrimary: "P", vtPromptContinuation: "C", vtPromptSecondary: "S"}[prompt]
 		wrap := " "
 		if wrapped {
 			wrap = "+"
@@ -175,6 +175,27 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 		{"input ending with its line", [2]int{20, 5}, osc133("A") + "$ " + osc133("I") + "x"},
 		{"after output in the scrollback", [2]int{12, 3}, "1\r\n2\r\n3\r\n4\r\n" + osc133("A;special_key=1;click_events=1") +
 			"$ " + osc133("B") + "echo"},
+		// A newline inside a prompt continues it; only k=s starts a secondary
+		// prompt, which relative click events count rows from.
+		{"two-line prompt", [2]int{20, 5}, osc133("A;click_events=2") + "top\r\n$ " + osc133("B") + "abc"},
+		{"two-line prompt, second line k=s", [2]int{20, 5}, osc133("A;click_events=2") + "top\r\n" +
+			osc133("P;k=s") + "$ " + osc133("B") + "abc"},
+		{"two-line prompt, last line A;k=s", [2]int{20, 5}, osc133("A;click_events=2") + "top\r\n" +
+			osc133("A;k=s") + "$ " + osc133("B") + "abc"},
+		{"continuation prompt k=c", [2]int{20, 5}, osc133("A;cl=m") + "$ " + osc133("B") + "a\r\n" +
+			osc133("P;k=c") + "> " + osc133("B") + "b"},
+		{"wrapped two-line prompt", [2]int{6, 6}, osc133("A;click_events=2") + "topline!\r\n$ " + osc133("B") +
+			"abcdefgh"},
+		{"wrapped secondary prompt", [2]int{6, 6}, osc133("A;click_events=2") + "top\r\n" + osc133("P;k=s") +
+			"$ " + osc133("B") + "abcdefgh"},
+		{"secondary prompt from the scrollback", [2]int{6, 3}, osc133("A;click_events=2") + "top\r\n" +
+			osc133("P;k=s") + "$ " + osc133("B") + "abcdefghijklmnop"},
+		{"secondary prompt first on the screen", [2]int{20, 3}, osc133("A;click_events=2") + "top\r\n" +
+			osc133("P;k=s") + "$ " + osc133("B") + "a\x1b[H\x1b[1J\x1b[2;3H"},
+		// The frame reprints the last glyph of the scrollback to wrap onto
+		// the screen, and that glyph is prompt text.
+		{"prompt text wrapping from the scrollback", [2]int{10, 3}, osc133("A;click_events=2") + "topline!!!x\r\n$ " +
+			osc133("B") + "abcdefghijkl"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
