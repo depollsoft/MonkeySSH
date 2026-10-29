@@ -2095,6 +2095,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     final anchor =
         anchored ? buffer.currentLine.createAnchor(buffer.cursorX) : null;
     final generation = anchored ? buffer.graphics.generation : null;
+    final clears = buffer.graphics.clears;
     if (anchor != null) {
       buffer.graphics.retainPendingPlacementAnchor(anchor);
     }
@@ -2147,6 +2148,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
           anchor,
           buffer.graphics,
           generation,
+          clears: clears,
           preinflation: preinflation,
           commandImageId: commandImageId,
           imageNumberReservation: imageNumberReservation,
@@ -2542,6 +2544,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     CellAnchor? anchor,
     GraphicsManager manager,
     int? generation, {
+    required int clears,
     _GraphicsPreinflation? preinflation,
     int? commandImageId,
     _GraphicsImageNumberReservation? imageNumberReservation,
@@ -2659,7 +2662,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       );
       _respondToGraphics(
         args,
-        _placeStoredImageId(manager, imageId, anchor, args, generation),
+        _placeStoredImageId(
+          manager,
+          imageId,
+          anchor,
+          args,
+          generation,
+          clears: clears,
+        ),
         imageId: imageId,
       );
       return null;
@@ -2723,7 +2733,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         );
         return null;
       }
-      final error = _placeStoredImageId(manager, imageId, null, args, null);
+      final error = _placeStoredImageId(
+        manager,
+        imageId,
+        null,
+        args,
+        null,
+        clears: clears,
+      );
       notifyListeners();
       _respondToGraphics(args, error, imageId: imageId);
       return null;
@@ -2735,6 +2752,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       anchor,
       manager,
       generation,
+      clears: clears,
       format: format,
       width: width,
       height: height,
@@ -2754,6 +2772,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     CellAnchor? anchor,
     GraphicsManager manager,
     int? generation, {
+    required int clears,
     required int format,
     required int width,
     required int height,
@@ -2822,7 +2841,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     );
     _respondToGraphics(
       args,
-      _placeStoredImageId(manager, storedImageId, anchor, args, generation),
+      _placeStoredImageId(
+        manager,
+        storedImageId,
+        anchor,
+        args,
+        generation,
+        clears: clears,
+      ),
       imageId: imageId,
     );
   }
@@ -2869,8 +2895,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     int storedImageId,
     CellAnchor? anchor,
     Map<String, String> args,
-    int? generation,
-  ) {
+    int? generation, {
+    required int clears,
+  }) {
     final parentImageId = int.tryParse(args['P'] ?? '') ?? 0;
     if (_graphicsFlag(args['U'])) {
       if (parentImageId > 0) {
@@ -2884,7 +2911,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         clientPlacementId: int.tryParse(args['p'] ?? '') ?? 0,
       );
     } else if (parentImageId > 0 && args['a'] == 'T') {
-      final error = _placeRelativeGraphics(manager, storedImageId, args);
+      final error =
+          _placeRelativeGraphics(manager, storedImageId, args, clears);
       notifyListeners();
       return error;
     }
@@ -2931,11 +2959,16 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   /// Places [imageId] relative to the parent the Kitty keys `P`/`Q` name,
   /// offset by `H`/`V` cells. Returns the protocol error when it is rejected.
+  /// [clears] is the manager's [GraphicsManager.clears] when the command
+  /// arrived: a clear since then would have taken the placement, so there is
+  /// none to make.
   String? _placeRelativeGraphics(
     GraphicsManager manager,
     int imageId,
     Map<String, String> args,
+    int clears,
   ) {
+    if (manager.clears != clears) return null;
     final result = manager.placeRelativeImage(
       imageId,
       parentImageId: int.tryParse(args['P'] ?? '') ?? 0,
@@ -3025,12 +3058,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (parentImageId > 0) {
       // The parent can belong to any image, so wait for every queued image
       // operation. A relative placement never moves the cursor.
+      final clears = manager.clears;
       _scheduleGraphicsBarrier(manager, () {
         if (!imageExists()) {
           _respondToGraphics(args, 'ENOENT: image not found', imageId: imageId);
           return;
         }
-        final error = _placeRelativeGraphics(manager, imageId, args);
+        final error = _placeRelativeGraphics(manager, imageId, args, clears);
         notifyListeners();
         _respondToGraphics(args, error, imageId: imageId);
       });

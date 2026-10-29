@@ -980,6 +980,7 @@ class GraphicsManager {
   int _nextPlacementId = 1;
   int _nextPlaceholderSequence = 1;
   int _generation = 0;
+  int _clears = 0;
   final SplayTreeMap<int, int> _placementFirstRowCounts = SplayTreeMap();
   final SplayTreeMap<int, int> _placementLastRowCounts = SplayTreeMap();
   final Map<CellAnchor, ({int first, int last})> _placementRowsByAnchor = {};
@@ -1540,6 +1541,13 @@ class GraphicsManager {
   /// captures this before it starts and skips placing if it changed, so a clear
   /// that races an in-flight decode cannot leave a stale image behind.
   int get generation => _generation;
+
+  /// Bumped by every [clear]. Commands wait in a queue while earlier images
+  /// decode; one that places an image without an anchor cell (a relative
+  /// placement) captures this when it arrives and places nothing if it
+  /// changed, as the clear would have taken the placement had the command run
+  /// at once.
+  int get clears => _clears;
 
   /// Looks up a stored image by id.
   TerminalImage? imageById(int id) {
@@ -3241,6 +3249,13 @@ class GraphicsManager {
   /// them after a clear.
   void clear() {
     _generation++;
+    _clears++;
+    // Placements still queued behind a decode lose their anchor cells, so
+    // they cannot land on the cleared screen. A screen erased in place, as a
+    // full reset erases the main screen, keeps the rows they were anchored to.
+    for (final anchor in _pendingPlacementAnchors.toList()) {
+      anchor.dispose();
+    }
     _pendingPlacementAnchors.clear();
     for (final placement in _placementsById.values.toList()) {
       _disposePlacement(placement, removeOrphans: false);
