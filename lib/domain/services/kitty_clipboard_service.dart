@@ -278,6 +278,11 @@ const kittyClipboardPasteGrantLifetime = Duration(seconds: 30);
 /// sends its end, and the transaction would otherwise hold its data.
 const kittyClipboardWriteIdleTimeout = Duration(seconds: 60);
 
+/// Most requests that may wait for their turn, the one being answered
+/// included. Past it, a program that keeps sending while a request waits on
+/// the platform is answered at once and nothing is queued for it.
+const kittyClipboardMaxPendingRequests = 64;
+
 const _maxReadMimes = 8;
 const _maxPasteGrants = 4;
 const _passwordLength = 22;
@@ -305,7 +310,9 @@ class _PasteGrant {
 /// so `loc=primary` is answered ENOSYS.
 ///
 /// Requests are answered one at a time in arrival order, so a read that
-/// follows a write sees the written data and replies never interleave.
+/// follows a write sees the written data and replies never interleave. A
+/// request that would queue past [kittyClipboardMaxPendingRequests] is
+/// answered at once instead: EBUSY, or the error it already has.
 /// Replies go only to the shell channel that asked ([abandonChannel]), and
 /// nothing queued touches the clipboard after [dispose].
 class KittyClipboardHandler {
@@ -353,6 +360,8 @@ class KittyClipboardHandler {
   bool _disposed = false;
   // Decoded bytes of committed writes still waiting for their turn.
   int _queuedWriteBytes = 0;
+  // Queued tasks not finished yet, the one running included.
+  int _pendingTasks = 0;
   // The shell channel requests arrive on, and the one the queued task being
   // answered arrived on; see [abandonChannel].
   int _channel = 0;
@@ -594,6 +603,15 @@ class KittyClipboardHandler {
       _logWrite(KittyClipboardStatus.tooLarge, typeCount: 0, bytes: bytes);
       return;
     }
+    if (_queueFull) {
+      _sendStatusNow(
+        KittyClipboardOperation.write,
+        KittyClipboardStatus.busy,
+        write.id,
+      );
+      _logWrite(KittyClipboardStatus.busy, typeCount: 0, bytes: bytes);
+      return;
+    }
     _queuedWriteBytes += bytes;
     _enqueue(() async {
       _queuedWriteBytes -= bytes;
@@ -665,6 +683,17 @@ class KittyClipboardHandler {
       } else if (mimes.length < _maxReadMimes && !mimes.contains(mime)) {
         mimes.add(mime);
       }
+    }
+    if (_queueFull) {
+      // Refused before its password is checked, so the paste grant it may
+      // carry is still there for a retry.
+      _sendStatusNow(
+        KittyClipboardOperation.read,
+        KittyClipboardStatus.busy,
+        metadata.id,
+      );
+      _logRead(KittyClipboardStatus.busy, mimes.length, 0);
+      return;
     }
     // A password without a name is no password, per the spec.
     final grant = metadata.name.isEmpty
@@ -801,8 +830,11 @@ class KittyClipboardHandler {
     ),
   );
 
+  bool get _queueFull => _pendingTasks >= kittyClipboardMaxPendingRequests;
+
   void _enqueue(Future<void> Function() task) {
     final channel = _channel;
+    _pendingTasks++;
     _queue = _queue
         .then((_) {
           _taskChannel = channel;
@@ -817,16 +849,44 @@ class KittyClipboardHandler {
               'errorType': error.runtimeType,
             },
           );
-        });
+        })
+        .whenComplete(() => _pendingTasks--);
   }
 
   /// Answers from outside the queue, behind every reply already queued, so
-  /// replies keep the order of the requests.
+  /// replies keep the order of the requests. When the queue is full the
+  /// reply goes out at once instead.
   void _replyStatus(
     KittyClipboardOperation operation,
     KittyClipboardStatus status,
     String id,
-  ) => _enqueue(() async => _sendStatus(operation, status, id));
+  ) {
+    if (_queueFull) {
+      _sendStatusNow(operation, status, id);
+      return;
+    }
+    _enqueue(() async => _sendStatus(operation, status, id));
+  }
+
+  /// Answers a request that just arrived, ahead of the replies still
+  /// queued. It goes to the current shell channel, which sent the request,
+  /// whatever channel the task being answered came from.
+  void _sendStatusNow(
+    KittyClipboardOperation operation,
+    KittyClipboardStatus status,
+    String id,
+  ) {
+    if (_disposed) {
+      return;
+    }
+    sendReply(
+      encodeKittyClipboardResponse(
+        operation: operation,
+        status: status,
+        id: id,
+      ),
+    );
+  }
 
   void _sendStatus(
     KittyClipboardOperation operation,
