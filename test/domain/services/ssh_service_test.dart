@@ -231,6 +231,8 @@ class _ReconnectFixture {
   static Future<_ReconnectFixture> create({
     required List<_ServerAuthStep> steps,
     InteractiveAuthPromptHandler? promptHandler,
+    Set<int> refusedSockets = const {},
+    Duration reconnectWindow = const Duration(seconds: 45),
   }) async {
     final fixture = _ReconnectFixture();
     final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -245,8 +247,13 @@ class _ReconnectFixture {
     fixture.service = SshService(
       knownHostsRepository: knownHostsRepository,
       interactiveAuthPromptHandler: promptHandler,
+      reconnectAfterDropWindow: reconnectWindow,
+      reconnectAfterDropRetryDelay: Duration.zero,
       socketConnector: (host, port, {timeout}) async {
         fixture.socketCount++;
+        if (refusedSockets.contains(fixture.socketCount)) {
+          throw const SocketException('Connection refused');
+        }
         return _FakeHostKeySocket(hostKeyBytes);
       },
       clientFactory:
@@ -8659,6 +8666,57 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         expect(fixture.socketCount, 1);
       });
     }
+
+    test('keeps trying to reach a server that restarts after the '
+        'password', () async {
+      final progress = <String>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async => ['typed-secret'],
+        // A Mac unlocked over SSH restarts sshd, refusing connections
+        // until it is back.
+        refusedSockets: {2, 3},
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (_, _) async {},
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.config,
+        onProgress: (update) => progress.add(update.message),
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 4);
+      expect(fixture.clients, hasLength(2));
+      expect(progress, contains('Waiting for the server to come back…'));
+    });
+
+    test('stops trying to reach the server when the window runs out', () async {
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async => ['typed-secret'],
+        refusedSockets: {2, 3},
+        reconnectWindow: Duration.zero,
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(_ReconnectFixture.config);
+
+      expect(result.success, isFalse);
+      expect(fixture.socketCount, 2);
+    });
 
     test('reconnects only once', () async {
       var promptCalls = 0;

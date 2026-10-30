@@ -1505,6 +1505,8 @@ class SshService {
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
     this.wifiPermissionTimeout = const Duration(seconds: 15),
+    this.reconnectAfterDropWindow = const Duration(seconds: 45),
+    this.reconnectAfterDropRetryDelay = const Duration(seconds: 2),
     this.onNonFatalError,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
@@ -1551,6 +1553,16 @@ class SshService {
   /// connecting through the jump host. A prompt the user leaves open, or one
   /// the OS never answers, must not hold the connection.
   final Duration wifiPermissionTimeout;
+
+  /// How long reconnecting after the server dropped the connection during
+  /// sign-in keeps trying to reach it. A Mac unlocked over SSH after a
+  /// restart (FileVault) restarts every process, sshd and its network
+  /// included, and takes several seconds to accept connections again.
+  final Duration reconnectAfterDropWindow;
+
+  /// Pause between attempts to reach the server within
+  /// [reconnectAfterDropWindow].
+  final Duration reconnectAfterDropRetryDelay;
 
   /// Reports an error the connection recovered from but that points at a bug,
   /// such as the permissions channel never having been registered.
@@ -2195,6 +2207,35 @@ class SshService {
         );
       }
 
+      Future<SSHSocket> reopenEndpointSocket() async {
+        final elapsed = Stopwatch()..start();
+        for (var attempt = 1; ; attempt++) {
+          try {
+            return await openEndpointSocket();
+          } on Object catch (error) {
+            if (error is! Exception && error is! SSHError) rethrow;
+            if (error is SshConnectionCancelledException ||
+                elapsed.elapsed >= reconnectAfterDropWindow) {
+              rethrow;
+            }
+            DiagnosticsLogService.instance.info(
+              'ssh.connect',
+              'auth_reconnect_retry',
+              fields: {
+                'isJumpHost': isJumpHost,
+                'attempt': attempt,
+                'errorType': error.runtimeType,
+              },
+            );
+            report(
+              SshConnectionState.connecting,
+              'Waiting for the server to come back…',
+            );
+            await guard(Future<void>.delayed(reconnectAfterDropRetryDelay));
+          }
+        }
+      }
+
       var reconnectedAfterDrop = false;
 
       Future<void> authenticate(
@@ -2239,11 +2280,12 @@ class SshService {
             cancellationToken: cancellationToken,
           );
         } on SSHAuthAbortError catch (error) {
-          // Some servers drop the connection while checking a password
-          // instead of answering (seen from a Mac just after a reboot), and
-          // sshd drops it when LoginGraceTime runs out while the user types.
-          // Reconnect once rather than make the user do it. A prompt still
-          // open is waited for, so its answer is not lost.
+          // A Mac unlocked over SSH after a restart (FileVault) drops the
+          // connection once the password is in, restarts every process and
+          // then accepts the key; sshd also drops it when LoginGraceTime runs
+          // out while the user types. Reconnect once rather than make the
+          // user do it. A prompt still open is waited for, so its answer is
+          // not lost.
           if (reconnectedAfterDrop || !_isDroppedConnection(error)) rethrow;
           await guard(authGate.idle);
           if (!authGate.answeredLastPrompt) rethrow;
@@ -2259,7 +2301,7 @@ class SshService {
           client = null;
           await createdClient.close();
           authGate.startRetry();
-          await authenticate(await openEndpointSocket(), verify);
+          await authenticate(await reopenEndpointSocket(), verify);
         }
       }
 
