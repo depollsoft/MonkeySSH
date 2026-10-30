@@ -1896,22 +1896,24 @@ zstyle ':completion:*' verbose no
 zstyle ':completion:*' group-name ''
 zstyle ':completion:*' format ''
 emit_native_completion_item() {
-  local item=\$1
+  local item=\$1 target=\$1
+  # Test a word that starts with ~/ where the shell would expand it.
+  [[ \$target == '~' || \$target == '~/'* ]] && target=\$HOME\${target#?}
   case "\$FLUTTY_MODE" in
     directory)
-      [ -d "\$item" ] && printf 'directory\\t%s\\n' "\$item"
+      [ -d "\$target" ] && printf 'directory\\t%s\\n' "\$item"
       ;;
     path)
-      if [ -d "\$item" ]; then
+      if [ -d "\$target" ]; then
         printf 'directory\\t%s\\n' "\$item"
-      elif [ -e "\$item" ]; then
+      elif [ -e "\$target" ]; then
         printf 'file\\t%s\\n' "\$item"
       fi
       ;;
     *)
-      if [ -d "\$item" ]; then
+      if [ -d "\$target" ]; then
         printf 'directory\\t%s\\n' "\$item"
-      elif [ -e "\$item" ]; then
+      elif [ -e "\$target" ]; then
         printf 'file\\t%s\\n' "\$item"
       else
         printf 'argument\\t%s\\n' "\$item"
@@ -1923,27 +1925,50 @@ _flutty_dump_completions() {
   typeset -ga _flutty_matches
   _flutty_matches=()
   compadd() {
-    local -a original_args capture_args out
-    original_args=("\$@")
-    while (( \$# )); do
-      case "\$1" in
-        -O|-A)
-          shift 2
-          ;;
-        -O*|-A*)
-          shift
-          ;;
-        *)
-          capture_args+=("\$1")
-          shift
-          ;;
-      esac
+    emulate -L zsh
+    # Reads compadd's options for the parts of the word that go before and
+    # after each match: the ignored (-i), visible (-P) and hidden (-p)
+    # prefixes and the hidden suffix (-s), which are quoted as on the command
+    # line, as are the matches with -Q. A call that only asks which words
+    # match (-O, -A, -D) adds nothing and is not captured.
+    local -a hits
+    local ipre= apre= hpre= hsuf= opt letter value
+    local -i i=1 j query=0 quoted=0
+    while (( i <= \$# )); do
+      opt=\${argv[i]}
+      [[ \$opt == -?* && \$opt != -- ]] || break
+      for (( j = 2; j <= \${#opt}; j++ )); do
+        letter=\${opt[j]}
+        [[ \$letter == Q ]] && quoted=1
+        [[ \$letter == [PSpsiIWdJVXxrRMFEDOA] ]] || continue
+        if (( j < \${#opt} )); then
+          value=\${opt[j+1,-1]}
+        else
+          (( i++ ))
+          value=\${argv[i]}
+        fi
+        case \$letter in
+          [OAD]) query=1 ;;
+          i) ipre=\$value ;;
+          P) apre=\$value ;;
+          p) hpre=\$value ;;
+          s) hsuf=\$value ;;
+        esac
+        break
+      done
+      (( i++ ))
     done
-    builtin compadd -O out "\${capture_args[@]}" 2>/dev/null || :
-    _flutty_matches+=("\${out[@]}")
+    if (( ! query )); then
+      builtin compadd -A hits "\$@" 2>/dev/null
+      for value in "\${hits[@]}"; do
+        (( quoted )) || value=\${(q)value}
+        # The word as the shell reads it, unquoted: the app quotes it again.
+        _flutty_matches+=("\${(Q):-\$IPREFIX\$ipre\$apre\$hpre\$value\$hsuf}")
+      done
+    fi
     # Returns compadd's status. Never name a local `status`: zsh's is
     # read-only, and assigning it aborts the whole widget before the marker.
-    builtin compadd "\${original_args[@]}" 2>/dev/null
+    builtin compadd "\$@" 2>/dev/null
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__

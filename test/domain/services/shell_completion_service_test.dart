@@ -1316,34 +1316,56 @@ void main() {
     addTearDown(() => home.delete(recursive: true));
     File('${home.path}/notes.txt').writeAsStringSync('');
     File('${home.path}/notebook.md').writeAsStringSync('');
+    File('${home.path}/sub/notes.txt').createSync(recursive: true);
+    File('${home.path}/my dir/inner.txt').createSync(recursive: true);
     // A startup file that changes directory must not move the completion.
     File('${home.path}/.zshrc').writeAsStringSync('cd /\n');
-    final invocation = ShellCompletionInvocation(
-      commandLine: 'cat no',
-      cursorOffset: 6,
-      token: 'no',
-      tokenStart: 4,
-      mode: ShellCompletionMode.argument,
-      commandName: 'cat',
-      shellCommand: zsh,
-      words: const ['cat', 'no'],
-      wordIndex: 1,
-      workingDirectory: home.path,
-    );
 
-    final result = await Process.run(python, [
-      '-c',
-      _ptyRunner,
-      buildInteractiveZshCompletionRemoteCommand(invocation),
-      buildInteractiveZshCompletionInput(invocation),
-      home.path,
-    ]).timeout(const Duration(seconds: 30));
+    // Each match comes back as the whole word, unquoted, with the path the
+    // completer passed as a compadd prefix; the app quotes it again.
+    for (final (line, token, replacements) in [
+      ('cat no', 'no', ['notebook.md', 'notes.txt']),
+      ('cat sub/no', 'sub/no', ['sub/notes.txt']),
+      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt']),
+      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt']),
+    ]) {
+      final invocation = ShellCompletionInvocation(
+        commandLine: line,
+        cursorOffset: line.length,
+        token: token,
+        tokenStart: 4,
+        mode: ShellCompletionMode.argument,
+        commandName: 'cat',
+        shellCommand: zsh,
+        words: ['cat', token],
+        wordIndex: 1,
+        workingDirectory: home.path,
+      );
 
-    final output = result.stdout.toString();
-    expect(result.exitCode, 0, reason: output);
-    expect(output, contains('__FLUTTY_ZSH_NATIVE_DONE__'));
-    expect(output, contains('file\tnotes.txt'));
-    expect(output, contains('file\tnotebook.md'));
+      final result = await Process.run(python, [
+        '-c',
+        _ptyRunner,
+        buildInteractiveZshCompletionRemoteCommand(invocation),
+        buildInteractiveZshCompletionInput(invocation),
+        home.path,
+      ]).timeout(const Duration(seconds: 30));
+
+      final output = result.stdout.toString();
+      expect(result.exitCode, 0, reason: '$line: $output');
+      expect(output, contains('__FLUTTY_ZSH_NATIVE_DONE__'), reason: line);
+      final suggestions = parseShellCompletionOutput(
+        output.substring(output.indexOf('__FLUTTY_ZSH_NATIVE_START__')),
+        invocation,
+      );
+      expect(
+        suggestions.map((s) => s.replacement).toList()..sort(),
+        replacements,
+        reason: line,
+      );
+      expect(suggestions.map((s) => s.kind).toSet(), {
+        ShellCompletionSuggestionKind.file,
+      }, reason: line);
+    }
     expect(
       home.listSync().map((entry) => entry.uri.pathSegments.last),
       isNot(contains(startsWith('flutty-zsh-completion.'))),
