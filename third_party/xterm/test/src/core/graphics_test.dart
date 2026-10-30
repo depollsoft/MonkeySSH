@@ -2048,6 +2048,41 @@ void main() {
     });
   });
 
+  // A delete waits behind an earlier image's decode; an image placed after
+  // it must still land once the delete has run.
+  for (final viaApi in [false, true]) {
+    testWidgets('an image placed after a deferred delete lands, api: $viaApi', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final pngBase64 = await _buildPngBase64(2, 2);
+        final terminal = Terminal()..resize(20, 6);
+        int anchors() => [
+              for (var row = 0; row < terminal.buffer.lines.length; row++)
+                ...terminal.graphics.physicalPlacementAnchorsInLine(
+                  terminal.buffer.lines[row],
+                ),
+            ].length;
+        terminal.write('\x1b_Ga=T,f=100,i=1,c=2,r=1,C=1,q=2;$pngBase64\x1b\\');
+        if (viaApi) {
+          terminal.deletePhysicalPlacements();
+        } else {
+          terminal.write('\x1b_Ga=d,d=a,q=2\x1b\\');
+        }
+        terminal.write(
+          '\x1b[3;1H\x1b_Ga=T,f=100,i=2,c=2,r=1,C=1,q=2;$pngBase64\x1b\\',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        expect(anchors(), 1);
+        expect(
+          terminal.graphics.placements.map((p) => p.imageId),
+          [2],
+        );
+      });
+    });
+  }
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

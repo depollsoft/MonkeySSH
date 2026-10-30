@@ -1537,7 +1537,8 @@ class GraphicsManager {
     // Indexed removal and placeholder grid release are O(anchors on this line).
   }
 
-  /// Bumped whenever placements are cleared. An asynchronous image decode
+  /// Bumped whenever placements are cleared outside the command queues (a
+  /// reset, a screen clear, rows removed). An asynchronous image decode
   /// captures this before it starts and skips placing if it changed, so a clear
   /// that races an in-flight decode cannot leave a stale image behind.
   int get generation => _generation;
@@ -3230,9 +3231,10 @@ class GraphicsManager {
       _dropUnreferencedImages();
     }
 
-    if (changed) {
-      _generation++;
-    }
+    // No generation bump: a delete runs in its image's queue or as a barrier
+    // (Terminal), so nothing parsed before it is still in flight, and a bump
+    // would drop the placements parsed after it, such as the next window's
+    // images behind a deferred delete.
     return changed;
   }
 
