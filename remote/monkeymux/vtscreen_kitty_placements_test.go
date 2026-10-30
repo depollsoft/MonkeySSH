@@ -357,31 +357,6 @@ func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/@2,3")
 }
 
-func TestVTKittyPlacementMovesTheCursorPastAKnownSpan(t *testing.T) {
-	s := newTerminalScreen(20, 6)
-	s.Write([]byte(vtKittyUploads(1, 3, 4) + "\x1b[2;3H\x1b_Ga=p,i=1,c=4,r=2\x1b\\"))
-	if row, col := s.CursorPosition(); row != 2 || col != 6 {
-		t.Fatalf("cursor at %d,%d after a 4x2 image, want 2,6", row, col)
-	}
-	// Past the right edge it wraps to the start of the next row.
-	s.Write([]byte("\x1b[2;18H\x1b_Ga=T,f=100,i=2,c=4,r=1;AAAA\x1b\\"))
-	if row, col := s.CursorPosition(); row != 2 || col != 0 {
-		t.Fatalf("cursor at %d,%d after wrapping, want 2,0", row, col)
-	}
-	// At the bottom it scrolls, taking the placement with it.
-	s.Write([]byte("\x1b[6;1H\x1b_Ga=p,i=3,c=1,r=3\x1b\\"))
-	if row, col := s.CursorPosition(); row != 5 || col != 1 {
-		t.Fatalf("cursor at %d,%d at the bottom, want 5,1", row, col)
-	}
-	assertVTKittyPlaced(t, s, "1/@-1,2", "2/@-1,17", "3/@3,0")
-	// C=1 keeps it, and an image sized by its pixels moves it by an amount
-	// the model cannot know, so the model leaves it.
-	s.Write([]byte("\x1b[1;1H\x1b_Ga=p,i=4,c=4,r=2,C=1\x1b\\\x1b_Ga=p,i=4,c=4\x1b\\"))
-	if row, col := s.CursorPosition(); row != 0 || col != 0 {
-		t.Fatalf("cursor at %d,%d, want 0,0", row, col)
-	}
-}
-
 func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 	s := newTerminalScreen(10, 4)
 	// "0123456789ABCDE" wraps after 9; the placement is on C, the 13th cell.
@@ -554,47 +529,72 @@ func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/1@4,0")
 }
 
-// TestVTKittyPlacesOnlyImagesTheClientHolds follows a display command as the
-// client runs it: an image it does not hold on the screen shown is answered
-// with ENOENT, placed nowhere, and leaves the cursor where it is. Each case's
-// cursor is the client's after the X that follows the command.
-func TestVTKittyPlacesOnlyImagesTheClientHolds(t *testing.T) {
+// TestVTKittyRecordsOnlyImagesTheClientHolds follows a display command as
+// the client runs it: an image it does not hold on the screen shown is
+// answered with ENOENT and placed nowhere, so the model records nothing.
+func TestVTKittyRecordsOnlyImagesTheClientHolds(t *testing.T) {
 	const upload = "\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\"
 	const place = "\x1b_Ga=p,i=7,c=2,r=3\x1b\\X"
+	const placeAgain = "\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b[2;1H\x1b_Ga=p,i=7,p=2,C=1\x1b\\\x1b[H"
 	for _, tc := range []struct {
-		name     string
-		stream   string
-		row, col int
-		placed   []string
+		name, stream string
+		placed       []string
 	}{
-		{"never sent", place, 0, 1, nil},
-		{"sent", upload + place, 2, 3, []string{"7/@0,0"}},
+		{"never sent", place, nil},
+		{"sent", upload + place, []string{"7/@0,0"}},
 		// RIS clears placements but keeps the images (fullReset).
-		{"sent before a reset", upload + "\x1bc" + place, 2, 3, []string{"7/@0,0"}},
+		{"sent before a reset", upload + "\x1bc" + place, []string{"7/@0,0"}},
 		// Each screen has its own store; a clear of the alternate screen
 		// keeps its images.
-		{"sent to the other screen", upload + "\x1b[?1049h" + place, 0, 1, nil},
-		{"sent before a clear", "\x1b[?1049h" + upload + "\x1b[?1049l\x1b[?1049h" + place, 2, 3, []string{"alt:7/@0,0"}},
-		// Uppercase deletes free the data of what they match.
-		{"freed by id", upload + "\x1b_Ga=d,d=I,i=7\x1b\\" + place, 0, 1, nil},
-		{"freed with its placement", upload + "\x1b_Ga=p,i=7,C=1\x1b\\\x1b_Ga=d,d=A\x1b\\" + place, 0, 1, nil},
-		{"not placed when all are freed", "\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=d,d=A\x1b\\" + place, 2, 3, []string{"7/@0,0"}},
+		{"sent to the other screen", upload + "\x1b[?1049h" + place, nil},
+		{"sent before a clear", "\x1b[?1049h" + upload + "\x1b[?1049l\x1b[?1049h" + place, []string{"alt:7/@0,0"}},
+		// Uppercase deletes free the data of an image they leave with no
+		// placement (_imageHasPlacements).
+		{"freed by id", upload + "\x1b_Ga=d,d=I,i=7\x1b\\" + place, nil},
+		{"freed with its placement", upload + "\x1b_Ga=p,i=7,C=1\x1b\\\x1b_Ga=d,d=A\x1b\\" + place, nil},
+		{"not placed when all are freed", upload + "\x1b_Ga=d,d=A\x1b\\" + place, []string{"7/@0,0"}},
+		{"freed with its last placement", upload + placeAgain + "\x1b_Ga=d,d=I,i=7,p=1\x1b\\\x1b_Ga=d,d=I,i=7,p=2\x1b\\" + place, nil},
+		{"kept with a placement left", upload + placeAgain + "\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, []string{"7/2@1,0", "7/@0,0"}},
+		// One with a virtual placement the model does not follow may still
+		// have it, so the model keeps it.
+		{"kept with a virtual placement", upload + "\x1b_Ga=p,U=1,i=7,c=2,r=1\x1b\\\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, []string{"7/@0,0"}},
 		// A retransmission the client rejects, or abandons, leaves no image.
-		{"rejected retransmission", upload + "\x1b_Ga=t,i=7,f=24;AAAA\x1b\\" + place, 0, 1, nil},
-		{"abandoned retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Ga=q,i=9;AAAA\x1b\\" + place, 0, 1, nil},
-		{"cancelled retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Gm=1;/w\x18" + place, 0, 1, nil},
-		// An image sent by number is placed by number, though not followed.
-		{"by number", "\x1b_Ga=t,I=5," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,I=5,c=2,r=3\x1b\\X", 2, 3, nil},
-		{"by unknown number", "\x1b_Ga=p,I=5,c=2,r=3\x1b\\X", 0, 1, nil},
+		{"rejected retransmission", upload + "\x1b_Ga=t,i=7,f=24;AAAA\x1b\\" + place, nil},
+		{"abandoned retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Ga=q,i=9;AAAA\x1b\\" + place, nil},
+		{"cancelled retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Gm=1;/w\x18" + place, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTerminalScreen(10, 6)
 			s.Write([]byte(tc.stream))
-			if row, col := s.CursorPosition(); row != tc.row || col != tc.col {
-				t.Fatalf("cursor at %d,%d, want %d,%d", row, col, tc.row, tc.col)
-			}
 			assertVTKittyPlaced(t, s, tc.placed...)
 		})
+	}
+}
+
+// TestVTKittyPlacementLeavesTheCursorUnknown: the client moves its cursor
+// past an image it places, by the image's size, unless the image is missing
+// or the command says C=1. The model cannot follow either for certain, so
+// it keeps its cursor and leaves it unknown.
+func TestVTKittyPlacementLeavesTheCursorUnknown(t *testing.T) {
+	s := newTerminalScreen(10, 6)
+	s.Write([]byte("\x1b[H\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=7,c=2,r=3\x1b\\"))
+	if row, col := s.CursorPosition(); row != 0 || col != 0 {
+		t.Fatalf("cursor at %d,%d, want 0,0", row, col)
+	}
+	if _, ok := s.CursorPositionReport(); ok {
+		t.Fatal("the model answers for a cursor the client moved")
+	}
+	assertVTKittyPlaced(t, s, "7/@0,0")
+}
+
+// TestVTKittyReplayCommandNamesKeysInDecimal: the client reads 0x keys as
+// numbers, and a replay names them in decimal.
+func TestVTKittyReplayCommandNamesKeysInDecimal(t *testing.T) {
+	s := newTerminalScreen(10, 6)
+	s.Write([]byte("\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=0x7,c=0x2,r=1,C=1\x1b\\"))
+	assertVTKittyPlaced(t, s, "7/@0,0")
+	if got := string(s.kittyDirect[0].command); got != "\x1b_Ga=p,i=7,c=2,r=1,C=1,q=2\x1b\\" {
+		t.Fatalf("replay command %q", got)
 	}
 }
 

@@ -22,6 +22,18 @@ import (
 // placements of an image with an explicit id (i=) are followed: a frame
 // cannot name an image sent by number (I=) or with neither, since the client
 // gives those an id of its own.
+//
+// The client places an image only when the store of the screen it is on
+// holds it, and answers ENOENT otherwise. The model follows each screen's
+// store (vtKittyStore) only to decide whether to record a placement, and
+// cannot follow it exactly: the client evicts images under caps the model
+// does not keep (graphics_manager.dart: 128 images awaiting their first
+// decode, unplaced ones first, and 256 decoded ones, least used first) and
+// drops an image whose data fails to decode. Where it cannot tell, the model
+// keeps the image: a replay then places it again with q=2 and C=1, and a
+// client that lacks it answers that silently. Nor does the model move its
+// cursor past a placed image as the client does; it leaves it unknown
+// (endString).
 
 // vtKittyPlacementLimit bounds the direct placements the model follows; the
 // oldest goes first.
@@ -55,19 +67,18 @@ type vtKittyChunk struct {
 	args map[string]string
 }
 
-// vtKittyImageLimit bounds each set a vtKittyStore keeps, as the client's
-// GraphicsManager keeps at most 256 images; the oldest goes first.
+// vtKittyImageLimit bounds each set a vtKittyStore keeps; the oldest goes
+// first.
 const vtKittyImageLimit = 256
 
 // vtKittyStore is what the model knows of the image store the client keeps
 // for one screen (each Buffer has its own GraphicsManager): the ids of the
 // images it holds, transmitted in full and not freed, which a display
-// command can place, and the image numbers (I=) it resolves. untracked lists
-// the images it holds with placements the model does not follow, virtual or
-// relative, which may be the last placement a delete removes.
+// command can place. untracked lists the images it holds with placements the
+// model does not follow, virtual or relative, which keep the image when a
+// delete freeing data removes the last placement the model follows.
 type vtKittyStore struct {
 	ids       vtKittyIDs
-	numbers   vtKittyIDs
 	untracked vtKittyIDs
 }
 
@@ -108,7 +119,6 @@ func (ids *vtKittyIDs) removeIf(match func(id string) bool) {
 func (store vtKittyStore) clone() vtKittyStore {
 	return vtKittyStore{
 		ids:       append(vtKittyIDs(nil), store.ids...),
-		numbers:   append(vtKittyIDs(nil), store.numbers...),
 		untracked: append(vtKittyIDs(nil), store.untracked...),
 	}
 }
@@ -126,15 +136,13 @@ func (s *terminalScreen) kittyStore() *vtKittyStore {
 // placements it keeps. truncated reports keys past what the parser keeps.
 func (s *terminalScreen) observeKittyGraphics(control []byte, truncated bool) {
 	if truncated {
-		// Whatever it was, it may have ended a transmission, or deleted,
-		// replaced or freed anything on this screen. The model forgets it
-		// all: a placement the client still has is missing after a replay,
-		// rather than one it deleted coming back, and a display command of an
-		// image the model forgot leaves the cursor unknown rather than moved.
+		// Whatever it was, it may have ended a transmission, or deleted or
+		// replaced anything on this screen. The model forgets the
+		// placements: one the client still has is missing after a replay,
+		// rather than one it deleted coming back.
 		s.kittyChunk = vtKittyChunk{}
 		alt := s.altActive
 		s.dropKittyPlacements(func(p *vtKittyPlacement) bool { return p.alt == alt })
-		*s.kittyStore() = vtKittyStore{}
 		return
 	}
 	args := parseKittyControl(string(control))
@@ -187,7 +195,6 @@ func (s *terminalScreen) runKittyGraphics(args map[string]string) {
 		action = "t"
 	}
 	imageID := kittyIDValue(args["i"])
-	number := kittyIDValue(args["I"])
 	store := s.kittyStore()
 	virtual, relative := kittyNonZero(args["U"]), kittyNonZero(args["P"])
 	switch action {
@@ -201,33 +208,23 @@ func (s *terminalScreen) runKittyGraphics(args map[string]string) {
 			if accepted {
 				store.ids.add(imageID)
 			}
-		} else if number != "" && accepted {
-			store.numbers.add(number)
 		}
 		switch {
-		case !accepted:
+		case !accepted || imageID == "":
 		case virtual || relative:
-			if imageID != "" {
-				store.untracked.add(imageID)
-			}
+			store.untracked.add(imageID)
 		case action == "T":
 			s.placeKittyImage(args, imageID)
 		}
 	case "p":
-		known := store.ids.has(imageID)
-		if imageID == "" {
-			known = number != "" && store.numbers.has(number)
-		}
 		switch {
-		case !known:
-			// The client answers ENOENT: no placement, and its cursor stays
-			// where it is (_placeStoredGraphics).
+		case imageID == "" || !store.ids.has(imageID):
+			// An image the model does not follow, or one the client does
+			// not hold: it answers ENOENT and places nothing
+			// (_placeStoredGraphics).
 		case virtual && relative:
 			// The client rejects a virtual relative placement.
 		case virtual || relative:
-			if imageID == "" {
-				return
-			}
 			store.untracked.add(imageID)
 			// A relative placement replaces one with the same image and
 			// placement id when the client accepts it, which depends on a
@@ -318,76 +315,36 @@ func kittyBareContinuation(args map[string]string) bool {
 	return true
 }
 
-// placeKittyImage follows a direct placement the client makes at the cursor,
-// of imageID ("" for an image the model does not follow), then moves the
-// cursor past it as the client does.
+// placeKittyImage follows a direct placement of imageID the client makes at
+// the cursor.
 func (s *terminalScreen) placeKittyImage(args map[string]string, imageID string) {
 	g := s.grid()
-	if imageID != "" {
-		placementID := kittyIDValue(args["p"])
-		alt := s.altActive
-		if placementID != "" {
-			// The same image and placement id replace the placement.
-			s.dropKittyPlacements(func(p *vtKittyPlacement) bool {
-				return p.alt == alt && p.imageID == imageID && p.placementID == placementID
-			})
-		}
-		span := kittyPlacementSpan(
-			g.cursorCol, g.cursorRow,
-			kittyIntValue(args["c"]), kittyIntValue(args["r"]),
-		)
-		s.kittyDirect = append(s.kittyDirect, vtKittyPlacement{
-			imageID:     imageID,
-			placementID: placementID,
-			alt:         alt,
-			row:         span.row,
-			col:         span.col,
-			cols:        span.cols,
-			rows:        span.rows,
-			z:           kittyIntValue(args["z"]),
-			command:     kittyDirectPlacementReplayCommand(args),
+	placementID := kittyIDValue(args["p"])
+	alt := s.altActive
+	if placementID != "" {
+		// The same image and placement id replace the placement.
+		s.dropKittyPlacements(func(p *vtKittyPlacement) bool {
+			return p.alt == alt && p.imageID == imageID && p.placementID == placementID
 		})
-		if extra := len(s.kittyDirect) - vtKittyPlacementLimit; extra > 0 {
-			s.kittyDirect = append(s.kittyDirect[:0], s.kittyDirect[extra:]...)
-		}
 	}
-	s.advanceKittyCursor(args)
-}
-
-// advanceKittyCursor moves the cursor past a placed image as the client's
-// _advanceGraphicsCursor does, unless the command asks it to stay (C=1).
-// Only an image given both a column and a row span (c=, r=) covers cells the
-// model can count; any other moves the client's cursor by its pixel size,
-// which the model does not know, and leaves the two apart.
-func (s *terminalScreen) advanceKittyCursor(args map[string]string) {
-	if stay, ok := kittyNumber(args["C"]); ok && stay == 1 {
-		return
+	span := kittyPlacementSpan(
+		g.cursorCol, g.cursorRow,
+		kittyIntValue(args["c"]), kittyIntValue(args["r"]),
+	)
+	s.kittyDirect = append(s.kittyDirect, vtKittyPlacement{
+		imageID:     imageID,
+		placementID: placementID,
+		alt:         alt,
+		row:         span.row,
+		col:         span.col,
+		cols:        span.cols,
+		rows:        span.rows,
+		z:           kittyIntValue(args["z"]),
+		command:     kittyDirectPlacementReplayCommand(args),
+	})
+	if extra := len(s.kittyDirect) - vtKittyPlacementLimit; extra > 0 {
+		s.kittyDirect = append(s.kittyDirect[:0], s.kittyDirect[extra:]...)
 	}
-	cols, rows := kittyIntValue(args["c"]), kittyIntValue(args["r"])
-	if cols <= 0 || rows <= 0 {
-		return
-	}
-	g := s.grid()
-	target := min(g.cursorCol, s.width-1) + cols
-	wraps := target >= s.width
-	moves := rows - 1
-	if wraps {
-		moves++
-	}
-	// Enough moves to reach the bottom of the scroll region, then at most a
-	// screen of scrolling.
-	before := 0
-	if g.cursorRow >= s.top && g.cursorRow <= s.bottom {
-		before = max(0, s.bottom-g.cursorRow)
-	}
-	for range min(moves, before+s.height) {
-		s.index()
-	}
-	if wraps {
-		target = 0
-	}
-	g.cursorCol = min(target, s.width-1)
-	g.pendingWrap = false
 }
 
 // deleteKittyPlacements applies a delete command (a=d) to the placements on
@@ -398,34 +355,28 @@ func (s *terminalScreen) advanceKittyCursor(args map[string]string) {
 // matches none of them.
 //
 // An uppercase selector also frees the data of each image it matched that
-// has no placement left, and with d=I and d=R every image it names. Where
-// the model cannot tell, because the image may have placements the model
-// does not follow, it takes the image as freed: a display command of it then
-// leaves the cursor unknown and places nothing, rather than placing an image
-// the client no longer has.
+// has no placement left (_imageHasPlacements), and with d=I and d=R without
+// p= every image it names. Where the model cannot tell, because the image
+// may have placements the model does not follow, it keeps the image.
 func (s *terminalScreen) deleteKittyPlacements(args map[string]string) {
 	selector := kittyDeleteSelectorOf(args)
 	frees := args["d"] != "" && args["d"] != selector
 	store := s.kittyStore()
 	imageID := kittyIDValue(args["i"])
+	placementID := kittyIDValue(args["p"])
 	var match func(p *vtKittyPlacement) bool
 	switch selector {
 	case "i", "n":
 		// Either names the image by its id when it has one, and by its
-		// number (I=) when not (_deleteGraphics).
+		// number (I=), which the model does not follow, when not
+		// (_deleteGraphics).
 		if imageID == "" {
-			if number := kittyIDValue(args["I"]); frees && number != "" {
-				store.numbers.remove(number)
-			}
 			return
 		}
-		placementID := kittyIDValue(args["p"])
 		match = func(p *vtKittyPlacement) bool {
 			return p.imageID == imageID && (placementID == "" || p.placementID == placementID)
 		}
-		if frees {
-			// Without p= the image goes; with it, if that placement was
-			// its last.
+		if frees && placementID == "" {
 			store.ids.remove(imageID)
 			store.untracked.remove(imageID)
 		}
@@ -436,8 +387,6 @@ func (s *terminalScreen) deleteKittyPlacements(args map[string]string) {
 		if frees {
 			store.ids.removeIf(inRange)
 			store.untracked.removeIf(inRange)
-			// The client gave numbered images ids of its own.
-			store.numbers = nil
 		}
 	case "z":
 		z, ok := kittyDeleteZ(args)
@@ -467,21 +416,15 @@ func (s *terminalScreen) deleteKittyPlacements(args map[string]string) {
 		matched = append(matched, p.imageID)
 		return true
 	})
-	if !frees || selector == "i" || selector == "n" || selector == "r" {
+	if !frees || selector == "r" || ((selector == "i" || selector == "n") && placementID == "") {
 		return
 	}
-	// The images it matched placements of go once they have none left; any
-	// the model does not follow every placement of may have matched too.
+	// The images it matched placements of go once they have none left.
 	for _, id := range matched {
-		if !s.kittyImagePlacedOn(id, alt) {
+		if !s.kittyImagePlacedOn(id, alt) && !store.untracked.has(id) {
 			store.ids.remove(id)
 		}
 	}
-	for _, id := range store.untracked {
-		store.ids.remove(id)
-	}
-	store.untracked = nil
-	store.numbers = nil
 }
 
 // kittyImagePlacedOn reports whether the model follows a placement of

@@ -190,14 +190,10 @@ func kittyDirectPlacementReplayCommand(args map[string]string) []byte {
 func kittyPlacementCommand(args map[string]string, tail string) []byte {
 	out := []byte("\x1b_Ga=p")
 	appendKey := func(key string) {
-		value, ok := args[key]
+		// The client reads every key as an integer (kittyNumber), and one it
+		// cannot read as absent; the replay names it in decimal.
+		n, ok := kittyNumber(args[key])
 		if !ok {
-			return
-		}
-		// The client reads every key as an integer, and one it cannot read
-		// as absent.
-		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		if err != nil {
 			return
 		}
 		out = append(out, ',')
