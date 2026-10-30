@@ -1509,15 +1509,21 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
     var rawKind = rawLine.substring(0, separatorIndex);
     var value = rawLine.substring(separatorIndex + 1).trimRight();
     var nativeReplacement = '';
+    var endsWithSuffix = false;
     if (rawKind.startsWith(_zshNativeKindPrefix)) {
-      // Untrimmed: an inserted word can end in an escaped space.
+      // Untrimmed: an inserted word can end in an escaped space. A third
+      // field `S` says the word ends in its completer's own suffix, such as
+      // the } of ${PARAM}, which nothing follows.
       final fields = rawLine.substring(separatorIndex + 1).split('\t');
-      if (fields.length != 2) {
+      if (fields.length < 2 ||
+          fields.length > 3 ||
+          (fields.length == 3 && fields[2] != '' && fields[2] != 'S')) {
         continue;
       }
       rawKind = rawKind.substring(_zshNativeKindPrefix.length);
       value = fields[0];
       nativeReplacement = fields[1];
+      endsWithSuffix = fields.length == 3 && fields[2] == 'S';
       if (nativeReplacement.isEmpty) {
         continue;
       }
@@ -1538,7 +1544,7 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       continue;
     }
 
-    final suggestion = _suggestionFromRemoteValue(
+    var suggestion = _suggestionFromRemoteValue(
       rawKind: rawKind,
       value: value,
       invocation: invocation,
@@ -1546,6 +1552,15 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
     );
     if (suggestion == null) {
       continue;
+    }
+    if (endsWithSuffix) {
+      suggestion = ShellCompletionSuggestion(
+        label: suggestion.label,
+        replacement: suggestion.replacement,
+        replacementStart: suggestion.replacementStart,
+        replacementEnd: suggestion.replacementEnd,
+        kind: suggestion.kind,
+      );
     }
 
     final key =
@@ -1916,8 +1931,13 @@ emit_native_completion_item() {
   # The word as the shell reads it, to test its type and to show, and as zsh
   # would insert it, which the app inserts unchanged.
   # Inside an open quote the word is inserted after it, and anything but a
-  # directory closes it, as zsh does.
-  local item=\$1 insert=\$2 target=\$1 q=\$_flutty_quote
+  # directory closes it, as zsh does. A suffix the completer gave (-S), such
+  # as the } of \${PARAM} or the = of --opt=, is inserted too and the app
+  # adds no space after it (S); a space is what the app adds anyway.
+  local item=\$1 insert=\$2 suffix=\$3 target=\$1 q=\$_flutty_quote end=
+  if [[ -n \$suffix && \$suffix != ' ' ]]; then
+    insert=\$insert\$suffix end=S
+  fi
   # Test a word that starts with ~/ where the shell would expand it.
   [[ \$target == '~' || \$target == '~/'* ]] && target=\$HOME\${target#?}
   case "\$FLUTTY_MODE" in
@@ -1928,15 +1948,15 @@ emit_native_completion_item() {
       if [ -d "\$target" ]; then
         printf 'zsh_directory\\t%s\\t%s%s/\\n' "\$item" "\$q" "\${insert%/}"
       elif [ -e "\$target" ]; then
-        printf 'zsh_file\\t%s\\t%s%s%s\\n' "\$item" "\$q" "\$insert" "\$q"
+        printf 'zsh_file\\t%s\\t%s%s%s\\t%s\\n' "\$item" "\$q" "\$insert" "\$q" "\$end"
       else
-        printf 'zsh_argument\\t%s\\t%s%s%s\\n' "\$item" "\$q" "\$insert" "\$q"
+        printf 'zsh_argument\\t%s\\t%s%s%s\\t%s\\n' "\$item" "\$q" "\$insert" "\$q" "\$end"
       fi
       ;;
   esac
 }
 _flutty_dump_completions() {
-  # Pairs of the word as the shell reads it and as zsh would insert it.
+  # The word as the shell reads it, as zsh would insert it, and its suffix.
   typeset -ga _flutty_matches
   _flutty_matches=()
   typeset -g _flutty_quote=
@@ -1948,7 +1968,7 @@ _flutty_dump_completions() {
     # matches -A reports are quoted as zsh would insert them. A call that only
     # asks which words match (-O, -A, -D) adds nothing and is not captured.
     local -a hits
-    local ipre=\$IPREFIX apre= hpre= hsuf= opt letter value
+    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= opt letter value
     local -i i=1 j query=0
     while (( i <= \$# )); do
       opt=\${argv[i]}
@@ -1968,6 +1988,7 @@ _flutty_dump_completions() {
           P) apre=\$value ;;
           p) hpre=\$value ;;
           s) hsuf=\$value ;;
+          S) asuf=\$value ;;
         esac
         break
       done
@@ -1976,9 +1997,11 @@ _flutty_dump_completions() {
     if (( ! query )); then
       _flutty_quote=\${compstate[quote]}
       builtin compadd -A hits "\$@" 2>/dev/null
+      # zsh closes a \${ parameter itself, then adds its usual space.
+      [[ \${compstate[context]} == brace_parameter ]] && hsuf+='}'
       for value in "\${hits[@]}"; do
         value=\$ipre\$apre\$hpre\$value\$hsuf
-        _flutty_matches+=("\${(Q)value}" "\$value")
+        _flutty_matches+=("\${(Q)value}" "\$value" "\$asuf")
       done
     fi
     # Returns compadd's status. Never name a local `status`: zsh's is
@@ -1987,9 +2010,9 @@ _flutty_dump_completions() {
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__
-  local item insert
-  for item insert in "\${_flutty_matches[@]}"; do
-    emit_native_completion_item "\$item" "\$insert"
+  local item insert suffix
+  for item insert suffix in "\${_flutty_matches[@]}"; do
+    emit_native_completion_item "\$item" "\$insert" "\$suffix"
   done
   print -r -- $_interactiveZshCompletionDoneMarker
   exit 0

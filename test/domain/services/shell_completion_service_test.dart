@@ -1292,7 +1292,10 @@ void main() {
       expect(input, contains(r'source "$FLUTTY_ZSH_COMPLETION_SETUP"'));
       expect(input, contains('git c\t'));
       expect(command, contains('__FLUTTY_ZSH_NATIVE_DONE__'));
-      expect(command, contains(r'''printf 'zsh_argument\t%s\t%s%s%s\n' '''));
+      expect(
+        command,
+        contains(r'''printf 'zsh_argument\t%s\t%s%s%s\t%s\n' '''),
+      );
     },
   );
 
@@ -1327,9 +1330,12 @@ void main() {
     File('${home.path}/comp/_topt').writeAsStringSync(
       '#compdef topt\ncompset -P "*="\ncompadd -U -i "\$IPREFIX" -- hello\n',
     );
+    // A completer whose matches end in their own suffix, as `--opt=` does.
+    File('${home.path}/comp/_tsuffix')
+        .writeAsStringSync('#compdef tsuffix\ncompadd -S = -- value\n');
     // A startup file that changes directory must not move the completion.
     File('${home.path}/.zshrc')
-        .writeAsStringSync('fpath=(~/comp \$fpath)\ncd /\n');
+        .writeAsStringSync('fpath=(~/comp \$fpath)\nPROBEPARAM=1\ncd /\n');
 
     // Each match comes back as the word the shell reads, to show, and as zsh
     // would insert it, with the path the completer passed as a compadd prefix,
@@ -1337,15 +1343,19 @@ void main() {
     const file = ShellCompletionSuggestionKind.file;
     const directory = ShellCompletionSuggestionKind.directory;
     const argument = ShellCompletionSuggestionKind.command;
-    for (final (line, token, replacements, kind) in [
-      ('cat no', 'no', ['notebook.md', 'notes.txt'], file),
-      ('cat sub/no', 'sub/no', ['sub/notes.txt'], file),
-      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt'], file),
-      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt'], file),
-      ('cat "my d', '"my d', ['"my dir/'], directory),
-      ("cat 'sub/no", "'sub/no", ["'sub/notes.txt'"], file),
-      ('tspace ', '', [r'\$HOME', r"it\'s", r'space\ file'], argument),
-      ('topt --opt=he', '--opt=he', ['--opt=hello'], argument),
+    // The suffix is what follows the inserted word: a space, nothing after a
+    // completer's own suffix, or the slash a directory already ends in.
+    for (final (line, token, replacements, kind, suffix) in [
+      ('cat no', 'no', ['notebook.md', 'notes.txt'], file, ' '),
+      ('cat sub/no', 'sub/no', ['sub/notes.txt'], file, ' '),
+      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt'], file, ' '),
+      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt'], file, ' '),
+      ('cat "my d', '"my d', ['"my dir/'], directory, ''),
+      ("cat 'sub/no", "'sub/no", ["'sub/notes.txt'"], file, ' '),
+      ('tspace ', '', [r'\$HOME', r"it\'s", r'space\ file'], argument, ' '),
+      ('topt --opt=he', '--opt=he', ['--opt=hello'], argument, ' '),
+      ('tsuffix v', 'v', ['value='], argument, ''),
+      (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
     ]) {
       final command = line.substring(0, line.indexOf(' '));
       final invocation = ShellCompletionInvocation(
@@ -1382,6 +1392,9 @@ void main() {
         reason: line,
       );
       expect(suggestions.map((s) => s.kind).toSet(), {kind}, reason: line);
+      expect(suggestions.map((s) => s.commitSuffix).toSet(), {
+        suffix,
+      }, reason: line);
     }
     expect(
       home.listSync().map((entry) => entry.uri.pathSegments.last),
