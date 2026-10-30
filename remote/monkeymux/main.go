@@ -225,16 +225,27 @@ func windowReplayTag(window *muxWindow) string {
 	return "\x1b]" + monkeyMuxReplayWindowOSC + ";window=" + monkeyMuxServerInstance + ":" + window.id + "\x1b\\"
 }
 
-// trimWindowReplayTag drops the tag a captured replay starts with.
-func trimWindowReplayTag(history []byte) []byte {
+// stripWindowReplayTags drops every replay tag from captured history: a tag
+// replayed later would name the old server's window, and a ConPTY replay
+// starts with a synchronized-output mode before its tag.
+func stripWindowReplayTags(history []byte) []byte {
 	tag := []byte("\x1b]" + monkeyMuxReplayWindowOSC + ";")
-	if !bytes.HasPrefix(history, tag) {
+	if !bytes.Contains(history, tag) {
 		return history
 	}
-	if end := bytes.Index(history, []byte("\x1b\\")); end >= 0 {
-		return history[end+2:]
+	out := make([]byte, 0, len(history))
+	for {
+		start := bytes.Index(history, tag)
+		if start < 0 {
+			return append(out, history...)
+		}
+		end := bytes.Index(history[start:], []byte("\x1b\\"))
+		if end < 0 {
+			return append(out, history...)
+		}
+		out = append(out, history[:start]...)
+		history = history[start+end+2:]
 	}
-	return history
 }
 
 const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
@@ -3702,7 +3713,7 @@ func normalizeCapturedReplayHistory(history []byte) []byte {
 	if len(history) == 0 {
 		return nil
 	}
-	history = trimWindowReplayTag(history)
+	history = stripWindowReplayTags(history)
 	if bytes.HasPrefix(history, []byte(activeWindowReplayPrefix)) {
 		history = history[len(activeWindowReplayPrefix):]
 	}

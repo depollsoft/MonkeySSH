@@ -332,4 +332,10 @@ func TestWindowReplayStartsWithItsWindowTag(t *testing.T) {
 		!strings.Contains(captured, "hello") {
 		t.Fatalf("captured history = %q", captured)
 	}
+	// A ConPTY replay is wrapped in synchronized output, ahead of its tag.
+	wrapped := string(wrapSynchronizedTerminalOutput(nil, []byte(replay)))
+	captured = string(normalizeCapturedReplayHistory([]byte(wrapped)))
+	if strings.Contains(captured, "\x1b]7502;") || !strings.Contains(captured, "hello") {
+		t.Fatalf("captured synchronized history = %q", captured)
+	}
 }
