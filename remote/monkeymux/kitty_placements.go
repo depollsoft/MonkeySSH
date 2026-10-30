@@ -143,6 +143,19 @@ var kittyPlacementCommandKeys = []string{
 // so a kept placement costs a few bytes whatever its command carried; a
 // display command has no payload.
 func kittyPlacementReplayCommand(args map[string]string) []byte {
+	return kittyPlacementCommand(args, ",q=2\x1b\\")
+}
+
+// kittyDirectPlacementReplayCommand builds the a=p command that places a
+// direct placement again at the cursor, from the keys of the a=T or a=p that
+// made it, keeping the cursor where it is (C=1) and replies silenced.
+func kittyDirectPlacementReplayCommand(args map[string]string) []byte {
+	return kittyPlacementCommand(args, ",C=1,q=2\x1b\\")
+}
+
+// kittyPlacementCommand is the a=p command with the keys of args a replay
+// needs, followed by tail, which ends the command.
+func kittyPlacementCommand(args map[string]string, tail string) []byte {
 	out := []byte("\x1b_Ga=p")
 	appendKey := func(key string) {
 		value, ok := args[key]
@@ -169,7 +182,7 @@ func kittyPlacementReplayCommand(args map[string]string) []byte {
 	for _, key := range kittyPlacementCommandKeys {
 		appendKey(key)
 	}
-	return append(out, ",q=2\x1b\\"...)
+	return append(out, tail...)
 }
 
 // kittyRootIsVirtual reports whether the retained root transmission of

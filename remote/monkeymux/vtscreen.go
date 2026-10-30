@@ -98,6 +98,11 @@ type terminalScreen struct {
 	kittyPlaceholderOrder []string
 	kittyPending          vtKittyPlaceholder
 	kittyLast             vtKittyPlaceholder
+	// kittyDirect are the direct Kitty placements the client keeps, and
+	// kittyChunk a chunked transmission still arriving, which may make one;
+	// see vtscreen_kitty_placements.go.
+	kittyDirect []vtKittyPlacement
+	kittyChunk  vtKittyChunk
 
 	// Semantic prompt (OSC 133) state of each screen; see vtscreen_prompt.go.
 	semMain vtSemanticState
@@ -404,6 +409,9 @@ func (s *terminalScreen) Reset() {
 	s.kittyLast = vtKittyPlaceholder{}
 	// Nothing is left for REP to repeat, as in the client.
 	s.lastPrinted = 0
+	// The client clears both screens' placements.
+	s.kittyDirect = nil
+	s.kittyChunk = vtKittyChunk{}
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
 	s.resetState()
@@ -551,6 +559,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.tabs = append([]bool(nil), s.tabs...)
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
+	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
 	if s.kittyPlaceholderIDs != nil {
 		c.kittyPlaceholderIDs = make(map[string]struct{}, len(s.kittyPlaceholderIDs))
 		for id := range s.kittyPlaceholderIDs {
@@ -637,7 +646,9 @@ func (s *terminalScreen) Resize(width, height int) {
 // reflowed to the new width.
 func (s *terminalScreen) resizeMain(width, height int) {
 	g := &s.main
+	rows, cursorRow := len(g.rows), g.cursorRow
 	s.resizeMainRows(g, s.width, height)
+	s.kittyMainRowsResized(rows, cursorRow)
 	for len(g.rows) < height {
 		g.rows = append(g.rows, newVTRow(s.width))
 		g.wrapped = append(g.wrapped, false)
@@ -667,9 +678,9 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 	for i := range g.rows {
 		g.rows[i] = resizeVTRow(g.rows[i], width)
 	}
+	rows, fromTop, drop := len(g.rows), 0, 0
 	if height < len(g.rows) {
-		drop := len(g.rows) - height
-		fromTop := 0
+		drop = len(g.rows) - height
 		if g.cursorRow >= height {
 			fromTop = g.cursorRow - height + 1
 		}
@@ -691,6 +702,7 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 		g.wrapped = append(g.wrapped, false)
 		g.prompt = append(g.prompt, vtPromptNone)
 	}
+	s.kittyAltResized(rows, fromTop, drop, width)
 	s.clampVTCursor(g, width, height)
 }
 
@@ -797,7 +809,9 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 	for i, row := range g.rows {
 		lines = append(lines, vtLine{cells: row, wrapped: g.wrapped[i], prompt: g.prompt[i]})
 	}
-	lines[history+g.cursorRow].cursor = vtReflowCursor{set: true, x: cursorX}
+	cursor := &lines[history+g.cursorRow]
+	cursor.anchors = append(cursor.anchors, vtReflowAnchor{id: vtReflowCursorAnchor, x: cursorX})
+	s.anchorKittyPlacements(lines, history)
 	lines = vtReflow(lines, s.width, width)
 	for len(lines) < height {
 		lines = append(lines, vtLine{cells: newVTRow(width)})
@@ -818,18 +832,21 @@ func (s *terminalScreen) reflowMain(width, height, cursorX int, cursorFollowsTex
 		g.wrapped[i] = line.wrapped
 		g.prompt[i] = line.prompt
 	}
+	s.reflowedKittyPlacements(lines, screenStart)
 	for i, line := range lines {
-		if !line.cursor.set {
-			continue
+		for _, anchor := range line.anchors {
+			if anchor.id != vtReflowCursorAnchor {
+				continue
+			}
+			g.cursorRow = clampInt(i-screenStart, 0, height-1)
+			g.cursorCol = min(anchor.x, width-1)
+			// Past the last column a wrap is pending only for a cursor that
+			// follows its text, which now fills the row, and only with
+			// autowrap on; any other cursor the new edge cut short sits on
+			// the last column.
+			g.pendingWrap = anchor.x >= width && cursorFollowsText && s.autowrap
+			return
 		}
-		g.cursorRow = clampInt(i-screenStart, 0, height-1)
-		g.cursorCol = min(line.cursor.x, width-1)
-		// Past the last column a wrap is pending only for a cursor that
-		// follows its text, which now fills the row, and only with autowrap
-		// on; any other cursor the new edge cut short sits on the last
-		// column.
-		g.pendingWrap = line.cursor.x >= width && cursorFollowsText && s.autowrap
-		break
 	}
 }
 
@@ -1317,7 +1334,11 @@ func (s *terminalScreen) step(b byte) {
 			s.endString()
 			s.endStringEarly()
 		case b == 0x18, b == 0x1a:
-			// A cancelled string runs nothing.
+			// A cancelled string runs nothing, and a cancelled graphics
+			// command abandons the transmission it continued.
+			if p.stringKind == '_' {
+				s.kittyChunk = vtKittyChunk{}
+			}
 			p.state = vtGround
 			p.beginString(0)
 			s.endStringEarly()
@@ -1418,6 +1439,7 @@ func (s *terminalScreen) endString() {
 	if len(head) == 0 || head[0] != 'G' {
 		return
 	}
+	s.observeKittyGraphics(head[1:], truncated)
 	if truncated {
 		// Keys past the limit were not read; assume the command places an
 		// image, whether now or with a later chunk.
@@ -1789,6 +1811,7 @@ func (s *terminalScreen) scrollRegionUp(top, bottom, n int) {
 		g.endContinuation(top)
 	}
 	g.endContinuation(bottom + 1)
+	s.scrollKittyPlacementsUp(top, bottom, n)
 }
 
 // endContinuation marks the row at index, if any, as no longer continuing the
@@ -1803,6 +1826,9 @@ func (g *vtGrid) endContinuation(index int) {
 
 func (s *terminalScreen) scrollDown(n int) {
 	s.scrollRegionDown(s.top, s.bottom, n)
+	if n > 0 {
+		s.scrollKittyPlacementRegion(s.top, s.bottom, min(n, s.bottom-s.top+1))
+	}
 }
 
 func (s *terminalScreen) scrollRegionDown(top, bottom, n int) {
@@ -1930,6 +1956,7 @@ func (s *terminalScreen) print(r rune) {
 		if last := len(row) - 1; last >= 0 && row[last].width == 2 {
 			row[last] = blankedHalf(row[last])
 		}
+		s.shiftKittyPlacementCells(g.cursorCol, width)
 	}
 	col := g.cursorCol
 	// Overwriting half of a wide glyph blanks the other half.
@@ -2340,6 +2367,7 @@ func (s *terminalScreen) clearAlt() {
 	cleared := newVTGrid(s.width, s.height)
 	cleared.cursorRow, cleared.cursorCol, cleared.pendingWrap = s.alt.cursorRow, s.alt.cursorCol, s.alt.pendingWrap
 	s.alt = cleared
+	s.dropKittyAltPlacements()
 }
 
 func (s *terminalScreen) eraseDisplay(mode int) {
@@ -2372,6 +2400,7 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		// this erases nothing, as in the client's Buffer.clearScrollback.
 		if !s.altActive {
 			s.scrollback = vtScrollback{}
+			s.dropKittyScrollbackPlacements()
 		}
 		// A replay prefix ends with it, so the client ends an open prompt.
 		s.semantic().resetCursor()
@@ -2462,6 +2491,7 @@ func (s *terminalScreen) insertChars(n int) {
 	if row[s.width-1].width == 2 {
 		row[s.width-1] = blankedHalf(row[s.width-1])
 	}
+	s.shiftKittyPlacementCells(col, n)
 	g.pendingWrap = false
 }
 
@@ -2482,6 +2512,7 @@ func (s *terminalScreen) deleteChars(n int) {
 	if row[col].width == 0 {
 		row[col] = blankedHalf(row[col])
 	}
+	s.shiftKittyPlacementCells(col, -n)
 	g.pendingWrap = false
 }
 
@@ -2491,6 +2522,9 @@ func (s *terminalScreen) insertLines(n int) {
 		return
 	}
 	s.scrollRegionDown(g.cursorRow, s.bottom, n)
+	if n > 0 {
+		s.shiftKittyPlacementLines(g.cursorRow, s.bottom, n)
+	}
 	g.cursorCol = 0
 	g.pendingWrap = false
 }
@@ -2515,6 +2549,7 @@ func (s *terminalScreen) deleteLines(n int) {
 	}
 	g.endContinuation(g.cursorRow)
 	g.endContinuation(s.bottom + 1)
+	s.shiftKittyPlacementLines(g.cursorRow, s.bottom, -n)
 	g.cursorCol = 0
 	g.pendingWrap = false
 }
