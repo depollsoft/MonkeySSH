@@ -723,7 +723,8 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
     if (_sftp != null) {
       session.discardSftpClient(_sftp);
     }
-    _sftp = null;
+    // Rebuild, so Upload and New folder go while no client is open.
+    setState(() => _sftp = null);
 
     try {
       final sftp = await _openSftpClient(session);

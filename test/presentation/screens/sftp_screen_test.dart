@@ -1527,6 +1527,75 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
 
+    testWidgets('hides Upload and New folder while SFTP reopens', (
+      tester,
+    ) async {
+      final sshClient = _MockSshClient();
+      final staleSftp = _MockSftpClient();
+      final freshSftp = _MockSftpClient();
+      final session = _sftpSession(sshClient);
+      addTearDown(session.close);
+      final reopening = Completer<SftpClient>();
+      var sftpOpenAttempts = 0;
+      when(sshClient.sftp).thenAnswer((_) {
+        sftpOpenAttempts++;
+        return sftpOpenAttempts == 1
+            ? Future.value(staleSftp)
+            : reopening.future;
+      });
+      when(() => staleSftp.absolute('.')).thenAnswer((_) async => '/home/demo');
+      when(() => staleSftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt')]);
+      when(staleSftp.close).thenAnswer((_) async {});
+      when(() => freshSftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt')]);
+
+      await tester.pumpWidget(
+        _buildSftpTestApp(
+          session: session,
+          child: const SftpScreen(hostId: 1, connectionId: 7),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Upload files'), findsOneWidget);
+
+      // The listing channel goes stale after a frame, as over a network, and
+      // the replacement is still opening.
+      final listing = Completer<List<SftpName>>();
+      when(() => staleSftp.listdir('/home/demo'))
+          .thenAnswer((_) => listing.future);
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pump();
+      listing.completeError(SSHStateError('Connection closed'));
+      await tester.pump();
+
+      expect(sftpOpenAttempts, 2);
+      // The scaffold's own button: the old one may still be animating out.
+      Widget? uploadButton() => tester
+          .widget<Scaffold>(
+            find.ancestor(
+              of: find.byType(SftpBrowserToolbar),
+              matching: find.byType(Scaffold),
+            ),
+          )
+          .floatingActionButton;
+      expect(uploadButton(), isNull);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      reopening.complete(freshSftp);
+      await tester.pumpAndSettle();
+      expect(uploadButton(), isNotNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
     testWidgets('opens a Windows remote home directory from SFTP realpath', (
       tester,
     ) async {
