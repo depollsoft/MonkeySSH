@@ -89,6 +89,8 @@ class ScreenshotTarget:
 class DuoPose:
     # Device Hub button that sets the hinge.
     hinge: str
+    # hingectl's name for the same preset.
+    preset: str
     # simctl display: 1 is the outer display, 3 the inner one.
     display: int
     size: tuple[int, int]
@@ -97,11 +99,18 @@ class DuoPose:
 # Must match _DuoPose in tool/store_screenshot_app.dart, which also checks the
 # orientation and asks for Rotate Right when the window comes out turned.
 DUO_POSES = {
-    'closed': DuoPose(hinge='Closed', display=1, size=(1398, 2034)),
-    'open': DuoPose(hinge='Open', display=3, size=(2853, 2007)),
-    'book': DuoPose(hinge='Partially Open', display=3, size=(2853, 2007)),
-    'propped': DuoPose(hinge='Partially Open', display=3, size=(2007, 2853)),
+    'closed': DuoPose(hinge='Closed', preset='closed', display=1, size=(1398, 2034)),
+    'open': DuoPose(hinge='Open', preset='open', display=3, size=(2853, 2007)),
+    'book': DuoPose(
+        hinge='Partially Open', preset='partial', display=3, size=(2853, 2007),
+    ),
+    'propped': DuoPose(
+        hinge='Partially Open', preset='partial', display=3, size=(2007, 2853),
+    ),
 }
+# The orientations Device Hub's Rotate Right steps through, from the portrait
+# each preset starts in.
+DUO_ROTATION = ('portrait', 'landscape-right', 'pud', 'landscape-left')
 DUO_SCENES = (
     'duo_book_terminal',
     'duo_closed_terminal',
@@ -112,9 +121,12 @@ DUO_SCENES = (
     'duo_closed_hosts',
     'duo_closed_agent_management',
 )
+# Sets the iPhone Duo simulator's hinge and orientation from the command line,
+# with no Accessibility grant or unlocked screen; it comes with the user-level
+# iphone-duo-simulator skill. Without it, captures press Device Hub's buttons.
+DEFAULT_DUO_HINGECTL = '~/.agents/skills/iphone-duo-simulator/scripts/hingectl'
 # Presses Device Hub's hinge buttons through the macOS Accessibility API. It
-# takes one JSON request argument and prints the JSON result (see AGENTS.md,
-# "iOS scene lifecycle and iPhone Duo").
+# takes one JSON request argument and prints the JSON result.
 DEFAULT_AX_HELPER = '~/Library/Application Support/SimAXHelper/ax.py'
 
 
@@ -192,7 +204,6 @@ def main() -> None:
         print("All required store-capture agent CLIs are available.")
         if TARGETS['ios_duo'] in _targets_for_platform(args.platform):
             _check_duo_environment()
-            print('Device Hub can set the iPhone Duo hinge.')
         return
     targets = _targets_for_platform(args.platform, scene=args.scene)
     if not targets:
@@ -364,7 +375,9 @@ def _run_flutter_capture(
             line = raw_line.strip()
             if POSE_MARKER in line:
                 _set_duo_pose(
-                    target, json.loads(line.split(POSE_MARKER, 1)[1]),
+                    target,
+                    device_id,
+                    json.loads(line.split(POSE_MARKER, 1)[1]),
                 )
             if READY_MARKER in line:
                 payload = json.loads(line.split(READY_MARKER, 1)[1])
@@ -2199,15 +2212,47 @@ def _capture_native_screenshot(
                 )
 
 
+def _duo_hingectl() -> Path | None:
+    """Returns the hingectl that sets the Duo pose, or None to use Device Hub.
+
+    STORE_SCREENSHOT_DUO_HINGECTL names another copy; set it empty to press
+    Device Hub's buttons instead.
+    """
+    configured = os.environ.get('STORE_SCREENSHOT_DUO_HINGECTL')
+    if configured == '':
+        return None
+    # Absolute, so a relative path runs that file rather than a PATH lookup.
+    tool = Path(configured or DEFAULT_DUO_HINGECTL).expanduser().absolute()
+    if tool.is_file():
+        return tool
+    if configured:
+        raise RuntimeError(f'STORE_SCREENSHOT_DUO_HINGECTL names no file: {tool}')
+    return None
+
+
+def _run_hingectl(tool: Path, device_id: str, *args: str) -> None:
+    result = subprocess.run(
+        [str(tool), device_id, *args],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f'hingectl {" ".join(args)} failed: '
+            f'{(result.stderr or result.stdout).strip()}',
+        )
+    print(f'hingectl set {" ".join(args)} on {device_id}')
+
+
 def _ax_helper(request: dict[str, object]) -> object:
     helper = Path(
         os.environ.get('STORE_SCREENSHOT_AX_HELPER', DEFAULT_AX_HELPER),
     ).expanduser()
     if not helper.is_file():
         raise RuntimeError(
-            f'iPhone Duo captures need the Device Hub helper at {helper} '
-            '(set STORE_SCREENSHOT_AX_HELPER); see AGENTS.md, "iOS scene '
-            'lifecycle and iPhone Duo".',
+            f'iPhone Duo captures need hingectl at {DEFAULT_DUO_HINGECTL} '
+            '(from the iphone-duo-simulator skill; set '
+            'STORE_SCREENSHOT_DUO_HINGECTL) or the Device Hub helper at '
+            f'{helper} (set STORE_SCREENSHOT_AX_HELPER).',
         )
     result = subprocess.run(
         [sys.executable, str(helper), json.dumps(request)],
@@ -2302,21 +2347,40 @@ def _press_device_hub_button(device_name: str, description: str) -> None:
     raise RuntimeError(f'Device Hub has no {description!r} button for {device_name!r}')
 
 
-def _set_duo_pose(target: ScreenshotTarget, request: dict[str, object]) -> None:
+_duo_orientation = DUO_ROTATION[0]
+
+
+def _set_duo_pose(
+    target: ScreenshotTarget, device_id: str, request: dict[str, object],
+) -> None:
+    global _duo_orientation
     if target.name != 'ios_duo':
         raise RuntimeError(f'{target.name} asked for an iPhone Duo pose')
+    hingectl = _duo_hingectl()
     name = _ios_simulator_name(target)
     if request.get('rotate'):
-        _press_device_hub_button(name, 'Rotate Right')
+        if hingectl is None:
+            _press_device_hub_button(name, 'Rotate Right')
+            return
+        # hingectl sets an orientation; Rotate Right steps to the next one.
+        _duo_orientation = DUO_ROTATION[
+            (DUO_ROTATION.index(_duo_orientation) + 1) % len(DUO_ROTATION)
+        ]
+        _run_hingectl(hingectl, device_id, '--orientation', _duo_orientation)
         return
     pose = request.get('pose')
     if pose not in DUO_POSES:
         raise RuntimeError(f'Unknown iPhone Duo pose: {pose}')
-    _press_device_hub_button(name, DUO_POSES[pose].hinge)
+    if hingectl is None:
+        _press_device_hub_button(name, DUO_POSES[pose].hinge)
+        return
+    # Like Device Hub's presets, hingectl's turn the device upright first.
+    _run_hingectl(hingectl, device_id, DUO_POSES[pose].preset)
+    _duo_orientation = DUO_ROTATION[0]
 
 
 def _check_duo_environment() -> None:
-    """Fails before any capture when Device Hub cannot move the Duo hinge."""
+    """Fails before any capture when nothing can move the Duo hinge."""
     # Older SDKs compile out the fold reader, so no hinge pose would arrive.
     sdk = subprocess.check_output(
         ['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True,
@@ -2326,19 +2390,26 @@ def _check_duo_environment() -> None:
             f'iPhone Duo captures need the iOS 27.1 SDK; the selected Xcode has '
             f'{sdk}. Set DEVELOPER_DIR to Xcode 27.1 or later.',
         )
-    trusted = _ax_helper({'cmd': 'trusted'})
-    if not (isinstance(trusted, dict) and trusted.get('trusted')):
-        raise RuntimeError('The Device Hub helper lacks the Accessibility permission.')
+    hingectl = _duo_hingectl()
+    if hingectl is None:
+        trusted = _ax_helper({'cmd': 'trusted'})
+        if not (isinstance(trusted, dict) and trusted.get('trusted')):
+            raise RuntimeError(
+                'The Device Hub helper lacks the Accessibility permission.',
+            )
     name = _ios_simulator_name(TARGETS['ios_duo'])
-    # Device Hub windows show a name, not a UDID.
+    # The capture finds its simulator by name, as Device Hub's windows show it.
     if len(_ios_simulator_udids(name)) > 1:
         raise RuntimeError(
             f'Several iOS simulators are named {name!r}; rename the extras or set '
             'STORE_SCREENSHOT_IOS_DUO_SIMULATOR to a unique name.',
         )
     device_id = _boot_ios_simulator(name)
+    if hingectl is not None:
+        print(f'hingectl at {hingectl} sets the hinge of {name} ({device_id}).')
+        return
     _show_in_device_hub(name, device_id)
-    print(f'Device Hub shows {name} ({device_id}).')
+    print(f'Device Hub shows {name} ({device_id}) and can set its hinge.')
 
 
 def _prepare_device(target: ScreenshotTarget) -> str:

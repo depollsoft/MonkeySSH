@@ -19,6 +19,11 @@ import store_media
 
 
 class DuoCaptureTest(unittest.TestCase):
+    @staticmethod
+    def _device_hub():
+        """Presses Device Hub's buttons even where hingectl is installed."""
+        return patch.object(capture, '_duo_hingectl', return_value=None)
+
     def _dart_duo_scenes(self):
         source = (ROOT / 'tool/store_screenshot_app.dart').read_text()
         block = source.split('const _duoScenes = <_DuoScene>[', 1)[1].split('];', 1)[0]
@@ -76,29 +81,31 @@ class DuoCaptureTest(unittest.TestCase):
             requests.append(request)
             return replies[request['cmd']]
 
-        with patch.object(capture, '_ax_helper', side_effect=helper):
-            capture._set_duo_pose(capture.TARGETS['ios_duo'], {'pose': 'book'})
+        with self._device_hub(), patch.object(capture, '_ax_helper', side_effect=helper):
+            capture._set_duo_pose(capture.TARGETS['ios_duo'], 'DUO-UDID', {'pose': 'book'})
         self.assertEqual(requests[-1], {
             'cmd': 'press', 'app': 'devicehub',
             'match': {'role': 'AXButton', 'desc': 'Partially Open', 'index': 1},
         })
 
     def test_press_refuses_an_overlapping_window(self):
-        with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
+        with self._device_hub(), \
+             patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
             {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [400, 0, 500, 800]},
             {'title': 'iPhone Duo \u2013 iOS 27.1', 'frame': [600, 0, 500, 800]},
         ]}}) as helper:
             with self.assertRaisesRegex(RuntimeError, "'Duo Lead – iOS 27.1' overlaps"):
-                capture._set_duo_pose(capture.TARGETS['ios_duo'], {'pose': 'book'})
+                capture._set_duo_pose(capture.TARGETS['ios_duo'], 'DUO-UDID', {'pose': 'book'})
         self.assertEqual([call.args[0]['cmd'] for call in helper.call_args_list], ['apps'])
 
     def test_press_requires_one_capture_window(self):
-        with patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
+        with self._device_hub(), \
+             patch.object(capture, '_ax_helper', return_value={'devicehub': {'windows': [
             {'title': 'Duo Lead \u2013 iOS 27.1', 'frame': [0, 0, 500, 800]},
             {'title': 'iPhone Duo Pro \u2013 iOS 27.1', 'frame': [600, 0, 500, 800]},
         ]}}):
             with self.assertRaisesRegex(RuntimeError, "Open one Device Hub window for the 'iPhone Duo'"):
-                capture._set_duo_pose(capture.TARGETS['ios_duo'], {'rotate': True})
+                capture._set_duo_pose(capture.TARGETS['ios_duo'], 'DUO-UDID', {'rotate': True})
 
     def test_environment_selects_the_capture_simulator_by_udid(self):
         windows = [{'title': 'iPhone 17 Pro \u2013 iOS 26.5', 'frame': [0, 0, 1100, 800]}]
@@ -113,7 +120,7 @@ class DuoCaptureTest(unittest.TestCase):
                 return {'at': [500, 300]}
             return {'devicehub': {'windows': list(windows)}}
 
-        with patch.object(capture, '_ax_helper', side_effect=helper), \
+        with self._device_hub(), patch.object(capture, '_ax_helper', side_effect=helper), \
              patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
              patch.object(capture, '_ios_simulator_udids', return_value=['DUO-UDID']), \
              patch.object(capture, '_boot_ios_simulator', return_value='DUO-UDID'):
@@ -132,7 +139,8 @@ class DuoCaptureTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'need the iOS 27.1 SDK'):
                 capture._check_duo_environment()
         helper.assert_not_called()
-        with patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
+        with self._device_hub(), \
+             patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
              patch.object(capture, '_ax_helper', return_value={'trusted': True}), \
              patch.object(capture, '_ios_simulator_udids', return_value=['A', 'B']), \
              patch.object(capture, '_boot_ios_simulator') as boot:
@@ -157,6 +165,7 @@ class DuoCaptureTest(unittest.TestCase):
         with patch.object(capture, '_flutter_environment', return_value={}), \
              patch.object(capture, '_flutter_command', return_value=['flutter']), \
              patch.object(capture.subprocess, 'Popen', return_value=process), \
+             self._device_hub(), \
              patch.object(capture, '_press_device_hub_button') as press, \
              patch.object(capture, '_terminate_process'):
             capture._run_flutter_capture(capture.TARGETS['ios_duo'], 'device', [])
@@ -164,6 +173,82 @@ class DuoCaptureTest(unittest.TestCase):
             [call.args for call in press.call_args_list],
             [('iPhone Duo', 'Partially Open'), ('iPhone Duo', 'Rotate Right')],
         )
+
+    def test_hingectl_sets_presets_and_steps_orientation_like_rotate_right(self):
+        tool = Path('/skills/hingectl')
+        process = Mock(stdout=iter([
+            capture.POSE_MARKER + '{"pose":"propped"}\n',
+            capture.POSE_MARKER + '{"rotate":true}\n',
+            capture.POSE_MARKER + '{"rotate":true}\n',
+            capture.POSE_MARKER + '{"pose":"closed"}\n',
+            capture.POSE_MARKER + '{"rotate":true}\n',
+            capture.DONE_MARKER + '\n',
+        ]))
+        with patch.object(capture, '_flutter_environment', return_value={}), \
+             patch.object(capture, '_flutter_command', return_value=['flutter']), \
+             patch.object(capture.subprocess, 'Popen', return_value=process), \
+             patch.object(capture, '_duo_hingectl', return_value=tool), \
+             patch.object(capture.subprocess, 'run', return_value=Mock(returncode=0)) as run, \
+             patch.object(capture, '_press_device_hub_button') as press, \
+             patch.object(capture, '_terminate_process'):
+            capture._run_flutter_capture(capture.TARGETS['ios_duo'], 'DUO-UDID', [])
+        press.assert_not_called()
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            [str(tool), 'DUO-UDID', 'partial'],
+            [str(tool), 'DUO-UDID', '--orientation', 'landscape-right'],
+            [str(tool), 'DUO-UDID', '--orientation', 'pud'],
+            # A preset turns the device upright again.
+            [str(tool), 'DUO-UDID', 'closed'],
+            [str(tool), 'DUO-UDID', '--orientation', 'landscape-right'],
+        ])
+
+    def test_hingectl_failure_stops_the_capture(self):
+        with patch.object(capture, '_duo_hingectl', return_value=Path('/skills/hingectl')), \
+             patch.object(capture.subprocess, 'run', return_value=Mock(
+                 returncode=1, stdout='', stderr='not an iPhone Duo simulator',
+             )):
+            with self.assertRaisesRegex(RuntimeError, 'hingectl partial failed: not an iPhone Duo'):
+                capture._set_duo_pose(capture.TARGETS['ios_duo'], 'DUO-UDID', {'pose': 'book'})
+
+    def test_environment_with_hingectl_needs_no_device_hub(self):
+        with patch.object(capture, '_duo_hingectl', return_value=Path('/skills/hingectl')), \
+             patch.object(capture, '_ax_helper') as helper, \
+             patch.object(capture.subprocess, 'check_output', return_value='27.1\n'), \
+             patch.object(capture, '_ios_simulator_udids', return_value=['DUO-UDID']), \
+             patch.object(capture, '_boot_ios_simulator', return_value='DUO-UDID') as boot:
+            capture._check_duo_environment()
+        helper.assert_not_called()
+        boot.assert_called_once_with('iPhone Duo')
+
+    def test_hingectl_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tool = Path(directory) / 'hingectl'
+            tool.write_text('#!/bin/sh\n')
+            missing = str(Path(directory) / 'missing')
+            with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': str(tool)}):
+                self.assertEqual(capture._duo_hingectl(), tool)
+            # A relative path names that file, not a command on PATH.
+            previous = Path.cwd()
+            capture.os.chdir(directory)
+            try:
+                with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': './hingectl'}):
+                    self.assertEqual(capture._duo_hingectl(), Path.cwd() / 'hingectl')
+            finally:
+                capture.os.chdir(previous)
+            # Empty picks Device Hub.
+            with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': ''}):
+                self.assertIsNone(capture._duo_hingectl())
+            with patch.dict(capture.os.environ, {'STORE_SCREENSHOT_DUO_HINGECTL': missing}):
+                with self.assertRaisesRegex(RuntimeError, 'names no file'):
+                    capture._duo_hingectl()
+            # Without the skill installed, Device Hub it is.
+            environment = {
+                key: value for key, value in capture.os.environ.items()
+                if key != 'STORE_SCREENSHOT_DUO_HINGECTL'
+            }
+            with patch.dict(capture.os.environ, environment, clear=True), \
+                 patch.object(capture, 'DEFAULT_DUO_HINGECTL', missing):
+                self.assertIsNone(capture._duo_hingectl())
 
     def test_duo_capture_uses_pose_display_and_exact_size(self):
         def fake_screenshot(size):
