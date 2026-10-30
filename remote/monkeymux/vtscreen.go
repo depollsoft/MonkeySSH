@@ -98,10 +98,12 @@ type terminalScreen struct {
 	kittyPlaceholderOrder []string
 	kittyPending          vtKittyPlaceholder
 	kittyLast             vtKittyPlaceholder
-	// kittyDirect are the direct Kitty placements the client keeps, and
-	// kittyChunk a chunked transmission still arriving, which may make one;
+	// kittyDirect are the direct Kitty placements the client keeps,
+	// kittyStores what it holds in the image store of the main screen and
+	// of the alternate one, and kittyChunk a transmission still arriving;
 	// see vtscreen_kitty_placements.go.
 	kittyDirect []vtKittyPlacement
+	kittyStores [2]vtKittyStore
 	kittyChunk  vtKittyChunk
 
 	// Semantic prompt (OSC 133) state of each screen; see vtscreen_prompt.go.
@@ -409,9 +411,9 @@ func (s *terminalScreen) Reset() {
 	s.kittyLast = vtKittyPlaceholder{}
 	// Nothing is left for REP to repeat, as in the client.
 	s.lastPrinted = 0
-	// The client clears both screens' placements.
+	// The client clears both screens' placements but keeps the images, and
+	// a transmission still open (fullReset).
 	s.kittyDirect = nil
-	s.kittyChunk = vtKittyChunk{}
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
 	s.resetState()
@@ -560,6 +562,9 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
+	for i, store := range s.kittyStores {
+		c.kittyStores[i] = store.clone()
+	}
 	if s.kittyPlaceholderIDs != nil {
 		c.kittyPlaceholderIDs = make(map[string]struct{}, len(s.kittyPlaceholderIDs))
 		for id := range s.kittyPlaceholderIDs {
@@ -1339,9 +1344,10 @@ func (s *terminalScreen) step(b byte) {
 			s.endStringEarly()
 		case b == 0x18, b == 0x1a:
 			// A cancelled string runs nothing, and a cancelled graphics
-			// command abandons the transmission it continued.
-			if p.stringKind == '_' {
-				s.kittyChunk = vtKittyChunk{}
+			// command abandons the transmission it continued
+			// (graphicsCommandAbort).
+			if p.stringKind == '_' && len(p.apcHead) > 0 && p.apcHead[0] == 'G' {
+				s.abandonKittyChunk()
 			}
 			p.state = vtGround
 			p.beginString(0)

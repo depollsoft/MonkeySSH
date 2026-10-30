@@ -50,15 +50,15 @@ func TestVTKittyDirectPlacementIsAnchoredToItsCell(t *testing.T) {
 	// store-only transmission, a command naming no image or both an id and
 	// a number, and an image the client has to give an id of its own are
 	// not.
-	s.Write([]byte(
+	s.Write([]byte(vtKittyUploads(2) +
 		"\x1b_Ga=p,U=1,i=2\x1b\\" +
-			"\x1b_Ga=p,i=2,p=1,P=1\x1b\\" +
-			"\x1b_Ga=t,f=100,i=3;AAAA\x1b\\" +
-			"\x1b_Ga=p,C=1\x1b\\" +
-			"\x1b_Ga=p,i=2,I=4,C=1\x1b\\" +
-			"\x1b_Ga=T,f=100,I=5,C=1;AAAA\x1b\\" +
-			"\x1b_Ga=T,f=100,C=1;AAAA\x1b\\" +
-			"\x1b_Ga=x,i=2,C=1\x1b\\"))
+		"\x1b_Ga=p,i=2,p=1,P=1\x1b\\" +
+		"\x1b_Ga=t,f=100,i=3;AAAA\x1b\\" +
+		"\x1b_Ga=p,C=1\x1b\\" +
+		"\x1b_Ga=p,i=2,I=4,C=1\x1b\\" +
+		"\x1b_Ga=T,f=100,I=5,C=1;AAAA\x1b\\" +
+		"\x1b_Ga=T,f=100,C=1;AAAA\x1b\\" +
+		"\x1b_Ga=x,i=2,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "1/1@4,2")
 
 	// A transmission that displays its image places it at the cursor,
@@ -75,7 +75,7 @@ func TestVTKittyDirectPlacementsReplaceAndAccumulateAsInTheClient(t *testing.T) 
 	s := newTerminalScreen(40, 10)
 	// The same image and placement id move the placement; without one,
 	// each command adds another.
-	s.Write([]byte(vtKittyPlaceAt + "\x1b[8;1H\x1b_Ga=p,i=1,p=1,C=1\x1b\\"))
+	s.Write([]byte(vtKittyUploads(1, 2) + vtKittyPlaceAt + "\x1b[8;1H\x1b_Ga=p,i=1,p=1,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "1/1@7,0")
 	s.Write([]byte("\x1b_Ga=p,i=2,C=1\x1b\\\x1b[H\x1b_Ga=p,i=2,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "1/1@7,0", "2/@7,0", "2/@0,0")
@@ -92,11 +92,19 @@ func TestVTKittyDirectPlacementsReplaceAndAccumulateAsInTheClient(t *testing.T) 
 
 func TestVTKittyDirectPlacementsAreBounded(t *testing.T) {
 	s := newTerminalScreen(40, 10)
+	s.Write([]byte(vtKittyUploads(1)))
 	for i := 1; i <= vtKittyPlacementLimit+3; i++ {
-		s.Write([]byte(fmt.Sprintf("\x1b_Ga=p,i=%d,C=1\x1b\\", i)))
+		s.Write([]byte(fmt.Sprintf("\x1b_Ga=p,i=1,p=%d,C=1\x1b\\", i)))
 	}
-	if len(s.kittyDirect) != vtKittyPlacementLimit || s.kittyDirect[0].imageID != "4" {
-		t.Fatalf("kept %d placements from image %s", len(s.kittyDirect), s.kittyDirect[0].imageID)
+	if len(s.kittyDirect) != vtKittyPlacementLimit || s.kittyDirect[0].placementID != "4" {
+		t.Fatalf("kept %d placements from %v", len(s.kittyDirect), vtKittyPlaced(s)[:1])
+	}
+	// So are the images the model knows the client holds.
+	for i := 2; i <= vtKittyImageLimit+3; i++ {
+		s.Write([]byte(vtKittyUploads(i)))
+	}
+	if ids := s.kittyStores[0].ids; len(ids) != vtKittyImageLimit || ids[0] != "4" {
+		t.Fatalf("knows %d images from %s", len(ids), ids[0])
 	}
 	// Only the keys a replay needs are kept, whatever the command carried.
 	s.Write([]byte("\x1b_Ga=T,f=100,i=900,c=2,r=1,C=1,q=2;" + strings.Repeat("A", 4096) + "\x1b\\"))
@@ -108,7 +116,7 @@ func TestVTKittyDirectPlacementsAreBounded(t *testing.T) {
 
 func TestVTKittyDirectPlacementFollowsItsLineIntoTheScrollback(t *testing.T) {
 	s := newTerminalScreen(40, 4)
-	s.Write([]byte("\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H\n\n"))
+	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H\n\n"))
 	assertVTKittyPlaced(t, s, "1/@-1,2")
 	if strings.Contains(string(s.RenderFrame()), "a=p") {
 		t.Fatal("a placement in the scrollback was placed on the screen")
@@ -137,7 +145,7 @@ func TestVTKittyDirectPlacementFollowsItsLineIntoTheScrollback(t *testing.T) {
 	// A region whose top margin is the first row feeds the scrollback, and
 	// the rows below it stay.
 	s = newTerminalScreen(40, 6)
-	s.Write([]byte("\x1b[2;1H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[6;1H\x1b_Ga=p,i=2,C=1\x1b\\" +
+	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;1H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[6;1H\x1b_Ga=p,i=2,C=1\x1b\\" +
 		"\x1b[1;4r\x1b[4;1H\n"))
 	assertVTKittyPlaced(t, s, "1/@0,0", "2/@5,0")
 }
@@ -204,7 +212,7 @@ func TestVTKittyDirectPlacementFollowsRegionScrollsAsKitty(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTerminalScreen(20, 10)
-			s.Write([]byte("\x1b[?1049h" + tc.stream))
+			s.Write([]byte("\x1b[?1049h" + vtKittyUploads(1, 2) + tc.stream))
 			assertVTKittyPlaced(t, s, tc.want...)
 		})
 	}
@@ -213,7 +221,7 @@ func TestVTKittyDirectPlacementFollowsRegionScrollsAsKitty(t *testing.T) {
 func TestVTKittyDirectPlacementFollowsInsertedAndDeletedLines(t *testing.T) {
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 8)
-		s.Write([]byte("\x1b[2;8r\x1b[4;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[7;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
+		s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;8r\x1b[4;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[7;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
 		return s
 	}
 	for _, tc := range []struct {
@@ -239,7 +247,7 @@ func TestVTKittyDirectPlacementFollowsInsertedAndDeletedLines(t *testing.T) {
 
 func TestVTKittyDirectPlacementFollowsInsertedAndDeletedCells(t *testing.T) {
 	s := newTerminalScreen(20, 4)
-	s.Write([]byte("\x1b[2;6H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[2;3H\x1b[2@"))
+	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;6H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[2;3H\x1b[2@"))
 	assertVTKittyPlaced(t, s, "1/@1,7")
 	s.Write([]byte("\x1b[2;2H\x1b[3P"))
 	assertVTKittyPlaced(t, s, "1/@1,4")
@@ -256,7 +264,7 @@ func TestVTKittyDirectPlacementFollowsInsertedAndDeletedCells(t *testing.T) {
 
 func TestVTKittyDirectPlacementSurvivesErases(t *testing.T) {
 	s := newTerminalScreen(20, 4)
-	s.Write([]byte("text\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\" +
+	s.Write([]byte(vtKittyUploads(1) + "text\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\" +
 		"\x1b[2J\x1b[K\x1b[2;1H\x1b[2K\x1b[5X\x1b[1J\x1b[J"))
 	assertVTKittyPlaced(t, s, "1/@1,2")
 	// Clearing at a prompt keeps the screen as history, placement and all.
@@ -267,11 +275,11 @@ func TestVTKittyDirectPlacementSurvivesErases(t *testing.T) {
 func TestVTKittyDirectPlacementDeletesMatchTheClient(t *testing.T) {
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 10)
-		s.Write([]byte(
+		s.Write([]byte(vtKittyUploads(1, 2, 3) +
 			"\x1b[2;3H\x1b_Ga=p,i=1,p=1,c=2,r=2,C=1\x1b\\" +
-				"\x1b[5;6H\x1b_Ga=p,i=1,p=2,c=1,r=1,z=-1,C=1\x1b\\" +
-				"\x1b[8;9H\x1b_Ga=p,i=2,c=3,r=1,z=5,C=1\x1b\\" +
-				"\x1b[1;15H\x1b_Ga=p,i=3,C=1\x1b\\"))
+			"\x1b[5;6H\x1b_Ga=p,i=1,p=2,c=1,r=1,z=-1,C=1\x1b\\" +
+			"\x1b[8;9H\x1b_Ga=p,i=2,c=3,r=1,z=5,C=1\x1b\\" +
+			"\x1b[1;15H\x1b_Ga=p,i=3,C=1\x1b\\"))
 		return s
 	}
 	all := []string{"1/1@1,2", "1/2@4,5", "2/@7,8", "3/@0,14"}
@@ -307,13 +315,14 @@ func TestVTKittyDirectPlacementDeletesMatchTheClient(t *testing.T) {
 
 	// A delete runs on the screen it was sent on.
 	s := setup()
-	s.Write([]byte("\x1b[?1049h\x1b_Ga=p,i=1,C=1\x1b\\\x1b_Ga=d,d=i,i=1\x1b\\"))
+	s.Write([]byte("\x1b[?1049h" + vtKittyUploads(1) + "\x1b_Ga=p,i=1,C=1\x1b\\\x1b_Ga=d,d=i,i=1\x1b\\"))
 	assertVTKittyPlaced(t, s, all...)
 }
 
 func TestVTKittyDirectPlacementsGoWithResetsAndScreenClears(t *testing.T) {
 	s := newTerminalScreen(20, 4)
-	s.Write([]byte("\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h\x1b[2;2H\x1b_Ga=p,i=2,C=1\x1b\\"))
+	s.Write([]byte(vtKittyUploads(1) + "\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h" + vtKittyUploads(2, 3) +
+		"\x1b[2;2H\x1b_Ga=p,i=2,C=1\x1b\\"))
 	assertVTKittyPlaced(t, s, "1/@0,0", "alt:2/@1,1")
 	// Leaving with 1049 keeps the alternate screen; entering again clears it.
 	s.Write([]byte("\x1b[?1049l"))
@@ -350,7 +359,7 @@ func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
 
 func TestVTKittyPlacementMovesTheCursorPastAKnownSpan(t *testing.T) {
 	s := newTerminalScreen(20, 6)
-	s.Write([]byte("\x1b[2;3H\x1b_Ga=p,i=1,c=4,r=2\x1b\\"))
+	s.Write([]byte(vtKittyUploads(1, 3, 4) + "\x1b[2;3H\x1b_Ga=p,i=1,c=4,r=2\x1b\\"))
 	if row, col := s.CursorPosition(); row != 2 || col != 6 {
 		t.Fatalf("cursor at %d,%d after a 4x2 image, want 2,6", row, col)
 	}
@@ -376,7 +385,7 @@ func TestVTKittyPlacementMovesTheCursorPastAKnownSpan(t *testing.T) {
 func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 	s := newTerminalScreen(10, 4)
 	// "0123456789ABCDE" wraps after 9; the placement is on C, the 13th cell.
-	s.Write([]byte("0123456789ABCDE\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H"))
+	s.Write([]byte(vtKittyUploads(1) + "0123456789ABCDE\x1b[2;3H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[4;1H"))
 	assertVTKittyPlaced(t, s, "1/@1,2")
 	s.Resize(20, 4)
 	assertVTKittyPlaced(t, s, "1/@0,12")
@@ -386,7 +395,7 @@ func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/@0,2")
 	// The scrollback reflows too: five rows of three put the cell first in
 	// the last, at the top of the screen again.
-	s.Write([]byte("\x1b[?1049h\x1b[1;5H\x1b_Ga=p,i=2,C=1\x1b\\"))
+	s.Write([]byte("\x1b[?1049h" + vtKittyUploads(2) + "\x1b[1;5H\x1b_Ga=p,i=2,C=1\x1b\\"))
 	s.Resize(3, 4)
 	// The alternate screen is cut, and a cell past the edge moves to it.
 	assertVTKittyPlaced(t, s, "1/@0,0", "alt:2/@0,3")
@@ -398,7 +407,7 @@ func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 func TestVTKittyAltPlacementGoesWithTheRowsAShrinkGivesUp(t *testing.T) {
 	setup := func() *terminalScreen {
 		s := newTerminalScreen(20, 8)
-		s.Write([]byte("\x1b[?1049h" +
+		s.Write([]byte("\x1b[?1049h" + vtKittyUploads(1, 2, 3, 4) +
 			"\x1b[1;1H\x1b_Ga=p,i=1,c=1,r=1,C=1\x1b\\" +
 			"\x1b[3;1H\x1b_Ga=p,i=2,c=1,r=2,C=1\x1b\\" +
 			"\x1b[3;5H\x1b_Ga=p,i=3,c=1,r=1,C=1\x1b\\" +
@@ -424,7 +433,7 @@ func TestVTKittyAltPlacementGoesWithTheRowsAShrinkGivesUp(t *testing.T) {
 
 func TestVTKittyDirectPlacementsSurviveAClone(t *testing.T) {
 	s := newTerminalScreen(20, 4)
-	s.Write([]byte("\x1b_Ga=p,i=1,C=1\x1b\\"))
+	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b_Ga=p,i=1,C=1\x1b\\"))
 	clone := s.Clone()
 	clone.Write([]byte("\x1b_Ga=p,i=2,C=1\x1b\\\x1b[1;1H\x1b[1L"))
 	assertVTKittyPlaced(t, s, "1/@0,0")
@@ -436,7 +445,7 @@ func TestVTKittyDirectPlacementsSurviveAClone(t *testing.T) {
 // frame leaves the cursor, the saved cursor and the modes as it would
 // without them.
 func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
-	stream := "\x1b[?6h\x1b[2;9r" + // origin mode inside a region
+	stream := vtKittyUploads(1) + "\x1b[?6h\x1b[2;9r" + // origin mode inside a region
 		"\x1b[2;3Hhello\x1b7\x1b[1;5H\x1b(0q\x1b[4h\x1b[31m" +
 		"\x1b[4;3H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\\x1b[6;2H"
 	s := newTerminalScreen(30, 10)
@@ -467,7 +476,8 @@ func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
 	}
 	painted := func(frame string) *terminalScreen {
 		c := newTerminalScreen(30, 10)
-		c.Write([]byte(activeWindowReplayPrefix + frame))
+		// A replay sends the image before the frame.
+		c.Write([]byte(activeWindowReplayPrefix + vtKittyUploads(1) + frame))
 		return c
 	}
 	a, b := painted(frame), painted(bare)
@@ -490,7 +500,8 @@ func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
 
 func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testing.T) {
 	s := newTerminalScreen(20, 4)
-	s.Write([]byte("\x1b[2;2H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h\x1b[3;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
+	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;2H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h" +
+		vtKittyUploads(2) + "\x1b[3;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
 	main := string(s.RenderMainScreen())
 	if !strings.HasPrefix(main, kittyPlacementClear) ||
 		!strings.Contains(main, "\x1b[2;2H\x1b_Ga=p,i=1,C=1,q=2\x1b\\") || strings.Contains(main, "i=2") {
@@ -530,6 +541,71 @@ func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
 		t.Fatalf("cursor row %d, want 1", row)
 	}
 	assertVTKittyPlaced(t, s, "1/1@4,0")
+}
+
+// TestVTKittyPlacesOnlyImagesTheClientHolds follows a display command as the
+// client runs it: an image it does not hold on the screen shown is answered
+// with ENOENT, placed nowhere, and leaves the cursor where it is. Each case's
+// cursor is the client's after the X that follows the command.
+func TestVTKittyPlacesOnlyImagesTheClientHolds(t *testing.T) {
+	const upload = "\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\"
+	const place = "\x1b_Ga=p,i=7,c=2,r=3\x1b\\X"
+	for _, tc := range []struct {
+		name     string
+		stream   string
+		row, col int
+		placed   []string
+	}{
+		{"never sent", place, 0, 1, nil},
+		{"sent", upload + place, 2, 3, []string{"7/@0,0"}},
+		// RIS clears placements but keeps the images (fullReset).
+		{"sent before a reset", upload + "\x1bc" + place, 2, 3, []string{"7/@0,0"}},
+		// Each screen has its own store; a clear of the alternate screen
+		// keeps its images.
+		{"sent to the other screen", upload + "\x1b[?1049h" + place, 0, 1, nil},
+		{"sent before a clear", "\x1b[?1049h" + upload + "\x1b[?1049l\x1b[?1049h" + place, 2, 3, []string{"alt:7/@0,0"}},
+		// Uppercase deletes free the data of what they match.
+		{"freed by id", upload + "\x1b_Ga=d,d=I,i=7\x1b\\" + place, 0, 1, nil},
+		{"freed with its placement", upload + "\x1b_Ga=p,i=7,C=1\x1b\\\x1b_Ga=d,d=A\x1b\\" + place, 0, 1, nil},
+		{"not placed when all are freed", "\x1b_Ga=t,i=7," + kittyPixelRoot + "\x1b\\\x1b_Ga=d,d=A\x1b\\" + place, 2, 3, []string{"7/@0,0"}},
+		// A retransmission the client rejects, or abandons, leaves no image.
+		{"rejected retransmission", upload + "\x1b_Ga=t,i=7,f=24;AAAA\x1b\\" + place, 0, 1, nil},
+		{"abandoned retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Ga=q,i=9;AAAA\x1b\\" + place, 0, 1, nil},
+		{"cancelled retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Gm=1;/w\x18" + place, 0, 1, nil},
+		// An image sent by number is placed by number, though not followed.
+		{"by number", "\x1b_Ga=t,I=5," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,I=5,c=2,r=3\x1b\\X", 2, 3, nil},
+		{"by unknown number", "\x1b_Ga=p,I=5,c=2,r=3\x1b\\X", 0, 1, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTerminalScreen(10, 6)
+			s.Write([]byte(tc.stream))
+			if row, col := s.CursorPosition(); row != tc.row || col != tc.col {
+				t.Fatalf("cursor at %d,%d, want %d,%d", row, col, tc.row, tc.col)
+			}
+			assertVTKittyPlaced(t, s, tc.placed...)
+		})
+	}
+}
+
+// TestVTKittyRetransmissionReplacesPlacementsWhenItCompletes keeps a
+// placement until the retransmission of its image ends: until then the
+// client still has it, and keeps its row through a shrink.
+func TestVTKittyRetransmissionReplacesPlacementsWhenItCompletes(t *testing.T) {
+	s := newTerminalScreen(20, 6)
+	s.Write([]byte("A\r\nB\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b[6;1H\x1b_Ga=p,i=1,c=2,r=1,C=1\x1b\\\x1b[2;2H" +
+		"\x1b_Ga=t,i=1,f=32,s=1,v=1,m=1;/wAA\x1b\\"))
+	assertVTKittyPlaced(t, s, "1/@5,0")
+	s.Resize(20, 5)
+	if got := s.TextRows(); !reflect.DeepEqual(got, []string{"B", "", "", "", ""}) {
+		t.Fatalf("rows = %q, want A scrolled away", got)
+	}
+	assertVTKittyPlaced(t, s, "1/@4,0")
+	s.Write([]byte("\x1b_Gm=0;/w==\x1b\\"))
+	assertVTKittyPlaced(t, s)
+	// The image is the new one, and placing it works.
+	s.Write([]byte("\x1b_Ga=p,i=1,C=1\x1b\\"))
+	assertVTKittyPlaced(t, s, "1/@0,1")
 }
 
 // TestVTKittyPixelOffsetsKeepThePlacementSpan: the client shrinks an image
