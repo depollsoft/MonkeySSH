@@ -501,3 +501,23 @@ func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testin
 		t.Fatal("a frame without placements carries a graphics command")
 	}
 }
+
+// The client keeps a blank row an image is anchored to through a shrink, as
+// if it held text, and scrolls the top row away instead.
+func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
+	s := newTerminalScreen(20, 6)
+	s.Write([]byte("a\r\nb\r\nc" +
+		"\x1b_Ga=t,f=100,i=1,q=2;AAAA\x1b\\" +
+		"\x1b[6;1H\x1b_Ga=p,i=1,p=1,c=2,r=1,C=1,q=2\x1b\\\x1b[3;2H"))
+	assertVTKittyPlaced(t, s, "1/1@5,0")
+
+	s.Resize(20, 5)
+
+	if got := s.TextRows(); !reflect.DeepEqual(got, []string{"b", "c", "", "", ""}) {
+		t.Fatalf("rows = %q", got)
+	}
+	if row, _ := s.CursorPosition(); row != 1 {
+		t.Fatalf("cursor row %d, want 1", row)
+	}
+	assertVTKittyPlaced(t, s, "1/1@4,0")
+}

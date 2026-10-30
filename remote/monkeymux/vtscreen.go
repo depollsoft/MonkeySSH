@@ -729,7 +729,7 @@ func (s *terminalScreen) clampVTCursor(g *vtGrid, width, height int) {
 //
 //   - Shrinking gives up empty rows below the cursor first, then scrolls rows
 //     into the scrollback, keeping rows an application drew below its cursor,
-//     such as an agent's input box border.
+//     such as an agent's input box border, and rows an image is anchored to.
 //   - Growing brings scrolled-off lines back above the content while the
 //     content reaches the bottom row (the cursor is on it, or something was
 //     written there), and adds blank rows once the scrollback runs out.
@@ -745,11 +745,14 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 	if last := len(g.rows) - 1; len(g.rows) < height && g.cursorRow < last && vtRowReclaimable(g.rows[last]) {
 		return
 	}
+	// scrolled counts the rows pushed into the scrollback so far, to find a
+	// row's placements, which keep the old row numbers until the resize ends.
+	scrolled := 0
 	for len(g.rows) > height {
 		last := len(g.rows) - 1
 		belowCursor := last > g.cursorRow
 		switch {
-		case belowCursor && vtRowReclaimable(g.rows[last]):
+		case belowCursor && vtRowReclaimable(g.rows[last]) && !s.kittyPlacementAnchoredOnMainRow(last+scrolled):
 			g.rows = g.rows[:last]
 			g.wrapped = g.wrapped[:last]
 			g.prompt = g.prompt[:last]
@@ -759,6 +762,7 @@ func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
 			g.wrapped = g.wrapped[1:]
 			g.prompt = g.prompt[1:]
 			g.cursorRow--
+			scrolled++
 		default:
 			g.rows = g.rows[:last]
 			g.wrapped = g.wrapped[:last]

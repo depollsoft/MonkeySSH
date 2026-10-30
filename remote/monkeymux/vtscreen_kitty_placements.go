@@ -448,9 +448,10 @@ func (s *terminalScreen) dropKittyAltPlacements() {
 
 // kittyMainRowsResized follows resizeMainRows from the main grid's row count
 // and cursor row before it. Growing brought lines back from the scrollback
-// above the screen, moving the cursor down by as many. Shrinking moved the
-// cursor up once for each top row it pushed into the scrollback and dropped
-// the rest from the bottom, with their placements, as the client pops a line.
+// above the screen, moving the cursor down by as many, or added rows below,
+// leaving the cursor where it was. Shrinking moved the cursor up once for
+// each top row it pushed into the scrollback and dropped the rest from the
+// bottom, with their placements, as the client pops a line.
 func (s *terminalScreen) kittyMainRowsResized(oldRows, oldCursorRow int) {
 	if len(s.kittyDirect) == 0 {
 		return
@@ -472,6 +473,18 @@ func (s *terminalScreen) kittyMainRowsResized(oldRows, oldCursorRow int) {
 		return false
 	})
 	s.pruneKittyScrollback()
+}
+
+// kittyPlacementAnchoredOnMainRow reports whether a direct placement is
+// anchored to the main grid's row, which the client then keeps through a
+// shrink as if it held text (Buffer._isReclaimableRow).
+func (s *terminalScreen) kittyPlacementAnchoredOnMainRow(row int) bool {
+	for i := range s.kittyDirect {
+		if p := &s.kittyDirect[i]; !p.alt && p.row == row {
+			return true
+		}
+	}
+	return false
 }
 
 // kittyAltResized follows resizeAlt, which gave up fromTop rows at the top
