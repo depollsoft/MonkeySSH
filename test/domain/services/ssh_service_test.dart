@@ -322,6 +322,7 @@ class _ReconnectFixture {
     InteractiveAuthPromptHandler? promptHandler,
     Set<int> refusedSockets = const {},
     Duration reconnectWindow = const Duration(seconds: 45),
+    Duration retryDelay = Duration.zero,
   }) async {
     final fixture = _ReconnectFixture();
     final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -337,7 +338,7 @@ class _ReconnectFixture {
       knownHostsRepository: knownHostsRepository,
       interactiveAuthPromptHandler: promptHandler,
       reconnectAfterDropWindow: reconnectWindow,
-      reconnectAfterDropRetryDelay: Duration.zero,
+      reconnectAfterDropRetryDelay: retryDelay,
       socketConnector: (host, port, {timeout}) async {
         fixture.socketCount++;
         fixture.socketTimeouts.add(timeout);
@@ -8791,7 +8792,12 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(fixture.socketTimeouts.first, const Duration(seconds: 30));
       expect(
         fixture.socketTimeouts.skip(1),
-        everyElement(lessThanOrEqualTo(const Duration(seconds: 10))),
+        everyElement(
+          allOf(
+            greaterThan(Duration.zero),
+            lessThanOrEqualTo(const Duration(seconds: 10)),
+          ),
+        ),
       );
     });
 
@@ -8799,7 +8805,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final fixture = await _ReconnectFixture.create(
         promptHandler: (challenge) async => ['typed-secret'],
         refusedSockets: {2, 3},
-        reconnectWindow: Duration.zero,
+        // No time left for another attempt after the pause.
+        reconnectWindow: const Duration(seconds: 1),
+        retryDelay: const Duration(seconds: 2),
         steps: [
           (onPassword, _) async {
             await onPassword!();

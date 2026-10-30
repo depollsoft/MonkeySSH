@@ -2204,12 +2204,7 @@ class SshService {
                 : forwarding.timeout(
                     timeout,
                     onTimeout: () {
-                      unawaited(
-                        forwarding.then(
-                          _closeAbandonedSocket,
-                          onError: (Object _, StackTrace _) {},
-                        ),
-                      );
+                      forwarding.then(_closeAbandonedSocket).ignore();
                       throw TimeoutException(
                         'Opening the tunnel timed out',
                         timeout,
@@ -2269,6 +2264,8 @@ class SshService {
               'Waiting for the server to come back…',
             );
             await guard(Future<void>.delayed(reconnectAfterDropRetryDelay));
+            // The timer can fire after the window has run out.
+            if (elapsed.elapsed >= reconnectAfterDropWindow) rethrow;
           }
         }
       }
