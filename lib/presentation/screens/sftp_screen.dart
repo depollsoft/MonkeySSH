@@ -1553,6 +1553,12 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
                 title: 'empty directory',
                 message: 'No files in this folder yet.',
               )
+            // No actions while a reconnect has no SFTP client to act with.
+            : _sftp == null
+            ? const BrandEmptyState(
+                title: 'empty directory',
+                message: 'Nothing here yet.',
+              )
             : BrandEmptyState(
                 title: 'empty directory',
                 message: 'Nothing here yet.',
