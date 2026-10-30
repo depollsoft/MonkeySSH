@@ -1005,9 +1005,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     }
 
     // Capped at one row, like the MonkeyMux screen model: the count can be
-    // 2^31.
+    // 2^31. Each repeat is printed like the original, so a repeated Kitty
+    // Unicode placeholder is a placeholder too, one column on from the last.
     for (var i = 0; i < count && i < _viewWidth; i++) {
-      _buffer.writeChar(_precedingCodepoint);
+      writeChar(_precedingCodepoint);
     }
   }
 

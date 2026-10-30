@@ -2013,6 +2013,32 @@ void main() {
     }
   });
 
+  testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
+    final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
+    final terminal = Terminal()..resize(10, 3);
+    // Row 1, column 0, then two repeats, each one column on.
+    terminal.write('\x1b[38;5;42m$placeholder̍̅\x1b[2b');
+
+    var placeholders = terminal.graphics.placeholders;
+    expect(placeholders.map((p) => p.anchor.x), [0, 1, 2]);
+    expect(placeholders.map((p) => p.row), [1, 1, 1]);
+    expect(placeholders.map((p) => p.col), [0, 1, 2]);
+    for (final p in placeholders) {
+      expect(p.imageId, 42);
+      expect(p.anchor.line, same(terminal.buffer.lines[0]));
+    }
+
+    // A diacritic after the repeats belongs to the last one (row 2 resets its
+    // column), not to the placeholder that was repeated, and the next repeat
+    // follows it.
+    terminal.write('̎\x1b[b');
+    placeholders = terminal.graphics.placeholders;
+    expect(placeholders.map((p) => p.row), [1, 1, 2, 2]);
+    expect(placeholders.map((p) => p.col), [0, 1, 0, 1]);
+    expect(placeholders.map((p) => p.imageId), [42, 42, 42, 42]);
+    expect(placeholders.last.anchor.x, 3);
+  });
+
   testWidgets('placeholders survive the image decode that backs them', (
     tester,
   ) async {
