@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -270,6 +271,32 @@ void main() {
         final line = terminal.buffer.lines[terminal.buffer.scrollBack + row];
         expect(line.toString().trim(), isEmpty, reason: 'row $row');
       }
+    });
+
+    // Only text counts, as in the MonkeyMux model, which doesn't know where
+    // images were placed: an image alone on the bottom row pulls nothing.
+    test('growing ignores an image alone on the bottom row', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(20, 10);
+      for (var i = 1; i <= 30; i++) {
+        terminal.write('line$i\r\n');
+      }
+      final pixel = base64.encode([0, 0, 0]);
+      terminal.write('\x1b[H\x1b[2J\x1b[10;1H'
+          '\x1b_Ga=T,f=24,s=1,v=1,i=9,c=2,r=1,C=1,q=2;$pixel\x1b\\'
+          '\x1b[Hprompt>');
+      expect(
+        terminal.graphics.physicalPlacementAnchorsInLine(
+          terminal.buffer.lines[terminal.buffer.height - 1],
+        ),
+        isNotEmpty,
+      );
+      final scrollBack = terminal.buffer.scrollBack;
+
+      terminal.resize(20, 13);
+
+      expect(terminal.buffer.scrollBack, scrollBack);
+      expect(terminal.buffer.cursorY, 0);
     });
 
     test('growing pulls rows back while the content reaches the bottom', () {

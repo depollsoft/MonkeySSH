@@ -622,9 +622,10 @@ class Buffer {
       // Otherwise blank rows go below, as Ghostty and xterm.js add them when
       // the cursor is above the bottom row, so a screen cleared at the prompt
       // doesn't come back above it. The MonkeyMux screen model applies the
-      // same rule (resizeMainRows).
-      final pullScrollback =
-          _cursorY >= oldHeight - 1 || !_isReclaimableRow(lines.length - 1);
+      // same rule (resizeMainRows), so only text counts: the model doesn't
+      // know where an image was placed.
+      final pullScrollback = _cursorY >= oldHeight - 1 ||
+          lines[lines.length - 1].getTrimmedLength() != 0;
       for (var i = 0; i < newHeight - oldHeight; i++) {
         if (pullScrollback && newHeight <= lines.length) {
           _cursorY++;
