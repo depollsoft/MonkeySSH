@@ -1358,6 +1358,7 @@ void main() {
       ('topt --opt=he', '--opt=he', ['--opt=hello'], argument, ' '),
       ('tsuffix v', 'v', ['value='], argument, ''),
       (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
+      (r'echo ${#PROBEP', r'${#PROBEP', [r'${#PROBEPARAM}'], argument, ' '),
       // A modifier completed inside the braces leaves them open.
       (
         r'echo ${PROBEPARAM:-',

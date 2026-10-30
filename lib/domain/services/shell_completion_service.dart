@@ -1971,7 +1971,7 @@ _flutty_dump_completions() {
     # matches -A reports are quoted as zsh would insert them. A call that only
     # asks which words match (-O, -A, -D) adds nothing and is not captured.
     local -a hits
-    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= opt letter value
+    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= base= opt letter value
     local -i i=1 j query=0
     while (( i <= \$# )); do
       opt=\${argv[i]}
@@ -2005,7 +2005,12 @@ _flutty_dump_completions() {
       # space; a modifier completed later in the braces stays open, with
       # nothing after it.
       if [[ \${compstate[context]} == brace_parameter ]]; then
-        if [[ \$ipre == *'\${'(|'('*')') ]]; then
+        # A name follows \${, its flags in parentheses and # + ^ = ~.
+        base=\$ipre
+        while [[ \$base == *[#+^=~] ]]; do
+          base=\${base%?}
+        done
+        if [[ \$base == *'\${'(|'('*')') ]]; then
           hsuf+='}'
         else
           open=S
