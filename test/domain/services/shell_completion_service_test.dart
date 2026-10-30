@@ -1321,6 +1321,7 @@ void main() {
     File('${home.path}/notebook.md').writeAsStringSync('');
     File('${home.path}/sub/notes.txt').createSync(recursive: true);
     File('${home.path}/my dir/inner.txt').createSync(recursive: true);
+    Directory('${home.path}/cdp/proj1').createSync(recursive: true);
     // Completers that quote their matches and pass their own ignored prefix.
     File('${home.path}/comp/_tspace')
       ..createSync(recursive: true)
@@ -1334,8 +1335,9 @@ void main() {
     File('${home.path}/comp/_tsuffix')
         .writeAsStringSync('#compdef tsuffix\ncompadd -S = -- value\n');
     // A startup file that changes directory must not move the completion.
-    File('${home.path}/.zshrc')
-        .writeAsStringSync('fpath=(~/comp \$fpath)\nPROBEPARAM=1\ncd /\n');
+    File('${home.path}/.zshrc').writeAsStringSync(
+      'fpath=(~/comp \$fpath)\nPROBEPARAM=1\ncdpath=(~/cdp)\ncd /\n',
+    );
 
     // Each match comes back as the word the shell reads, to show, and as zsh
     // would insert it, with the path the completer passed as a compadd prefix,
@@ -1356,6 +1358,8 @@ void main() {
       ('topt --opt=he', '--opt=he', ['--opt=hello'], argument, ' '),
       ('tsuffix v', 'v', ['value='], argument, ''),
       (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
+      // Found through cdpath: the type is tested where the completer looked.
+      ('cd pro', 'pro', ['proj1/'], directory, ''),
     ]) {
       final command = line.substring(0, line.indexOf(' '));
       final invocation = ShellCompletionInvocation(
