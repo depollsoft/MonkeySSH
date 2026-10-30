@@ -226,8 +226,7 @@ func TestForegroundReplayPlacesAgainImagesItCanName(t *testing.T) {
 // TestMainScreenReplayKeepsTheAlternateScreensImageData: the client keeps an
 // image store per screen, so an id transmitted on the main screen and again
 // on the alternate one names two images. The main screen gets no image the
-// window last transmitted on the alternate screen; its placement is made on
-// whatever the main screen's store holds.
+// window last transmitted on the alternate screen, and no placement of it.
 func TestMainScreenReplayKeepsTheAlternateScreensImageData(t *testing.T) {
 	const red, blue = "f=32,s=1,v=1;/wAA/w==", "f=32,s=1,v=1;AAD//w=="
 	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
@@ -237,7 +236,9 @@ func TestMainScreenReplayKeepsTheAlternateScreensImageData(t *testing.T) {
 	got := selectWindowReplay(t, window, stream, "")
 	enter := strings.LastIndex(got, "\x1b[?1049h")
 	mainPart, altPart := got[:enter], got[enter:]
-	if strings.Contains(mainPart, "a=t,i=7") || !strings.Contains(mainPart, "\x1b[2;3H\x1b_Ga=p,i=7,C=1,q=2\x1b\\") {
+	// The main screen gets neither the alternate screen's data nor a placement
+	// of id 7, which would show whatever its store holds under that id.
+	if strings.Contains(mainPart, "a=t,i=7") || strings.Contains(mainPart, "a=p,i=7") {
 		t.Fatalf("main screen replay = %q", mainPart)
 	}
 	if !strings.Contains(altPart, "AAD//w==") || !strings.Contains(altPart, "\x1b[5;5H\x1b_Ga=p,i=7,p=2,C=1,q=2\x1b\\") {

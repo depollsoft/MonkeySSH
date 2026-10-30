@@ -11440,12 +11440,12 @@ func kittyCarriedImages(replayed map[string]struct{}, served []string) func(stri
 // image data; it is nil while the main screen shows. Each screen keeps its
 // own images on the client, so the images its direct placements show are
 // sent store-only while it is the screen shown, as many as fit in budget; a
-// placement whose image does not fit is left out. An image the window last
-// transmitted on the alternate screen is not sent, since the client keeps
-// that data apart from the main screen's: the placement is made again on
-// whatever the main screen's store holds, which a client that saw the
-// output has and a fresh one lacks. Sending an image replaces every
-// placement it had there, so the screen's kept placements follow.
+// placement whose image does not fit is left out. So is one whose image the
+// window last transmitted on the alternate screen: the client keeps that data
+// apart from the main screen's, and the main screen's store may hold another
+// window's image under the same id, which a placement made again would show.
+// Sending an image replaces every placement it had there, so the screen's
+// kept placements follow.
 func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 	if !w.alternateScreenModeActiveLocked() {
 		return nil, 0
@@ -11455,19 +11455,17 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 		return nil, 0
 	}
 	want := screen.KittyPlacementImageIDsOn(false)
-	var ids, elsewhere []string
+	var ids []string
 	for _, id := range w.kittyImageOrder {
 		if !slices.Contains(want, id) {
 			continue
 		}
 		if alt, ok := w.kittyTracking.rootAlt[id]; ok && !alt {
 			ids = append(ids, id)
-		} else {
-			elsewhere = append(elsewhere, id)
 		}
 	}
 	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
-	carried := kittyCarriedImages(nil, append(sent, elsewhere...))
+	carried := kittyCarriedImages(nil, sent)
 	out := append([]byte(nil), images...)
 	out = append(out, screen.RenderMainScreenReplacing(carried)...)
 	if len(images) > 0 {
