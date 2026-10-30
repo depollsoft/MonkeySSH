@@ -1934,7 +1934,7 @@ emit_native_completion_item() {
   # directory closes it, as zsh does. A suffix the completer gave (-S), such
   # as the } of \${PARAM} or the = of --opt=, is inserted too and the app
   # adds no space after it (S); a space is what the app adds anyway.
-  local item=\$1 insert=\$2 suffix=\$3 target=\${4:-\$1} q=\$_flutty_quote end=
+  local item=\$1 insert=\$2 suffix=\$3 target=\${4:-\$1} q=\$_flutty_quote end=\$5
   if [[ -n \$suffix && \$suffix != ' ' ]]; then
     insert=\$insert\$suffix end=S
   fi
@@ -1957,9 +1957,9 @@ emit_native_completion_item() {
   esac
 }
 _flutty_dump_completions() {
-  # The word as the shell reads it, as zsh would insert it, its suffix, and
-  # the file it names when that differs from the word: the match in the
-  # directory the completer named (-W), as for cdpath.
+  # The word as the shell reads it, as zsh would insert it, its suffix, the
+  # file it names when that differs from the word (the match in the directory
+  # the completer named, -W, as for cdpath), and S when nothing may follow it.
   typeset -ga _flutty_matches
   _flutty_matches=()
   typeset -g _flutty_quote=
@@ -1971,7 +1971,7 @@ _flutty_dump_completions() {
     # matches -A reports are quoted as zsh would insert them. A call that only
     # asks which words match (-O, -A, -D) adds nothing and is not captured.
     local -a hits
-    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= opt letter value
+    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= opt letter value
     local -i i=1 j query=0
     while (( i <= \$# )); do
       opt=\${argv[i]}
@@ -2001,13 +2001,21 @@ _flutty_dump_completions() {
     if (( ! query )); then
       _flutty_quote=\${compstate[quote]}
       builtin compadd -A hits "\$@" 2>/dev/null
-      # zsh closes a \${ parameter itself, then adds its usual space.
-      [[ \${compstate[context]} == brace_parameter ]] && hsuf+='}'
+      # zsh closes a \${ parameter after its name itself, then adds its usual
+      # space; a modifier completed later in the braces stays open, with
+      # nothing after it.
+      if [[ \${compstate[context]} == brace_parameter ]]; then
+        if [[ \$ipre == *'\${'(|'('*')') ]]; then
+          hsuf+='}'
+        else
+          open=S
+        fi
+      fi
       for value in "\${hits[@]}"; do
         file=
         [[ -n \$wdir && \$wdir != '('* ]] && file=\${wdir%/}/\${(Q)value}
         value=\$ipre\$apre\$hpre\$value\$hsuf
-        _flutty_matches+=("\${(Q)value}" "\$value" "\$asuf" "\$file")
+        _flutty_matches+=("\${(Q)value}" "\$value" "\$asuf" "\$file" "\$open")
       done
     fi
     # Returns compadd's status. Never name a local `status`: zsh's is
@@ -2016,9 +2024,9 @@ _flutty_dump_completions() {
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__
-  local item insert suffix file
-  for item insert suffix file in "\${_flutty_matches[@]}"; do
-    emit_native_completion_item "\$item" "\$insert" "\$suffix" "\$file"
+  local item insert suffix file open
+  for item insert suffix file open in "\${_flutty_matches[@]}"; do
+    emit_native_completion_item "\$item" "\$insert" "\$suffix" "\$file" "\$open"
   done
   print -r -- $_interactiveZshCompletionDoneMarker
   exit 0

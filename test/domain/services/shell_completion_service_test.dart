@@ -1358,6 +1358,14 @@ void main() {
       ('topt --opt=he', '--opt=he', ['--opt=hello'], argument, ' '),
       ('tsuffix v', 'v', ['value='], argument, ''),
       (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
+      // A modifier completed inside the braces leaves them open.
+      (
+        r'echo ${PROBEPARAM:-',
+        r'${PROBEPARAM:-',
+        [r'${PROBEPARAM:-', r'${PROBEPARAM:-:'],
+        argument,
+        '',
+      ),
       // Found through cdpath: the type is tested where the completer looked.
       ('cd pro', 'pro', ['proj1/'], directory, ''),
     ]) {
