@@ -25,16 +25,20 @@ import (
 // once the rows are painted, before the cursor is restored (see
 // vtscreen_kitty_placements.go).
 func (s *terminalScreen) RenderFrame() []byte {
+	return s.RenderFrameReplacing(nil)
+}
+
+// RenderFrameReplacing is RenderFrame placing again only the direct
+// placements of the images replace accepts, those the replay carries, or
+// every one for nil. A replay that places a main-screen image again first
+// deletes the client's copies of it (KittyMainPlacementDeletes).
+func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil
 	}
 	g := s.grid()
-	out := make([]byte, 0, 4096)
-	if !s.altActive {
-		out = s.appendKittyPlacementClear(out)
-	}
-	out = s.appendGridFrame(out, g, !s.altActive)
-	out = s.appendKittyPlacements(out, s.altActive)
+	out := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
+	out = s.appendKittyPlacements(out, s.altActive, replace)
 	out = s.appendSavedCursor(out, g, *s.saved())
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
@@ -70,13 +74,18 @@ func (s *terminalScreen) RenderFrame() []byte {
 // paints it then. Its direct Kitty placements are placed again as RenderFrame
 // places them.
 func (s *terminalScreen) RenderMainScreen() []byte {
+	return s.RenderMainScreenReplacing(nil)
+}
+
+// RenderMainScreenReplacing is RenderMainScreen placing again only the direct
+// placements of the images replace accepts, as RenderFrameReplacing does.
+func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) bool) []byte {
 	if s == nil || !s.altActive {
 		return nil
 	}
 	g := &s.main
-	out := s.appendKittyPlacementClear(make([]byte, 0, 4096))
-	out = s.appendGridFrame(out, g, true)
-	out = s.appendKittyPlacements(out, false)
+	out := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	out = s.appendKittyPlacements(out, false, replace)
 	if saved := s.savedMain; s.altSavedCursor {
 		// DECSET 6 homes the cursor, so it goes first. The frame left the
 		// scroll region full, where an origin-relative row is the row.

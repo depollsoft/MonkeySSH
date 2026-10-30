@@ -458,8 +458,11 @@ func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
 	if at < 0 || strings.Count(frame, "a=p") != 1 {
 		t.Fatalf("frame does not place the image once on its cell: %q", frame)
 	}
-	if clear := strings.Index(frame, kittyPlacementClear); clear != 0 {
-		t.Fatalf("frame does not start by clearing the client's placements: %q", frame)
+	if strings.Contains(frame, "a=d") {
+		t.Fatalf("frame deletes placements itself: %q", frame)
+	}
+	if deletes := string(s.KittyMainPlacementDeletes(nil)); deletes != "\x1b_Ga=d,d=i,i=1,q=2\x1b\\" {
+		t.Fatalf("deletes before the frame = %q", deletes)
 	}
 	if paint := strings.Index(frame, "hello"); paint > at {
 		t.Fatalf("the image was placed before the rows were painted: %q", frame)
@@ -471,7 +474,7 @@ func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
 	without := s.Clone()
 	without.kittyDirect = nil
 	bare := string(without.RenderFrame())
-	if strings.Replace(strings.Replace(frame, place, "", 1), kittyPlacementClear, "", 1) != bare {
+	if strings.Replace(frame, place, "", 1) != bare {
 		t.Fatalf("placements changed more than their own commands:\n%q\n%q", frame, bare)
 	}
 	painted := func(frame string) *terminalScreen {
@@ -503,18 +506,26 @@ func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testin
 	s.Write([]byte(vtKittyUploads(1) + "\x1b[2;2H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h" +
 		vtKittyUploads(2) + "\x1b[3;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
 	main := string(s.RenderMainScreen())
-	if !strings.HasPrefix(main, kittyPlacementClear) ||
-		!strings.Contains(main, "\x1b[2;2H\x1b_Ga=p,i=1,C=1,q=2\x1b\\") || strings.Contains(main, "i=2") {
+	if !strings.Contains(main, "\x1b[2;2H\x1b_Ga=p,i=1,C=1,q=2\x1b\\") || strings.Contains(main, "i=2") {
 		t.Fatalf("main screen frame = %q", main)
 	}
-	// The alternate screen's frame needs no clear: entering it cleared it.
+	if deletes := string(s.KittyMainPlacementDeletes(nil)); deletes != "\x1b_Ga=d,d=i,i=1,q=2\x1b\\" {
+		t.Fatalf("deletes before the main screen's frame = %q", deletes)
+	}
 	alt := string(s.RenderFrame())
-	if strings.Contains(alt, kittyPlacementClear) ||
-		!strings.Contains(alt, "\x1b[3;3H\x1b_Ga=p,i=2,C=1,q=2\x1b\\") || strings.Contains(alt, "i=1") {
+	if !strings.Contains(alt, "\x1b[3;3H\x1b_Ga=p,i=2,C=1,q=2\x1b\\") || strings.Contains(alt, "i=1") {
 		t.Fatalf("alternate screen frame = %q", alt)
 	}
 	if ids := s.KittyPlacementImageIDs(); !reflect.DeepEqual(ids, []string{"2"}) {
 		t.Fatalf("shown screen's placement images = %v", ids)
+	}
+	if ids := s.KittyPlacementImageIDsOn(false); !reflect.DeepEqual(ids, []string{"1"}) {
+		t.Fatalf("main screen's placement images = %v", ids)
+	}
+	// A frame places again only the images the replay carries.
+	if main := string(s.RenderMainScreenReplacing(func(string) bool { return false })); strings.Contains(main, "a=p") ||
+		len(s.KittyMainPlacementDeletes(func(string) bool { return false })) != 0 {
+		t.Fatalf("placed an image the replay does not carry: %q", main)
 	}
 	// Without placements the frames are what they were.
 	s.Write([]byte("\x1bc"))

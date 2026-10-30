@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -730,47 +731,63 @@ func (s *terminalScreen) reflowedKittyPlacements(lines []vtLine, screenStart int
 	s.pruneKittyScrollback()
 }
 
-// kittyPlacementsShown reports whether a frame of the screen places any
-// direct placement again.
-func (s *terminalScreen) kittyPlacementsShown(alt bool) bool {
-	for i := range s.kittyDirect {
-		if s.kittyPlacementOnScreen(&s.kittyDirect[i], alt) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *terminalScreen) kittyPlacementOnScreen(p *vtKittyPlacement, alt bool) bool {
 	return p.alt == alt && p.row >= 0 && p.row < s.height && p.col < s.width
 }
 
-// kittyPlacementClear is the delete a main-screen frame starts with when it
-// places images again: every physical placement on the visible screen, image
-// data kept. The replay prefix's ED 2 leaves the client's own placements on
-// the main screen, where the frame then scrolls them into the scrollback or
-// paints over them, and an image the replay does not send again keeps them,
-// so placing one again without a placement id would leave two copies.
-const kittyPlacementClear = "\x1b_Ga=d,d=a,q=2\x1b\\"
+// kittyPlacementReplaced reports whether a frame of a screen places p again:
+// a placement on that screen, of an image replace accepts (nil accepts any).
+func (s *terminalScreen) kittyPlacementReplaced(
+	p *vtKittyPlacement,
+	alt bool,
+	replace func(imageID string) bool,
+) bool {
+	return s.kittyPlacementOnScreen(p, alt) && (replace == nil || replace(p.imageID))
+}
 
-// appendKittyPlacementClear starts a main-screen frame that places images
-// again with kittyPlacementClear.
-func (s *terminalScreen) appendKittyPlacementClear(out []byte) []byte {
-	if !s.kittyPlacementsShown(false) {
-		return out
+// KittyMainPlacementDeletes returns what a replay sends, before the images,
+// when it paints the main screen and places its direct placements again
+// (replace as for RenderFrameReplacing): a lowercase delete by id (a=d,d=i),
+// which keeps the image data, of each image it places again. The replay
+// prefix's ED 2 leaves the client's own placements on the main screen, where
+// the frame scrolls them into the scrollback or paints over them, so placing
+// one without a placement id again would leave a second copy. The delete
+// takes every placement of the image, wherever it is, and only those, so
+// what the replay does not place again keeps whatever the client had. The
+// alternate screen needs none: entering it cleared it.
+func (s *terminalScreen) KittyMainPlacementDeletes(replace func(imageID string) bool) []byte {
+	if s == nil {
+		return nil
 	}
-	return append(out, kittyPlacementClear...)
+	var out []byte
+	var deleted []string
+	for i := range s.kittyDirect {
+		p := &s.kittyDirect[i]
+		if !s.kittyPlacementReplaced(p, false, replace) || slices.Contains(deleted, p.imageID) {
+			continue
+		}
+		deleted = append(deleted, p.imageID)
+		out = append(out, "\x1b_Ga=d,d=i,i="...)
+		out = append(out, p.imageID...)
+		out = append(out, ",q=2\x1b\\"...)
+	}
+	return out
 }
 
 // appendKittyPlacements places the screen's direct placements again, on
 // their cells, after a frame painted it: at the cursor moved to each, with
-// the cursor kept (C=1) for the frame's final restore. Placements in the
-// scrollback are left out; the replay prefix cleared the client's scrollback,
-// so they do not come back.
-func (s *terminalScreen) appendKittyPlacements(out []byte, alt bool) []byte {
+// the cursor kept (C=1) for the frame's final restore. Only the images
+// replace accepts are placed (nil accepts any). Placements in the scrollback
+// are left out; the replay prefix cleared the client's scrollback, so they do
+// not come back.
+func (s *terminalScreen) appendKittyPlacements(
+	out []byte,
+	alt bool,
+	replace func(imageID string) bool,
+) []byte {
 	for i := range s.kittyDirect {
 		p := &s.kittyDirect[i]
-		if !s.kittyPlacementOnScreen(p, alt) {
+		if !s.kittyPlacementReplaced(p, alt, replace) {
 			continue
 		}
 		out = appendVTCursorPosition(out, p.row, p.col)
@@ -786,9 +803,18 @@ func (s *terminalScreen) KittyPlacementImageIDs() []string {
 	if s == nil {
 		return nil
 	}
+	return s.KittyPlacementImageIDsOn(s.altActive)
+}
+
+// KittyPlacementImageIDsOn is KittyPlacementImageIDs for the main screen or
+// the alternate one, shown or not.
+func (s *terminalScreen) KittyPlacementImageIDsOn(alt bool) []string {
+	if s == nil {
+		return nil
+	}
 	var ids []string
 	for i := range s.kittyDirect {
-		if p := &s.kittyDirect[i]; s.kittyPlacementOnScreen(p, s.altActive) {
+		if p := &s.kittyDirect[i]; s.kittyPlacementOnScreen(p, alt) && !slices.Contains(ids, p.imageID) {
 			ids = append(ids, p.imageID)
 		}
 	}

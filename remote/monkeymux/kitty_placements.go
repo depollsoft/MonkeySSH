@@ -1119,7 +1119,12 @@ func (w *muxWindow) setKittyPlacementScreenLocked(alt bool) {
 // kittyPlacementReplayLocked returns the kept placements of the screen the
 // window shows, parents first, to send after the images they show.
 func (w *muxWindow) kittyPlacementReplayLocked() []byte {
-	alt := w.alternateScreenModeActiveLocked()
+	return w.kittyPlacementReplayOnLocked(w.alternateScreenModeActiveLocked())
+}
+
+// kittyPlacementReplayOnLocked is kittyPlacementReplayLocked for the main
+// screen or the alternate one.
+func (w *muxWindow) kittyPlacementReplayOnLocked(alt bool) []byte {
 	// A placement can be reparented to one made after it, so emit by
 	// dependency rather than by age: a parent must exist on the client
 	// before a child can be placed relative to it.

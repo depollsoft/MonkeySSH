@@ -93,7 +93,7 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 
 	frame := strings.Index(got, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l\x1b[3g")
 	image := strings.Index(got, "\x1b_Ga=t,i=1,")
-	clear := strings.Index(got, kittyPlacementClear)
+	clear := strings.Index(got, "\x1b_Ga=d,d=i,i=1,q=2\x1b\\")
 	rows := strings.Index(got, "5 parent placed again")
 	placed := strings.Index(got, kittyDemoPlacement)
 	saved := strings.LastIndex(got, "\x1b7")
@@ -101,9 +101,13 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 	case frame < 0 || image < 0 || clear < 0 || rows < 0 || placed < 0 || saved < 0:
 		t.Fatalf("replay is missing a part (frame %d, image %d, clear %d, rows %d, placement %d, saved cursor %d): %q",
 			frame, image, clear, rows, placed, saved, got)
-	case !(image < clear && clear < frame && frame < rows && rows < placed && placed < saved):
-		t.Fatalf("replay parts out of order (image %d, clear %d, frame %d, rows %d, placement %d, saved cursor %d): %q",
-			image, clear, frame, rows, placed, saved, got)
+	case !(clear < image && image < frame && frame < rows && rows < placed && placed < saved):
+		t.Fatalf("replay parts out of order (clear %d, image %d, frame %d, rows %d, placement %d, saved cursor %d): %q",
+			clear, image, frame, rows, placed, saved, got)
+	}
+	// Only the image placed again is deleted first.
+	if n := strings.Count(got, "a=d"); n != 1 {
+		t.Fatalf("replay deletes %d times: %q", n, got)
 	}
 	if n := strings.Count(got, "a=p,i=1,"); n != 1 {
 		t.Fatalf("image 1 placed %d times: %q", n, got)
@@ -130,7 +134,7 @@ func TestForegroundReplayLeavesARedrawnScreenToTheProgram(t *testing.T) {
 	if !strings.Contains(got, "redrawn") {
 		t.Fatalf("the redraw was not forwarded: %q", got)
 	}
-	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Contains(got, kittyPlacementClear) {
+	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Contains(got, "a=d") {
 		t.Fatalf("replay placed image 1 besides the program (%d placements): %q", n, got)
 	}
 }
@@ -145,6 +149,8 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 		"\x1b[7;9H\x1b_Ga=p,i=6,p=2,C=1\x1b\\\x1b[10;1Halternate"
 	got := selectWindowReplay(t, window, stream, "")
 
+	mainDelete := strings.Index(got, "\x1b_Ga=d,d=i,i=5,q=2\x1b\\")
+	mainImage := strings.Index(got, "\x1b_Ga=t,i=5,")
 	mainPlaced := strings.Index(got, "\x1b[2;3H\x1b_Ga=p,i=5,C=1,q=2\x1b\\")
 	enter := strings.LastIndex(got, "\x1b[?1049h")
 	altImage := strings.LastIndex(got, "\x1b_Ga=t,i=6,")
@@ -158,10 +164,14 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 	if strings.Count(got, "a=p,i=5,") != 1 || strings.Count(got, "a=p,i=6,") != 1 {
 		t.Fatalf("an image was placed more than once: %q", got)
 	}
-	// Only the main screen keeps the client's placements through the
-	// replay prefix, so only its frame clears them.
-	if strings.Count(got, kittyPlacementClear) != 1 || strings.Index(got, kittyPlacementClear) > mainPlaced {
-		t.Fatalf("main screen placements not cleared once before its frame: %q", got)
+	// The main screen's image reaches its own store before its frame, after
+	// the client's copies of the placement are deleted. Only the main screen
+	// keeps the client's placements through the replay prefix, so only it
+	// needs the delete.
+	if !(mainDelete >= 0 && mainDelete < mainImage && mainImage < mainPlaced) ||
+		strings.Count(got, "a=d") != 1 {
+		t.Fatalf("main screen image and delete out of place (delete %d, image %d, placement %d): %q",
+			mainDelete, mainImage, mainPlaced, got)
 	}
 }
 
@@ -180,7 +190,61 @@ func TestHistoryReplayPlacesNoImagesAgain(t *testing.T) {
 		t.Fatalf("not a history replay: %q", got)
 	}
 	want := strings.Count(stream, "a=p,i=1,")
-	if n := strings.Count(got, "a=p,i=1,"); n != want || strings.Contains(got, kittyPlacementClear) {
+	if n := strings.Count(got, "a=p,i=1,"); n != want || strings.Contains(got, "a=d,d=i,i=1,q=2") {
 		t.Fatalf("history replay placed image 1 %d times, its history %d: %q", n, want, got)
+	}
+}
+
+// TestForegroundReplayKeepsWhatItDoesNotPlaceAgain: an image the client
+// placed by number (I=) next to one placed by id. The replay can only place
+// the one with an id again, so it deletes that image's placements alone and
+// leaves the client's other placements as they are.
+func TestForegroundReplayKeepsWhatItDoesNotPlaceAgain(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot", lastActivity: time.Now()}
+	stream := "\x1b[2;2H\x1b_Ga=T,I=9,C=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b[2;20H\x1b_Ga=T,i=42,C=1," + kittyPixelRoot + "\x1b\\\x1b[5;1Hwaiting"
+	got := selectWindowReplay(t, window, stream, "")
+	if strings.Count(got, "a=d") != 1 || !strings.Contains(got, "\x1b_Ga=d,d=i,i=42,q=2\x1b\\") {
+		t.Fatalf("replay deletes more than image 42's placements: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[2;20H\x1b_Ga=p,i=42,C=1,q=2\x1b\\") {
+		t.Fatalf("replay does not place image 42 again: %q", got)
+	}
+}
+
+// TestForegroundReplaySendsMainScreenImagesToTheMainScreen: the client keeps
+// an image store per screen, so the images the main screen's placements show
+// are sent while it is the screen shown, before the frame places them, and a
+// placement whose image the replay cannot carry is left out.
+func TestForegroundReplaySendsMainScreenImagesToTheMainScreen(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	big := strings.Repeat("A", maxReplayedKittyImageBytes)
+	stream := "\x1b[2;3H\x1b_Ga=T,i=5,C=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b[3;3H\x1b_Ga=T,i=8,C=1,f=100;" + big + "\x1b\\" +
+		"\x1b[?1049h\x1b[10;1Halternate"
+	server := newMuxServerWithSize("test", 80, 40)
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.mu.Lock()
+	window.recordScreenGeometryLocked(80, 40)
+	window.screenWidth, window.screenHeight = 80, 40
+	server.mu.Unlock()
+	server.handleWindowOutput(window.id, []byte(stream))
+
+	server.mu.Lock()
+	replay, _ := server.replayBytesWithImageFollowUpLocked(window, nil)
+	server.mu.Unlock()
+	got := string(replay)
+	image := strings.Index(got, "\x1b_Ga=t,i=5,")
+	placed := strings.Index(got, "\x1b[2;3H\x1b_Ga=p,i=5,C=1,q=2\x1b\\")
+	enter := strings.LastIndex(got, "\x1b[?1049h")
+	if !(image >= 0 && image < placed && placed < enter) {
+		t.Fatalf("main screen image not sent before its placement on the main screen (image %d, placement %d, 1049h %d): %q",
+			image, placed, enter, got)
+	}
+	// Image 8 does not fit in what the replay carries, so neither its
+	// placement nor its delete is sent: the client keeps what it had.
+	if strings.Contains(got, "i=8") {
+		t.Fatalf("replay places an image it does not carry: %.400q", got)
 	}
 }
