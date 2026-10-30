@@ -788,6 +788,15 @@ void main() {
 
       expect(find.text('notes.txt'), findsOneWidget);
       expect(find.text('0 B'), findsOneWidget);
+      expect(find.byTooltip('Upload files'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNotNull,
+      );
     });
 
     testWidgets('handles stale SSH errors while opening the browser', (
@@ -811,6 +820,17 @@ void main() {
           'SFTP connection failed. Check the connection and try again.',
         ),
         findsOneWidget,
+      );
+      // With no SFTP client there is nothing to upload or create a folder
+      // with.
+      expect(find.byType(FloatingActionButton), findsNothing);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNull,
       );
 
       await tester.pumpWidget(const SizedBox.shrink());

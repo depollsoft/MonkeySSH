@@ -1236,10 +1236,14 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
             if (!_isSelectionMode)
               IconButton(
                 icon: const Icon(Icons.create_new_folder),
-                onPressed: () {
-                  _clearHighlightedFile();
-                  unawaited(_showCreateDirectoryDialog());
-                },
+                // Without an SFTP client the dialog would ask for a name and
+                // then do nothing with it.
+                onPressed: _sftp == null
+                    ? null
+                    : () {
+                        _clearHighlightedFile();
+                        unawaited(_showCreateDirectoryDialog());
+                      },
                 tooltip: 'New folder',
               ),
           ],
@@ -1272,8 +1276,11 @@ class _SftpScreenState extends ConsumerState<SftpScreen> {
         ),
       ),
       bottomNavigationBar: _buildBottomBar(),
+      // Hidden, not disabled, while there is no SFTP client to upload with:
+      // a floating action button looks the same either way.
       floatingActionButton:
-          _isSelectionMode ||
+          _sftp == null ||
+              _isSelectionMode ||
               _isBatchSelecting ||
               _movingFiles != null ||
               _batchRunning
