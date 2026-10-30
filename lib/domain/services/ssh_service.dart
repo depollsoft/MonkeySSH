@@ -1492,6 +1492,13 @@ class _InteractiveAuthGate {
     _replayPassword = null;
     return password;
   }
+
+  /// Drops the typed password once it can no longer be needed. The client's
+  /// auth callbacks keep this gate alive for as long as the connection.
+  void forgetTypedPassword() {
+    _typedPassword = null;
+    _replayPassword = null;
+  }
 }
 
 /// Service for managing SSH connections.
@@ -2309,6 +2316,7 @@ class SshService {
             isJumpHost: isJumpHost,
             cancellationToken: cancellationToken,
           );
+          authGate.forgetTypedPassword();
         } on SSHAuthAbortError catch (error) {
           // A Mac unlocked over SSH after a restart (FileVault) drops the
           // connection once the password is in, restarts every process and
