@@ -3155,7 +3155,7 @@ void main() {
       // Decodes run in order, so the earlier images have finished by now.
       await Future<void>.delayed(const Duration(milliseconds: 100));
 
-      expect(responses, [matches(RegExp(r'I=7,i=\d+;OK'))]);
+      expect(responses, [matches(RegExp(r'i=\d+,I=7;OK'))]);
     });
   });
 

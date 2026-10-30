@@ -1043,8 +1043,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _lastKittyPlaceholder = null;
     // The main screen kept its own cursor while the alternate one was shown,
     // which is where `CSI ? 1049 l` would put it back too. Restoring the saved
-    // cursor instead would home it after `CSI ? 47 h`, which saves none.
-    useMainBuffer();
+    // cursor instead would home it after `CSI ? 47 h`, which saves none, and
+    // [useMainBuffer] would carry the alternate screen's cursor over, as
+    // `CSI ? 47 l` does.
+    _buffer = _mainBuffer;
     _mouseMode = MouseMode.none;
     _mouseReportMode = MouseReportMode.normal;
     _altBufferMouseScrollMode = false;
