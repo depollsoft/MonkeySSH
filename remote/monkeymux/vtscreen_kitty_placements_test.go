@@ -338,6 +338,31 @@ func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/@2,3")
 }
 
+func TestVTKittyPlacementMovesTheCursorPastAKnownSpan(t *testing.T) {
+	s := newTerminalScreen(20, 6)
+	s.Write([]byte("\x1b[2;3H\x1b_Ga=p,i=1,c=4,r=2\x1b\\"))
+	if row, col := s.CursorPosition(); row != 2 || col != 6 {
+		t.Fatalf("cursor at %d,%d after a 4x2 image, want 2,6", row, col)
+	}
+	// Past the right edge it wraps to the start of the next row.
+	s.Write([]byte("\x1b[2;18H\x1b_Ga=T,f=100,i=2,c=4,r=1;AAAA\x1b\\"))
+	if row, col := s.CursorPosition(); row != 2 || col != 0 {
+		t.Fatalf("cursor at %d,%d after wrapping, want 2,0", row, col)
+	}
+	// At the bottom it scrolls, taking the placement with it.
+	s.Write([]byte("\x1b[6;1H\x1b_Ga=p,i=3,c=1,r=3\x1b\\"))
+	if row, col := s.CursorPosition(); row != 5 || col != 1 {
+		t.Fatalf("cursor at %d,%d at the bottom, want 5,1", row, col)
+	}
+	assertVTKittyPlaced(t, s, "1/@-1,2", "2/@-1,17", "3/@3,0")
+	// C=1 keeps it, and an image sized by its pixels moves it by an amount
+	// the model cannot know, so the model leaves it.
+	s.Write([]byte("\x1b[1;1H\x1b_Ga=p,i=4,c=4,r=2,C=1\x1b\\\x1b_Ga=p,i=4,c=4\x1b\\"))
+	if row, col := s.CursorPosition(); row != 0 || col != 0 {
+		t.Fatalf("cursor at %d,%d, want 0,0", row, col)
+	}
+}
+
 func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 	s := newTerminalScreen(10, 4)
 	// "0123456789ABCDE" wraps after 9; the placement is on C, the 13th cell.

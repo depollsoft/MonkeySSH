@@ -196,7 +196,8 @@ func kittyBareContinuation(args map[string]string) bool {
 	return true
 }
 
-// placeKittyImage follows a direct placement made at the cursor.
+// placeKittyImage follows a direct placement made at the cursor, then moves
+// the cursor past it as the client does.
 func (s *terminalScreen) placeKittyImage(args map[string]string) {
 	g := s.grid()
 	if imageID := kittyIDValue(args["i"]); imageID != "" {
@@ -228,6 +229,43 @@ func (s *terminalScreen) placeKittyImage(args map[string]string) {
 			s.kittyDirect = append(s.kittyDirect[:0], s.kittyDirect[extra:]...)
 		}
 	}
+	s.advanceKittyCursor(args)
+}
+
+// advanceKittyCursor moves the cursor past a placed image as the client's
+// _advanceGraphicsCursor does, unless the command asks it to stay (C=1).
+// Only an image given both a column and a row span (c=, r=) covers cells the
+// model can count; any other moves the client's cursor by its pixel size,
+// which the model does not know, and leaves the two apart.
+func (s *terminalScreen) advanceKittyCursor(args map[string]string) {
+	if stay, err := strconv.Atoi(args["C"]); err == nil && stay == 1 {
+		return
+	}
+	cols, rows := kittyIntValue(args["c"]), kittyIntValue(args["r"])
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	g := s.grid()
+	target := min(g.cursorCol, s.width-1) + cols
+	wraps := target >= s.width
+	moves := rows - 1
+	if wraps {
+		moves++
+	}
+	// Enough moves to reach the bottom of the scroll region, then at most a
+	// screen of scrolling.
+	before := 0
+	if g.cursorRow >= s.top && g.cursorRow <= s.bottom {
+		before = max(0, s.bottom-g.cursorRow)
+	}
+	for range min(moves, before+s.height) {
+		s.index()
+	}
+	if wraps {
+		target = 0
+	}
+	g.cursorCol = min(target, s.width-1)
+	g.pendingWrap = false
 }
 
 // deleteKittyPlacements applies a delete command (a=d) to the placements on
