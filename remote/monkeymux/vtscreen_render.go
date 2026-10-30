@@ -20,12 +20,21 @@ import (
 // A line that soft-wraps from the one above is reached by wrapping onto it
 // instead (appendVTSoftWrap), so the client marks it as a continuation just as
 // the model does and reflows it the same way on the next width change.
+//
+// The direct Kitty placements on the screen are placed again on their cells
+// once the rows are painted, before the cursor is restored (see
+// vtscreen_kitty_placements.go).
 func (s *terminalScreen) RenderFrame() []byte {
 	if s == nil {
 		return nil
 	}
 	g := s.grid()
-	out := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
+	out := make([]byte, 0, 4096)
+	if !s.altActive {
+		out = s.appendKittyPlacementClear(out)
+	}
+	out = s.appendGridFrame(out, g, !s.altActive)
+	out = s.appendKittyPlacements(out, s.altActive)
 	out = s.appendSavedCursor(out, g, *s.saved())
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
@@ -58,13 +67,16 @@ func (s *terminalScreen) RenderFrame() []byte {
 // once a DECSTR reset it), with the origin mode, rendition and charsets it
 // saved, all of which the replayed 1049 entry saves again, or on the main
 // cursor for 47 and 1047. It is nil while the main screen shows; RenderFrame
-// paints it then.
+// paints it then. Its direct Kitty placements are placed again as RenderFrame
+// places them.
 func (s *terminalScreen) RenderMainScreen() []byte {
 	if s == nil || !s.altActive {
 		return nil
 	}
 	g := &s.main
-	out := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	out := s.appendKittyPlacementClear(make([]byte, 0, 4096))
+	out = s.appendGridFrame(out, g, true)
+	out = s.appendKittyPlacements(out, false)
 	if saved := s.savedMain; s.altSavedCursor {
 		// DECSET 6 homes the cursor, so it goes first. The frame left the
 		// scroll region full, where an origin-relative row is the row.

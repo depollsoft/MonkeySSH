@@ -57,7 +57,7 @@ func TestKittyRelativePlacementsNeedAVirtualRootAndAPlacementID(t *testing.T) {
 	window.observeKittyGraphicsLocked([]byte(
 		"\x1b_Ga=t,i=1," + kittyPixelRoot + "\x1b\\" +
 			"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
-			// A physical parent never comes back, so neither does its child.
+			// The children of a physical parent are not kept.
 			"\x1b_Ga=p,i=1,p=1\x1b\\" +
 			"\x1b_Ga=p,i=2,p=1,P=1,Q=1\x1b\\" +
 			// Without p= every replay would add a copy.

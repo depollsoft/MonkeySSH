@@ -8,14 +8,17 @@ import (
 
 // Kitty placements MonkeyMux replays after the images on attach.
 //
-// A replay restores image data and the screen, but never a physical placement:
-// the screen model skips APC strings, so it cannot say where one went. Two
-// kinds of placement are positioned without a cell of their own and come back
-// correctly: a virtual placement (a=p,U=1), which the Unicode placeholder cells
-// in the replayed frame display, and a relative placement (P=), which sits a
-// cell offset from its parent and moves with it. A relative placement is kept
-// only while its parent chain ends at a virtual placement that is kept too,
-// since a physical parent never comes back.
+// A replay restores image data and the screen. Two kinds of placement are
+// positioned without a cell of their own and are kept here: a virtual
+// placement (a=p,U=1), which the Unicode placeholder cells in the replayed
+// frame display, and a relative placement (P=), which sits a cell offset from
+// its parent and moves with it. A direct placement at the cursor (a=T or a=p
+// without U= or P=) is anchored to a cell, which only the screen model can
+// follow (vtscreen_kitty_placements.go); a frame painted from the model places
+// the ones on its screen again. A relative placement is kept only while its
+// parent chain ends at a virtual placement that is kept too: the children of
+// a direct placement are not followed, so they come back only when the
+// program places them again.
 //
 // The client keeps one placement per image and placement id and replaces it
 // when the same pair is sent again, so a replay never duplicates one; a
@@ -35,10 +38,11 @@ type kittyPlacementTracking struct {
 	// modeCarry is the start of an alternate-screen mode change cut off at
 	// the end of the last output, which the next output completes.
 	modeCarry []byte
-	// physical lists the physical placements the window made, which a replay
-	// never restores but a relative placement can name as its parent. A
-	// delete MonkeyMux cannot resolve leaves them listed, so a relative
-	// placement naming one is taken as accepted and is not kept.
+	// physical lists the physical placements the window made, which a
+	// relative placement can name as its parent; the screen model follows
+	// the placements themselves. A delete MonkeyMux cannot resolve leaves
+	// them listed, so a relative placement naming one is taken as accepted
+	// and is not kept.
 	physical []kittyPhysicalPlacement
 	// rootAlt records the screen each retained root was transmitted on. The
 	// client keeps placements per screen, so the virtual placement a root
@@ -344,9 +348,9 @@ func (w *muxWindow) observeKittyPlacementLocked(
 			// ENOPARENT and keeps the placement it had.
 			return false
 		}
-		// The parent is a physical placement, which no replay restores, so
-		// neither can this placement be. It replaces a kept one with the
-		// same ids on the client, so that one goes.
+		// The parent is a physical placement, whose children are not kept
+		// (see the top of this file). It replaces a kept one with the same
+		// ids on the client, so that one goes.
 		changed := w.removeKittyPlacementsLocked(func(p kittyRetainedPlacement) bool {
 			return p.key() == key && p.alt == alt
 		})

@@ -15285,11 +15285,16 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 		return nil
 	}
 	// The images kept virtual and relative placements show come back too, or
-	// the placements replayed after them would have nothing to place.
+	// the placements replayed after them would have nothing to place, and so
+	// do those of the direct placements a frame painted from the model places
+	// again, which a history replay carries in its own bytes instead.
 	wanted := append(
 		w.screenLocked().PlaceholderImageIDs(),
 		w.kittyPlacementImageIDsLocked()...,
 	)
+	if w.usesForegroundRedrawReplayLocked() {
+		wanted = append(wanted, w.screenLocked().KittyPlacementImageIDs()...)
+	}
 	if len(wanted) == 0 {
 		return nil
 	}

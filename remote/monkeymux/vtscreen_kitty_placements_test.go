@@ -420,3 +420,84 @@ func TestVTKittyDirectPlacementsSurviveAClone(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/@0,0")
 	assertVTKittyPlaced(t, clone, "1/@1,0", "2/@1,0")
 }
+
+// TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor checks the frame's
+// placements land on their cells after the rows are painted, and that the
+// frame leaves the cursor, the saved cursor and the modes as it would
+// without them.
+func TestVTKittyFramePlacesImagesAgainAndRestoresTheCursor(t *testing.T) {
+	stream := "\x1b[?6h\x1b[2;9r" + // origin mode inside a region
+		"\x1b[2;3Hhello\x1b7\x1b[1;5H\x1b(0q\x1b[4h\x1b[31m" +
+		"\x1b[4;3H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\\x1b[6;2H"
+	s := newTerminalScreen(30, 10)
+	s.Write([]byte(stream))
+	assertVTKittyPlaced(t, s, "1/1@4,2")
+
+	frame := string(s.RenderFrame())
+	place := "\x1b[5;3H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\"
+	at := strings.Index(frame, place)
+	if at < 0 || strings.Count(frame, "a=p") != 1 {
+		t.Fatalf("frame does not place the image once on its cell: %q", frame)
+	}
+	if clear := strings.Index(frame, kittyPlacementClear); clear != 0 {
+		t.Fatalf("frame does not start by clearing the client's placements: %q", frame)
+	}
+	if paint := strings.Index(frame, "hello"); paint > at {
+		t.Fatalf("the image was placed before the rows were painted: %q", frame)
+	}
+	if save := strings.Index(frame, "\x1b7"); save < at {
+		t.Fatalf("the image was placed after the saved cursor was staged: %q", frame)
+	}
+
+	without := s.Clone()
+	without.kittyDirect = nil
+	bare := string(without.RenderFrame())
+	if strings.Replace(strings.Replace(frame, place, "", 1), kittyPlacementClear, "", 1) != bare {
+		t.Fatalf("placements changed more than their own commands:\n%q\n%q", frame, bare)
+	}
+	painted := func(frame string) *terminalScreen {
+		c := newTerminalScreen(30, 10)
+		c.Write([]byte(activeWindowReplayPrefix + frame))
+		return c
+	}
+	a, b := painted(frame), painted(bare)
+	ar, ac := a.CursorPosition()
+	br, bc := b.CursorPosition()
+	if ar != br || ac != bc || a.grid().pendingWrap != b.grid().pendingWrap {
+		t.Fatalf("cursor %d,%d with placements, %d,%d without", ar, ac, br, bc)
+	}
+	if !reflect.DeepEqual(a.savedMain, b.savedMain) || a.originMode != b.originMode ||
+		a.insertMode != b.insertMode || a.top != b.top || a.bottom != b.bottom ||
+		a.attrs != b.attrs || a.g0Graphics != b.g0Graphics {
+		t.Fatal("placements changed the state the frame restores")
+	}
+	if !reflect.DeepEqual(a.TextRows(), s.TextRows()) {
+		t.Fatalf("frame painted %q, want %q", a.TextRows(), s.TextRows())
+	}
+	// The painted model follows the placement as the client would.
+	assertVTKittyPlaced(t, a, "1/1@4,2")
+}
+
+func TestVTKittyMainScreenFramePlacesItsImagesBehindTheAlternateScreen(t *testing.T) {
+	s := newTerminalScreen(20, 4)
+	s.Write([]byte("\x1b[2;2H\x1b_Ga=p,i=1,C=1\x1b\\\x1b[?1049h\x1b[3;3H\x1b_Ga=p,i=2,C=1\x1b\\"))
+	main := string(s.RenderMainScreen())
+	if !strings.HasPrefix(main, kittyPlacementClear) ||
+		!strings.Contains(main, "\x1b[2;2H\x1b_Ga=p,i=1,C=1,q=2\x1b\\") || strings.Contains(main, "i=2") {
+		t.Fatalf("main screen frame = %q", main)
+	}
+	// The alternate screen's frame needs no clear: entering it cleared it.
+	alt := string(s.RenderFrame())
+	if strings.Contains(alt, kittyPlacementClear) ||
+		!strings.Contains(alt, "\x1b[3;3H\x1b_Ga=p,i=2,C=1,q=2\x1b\\") || strings.Contains(alt, "i=1") {
+		t.Fatalf("alternate screen frame = %q", alt)
+	}
+	if ids := s.KittyPlacementImageIDs(); !reflect.DeepEqual(ids, []string{"2"}) {
+		t.Fatalf("shown screen's placement images = %v", ids)
+	}
+	// Without placements the frames are what they were.
+	s.Write([]byte("\x1bc"))
+	if strings.Contains(string(s.RenderFrame()), "\x1b_G") {
+		t.Fatal("a frame without placements carries a graphics command")
+	}
+}
