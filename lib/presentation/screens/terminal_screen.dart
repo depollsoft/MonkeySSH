@@ -2042,6 +2042,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _terminalContentGeneration++;
     _syncShellCompletionOptimisticSnapshotWithTerminal();
+    _refilterShellCompletionsForEditedLine();
 
     _queueVisibleTerminalPathUnderlineRefresh();
     _scheduleMissingImageRecoveryRequest();
@@ -3959,6 +3960,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
     if (!_terminalOutputCanTriggerShellCompletion(output)) {
+      // The optimistic snapshot only follows printable input and Backspace.
+      // After anything else (Ctrl+U, an arrow key) it no longer matches what
+      // the shell will show and would never match again, so every later
+      // request completed a line nobody typed: read the terminal instead.
+      _shellCompletionOptimisticSnapshot = null;
       if (_filterVisibleShellCompletionsForCurrentInput()) {
         return;
       }
@@ -4016,6 +4022,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       snapshot: snapshot,
       output: output,
     );
+  }
+
+  /// Follows a line the shell redrew with completions showing and no typed
+  /// input pending, such as one Ctrl+U cleared, so the popup doesn't stay
+  /// over text that is gone.
+  void _refilterShellCompletionsForEditedLine() {
+    final shown = _shellCompletionInvocation;
+    if (shown == null ||
+        _shellCompletionSuggestions.isEmpty ||
+        _shellCompletionOptimisticSnapshot != null) {
+      return;
+    }
+    final current = _buildCurrentShellCompletionInvocation(
+      workingDirectory: shown.workingDirectory,
+      shellCommand: shown.shellCommand,
+    );
+    if (current != null &&
+        current.commandLine == shown.commandLine &&
+        current.cursorOffset == shown.cursorOffset) {
+      return;
+    }
+    _filterVisibleShellCompletionsForCurrentInput();
   }
 
   void _syncShellCompletionOptimisticSnapshotWithTerminal() {
@@ -13495,6 +13523,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             builder: (overlayContext, constraints) {
               final overlayObject = overlayContext.findRenderObject();
               if (overlayObject is! RenderBox || !overlayObject.hasSize) {
+                // A LayoutBuilder has no size during its first layout, and
+                // nothing else may rebuild it, which left a popup that
+                // opened again after being hidden empty: build once more.
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) {
+                    setState(() {});
+                  }
+                });
                 return const SizedBox.shrink();
               }
 

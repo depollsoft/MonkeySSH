@@ -9357,6 +9357,72 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    // Ctrl+U used to leave the popup over the cleared prompt, and, when it
+    // came before the shell echoed the last key, the typed prefix behind in
+    // the optimistic snapshot, so every later request completed a line nobody
+    // typed ("git chls ~/b"). A popup opened again after being hidden also
+    // stayed empty until something else rebuilt the screen.
+    for (final echoedFirst in [true, false]) {
+      testWidgets('completes the new line after Ctrl+U clears the old one, '
+          'echoed first: $echoedFirst', (tester) async {
+        final completionService = _TestShellCompletionService(
+          cachedSuggestions: const <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'checkout',
+              replacement: 'checkout',
+              replacementStart: 4,
+              replacementEnd: 6,
+              kind: ShellCompletionSuggestionKind.history,
+              commitSuffix: ' ',
+            ),
+          ],
+          completionSuggestions:
+              const <String, List<ShellCompletionSuggestion>>{
+                '~/b': <ShellCompletionSuggestion>[
+                  ShellCompletionSuggestion(
+                    label: '~/bin/',
+                    replacement: '~/bin/',
+                    replacementStart: 3,
+                    replacementEnd: 6,
+                    kind: ShellCompletionSuggestionKind.directory,
+                  ),
+                ],
+              },
+        );
+
+        session.terminal!.write('root@host ~ % git c');
+        await pumpScreen(tester, shellCompletionService: completionService);
+        session.terminal!.textInput('h');
+        await tester.pump();
+        await tester.pump();
+        if (echoedFirst) {
+          session.terminal!.write('h');
+          await tester.pump();
+        }
+        expect(find.text('checkout'), findsOneWidget);
+
+        // Ctrl+U, then the shell redraws the empty prompt.
+        session.terminal!.textInput('\x15');
+        await tester.pump();
+        session.terminal!.write('\rroot@host ~ % \x1b[K');
+        await tester.pump();
+        expect(find.text('checkout'), findsNothing);
+
+        for (final character in 'ls ~/b'.split('')) {
+          session.terminal!.textInput(character);
+          await tester.pump();
+        }
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump();
+
+        expect(
+          completionService.completeInvocations.last.commandLine,
+          'ls ~/b',
+        );
+        expect(find.text('~/bin/'), findsOneWidget);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {
