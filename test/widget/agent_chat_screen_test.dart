@@ -995,7 +995,7 @@ void main() {
         tester.getRect(find.byKey(const ValueKey('acp-composer-surface')));
 
     for (final (size, embedded) in [
-      (const Size(951, 669), true),
+      (const Size(1200, 800), true),
       (const Size(1366, 1024), false),
     ]) {
       testWidgets(
@@ -1023,7 +1023,7 @@ void main() {
           final letterSpacing =
               Theme.of(context).textTheme.bodyMedium?.letterSpacing ?? 0;
           final measure = acpReadingMeasure(context);
-          // 70 characters of 15 pt prose, zoomed from 14 pt to 8 pt. Linux
+          // 100 characters of 15 pt prose, zoomed from 14 pt to 8 pt. Linux
           // snaps each glyph's advance to 1/16 pt.
           expect(
             measure,
@@ -1129,7 +1129,7 @@ void main() {
           FakeAcpSessionManager(sessions: [modelSession(mode: 'Plan review')]),
           size: const Size(1366, 1024),
           embedded: true,
-          preferredFontSize: 12,
+          preferredFontSize: 8,
         ),
       );
       await tester.pumpAndSettle();

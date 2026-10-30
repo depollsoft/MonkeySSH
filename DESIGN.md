@@ -245,7 +245,9 @@ quotes the machine; Inter explains.
   titles, dialog titles, list group headers.
 - **Body** (Inter 400, 16px, line-height ~1.5): Primary reading text in
   Terminal White. Secondary body is 14px in Muted Steel. Cap measure at 65–75ch
-  on wide screens.
+  on wide screens. Agent chat transcripts cap at about 100ch instead: they mix
+  prose with code, diffs and tool output, and a tablet's chat should fill most
+  of its width.
 - **Label** (Inter 600, 14px): Buttons, tabs, chips, emphasis. Weight carries
   emphasis — not size, not color.
 - **Mono** (JetBrains Mono 400, 13px, line-height ~1.4): Terminal output, code,
