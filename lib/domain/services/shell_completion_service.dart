@@ -1478,7 +1478,8 @@ String normalizeShellCompletionToken(String token) {
 /// When [windows] is true, replacement text is quoted for the Windows shell the
 /// helper resolved (its leading `shell` line): PowerShell gets single-quoted
 /// literals, cmd.exe double quotes. A third field carries PowerShell's own
-/// insertion text, which is used verbatim.
+/// insertion text, which is used verbatim, as it is for the native zsh probe's
+/// `zsh_` kinds: a word such as `\$HOME` from `echo \$HO` must keep its syntax.
 @visibleForTesting
 List<ShellCompletionSuggestion> parseShellCompletionOutput(
   String output,
@@ -1505,10 +1506,22 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       continue;
     }
 
-    final rawKind = rawLine.substring(0, separatorIndex);
+    var rawKind = rawLine.substring(0, separatorIndex);
     var value = rawLine.substring(separatorIndex + 1).trimRight();
     var nativeReplacement = '';
-    if (windows) {
+    if (rawKind.startsWith(_zshNativeKindPrefix)) {
+      // Untrimmed: an inserted word can end in an escaped space.
+      final fields = rawLine.substring(separatorIndex + 1).split('\t');
+      if (fields.length != 2) {
+        continue;
+      }
+      rawKind = rawKind.substring(_zshNativeKindPrefix.length);
+      value = fields[0];
+      nativeReplacement = fields[1];
+      if (nativeReplacement.isEmpty) {
+        continue;
+      }
+    } else if (windows) {
       if (rawKind == 'shell') {
         escape = _windowsCompletionEscape(value);
         continue;
@@ -1764,6 +1777,10 @@ String shellCompletionReplacementLiteral(
 const _interactiveZshCompletionDoneMarker = '__FLUTTY_ZSH_NATIVE_DONE__';
 const _shellHistoryDoneMarker = '__FLUTTY_HISTORY_DONE__';
 
+/// Kind prefix of the native zsh probe's lines, which carry zsh's own
+/// insertion text as a third field.
+const _zshNativeKindPrefix = 'zsh_';
+
 /// Exit status of [buildInteractiveZshCompletionRemoteCommand] when the
 /// foreground shell is not zsh or zsh cannot be started.
 const _interactiveZshUnsupportedExitCode = 78;
@@ -1896,50 +1913,48 @@ zstyle ':completion:*' verbose no
 zstyle ':completion:*' group-name ''
 zstyle ':completion:*' format ''
 emit_native_completion_item() {
-  local item=\$1 target=\$1
+  # The word as the shell reads it, to test its type and to show, and as zsh
+  # would insert it, which the app inserts unchanged.
+  # Inside an open quote the word is inserted after it, and anything but a
+  # directory closes it, as zsh does.
+  local item=\$1 insert=\$2 target=\$1 q=\$_flutty_quote
   # Test a word that starts with ~/ where the shell would expand it.
   [[ \$target == '~' || \$target == '~/'* ]] && target=\$HOME\${target#?}
   case "\$FLUTTY_MODE" in
     directory)
-      [ -d "\$target" ] && printf 'directory\\t%s\\n' "\$item"
-      ;;
-    path)
-      if [ -d "\$target" ]; then
-        printf 'directory\\t%s\\n' "\$item"
-      elif [ -e "\$target" ]; then
-        printf 'file\\t%s\\n' "\$item"
-      fi
+      [ -d "\$target" ] && printf 'zsh_directory\\t%s\\t%s%s/\\n' "\$item" "\$q" "\${insert%/}"
       ;;
     *)
       if [ -d "\$target" ]; then
-        printf 'directory\\t%s\\n' "\$item"
+        printf 'zsh_directory\\t%s\\t%s%s/\\n' "\$item" "\$q" "\${insert%/}"
       elif [ -e "\$target" ]; then
-        printf 'file\\t%s\\n' "\$item"
+        printf 'zsh_file\\t%s\\t%s%s%s\\n' "\$item" "\$q" "\$insert" "\$q"
       else
-        printf 'argument\\t%s\\n' "\$item"
+        printf 'zsh_argument\\t%s\\t%s%s%s\\n' "\$item" "\$q" "\$insert" "\$q"
       fi
       ;;
   esac
 }
 _flutty_dump_completions() {
+  # Pairs of the word as the shell reads it and as zsh would insert it.
   typeset -ga _flutty_matches
   _flutty_matches=()
+  typeset -g _flutty_quote=
   compadd() {
     emulate -L zsh
     # Reads compadd's options for the parts of the word that go before and
-    # after each match: the ignored (-i), visible (-P) and hidden (-p)
-    # prefixes and the hidden suffix (-s), which are quoted as on the command
-    # line, as are the matches with -Q. A call that only asks which words
-    # match (-O, -A, -D) adds nothing and is not captured.
+    # after each match: the ignored prefix (-i, else IPREFIX), the visible
+    # (-P) and hidden (-p) prefixes and the hidden suffix (-s). They and the
+    # matches -A reports are quoted as zsh would insert them. A call that only
+    # asks which words match (-O, -A, -D) adds nothing and is not captured.
     local -a hits
-    local ipre= apre= hpre= hsuf= opt letter value
-    local -i i=1 j query=0 quoted=0
+    local ipre=\$IPREFIX apre= hpre= hsuf= opt letter value
+    local -i i=1 j query=0
     while (( i <= \$# )); do
       opt=\${argv[i]}
       [[ \$opt == -?* && \$opt != -- ]] || break
       for (( j = 2; j <= \${#opt}; j++ )); do
         letter=\${opt[j]}
-        [[ \$letter == Q ]] && quoted=1
         [[ \$letter == [PSpsiIWdJVXxrRMFEDOA] ]] || continue
         if (( j < \${#opt} )); then
           value=\${opt[j+1,-1]}
@@ -1959,11 +1974,11 @@ _flutty_dump_completions() {
       (( i++ ))
     done
     if (( ! query )); then
+      _flutty_quote=\${compstate[quote]}
       builtin compadd -A hits "\$@" 2>/dev/null
       for value in "\${hits[@]}"; do
-        (( quoted )) || value=\${(q)value}
-        # The word as the shell reads it, unquoted: the app quotes it again.
-        _flutty_matches+=("\${(Q):-\$IPREFIX\$ipre\$apre\$hpre\$value\$hsuf}")
+        value=\$ipre\$apre\$hpre\$value\$hsuf
+        _flutty_matches+=("\${(Q)value}" "\$value")
       done
     fi
     # Returns compadd's status. Never name a local `status`: zsh's is
@@ -1972,9 +1987,9 @@ _flutty_dump_completions() {
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__
-  local item
-  for item in "\${_flutty_matches[@]}"; do
-    emit_native_completion_item "\$item"
+  local item insert
+  for item insert in "\${_flutty_matches[@]}"; do
+    emit_native_completion_item "\$item" "\$insert"
   done
   print -r -- $_interactiveZshCompletionDoneMarker
   exit 0

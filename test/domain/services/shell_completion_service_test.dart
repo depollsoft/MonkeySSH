@@ -1292,7 +1292,7 @@ void main() {
       expect(input, contains(r'source "$FLUTTY_ZSH_COMPLETION_SETUP"'));
       expect(input, contains('git c\t'));
       expect(command, contains('__FLUTTY_ZSH_NATIVE_DONE__'));
-      expect(command, contains(r'''printf 'argument\t%s\n' "$item"'''));
+      expect(command, contains(r'''printf 'zsh_argument\t%s\t%s%s%s\n' '''));
     },
   );
 
@@ -1318,26 +1318,45 @@ void main() {
     File('${home.path}/notebook.md').writeAsStringSync('');
     File('${home.path}/sub/notes.txt').createSync(recursive: true);
     File('${home.path}/my dir/inner.txt').createSync(recursive: true);
+    // Completers that quote their matches and pass their own ignored prefix.
+    File('${home.path}/comp/_tspace')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        '#compdef tspace\ncompadd -- "space file" "it\'s" \'\$HOME\'\n',
+      );
+    File('${home.path}/comp/_topt').writeAsStringSync(
+      '#compdef topt\ncompset -P "*="\ncompadd -U -i "\$IPREFIX" -- hello\n',
+    );
     // A startup file that changes directory must not move the completion.
-    File('${home.path}/.zshrc').writeAsStringSync('cd /\n');
+    File('${home.path}/.zshrc')
+        .writeAsStringSync('fpath=(~/comp \$fpath)\ncd /\n');
 
-    // Each match comes back as the whole word, unquoted, with the path the
-    // completer passed as a compadd prefix; the app quotes it again.
-    for (final (line, token, replacements) in [
-      ('cat no', 'no', ['notebook.md', 'notes.txt']),
-      ('cat sub/no', 'sub/no', ['sub/notes.txt']),
-      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt']),
-      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt']),
+    // Each match comes back as the word the shell reads, to show, and as zsh
+    // would insert it, with the path the completer passed as a compadd prefix,
+    // the quote the word is in and any syntax such as a parameter's `$`.
+    const file = ShellCompletionSuggestionKind.file;
+    const directory = ShellCompletionSuggestionKind.directory;
+    const argument = ShellCompletionSuggestionKind.command;
+    for (final (line, token, replacements, kind) in [
+      ('cat no', 'no', ['notebook.md', 'notes.txt'], file),
+      ('cat sub/no', 'sub/no', ['sub/notes.txt'], file),
+      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt'], file),
+      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt'], file),
+      ('cat "my d', '"my d', ['"my dir/'], directory),
+      ("cat 'sub/no", "'sub/no", ["'sub/notes.txt'"], file),
+      ('tspace ', '', [r'\$HOME', r"it\'s", r'space\ file'], argument),
+      ('topt --opt=he', '--opt=he', ['--opt=hello'], argument),
     ]) {
+      final command = line.substring(0, line.indexOf(' '));
       final invocation = ShellCompletionInvocation(
         commandLine: line,
         cursorOffset: line.length,
         token: token,
-        tokenStart: 4,
+        tokenStart: command.length + 1,
         mode: ShellCompletionMode.argument,
-        commandName: 'cat',
+        commandName: command,
         shellCommand: zsh,
-        words: ['cat', token],
+        words: [command, token],
         wordIndex: 1,
         workingDirectory: home.path,
       );
@@ -1362,9 +1381,7 @@ void main() {
         replacements,
         reason: line,
       );
-      expect(suggestions.map((s) => s.kind).toSet(), {
-        ShellCompletionSuggestionKind.file,
-      }, reason: line);
+      expect(suggestions.map((s) => s.kind).toSet(), {kind}, reason: line);
     }
     expect(
       home.listSync().map((entry) => entry.uri.pathSegments.last),
