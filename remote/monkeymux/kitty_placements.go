@@ -20,11 +20,10 @@ import (
 // images (KittyMainPlacementDeletes). A client reopened on the window it
 // showed keeps the rest of what it holds: ED 2 leaves physical placements,
 // and a shell window's images often have transmissions older than the
-// history its replay carries. A window change deletes every placement on the
-// main screen first (windowChangeReplayPrefix), so another window's images
-// never stay over this one; an image the new window placed by number (I=) or
-// without an id, which no replay can name, then comes back only in a shell
-// window's history replay.
+// history its replay carries. When the app changes windows itself, it
+// deletes its own physical placements first; a window change started
+// elsewhere (another client, a window that exits) leaves the client's
+// placements on the main screen, as replays always have.
 //
 // A relative placement is kept only while its parent chain ends at a
 // virtual placement that is kept too: the children of a direct placement are

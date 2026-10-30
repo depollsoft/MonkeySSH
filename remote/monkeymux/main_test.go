@@ -1425,7 +1425,6 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
 			window.redrawForwardingFallbackScreen,
-			false,
 		),
 	)
 	server.mu.Unlock()

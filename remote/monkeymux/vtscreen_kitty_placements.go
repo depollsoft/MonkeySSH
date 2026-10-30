@@ -22,9 +22,9 @@ import (
 // placements of an image with an explicit id (i=) are followed: a frame
 // cannot name an image sent by number (I=) or with neither, since the client
 // gives those an id of its own. A client reopened on the window it showed
-// keeps such an image where it had it; one switched from another window had
-// its placements deleted (windowChangeReplayPrefix), and gets it back only
-// from a shell window's history replay.
+// keeps what it holds (activeWindowReplayPrefix leaves physical placements).
+// When the app changes windows itself, it deletes its own physical
+// placements first; a window change started elsewhere leaves them.
 //
 // The client places an image only when the store of the screen it is on
 // holds it, and answers ENOENT otherwise. The model follows each screen's
