@@ -3067,6 +3067,38 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    // MonkeyMux tags each window replay with its window. The terminal keeps
+    // its images through a replay of the window it shows (a reopen) and
+    // drops them, before the replay's own, for another window.
+    test('MonkeyMux replay tags keep or drop the shown images', () async {
+      final session = _testSession(_MockSshClient());
+      final terminal = session.getOrCreateTerminal()..resize(20, 6);
+      int anchors() => [
+        for (var row = 0; row < terminal.mainBuffer.lines.length; row++)
+          ...terminal.mainBuffer.graphics.physicalPlacementAnchorsInLine(
+            terminal.mainBuffer.lines[row],
+          ),
+      ].length;
+      String tag(String window) =>
+          '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
+      final pixel = base64.encode([0, 0, 0]);
+
+      terminal
+        ..write(tag('@1'))
+        ..write('\x1b_Ga=T,f=24,s=1,v=1,i=1,c=2,r=1,C=1,q=2;$pixel\x1b\\');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 1);
+
+      terminal.write(tag('@1'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 1, reason: 'a reopen of the window shown keeps it');
+
+      terminal.write(tag('@2'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 0, reason: 'another window drops it');
+      expect(terminal.heldImageSignatures(), contains(1));
+    });
+
     test('returns completed startup commands to a login shell without disconnecting', () async {
       final client = _MockSshClient();
       final startupShell = _MockExecSession();

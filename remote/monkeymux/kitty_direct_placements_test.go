@@ -311,8 +311,25 @@ func TestAttachReplayDeletesOnlyTheImagesItPlacesAgain(t *testing.T) {
 	deleted := strings.Index(got, "\x1b_Ga=d,d=i,i=4,q=2\x1b\\")
 	image := strings.Index(got, "\x1b_Ga=t,i=4,")
 	placed := strings.Index(got, "\x1b[3;3H\x1b_Ga=p,i=4,C=1,q=2\x1b\\")
-	if !strings.HasPrefix(got, activeWindowReplayPrefix) || strings.Count(got, "a=d") != 1 ||
+	if !strings.HasPrefix(got, windowReplayTag(window)+activeWindowReplayPrefix) || strings.Count(got, "a=d") != 1 ||
 		!(deleted >= 0 && deleted < image && image < placed) {
 		t.Fatalf("attach frame (delete %d, image %d, placement %d): %q", deleted, image, placed, got)
+	}
+}
+
+// TestWindowReplayStartsWithItsWindowTag: every replay names the window it
+// paints, so the app keeps its images on a reopen and drops them for another
+// window; a captured replay loses the tag along with its prefix.
+func TestWindowReplayStartsWithItsWindowTag(t *testing.T) {
+	window := &muxWindow{id: "@3", index: 0, lastActivity: time.Now()}
+	replay := string(buildWindowReplay(window, nil, []byte("hello"), false))
+	want := "\x1b]7502;window=" + monkeyMuxServerInstance + ":@3\x1b\\" + activeWindowReplayPrefix
+	if !strings.HasPrefix(replay, want) {
+		t.Fatalf("replay = %q, want it to start with %q", replay, want)
+	}
+	captured := string(normalizeCapturedReplayHistory([]byte(replay)))
+	if strings.Contains(captured, "\x1b]7502;") || strings.HasPrefix(captured, activeWindowReplayPrefix) ||
+		!strings.Contains(captured, "hello") {
+		t.Fatalf("captured history = %q", captured)
 	}
 }

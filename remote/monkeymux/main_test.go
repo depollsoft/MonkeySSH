@@ -44,7 +44,7 @@ func assertInputActions(t *testing.T, routing attachInputRouting, want []attachI
 }
 
 func replayPrefixForTest(window *muxWindow) string {
-	return activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
+	return windowReplayTag(window) + activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
 }
 
 func replayPostHistorySuffixForTest(cursorVisible bool) string {
@@ -2001,7 +2001,7 @@ func TestWindowSwitchResetsParserBeforePendingViewport(t *testing.T) {
 	}
 
 	wantPrefix := terminalParserResetSequence + "\x1b[?8;30;100t" +
-		activeWindowReplayPrefix
+		windowReplayTag(second) + activeWindowReplayPrefix
 	waitForRecordedContains(t, conn, wantPrefix)
 }
 
@@ -2195,7 +2195,7 @@ func TestClientFocusBroadcastsSharedViewportToClippingClients(t *testing.T) {
 
 	const viewportResize = "\x1b[?8;28;72t"
 	waitForRecordedOutput(t, desktopConn, viewportResize)
-	waitForRecordedContains(t, phoneConn, viewportResize+activeWindowReplayPrefix)
+	waitForRecordedContains(t, phoneConn, viewportResize+windowReplayTag(window)+activeWindowReplayPrefix)
 	if got := phoneConn.String(); !strings.HasPrefix(got, viewportResize) {
 		t.Fatalf("focused client output = %q, want viewport resize first", got)
 	}
@@ -8651,7 +8651,7 @@ func TestCreateWindowClearsAttachBeforePromptOutput(t *testing.T) {
 
 	waitForTestAttachWrites(t, server)
 	output := attach.String()
-	wantPrefix := replayPrefixForTest(&muxWindow{name: "sh", paneTitle: "sh"}) +
+	wantPrefix := replayPrefixForTest(&muxWindow{id: "@2", name: "sh", paneTitle: "sh"}) +
 		replayPostHistorySuffixForTest(true)
 	if !strings.HasPrefix(output, wantPrefix) {
 		t.Fatalf("attach output = %q, want replay prefix before prompt", output)

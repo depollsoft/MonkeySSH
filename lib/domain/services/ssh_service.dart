@@ -3469,6 +3469,10 @@ String _sshEndpointKey(SshConnectionConfig config) {
       : '${_sshEndpointKey(jumpHost)}->$endpoint';
 }
 
+/// The private OSC with which a MonkeyMux server tags each window replay with
+/// the window it paints (`remote/monkeymux` `monkeyMuxReplayWindowOSC`).
+const monkeyMuxReplayWindowOsc = '7502';
+
 /// An active SSH session.
 class SshSession {
   /// Creates a new [SshSession].
@@ -4311,7 +4315,42 @@ class SshSession {
     _notifyMetadataChanged();
   }
 
+  /// The MonkeyMux window whose replay each terminal last received
+  /// (`OSC 7502 ; window=<server instance>:<window id>`).
+  static final _monkeyMuxReplayWindows = Expando<String>();
+
+  /// Deletes the terminal's physical image placements when a MonkeyMux replay
+  /// paints another window than the one it shows, wherever the change was
+  /// started (this app, another client, a window that exited). The replay
+  /// keeps them otherwise, so a reopen of the same window keeps images whose
+  /// transmission is past the replayed history. The tag precedes the replay,
+  /// so the delete is ordered before the images it places.
+  void _handleMonkeyMuxReplayWindow(List<String> args) {
+    final terminal = this.terminal;
+    if (terminal == null) {
+      return;
+    }
+    String? window;
+    for (final arg in args) {
+      if (arg.startsWith('window=')) {
+        window = arg.substring('window='.length);
+      }
+    }
+    if (window == null || window.isEmpty) {
+      return;
+    }
+    final shown = _monkeyMuxReplayWindows[terminal];
+    if (shown != null && shown != window) {
+      terminal.deletePhysicalPlacements();
+    }
+    _monkeyMuxReplayWindows[terminal] = window;
+  }
+
   void _handlePrivateOsc(String code, List<String> args) {
+    if (code == monkeyMuxReplayWindowOsc) {
+      _handleMonkeyMuxReplayWindow(args);
+      return;
+    }
     final hasThemeQuery = args.any((arg) => arg.trim() == '?');
     if (hasThemeQuery && code == '4') {
       _lastTerminalPaletteQueryAt = DateTime.now();

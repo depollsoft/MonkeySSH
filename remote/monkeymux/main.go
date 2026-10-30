@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -198,6 +199,43 @@ const terminalSynchronizedOutputEnd = "\x1b[?9002l"
 const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
 const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
+
+// monkeyMuxReplayWindowOSC tags each window replay, before its prefix, with
+// the window it paints as "window=<server instance>:<window id>". The app
+// keeps the tag its terminal last received and deletes its physical image
+// placements only when a replay names another window: a reopen of the window
+// it shows keeps images whose transmission is past the replayed history, and
+// a change to another window, wherever it was started, drops the old one's.
+// Other terminals ignore the unknown OSC.
+const monkeyMuxReplayWindowOSC = "7502"
+
+// monkeyMuxServerInstance tells this server's window ids from those of a
+// server started later, which reuses them for other windows.
+var monkeyMuxServerInstance = newMonkeyMuxServerInstance()
+
+func newMonkeyMuxServerInstance() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func windowReplayTag(window *muxWindow) string {
+	return "\x1b]" + monkeyMuxReplayWindowOSC + ";window=" + monkeyMuxServerInstance + ":" + window.id + "\x1b\\"
+}
+
+// trimWindowReplayTag drops the tag a captured replay starts with.
+func trimWindowReplayTag(history []byte) []byte {
+	tag := []byte("\x1b]" + monkeyMuxReplayWindowOSC + ";")
+	if !bytes.HasPrefix(history, tag) {
+		return history
+	}
+	if end := bytes.Index(history, []byte("\x1b\\")); end >= 0 {
+		return history[end+2:]
+	}
+	return history
+}
 
 const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
@@ -3664,6 +3702,7 @@ func normalizeCapturedReplayHistory(history []byte) []byte {
 	if len(history) == 0 {
 		return nil
 	}
+	history = trimWindowReplayTag(history)
 	if bytes.HasPrefix(history, []byte(activeWindowReplayPrefix)) {
 		history = history[len(activeWindowReplayPrefix):]
 	}
@@ -11502,13 +11541,15 @@ func buildWindowReplay(
 	postParser := []byte(terminalParserResetSequence)
 	postCharset := window.screenLocked().CharsetSequence()
 	cursor := cursorVisibilityReplaySequence(window.cursorVisibleForReplayLocked())
+	tag := windowReplayTag(window)
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+		len(tag)+len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
 			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
+	replay = append(replay, tag...)
 	replay = append(replay, activeWindowReplayPrefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
