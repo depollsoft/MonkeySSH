@@ -1316,6 +1316,8 @@ void main() {
     addTearDown(() => home.delete(recursive: true));
     File('${home.path}/notes.txt').writeAsStringSync('');
     File('${home.path}/notebook.md').writeAsStringSync('');
+    // A startup file that changes directory must not move the completion.
+    File('${home.path}/.zshrc').writeAsStringSync('cd /\n');
     final invocation = ShellCompletionInvocation(
       commandLine: 'cat no',
       cursorOffset: 6,

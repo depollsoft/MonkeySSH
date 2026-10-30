@@ -1886,6 +1886,10 @@ TRAPEXIT() {
 }
 source_if_readable "\$HOME/.zprofile"
 source_if_readable "\$HOME/.zshrc"
+# The startup files may change directory; complete where the prompt is.
+if [ -n "\$FLUTTY_CWD" ]; then
+  builtin cd -q -- "\$FLUTTY_CWD" 2>/dev/null || builtin cd -q -- "\$HOME" 2>/dev/null || :
+fi
 autoload -Uz compinit
 compinit -C >/dev/null 2>&1 || compinit -u >/dev/null 2>&1 || :
 zstyle ':completion:*' verbose no
