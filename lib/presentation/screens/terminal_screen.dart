@@ -1162,9 +1162,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _shellCompletionPromptPrefix;
   ({String text, int cursorOffset})? _shellCompletionOptimisticSnapshot;
 
-  /// The terminal's command line when the optimistic snapshot was seeded or
-  /// last checked against it; input notifies listeners before any echo.
-  String? _shellCompletionOptimisticBaseText;
+  /// The command lines the shell will show while it echoes the input behind
+  /// the optimistic snapshot: the line it was seeded from, then one per input
+  /// still unechoed. The snapshot is the last.
+  var _shellCompletionOptimisticStates = <({String text, int cursorOffset})>[];
+
+  /// Inputs the optimistic snapshot follows ahead of the shell before it gives
+  /// up and reads the terminal.
+  static const _maxShellCompletionOptimisticStates = 64;
   ShellCompletionInvocation? _shellCompletionSourceInvocation;
   List<ShellCompletionSuggestion> _shellCompletionSourceSuggestions =
       const <ShellCompletionSuggestion>[];
@@ -4023,13 +4028,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       terminalSnapshot.cursorOffset,
     );
     if (_shellCompletionOptimisticSnapshot == null) {
-      _shellCompletionOptimisticBaseText = terminalSnapshot.text;
+      _shellCompletionOptimisticStates = [terminalSnapshot];
     }
     final snapshot = _shellCompletionOptimisticSnapshot ?? terminalSnapshot;
     _shellCompletionOptimisticSnapshot = applyShellCompletionOutputToSnapshot(
       snapshot: snapshot,
       output: output,
     );
+    _shellCompletionOptimisticStates.add(_shellCompletionOptimisticSnapshot!);
+    if (_shellCompletionOptimisticStates.length >
+        _maxShellCompletionOptimisticStates) {
+      _shellCompletionOptimisticSnapshot = null;
+    }
   }
 
   /// Follows a line the shell redrew with completions showing and no typed
@@ -4063,28 +4073,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (terminalSnapshot == null) {
       return;
     }
-    if (terminalSnapshot.text == optimisticSnapshot.text &&
-        terminalSnapshot.cursorOffset == optimisticSnapshot.cursorOffset) {
+    // While the shell echoes the input behind the snapshot, its line up to
+    // the cursor is one of the lines on the way, so the inputs before it are
+    // done. Typing notifies before anything is echoed, and an echo can show
+    // more than the snapshot when a Backspace for it is still pending. A line
+    // that is none of them, such as one the shell redrew after Ctrl+U when
+    // the snapshot was seeded before the redraw, means the snapshot will
+    // never match: drop it and read the terminal, as once the last line is
+    // reached and every input is echoed. The first match counts, since input
+    // can return to an earlier line ("e" then Backspace) before any echo.
+    // Text after the cursor, such as an autosuggestion, doesn't count.
+    String beforeCursor(({String text, int cursorOffset}) line) => line.text
+        .substring(0, min(max(line.cursorOffset, 0), line.text.length));
+    final echoed = beforeCursor(terminalSnapshot);
+    final states = _shellCompletionOptimisticStates;
+    final reached = states.indexWhere((line) => beforeCursor(line) == echoed);
+    if (reached < 0 || reached == states.length - 1) {
       _shellCompletionOptimisticSnapshot = null;
       return;
     }
-    // Typing notifies before the shell echoes anything: only a changed line
-    // says anything about the snapshot.
-    if (terminalSnapshot.text == _shellCompletionOptimisticBaseText) {
-      return;
-    }
-    _shellCompletionOptimisticBaseText = terminalSnapshot.text;
-    // While echoes are pending the shell's line up to its cursor leads into
-    // the snapshot. A line that doesn't, such as one the shell redrew after
-    // Ctrl+U when the snapshot was seeded before the redraw, means the
-    // snapshot will never match: drop it and read the terminal.
-    final echoed = terminalSnapshot.text.substring(
-      0,
-      min(max(terminalSnapshot.cursorOffset, 0), terminalSnapshot.text.length),
-    );
-    if (!optimisticSnapshot.text.startsWith(echoed)) {
-      _shellCompletionOptimisticSnapshot = null;
-    }
+    _shellCompletionOptimisticStates = states.sublist(reached);
   }
 
   void _queueShellCompletionRefresh({bool resetAnchorRetries = true}) {

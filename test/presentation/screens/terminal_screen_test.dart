@@ -9495,6 +9495,42 @@ void main() {
       expect(completionService.completeInvocations.last.commandLine, 'cat ac');
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    // An echo can show more than the snapshot while a Backspace for it is
+    // still pending ("git che" on the way to "git ch"), which is no reason to
+    // drop the snapshot and complete the echoed line.
+    testWidgets('keeps the snapshot through an echo a Backspace will undo', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % git c');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('h');
+      await tester.pump();
+      session.terminal!.write('h');
+      await tester.pump();
+      session.terminal!.textInput('e');
+      await tester.pump();
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.write('e');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+      session.terminal!.write('\b \b');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('git che')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'git ch');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {
