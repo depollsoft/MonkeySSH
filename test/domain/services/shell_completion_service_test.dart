@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart' as ssh;
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
@@ -348,6 +350,47 @@ void main() {
       }
       return probes;
     }
+
+    // A PTY zsh still at its prompt ignores EOF, so a probe that times out
+    // kept its channel, and the sshd session behind it, for the life of the
+    // connection, until the server's MaxSessions refused SFTP.
+    test('that never finishes has its channel destroyed', () {
+      fakeAsync((async) {
+        final client = MockSshClient();
+        final session = _buildShellCompletionSession(
+          client,
+          connectionId: 106,
+          hostId: 106,
+        );
+        final probe = _MockSshExecSession();
+        final input = _MockByteSink();
+        when(() => probe.stdout)
+            .thenAnswer((_) => StreamController<Uint8List>().stream);
+        when(() => probe.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => probe.done).thenAnswer((_) => Completer<void>().future);
+        when(() => probe.stdin).thenReturn(input);
+        when(() => probe.write(any())).thenAnswer((_) {});
+        when(input.close).thenAnswer((_) async {});
+        final fallback = _MockSshExecSession();
+        when(() => fallback.stdout).thenAnswer((_) => const Stream.empty());
+        when(() => fallback.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => fallback.done).thenAnswer((_) => Future<void>.value());
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+          (call) async => call.namedArguments[#pty] == null ? fallback : probe,
+        );
+        final service = ShellCompletionService(
+          interactiveZshTimeout: const Duration(milliseconds: 10),
+        );
+
+        unawaited(service.complete(session, argument('a')));
+        async.elapse(const Duration(milliseconds: 500));
+        verify(probe.close).called(1);
+        verifyNever(probe.channel.destroy);
+
+        async.elapse(abandonedSshExecCloseGrace);
+        verify(probe.channel.destroy).called(1);
+      });
+    });
 
     test('is skipped when the invocation names a non-zsh shell', () async {
       expect(
@@ -1252,7 +1295,90 @@ void main() {
       expect(command, contains(r'''printf 'argument\t%s\n' "$item"'''));
     },
   );
+
+  // Runs the probe the way sshd does, in a PTY, against the local zsh. Its
+  // compadd wrapper once assigned zsh's read-only `status`, which aborted the
+  // widget as soon as a completer added a match: no marker, no exit, and the
+  // shell waited at its prompt for good.
+  test('interactive zsh probe completes and exits in a real zsh', () async {
+    final zsh = [
+      '/bin/zsh',
+      '/usr/bin/zsh',
+    ].where((path) => File(path).existsSync()).firstOrNull;
+    final python = Platform.isWindows
+        ? null
+        : (await Process.run('which', ['python3'])).stdout.toString().trim();
+    if (zsh == null || python == null || python.isEmpty) {
+      markTestSkipped('needs zsh and python3');
+      return;
+    }
+    final home = await Directory.systemTemp.createTemp('flutty-zsh-probe');
+    addTearDown(() => home.delete(recursive: true));
+    File('${home.path}/notes.txt').writeAsStringSync('');
+    File('${home.path}/notebook.md').writeAsStringSync('');
+    final invocation = ShellCompletionInvocation(
+      commandLine: 'cat no',
+      cursorOffset: 6,
+      token: 'no',
+      tokenStart: 4,
+      mode: ShellCompletionMode.argument,
+      commandName: 'cat',
+      shellCommand: zsh,
+      words: const ['cat', 'no'],
+      wordIndex: 1,
+      workingDirectory: home.path,
+    );
+
+    final result = await Process.run(python, [
+      '-c',
+      _ptyRunner,
+      buildInteractiveZshCompletionRemoteCommand(invocation),
+      buildInteractiveZshCompletionInput(invocation),
+      home.path,
+    ]).timeout(const Duration(seconds: 30));
+
+    final output = result.stdout.toString();
+    expect(result.exitCode, 0, reason: output);
+    expect(output, contains('__FLUTTY_ZSH_NATIVE_DONE__'));
+    expect(output, contains('file\tnotes.txt'));
+    expect(output, contains('file\tnotebook.md'));
+    expect(
+      home.listSync().map((entry) => entry.uri.pathSegments.last),
+      isNot(contains(startsWith('flutty-zsh-completion.'))),
+      reason: 'the setup file is removed when the shell exits',
+    );
+  });
 }
+
+/// Runs `sh -c COMMAND` in a PTY with HOME and TMPDIR set to HOME, writes
+/// INPUT, and prints what the PTY printed. Exits with the shell's status, or
+/// 124 when it is still running after ten seconds.
+const _ptyRunner = '''
+import os, pty, select, signal, sys, time
+command, data, home = sys.argv[1], sys.argv[2].encode(), sys.argv[3]
+env = {'HOME': home, 'ZDOTDIR': home, 'TMPDIR': home, 'TERM': 'xterm-256color',
+       'PATH': '/usr/bin:/bin'}
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(home)
+    os.execve('/bin/sh', ['sh', '-c', command], env)
+os.write(fd, data)
+out, status, deadline = b'', None, time.time() + 10
+while status is None and time.time() < deadline:
+    if select.select([fd], [], [], 0.1)[0]:
+        try:
+            out += os.read(fd, 65536)
+        except OSError:
+            pass
+    done, code = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = os.waitstatus_to_exitcode(code)
+if status is None:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+sys.exit(124 if status is None else status)
+''';
 
 ShellCompletionInvocation _commandInvocation(String token, String cwd) =>
     ShellCompletionInvocation(

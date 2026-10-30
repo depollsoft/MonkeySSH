@@ -388,6 +388,7 @@ class ShellCompletionService {
     required Duration timeout,
     Future<void> Function()? writeInput,
   }) async {
+    var finished = false;
     try {
       final stdout = StringBuffer();
       final stdoutFuture = exec.stdout
@@ -409,9 +410,18 @@ class ShellCompletionService {
         exec.done,
         if (writeInput != null) writeInput(),
       ]).timeout(timeout);
+      finished = true;
       return stdout.toString();
     } finally {
-      exec.close();
+      if (finished) {
+        exec.close();
+      } else {
+        // EOF alone never ends a command that is still running, such as the
+        // PTY zsh of the native completion probe, which then kept its sshd
+        // session, one of the server's MaxSessions, until the connection
+        // closed.
+        unawaited(closeAbandonedSshExec(exec));
+      }
     }
   }
 
@@ -1927,9 +1937,9 @@ _flutty_dump_completions() {
     done
     builtin compadd -O out "\${capture_args[@]}" 2>/dev/null || :
     _flutty_matches+=("\${out[@]}")
+    # Returns compadd's status. Never name a local `status`: zsh's is
+    # read-only, and assigning it aborts the whole widget before the marker.
     builtin compadd "\${original_args[@]}" 2>/dev/null
-    local status=\$?
-    return \$status
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__
