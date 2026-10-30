@@ -76,10 +76,12 @@ type kittyRetainedPlacement struct {
 	alt bool
 	// horizontal and vertical are the cell offsets from the parent (H=, V=);
 	// cols and rows are the explicit cell span (c=, r=), 0 when the image
-	// sizes it; z is its z-index. A delete by position or z-index matches on
-	// them as the client does.
+	// sizes it, and offsetX and offsetY record an in-cell pixel offset (X=,
+	// Y=), which reaches one cell further; z is its z-index. A delete by
+	// position or z-index matches on them as the client does.
 	horizontal, vertical int
 	cols, rows           int
+	offsetX, offsetY     bool
 	z                    int
 	// command is the a=p command replayed for it, with replies silenced
 	// (kittyPlacementReplayCommand).
@@ -351,6 +353,8 @@ func (w *muxWindow) observeKittyPlacementLocked(
 		vertical:    kittyIntValue(args["V"]),
 		cols:        kittyIntValue(args["c"]),
 		rows:        kittyIntValue(args["r"]),
+		offsetX:     kittyIntValue(args["X"]) > 0,
+		offsetY:     kittyIntValue(args["Y"]) > 0,
 		z:           kittyIntValue(args["z"]),
 		command:     kittyPlacementReplayCommand(args),
 	})
@@ -572,10 +576,7 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 	alt bool,
 	screen *terminalScreen,
 ) bool {
-	selector := strings.ToLower(args["d"])
-	if selector == "" {
-		selector = "a"
-	}
+	selector := kittyDeleteSelectorOf(args)
 	placementID := kittyIDValue(args["p"])
 	var match func(kittyRetainedPlacement) bool
 	rootChanged := false
@@ -604,14 +605,9 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 				(rootVirtual != "" && p.parent == rootVirtual)
 		}
 	case "r":
-		first, errFirst := strconv.ParseUint(args["x"], 10, 32)
-		last, errLast := strconv.ParseUint(args["y"], 10, 32)
-		if errFirst != nil || errLast != nil {
-			return false
-		}
+		first, last := kittyDeleteRange(args)
 		inRange := func(imageID string) bool {
-			id, err := strconv.ParseUint(imageID, 10, 32)
-			return err == nil && id >= first && id <= last
+			return kittyIDInRange(imageID, first, last)
 		}
 		w.forgetKittyPhysicalPlacementsLocked(func(p kittyPhysicalPlacement) bool {
 			return p.alt == alt && inRange(p.imageID)
@@ -626,7 +622,10 @@ func (w *muxWindow) observeKittyPlacementDeleteLocked(
 			return inRange(p.imageID) || (rooted && inRange(image))
 		}
 	case "z":
-		z := kittyIntValue(args["z"])
+		z, ok := kittyDeleteZ(args)
+		if !ok {
+			return false
+		}
 		match = func(p kittyRetainedPlacement) bool {
 			return !p.virtual() && p.z == z
 		}
@@ -652,26 +651,24 @@ func (w *muxWindow) kittyPositionalDeleteMatch(
 	args map[string]string,
 	screen *terminalScreen,
 ) func(kittyRetainedPlacement) bool {
+	z, hasZ := kittyDeleteZ(args)
+	zMatches := func(p kittyRetainedPlacement) bool {
+		return selector != "q" || (hasZ && p.z == z)
+	}
 	if screen == nil {
 		return func(p kittyRetainedPlacement) bool {
-			return !p.virtual() && (selector != "q" ||
-				p.z == kittyIntValue(args["z"]))
+			return !p.virtual() && zMatches(p)
 		}
 	}
-	x, hasX := kittyCellValue(args["x"])
-	y, hasY := kittyCellValue(args["y"])
-	if selector == "c" {
-		row, col := screen.CursorPosition()
-		x, y, hasX, hasY = col, row, true, true
-	}
-	z := kittyIntValue(args["z"])
+	cursorRow, cursorCol := screen.CursorPosition()
+	cell := kittyDeleteCellOf(selector, args, cursorRow, cursorCol)
 	_, height := screen.Size()
 	seen := make(map[string]bool)
 	for _, id := range screen.PlaceholderImageIDs() {
 		seen[id] = true
 	}
 	return func(p kittyRetainedPlacement) bool {
-		if p.virtual() || (selector == "q" && p.z != z) {
+		if p.virtual() || !zMatches(p) {
 			return false
 		}
 		col, row, root, placed := w.kittyPlacementCellLocked(p, screen)
@@ -681,22 +678,110 @@ func (w *muxWindow) kittyPositionalDeleteMatch(
 			// scrollback could still put it anywhere.
 			return seen[root]
 		}
-		// A side the image sizes by its pixels may reach any further cell.
-		openRight, openDown := p.cols <= 0, p.rows <= 0
-		lastCol := col + max(1, p.cols) - 1
-		lastRow := row + max(1, p.rows) - 1
-		coversX := hasX && x >= col && (openRight || x <= lastCol)
-		coversY := hasY && y >= row && (openDown || y <= lastRow)
-		switch selector {
-		case "a":
-			return row < height && (openDown || lastRow >= 0)
-		case "x":
-			return coversX
-		case "y":
-			return coversY
-		default:
-			return coversX && coversY
-		}
+		span := kittyPlacementSpan(col, row, p.cols, p.rows, p.offsetX, p.offsetY)
+		return span.deletedBy(selector, cell, height)
+	}
+}
+
+// kittyDeleteSelectorOf returns the selector (d=) of a delete command in
+// lower case, "a" when it has none, as Kitty defaults it. An uppercase
+// selector removes the same placements and also frees image data.
+func kittyDeleteSelectorOf(args map[string]string) string {
+	if selector := strings.ToLower(args["d"]); selector != "" {
+		return selector
+	}
+	return "a"
+}
+
+// kittyDeleteRange reads the image ids a d=r delete names, x= through y=.
+// The client reads a bound it cannot read as 0.
+func kittyDeleteRange(args map[string]string) (first, last int64) {
+	first, err := strconv.ParseInt(args["x"], 10, 32)
+	if err != nil {
+		first = 0
+	}
+	last, err = strconv.ParseInt(args["y"], 10, 32)
+	if err != nil {
+		last = 0
+	}
+	return first, last
+}
+
+// kittyIDInRange reports whether imageID is an image id from first to last.
+func kittyIDInRange(imageID string, first, last int64) bool {
+	id, err := strconv.ParseInt(imageID, 10, 64)
+	return err == nil && id >= first && id <= last
+}
+
+// kittyDeleteZ reads the z-index a d=z or d=q delete names. Without one it
+// can read, the client matches no placement.
+func kittyDeleteZ(args map[string]string) (int, bool) {
+	z, err := strconv.ParseInt(args["z"], 10, 32)
+	return int(z), err == nil
+}
+
+// kittyDeleteCell is the cell a positional delete names, 0-based: the cursor
+// for d=c, otherwise the column x= and the row y=, either of which may be
+// absent.
+type kittyDeleteCell struct {
+	col, row       int
+	hasCol, hasRow bool
+}
+
+func kittyDeleteCellOf(
+	selector string,
+	args map[string]string,
+	cursorRow, cursorCol int,
+) kittyDeleteCell {
+	if selector == "c" {
+		return kittyDeleteCell{col: cursorCol, row: cursorRow, hasCol: true, hasRow: true}
+	}
+	col, hasCol := kittyCellValue(args["x"])
+	row, hasRow := kittyCellValue(args["y"])
+	return kittyDeleteCell{col: col, row: row, hasCol: hasCol, hasRow: hasRow}
+}
+
+// kittyCellSpan is the cells a placement covers on a screen: cols columns
+// and rows rows from its top-left cell at col, row, or 0 for a side the
+// image's pixels size, which may reach any further cell.
+type kittyCellSpan struct {
+	col, row   int
+	cols, rows int
+}
+
+// kittyPlacementSpan is the span of a placement at col, row given the cell
+// span its c= and r= keys asked for (0 when absent). An in-cell pixel offset
+// (X=, Y=) pushes the image into one more cell, as the client sizes it.
+func kittyPlacementSpan(col, row, cols, rows int, offsetX, offsetY bool) kittyCellSpan {
+	if cols > 0 && offsetX {
+		cols++
+	}
+	if rows > 0 && offsetY {
+		rows++
+	}
+	return kittyCellSpan{col: col, row: row, cols: max(cols, 0), rows: max(rows, 0)}
+}
+
+// deletedBy reports whether a positional delete (a, c, p, q, x or y) removes
+// a placement covering span from a screen height rows tall, as the client
+// matches it; d=q's z-index is the caller's to check. A side the image sizes
+// counts as reaching every cell past its start, so MonkeyMux takes the
+// placement as deleted whenever the client may have.
+func (span kittyCellSpan) deletedBy(selector string, cell kittyDeleteCell, height int) bool {
+	openRight, openDown := span.cols <= 0, span.rows <= 0
+	lastCol := span.col + max(1, span.cols) - 1
+	lastRow := span.row + max(1, span.rows) - 1
+	coversX := cell.hasCol && cell.col >= span.col && (openRight || cell.col <= lastCol)
+	coversY := cell.hasRow && cell.row >= span.row && (openDown || cell.row <= lastRow)
+	switch selector {
+	case "a":
+		return span.row < height && (openDown || lastRow >= 0)
+	case "x":
+		return coversX
+	case "y":
+		return coversY
+	default:
+		return coversX && coversY
 	}
 }
 
