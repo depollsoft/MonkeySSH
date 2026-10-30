@@ -749,7 +749,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     if (!_buffer.writeChar(char)) {
       return;
     }
-    _precedingCodepoint = char;
+    // REP repeats the glyph that was shown, as Ghostty and the MonkeyMux
+    // model do, even after the character set changes.
+    _precedingCodepoint = _buffer.charset.translate(char);
     if (char == kittyGraphicsPlaceholderCodePoint) {
       // Anchor to the cell the placeholder landed in, after any wrap or
       // insert-mode shift the write made.

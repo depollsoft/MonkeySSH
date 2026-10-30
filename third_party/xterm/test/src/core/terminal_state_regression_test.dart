@@ -148,6 +148,16 @@ void main() {
       expect(row(terminal, 1), 'a');
     });
 
+    // As in Ghostty and the MonkeyMux model: the glyph shown is repeated,
+    // whatever the character set is now, and nothing is left after RIS.
+    test('REP repeats the glyph shown and nothing after RIS', () {
+      final terminal = Terminal()..resize(10, 2);
+      terminal.write('\x1b(0q\x1b(B\x1b[2b');
+      expect(row(terminal, 0), '───');
+      terminal.write('x\x1bc\x1b[2b');
+      expect(row(terminal, 0), '');
+    });
+
     test('without autowrap output overwrites the last column', () {
       final terminal = Terminal()..resize(4, 2);
       terminal.write('\x1b[?7labcde');

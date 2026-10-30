@@ -402,6 +402,8 @@ func (s *terminalScreen) Reset() {
 	// a frame rendered after RIS still reproduces those cells.
 	s.kittyPending = vtKittyPlaceholder{}
 	s.kittyLast = vtKittyPlaceholder{}
+	// Nothing is left for REP to repeat, as in the client.
+	s.lastPrinted = 0
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
 	s.resetState()

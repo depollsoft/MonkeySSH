@@ -1187,3 +1187,17 @@ func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {
 		t.Fatalf("oldest ids were not evicted first: %q..%q", got[0], got[len(got)-1])
 	}
 }
+
+// REP repeats the glyph shown, whatever the character set is now, and nothing
+// after RIS, as the client does.
+func TestVTScreenRepeatAfterCharsetChangeAndReset(t *testing.T) {
+	s := newTerminalScreen(10, 2)
+	s.Write([]byte("\x1b(0q\x1b(B\x1b[2b"))
+	if got := s.TextRows()[0]; got != "───" {
+		t.Fatalf("REP after the charset change: %q", got)
+	}
+	s.Write([]byte("x\x1bc\x1b[2b"))
+	if got := s.TextRows()[0]; got != "" {
+		t.Fatalf("REP after RIS: %q", got)
+	}
+}
