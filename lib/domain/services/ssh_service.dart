@@ -2243,6 +2243,7 @@ class SshService {
           } on Object catch (error) {
             if (error is! Exception && error is! SSHError) rethrow;
             if (error is SshConnectionCancelledException ||
+                (jumpClient?.isClosed ?? false) ||
                 reconnectAfterDropWindow - elapsed.elapsed <=
                     reconnectAfterDropRetryDelay) {
               rethrow;
@@ -2317,7 +2318,10 @@ class SshService {
           // not lost.
           if (reconnectedAfterDrop || !_isDroppedConnection(error)) rethrow;
           await guard(authGate.idle);
-          if (!authGate.answeredLastPrompt) rethrow;
+          // A dropped jump connection can't carry the reconnect.
+          if (!authGate.answeredLastPrompt || (jumpClient?.isClosed ?? false)) {
+            rethrow;
+          }
           reconnectedAfterDrop = true;
           DiagnosticsLogService.instance.info(
             'ssh.connect',
@@ -2606,7 +2610,13 @@ class SshService {
           gate.recordDeclined();
           return null;
         }
-        if (isPasswordPrompt) {
+        // Only a prompt that names a password trades a typed answer with a
+        // reconnect: one that asks for a passphrase may be for a key, not the
+        // account.
+        final isReplayable =
+            isPasswordPrompt &&
+            prompts.first.promptText.toLowerCase().contains('password');
+        if (isReplayable) {
           final replayed = gate.takeReplayPassword();
           if (replayed != null) {
             gate.recordAnswer(typedPassword: replayed);
@@ -2634,7 +2644,7 @@ class SshService {
             gate.recordDeclined();
           } else {
             gate.recordAnswer(
-              typedPassword: isPasswordPrompt && responses.length == 1
+              typedPassword: isReplayable && responses.length == 1
                   ? responses.single
                   : null,
             );

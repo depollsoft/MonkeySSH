@@ -211,6 +211,94 @@ class _AuthenticationFixture {
 
 /// What the server does on one connection of a [_ReconnectFixture], after the
 /// host key is accepted. Throwing ends that connection.
+/// A destination behind a trusted jump host. The destination drops the
+/// connection after the user answers its password prompt, and [forward]
+/// answers each tunnel the jump host is asked to open.
+class _JumpReconnectFixture {
+  final jumpClient = _MockSshClient();
+  int forwardCount = 0;
+  late final SshService service;
+
+  static final jumpKey = _ed25519HostKeyBlob([5, 1]);
+  static final targetKey = _ed25519HostKeyBlob([5, 2]);
+
+  static Future<_JumpReconnectFixture> create({
+    required Future<SSHForwardChannel> Function(int forwardCount) forward,
+  }) async {
+    final fixture = _JumpReconnectFixture();
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final knownHostsRepository = KnownHostsRepository(db);
+    await _seedTrustedHost(
+      knownHostsRepository,
+      hostname: 'jump.example.com',
+      hostKeyBytes: jumpKey,
+    );
+    await _seedTrustedHost(
+      knownHostsRepository,
+      hostname: 'target.example.com',
+      hostKeyBytes: targetKey,
+    );
+
+    final jumpClient = fixture.jumpClient;
+    when(() => jumpClient.forwardLocal('target.example.com', 22))
+        .thenAnswer((_) => forward(++fixture.forwardCount));
+    when(() => jumpClient.isClosed).thenReturn(false);
+    when(jumpClient.close).thenAnswer((_) async {});
+    var clientIndex = 0;
+
+    fixture.service = SshService(
+      knownHostsRepository: knownHostsRepository,
+      interactiveAuthPromptHandler: (_) async => ['typed-secret'],
+      reconnectAfterDropWindow: const Duration(milliseconds: 50),
+      reconnectAfterDropRetryDelay: Duration.zero,
+      socketConnector: (host, port, {timeout}) async =>
+          _FakeHostKeySocket(jumpKey),
+      clientFactory:
+          (
+            socket, {
+            required username,
+            onVerifyHostKey,
+            onPasswordRequest,
+            onUserInfoRequest,
+            identities,
+            keepAliveInterval,
+          }) {
+            final isJump = clientIndex++ == 0;
+            final client = isJump ? jumpClient : _MockSshClient();
+            when(client.close).thenAnswer((_) async {});
+            when(() => client.authenticated).thenAnswer((_) async {
+              final bytes = await (socket as HostKeySource).hostKeyBytes;
+              await onVerifyHostKey!(
+                'ssh-ed25519',
+                _hostKeyCallbackFingerprint(bytes),
+              );
+              if (isJump) return;
+              await onPasswordRequest!();
+              return Future<void>.error(
+                SSHAuthAbortError('Connection closed before authentication'),
+              );
+            });
+            return client;
+          },
+    );
+    return fixture;
+  }
+
+  Future<SshConnectionResult> connect() => service.connect(
+    const SshConnectionConfig(
+      hostname: 'target.example.com',
+      port: 22,
+      username: 'target',
+      jumpHost: SshConnectionConfig(
+        hostname: 'jump.example.com',
+        port: 22,
+        username: 'jump',
+      ),
+    ),
+  );
+}
+
 typedef _ServerAuthStep = Future<void> Function(
   SSHPasswordRequestHandler? onPasswordRequest,
   SSHUserInfoRequestHandler? onUserInfoRequest,
@@ -8730,89 +8818,76 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('gives up on a tunnel that does not open within the window and '
         'closes it when it opens late', () async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      final knownHostsRepository = KnownHostsRepository(db);
-      final jumpHostKeyBytes = _ed25519HostKeyBlob([5, 1]);
-      final targetHostKeyBytes = _ed25519HostKeyBlob([5, 2]);
-      await _seedTrustedHost(
-        knownHostsRepository,
-        hostname: 'jump.example.com',
-        hostKeyBytes: jumpHostKeyBytes,
-      );
-      await _seedTrustedHost(
-        knownHostsRepository,
-        hostname: 'target.example.com',
-        hostKeyBytes: targetHostKeyBytes,
-      );
-
-      final jumpClient = _MockSshClient();
-      final targetClient = _MockSshClient();
       final lateTunnel = Completer<SSHForwardChannel>();
-      final lateSocket = _FakeForwardHostKeySocket(targetHostKeyBytes);
-      var forwardCount = 0;
-      when(() => jumpClient.forwardLocal('target.example.com', 22)).thenAnswer(
-        (_) => ++forwardCount == 1
-            ? Future.value(_FakeForwardHostKeySocket(targetHostKeyBytes))
+      final lateSocket = _FakeForwardHostKeySocket(
+        _JumpReconnectFixture.targetKey,
+      );
+      final fixture = await _JumpReconnectFixture.create(
+        forward: (count) => count == 1
+            ? Future.value(
+                _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+              )
             : lateTunnel.future,
       );
-      when(jumpClient.close).thenAnswer((_) async {});
-      when(targetClient.close).thenAnswer((_) async {});
-      var clientIndex = 0;
 
-      final service = SshService(
-        knownHostsRepository: knownHostsRepository,
-        interactiveAuthPromptHandler: (_) async => ['typed-secret'],
-        reconnectAfterDropWindow: const Duration(milliseconds: 50),
-        reconnectAfterDropRetryDelay: Duration.zero,
-        socketConnector: (host, port, {timeout}) async =>
-            _FakeHostKeySocket(jumpHostKeyBytes),
-        clientFactory:
-            (
-              socket, {
-              required username,
-              onVerifyHostKey,
-              onPasswordRequest,
-              onUserInfoRequest,
-              identities,
-              keepAliveInterval,
-            }) {
-              final isJump = clientIndex++ == 0;
-              final client = isJump ? jumpClient : targetClient;
-              when(() => client.authenticated).thenAnswer((_) async {
-                final bytes = await (socket as HostKeySource).hostKeyBytes;
-                await onVerifyHostKey!(
-                  'ssh-ed25519',
-                  _hostKeyCallbackFingerprint(bytes),
-                );
-                if (isJump) return;
-                await onPasswordRequest!();
-                return Future<void>.error(
-                  SSHAuthAbortError('Connection closed before authentication'),
-                );
-              });
-              return client;
-            },
-      );
-
-      final result = await service.connect(
-        const SshConnectionConfig(
-          hostname: 'target.example.com',
-          port: 22,
-          username: 'target',
-          jumpHost: SshConnectionConfig(
-            hostname: 'jump.example.com',
-            port: 22,
-            username: 'jump',
-          ),
-        ),
-      );
+      final result = await fixture.connect();
 
       expect(result.success, isFalse);
-      expect(forwardCount, 2);
+      expect(fixture.forwardCount, 2);
       lateTunnel.complete(lateSocket);
       await pumpEventQueue();
       expect(lateSocket.destroyed, isTrue);
+    });
+
+    test('does not reconnect through a jump connection that dropped', () async {
+      final fixture = await _JumpReconnectFixture.create(
+        forward: (_) => Future.value(
+          _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+        ),
+      );
+      when(() => fixture.jumpClient.isClosed).thenReturn(true);
+
+      final result = await fixture.connect();
+
+      expect(result.success, isFalse);
+      expect(fixture.forwardCount, 1);
+    });
+
+    test('does not offer a typed passphrase as the password', () async {
+      var promptCalls = 0;
+      final sentAnswers = <Object?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async {
+          promptCalls++;
+          return ['answer-$promptCalls'];
+        },
+        steps: [
+          (_, onUserInfo) async {
+            sentAnswers.add(
+              await onUserInfo!(
+                SSHUserInfoRequest('', '', [
+                  SSHUserInfoPrompt('Passphrase for key:', false),
+                ]),
+              ),
+            );
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (onPassword, _) async {
+            sentAnswers.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(_ReconnectFixture.config);
+
+      expect(result.success, isTrue);
+      expect(sentAnswers, [
+        ['answer-1'],
+        'answer-2',
+      ]);
+      expect(promptCalls, 2);
     });
 
     test('reconnects only once', () async {
