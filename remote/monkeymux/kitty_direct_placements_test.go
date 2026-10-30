@@ -93,7 +93,7 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 
 	frame := strings.Index(got, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l\x1b[3g")
 	image := strings.Index(got, "\x1b_Ga=t,i=1,")
-	clear := strings.Index(got, "\x1b_Ga=d,d=i,i=1,q=2\x1b\\")
+	clear := strings.Index(got, "\x1b_Ga=d,d=a,q=2\x1b\\")
 	rows := strings.Index(got, "5 parent placed again")
 	placed := strings.Index(got, kittyDemoPlacement)
 	saved := strings.LastIndex(got, "\x1b7")
@@ -105,7 +105,7 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 		t.Fatalf("replay parts out of order (clear %d, image %d, frame %d, rows %d, placement %d, saved cursor %d): %q",
 			clear, image, frame, rows, placed, saved, got)
 	}
-	// Only the image placed again is deleted first.
+	// The prefix deletes the client's placements; nothing else does.
 	if n := strings.Count(got, "a=d"); n != 1 {
 		t.Fatalf("replay deletes %d times: %q", n, got)
 	}
@@ -134,7 +134,7 @@ func TestForegroundReplayLeavesARedrawnScreenToTheProgram(t *testing.T) {
 	if !strings.Contains(got, "redrawn") {
 		t.Fatalf("the redraw was not forwarded: %q", got)
 	}
-	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Contains(got, "a=d") {
+	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Count(got, "a=d") != 1 {
 		t.Fatalf("replay placed image 1 besides the program (%d placements): %q", n, got)
 	}
 }
@@ -149,7 +149,7 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 		"\x1b[7;9H\x1b_Ga=p,i=6,p=2,C=1\x1b\\\x1b[10;1Halternate"
 	got := selectWindowReplay(t, window, stream, "")
 
-	mainDelete := strings.Index(got, "\x1b_Ga=d,d=i,i=5,q=2\x1b\\")
+	mainDelete := strings.Index(got, "\x1b_Ga=d,d=a,q=2\x1b\\")
 	mainImage := strings.Index(got, "\x1b_Ga=t,i=5,")
 	mainPlaced := strings.Index(got, "\x1b[2;3H\x1b_Ga=p,i=5,C=1,q=2\x1b\\")
 	enter := strings.LastIndex(got, "\x1b[?1049h")
@@ -165,9 +165,8 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 		t.Fatalf("an image was placed more than once: %q", got)
 	}
 	// The main screen's image reaches its own store before its frame, after
-	// the client's copies of the placement are deleted. Only the main screen
-	// keeps the client's placements through the replay prefix, so only it
-	// needs the delete.
+	// the prefix deleted the client's placements there; entering the
+	// alternate screen clears its own.
 	if !(mainDelete >= 0 && mainDelete < mainImage && mainImage < mainPlaced) ||
 		strings.Count(got, "a=d") != 1 {
 		t.Fatalf("main screen image and delete out of place (delete %d, image %d, placement %d): %q",
@@ -195,20 +194,54 @@ func TestHistoryReplayPlacesNoImagesAgain(t *testing.T) {
 	}
 }
 
-// TestForegroundReplayKeepsWhatItDoesNotPlaceAgain: an image the client
-// placed by number (I=) next to one placed by id. The replay can only place
-// the one with an id again, so it deletes that image's placements alone and
-// leaves the client's other placements as they are.
-func TestForegroundReplayKeepsWhatItDoesNotPlaceAgain(t *testing.T) {
+// TestReplayPrefixDeletesTheClientsPlacements: ED 2 leaves the client's
+// physical placements on the main screen, so the replay prefix deletes them
+// (keeping the image data), and the window shown before leaves no image over
+// the one shown now.
+func TestReplayPrefixDeletesTheClientsPlacements(t *testing.T) {
+	if !strings.Contains(activeWindowReplayPrefix,
+		"\x1b[H\x1b[2J\x1b[3J\x1b_Ga=d,d=a,q=2\x1b\\\x1b[?1049h") {
+		t.Fatalf("replay prefix %q does not delete the main screen's placements", activeWindowReplayPrefix)
+	}
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot", lastActivity: time.Now()}
+	got := selectWindowReplay(t, window, "\x1b[Hno images here", "")
+	if strings.Count(got, "\x1b_Ga=d,d=a,q=2\x1b\\") != 1 || strings.Contains(got, "a=p") {
+		t.Fatalf("switching to a window without images: %q", got)
+	}
+}
+
+// TestForegroundReplayPlacesAgainImagesItCanName: an image placed by number
+// (I=) next to one placed by id. The prefix deletes both on the client, and
+// the replay can only name the one with an id to place it again.
+func TestForegroundReplayPlacesAgainImagesItCanName(t *testing.T) {
 	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot", lastActivity: time.Now()}
 	stream := "\x1b[2;2H\x1b_Ga=T,I=9,C=1," + kittyPixelRoot + "\x1b\\" +
 		"\x1b[2;20H\x1b_Ga=T,i=42,C=1," + kittyPixelRoot + "\x1b\\\x1b[5;1Hwaiting"
 	got := selectWindowReplay(t, window, stream, "")
-	if strings.Count(got, "a=d") != 1 || !strings.Contains(got, "\x1b_Ga=d,d=i,i=42,q=2\x1b\\") {
-		t.Fatalf("replay deletes more than image 42's placements: %q", got)
+	if strings.Count(got, "a=p") != 1 || !strings.Contains(got, "\x1b[2;20H\x1b_Ga=p,i=42,C=1,q=2\x1b\\") {
+		t.Fatalf("replay does not place image 42 alone again: %q", got)
 	}
-	if !strings.Contains(got, "\x1b[2;20H\x1b_Ga=p,i=42,C=1,q=2\x1b\\") {
-		t.Fatalf("replay does not place image 42 again: %q", got)
+}
+
+// TestMainScreenReplayKeepsTheAlternateScreensImageData: the client keeps an
+// image store per screen, so an id transmitted on the main screen and again
+// on the alternate one names two images. The main screen gets no image the
+// window last transmitted on the alternate screen; its placement is made on
+// whatever the main screen's store holds.
+func TestMainScreenReplayKeepsTheAlternateScreensImageData(t *testing.T) {
+	const red, blue = "f=32,s=1,v=1;/wAA/w==", "f=32,s=1,v=1;AAD//w=="
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "\x1b[2;3H\x1b_Ga=T,i=7,C=1," + red + "\x1b\\" +
+		"\x1b[?1049h\x1b_Ga=t,i=7," + blue + "\x1b\\" +
+		"\x1b[5;5H\x1b_Ga=p,i=7,p=2,C=1\x1b\\\x1b[10;1Halternate"
+	got := selectWindowReplay(t, window, stream, "")
+	enter := strings.LastIndex(got, "\x1b[?1049h")
+	mainPart, altPart := got[:enter], got[enter:]
+	if strings.Contains(mainPart, "a=t,i=7") || !strings.Contains(mainPart, "\x1b[2;3H\x1b_Ga=p,i=7,C=1,q=2\x1b\\") {
+		t.Fatalf("main screen replay = %q", mainPart)
+	}
+	if !strings.Contains(altPart, "AAD//w==") || !strings.Contains(altPart, "\x1b[5;5H\x1b_Ga=p,i=7,p=2,C=1,q=2\x1b\\") {
+		t.Fatalf("alternate screen replay = %q", altPart)
 	}
 }
 

@@ -16,10 +16,16 @@ import (
 // its parent and moves with it. A direct placement at the cursor (a=T or a=p
 // without U= or P=) is anchored to a cell, which only the screen model can
 // follow (vtscreen_kitty_placements.go); a frame painted from the model places
-// the ones on its screen again. A relative placement is kept only while its
-// parent chain ends at a virtual placement that is kept too: the children of
-// a direct placement are not followed, so they come back only when the
-// program places them again.
+// the ones on its screen again. Every replay first deletes the placements on
+// the client's main screen (activeWindowReplayPrefix), so another window's
+// images never stay over this one; the cost is that an image a window
+// replayed from its frame placed by number (I=) or without an id, which no
+// replay can name, is gone after a reopen. A shell window's history replay
+// carries its placements and places them again.
+//
+// A relative placement is kept only while its parent chain ends at a
+// virtual placement that is kept too: the children of a direct placement are
+// not followed, so they come back only when the program places them again.
 //
 // The client keeps one placement per image and placement id and replaces it
 // when the same pair is sent again, so a replay never duplicates one; a

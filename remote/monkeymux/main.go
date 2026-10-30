@@ -197,7 +197,17 @@ const terminalSynchronizedOutputEnd = "\x1b[?9002l"
 
 const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
-const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
+// terminalKittyPlacementsClearSequence deletes every Kitty placement on the
+// visible screen, keeping the image data (lowercase d=a). ED 2 leaves the
+// client's physical placements where they are (Buffer._eraseRange), so
+// without it one window's images stayed over the next window's replay; it
+// matches no virtual placement, which only placeholder cells show. A window
+// replayed from its frame places its own direct placements again, those of
+// images it names by id; a shell window replays its history, which carries
+// its placements.
+const terminalKittyPlacementsClearSequence = "\x1b_Ga=d,d=a,q=2\x1b\\"
+
+const terminalAllScreensClearSequence = terminalScreenClearSequence + terminalKittyPlacementsClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
 const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
@@ -11401,18 +11411,12 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	)
 	images = append(images, frameImages...)
 	// A direct placement whose image did not fit is left out rather than
-	// placed where the client may have no image, along with the delete of the
-	// client's own copies, which then stay.
+	// placed where the client may hold another window's image of that id.
 	carried := kittyCarriedImages(replayed, served)
-	var deletes []byte
-	if !screen.AlternateScreenActive() {
-		deletes = screen.KittyMainPlacementDeletes(carried)
-	}
 	frame := window.withheldAttachOscSuffixTrimmedLocked(screen.RenderFrameReplacing(carried))
 	mainScreen, _ := window.mainScreenReplayLocked(maxKittyImageRepairBytes - len(images))
 	placements := window.kittyPlacementReplayLocked()
-	replayHistory := make([]byte, 0, len(deletes)+len(images)+len(frame)+len(placements))
-	replayHistory = append(replayHistory, deletes...)
+	replayHistory := make([]byte, 0, len(images)+len(frame)+len(placements))
 	replayHistory = append(replayHistory, images...)
 	replayHistory = append(replayHistory, frame...)
 	replayHistory = append(replayHistory, placements...)
@@ -11435,10 +11439,13 @@ func kittyCarriedImages(replayed map[string]struct{}, served []string) func(stri
 // alternate screen again, and returns it with how many of its bytes are
 // image data; it is nil while the main screen shows. Each screen keeps its
 // own images on the client, so the images its direct placements show are
-// sent store-only while it is the screen shown, as many as fit in budget,
-// after deleting the client's copies of their placements; a placement whose
-// image does not fit is left out, with that delete. Sending an image replaces
-// every placement it had there, so the screen's kept placements follow.
+// sent store-only while it is the screen shown, as many as fit in budget; a
+// placement whose image does not fit is left out. An image the window last
+// transmitted on the alternate screen is not sent, since the client keeps
+// that data apart from the main screen's: the placement is made again on
+// whatever the main screen's store holds, which a client that saw the
+// output has and a fresh one lacks. Sending an image replaces every
+// placement it had there, so the screen's kept placements follow.
 func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 	if !w.alternateScreenModeActiveLocked() {
 		return nil, 0
@@ -11448,16 +11455,20 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 		return nil, 0
 	}
 	want := screen.KittyPlacementImageIDsOn(false)
-	var ids []string
+	var ids, elsewhere []string
 	for _, id := range w.kittyImageOrder {
-		if slices.Contains(want, id) {
+		if !slices.Contains(want, id) {
+			continue
+		}
+		if alt, ok := w.kittyTracking.rootAlt[id]; ok && !alt {
 			ids = append(ids, id)
+		} else {
+			elsewhere = append(elsewhere, id)
 		}
 	}
 	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
-	carried := kittyCarriedImages(nil, sent)
-	out := screen.KittyMainPlacementDeletes(carried)
-	out = append(out, images...)
+	carried := kittyCarriedImages(nil, append(sent, elsewhere...))
+	out := append([]byte(nil), images...)
 	out = append(out, screen.RenderMainScreenReplacing(carried)...)
 	if len(images) > 0 {
 		out = append(out, w.kittyPlacementReplayOnLocked(false)...)
