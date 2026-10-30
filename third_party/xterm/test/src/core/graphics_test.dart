@@ -2013,6 +2013,41 @@ void main() {
     }
   });
 
+  testWidgets('deletePhysicalPlacements clears both screens, keeping images', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final pngBase64 = await _buildPngBase64(2, 2);
+      final terminal = Terminal()..resize(20, 6);
+      int anchors(Buffer buffer) => [
+            for (var row = 0; row < buffer.lines.length; row++)
+              ...buffer.graphics.physicalPlacementAnchorsInLine(
+                buffer.lines[row],
+              ),
+          ].length;
+      terminal
+        ..write('\x1b_Ga=T,f=100,i=1,c=2,r=1,C=1,q=2;$pngBase64\x1b\\')
+        ..write('\x1b_Ga=t,f=100,i=2,q=2;$pngBase64\x1b\\')
+        ..write('\x1b_Ga=p,U=1,i=2,c=2,r=1,q=2\x1b\\')
+        ..write('\x1b[?1049h')
+        ..write('\x1b_Ga=T,f=100,i=3,c=2,r=1,C=1,q=2;$pngBase64\x1b\\');
+
+      // Called with the decodes behind the placements still pending: the
+      // placements land and go.
+      terminal.deletePhysicalPlacements();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(anchors(terminal.mainBuffer), 0);
+      expect(anchors(terminal.altBuffer), 0);
+      expect(terminal.mainBuffer.graphics.placements, isEmpty);
+      expect(terminal.altBuffer.graphics.placements, isEmpty);
+      // The images, and the virtual placement placeholder cells show, stay.
+      expect(terminal.mainBuffer.graphics.heldImageSignatures(), contains(1));
+      expect(terminal.altBuffer.graphics.heldImageSignatures(), contains(3));
+      expect(terminal.mainBuffer.graphics.virtualPlacementById(2), isNotNull);
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

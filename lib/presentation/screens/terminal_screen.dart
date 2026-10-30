@@ -10977,6 +10977,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  /// Deletes the terminal's own image placements before this client changes
+  /// the MonkeyMux window it shows. The server repaints the screen with the
+  /// other window's output, under which an image this window placed would
+  /// otherwise stay; a replay keeps what the client holds, since only the
+  /// client knows whether it is reopening the same window. A change started
+  /// elsewhere (another client, a window that exits) keeps them.
+  void _clearImagesBeforeMonkeyMuxWindowChange() {
+    _terminal.deletePhysicalPlacements();
+  }
+
   /// Switches to a different tmux window via exec channel.
   ///
   /// Uses an exec channel (not the interactive shell) because
@@ -11010,6 +11020,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       session
         ..clearTerminalProgress()
         ..synchronizeProgramStatus(null);
+      if (!suppressTerminalReplay && targetWindow?.isActive != true) {
+        _clearImagesBeforeMonkeyMuxWindowChange();
+      }
     }
     if (targetWindowId == null) {
       await backend.selectWindow(
@@ -11243,6 +11256,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         refreshVisibleTerminal: true,
       );
       if (!mounted) return;
+      // The new window becomes the one shown.
+      _clearImagesBeforeMonkeyMuxWindowChange();
     }
     final tool = agentLaunchToolForCommandText(command);
     await backend.createWindow(
@@ -11332,6 +11347,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       await _handleMuxSessionEnded(session, sessionName);
     }
 
+    // Closing the window shown makes the server show another one.
+    if (!closesLastMonkeyMuxWindow &&
+        _activeMuxBackend == RemoteMuxBackend.monkeyMux &&
+        _resolveTmuxWindowByTarget(windowIndex, windowId: windowId)?.isActive ==
+            true) {
+      _clearImagesBeforeMonkeyMuxWindowChange();
+    }
     try {
       try {
         await _activeTerminalConnectionBackend(session)

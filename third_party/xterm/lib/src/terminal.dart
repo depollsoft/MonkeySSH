@@ -254,6 +254,23 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     return result;
   }
 
+  /// Deletes every physical Kitty placement on both screens, scrollback
+  /// included, keeping the image data, as `a=d,d=a` does on one screen. For a
+  /// client about to show another program's output in place of this one's,
+  /// such as another multiplexer window, whose replay would otherwise land
+  /// under the images this one placed.
+  void deletePhysicalPlacements() {
+    for (final buffer in [_mainBuffer, _altBuffer]) {
+      // A barrier, as for `a=d`: a placement still waiting on its image's
+      // decode lands first and goes with the rest.
+      _scheduleGraphicsBarrier(buffer.graphics, () {
+        if (buffer.graphics.deletePlacements(firstVisibleRow: 0)) {
+          notifyListeners();
+        }
+      });
+    }
+  }
+
   /// Protocol image ids referenced by on-screen Kitty Unicode-placeholder cells
   /// on the active screen that resolve to no stored or pending image.
   ///

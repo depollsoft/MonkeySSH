@@ -7017,6 +7017,83 @@ void main() {
       expect(writtenAtSelect, 'hi?\r');
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    // The server repaints the screen with the other window's output, which
+    // would land under this window's images, so the app deletes its own
+    // placements when it asks for the switch.
+    testWidgets('a MonkeyMux window switch clears the shown images first', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const sessionName = 'work';
+      const windows = <TmuxWindow>[
+        TmuxWindow(index: 0, name: 'shell', isActive: true, id: '@0'),
+        TmuxWindow(index: 1, name: 'agent', isActive: false, id: '@1'),
+      ];
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: sessionName,
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final muxFixture =
+          createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+            ..stubPrefetch()
+            ..stubPaneContext()
+            ..stubForegroundClient()
+            ..stubWindows(() => windows)
+            ..stubWindowEvents();
+      int anchors() {
+        final buffer = session.terminal!.mainBuffer;
+        return [
+          for (var row = 0; row < buffer.lines.length; row++)
+            ...buffer.graphics.physicalPlacementAnchorsInLine(
+              buffer.lines[row],
+            ),
+        ].length;
+      }
+
+      int? anchorsAtSelect;
+      when(
+        () => monkeyMuxService.selectWindow(
+          session,
+          sessionName,
+          1,
+          windowId: any(named: 'windowId'),
+          extraFlags: any(named: 'extraFlags'),
+          clientImageSignatures: any(named: 'clientImageSignatures'),
+          suppressReplay: any(named: 'suppressReplay'),
+        ),
+      ).thenAnswer((_) async {
+        anchorsAtSelect = anchors();
+      });
+      muxFixture.stubThemeRefresh();
+      // Decoded before it is placed, so nothing waits behind the delete.
+      final pixel = base64.encode([0, 0, 0]);
+      await tester.runAsync(() async {
+        session.terminal!.write('\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;$pixel\x1b\\');
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      session.terminal!.write('\x1b_Ga=p,i=1,c=2,r=1,C=1,q=2\x1b\\');
+      expect(anchors(), 1);
+
+      await muxFixture.pump(tester);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(find.text('agent'));
+      await tester.pump();
+      await tester.pump(TerminalEnterPacer.defaultGap);
+      await tester.pump();
+
+      expect(anchorsAtSelect, 0);
+      // Past the image upkeep timers the screen starts while it holds images.
+      await tester.pump(const Duration(seconds: 10));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'MonkeyMux window switches wait for replay before following output',
       (tester) async {
