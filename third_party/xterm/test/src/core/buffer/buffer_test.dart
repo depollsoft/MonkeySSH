@@ -241,6 +241,58 @@ void main() {
       expect(terminal.buffer.height, beforeHeight);
     });
 
+    // Growing pulls rows back from the scrollback only while the content
+    // reaches the bottom row. A screen cleared at the prompt has the cursor at
+    // the top and nothing below it, so the old screen must not come back above
+    // the prompt when the keyboard closes; the rows go below, as in Ghostty.
+    test('growing keeps a cleared screen clear', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(20, 10);
+      for (var i = 1; i <= 30; i++) {
+        terminal.write('line$i\r\n');
+      }
+      terminal.write('\x1b[H\x1b[2Jprompt>');
+      final scrollBack = terminal.buffer.scrollBack;
+
+      for (var height = 11; height <= 16; height++) {
+        terminal.resize(20, height);
+      }
+
+      expect(terminal.buffer.scrollBack, scrollBack);
+      expect(terminal.buffer.cursorY, 0);
+      expect(
+        terminal.buffer.lines[terminal.buffer.scrollBack]
+            .toString()
+            .trimRight(),
+        'prompt>',
+      );
+      for (var row = 1; row < 16; row++) {
+        final line = terminal.buffer.lines[terminal.buffer.scrollBack + row];
+        expect(line.toString().trim(), isEmpty, reason: 'row $row');
+      }
+    });
+
+    test('growing pulls rows back while the content reaches the bottom', () {
+      for (final (name, setup, cursorY) in [
+        ('cursor on the bottom row', 'prompt>', 9),
+        // An inline app's footer below its input line.
+        ('a footer on the bottom row', '\x1b[10;1H footer\x1b[8;1Hinput>', 7),
+      ]) {
+        final terminal = Terminal(maxLines: 200);
+        terminal.resize(20, 10);
+        for (var i = 1; i <= 30; i++) {
+          terminal.write('line$i\r\n');
+        }
+        terminal.write(setup);
+        final scrollBack = terminal.buffer.scrollBack;
+
+        terminal.resize(20, 13);
+
+        expect(terminal.buffer.scrollBack, scrollBack - 3, reason: name);
+        expect(terminal.buffer.cursorY, cursorY + 3, reason: name);
+      }
+    });
+
     // The alternate screen has no scrollback, so the rows a shrink scrolls above
     // the viewport are deleted by the `clearScrollback()` that follows the
     // resize. Scrolling there therefore destroys the *top* rows, while the host

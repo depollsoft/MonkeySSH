@@ -716,13 +716,21 @@ func (s *terminalScreen) clampVTCursor(g *vtGrid, width, height int) {
 //   - Shrinking gives up empty rows below the cursor first, then scrolls rows
 //     into the scrollback, keeping rows an application drew below its cursor,
 //     such as an agent's input box border.
-//   - Growing brings scrolled-off lines back above the content, as tmux and
-//     xterm.js do, and adds blank rows only once the scrollback runs out.
+//   - Growing brings scrolled-off lines back above the content while the
+//     content reaches the bottom row (the cursor is on it, or something was
+//     written there), and adds blank rows once the scrollback runs out.
+//     Otherwise it adds blank rows below, as Ghostty and xterm.js do when the
+//     cursor is above the bottom row.
 //
 // Appending blank rows on growth left an inline agent's input box mid-screen,
 // with blank rows under it, on every switch back after the phone keyboard
-// closed.
+// closed; the agent's footer below its input line keeps it at the bottom. But
+// pulling rows back whatever the screen held brought a screen cleared at the
+// prompt back above it.
 func (s *terminalScreen) resizeMainRows(g *vtGrid, width, height int) {
+	if last := len(g.rows) - 1; len(g.rows) < height && g.cursorRow < last && vtRowReclaimable(g.rows[last]) {
+		return
+	}
 	for len(g.rows) > height {
 		last := len(g.rows) - 1
 		belowCursor := last > g.cursorRow

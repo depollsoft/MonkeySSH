@@ -65,6 +65,41 @@ func TestVTScreenKeyboardCycleKeepsInlineAgentAnchored(t *testing.T) {
 	}
 }
 
+// TestVTScreenGrowKeepsClearedScreenClear: a screen cleared at the prompt has
+// the cursor at the top and nothing written below it, so a taller screen adds
+// blank rows below instead of bringing the old screen back above the prompt,
+// as the client does (Buffer.resize).
+func TestVTScreenGrowKeepsClearedScreenClear(t *testing.T) {
+	s := newTerminalScreen(20, 10)
+	for line := 1; line <= 30; line++ {
+		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))
+	}
+	s.Write([]byte("\x1b[H\x1b[2Jprompt>"))
+	history := s.scrollback.len()
+
+	for height := 11; height <= 16; height++ {
+		s.Resize(20, height)
+	}
+
+	want := append([]string{"prompt>"}, make([]string, 15)...)
+	if got := s.TextRows(); !slices.Equal(got, want) {
+		t.Fatalf("grow brought rows back: %q", got)
+	}
+	if row, col := s.CursorPosition(); row != 0 || col != 7 {
+		t.Fatalf("cursor (%d,%d), want (0,7)", row, col)
+	}
+	if s.scrollback.len() != history {
+		t.Fatalf("scrollback %d lines, want %d", s.scrollback.len(), history)
+	}
+
+	// With the cursor on the bottom row the rows come back, as before.
+	s.Write([]byte("\x1b[16;1H$ "))
+	s.Resize(20, 19)
+	if row, _ := s.CursorPosition(); row != 18 || s.scrollback.len() != history-3 {
+		t.Fatalf("cursor row %d, scrollback %d: want 18 and %d", row, s.scrollback.len(), history-3)
+	}
+}
+
 func TestVTScreenShrinkGivesUpEmptyRowsBelowCursorFirst(t *testing.T) {
 	s := newTerminalScreen(20, 8)
 	s.Write([]byte("one\r\ntwo\r\nthree"))

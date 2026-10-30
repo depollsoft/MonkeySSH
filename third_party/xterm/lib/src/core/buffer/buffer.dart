@@ -615,12 +615,24 @@ class Buffer {
   void resize(int oldWidth, int oldHeight, int newWidth, int newHeight) {
     // 1. Adjust the height.
     if (newHeight > oldHeight) {
-      // Grow larger
+      // Grow larger. Rows come back from the scrollback above the content
+      // while the content reaches the bottom row: the cursor is on it, or
+      // something was written there, such as an inline app's footer under its
+      // input line, which then stays at the bottom when the keyboard closes.
+      // Otherwise blank rows go below, as Ghostty and xterm.js add them when
+      // the cursor is above the bottom row, so a screen cleared at the prompt
+      // doesn't come back above it. The MonkeyMux screen model applies the
+      // same rule (resizeMainRows).
+      final pullScrollback =
+          _cursorY >= oldHeight - 1 || !_isReclaimableRow(lines.length - 1);
       for (var i = 0; i < newHeight - oldHeight; i++) {
-        if (newHeight > lines.length) {
-          lines.push(_newEmptyLine(newWidth));
-        } else {
+        if (pullScrollback && newHeight <= lines.length) {
           _cursorY++;
+        } else {
+          if (lines.isFull) {
+            graphics.removeGraphicsAnchoredToLine(lines[0]);
+          }
+          lines.push(_newEmptyLine(newWidth));
         }
       }
     } else {
