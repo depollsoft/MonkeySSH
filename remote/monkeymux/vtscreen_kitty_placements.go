@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -162,8 +161,8 @@ func kittyTransmissionAccepted(args map[string]string) bool {
 	}
 	raw := true
 	if format := args["f"]; format != "" {
-		switch n, err := strconv.Atoi(format); {
-		case err != nil:
+		switch n, ok := kittyNumber(format); {
+		case !ok:
 			return false
 		case n == 100:
 			raw = false
@@ -212,7 +211,6 @@ func (s *terminalScreen) placeKittyImage(args map[string]string) {
 		span := kittyPlacementSpan(
 			g.cursorCol, g.cursorRow,
 			kittyIntValue(args["c"]), kittyIntValue(args["r"]),
-			kittyIntValue(args["X"]) > 0, kittyIntValue(args["Y"]) > 0,
 		)
 		s.kittyDirect = append(s.kittyDirect, vtKittyPlacement{
 			imageID:     imageID,
@@ -238,7 +236,7 @@ func (s *terminalScreen) placeKittyImage(args map[string]string) {
 // model can count; any other moves the client's cursor by its pixel size,
 // which the model does not know, and leaves the two apart.
 func (s *terminalScreen) advanceKittyCursor(args map[string]string) {
-	if stay, err := strconv.Atoi(args["C"]); err == nil && stay == 1 {
+	if stay, ok := kittyNumber(args["C"]); ok && stay == 1 {
 		return
 	}
 	cols, rows := kittyIntValue(args["c"]), kittyIntValue(args["r"])

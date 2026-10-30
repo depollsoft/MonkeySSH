@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -80,12 +81,10 @@ type kittyRetainedPlacement struct {
 	alt bool
 	// horizontal and vertical are the cell offsets from the parent (H=, V=);
 	// cols and rows are the explicit cell span (c=, r=), 0 when the image
-	// sizes it, and offsetX and offsetY record an in-cell pixel offset (X=,
-	// Y=), which reaches one cell further; z is its z-index. A delete by
-	// position or z-index matches on them as the client does.
+	// sizes it; z is its z-index. A delete by position or z-index matches on
+	// them as the client does.
 	horizontal, vertical int
 	cols, rows           int
-	offsetX, offsetY     bool
 	z                    int
 	// command is the a=p command replayed for it, with replies silenced
 	// (kittyPlacementReplayCommand).
@@ -118,19 +117,48 @@ func kittyRootPlacementKey(imageID string) string {
 	return "root:" + imageID
 }
 
-// kittyNonZero reads a Kitty numeric key the way the client does: present and
-// any non-zero value.
-func kittyNonZero(value string) bool {
-	n, err := strconv.ParseUint(value, 10, 32)
-	return err == nil && n != 0
+// kittyNumber reads a Kitty numeric key as the client reads every one, with
+// Dart's int.tryParse: surrounding whitespace, a sign and a 0x prefix are
+// allowed, and any value that fits in 64 bits. ok is false for anything
+// else, which the client takes as an absent key.
+func kittyNumber(value string) (n int64, ok bool) {
+	digits := strings.TrimSpace(value)
+	negative := false
+	if digits != "" && (digits[0] == '+' || digits[0] == '-') {
+		negative = digits[0] == '-'
+		digits = digits[1:]
+	}
+	base := 10
+	if len(digits) > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X') {
+		base, digits = 16, digits[2:]
+	}
+	magnitude, err := strconv.ParseUint(digits, base, 64)
+	switch {
+	case err != nil:
+		return 0, false
+	case negative && magnitude <= 1<<63:
+		return int64(-magnitude), true
+	case !negative && magnitude <= math.MaxInt64:
+		return int64(magnitude), true
+	}
+	return 0, false
 }
 
-// kittyIDValue normalizes an id key: "" for absent or zero.
+// kittyNonZero reads a Kitty flag key the way the client does: present and
+// any non-zero value.
+func kittyNonZero(value string) bool {
+	n, ok := kittyNumber(value)
+	return ok && n != 0
+}
+
+// kittyIDValue normalizes an id key, as the decimal number the client reads:
+// "" for absent, zero or negative, which the client takes as no id.
 func kittyIDValue(value string) string {
-	if !kittyNonZero(value) {
+	n, ok := kittyNumber(value)
+	if !ok || n <= 0 {
 		return ""
 	}
-	return strings.TrimLeft(value, "0")
+	return strconv.FormatInt(n, 10)
 }
 
 // kittyPlacementCommandKeys are the keys a replay needs to make a kept
@@ -370,8 +398,6 @@ func (w *muxWindow) observeKittyPlacementLocked(
 		vertical:    kittyIntValue(args["V"]),
 		cols:        kittyIntValue(args["c"]),
 		rows:        kittyIntValue(args["r"]),
-		offsetX:     kittyIntValue(args["X"]) > 0,
-		offsetY:     kittyIntValue(args["Y"]) > 0,
 		z:           kittyIntValue(args["z"]),
 		command:     kittyPlacementReplayCommand(args),
 	})
@@ -381,10 +407,7 @@ func (w *muxWindow) observeKittyPlacementLocked(
 
 // kittyIntValue reads a signed Kitty numeric key, 0 when absent or invalid.
 func kittyIntValue(value string) int {
-	n, err := strconv.ParseInt(value, 10, 32)
-	if err != nil {
-		return 0
-	}
+	n, _ := kittyNumber(value)
 	return int(n)
 }
 
@@ -695,7 +718,7 @@ func (w *muxWindow) kittyPositionalDeleteMatch(
 			// scrollback could still put it anywhere.
 			return seen[root]
 		}
-		span := kittyPlacementSpan(col, row, p.cols, p.rows, p.offsetX, p.offsetY)
+		span := kittyPlacementSpan(col, row, p.cols, p.rows)
 		return span.deletedBy(selector, cell, height)
 	}
 }
@@ -710,31 +733,25 @@ func kittyDeleteSelectorOf(args map[string]string) string {
 	return "a"
 }
 
-// kittyDeleteRange reads the image ids a d=r delete names, x= through y=.
-// The client reads a bound it cannot read as 0.
+// kittyDeleteRange reads the image ids a d=r delete names, x= through y=,
+// as the client does: a bound it cannot read is 0 (_deleteGraphics).
 func kittyDeleteRange(args map[string]string) (first, last int64) {
-	first, err := strconv.ParseInt(args["x"], 10, 32)
-	if err != nil {
-		first = 0
-	}
-	last, err = strconv.ParseInt(args["y"], 10, 32)
-	if err != nil {
-		last = 0
-	}
+	first, _ = kittyNumber(args["x"])
+	last, _ = kittyNumber(args["y"])
 	return first, last
 }
 
 // kittyIDInRange reports whether imageID is an image id from first to last.
 func kittyIDInRange(imageID string, first, last int64) bool {
-	id, err := strconv.ParseInt(imageID, 10, 64)
-	return err == nil && id >= first && id <= last
+	id, ok := kittyNumber(imageID)
+	return ok && id >= first && id <= last
 }
 
 // kittyDeleteZ reads the z-index a d=z or d=q delete names. Without one it
 // can read, the client matches no placement.
 func kittyDeleteZ(args map[string]string) (int, bool) {
-	z, err := strconv.ParseInt(args["z"], 10, 32)
-	return int(z), err == nil
+	z, ok := kittyNumber(args["z"])
+	return int(z), ok
 }
 
 // kittyDeleteCell is the cell a positional delete names, 0-based: the cursor
@@ -767,15 +784,11 @@ type kittyCellSpan struct {
 }
 
 // kittyPlacementSpan is the span of a placement at col, row given the cell
-// span its c= and r= keys asked for (0 when absent). An in-cell pixel offset
-// (X=, Y=) pushes the image into one more cell, as the client sizes it.
-func kittyPlacementSpan(col, row, cols, rows int, offsetX, offsetY bool) kittyCellSpan {
-	if cols > 0 && offsetX {
-		cols++
-	}
-	if rows > 0 && offsetY {
-		rows++
-	}
+// span its c= and r= keys asked for (0 when absent). A side with a span
+// covers exactly that many cells whatever its in-cell pixel offset (X=, Y=):
+// the client shrinks the image by the offset rather than pushing it into
+// another cell (terminalImageSpanSize, _placementRelativeCellRange).
+func kittyPlacementSpan(col, row, cols, rows int) kittyCellSpan {
 	return kittyCellSpan{col: col, row: row, cols: max(cols, 0), rows: max(rows, 0)}
 }
 
@@ -802,13 +815,14 @@ func (span kittyCellSpan) deletedBy(selector string, cell kittyDeleteCell, heigh
 	}
 }
 
-// kittyCellValue reads a 1-based Kitty cell coordinate as a 0-based one.
+// kittyCellValue reads a 1-based Kitty cell coordinate as a 0-based one. The
+// client's x - 1 below 0 names no cell.
 func kittyCellValue(value string) (int, bool) {
-	n, err := strconv.ParseUint(value, 10, 32)
-	if err != nil || n == 0 {
+	n, ok := kittyNumber(value)
+	if !ok || n < 1 {
 		return 0, false
 	}
-	return int(n) - 1, true
+	return int(n - 1), true
 }
 
 // kittyPlacementCellLocked resolves a kept relative placement to the screen

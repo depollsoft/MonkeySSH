@@ -31,6 +31,16 @@ func assertVTKittyPlaced(t *testing.T, s *terminalScreen, want ...string) {
 
 const vtKittyPlaceAt = "\x1b[5;3H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\"
 
+// vtKittyUploads transmits images store-only, on the screen shown, so that
+// display commands can place them.
+func vtKittyUploads(ids ...int) string {
+	var out strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&out, "\x1b_Ga=t,f=100,i=%d,q=2;AAAA\x1b\\", id)
+	}
+	return out.String()
+}
+
 func TestVTKittyDirectPlacementIsAnchoredToItsCell(t *testing.T) {
 	s := newTerminalScreen(40, 10)
 	s.Write([]byte("\x1b_Ga=t,f=100,i=1,q=2;AAAA\x1b\\" + vtKittyPlaceAt))
@@ -520,4 +530,46 @@ func TestVTKittyShrinkKeepsARowAnImageIsAnchoredTo(t *testing.T) {
 		t.Fatalf("cursor row %d, want 1", row)
 	}
 	assertVTKittyPlaced(t, s, "1/1@4,0")
+}
+
+// TestVTKittyPixelOffsetsKeepThePlacementSpan: the client shrinks an image
+// by its in-cell offset (X=, Y=) inside the cells c= and r= give it, so the
+// offset never reaches another cell, for deletes and region scrolls alike.
+func TestVTKittyPixelOffsetsKeepThePlacementSpan(t *testing.T) {
+	s := newTerminalScreen(10, 6)
+	s.Write([]byte("\x1b_Ga=t,i=42," + kittyPixelRoot + "\x1b\\" +
+		"\x1b[3;2H\x1b_Ga=p,i=42,c=2,r=1,X=1,Y=1,C=1\x1b\\" +
+		"\x1b_Ga=d,d=x,x=4\x1b\\\x1b_Ga=d,d=y,y=4\x1b\\"))
+	assertVTKittyPlaced(t, s, "42/@2,1")
+	s.Write([]byte("\x1b_Ga=d,d=x,x=3\x1b\\"))
+	assertVTKittyPlaced(t, s)
+
+	// Inside a region the offset does not reach past the bottom margin, so
+	// the placement scrolls with the text.
+	s = newTerminalScreen(20, 10)
+	s.Write([]byte("\x1b[?1049h" + vtKittyUploads(1) +
+		"\x1b[3;8r\x1b[7;2H\x1b_Ga=p,i=1,c=2,r=2,Y=5,C=1\x1b\\\x1b[8;1H\n"))
+	assertVTKittyPlaced(t, s, "alt:1/@5,1")
+}
+
+// TestVTKittyNumbersReadAsTheClientReadsThem: every key is a Dart
+// int.tryParse, which takes whitespace, a sign, a 0x prefix and any 64-bit
+// value.
+func TestVTKittyNumbersReadAsTheClientReadsThem(t *testing.T) {
+	for value, want := range map[string]int64{
+		" 12": 12, "+5": 5, "0x10": 16, "-3": -3, "007": 7, "4294967295": 4294967295,
+	} {
+		if got, ok := kittyNumber(value); !ok || got != want {
+			t.Fatalf("kittyNumber(%q) = %d, %v; want %d", value, got, ok, want)
+		}
+	}
+	for _, value := range []string{"", "x", "99999999999999999999", "1.5", "--1"} {
+		if got, ok := kittyNumber(value); ok {
+			t.Fatalf("kittyNumber(%q) = %d, want none", value, got)
+		}
+	}
+	s := newTerminalScreen(10, 6)
+	s.Write([]byte("\x1b_Ga=t,i=42," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=42,C=1\x1b\\" +
+		"\x1b_Ga=d,d=r,x=1,y=4294967295\x1b\\"))
+	assertVTKittyPlaced(t, s)
 }

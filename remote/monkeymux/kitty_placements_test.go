@@ -118,6 +118,8 @@ func TestKittyPlacementsGoWithTheirParents(t *testing.T) {
 		"physical re-place": "\x1b_Ga=p,i=2,p=1\x1b\\\x1b_Ga=p,i=1,p=9\x1b\\",
 		"free the image":    "\x1b_Ga=d,d=I,i=1\x1b\\",
 		"free a range":      "\x1b_Ga=d,d=R,x=1,y=2\x1b\\",
+		// The client reads the bound as the 64-bit number it is.
+		"range to the largest id": "\x1b_Ga=d,d=r,x=1,y=4294967295\x1b\\",
 	} {
 		t.Run(name, func(t *testing.T) {
 			window := setup()
@@ -323,6 +325,17 @@ func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
 					kittyPlacementKeys(window))
 			}
 		})
+	}
+
+	// An in-cell pixel offset shrinks the image inside its cells rather than
+	// pushing it into the next one (terminalImageSpanSize).
+	for _, command := range []string{"d=x,x=8", "d=y,y=5", "d=p,x=8,y=5"} {
+		window := kittyPlacementWindow(t, "H=1,V=1,c=2,r=1,X=4,Y=4")
+		window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d," + command + "\x1b\\"))
+		if len(window.kittyPlacements) != 2 {
+			t.Fatalf("%s beside an offset placement removed it: %v", command,
+				kittyPlacementKeys(window))
+		}
 	}
 
 	// The cursor cell, and a child whose root shows no placeholder cell.
