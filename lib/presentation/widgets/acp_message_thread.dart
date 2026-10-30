@@ -37,9 +37,11 @@ const double kAcpThreadStickyPromptMinHeight = 2 * _stickyPromptHeight;
 /// 48 pt buttons tall.
 const double kAcpThreadPromptNavigationMinHeight = 160;
 
-/// Characters of transcript prose a line holds at most on a wide screen: the
-/// middle of the 65–75 character measure DESIGN.md sets for body text.
-const int kAcpReadingMeasureCharacters = 70;
+/// Characters of transcript prose a line holds at most on a wide screen.
+/// Transcripts mix prose with code, diffs and tool output, so they read
+/// wider than the 65–75 character measure DESIGN.md sets for body text; at
+/// about 100 a tablet's chat still fills most of its width.
+const int kAcpReadingMeasureCharacters = 100;
 
 /// Size of the transcript's prose, which [AcpMarkdown] and the user prompt
 /// set on the theme's body style.
