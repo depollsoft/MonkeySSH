@@ -273,6 +273,38 @@ void main() {
       }
     });
 
+    // ?1049l restores the cursor saved on the main screen, which has to move
+    // with the rows the keyboard's resizes scroll under vim, or the prompt
+    // comes back on the wrong row and overwrites the shell's output.
+    test('the saved cursor follows the main screen under vim', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(30, 12);
+      for (var i = 1; i <= 11; i++) {
+        terminal.write('line $i\r\n');
+      }
+      terminal.write('% vim');
+      String promptRow() =>
+          terminal.buffer.lines[terminal.buffer.absoluteCursorY]
+              .toString()
+              .trimRight();
+      expect(promptRow(), '% vim');
+
+      terminal.write('\x1b[?1049h\x1b[H\x1b[2Jvim');
+      for (final height in [10, 8, 6, 8, 10, 12]) {
+        terminal.resize(30, height);
+      }
+      terminal.write('\x1b[?1049l');
+
+      expect(promptRow(), '% vim');
+      expect(terminal.buffer.cursorY, 11);
+      expect(
+        terminal.buffer.lines[terminal.buffer.scrollBack]
+            .toString()
+            .trimRight(),
+        'line 1',
+      );
+    });
+
     // Only text counts, as in the MonkeyMux model, which doesn't know where
     // images were placed: an image alone on the bottom row pulls nothing.
     test('growing ignores an image alone on the bottom row', () {

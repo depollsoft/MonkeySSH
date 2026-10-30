@@ -180,3 +180,23 @@ func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
 	}
 	vtRoundTrip(t, s)
 }
+
+// TestVTScreenSavedCursorFollowsMainScreenUnderAltScreen: ?1049l restores the
+// cursor saved on the main screen, which moves with the rows the keyboard's
+// resizes scroll while vim runs, as the client's does (Buffer.resize).
+func TestVTScreenSavedCursorFollowsMainScreenUnderAltScreen(t *testing.T) {
+	s := newTerminalScreen(30, 12)
+	for line := 1; line <= 11; line++ {
+		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))
+	}
+	s.Write([]byte("% vim\x1b[?1049h\x1b[H\x1b[2Jvim"))
+	for _, height := range []int{10, 8, 6, 8, 10, 12} {
+		s.Resize(30, height)
+	}
+	s.Write([]byte("\x1b[?1049l"))
+
+	rows := s.TextRows()
+	if row, _ := s.CursorPosition(); row != 11 || rows[11] != "% vim" || rows[0] != "line 1" {
+		t.Fatalf("cursor row %d, rows %q", row, rows)
+	}
+}

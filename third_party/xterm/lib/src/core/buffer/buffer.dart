@@ -613,6 +613,7 @@ class Buffer {
   }
 
   void resize(int oldWidth, int oldHeight, int newWidth, int newHeight) {
+    final cursorYBefore = _cursorY;
     // 1. Adjust the height.
     if (newHeight > oldHeight) {
       // Grow larger. Rows come back from the scrollback above the content
@@ -726,6 +727,13 @@ class Buffer {
     // The cursor's cell before it is clamped, past the last column when a
     // wrap is pending, for a reflow to carry along.
     final cursorCellX = min(_cursorX, oldWidth);
+
+    // The saved cursor moves with the rows the height change scrolled, as the
+    // cursor did; it is what ?1049l restores after an alternate-screen app,
+    // and clamping it alone put the shell's prompt back on the wrong row after
+    // the keyboard opened and closed under vim. The MonkeyMux screen model
+    // moves it the same way.
+    _savedCursorY += _cursorY - cursorYBefore;
 
     // Ensure cursor is within the screen.
     _cursorX = _cursorX.clamp(0, newWidth - 1);

@@ -637,9 +637,7 @@ func (s *terminalScreen) Resize(width, height int) {
 			saved.col = oldWidth
 			saved.pendingWrap = false
 		}
-		if saved.row >= height {
-			saved.row = height - 1
-		}
+		saved.row = clampInt(saved.row, 0, height-1)
 		if saved.col >= width {
 			saved.col = width - 1
 		}
@@ -654,6 +652,9 @@ func (s *terminalScreen) resizeMain(width, height int) {
 	rows, cursorRow := len(g.rows), g.cursorRow
 	s.resizeMainRows(g, s.width, height)
 	s.kittyMainRowsResized(rows, cursorRow)
+	// The saved cursor, which ?1049l restores, moves with the rows the height
+	// change scrolled, as the client's does (Buffer.resize).
+	s.savedMain.row += g.cursorRow - cursorRow
 	for len(g.rows) < height {
 		g.rows = append(g.rows, newVTRow(s.width))
 		g.wrapped = append(g.wrapped, false)
@@ -694,6 +695,7 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 			g.wrapped = g.wrapped[fromTop:]
 			g.prompt = g.prompt[fromTop:]
 			g.cursorRow -= fromTop
+			s.savedAlt.row -= fromTop
 			drop -= fromTop
 		}
 		if drop > 0 {
