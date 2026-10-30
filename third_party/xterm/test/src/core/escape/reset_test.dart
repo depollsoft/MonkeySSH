@@ -300,6 +300,113 @@ void main() {
     });
   });
 
+  group('resetForNextProgram', () {
+    test('leaves the alternate screen and keeps the main one as it was', () {
+      final terminal = newTerminal();
+      terminal.write('main text');
+      final x = terminal.buffer.cursorX;
+      terminal.write('\x1b[?1049h\x1b[10;20Halt text');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.isUsingAltBuffer, isFalse);
+      expect(terminal.buffer.getText(), contains('main text'));
+      expect(terminal.buffer.getText(), isNot(contains('alt text')));
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, 0);
+    });
+
+    test('leaves an alternate screen entered without saving the cursor', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[5;10Hmain text');
+      final x = terminal.buffer.cursorX;
+      terminal.write('\x1b[?1047h\x1b[2;2Halt text');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.isUsingAltBuffer, isFalse);
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, 4);
+    });
+
+    test('keeps the main screen and the cursor when it is already shown', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[3;4H\x1b7'); // a stale DECSC
+      terminal.write('\x1b[1;1Hhello\r\nworld');
+      final x = terminal.buffer.cursorX;
+      final y = terminal.buffer.cursorY;
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.buffer.getText(), contains('hello'));
+      expect(terminal.buffer.getText(), contains('world'));
+      expect(terminal.buffer.cursorX, x);
+      expect(terminal.buffer.cursorY, y);
+    });
+
+    test('switches off every mode a program sets for its own input', () {
+      final terminal = newTerminal();
+      terminal.write('\x1b[=5u'); // Kitty keyboard flags, main screen
+      terminal.write('\x1b[?1049h');
+      terminal.write('\x1b[>1u'); // Kitty keyboard flags, alternate screen
+      terminal.write('\x1b[?1002h\x1b[?1006h\x1b[?1007h'); // mouse
+      terminal
+          .write('\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b='); // focus, paste, keys
+      terminal.write('\x1b[?25l\x1b[?2026h\x1b[?9002h');
+
+      terminal.resetForNextProgram();
+
+      expect(terminal.mouseMode, MouseMode.none);
+      expect(terminal.mouseReportMode, MouseReportMode.normal);
+      expect(terminal.altBufferMouseScrollMode, isFalse);
+      expect(terminal.reportFocusMode, isFalse);
+      expect(terminal.bracketedPasteMode, isFalse);
+      expect(terminal.cursorKeysMode, isFalse);
+      expect(terminal.appKeypadMode, isFalse);
+      expect(terminal.cursorVisibleMode, isTrue);
+      expect(terminal.synchronizedOutputMode, isFalse);
+      expect(terminal.isMonkeyMuxSynchronizedOutputOpen, isFalse);
+      expect(terminal.kittyKeyboardFlags, 0);
+      terminal.write('\x1b[?1049h');
+      expect(terminal.kittyKeyboardFlags, 0);
+    });
+
+    test('drops a sequence the program never finished', () {
+      final terminal = newTerminal();
+      final titles = <String>[];
+      terminal.onTitleChange = titles.add;
+      terminal.write('\x1b]0;agen');
+
+      terminal.resetForNextProgram();
+      terminal.write('prompt %\x1b]0;shell\x07');
+
+      expect(terminal.buffer.getText(), contains('prompt %'));
+      expect(titles, ['shell']);
+    });
+
+    test('drops a chunked Kitty image the program never finished', () {
+      final terminal = newTerminal();
+      final pixel = base64.encode(const [0xFF, 0x00, 0x00, 0xFF]);
+      terminal.write('\x1b_Ga=T,f=32,s=1,v=1,i=7,q=2,m=1;$pixel\x1b\\');
+      const inlineArgs = {'a': 'T', 'f': '32', 's': '1', 'v': '1', 'q': '2'};
+      expect(
+        terminal.submitGraphicsCommand(inlineArgs, const []),
+        isFalse,
+        reason: 'the open transmission refuses other images',
+      );
+
+      terminal.resetForNextProgram();
+
+      expect(
+        terminal.submitGraphicsCommand(
+          inlineArgs,
+          const [0x00, 0xFF, 0x00, 0xFF],
+        ),
+        isTrue,
+      );
+    });
+  });
+
   group('the byte stream /usr/bin/reset writes', () {
     test('leaves no literal garbage behind', () {
       final terminal = newTerminal();

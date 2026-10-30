@@ -39,6 +39,7 @@ import 'package:monkeyssh/presentation/widgets/acp_inline_image.dart';
 import 'package:monkeyssh/presentation/widgets/acp_message_thread.dart';
 import 'package:monkeyssh/presentation/widgets/acp_permission_surface.dart';
 import 'package:monkeyssh/presentation/widgets/cursor_block.dart';
+import 'package:monkeyssh/presentation/widgets/scroll_edge_fade.dart';
 import 'package:monkeyssh/presentation/widgets/system_bottom_inset.dart';
 import 'package:monkeyssh/presentation/widgets/terminal_pinch_zoom_gesture_handler.dart';
 
@@ -377,6 +378,7 @@ void main() {
     expect(find.byType(AcpComposer), findsOneWidget);
     expect(find.byTooltip('MonkeyMux windows'), findsOneWidget);
     expect(find.byTooltip('Session settings'), findsNothing);
+    expect(find.byTooltip('Chat actions'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
     expect(find.text('Session settings'), findsOneWidget);
@@ -621,6 +623,18 @@ void main() {
         const ValueKey('acp-quick-selector-pill-Effort'),
       );
       expect(tester.getSize(modelPill).height, 40);
+      // Ink paints on its nearest Material, so that Material must sit inside
+      // the scroll viewport or pills scrolled out of view leave their
+      // backgrounds painted beside the composer.
+      expect(
+        find.descendant(
+          of: controls,
+          matching: find
+              .ancestor(of: modelPill, matching: find.byType(Material))
+              .first,
+        ),
+        findsOneWidget,
+      );
       expect(
         tester.getTopLeft(effortPill).dx - tester.getTopRight(modelPill).dx,
         FluttyTheme.spacingXs,
@@ -954,6 +968,259 @@ void main() {
 
     expect(find.text('sessions'), findsOneWidget);
     expect(find.text('ready when you are'), findsOneWidget);
+  });
+
+  group('reading column', () {
+    /// The transcript's content column, from the thread's padding.
+    Rect transcriptColumn(WidgetTester tester) {
+      final viewport = tester.getRect(find.byType(CustomScrollView));
+      final padding = tester
+          .widget<SliverPadding>(
+            find.descendant(
+              of: find.byType(AcpMessageThread),
+              matching: find.byType(SliverPadding),
+            ),
+          )
+          .padding
+          .resolve(TextDirection.ltr);
+      return Rect.fromLTRB(
+        viewport.left + padding.left,
+        viewport.top,
+        viewport.right - padding.right,
+        viewport.bottom,
+      );
+    }
+
+    Rect composer(WidgetTester tester) =>
+        tester.getRect(find.byKey(const ValueKey('acp-composer-surface')));
+
+    for (final (size, embedded) in [
+      (const Size(1200, 800), true),
+      (const Size(1366, 1024), false),
+    ]) {
+      testWidgets(
+        'a ${size.width.toInt()} pt chat reads in a centred column the '
+        'composer shares',
+        (tester) async {
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          await tester.binding.setSurfaceSize(size);
+          final session = fakeAcpSession(
+            timeline: fakeAcpTimeline('Hello from the agent'),
+          );
+          // At 8 pt the test font's 1 em characters give a measure narrower
+          // than either window.
+          await tester.pumpWidget(
+            _wrap(
+              FakeAcpSessionManager(sessions: [session]),
+              size: size,
+              embedded: embedded,
+              preferredFontSize: 8,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final context = tester.element(find.byType(AcpMessageThread));
+          final letterSpacing =
+              Theme.of(context).textTheme.bodyMedium?.letterSpacing ?? 0;
+          final measure = acpReadingMeasure(context);
+          // 100 characters of 15 pt prose, zoomed from 14 pt to 8 pt. Linux
+          // snaps each glyph's advance to 1/16 pt.
+          expect(
+            measure,
+            closeTo(
+              kAcpReadingMeasureCharacters * (15 * 8 / 14 + letterSpacing),
+              kAcpReadingMeasureCharacters / 16,
+            ),
+          );
+
+          final viewport = tester.getRect(find.byType(CustomScrollView));
+          final column = transcriptColumn(tester);
+          expect(column.width, closeTo(measure, 0.01));
+          expect(
+            column.left - viewport.left,
+            closeTo(viewport.right - column.right, 0.01),
+          );
+          expect(column.left - viewport.left, greaterThan(12));
+          // The scroll view still spans the pane.
+          expect(viewport.width, greaterThan(measure + 100));
+
+          // The composer's box sits 4 pt outside the text, as on a phone.
+          expect(composer(tester).left, closeTo(column.left - 4, 0.01));
+          expect(composer(tester).right, closeTo(column.right + 4, 0.01));
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
+    testWidgets('a phone keeps the full-width transcript and composer', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      final session = fakeAcpSession(
+        timeline: fakeAcpTimeline('Hello from the agent'),
+      );
+      await tester.pumpWidget(
+        _wrap(FakeAcpSessionManager(sessions: [session]), embedded: true),
+      );
+      await tester.pumpAndSettle();
+
+      final column = transcriptColumn(tester);
+      expect(column.left, 12);
+      expect(column.right, 378);
+      expect(composer(tester).left, 8);
+      expect(composer(tester).right, 382);
+    });
+
+    const longModel = 'Claude Sonnet 4.5 (1M context)';
+    AcpSessionState modelSession({bool morePills = false, String? mode}) =>
+        fakeAcpSession(
+          modelState: const AcpModelState(
+            currentModelId: 'sonnet',
+            availableModels: [AcpModelInfo(id: 'sonnet', name: longModel)],
+          ),
+          modeState: mode != null
+              ? AcpSessionModeState(
+                  currentModeId: 'mode',
+                  availableModes: [AcpSessionMode(id: 'mode', name: mode)],
+                )
+              : morePills
+              ? const AcpSessionModeState(
+                  currentModeId: 'agent',
+                  availableModes: [
+                    AcpSessionMode(id: 'agent', name: 'Agent'),
+                    AcpSessionMode(id: 'plan', name: 'Plan'),
+                  ],
+                )
+              : null,
+        );
+
+    testWidgets('the model label grows into room the pill row has', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(951, 669));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession()]),
+          size: const Size(951, 669),
+          embedded: true,
+          preferredFontSize: 8,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final label = tester.widget<Text>(find.text(longModel));
+      final full = (TextPainter(
+        text: TextSpan(text: longModel, style: label.style),
+        textDirection: TextDirection.ltr,
+      )..layout()).width;
+      expect(full, greaterThan(110));
+      expect(tester.getSize(find.text(longModel)).width, closeTo(full, 0.01));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a label just over 110 pt leaves the model label the rest of '
+        'the room', (tester) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1366, 1024));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(mode: 'Plan review')]),
+          size: const Size(1366, 1024),
+          embedded: true,
+          preferredFontSize: 8,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      double fullWidth(String text) {
+        final label = tester.widget<Text>(find.text(text));
+        return (TextPainter(
+          text: TextSpan(text: text, style: label.style),
+          textDirection: TextDirection.ltr,
+        )..layout()).width;
+      }
+
+      // The row has room for both in full, but not for an even split of
+      // what is left: the mode label needs far less than half.
+      expect(fullWidth('Plan review'), greaterThan(110));
+      for (final text in ['Plan review', longModel]) {
+        expect(
+          tester.getSize(find.text(text)).width,
+          closeTo(fullWidth(text), 0.01),
+          reason: text,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the model label stops at 110 pt in a full pill row', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(morePills: true)]),
+          embedded: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.text(longModel)).width, 110);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a pill row wider than its box fades where it scrolls', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 800));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession(morePills: true)]),
+          embedded: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final row = find.descendant(
+        of: find.byKey(const ValueKey('acp-composer-controls')),
+        matching: find.byType(ListView),
+      );
+      ScrollEdgeFadeState fade() =>
+          tester.state<ScrollEdgeFadeState>(find.byType(ScrollEdgeFade));
+      expect((fade().fadesStart, fade().fadesEnd), (false, true));
+
+      await tester.drag(row, const Offset(-60, 0));
+      await tester.pumpAndSettle();
+      expect((fade().fadesStart, fade().fadesEnd), (true, true));
+
+      await tester.drag(row, const Offset(-2000, 0));
+      await tester.pumpAndSettle();
+      expect((fade().fadesStart, fade().fadesEnd), (true, false));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a pill row that fits does not fade', (tester) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(951, 669));
+      await tester.pumpWidget(
+        _wrap(
+          FakeAcpSessionManager(sessions: [modelSession()]),
+          size: const Size(951, 669),
+          embedded: true,
+          preferredFontSize: 8,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final fade = tester.state<ScrollEdgeFadeState>(
+        find.byType(ScrollEdgeFade),
+      );
+      expect((fade.fadesStart, fade.fadesEnd), (false, false));
+    });
   });
 
   testWidgets('shows inline recovery when a live session fails', (

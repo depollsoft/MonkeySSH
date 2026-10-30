@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/snippet_repository.dart';
@@ -21,6 +22,7 @@ import 'package:monkeyssh/domain/models/monetization.dart';
 import 'package:monkeyssh/domain/models/remote_multiplexer.dart';
 import 'package:monkeyssh/domain/models/terminal_preview.dart';
 import 'package:monkeyssh/domain/models/terminal_theme.dart';
+import 'package:monkeyssh/domain/models/terminal_themes.dart';
 import 'package:monkeyssh/domain/models/tmux_state.dart';
 import 'package:monkeyssh/domain/services/acp_session_manager.dart';
 import 'package:monkeyssh/domain/services/agent_launch_preset_service.dart';
@@ -42,10 +44,12 @@ import 'package:monkeyssh/domain/services/transfer_intent_service.dart';
 import 'package:monkeyssh/presentation/providers/entity_list_providers.dart';
 import 'package:monkeyssh/presentation/providers/host_row_providers.dart';
 import 'package:monkeyssh/presentation/screens/home_screen.dart';
+import 'package:monkeyssh/presentation/screens/snippet_edit_screen.dart';
 import 'package:monkeyssh/presentation/widgets/keyboard_list_navigation.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
 import 'package:monkeyssh/presentation/widgets/connection_preview_snippet.dart';
+import 'package:monkeyssh/presentation/widgets/display_fold.dart';
 import 'package:monkeyssh/presentation/widgets/mono_header_title.dart';
 import 'package:monkeyssh/presentation/widgets/panel_header.dart';
 import 'package:monkeyssh/presentation/widgets/system_vertical_bar.dart';
@@ -414,15 +418,26 @@ Snippet _buildSnippet({
   required int id,
   required String name,
   required int sortOrder,
+  int? folderId,
 }) => Snippet(
   id: id,
   name: name,
   command: 'echo $name',
+  folderId: folderId,
   autoExecute: false,
   createdAt: DateTime(2026),
   usageCount: 0,
   sortOrder: sortOrder,
 );
+
+/// A display pose with a system vertical bar: the window size, its safe area,
+/// the bar, and the fold.
+typedef _DuoPose = ({
+  Size size,
+  EdgeInsets padding,
+  SystemVerticalBar bar,
+  List<DisplayFeature> features,
+});
 
 ActiveConnection _buildActiveConnection({
   required int connectionId,
@@ -755,6 +770,8 @@ void main() {
         tester.getRect(find.text('Add Host')).right,
         lessThanOrEqualTo(466 - 84),
       );
+      // Without a vertical bar, Add Host stays in the panel header.
+      expect(find.byTooltip('Add host'), findsNothing);
     });
 
     testWidgets('keeps the wide sidebar whole beside a side strip', (
@@ -961,6 +978,674 @@ void main() {
       await tester.pump();
       expect(panelTitled('keys'), findsOneWidget);
       expect(panelTitled('hosts'), findsNothing);
+    });
+
+    const closed = (
+      size: outerDisplay,
+      padding: outerPadding,
+      bar: verticalBar,
+      features: <DisplayFeature>[],
+    );
+    // The other poses with a vertical bar: the inner display held wide,
+    // half open like a book or open flat (which arrives as the fold's centre
+    // line), and the outer display turned with the camera on the left.
+    const innerPadding = EdgeInsets.only(right: 84, bottom: 34);
+    const innerBar = SystemVerticalBar(
+      edge: SystemVerticalBarEdge.right,
+      itemColumn: Rect.fromLTRB(881, 124, 925, 635),
+    );
+    const book = (
+      size: Size(951, 669),
+      padding: innerPadding,
+      bar: innerBar,
+      features: [
+        DisplayFeature(
+          bounds: Rect.fromLTRB(455.5, 0, 495.5, 669),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureHalfOpened,
+        ),
+      ],
+    );
+    const flat = (
+      size: Size(951, 669),
+      padding: innerPadding,
+      bar: innerBar,
+      features: [
+        DisplayFeature(
+          bounds: Rect.fromLTWH(475.5, 0, 0, 669),
+          type: DisplayFeatureType.fold,
+          state: DisplayFeatureState.postureFlat,
+        ),
+      ],
+    );
+    const outerLandscape = (
+      size: Size(678, 466),
+      padding: EdgeInsets.only(left: 84, bottom: 21),
+      bar: SystemVerticalBar(
+        edge: SystemVerticalBarEdge.left,
+        itemColumn: Rect.fromLTRB(26, 82, 70, 432),
+      ),
+      features: <DisplayFeature>[],
+    );
+
+    // The routes home's add actions open, each a page naming its location
+    // and the snippet folder it was opened for.
+    GoRouter addRouter(HomeScreenTab initialTab) {
+      Widget opened(GoRouterState state) => Text(
+        'opened ${state.uri} '
+        '${(state.extra as SnippetEditPrefill?)?.folderId}',
+      );
+      final router = GoRouter(
+        routes: [
+          GoRoute(
+            path: '/',
+            builder: (context, state) => HomeScreen(initialTab: initialTab),
+          ),
+          for (final path in ['/hosts/add', '/keys/add', '/snippets/add'])
+            GoRoute(
+              path: path,
+              builder: (context, state) => Scaffold(body: opened(state)),
+            ),
+        ],
+      );
+      addTearDown(router.dispose);
+      return router;
+    }
+
+    Future<ValueNotifier<_DuoPose>> pumpInPose(
+      WidgetTester tester,
+      _DuoPose pose, {
+      List overrides = const [],
+      HomeScreenTab initialTab = HomeScreenTab.hosts,
+      TextScaler textScaler = TextScaler.noScaling,
+      GoRouter? router,
+      List<Host> hosts = const [],
+    }) async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      tester.view
+        ..physicalSize = pose.size
+        ..devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final current = ValueNotifier(pose);
+      Widget withPose(BuildContext context, Widget? navigator) =>
+          ValueListenableBuilder(
+            valueListenable: current,
+            builder: (context, pose, _) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                size: pose.size,
+                padding: pose.padding,
+                viewPadding: pose.padding,
+                displayFeatures: pose.features,
+                textScaler: textScaler,
+              ),
+              child: SystemVerticalBarScope(bar: pose.bar, child: navigator!),
+            ),
+          );
+
+      await tester.pumpWidget(
+        buildMobileHomeScreen(
+          db: db,
+          size: pose.size,
+          overrides: [
+            activeSessionsProvider.overrideWith(
+              _TestActiveSessionsNotifier.new,
+            ),
+            allHostsProvider.overrideWith((ref) => Stream.value(hosts)),
+            allKeysProvider.overrideWith(
+              (ref) => Stream.value(const <SshKey>[]),
+            ),
+            ...overrides,
+          ],
+          child: router == null
+              ? MaterialApp(
+                  builder: withPose,
+                  home: HomeScreen(initialTab: initialTab),
+                )
+              : MaterialApp.router(builder: withPose, routerConfig: router),
+        ),
+      );
+      await tester.pump();
+      return current;
+    }
+
+    Future<void> changePose(
+      WidgetTester tester,
+      ValueNotifier<_DuoPose> current,
+      _DuoPose pose,
+    ) async {
+      tester.view.physicalSize = pose.size;
+      current.value = pose;
+      await tester.pump();
+    }
+
+    // A panel header's filled add button, apart from the empty state's.
+    Finder headerAddButton() => find.descendant(
+      of: find.byType(PanelHeader),
+      matching: find.textContaining('Add '),
+    );
+
+    List<String> tabLabels(WidgetTester tester) => [
+      for (final tab
+          in tester.widget<VerticalBarTabs>(find.byType(VerticalBarTabs)).tabs)
+        tab.label,
+    ];
+
+    // Settings and the tabs stand in the bar, with no app bar, tab bar or
+    // sidebar (whose Settings item is the only labelled one).
+    void expectBarNavigation(WidgetTester tester, SystemVerticalBar bar) {
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.text('Settings'), findsNothing);
+      final settings = find.byTooltip('Settings');
+      expect(settings.hitTestable(), findsOneWidget);
+      expect(tester.getRect(settings).top, bar.itemColumn.top);
+      expect(tester.getRect(settings).center.dx, bar.itemColumn.center.dx);
+      final tabs = tester.getRect(find.byType(VerticalBarTabs));
+      expect(tabs.bottom, bar.itemColumn.bottom);
+      expect(tabs.center.dx, bar.itemColumn.center.dx);
+      for (final label in tabLabels(tester)) {
+        expect(
+          find
+              .descendant(
+                of: find.byType(VerticalBarTabs),
+                matching: find.text(label),
+              )
+              .hitTestable(),
+          findsOneWidget,
+          reason: label,
+        );
+      }
+    }
+
+    testWidgets('keeps Settings and the tabs in the bar across a book fold', (
+      tester,
+    ) async {
+      await pumpInPose(tester, book, initialTab: HomeScreenTab.connections);
+
+      expectBarNavigation(tester, innerBar);
+      // Connections has the right page, so the tabs skip it and the
+      // selection falls back to Hosts.
+      expect(tabLabels(tester), ['Hosts', 'Keys', 'Snippets']);
+      expect(
+        tester
+            .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+            .selectedIndex,
+        0,
+      );
+      expect(
+        tester.getRect(find.text('no hosts yet')).right,
+        lessThanOrEqualTo(455.5),
+      );
+      final connectionsEmpty = find.text('no active sessions');
+      expect(
+        tester.getRect(connectionsEmpty).left,
+        greaterThanOrEqualTo(495.5),
+      );
+      expect(
+        tester.getRect(find.byType(PanelHeader).last).right,
+        lessThanOrEqualTo(951 - 84),
+      );
+      // Both pages' headers sit on one line at the top of the spread.
+      expect(tester.getRect(find.byType(PanelHeader).first).top, 0);
+      expect(tester.getRect(find.byType(PanelHeader).last).top, 0);
+      // A hardware keyboard drives the connections as it does on the tab.
+      expect(
+        find.ancestor(
+          of: connectionsEmpty,
+          matching: find.byWidgetPredicate(
+            (widget) => widget is KeyboardListNavigation && widget.autofocus,
+          ),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Keys'));
+      await tester.pump();
+      expect(
+        tester
+            .getRect(
+              find.byWidgetPredicate(
+                (widget) => widget is MonoHeaderTitle && widget.title == 'keys',
+              ),
+            )
+            .right,
+        lessThanOrEqualTo(455.5),
+      );
+      expect(connectionsEmpty, findsOneWidget);
+    });
+
+    testWidgets('splits the flat inner display at its fold, with the bar', (
+      tester,
+    ) async {
+      await pumpInPose(tester, flat);
+
+      expectBarNavigation(tester, innerBar);
+      expect(tabLabels(tester), ['Hosts', 'Keys', 'Snippets']);
+      // Text keeps clear of the crease on both pages.
+      expect(
+        tester.getRect(find.text('Add Host').first).right,
+        lessThanOrEqualTo(475.5 - displayFoldContentGutter),
+      );
+      expect(
+        tester.getRect(find.text('no active sessions')).left,
+        greaterThanOrEqualTo(475.5 + displayFoldContentGutter),
+      );
+      expect(
+        tester
+            .getRect(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is MonoHeaderTitle && widget.title == 'connections',
+              ),
+            )
+            .left,
+        greaterThanOrEqualTo(475.5 + displayFoldContentGutter),
+      );
+    });
+
+    testWidgets(
+      'keeps every tab in the short bar of the turned outer display',
+      (tester) async {
+        await pumpInPose(tester, outerLandscape);
+
+        expectBarNavigation(tester, outerLandscape.bar);
+        expect(tabLabels(tester), ['Hosts', 'Connections', 'Keys', 'Snippets']);
+        expect(
+          tester.getSize(find.byType(VerticalBarTabs)).height,
+          VerticalBarTabs.extentFor(4),
+        );
+        expect(
+          tester.getRect(find.byType(PanelHeader)).left,
+          greaterThanOrEqualTo(84),
+        );
+        // The add key would need 4 pt more, so Add Host stays in the header.
+        expect(find.byTooltip('Add host'), findsNothing);
+        expect(headerAddButton(), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('keeps the tabs reachable when a Live Activity shortens the '
+        'bar', (tester) async {
+      final semantics = tester.ensureSemantics();
+      _DuoPose shortened(double top) => (
+        size: outerLandscape.size,
+        padding: outerLandscape.padding,
+        bar: SystemVerticalBar(
+          edge: SystemVerticalBarEdge.left,
+          itemColumn: Rect.fromLTRB(26, top, 70, 432),
+        ),
+        features: const <DisplayFeature>[],
+      );
+      final pose = await pumpInPose(tester, shortened(150));
+      // The labels give way first, and Settings fits above the tabs.
+      for (final (top, showsSettings) in [(150.0, true), (200.0, false)]) {
+        await changePose(tester, pose, shortened(top));
+        final tabs = find.byType(VerticalBarTabs);
+        expect(tester.widget<VerticalBarTabs>(tabs).showsLabels, isFalse);
+        expect(
+          tester.getSize(tabs).height,
+          VerticalBarTabs.extentFor(4, showsLabels: false),
+        );
+        expect(tester.getRect(tabs).bottom, 432);
+        for (final label in ['Hosts', 'Connections', 'Keys', 'Snippets']) {
+          expect(
+            find.semantics.byLabel(RegExp('^$label\n')),
+            findsOne,
+            reason: '$label at $top',
+          );
+        }
+        expect(
+          find.byTooltip('Settings').hitTestable(),
+          showsSettings ? findsOneWidget : findsNothing,
+          reason: 'at $top',
+        );
+      }
+
+      // In a bar too short for even those, the tabs run across the bottom.
+      await changePose(tester, pose, shortened(264));
+      expect(
+        432 - 264,
+        lessThan(VerticalBarTabs.extentFor(4, showsLabels: false)),
+      );
+      expect(find.byType(VerticalBarTabs), findsNothing);
+      for (final label in ['Hosts', 'Connections', 'Keys', 'Snippets']) {
+        expect(
+          find.descendant(
+            of: find.byType(NavigationBar),
+            matching: find.text(label),
+          ),
+          findsOne,
+          reason: label,
+        );
+      }
+      expect(find.byTooltip('Settings').hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
+
+    testWidgets('keeps the hosts list where it was across layouts and tabs', (
+      tester,
+    ) async {
+      final pose = await pumpInPose(
+        tester,
+        closed,
+        hosts: [
+          for (var index = 0; index < 40; index += 1)
+            _buildHost(id: index + 1, label: 'Host $index', sortOrder: index),
+        ],
+      );
+      await tester.pump();
+      double offset() => tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ReorderableListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position
+          .pixels;
+      await tester.drag(
+        find.byType(ReorderableListView),
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      final scrolled = offset();
+      expect(scrolled, greaterThan(0));
+
+      // Opened like a book, then beside a bar too short for the tabs.
+      await changePose(tester, pose, book);
+      expect(offset(), scrolled);
+      await changePose(tester, pose, (
+        size: outerLandscape.size,
+        padding: outerLandscape.padding,
+        bar: const SystemVerticalBar(
+          edge: SystemVerticalBarEdge.left,
+          itemColumn: Rect.fromLTRB(26, 264, 70, 432),
+        ),
+        features: const <DisplayFeature>[],
+      ));
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(offset(), scrolled);
+
+      await changePose(tester, pose, closed);
+      await tester.tap(find.text('Keys'));
+      await tester.pump();
+      await tester.tap(find.text('Hosts'));
+      await tester.pump();
+      expect(offset(), scrolled);
+      expect(tester.takeException(), isNull);
+    });
+
+    _MockSnippetRepository snippetsInFolder() {
+      final snippetRepository = _MockSnippetRepository();
+      when(snippetRepository.watchAll).thenAnswer(
+        (_) => Stream.value([
+          _buildSnippet(id: 1, name: 'deploy app', sortOrder: 0, folderId: 1),
+          _buildSnippet(id: 2, name: 'tail logs', sortOrder: 1),
+        ]),
+      );
+      when(snippetRepository.watchAllFolders).thenAnswer(
+        (_) => Stream.value([
+          SnippetFolder(
+            id: 1,
+            name: 'Deploy',
+            sortOrder: 0,
+            createdAt: DateTime(2026),
+          ),
+        ]),
+      );
+      return snippetRepository;
+    }
+
+    Future<void> openRoute(WidgetTester tester, Finder control) async {
+      await tester.tap(control);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+    }
+
+    Future<void> goBack(WidgetTester tester, GoRouter router) async {
+      router.pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+    }
+
+    testWidgets('holds the add action in a filled key just above the tabs', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final router = addRouter(HomeScreenTab.hosts);
+      await pumpInPose(
+        tester,
+        closed,
+        router: router,
+        overrides: [
+          snippetRepositoryProvider.overrideWithValue(snippetsInFolder()),
+        ],
+      );
+      final colorScheme = Theme.of(tester.element(find.byType(HomeScreen)))
+          .colorScheme;
+
+      for (final (tab, name, route) in [
+        ('Hosts', 'Add host', '/hosts/add'),
+        ('Keys', 'Add key', '/keys/add'),
+        ('Snippets', 'Add snippet', '/snippets/add'),
+      ]) {
+        await tester.tap(find.text(tab));
+        await tester.pump();
+
+        final key = find.byTooltip(name);
+        expect(key.hitTestable(), findsOneWidget, reason: tab);
+        expect(headerAddButton(), findsNothing, reason: tab);
+        final rect = tester.getRect(key);
+        expect(rect.size, const Size.square(verticalBarItemExtent));
+        expect(
+          rect.bottom,
+          tester.getRect(find.byType(VerticalBarTabs)).top - verticalBarItemGap,
+          reason: tab,
+        );
+        expect(rect.center.dx, verticalBar.itemColumn.center.dx);
+        expect(
+          tester.getSemantics(key),
+          isSemantics(tooltip: name, isButton: true, hasTapAction: true),
+        );
+        // Filled in the accent, like the header button it replaces.
+        expect(
+          tester
+              .widget<Material>(
+                find.ancestor(of: key, matching: find.byType(Material)).first,
+              )
+              .color,
+          colorScheme.primary,
+        );
+        expect(
+          IconTheme.of(
+            tester.element(
+              find.descendant(of: key, matching: find.byIcon(Icons.add)),
+            ),
+          ).color,
+          colorScheme.onPrimary,
+        );
+
+        await openRoute(tester, key);
+        expect(find.text('opened $route null'), findsOneWidget, reason: tab);
+        await goBack(tester, router);
+      }
+
+      // A snippet added from the key goes in the folder on show, as one
+      // added from the header does.
+      await tester.ensureVisible(find.text('Deploy (1)'));
+      await tester.tap(find.text('Deploy (1)'));
+      await tester.pump();
+      await openRoute(tester, find.byTooltip('Add snippet'));
+      expect(find.text('opened /snippets/add 1'), findsOneWidget);
+      await goBack(tester, router);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
+
+    testWidgets('leaves the add key out on Connections without moving the '
+        'rail', (tester) async {
+      await pumpInPose(tester, closed);
+      final tabs = tester.getRect(find.byType(VerticalBarTabs));
+      final settings = tester.getRect(find.byTooltip('Settings'));
+      expect(find.byTooltip('Add host'), findsOneWidget);
+
+      await tester.tap(find.text('Connections'));
+      await tester.pump();
+
+      expect(find.byTooltip(RegExp('^Add ')), findsNothing);
+      expect(headerAddButton(), findsNothing);
+      expect(tester.getRect(find.byType(VerticalBarTabs)), tabs);
+      expect(
+        tester
+            .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+            .showsLabels,
+        isTrue,
+      );
+      expect(tester.getRect(find.byTooltip('Settings')), settings);
+    });
+
+    for (final (name, pose) in [('book', book), ('flat', flat)]) {
+      testWidgets('adds to the left page across a $name fold', (tester) async {
+        final router = addRouter(HomeScreenTab.connections);
+        await pumpInPose(tester, pose, router: router);
+
+        // Connections has the right page, so the key adds hosts, as the
+        // left page shows them.
+        final addHost = find.byTooltip('Add host');
+        expect(addHost.hitTestable(), findsOneWidget);
+        expect(
+          tester.getRect(addHost).bottom,
+          tester.getRect(find.byType(VerticalBarTabs)).top - verticalBarItemGap,
+        );
+        expect(
+          tester.getRect(addHost).center.dx,
+          innerBar.itemColumn.center.dx,
+        );
+        expect(headerAddButton(), findsNothing);
+
+        await tester.tap(find.text('Keys'));
+        await tester.pump();
+        await openRoute(tester, find.byTooltip('Add key'));
+        expect(find.text('opened /keys/add null'), findsOneWidget);
+      });
+    }
+
+    testWidgets('gives up the add key first in a short bar, returning its '
+        'button to the header', (tester) async {
+      _DuoPose shortened(double height) => (
+        size: closed.size,
+        padding: closed.padding,
+        bar: SystemVerticalBar(
+          edge: SystemVerticalBarEdge.right,
+          itemColumn: Rect.fromLTRB(396, 644 - height, 440, 644),
+        ),
+        features: const <DisplayFeature>[],
+      );
+      final pose = await pumpInPose(tester, closed);
+      // Settings, the key and the labelled tabs take 354 pt; the labelled
+      // tabs and Settings 302 pt; the bare tabs and Settings 246 pt.
+      for (final (height, showsKey, showsLabels, showsSettings) in [
+        (354.0, true, true, true),
+        (353.0, false, true, true),
+        (301.0, false, false, true),
+        (245.0, false, false, false),
+      ]) {
+        await changePose(tester, pose, shortened(height));
+        final reason = 'at $height pt';
+        expect(
+          find.byTooltip('Add host').hitTestable(),
+          showsKey ? findsOneWidget : findsNothing,
+          reason: reason,
+        );
+        expect(
+          headerAddButton(),
+          showsKey ? findsNothing : findsOneWidget,
+          reason: reason,
+        );
+        expect(
+          tester
+              .widget<VerticalBarTabs>(find.byType(VerticalBarTabs))
+              .showsLabels,
+          showsLabels,
+          reason: reason,
+        );
+        expect(tester.getRect(find.byType(VerticalBarTabs)).bottom, 644);
+        expect(
+          find.byTooltip('Settings').hitTestable(),
+          showsSettings ? findsOneWidget : findsNothing,
+          reason: reason,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    test('fills the add key legibly in every built-in theme', () {
+      for (final (name, theme) in [
+        ('default dark', FluttyTheme.dark),
+        ('default light', FluttyTheme.light),
+        for (final terminalTheme in TerminalThemes.all)
+          (
+            terminalTheme.id,
+            FluttyTheme.fromTerminalTheme(
+              terminalTheme,
+              brightness: terminalTheme.isDark
+                  ? Brightness.dark
+                  : Brightness.light,
+            ),
+          ),
+      ]) {
+        expect(
+          contrastRatio(theme.colorScheme.onPrimary, theme.colorScheme.primary),
+          greaterThanOrEqualTo(3),
+          reason: name,
+        );
+      }
+    });
+
+    testWidgets('keeps the chosen snippet folder as the device folds', (
+      tester,
+    ) async {
+      final pose = await pumpInPose(
+        tester,
+        closed,
+        initialTab: HomeScreenTab.snippets,
+        overrides: [
+          snippetRepositoryProvider.overrideWithValue(snippetsInFolder()),
+        ],
+        // The test font sets every glyph a full em wide, so the snippets
+        // header needs a smaller scale to fit the book's 455 pt page, as it
+        // does at full size with Inter.
+        textScaler: const TextScaler.linear(0.6),
+      );
+      await tester.pump();
+
+      await tester.ensureVisible(find.text('Deploy (1)'));
+      await tester.tap(find.text('Deploy (1)'));
+      await tester.pump();
+      expect(find.text('tail logs'), findsNothing);
+
+      for (final (name, next) in [
+        ('book', book),
+        ('flat', flat),
+        ('closed', closed),
+      ]) {
+        await changePose(tester, pose, next);
+        expect(tester.takeException(), isNull, reason: name);
+        expect(
+          tester
+              .widget<FilterChip>(find.widgetWithText(FilterChip, 'Deploy (1)'))
+              .selected,
+          isTrue,
+          reason: name,
+        );
+        expect(find.text('deploy app'), findsOneWidget, reason: name);
+        expect(find.text('tail logs'), findsNothing, reason: name);
+      }
     });
   });
 

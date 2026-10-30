@@ -164,6 +164,42 @@ void registerThemeTests() {
         );
       });
 
+      test('keeps bottom navigation legible in every built-in theme', () {
+        for (final (terminalTheme, brightness) in [
+          for (final theme in TerminalThemes.darkThemes)
+            (theme, Brightness.dark),
+          for (final theme in TerminalThemes.lightThemes)
+            (theme, Brightness.light),
+        ]) {
+          final theme = FluttyTheme.fromTerminalTheme(
+            terminalTheme,
+            brightness: brightness,
+          );
+          final navigation = theme.navigationBarTheme;
+          final surface = navigation.backgroundColor!;
+          final indicator = Color.alphaBlend(
+            navigation.indicatorColor!,
+            surface,
+          );
+          for (final selected in [false, true]) {
+            final states = {if (selected) WidgetState.selected};
+            final label = navigation.labelTextStyle!.resolve(states)!.color!;
+            final icon = navigation.iconTheme!.resolve(states)!.color!;
+            final reason = '${terminalTheme.id}, selected: $selected';
+            expect(
+              contrastRatio(label, surface),
+              greaterThanOrEqualTo(4.5),
+              reason: reason,
+            );
+            expect(
+              contrastRatio(icon, selected ? indicator : surface),
+              greaterThanOrEqualTo(3),
+              reason: reason,
+            );
+          }
+        }
+      });
+
       test('keeps the requested brightness for the Material theme slot', () {
         const terminalTheme = TerminalThemes.atomOneDark;
 

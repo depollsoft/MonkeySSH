@@ -41,10 +41,11 @@ DUO_SCREENSHOTS = (
     # The outer display cuts the Copilot window's name short ("Mobile Copil…").
     ('duo_closed_terminal', (1398, 2034), ['Mobile Copil']),
     ('duo_propped_terminal', (2007, 2853), ['Claude Code', 'Workspace']),
-    ('duo_book_home', (2853, 2007), ['Hosts', 'Add Host', 'Connections']),
+    # With a vertical bar, Add Host is a + key in the bar, so check a host.
+    ('duo_book_home', (2853, 2007), ['Hosts', 'Build runner', 'Connections']),
     ('duo_open_native', (2853, 2007), ['Message the agent', 'reconnect']),
     ('duo_closed_windows', (1398, 2034), ['Workspace']),
-    ('duo_closed_hosts', (1398, 2034), ['Hosts', 'Add Host']),
+    ('duo_closed_hosts', (1398, 2034), ['Hosts', 'Build runner']),
     (
         'duo_closed_agent_management',
         (1398, 2034),

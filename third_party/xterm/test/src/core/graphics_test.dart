@@ -3129,6 +3129,36 @@ void main() {
     });
   });
 
+  testWidgets(
+      'an image still decoding when its program ends does not answer the next',
+      (tester) async {
+    await tester.runAsync(() async {
+      final pngBase64 = await _buildPngBase64(3, 2);
+      final responses = <String>[];
+      final terminal = Terminal(onOutput: responses.add);
+
+      terminal.write('\x1b_Ga=T,I=5,f=100,q=0;$pngBase64\x1b\\');
+      expect(responses, isEmpty, reason: 'the image is still decoding');
+      terminal.resetForNextProgram();
+      // One arguments map submitted on both sides of a reset: the reply to
+      // the first submission must stay with the program that sent it.
+      const shared = {'a': 'T', 'I': '7', 'f': '100', 'q': '0'};
+      final png = base64.decode(pngBase64);
+      terminal.submitGraphicsCommand(shared, png);
+      terminal.resetForNextProgram();
+      terminal.submitGraphicsCommand(shared, png);
+      var waited = 0;
+      while (responses.isEmpty && waited < 2000) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        waited += 20;
+      }
+      // Decodes run in order, so the earlier images have finished by now.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(responses, [matches(RegExp(r'I=7,i=\d+;OK'))]);
+    });
+  });
+
   testWidgets('Kitty graphics image numbers: transmit, place and delete by I=',
       (
     tester,

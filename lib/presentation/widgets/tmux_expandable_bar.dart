@@ -121,6 +121,7 @@ class _TmuxExpandableBar extends StatefulWidget {
     required this.onExpandedChanged,
     required this.onSidebarDragOffsetChanged,
     this.pinnedOpen = false,
+    this.pinnedHeader,
     this.onPinnedEscape,
     this.tmuxExtraFlags,
     this.hostLabel,
@@ -171,6 +172,10 @@ class _TmuxExpandableBar extends StatefulWidget {
   /// The expanded state underneath still follows selections, so the bar
   /// returns to it once the page goes away.
   final bool pinnedOpen;
+
+  /// Shown above the handle of a navigator that is [pinnedOpen], such as the
+  /// connection's identity when the screen has no title bar.
+  final Widget? pinnedHeader;
 
   /// Called when Esc leaves the window list of a navigator that is
   /// [pinnedOpen] and so cannot collapse; the screen takes keyboard focus
@@ -1646,6 +1651,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           ),
           child: Column(
             children: [
+              if (widget.pinnedOpen && widget.pinnedHeader != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                  child: widget.pinnedHeader,
+                ),
               _buildSidebarHandle(theme),
               Expanded(
                 // An IndexedStack also lays out hidden rows at the rail's
@@ -2169,6 +2179,11 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
 
     return SingleChildScrollView(
       key: const ValueKey('tmux-window-list'),
+      // A page of its own reaches the bottom of the window, so its last
+      // rows scroll clear of the home indicator.
+      padding: widget.pinnedOpen
+          ? EdgeInsets.only(bottom: MediaQuery.paddingOf(context).bottom)
+          : null,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -2180,7 +2195,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
           ListTile(
             dense: true,
             visualDensity: _denseTileVisualDensity,
-            minTileHeight: 42,
+            minTileHeight: _actionTileHeight(theme),
             contentPadding: _denseTilePadding,
             horizontalTitleGap: 12,
             minLeadingWidth: 20,
@@ -2208,6 +2223,10 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     );
   }
 
+  // A navigator pinned to its own page has room for full-size targets.
+  double _actionTileHeight(ThemeData theme) =>
+      widget.pinnedOpen ? muxNavigatorMinTouchTarget(theme.platform) : 42;
+
   Widget _buildSessionsSection(ThemeData theme) => MuxRecentSessionsSection(
     session: widget.session,
     tmuxSessionName: widget.tmuxSessionName,
@@ -2228,7 +2247,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     headerBuilder: (context, toggle, {required expanded}) => ListTile(
       dense: true,
       visualDensity: _denseTileVisualDensity,
-      minTileHeight: 42,
+      minTileHeight: _actionTileHeight(theme),
       contentPadding: _denseTilePadding,
       horizontalTitleGap: 12,
       minLeadingWidth: 18,
@@ -2370,6 +2389,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
       MuxWindowRow(
         key: ValueKey(('native-session', session.key)),
         inBar: true,
+        comfortable: widget.pinnedOpen,
         presentation: MuxWindowPresentation.session(
           session,
           index: _nativeAcpWindowIndex(session),
@@ -2452,6 +2472,7 @@ class _TmuxExpandableBarState extends State<_TmuxExpandableBar>
     return MuxWindowRow(
       key: ValueKey(('server-window', window.index)),
       inBar: true,
+      comfortable: widget.pinnedOpen,
       presentation: MuxWindowPresentation.window(
         window,
         session: _sessionForNativeWindow(window),

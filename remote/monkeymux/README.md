@@ -271,6 +271,18 @@ back to a less capable rendering mode. Queries with no cached reply, and every
 query whose answer depends on live terminal state, are still buffered and
 re-delivered to the terminal on the next attach or window switch.
 
+The server drops an attach client whose socket refuses output for a second,
+and a client behind a stalled SSH channel stops reading. When the server
+advertises `attach-output-delivery`, `monkeymux attach` keeps reading into a
+buffer of up to 16 MiB instead. It sends an `attachToken` in its hello and,
+over a control connection of its own, `attach_delivered` requests that carry
+how many output bytes its terminal has been written. Because the client reads
+ahead, the socket taking a query no longer means the terminal has it, so the
+server keeps that query's replies expected until a report covers it, and only
+then starts their usual grace. Past the grace a reply is routed to the window
+as typed input. Against a server without the capability the client copies
+without reading ahead.
+
 MonkeyMux observes 7-bit and C1 OSC title and working-directory reports for
 metadata only, without stripping or rewriting those bytes from the foreground
 stream. It also retains each window's OSC 9;4 progress state on the control

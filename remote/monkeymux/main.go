@@ -83,6 +83,9 @@ const (
 	attachWriteTimeout                = time.Second
 	attachTransitionTimeout           = 3 * time.Second
 	terminalResponseMaxOutstanding    = 64
+	// terminalResponseMaxUndelivered bounds the replies owed to queries a
+	// reporting client has read but its terminal has not been written yet.
+	terminalResponseMaxUndelivered    = 4096
 	attachWriteChunkBytes             = 32 * 1024
 	terminalResponseFocusGrace        = 2 * time.Second
 	focusInputCarryDelay              = 75 * time.Millisecond
@@ -353,6 +356,7 @@ var capabilities = []string{
 	"native-acp-upgrade-handoff-v1",
 	"push-v1",
 	"client-visibility",
+	attachOutputDeliveryCapability,
 }
 
 var (
@@ -601,6 +605,12 @@ type controlMessage struct {
 	// Hidden is client_visibility's state: true while the client's view of
 	// the attached terminal is hidden.
 	Hidden bool `json:"hidden,omitempty"`
+	// AttachToken names one attach connection, in its hello and in the
+	// attach_delivered reports its client sends over a control connection of
+	// its own; Delivered is how many bytes of that attach's output the
+	// client's terminal has been written (attach-output-delivery).
+	AttachToken string `json:"attachToken,omitempty"`
+	Delivered   uint64 `json:"delivered,omitempty"`
 }
 
 type controlResponse struct {
@@ -1233,6 +1243,18 @@ type attachClient struct {
 	replayedWindowID                      string
 	replayedOutputGeneration              uint64
 
+	// deliveryToken is set for a client that reports the output its terminal
+	// has been written (attach-output-delivery). Its writer then records, in
+	// undeliveredQueries, the output offset just past each query it sends,
+	// and the replies the query is owed do not expire, or count as missing,
+	// until a report covers that offset: the client reads ahead of its
+	// terminal, so the socket taking a query says nothing about when the
+	// terminal sees it. undeliveredResponses sums their replies.
+	deliveryToken        string
+	outputOffset         uint64
+	undeliveredQueries   []undeliveredQuery
+	undeliveredResponses int
+
 	// replyTrackMu guards a per-window count of the replies this client still
 	// owes to queries: written to it but still queued, sent and awaited until
 	// awaitedRepliesUntil, or received but not yet written to the window. It
@@ -1528,11 +1550,23 @@ func attachCommand(args []string) {
 		fatal(err)
 	}
 
+	// Reading ahead of the terminal needs a server that waits for delivery
+	// before it times a reply; an older one gets the plain copy it expects.
+	reporter := openAttachDeliveryReporter(session)
 	conn, err := dialSession(session)
 	if err != nil {
 		fatal(err)
 	}
 	defer conn.Close()
+	outputLimit := 1
+	var outputDelivered func(uint64)
+	attachToken := ""
+	if reporter != nil {
+		defer reporter.close()
+		outputLimit = attachOutputBufferLimitBytes
+		outputDelivered = reporter.report
+		attachToken = reporter.token
+	}
 
 	hello := controlMessage{
 		Role:           "attach",
@@ -1544,6 +1578,7 @@ func attachCommand(args []string) {
 		CapabilityHint: string(capabilityHint),
 		NoPrefix:       *noPrefix,
 		ClipViewport:   *clipViewport,
+		AttachToken:    attachToken,
 	}
 	if !*quiet {
 		fmt.Fprintf(
@@ -1554,6 +1589,21 @@ func attachCommand(args []string) {
 	}
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
 		fatal(err)
+	}
+	if reporter != nil {
+		go func() {
+			select {
+			case <-reporter.failed:
+				// Without reports the server would wait for them forever, so
+				// hang up, but only this side: a session that is ending has
+				// closed the attach already, which may not be seen yet, and
+				// one that is not drops the client on this EOF and closes it.
+				// Either way the relay still reads everything the session
+				// sent, up to its own EOF.
+				closeAttachInput(conn)
+			case <-reporter.done:
+			}
+		}()
 	}
 
 	restoreRawTerminal := makeTerminalRaw()
@@ -1590,7 +1640,7 @@ func attachCommand(args []string) {
 
 	modes := newAttachModeTracker(os.Stdout)
 	attachOut := attachOutputWriter(modes)
-	_, copyErr := io.Copy(attachOut, conn)
+	copyErr := relayAttachOutput(attachOut, conn, outputLimit, outputDelivered)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
 	// buffers, e.g. the Windows win32-input-mode request stripper).
@@ -7568,6 +7618,7 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
 		capabilityHint:  hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes),
+		deliveryToken:   strings.TrimSpace(hello.AttachToken),
 		queueReady:      make(chan struct{}, 1),
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
@@ -7596,9 +7647,10 @@ func (c *attachClient) writeLoop() {
 			}
 		}
 		if write.responseWindowID != "" && write.responseCount > 0 {
-			c.expectTerminalResponses(
+			c.expectTerminalResponsesUntilDelivered(
 				write.responseWindowID,
 				write.responseCount,
+				c.outputOffset+uint64(len(write.data)),
 			)
 			select {
 			case <-c.done:
@@ -7614,6 +7666,7 @@ func (c *attachClient) writeLoop() {
 			c.close()
 			return
 		}
+		c.outputOffset += uint64(len(write.data))
 	}
 }
 
@@ -7971,6 +8024,14 @@ func (c *attachClient) deliversReplies() bool {
 	return !c.isClosed() || len(c.routedReplies) > 0
 }
 
+// undeliveredQuery is a query a reporting client has read but not yet
+// written to its terminal: where it ends in the output, and how many replies
+// it is owed.
+type undeliveredQuery struct {
+	end       uint64
+	responses int
+}
+
 func (c *attachClient) isClosed() bool {
 	select {
 	case <-c.done:
@@ -8000,8 +8061,10 @@ func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
 	}
 	c.awaitedRepliesUntil = c.terminalResponseUntil
 	// Bracketed paste input renews the client's wait before it checks the
-	// deadline, so a paste in progress keeps the replies owed.
-	c.awaitedRepliesHeld = c.inputBracketedPasteActive
+	// deadline, so a paste in progress keeps the replies owed, as does a query
+	// the client's terminal has not been written yet.
+	c.awaitedRepliesHeld = c.inputBracketedPasteActive ||
+		len(c.undeliveredQueries) > 0
 	for _, action := range routed {
 		if !action.userInput && action.windowID != "" {
 			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
@@ -8049,6 +8112,19 @@ func addReplyCount(counts map[string]int, windowID string, delta int) map[string
 }
 
 func (c *attachClient) expectTerminalResponses(windowID string, count int) {
+	c.expectTerminalResponsesUntilDelivered(windowID, count, 0)
+}
+
+// expectTerminalResponsesUntilDelivered expects count replies for windowID to
+// a query that ends at output offset deliveredAt. For a client that reports
+// delivery, the replies stay expected past the usual grace until a report
+// covers that offset; zero, or a client that does not report, starts the
+// grace now as expectTerminalResponses does.
+func (c *attachClient) expectTerminalResponsesUntilDelivered(
+	windowID string,
+	count int,
+	deliveredAt uint64,
+) {
 	if c == nil || windowID == "" {
 		return
 	}
@@ -8064,8 +8140,7 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	var passthrough func([]byte)
 	inputLocked := false
 	c.activityMu.Lock()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		if len(c.terminalResponseCarry) > 0 ||
 			len(c.terminalResponsePasteStartCarry) > 0 {
 			c.inputMu.Lock()
@@ -8086,11 +8161,14 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 		}
 		c.resetTerminalResponseStateLocked()
 	}
-	outstanding := len(c.terminalResponseWindows)
-	if c.terminalResponseActiveWindow != "" {
-		outstanding++
+	deferred := c.deliveryToken != "" && deliveredAt > 0
+	tooMany := count > terminalResponseMaxOutstanding-c.deliveredResponsesLocked()
+	if deferred {
+		// Replies to a query the terminal does not have yet cannot be missing;
+		// they are checked against the outstanding limit once it is delivered.
+		tooMany = count > terminalResponseMaxUndelivered-c.undeliveredResponses
 	}
-	if count > terminalResponseMaxOutstanding-outstanding {
+	if tooMany {
 		c.activityMu.Unlock()
 		if inputLocked {
 			c.inputMu.Unlock()
@@ -8104,6 +8182,13 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 			c.terminalResponseWindows,
 			windowID,
 		)
+	}
+	if deferred {
+		c.undeliveredQueries = append(
+			c.undeliveredQueries,
+			undeliveredQuery{end: deliveredAt, responses: count},
+		)
+		c.undeliveredResponses += count
 	}
 	if len(c.terminalResponseCarry) > 0 ||
 		len(c.terminalResponsePasteStartCarry) > 0 {
@@ -8213,8 +8298,7 @@ func (c *attachClient) routeInputLocked(
 		return
 	}
 	now := time.Now()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		combined := make(
 			[]byte,
 			0,
@@ -8723,6 +8807,59 @@ func (c *attachClient) hasExpectedTerminalResponseLocked() bool {
 		len(c.terminalResponseWindows) > 0
 }
 
+// terminalResponsesExpiredLocked reports whether the replies this client owes
+// have run past their grace, so input is the user's again. Never while a query
+// it sent has not reached the terminal: the reply cannot have come yet.
+func (c *attachClient) terminalResponsesExpiredLocked(now time.Time) bool {
+	return !c.terminalResponseUntil.IsZero() &&
+		now.After(c.terminalResponseUntil) &&
+		len(c.undeliveredQueries) == 0
+}
+
+// deliveredResponsesLocked counts the expected replies to queries the
+// terminal has been written. A reply can come before the report that its
+// query was delivered, hence the floor.
+func (c *attachClient) deliveredResponsesLocked() int {
+	outstanding := len(c.terminalResponseWindows)
+	if c.terminalResponseActiveWindow != "" {
+		outstanding++
+	}
+	return max(outstanding-c.undeliveredResponses, 0)
+}
+
+// markOutputDelivered records that the client's terminal has been written the
+// first offset bytes of its attach output. The queries that ends deliver get
+// their reply grace from now, and count toward the outstanding limit.
+func (c *attachClient) markOutputDelivered(offset uint64) {
+	c.activityMu.Lock()
+	delivered := 0
+	for delivered < len(c.undeliveredQueries) &&
+		c.undeliveredQueries[delivered].end <= offset {
+		c.undeliveredResponses -= c.undeliveredQueries[delivered].responses
+		delivered++
+	}
+	if delivered == 0 {
+		c.activityMu.Unlock()
+		return
+	}
+	c.undeliveredQueries = c.undeliveredQueries[delivered:]
+	if len(c.undeliveredQueries) == 0 {
+		c.undeliveredQueries = nil
+	}
+	if c.deliveredResponsesLocked() > terminalResponseMaxOutstanding {
+		// As desynchronized as a client that does not report would be when
+		// writing the query that took it past the limit.
+		c.activityMu.Unlock()
+		c.close()
+		return
+	}
+	if c.hasExpectedTerminalResponseLocked() {
+		c.renewTerminalResponseDeadlineLocked()
+	}
+	c.trackRepliesLocked(nil)
+	c.activityMu.Unlock()
+}
+
 func (c *attachClient) resetTerminalResponseStateLocked() {
 	c.terminalResponseCarry = nil
 	c.terminalResponseCarryGeneration++
@@ -8797,8 +8934,7 @@ func (c *attachClient) resolveAmbiguousTerminalResponseInput(
 	c.terminalResponseCarry = nil
 	c.terminalResponsePasteStartCarry = nil
 	c.terminalResponseCarryGeneration++
-	if !c.terminalResponseUntil.IsZero() &&
-		time.Now().After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(time.Now()) {
 		c.resetTerminalResponseStateLocked()
 	}
 	c.trackRepliesLocked(nil)
@@ -8911,6 +9047,23 @@ func terminalViewportTransitionSafe(window *muxWindow) bool {
 
 func (s *muxServer) primaryAttachClientLocked() *attachClient {
 	return s.attachClients[s.attachConn]
+}
+
+// attachClientByDeliveryToken finds the attach connection whose hello carried
+// token.
+func (s *muxServer) attachClientByDeliveryToken(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, client := range s.attachClients {
+		if client.deliveryToken == token {
+			return client
+		}
+	}
+	return nil
 }
 
 func (s *muxServer) attachClientByIDLocked(clientID string) *attachClient {
@@ -9570,6 +9723,12 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		client.send(controlResponse{ID: request.ID, Type: "window_closed", Status: "ok"})
 		if shouldShutdown {
 			go s.closeIfIdle()
+		}
+	case attachDeliveredRequest:
+		// A client reports after every write to its terminal, so this is not
+		// answered: the reply would only be read and dropped.
+		if attach := s.attachClientByDeliveryToken(request.AttachToken); attach != nil {
+			attach.markOutputDelivered(request.Delivered)
 		}
 	case "resize":
 		if request.Width <= 0 || request.Height <= 0 {
