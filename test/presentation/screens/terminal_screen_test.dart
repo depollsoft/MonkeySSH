@@ -9531,6 +9531,36 @@ void main() {
       expect(completionService.completeInvocations.last.commandLine, 'git ch');
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    // The shell can echo a paste in pieces; a piece is a line on the way,
+    // not a sign the snapshot went stale.
+    testWidgets('keeps the snapshot through a paste echoed in pieces', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % ');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('c');
+      await tester.pump();
+      session.terminal!.write('c');
+      await tester.pump();
+      session.terminal!.textInput('at abc');
+      await tester.pump();
+      session.terminal!.write('at a');
+      await tester.pump();
+      session.terminal!.textInput('d');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.last.commandLine,
+        'cat abcd',
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {

@@ -1169,7 +1169,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Inputs the optimistic snapshot follows ahead of the shell before it gives
   /// up and reads the terminal.
-  static const _maxShellCompletionOptimisticStates = 64;
+  static const _maxShellCompletionOptimisticStates = 128;
   ShellCompletionInvocation? _shellCompletionSourceInvocation;
   List<ShellCompletionSuggestion> _shellCompletionSourceSuggestions =
       const <ShellCompletionSuggestion>[];
@@ -4030,12 +4030,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (_shellCompletionOptimisticSnapshot == null) {
       _shellCompletionOptimisticStates = [terminalSnapshot];
     }
-    final snapshot = _shellCompletionOptimisticSnapshot ?? terminalSnapshot;
-    _shellCompletionOptimisticSnapshot = applyShellCompletionOutputToSnapshot(
-      snapshot: snapshot,
-      output: output,
-    );
-    _shellCompletionOptimisticStates.add(_shellCompletionOptimisticSnapshot!);
+    // One line per character: the shell can echo a paste or a quick run of
+    // keys in pieces.
+    var snapshot = _shellCompletionOptimisticSnapshot ?? terminalSnapshot;
+    final pieces = output == '\x7F' || output == '\b'
+        ? [output]
+        : [for (final rune in output.runes) String.fromCharCode(rune)];
+    for (final piece in pieces) {
+      snapshot = applyShellCompletionOutputToSnapshot(
+        snapshot: snapshot,
+        output: piece,
+      );
+      _shellCompletionOptimisticStates.add(snapshot);
+    }
+    _shellCompletionOptimisticSnapshot = snapshot;
     if (_shellCompletionOptimisticStates.length >
         _maxShellCompletionOptimisticStates) {
       _shellCompletionOptimisticSnapshot = null;
