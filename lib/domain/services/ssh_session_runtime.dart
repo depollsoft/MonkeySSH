@@ -770,9 +770,15 @@ if(!$__flResolved){$__flResolved='cmd'}
         );
     _shellDoneSubscription = shell.done.asStream().listen(
       (_) {
-        _flushPendingShellOutput(drainAll: true);
         final returnToLoginShell =
             identical(_shell, shell) && _returnToLoginShell;
+        if (returnToLoginShell) {
+          _withoutTerminalReplies(
+            () => _flushPendingShellOutput(drainAll: true),
+          );
+        } else {
+          _flushPendingShellOutput(drainAll: true);
+        }
         DiagnosticsLogService.instance.info(
           'ssh.shell',
           'done',
@@ -835,6 +841,26 @@ if(!$__flResolved){$__flResolved='cmd'}
     }
   }
 
+  /// Runs [parse] over the last output of a command that has ended, with the
+  /// terminal's replies switched off. Nothing is left to read them, and
+  /// whichever handler owns the terminal would pass them on to the login
+  /// shell that replaces the command, even later: the screen's Enter pacer
+  /// queues them behind an Enter it is holding.
+  void _withoutTerminalReplies(void Function() parse) {
+    final terminal = _terminal;
+    if (terminal == null) {
+      parse();
+      return;
+    }
+    final onOutput = terminal.onOutput;
+    terminal.onOutput = null;
+    try {
+      parse();
+    } finally {
+      terminal.onOutput ??= onOutput;
+    }
+  }
+
   Future<void> _replaceCompletedCommandWithLoginShell(
     SSHSession completedShell,
   ) async {
@@ -844,7 +870,13 @@ if(!$__flResolved){$__flResolved='cmd'}
       'return_to_login_start',
       fields: {'connectionId': _session.connectionId},
     );
-    _drainTerminalParseBacklogNow();
+    _withoutTerminalReplies(_drainTerminalParseBacklogNow);
+    // The session answers some queries itself, past the terminal; those
+    // replies are waiting here for the login shell. The modes the command left
+    // on have no owner either: the screen drops focus on this transition, and
+    // with focus reporting still on the shell would read `^[[O`.
+    _pendingReplacementInput.clear();
+    _terminal?.resetForNextProgram();
     _resetShellChannelState();
 
     final stdoutSubscription = _shellStdoutSubscription;
