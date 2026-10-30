@@ -411,9 +411,10 @@ func (s *terminalScreen) Reset() {
 	s.kittyLast = vtKittyPlaceholder{}
 	// Nothing is left for REP to repeat, as in the client.
 	s.lastPrinted = 0
-	// The client clears both screens' placements but keeps the images, and
-	// a transmission still open (fullReset).
+	// The client clears both screens' placements but keeps the images, with
+	// their virtual placements, and a transmission still open (fullReset).
 	s.kittyDirect = nil
+	s.kittyStores[0].relative, s.kittyStores[1].relative = nil, nil
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
 	s.resetState()

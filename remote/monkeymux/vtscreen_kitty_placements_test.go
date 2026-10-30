@@ -551,6 +551,12 @@ func TestVTKittyRecordsOnlyImagesTheClientHolds(t *testing.T) {
 		// One with a virtual placement the model does not follow may still
 		// have it, so the model keeps it.
 		{"kept with a virtual placement", upload + "\x1b_Ga=p,U=1,i=7,c=2,r=1\x1b\\\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, []string{"7/@0,0"}},
+		// Its virtual and relative placements count as placements too.
+		{"freed with its virtual placement", upload + "\x1b_Ga=p,U=1,i=7,c=1,r=1,p=1\x1b\\\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, nil},
+		{"kept by a relative placement", upload + vtKittyUploads(3) + "\x1b_Ga=p,U=1,i=3,c=1,r=1\x1b\\" +
+			"\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b_Ga=p,i=7,p=2,P=3\x1b\\\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, []string{"7/@0,0"}},
+		{"freed once its relative placement's parent goes", upload + vtKittyUploads(3) + "\x1b_Ga=p,i=3,p=1,C=1\x1b\\" +
+			"\x1b_Ga=p,i=7,p=2,P=3,Q=1\x1b\\\x1b_Ga=p,i=7,p=1,C=1\x1b\\\x1b_Ga=d,d=i,i=3\x1b\\\x1b_Ga=d,d=I,i=7,p=1\x1b\\" + place, nil},
 		// A retransmission the client rejects, or abandons, leaves no image.
 		{"rejected retransmission", upload + "\x1b_Ga=t,i=7,f=24;AAAA\x1b\\" + place, nil},
 		{"abandoned retransmission", upload + "\x1b_Ga=t,i=7,f=32,s=1,v=1,m=1;/wAA\x1b\\\x1b_Ga=q,i=9;AAAA\x1b\\" + place, nil},
@@ -652,4 +658,19 @@ func TestVTKittyNumbersReadAsTheClientReadsThem(t *testing.T) {
 	s.Write([]byte("\x1b_Ga=t,i=42," + kittyPixelRoot + "\x1b\\\x1b_Ga=p,i=42,C=1\x1b\\" +
 		"\x1b_Ga=d,d=r,x=1,y=4294967295\x1b\\"))
 	assertVTKittyPlaced(t, s)
+}
+
+// TestVTKittyFreedImageLeavesNoRowToKeep: an image freed with its last,
+// virtual, placement is not placed again, so no phantom placement keeps a
+// blank row through a shrink that the client gives up.
+func TestVTKittyFreedImageLeavesNoRowToKeep(t *testing.T) {
+	s := newTerminalScreen(20, 5)
+	s.Write([]byte("\x1b_Ga=t,i=1,U=1,c=1,r=1,p=1," + kittyPixelRoot + "\x1b\\" +
+		"\x1b_Ga=d,d=I,i=1,p=1\x1b\\\x1b[5;1H\x1b_Ga=p,i=1,C=1\x1b\\" +
+		"\x1b[1;1HA\r\nB"))
+	assertVTKittyPlaced(t, s)
+	s.Resize(20, 4)
+	if got := s.TextRows(); !reflect.DeepEqual(got, []string{"A", "B", "", ""}) {
+		t.Fatalf("rows = %q", got)
+	}
 }
