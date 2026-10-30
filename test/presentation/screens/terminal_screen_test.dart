@@ -9471,6 +9471,30 @@ void main() {
       expect(find.text('status'), findsOneWidget);
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
+    // Input notifies listeners before the shell echoes it, so a Backspace
+    // followed by a key used to look like a line that stopped leading into
+    // the snapshot, which was dropped and seeded again from "cat ab".
+    testWidgets('completes edits typed before their echo', (tester) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % cat ab');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.textInput('c');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('cat abc')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'cat ac');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {

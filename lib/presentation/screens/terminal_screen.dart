@@ -1161,6 +1161,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _shellCompletionGeneration = 0;
   String? _shellCompletionPromptPrefix;
   ({String text, int cursorOffset})? _shellCompletionOptimisticSnapshot;
+
+  /// The terminal's command line when the optimistic snapshot was seeded or
+  /// last checked against it; input notifies listeners before any echo.
+  String? _shellCompletionOptimisticBaseText;
   ShellCompletionInvocation? _shellCompletionSourceInvocation;
   List<ShellCompletionSuggestion> _shellCompletionSourceSuggestions =
       const <ShellCompletionSuggestion>[];
@@ -4018,6 +4022,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       0,
       terminalSnapshot.cursorOffset,
     );
+    if (_shellCompletionOptimisticSnapshot == null) {
+      _shellCompletionOptimisticBaseText = terminalSnapshot.text;
+    }
     final snapshot = _shellCompletionOptimisticSnapshot ?? terminalSnapshot;
     _shellCompletionOptimisticSnapshot = applyShellCompletionOutputToSnapshot(
       snapshot: snapshot,
@@ -4061,6 +4068,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _shellCompletionOptimisticSnapshot = null;
       return;
     }
+    // Typing notifies before the shell echoes anything: only a changed line
+    // says anything about the snapshot.
+    if (terminalSnapshot.text == _shellCompletionOptimisticBaseText) {
+      return;
+    }
+    _shellCompletionOptimisticBaseText = terminalSnapshot.text;
     // While echoes are pending the shell's line up to its cursor leads into
     // the snapshot. A line that doesn't, such as one the shell redrew after
     // Ctrl+U when the snapshot was seeded before the redraw, means the
