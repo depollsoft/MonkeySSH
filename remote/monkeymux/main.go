@@ -197,19 +197,30 @@ const terminalSynchronizedOutputEnd = "\x1b[?9002l"
 
 const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
+const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
+
+const terminalReplayResetSequence = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m"
+
+// activeWindowReplayPrefix resets a client and clears both screens before a
+// window's replay. ED 2 leaves the client's physical Kitty placements on the
+// main screen (Buffer._eraseRange), so a client reopened on the window it
+// showed keeps the images it holds, including a shell window's whose
+// transmission is older than the history a replay carries.
+const activeWindowReplayPrefix = terminalReplayResetSequence + terminalAllScreensClearSequence
+
 // terminalKittyPlacementsClearSequence deletes every Kitty placement on the
-// visible screen, keeping the image data (lowercase d=a). ED 2 leaves the
-// client's physical placements where they are (Buffer._eraseRange), so
-// without it one window's images stayed over the next window's replay; it
-// matches no virtual placement, which only placeholder cells show. A window
+// visible screen, keeping the image data (lowercase d=a). It matches no
+// virtual placement, which only placeholder cells show.
+const terminalKittyPlacementsClearSequence = "\x1b_Ga=d,d=a,q=2\x1b\\"
+
+// windowChangeReplayPrefix is activeWindowReplayPrefix for clients that were
+// showing another window: the main screen's placements, which ED 2 leaves,
+// are deleted right after its clear, while it is the screen shown, so the
+// images of the window shown before do not stay over this one. A window
 // replayed from its frame places its own direct placements again, those of
 // images it names by id; a shell window replays its history, which carries
 // its placements.
-const terminalKittyPlacementsClearSequence = "\x1b_Ga=d,d=a,q=2\x1b\\"
-
-const terminalAllScreensClearSequence = terminalScreenClearSequence + terminalKittyPlacementsClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
-
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+const windowChangeReplayPrefix = terminalReplayResetSequence + terminalScreenClearSequence + terminalKittyPlacementsClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -805,6 +816,10 @@ type muxServer struct {
 	// hiddenClientIDs names the attach clients whose view is hidden
 	// (terminal_visibility.go). Guarded by mu.
 	hiddenClientIDs map[string]struct{}
+	// shownWindowID is the window the last replay was built for, which the
+	// attached clients' terminals show: a window can become active without
+	// one (selectWindowWithoutReplay).
+	shownWindowID string
 }
 
 type muxWindow struct {
@@ -3674,8 +3689,11 @@ func normalizeCapturedReplayHistory(history []byte) []byte {
 	if len(history) == 0 {
 		return nil
 	}
-	if bytes.HasPrefix(history, []byte(activeWindowReplayPrefix)) {
-		history = history[len(activeWindowReplayPrefix):]
+	for _, prefix := range []string{activeWindowReplayPrefix, windowChangeReplayPrefix} {
+		if bytes.HasPrefix(history, []byte(prefix)) {
+			history = history[len(prefix):]
+			break
+		}
 	}
 	if len(history) > windowHistoryLimitBytes {
 		history = history[len(history)-windowHistoryLimitBytes:]
@@ -6805,7 +6823,7 @@ func (s *muxServer) createWindowWithStarter(
 	}
 	s.clearAlertsLocked(window.id)
 	var imageFollowUp []byte
-	replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, nil)
+	replay, imageFollowUp = s.windowChangeReplayWithImageFollowUpLocked(window, nil)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	snapshots = s.snapshotsLocked()
 	addedSnapshot = snapshotByID(snapshots, window.id)
@@ -7432,7 +7450,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 				s.publishedHeight = s.height
 				s.resizeActiveLocked(s.width, s.height)
 				replay, imageFollowUp =
-					s.replayBytesWithImageFollowUpLocked(candidate, nil)
+					s.windowChangeReplayWithImageFollowUpLocked(candidate, nil)
 				foregroundProcessGroup = candidate.foregroundProcessGroupLocked()
 				redrawWindow = candidate
 				activeChanged = true
@@ -10396,7 +10414,7 @@ func (s *muxServer) selectWindowWithSkip(
 		clientHas = nil
 	}
 	primary = s.attachConn
-	replay, imageFollowUp = s.replayBytesWithImageFollowUpLocked(window, clientHas)
+	replay, imageFollowUp = s.windowChangeReplayWithImageFollowUpLocked(window, clientHas)
 	foregroundProcessGroup = window.foregroundProcessGroupLocked()
 	redrawWindow = window
 	s.mu.Unlock()
@@ -10517,7 +10535,7 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 			targetWidth = s.width
 			targetHeight = s.height
 			replay, imageFollowUp =
-				s.replayBytesWithImageFollowUpLocked(replacement, nil)
+				s.windowChangeReplayWithImageFollowUpLocked(replacement, nil)
 			foregroundProcessGroup = replacement.foregroundProcessGroupLocked()
 			redrawWindow = replacement
 			activeChanged = true
@@ -11047,6 +11065,9 @@ func (s *muxServer) resumePausedAttachForwarding(
 		return
 	}
 	replay = window.redrawForwardingReplay
+	// A frame that replaces a deferred window-change replay changes the
+	// window too.
+	changesWindow := bytes.HasPrefix(replay, []byte(windowChangeReplayPrefix))
 	clipboard := window.redrawForwardingClipboard
 	buffered = window.redrawForwardingBuffer
 	failoverBuffered = window.redrawForwardingFailoverBuffer
@@ -11079,6 +11100,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			frame := s.foregroundHistoryFallbackReplayLocked(
 				window,
 				window.screenLocked(),
+				changesWindow,
 			)
 			replay = nil
 			buffered = append(append([]byte(nil), frame...), queryData...)
@@ -11102,6 +11124,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		frame := s.foregroundHistoryFallbackReplayLocked(
 			window,
 			window.screenLocked(),
+			changesWindow,
 		)
 		replay = nil
 		buffered = append(append([]byte(nil), frame...), queryData...)
@@ -11128,6 +11151,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			fallbackReplay = s.foregroundHistoryFallbackReplayLocked(
 				window,
 				window.redrawForwardingFallbackScreen,
+				changesWindow,
 			)
 		}
 		if len(fallbackReplay) > 0 {
@@ -11152,7 +11176,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// do, so the response wait still has something to wait for.
 					screen := window.redrawForwardingFallbackScreen.Clone()
 					screen.Write(secondaryBuffered)
-					frame := s.foregroundHistoryFallbackReplayLocked(window, screen)
+					frame := s.foregroundHistoryFallbackReplayLocked(window, screen, changesWindow)
 					buffered = append(append([]byte(nil), frame...), queryData...)
 					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 					secondaryBuffered = append([]byte(nil), frame...)
@@ -11291,7 +11315,33 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 	window *muxWindow,
 	clientHas map[string]uint32,
 ) ([]byte, []byte) {
-	replay, followUp := s.replayBytesWithImagesLocked(window, clientHas)
+	return s.windowReplayWithImageFollowUpLocked(window, clientHas, false)
+}
+
+// windowChangeReplayWithImageFollowUpLocked is replayBytesWithImageFollowUpLocked
+// for a window becoming the active one. When the attached clients were last
+// sent another window, the replay starts with windowChangeReplayPrefix, which
+// deletes that window's placements; a client reopened on the window it showed
+// keeps what it holds. Before any replay no client shows anything: one
+// attaching gets its first replay from handleAttach.
+func (s *muxServer) windowChangeReplayWithImageFollowUpLocked(
+	window *muxWindow,
+	clientHas map[string]uint32,
+) ([]byte, []byte) {
+	return s.windowReplayWithImageFollowUpLocked(
+		window,
+		clientHas,
+		s.shownWindowID != "" && s.shownWindowID != window.id,
+	)
+}
+
+func (s *muxServer) windowReplayWithImageFollowUpLocked(
+	window *muxWindow,
+	clientHas map[string]uint32,
+	changesWindow bool,
+) ([]byte, []byte) {
+	s.shownWindowID = window.id
+	replay, followUp := s.replayBytesWithImagesLocked(window, clientHas, changesWindow)
 	// Kept virtual and relative placements go last, after every image they
 	// show and the frame whose placeholder cells position them.
 	return replay, append(followUp, window.kittyPlacementReplayLocked()...)
@@ -11300,6 +11350,7 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 func (s *muxServer) replayBytesWithImagesLocked(
 	window *muxWindow,
 	clientHas map[string]uint32,
+	changesWindow bool,
 ) ([]byte, []byte) {
 	history, historyStart := window.historyTailWithParserLocked()
 	if window.retainsConPtyNormalScreenLocked() {
@@ -11312,7 +11363,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 		replayHistory := append(images, history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
-				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed),
+				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed, changesWindow),
 			),
 			// The raw history tail is bounded, so a transmission it once
 			// carried can have been evicted while its placeholder cells
@@ -11341,7 +11392,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 		mainScreen, mainImages := window.mainScreenReplayLocked(
 			maxReplayedKittyImageBytes - len(images),
 		)
-		return buildWindowReplay(window, mainScreen, images, s.keyboardModesUsed),
+		return buildWindowReplay(window, mainScreen, images, s.keyboardModesUsed, changesWindow),
 			window.kittyPlaceholderImageFollowUpLocked(
 				replayed,
 				nil,
@@ -11356,7 +11407,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 	// transmission whose placeholder cells are still inside the tail. Ids the
 	// tail still transmits are excluded, so this is a no-op for the ordinary
 	// shell window that replays its images intact.
-	return buildWindowReplay(window, nil, history, s.keyboardModesUsed),
+	return buildWindowReplay(window, nil, history, s.keyboardModesUsed, changesWindow),
 		window.kittyPlaceholderImageFollowUpLocked(
 			nil,
 			history,
@@ -11386,14 +11437,16 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 }
 
 // foregroundHistoryFallbackReplayLocked renders screen, the snapshot taken
-// when the redraw pause began or the model as it is now, into a full replay.
-// The frame is the screen's, but the surrounding mode, cursor, and
+// when the redraw pause began or the model as it is now, into a full replay,
+// which starts with windowChangeReplayPrefix when it replaces a window-change
+// replay. The frame is the screen's, but the surrounding mode, cursor, and
 // retained-image state is read now, so state the window learned *during* the
 // pause (a mode change, a new image upload) is carried into the fallback
 // instead of being dropped with the discarded redraw.
 func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	window *muxWindow,
 	screen *terminalScreen,
+	changesWindow bool,
 ) []byte {
 	if window == nil || screen == nil {
 		return nil
@@ -11412,15 +11465,21 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	images = append(images, frameImages...)
 	// A direct placement whose image did not fit is left out rather than
 	// placed where the client may hold another window's image of that id.
+	// The client's own copies of the rest go first, before the images.
 	carried := kittyCarriedImages(replayed, served)
+	var deletes []byte
+	if !screen.AlternateScreenActive() {
+		deletes = screen.KittyMainPlacementDeletes(carried)
+	}
 	frame := window.withheldAttachOscSuffixTrimmedLocked(screen.RenderFrameReplacing(carried))
 	mainScreen, _ := window.mainScreenReplayLocked(maxKittyImageRepairBytes - len(images))
 	placements := window.kittyPlacementReplayLocked()
-	replayHistory := make([]byte, 0, len(images)+len(frame)+len(placements))
+	replayHistory := make([]byte, 0, len(deletes)+len(images)+len(frame)+len(placements))
+	replayHistory = append(replayHistory, deletes...)
 	replayHistory = append(replayHistory, images...)
 	replayHistory = append(replayHistory, frame...)
 	replayHistory = append(replayHistory, placements...)
-	return buildWindowReplay(window, mainScreen, replayHistory, s.keyboardModesUsed)
+	return buildWindowReplay(window, mainScreen, replayHistory, s.keyboardModesUsed, changesWindow)
 }
 
 // kittyCarriedImages reports whether a replay carries an image: one of the
@@ -11439,8 +11498,10 @@ func kittyCarriedImages(replayed map[string]struct{}, served []string) func(stri
 // alternate screen again, and returns it with how many of its bytes are
 // image data; it is nil while the main screen shows. Each screen keeps its
 // own images on the client, so the images its direct placements show are
-// sent store-only while it is the screen shown, as many as fit in budget; a
-// placement whose image does not fit is left out. So is one whose image the
+// sent store-only while it is the screen shown, as many as fit in budget,
+// after deleting the client's own copies of their placements (as the
+// fallback frame does); a placement whose image does not fit is left out,
+// with that delete. So is one whose image the
 // window last transmitted on the alternate screen: the client keeps that data
 // apart from the main screen's, and the main screen's store may hold another
 // window's image under the same id, which a placement made again would show.
@@ -11466,7 +11527,8 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 	}
 	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
 	carried := kittyCarriedImages(nil, sent)
-	out := append([]byte(nil), images...)
+	out := screen.KittyMainPlacementDeletes(carried)
+	out = append(out, images...)
 	out = append(out, screen.RenderMainScreenReplacing(carried)...)
 	if len(images) > 0 {
 		out = append(out, w.kittyPlacementReplayOnLocked(false)...)
@@ -11476,13 +11538,19 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 
 // buildWindowReplay is the replay that paints window on a client: history on
 // the screen it shows, after mainScreen (mainScreenReplayLocked) when that is
-// the alternate screen.
+// the alternate screen. It starts with windowChangeReplayPrefix for clients
+// that were showing another window, and activeWindowReplayPrefix otherwise.
 func buildWindowReplay(
 	window *muxWindow,
 	mainScreen []byte,
 	history []byte,
 	restoreKeyboardModes bool,
+	changesWindow bool,
 ) []byte {
+	prefix := activeWindowReplayPrefix
+	if changesWindow {
+		prefix = windowChangeReplayPrefix
+	}
 	// The replay prefix leaves the terminal on the main screen, where the
 	// keyboard restore has to start.
 	var keyboardModes []byte
@@ -11504,11 +11572,11 @@ func buildWindowReplay(
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+		len(prefix)+len(keyboardModes)+len(title)+len(mainScreen)+
 			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
-	replay = append(replay, activeWindowReplayPrefix...)
+	replay = append(replay, prefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
 	replay = append(replay, mainScreen...)

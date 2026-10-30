@@ -30,8 +30,8 @@ func (s *terminalScreen) RenderFrame() []byte {
 
 // RenderFrameReplacing is RenderFrame placing again only the direct
 // placements of the images replace accepts, those the replay carries, or
-// every one for nil. The replay prefix deleted the client's own placements
-// on the main screen (activeWindowReplayPrefix).
+// every one for nil. A replay that places a main-screen image again first
+// deletes the client's copies of it (KittyMainPlacementDeletes).
 func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil

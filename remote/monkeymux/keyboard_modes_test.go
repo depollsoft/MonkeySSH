@@ -162,7 +162,8 @@ func TestWindowSwitchRestoresEachWindowsKeyboardModes(t *testing.T) {
 	agentRestore := kittyKeyboardResetSequence + "\x1b[>5u" +
 		"\x1b[?1049h" + kittyKeyboardResetSequence + "\x1b[?1049l\x1b[>4;2m"
 	got := attach.String()
-	if !strings.Contains(got, activeWindowReplayPrefix+agentRestore) {
+	// The client showed @2's replay, so this one changes the window.
+	if !strings.Contains(got, windowChangeReplayPrefix+agentRestore) {
 		t.Fatalf("agent replay = %q, want keyboard restore %q after the prefix", got, agentRestore)
 	}
 	// The retained history's own push must not stack a second level.

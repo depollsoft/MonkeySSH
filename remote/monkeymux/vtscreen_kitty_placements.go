@@ -21,10 +21,10 @@ import (
 // RenderMainScreen place again the ones on the screen they paint. Only
 // placements of an image with an explicit id (i=) are followed: a frame
 // cannot name an image sent by number (I=) or with neither, since the client
-// gives those an id of its own. A replay deletes every placement on the
-// client's main screen first (activeWindowReplayPrefix), so after a reopen
-// such an image is gone from a window replayed from its frame; a shell
-// window's history replay places it again.
+// gives those an id of its own. A client reopened on the window it showed
+// keeps such an image where it had it; one switched from another window had
+// its placements deleted (windowChangeReplayPrefix), and gets it back only
+// from a shell window's history replay.
 //
 // The client places an image only when the store of the screen it is on
 // holds it, and answers ENOENT otherwise. The model follows each screen's
@@ -819,6 +819,35 @@ func (s *terminalScreen) kittyPlacementReplaced(
 	replace func(imageID string) bool,
 ) bool {
 	return s.kittyPlacementOnScreen(p, alt) && (replace == nil || replace(p.imageID))
+}
+
+// KittyMainPlacementDeletes returns what a replay sends, before the images,
+// when it paints the main screen and places its direct placements again
+// (replace as for RenderFrameReplacing): a lowercase delete by id (a=d,d=i),
+// which keeps the image data, of each image it places again. The replay
+// prefix's ED 2 leaves a reopened client's own placements on the main screen,
+// where the frame scrolls them into the scrollback or paints over them, so
+// placing one without a placement id again would leave a second copy. The
+// delete takes every placement of the image, wherever it is, and only those,
+// so what the replay does not place again keeps whatever the client had. The
+// alternate screen needs none: entering it cleared it.
+func (s *terminalScreen) KittyMainPlacementDeletes(replace func(imageID string) bool) []byte {
+	if s == nil {
+		return nil
+	}
+	var out []byte
+	var deleted []string
+	for i := range s.kittyDirect {
+		p := &s.kittyDirect[i]
+		if !s.kittyPlacementReplaced(p, false, replace) || slices.Contains(deleted, p.imageID) {
+			continue
+		}
+		deleted = append(deleted, p.imageID)
+		out = append(out, "\x1b_Ga=d,d=i,i="...)
+		out = append(out, p.imageID...)
+		out = append(out, ",q=2\x1b\\"...)
+	}
+	return out
 }
 
 // appendKittyPlacements places the screen's direct placements again, on

@@ -67,6 +67,8 @@ func selectWindowReplay(t *testing.T, window *muxWindow, stream, redraw string) 
 	server.mu.Lock()
 	window.recordScreenGeometryLocked(80, 40)
 	window.screenWidth, window.screenHeight = 80, 40
+	// The client shows @1, as its attach replay left it.
+	server.shownWindowID = "@1"
 	server.mu.Unlock()
 	server.handleWindowOutput(window.id, []byte(stream))
 	if err := server.selectWindow(window.id); err != nil {
@@ -93,7 +95,8 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 
 	frame := strings.Index(got, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l\x1b[3g")
 	image := strings.Index(got, "\x1b_Ga=t,i=1,")
-	clear := strings.Index(got, "\x1b_Ga=d,d=a,q=2\x1b\\")
+	clear := strings.Index(got, windowChangeReplayPrefix)
+	own := strings.Index(got, "\x1b_Ga=d,d=i,i=1,q=2\x1b\\")
 	rows := strings.Index(got, "5 parent placed again")
 	placed := strings.Index(got, kittyDemoPlacement)
 	saved := strings.LastIndex(got, "\x1b7")
@@ -101,12 +104,14 @@ func TestForegroundReplayPlacesDirectKittyImagesAgain(t *testing.T) {
 	case frame < 0 || image < 0 || clear < 0 || rows < 0 || placed < 0 || saved < 0:
 		t.Fatalf("replay is missing a part (frame %d, image %d, clear %d, rows %d, placement %d, saved cursor %d): %q",
 			frame, image, clear, rows, placed, saved, got)
-	case !(clear < image && image < frame && frame < rows && rows < placed && placed < saved):
+	case !(clear == len(terminalSynchronizedOutputBegin) && clear < own && own < image &&
+		image < frame && frame < rows && rows < placed && placed < saved):
 		t.Fatalf("replay parts out of order (clear %d, image %d, frame %d, rows %d, placement %d, saved cursor %d): %q",
 			clear, image, frame, rows, placed, saved, got)
 	}
-	// The prefix deletes the client's placements; nothing else does.
-	if n := strings.Count(got, "a=d"); n != 1 {
+	// The window-change prefix deletes the client's placements, and the
+	// image placed again its own copies too.
+	if n := strings.Count(got, "a=d"); n != 2 {
 		t.Fatalf("replay deletes %d times: %q", n, got)
 	}
 	if n := strings.Count(got, "a=p,i=1,"); n != 1 {
@@ -134,7 +139,8 @@ func TestForegroundReplayLeavesARedrawnScreenToTheProgram(t *testing.T) {
 	if !strings.Contains(got, "redrawn") {
 		t.Fatalf("the redraw was not forwarded: %q", got)
 	}
-	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Count(got, "a=d") != 1 {
+	if n := strings.Count(got, "a=p,i=1,"); n != 1 || strings.Count(got, "a=d") != 1 ||
+		!strings.Contains(got, windowChangeReplayPrefix) {
 		t.Fatalf("replay placed image 1 besides the program (%d placements): %q", n, got)
 	}
 }
@@ -149,7 +155,7 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 		"\x1b[7;9H\x1b_Ga=p,i=6,p=2,C=1\x1b\\\x1b[10;1Halternate"
 	got := selectWindowReplay(t, window, stream, "")
 
-	mainDelete := strings.Index(got, "\x1b_Ga=d,d=a,q=2\x1b\\")
+	mainDelete := strings.Index(got, "\x1b_Ga=d,d=i,i=5,q=2\x1b\\")
 	mainImage := strings.Index(got, "\x1b_Ga=t,i=5,")
 	mainPlaced := strings.Index(got, "\x1b[2;3H\x1b_Ga=p,i=5,C=1,q=2\x1b\\")
 	enter := strings.LastIndex(got, "\x1b[?1049h")
@@ -165,10 +171,10 @@ func TestForegroundReplayPlacesImagesOnBothScreens(t *testing.T) {
 		t.Fatalf("an image was placed more than once: %q", got)
 	}
 	// The main screen's image reaches its own store before its frame, after
-	// the prefix deleted the client's placements there; entering the
+	// the client's copies of its placements are deleted; entering the
 	// alternate screen clears its own.
 	if !(mainDelete >= 0 && mainDelete < mainImage && mainImage < mainPlaced) ||
-		strings.Count(got, "a=d") != 1 {
+		strings.Count(got, "a=d,d=i") != 1 {
 		t.Fatalf("main screen image and delete out of place (delete %d, image %d, placement %d): %q",
 			mainDelete, mainImage, mainPlaced, got)
 	}
@@ -194,19 +200,41 @@ func TestHistoryReplayPlacesNoImagesAgain(t *testing.T) {
 	}
 }
 
-// TestReplayPrefixDeletesTheClientsPlacements: ED 2 leaves the client's
-// physical placements on the main screen, so the replay prefix deletes them
-// (keeping the image data), and the window shown before leaves no image over
-// the one shown now.
-func TestReplayPrefixDeletesTheClientsPlacements(t *testing.T) {
-	if !strings.Contains(activeWindowReplayPrefix,
-		"\x1b[H\x1b[2J\x1b[3J\x1b_Ga=d,d=a,q=2\x1b\\\x1b[?1049h") {
-		t.Fatalf("replay prefix %q does not delete the main screen's placements", activeWindowReplayPrefix)
+// TestReplayPrefixDeletesPlacementsOnlyOnAWindowChange: ED 2 leaves the
+// client's physical placements on the main screen. A client reopened on the
+// window it showed keeps them, which is how a shell window's images whose
+// transmissions are older than its history tail survive; a client that was
+// showing another window has them deleted (keeping the image data), so the
+// images of the window shown before do not stay over this one.
+func TestReplayPrefixDeletesPlacementsOnlyOnAWindowChange(t *testing.T) {
+	const clear = "\x1b_Ga=d,d=a,q=2\x1b\\"
+	if strings.Contains(activeWindowReplayPrefix, clear) ||
+		!strings.Contains(windowChangeReplayPrefix, "\x1b[H\x1b[2J\x1b[3J"+clear+"\x1b[?1049h") {
+		t.Fatalf("prefixes: %q, %q", activeWindowReplayPrefix, windowChangeReplayPrefix)
 	}
 	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot", lastActivity: time.Now()}
 	got := selectWindowReplay(t, window, "\x1b[Hno images here", "")
-	if strings.Count(got, "\x1b_Ga=d,d=a,q=2\x1b\\") != 1 || strings.Contains(got, "a=p") {
+	if strings.Count(got, clear) != 1 || strings.Contains(got, "a=p") {
 		t.Fatalf("switching to a window without images: %q", got)
+	}
+
+	// A shell window with an image whose transmission is older than the
+	// history tail: an attach replay leaves the client's placement alone,
+	// and so does selecting the window the client already shows.
+	server := newMuxServerWithSize("test", 80, 24)
+	shell := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	server.windows = []*muxWindow{shell}
+	server.activeID = shell.id
+	big := strings.Repeat("A", 4*windowHistoryLimitBytes)
+	server.handleWindowOutput(shell.id, []byte("$ icat\r\n\x1b_Ga=T,i=7,C=1,f=100;"+big+"\x1b\\\r\n$ "))
+	server.mu.Lock()
+	attachReplay, _ := server.activeReplayWithImageFollowUpLocked()
+	reselect, _ := server.windowChangeReplayWithImageFollowUpLocked(shell, nil)
+	server.mu.Unlock()
+	for name, replay := range map[string][]byte{"attach": attachReplay, "reselect": reselect} {
+		if strings.Contains(string(replay), "a=d") || strings.Contains(string(replay), big) {
+			t.Fatalf("%s replay deletes the placement or carries the image: %.300q", name, replay)
+		}
 	}
 }
 
@@ -280,5 +308,27 @@ func TestForegroundReplaySendsMainScreenImagesToTheMainScreen(t *testing.T) {
 	// placement nor its delete is sent: the client keeps what it had.
 	if strings.Contains(got, "i=8") {
 		t.Fatalf("replay places an image it does not carry: %.400q", got)
+	}
+}
+
+// TestAttachReplayDeletesOnlyTheImagesItPlacesAgain: a client reopened on a
+// foreground window keeps what it holds, so the frame deletes the client's
+// copies of each image it places again, and nothing else.
+func TestAttachReplayDeletesOnlyTheImagesItPlacesAgain(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@1", index: 0, agentTool: "copilot", lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.handleWindowOutput(window.id, []byte("\x1b_Ga=t,i=4,"+kittyPixelRoot+"\x1b\\"+
+		"\x1b[3;3H\x1b_Ga=p,i=4,C=1\x1b\\\x1b[3;9H\x1b_Ga=T,I=9,C=1,"+kittyPixelRoot+"\x1b\\"))
+	server.mu.Lock()
+	got := string(server.foregroundHistoryFallbackReplayLocked(window, window.screenLocked(), false))
+	server.mu.Unlock()
+	deleted := strings.Index(got, "\x1b_Ga=d,d=i,i=4,q=2\x1b\\")
+	image := strings.Index(got, "\x1b_Ga=t,i=4,")
+	placed := strings.Index(got, "\x1b[3;3H\x1b_Ga=p,i=4,C=1,q=2\x1b\\")
+	if !strings.HasPrefix(got, activeWindowReplayPrefix) || strings.Count(got, "a=d") != 1 ||
+		!(deleted >= 0 && deleted < image && image < placed) {
+		t.Fatalf("attach frame (delete %d, image %d, placement %d): %q", deleted, image, placed, got)
 	}
 }
