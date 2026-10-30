@@ -161,6 +161,66 @@ void registerTerminalScreenLayoutTests() {
         );
       });
 
+      test('vertical bar keeps the menu while any key fits', () {
+        const all = {...TerminalVerticalBarControl.values};
+        Set<TerminalVerticalBarControl> fit(int capacity) =>
+            resolveTerminalVerticalBarControls(
+              available: all,
+              capacity: capacity,
+            );
+
+        expect(fit(0), isEmpty);
+        expect(fit(1), {TerminalVerticalBarControl.menu});
+        expect(fit(2), {
+          TerminalVerticalBarControl.menu,
+          TerminalVerticalBarControl.keyboard,
+        });
+        expect(fit(3), {
+          TerminalVerticalBarControl.menu,
+          TerminalVerticalBarControl.keyboard,
+          TerminalVerticalBarControl.back,
+        });
+        expect(fit(all.length), all);
+        expect(
+          resolveTerminalVerticalBarControls(
+            available: {
+              TerminalVerticalBarControl.keyboard,
+              TerminalVerticalBarControl.files,
+            },
+            capacity: 1,
+          ),
+          {TerminalVerticalBarControl.keyboard},
+        );
+      });
+
+      test('terminal title subtitle names a program title once', () {
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: 'deploy@example.com · session #7',
+            iconName: 'Claude Code Workspace',
+            windowTitle: 'Claude Code Workspace',
+          ),
+          'deploy@example.com · session #7 · Claude Code Workspace',
+        );
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: 'session #8',
+            iconName: 'vim',
+            windowTitle: 'notes.md',
+          ),
+          'session #8 · vim · notes.md',
+        );
+        expect(
+          formatTerminalTitleSubtitle(
+            connectionIdentity: null,
+            iconName: '  ',
+            windowTitle: 'htop',
+          ),
+          'htop',
+        );
+        expect(formatTerminalTitleSubtitle(connectionIdentity: null), isEmpty);
+      });
+
       test('terminal identity includes remote host and session id', () {
         expect(
           formatTerminalConnectionIdentity(
@@ -218,7 +278,7 @@ void registerTerminalScreenLayoutTests() {
             'workspace',
             activeWindowTitle: resolveTmuxBarActiveWindowTitle(windows),
           ),
-          'workspace · ✨ Editing main.dart',
+          '✨ Editing main.dart · workspace',
         );
       });
 
@@ -244,7 +304,7 @@ void registerTerminalScreenLayoutTests() {
             'workspace',
             activeWindowTitle: resolveTmuxBarActiveWindowTitle(windows),
           ),
-          'workspace · Fix tmux session labels',
+          'Fix tmux session labels · workspace',
         );
       });
 

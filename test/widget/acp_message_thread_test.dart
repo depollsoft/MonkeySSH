@@ -143,6 +143,183 @@ void main() {
     );
   });
 
+  group('reading column', () {
+    String longResponse(String label) => List.generate(
+      18,
+      (index) => '$label response paragraph $index with enough text to wrap.',
+    ).join('\n\n');
+    final entries = [
+      AcpUserPromptEntry(
+        id: 'u1',
+        parts: const [AcpTextPart('first user request')],
+      ),
+      AcpAssistantMessageEntry(id: 'a1', markdown: longResponse('first')),
+      AcpUserPromptEntry(
+        id: 'u2',
+        parts: const [AcpTextPart('second user request')],
+      ),
+      AcpAssistantMessageEntry(id: 'a2', markdown: longResponse('second')),
+    ];
+
+    /// Pumps a thread [width] wide whose content is capped at 400, scrolled
+    /// until the first prompt is pinned and the prompt navigation shows.
+    Future<void> pumpScrolled(WidgetTester tester, double width) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(Size(width, 800));
+      await tester.pumpWidget(
+        wrap(
+          size: Size(width, 800),
+          SizedBox(
+            height: 240,
+            child: AcpMessageThread(entries: entries, maxContentWidth: 400),
+          ),
+        ),
+      );
+      await tester.pump();
+      for (var attempt = 0; attempt < 10; attempt++) {
+        if (find
+            .byKey(const ValueKey('acp-sticky-user-prompt'))
+            .evaluate()
+            .isNotEmpty) {
+          break;
+        }
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, -100));
+        await tester.pump();
+      }
+      expect(
+        find.byKey(const ValueKey('acp-sticky-user-prompt')),
+        findsOneWidget,
+      );
+    }
+
+    testWidgets('centres capped content in a wider viewport', (tester) async {
+      await pumpScrolled(tester, 1000);
+
+      // The scroll view, and so its scrollbar and drag area, spans the
+      // viewport; only the content keeps to a 400 pt column, centred.
+      expect(tester.getSize(find.byType(CustomScrollView)).width, 1000);
+      final row = tester.getRect(find.byKey(const ValueKey('a1')));
+      expect(row.left, 300);
+      expect(row.width, 400);
+
+      // The pinned summary still spans the viewport, with its text in the
+      // column, and the navigation sits at the column's edge as it sits at
+      // the screen's edge on a phone.
+      expect(
+        tester.getSize(find.byKey(const ValueKey('acp-sticky-user-prompt'))),
+        const Size(1000, 44),
+      );
+      expect(
+        tester.getTopLeft(find.byIcon(Icons.person_outline_rounded)).dx,
+        row.left,
+      );
+      expect(
+        tester
+            .getRect(find.byKey(const ValueKey('acp-user-prompt-navigation')))
+            .right,
+        row.right + 4,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('scrolling a capped thread rebuilds none of its rows', (
+      tester,
+    ) async {
+      await pumpScrolled(tester, 1000);
+      await tester.pump(const Duration(seconds: 3));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(CustomScrollView)),
+      );
+      // Past the touch slop, so the frames below scroll.
+      await gesture.moveBy(const Offset(0, -30));
+      await tester.pump();
+      // Rows the list keeps built, including those in its cache extent.
+      final rows = find
+          .byType(AcpUserPromptView, skipOffstage: false)
+          .evaluate()
+          .toSet();
+      expect(rows, isNotEmpty);
+      final rebuilt = <Element>{};
+      debugOnRebuildDirtyWidget = (element, _) {
+        if (rows.contains(element)) rebuilt.add(element);
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+      final before = tester.getTopLeft(find.byKey(const ValueKey('a1'))).dy;
+      for (var frame = 0; frame < 5; frame++) {
+        await gesture.moveBy(const Offset(0, -4));
+        await tester.pump();
+      }
+      await gesture.up();
+
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('a1'))).dy,
+        lessThan(before),
+      );
+      expect(rebuilt, isEmpty);
+    });
+
+    testWidgets('a viewport narrower than the cap keeps its layout', (
+      tester,
+    ) async {
+      await pumpScrolled(tester, 380);
+
+      final row = tester.getRect(find.byKey(const ValueKey('a1')));
+      expect(row.left, 12);
+      expect(row.right, 368);
+      expect(
+        tester.getTopLeft(find.byIcon(Icons.person_outline_rounded)).dx,
+        12,
+      );
+      expect(
+        tester
+            .getRect(find.byKey(const ValueKey('acp-user-prompt-navigation')))
+            .right,
+        372,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the measure follows the prose style and text scale', (
+      tester,
+    ) async {
+      late double measure;
+      late double scaled;
+      late double letterSpacing;
+      await tester.pumpWidget(
+        wrap(
+          Builder(
+            builder: (context) {
+              letterSpacing =
+                  Theme.of(context).textTheme.bodyMedium?.letterSpacing ?? 0;
+              measure = acpReadingMeasure(context);
+              return MediaQuery(
+                data: MediaQuery.of(context)
+                    .copyWith(textScaler: const TextScaler.linear(1.5)),
+                child: Builder(
+                  builder: (context) {
+                    scaled = acpReadingMeasure(context);
+                    return const SizedBox.shrink();
+                  },
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      // The test font sets every character 1 em wide, so a character of
+      // 15 pt prose takes 15 pt plus the body style's letter spacing.
+      expect(
+        measure,
+        closeTo(kAcpReadingMeasureCharacters * (15 + letterSpacing), 0.01),
+      );
+      // Text scaling enlarges the glyphs, not the letter spacing.
+      expect(
+        scaled,
+        closeTo(kAcpReadingMeasureCharacters * (22.5 + letterSpacing), 0.01),
+      );
+    });
+  });
+
   testWidgets('pins and swaps the user prompt governing visible responses', (
     tester,
   ) async {

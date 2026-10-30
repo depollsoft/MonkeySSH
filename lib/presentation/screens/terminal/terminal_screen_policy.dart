@@ -87,6 +87,25 @@ String? formatTerminalConnectionIdentity({
   return '$hostWithPort · $sessionLabel';
 }
 
+/// Formats the terminal title's subtitle: the [connectionIdentity], then the
+/// remote program's [iconName] and [windowTitle].
+///
+/// OSC 0 sets the icon name and the window title to the same text, which
+/// appears once.
+String formatTerminalTitleSubtitle({
+  required String? connectionIdentity,
+  String? iconName,
+  String? windowTitle,
+}) {
+  final segments = <String>[];
+  for (final segment in [connectionIdentity, iconName, windowTitle]) {
+    final text = segment?.trim();
+    if (text == null || text.isEmpty || segments.contains(text)) continue;
+    segments.add(text);
+  }
+  return segments.join(' · ');
+}
+
 /// Resolves the user-visible text for a mux window notification.
 ///
 /// The title is the window the tap lands on (its navigator title, or the
@@ -704,8 +723,10 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
       : TmuxBarPlacement.bottomOverlay;
 }
 
-/// A control the connection screen puts in the system vertical bar, listed
-/// in the order the bar keeps them when it runs short of room.
+/// A control the connection screen stands as a key outside its title bar,
+/// in the system vertical bar or, propped up, in the row below the fold.
+/// Listed in the order the keys are kept when they run short of room. The
+/// menu takes the controls left out, so it stays while any key fits.
 enum TerminalVerticalBarControl {
   /// Shows or hides the system keyboard. It sits just above the keyboard.
   keyboard,
@@ -717,9 +738,6 @@ enum TerminalVerticalBarControl {
   /// Leaves the screen; the edge swipe does too.
   back,
 
-  /// Shows the connection's state, and its host on tap.
-  status,
-
   /// Shows or hides the extra keys toolbar.
   extraKeys,
 
@@ -730,17 +748,30 @@ enum TerminalVerticalBarControl {
   muxWindows,
 }
 
-/// Chooses the [available] controls the vertical bar has room for.
+/// Chooses the [available] controls the vertical bar, or the propped row,
+/// has room for.
 ///
 /// The bar holds [capacity] controls, fewer while the keyboard covers its
 /// lower part or a Live Activity lengthens the status cluster above them.
+/// When some are left out the menu stays, even with room for one key, since
+/// it takes the rest.
 Set<TerminalVerticalBarControl> resolveTerminalVerticalBarControls({
   required Set<TerminalVerticalBarControl> available,
   required int capacity,
-}) => TerminalVerticalBarControl.values
-    .where(available.contains)
-    .take(capacity)
-    .toSet();
+}) {
+  final ordered = TerminalVerticalBarControl.values.where(available.contains);
+  if (capacity < 1) return const {};
+  if (ordered.length <= capacity ||
+      !available.contains(TerminalVerticalBarControl.menu)) {
+    return ordered.take(capacity).toSet();
+  }
+  return {
+    TerminalVerticalBarControl.menu,
+    ...ordered
+        .where((control) => control != TerminalVerticalBarControl.menu)
+        .take(capacity - 1),
+  };
+}
 
 /// How the connection screen splits across a fold, such as iPhone Duo's.
 enum TerminalFoldLayout {
@@ -752,8 +783,9 @@ enum TerminalFoldLayout {
   book,
 
   /// Propped up like a laptop: the terminal fills the top page to read at a
-  /// distance; the bottom page, where the hands rest, holds the keyboard
-  /// toolbar above the window navigator or, without one, a keyboard deck.
+  /// distance; the bottom page, where the hands rest, holds the screen's
+  /// controls, then the window navigator or, without one, a keyboard deck,
+  /// and the keyboard toolbar.
   propped,
 }
 
@@ -1130,6 +1162,10 @@ int? resolveTmuxBarPendingSelectedWindowIndex(
 }
 
 /// Resolves the compact label shown in the tmux bar handle.
+///
+/// The active window's title leads, since it tells windows apart; the
+/// session name is the same for every window, so it trails and is what an
+/// ellipsis cuts first.
 String resolveTmuxBarHandleLabel(
   String tmuxSessionName, {
   String? activeWindowTitle,
@@ -1142,7 +1178,7 @@ String resolveTmuxBarHandleLabel(
   if (sessionName.isEmpty) {
     return title;
   }
-  return '$sessionName · $title';
+  return '$title · $sessionName';
 }
 
 final _oscEscapeSequencePattern = RegExp(

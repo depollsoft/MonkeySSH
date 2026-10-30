@@ -102,6 +102,7 @@ import '../widgets/acp_auth_method_sheet.dart';
 import '../widgets/acp_composer.dart';
 import '../widgets/acp_concurrency_choice.dart';
 import '../widgets/acp_connection_support.dart';
+import '../widgets/acp_diff.dart' show legibleDiffColor;
 import '../widgets/acp_native_badge.dart';
 import '../widgets/acp_native_starting_view.dart';
 import '../widgets/acp_new_session_sheet.dart';
@@ -291,6 +292,9 @@ typedef _PendingMonkeyMuxServerReplacement = ({
 });
 
 /// Resolves the terminal overflow menu height when the mobile keyboard is up.
+///
+/// The menu opens below its anchor, or above it where there is more room,
+/// as for a key in the vertical bar just above the keyboard.
 @visibleForTesting
 double? resolveTerminalOverflowMenuMaxHeight({
   required MediaQueryData mediaQuery,
@@ -305,8 +309,12 @@ double? resolveTerminalOverflowMenuMaxHeight({
   final visibleBottom = mediaQuery.size.height - keyboardInset;
   final effectiveAnchorTop =
       anchorTop ?? mediaQuery.padding.top + kToolbarHeight;
-  final maxHeight =
-      visibleBottom - effectiveAnchorTop - _terminalOverflowMenuScreenPadding;
+  final maxHeight = max(
+    visibleBottom - effectiveAnchorTop - _terminalOverflowMenuScreenPadding,
+    effectiveAnchorTop -
+        mediaQuery.padding.top -
+        _terminalOverflowMenuScreenPadding,
+  );
   return maxHeight > 0 ? maxHeight : null;
 }
 
@@ -979,6 +987,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isTmuxBarExpanded = false;
   // Whether a fold layout keeps the mux navigator open on its own page.
   bool _tmuxNavigatorPinned = false;
+  // Whether the keyboard leaves a propped fold's navigator page too short
+  // for a window row.
+  bool _proppedNavigatorCovered = false;
   double _tmuxSidebarDragOffset = 0;
   AcpSessionKey? _activeNativeAcpSessionKey;
   String? _autoOpenedNativeAcpBridgeId;
@@ -9068,7 +9079,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       ignoring: barOpacity == 0,
                       child: Opacity(
                         opacity: barOpacity,
-                        child: child ?? const SizedBox.shrink(),
+                        // The position already clears the side insets, so
+                        // the bar's rows must not pad for them again.
+                        child: MediaQuery.removePadding(
+                          context: context,
+                          removeLeft: true,
+                          removeRight: true,
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
                     ),
                   ),
@@ -9101,10 +9119,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           SizedBox(width: safeInsets.left),
           SizedBox(
             width: sidebarWidth,
-            child: _buildTmuxExpandableBar(
-              theme,
-              availableHeight,
-              placement: TmuxBarPlacement.sidebar,
+            // The spacer clears the left inset and the right one belongs to
+            // the terminal, so the bar's rows must not pad for either.
+            child: Builder(
+              builder: (context) => MediaQuery.removePadding(
+                context: context,
+                removeLeft: true,
+                removeRight: true,
+                child: _buildTmuxExpandableBar(
+                  theme,
+                  availableHeight,
+                  placement: TmuxBarPlacement.sidebar,
+                ),
+              ),
             ),
           ),
           Expanded(
@@ -9298,6 +9325,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     double availableHeight, {
     required TmuxBarPlacement placement,
     bool pinnedOpen = false,
+    Widget? pinnedHeader,
   }) {
     final connectionId = _connectionId;
     if (connectionId == null || _tmuxSessionName == null) {
@@ -9325,6 +9353,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       availableHeight: availableHeight,
       placement: placement,
       pinnedOpen: pinnedOpen,
+      pinnedHeader: pinnedHeader,
       onPinnedEscape: _focusKeyboardInput,
       recoveryGeneration: _tmuxBarRecoveryGeneration,
       isProUser: isProUser,
@@ -12250,17 +12279,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       port: _redactStoreScreenshotIdentities ? null : _host?.port,
       connectionId: _connectionId,
     );
-    final titleSubtitleSegments = <String>[];
-    if (connectionIdentity != null) {
-      titleSubtitleSegments.add(connectionIdentity);
-    }
-    if (!showsNativeAgent && (_iconName ?? '').isNotEmpty) {
-      titleSubtitleSegments.add(_iconName!);
-    }
-    if (!showsNativeAgent && (_windowTitle ?? '').isNotEmpty) {
-      titleSubtitleSegments.add(_windowTitle!);
-    }
-    final titleSubtitle = titleSubtitleSegments.join(' • ');
+    final titleSubtitle = formatTerminalTitleSubtitle(
+      connectionIdentity: connectionIdentity,
+      iconName: showsNativeAgent ? null : _iconName,
+      windowTitle: showsNativeAgent ? null : _windowTitle,
+    );
     final statusChips = _buildTerminalStatusChips(theme);
     final activeNativeKey = _activeNativeAcpSessionKey;
     final nativeActivitySnapshot = activeNativeKey == null
@@ -12307,6 +12330,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // leaves the screen instead of trying to collapse it.
     _tmuxNavigatorPinned =
         showsMuxNavigatorPage && terminalFoldLayout != TerminalFoldLayout.none;
+    if (!showsMuxNavigatorPage ||
+        terminalFoldLayout != TerminalFoldLayout.propped) {
+      _proppedNavigatorCovered = false;
+    }
 
     // A native chat hides the find bar without closing it.
     final showsFindBar = _scrollbackSearch != null && !showsNativeAgent;
@@ -12396,9 +12423,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ],
             ),
           );
+    // Offered while the navigator is hidden from the Options menu, or while
+    // the keyboard covers its propped page.
     final showsMuxWindowsControl =
         _isTmuxActive &&
-        !_showTmuxBar &&
+        (!_showTmuxBar || _proppedNavigatorCovered) &&
         connectionState == SshConnectionState.connected;
     final muxWindowsButton = IconButton(
       icon: const Icon(Icons.window_outlined),
@@ -12447,6 +12476,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // The vertical bar takes the app bar's controls only while it has room
     // for a key. Under a Live Activity with a very tall keyboard it has none,
     // and the screen keeps its regular app bar.
+    final impliesBack = ModalRoute.of(context)?.impliesAppBarDismissal ?? false;
     final systemVerticalBar = SystemVerticalBarScope.maybeOf(context);
     final verticalBar =
         systemVerticalBar != null &&
@@ -12459,47 +12489,110 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 1
         ? systemVerticalBar
         : null;
-    final verticalBarControls = verticalBar == null
-        ? const <TerminalVerticalBarControl>{}
-        : resolveTerminalVerticalBarControls(
-            available: {
-              TerminalVerticalBarControl.menu,
-              TerminalVerticalBarControl.status,
-              TerminalVerticalBarControl.extraKeys,
-              TerminalVerticalBarControl.files,
-              if (isMobile) TerminalVerticalBarControl.keyboard,
-              if (ModalRoute.of(context)?.impliesAppBarDismissal ?? false)
-                TerminalVerticalBarControl.back,
-              if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
-            },
+    final keyControlsAvailable = {
+      TerminalVerticalBarControl.menu,
+      TerminalVerticalBarControl.extraKeys,
+      TerminalVerticalBarControl.files,
+      if (isMobile) TerminalVerticalBarControl.keyboard,
+      if (impliesBack) TerminalVerticalBarControl.back,
+      if (showsMuxWindowsControl) TerminalVerticalBarControl.muxWindows,
+    };
+    // Propped up like a laptop, the top page tilts away, so the title bar
+    // keeps only the host line and its controls stand in a row of keys on
+    // the bottom page.
+    final showsProppedControls =
+        verticalBar == null && terminalFoldLayout == TerminalFoldLayout.propped;
+    // The controls standing as keys outside the title bar, or null when the
+    // title bar holds them all.
+    final keyControls = verticalBar != null
+        ? resolveTerminalVerticalBarControls(
+            available: keyControlsAvailable,
             capacity: verticalBarItemCapacity(
               resolveVerticalBarColumn(verticalBar, MediaQuery.of(context)),
             ),
-          );
-    bool leftOutOfVerticalBar(TerminalVerticalBarControl control) =>
-        verticalBar != null && !verticalBarControls.contains(control);
+          )
+        : showsProppedControls
+        ? resolveTerminalVerticalBarControls(
+            available: keyControlsAvailable,
+            capacity: _ProppedTerminalControls.capacityFor(
+              MediaQuery.sizeOf(context).width -
+                  MediaQuery.paddingOf(context).horizontal,
+              theme.platform,
+            ),
+          )
+        : null;
+    bool leftOutOfKeys(TerminalVerticalBarControl control) =>
+        keyControls != null && !keyControls.contains(control);
+    // Without a title bar a line names the host. Held like a book, it heads
+    // the navigator's page instead, so the terminal keeps its page's height.
+    final showsIdentityLine =
+        verticalBar != null && terminalFoldLayout != TerminalFoldLayout.book;
+    Widget identityLine({
+      required Color background,
+      double statusWidth = 20,
+      double statusGap = 8,
+    }) => _TerminalIdentityLine(
+      title: _host?.label ?? 'Terminal',
+      subtitle: titleSubtitle,
+      statusLabel: isConnectedThroughJumpHost
+          ? 'Connected through jump host'
+          : connectionLabel,
+      statusWidth: statusWidth,
+      statusGap: statusGap,
+      status: _TerminalConnectionStatusIcon(
+        label: connectionLabel,
+        state: connectionState,
+        isConnecting: _isConnecting,
+        connectedThroughJumpHost: isConnectedThroughJumpHost,
+        size: 16,
+        background: background,
+      ),
+    );
+    // The controls left out of the keys, in the order the keys stand.
     final railOverflowMenuItems = <Widget>[
+      // Back pops through the screen's guards, as the key does.
+      if (impliesBack && leftOutOfKeys(TerminalVerticalBarControl.back))
+        MenuItemButton(
+          style: TerminalMenuStyles.itemButtonStyle(context),
+          leadingIcon: Icon(
+            Icons.adaptive.arrow_back,
+            size: TerminalMenuStyles.iconSize,
+          ),
+          onPressed: () => unawaited(Navigator.maybePop(context)),
+          child: _terminalOverflowMenuLabel(
+            MaterialLocalizations.of(context).backButtonTooltip,
+          ),
+        ),
       if (showsMuxWindowsControl &&
-          leftOutOfVerticalBar(TerminalVerticalBarControl.muxWindows))
+          leftOutOfKeys(TerminalVerticalBarControl.muxWindows))
         _terminalRailOverflowMenuItem(
           context: context,
           button: muxWindowsButton,
           icon: Icons.window_outlined,
           label: 'Windows',
         ),
-      if (leftOutOfVerticalBar(TerminalVerticalBarControl.files))
+      if (leftOutOfKeys(TerminalVerticalBarControl.files))
         _terminalRailOverflowMenuItem(
           context: context,
           button: browseFilesButton,
           icon: Icons.folder_outlined,
           label: 'Browse Files',
         ),
-      if (leftOutOfVerticalBar(TerminalVerticalBarControl.extraKeys))
+      if (leftOutOfKeys(TerminalVerticalBarControl.extraKeys))
         _terminalRailOverflowMenuItem(
           context: context,
           button: extraKeysButton,
           icon: Icons.keyboard_command_key_rounded,
           label: _showKeyboardToolbar ? 'Hide Extra Keys' : 'Show Extra Keys',
+        ),
+      if (isMobile && leftOutOfKeys(TerminalVerticalBarControl.keyboard))
+        _terminalRailOverflowMenuItem(
+          context: context,
+          button: keyboardButton,
+          icon: systemKeyboardVisible
+              ? Icons.keyboard_hide
+              : Icons.keyboard_alt_outlined,
+          label: systemKeyboardVisible ? 'Hide Keyboard' : 'Show Keyboard',
         ),
     ];
     if (railOverflowMenuItems.isNotEmpty) {
@@ -12698,6 +12791,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         },
       ),
     );
+    // The keys standing outside the title bar, in the vertical bar from top
+    // to bottom or in the propped row from left to right: Back first and the
+    // keyboard key last, nearest the thumb.
+    final leadingKeys = <Widget>[
+      if (keyControls?.contains(TerminalVerticalBarControl.back) ?? false)
+        const BackButton(),
+    ];
+    final trailingKeys = <Widget>[
+      if (keyControls != null) ...[
+        if (keyControls.contains(TerminalVerticalBarControl.muxWindows))
+          muxWindowsButton,
+        if (keyControls.contains(TerminalVerticalBarControl.files))
+          browseFilesButton,
+        if (keyControls.contains(TerminalVerticalBarControl.extraKeys))
+          extraKeysButton,
+        if (keyControls.contains(TerminalVerticalBarControl.menu)) overflowMenu,
+        if (keyControls.contains(TerminalVerticalBarControl.keyboard))
+          keyboardButton,
+      ],
+    ];
     final terminalBody = Builder(
       builder: (bodyContext) {
         final showsKeyboardToolbar =
@@ -12750,6 +12863,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               connectionState,
               keyboardToolbar: keyboardToolbar,
               withFindBar: withFindBar,
+              // Lined up with the navigator's handle below it.
+              navigatorHeader: verticalBar == null
+                  ? null
+                  : identityLine(
+                      background: theme.colorScheme.surfaceContainerHighest,
+                      statusWidth: 28,
+                      statusGap: 10,
+                    ),
             );
           case TerminalFoldLayout.propped:
             return _buildProppedTerminalLayout(
@@ -12763,14 +12884,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               withFindBar: withFindBar,
               showsMuxNavigator: showsMuxNavigatorPage,
               // Where the body starts in the window: below the app bar, or
-              // with a vertical bar below the top inset and metadata row.
+              // with a vertical bar below the top inset, the identity line
+              // and the metadata row.
               bodyTop: verticalBar == null
                   ? Scaffold.of(bodyContext).appBarMaxHeight ?? 0
                   : MediaQuery.paddingOf(context).top +
+                        (showsIdentityLine
+                            ? _TerminalIdentityLine.heightFor(
+                                MediaQuery.textScalerOf(context),
+                              )
+                            : 0) +
                         (terminalBarBottom?.preferredSize.height ?? 0),
               onShowKeyboard: () => showsNativeAgent
                   ? _toggleNativeComposerKeyboard(false)
                   : _toggleSystemKeyboard(false),
+              controls: showsProppedControls
+                  ? _ProppedTerminalControls(
+                      leading: leadingKeys,
+                      trailing: trailingKeys,
+                    )
+                  : null,
             );
           case TerminalFoldLayout.none:
             break;
@@ -12808,6 +12941,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           ? null
           : AppBar(
               titleSpacing: 8,
+              // Propped up, Back stands in the row of keys with the actions.
+              automaticallyImplyLeading: !showsProppedControls,
               title: terminalFoldLayout == TerminalFoldLayout.book
                   // The title stays on the navigator's page, off the fold.
                   ? ConstrainedBox(
@@ -12828,13 +12963,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     )
                   : terminalBarTitle,
               bottom: terminalBarBottom,
-              actions: [
-                if (showsMuxWindowsControl) muxWindowsButton,
-                browseFilesButton,
-                if (isMobile) keyboardButton,
-                extraKeysButton,
-                overflowMenu,
-              ],
+              actions: showsProppedControls
+                  ? null
+                  : [
+                      if (showsMuxWindowsControl) muxWindowsButton,
+                      browseFilesButton,
+                      if (isMobile) keyboardButton,
+                      extraKeysButton,
+                      overflowMenu,
+                    ],
             ),
       body: verticalBar == null
           ? terminalBody
@@ -12844,6 +12981,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               bottom: false,
               child: Column(
                 children: [
+                  if (showsIdentityLine)
+                    Material(
+                      color: theme.colorScheme.surface,
+                      child: SafeArea(
+                        top: false,
+                        bottom: false,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: identityLine(
+                            background: theme.colorScheme.surface,
+                          ),
+                        ),
+                      ),
+                    ),
                   if (terminalBarBottom != null)
                     Material(
                       color: theme.colorScheme.surface,
@@ -12888,47 +13039,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           : VerticalBarRailPortal(
               rail: (context) => VerticalBarRail(
                 bar: verticalBar,
-                leading: [
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.back,
-                  ))
-                    const BackButton(),
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.status,
-                  ))
-                    _TerminalVerticalBarStatusKey(
-                      title: _host?.label ?? 'Terminal',
-                      subtitle: titleSubtitle,
-                      status: _TerminalConnectionStatusIcon(
-                        label: connectionLabel,
-                        state: connectionState,
-                        isConnecting: _isConnecting,
-                        connectedThroughJumpHost: isConnectedThroughJumpHost,
-                      ),
-                    ),
-                ],
-                trailing: [
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.muxWindows,
-                  ))
-                    muxWindowsButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.files,
-                  ))
-                    browseFilesButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.extraKeys,
-                  ))
-                    extraKeysButton,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.menu,
-                  ))
-                    overflowMenu,
-                  if (verticalBarControls.contains(
-                    TerminalVerticalBarControl.keyboard,
-                  ))
-                    keyboardButton,
-                ],
+                leading: leadingKeys,
+                trailing: trailingKeys,
               ),
               child: scaffold,
             ),
@@ -13004,6 +13116,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     SshConnectionState connectionState, {
     required Widget? keyboardToolbar,
     required Widget Function(Widget terminal) withFindBar,
+    Widget? navigatorHeader,
   }) {
     // The connection route fills the window, so the fold's window
     // coordinates map onto the body directly.
@@ -13036,6 +13149,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 double.infinity,
                 placement: TmuxBarPlacement.sidebar,
                 pinnedOpen: true,
+                pinnedHeader: navigatorHeader,
               ),
             ),
           ),
@@ -13086,9 +13200,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Lays the connection screen out across a fold running left to right.
   ///
   /// The terminal fills the top page and never reaches past the fold, so it
-  /// stays readable while the device is propped up. The mux navigator takes
-  /// the bottom page above the keyboard toolbar. A tall system keyboard
-  /// shrinks the navigator first and only then the terminal.
+  /// stays readable while the device is propped up. The screen's [controls]
+  /// stand just below the fold, and the mux navigator takes the rest of the
+  /// bottom page above the keyboard toolbar. A tall system keyboard shrinks
+  /// the navigator first; once it covers the bottom page the controls ride
+  /// on it, and only then does the terminal shrink.
   Widget _buildProppedTerminalLayout(
     BuildContext bodyContext,
     DisplayFold fold,
@@ -13101,6 +13217,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     required bool showsMuxNavigator,
     required double bodyTop,
     required VoidCallback onShowKeyboard,
+    Widget? controls,
   }) {
     // The connection route fills the window, so the fold's window
     // coordinates map onto the body once shifted by where it starts.
@@ -13134,6 +13251,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ),
             ),
           ),
+          // After the terminal and before the navigator, as focus traverses.
+          if (controls != null)
+            LayoutId(
+              id: _ProppedTerminalSlot.controls,
+              child: MediaQuery(data: pageMediaQuery, child: controls),
+            ),
           LayoutId(
             id: _ProppedTerminalSlot.navigator,
             child: MediaQuery(
@@ -13152,21 +13275,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   child: !showsMuxNavigator
                       ? _TerminalKeyboardDeck(onShowKeyboard: onShowKeyboard)
                       : LayoutBuilder(
-                          builder: (context, constraints) => OverflowBox(
-                            alignment: Alignment.topCenter,
-                            minHeight: _ProppedTerminalLayoutDelegate
-                                .navigatorMinHeight,
-                            maxHeight: max(
-                              _ProppedTerminalLayoutDelegate.navigatorMinHeight,
-                              constraints.maxHeight,
-                            ),
-                            child: _buildTmuxExpandableBar(
-                              theme,
-                              double.infinity,
-                              placement: TmuxBarPlacement.sidebar,
-                              pinnedOpen: true,
-                            ),
-                          ),
+                          builder: (context, constraints) {
+                            // Without room for a row, the navigator leaves
+                            // focus and semantics, and the keys offer
+                            // Windows in its place.
+                            final covered =
+                                constraints.maxHeight <
+                                _ProppedTerminalLayoutDelegate
+                                    .navigatorUsableHeight;
+                            _handleProppedNavigatorCovered(covered);
+                            return ExcludeFocus(
+                              excluding: covered,
+                              child: ExcludeSemantics(
+                                excluding: covered,
+                                child: OverflowBox(
+                                  alignment: Alignment.topCenter,
+                                  minHeight: _ProppedTerminalLayoutDelegate
+                                      .navigatorMinHeight,
+                                  maxHeight: max(
+                                    _ProppedTerminalLayoutDelegate
+                                        .navigatorMinHeight,
+                                    constraints.maxHeight,
+                                  ),
+                                  child: _buildTmuxExpandableBar(
+                                    theme,
+                                    double.infinity,
+                                    placement: TmuxBarPlacement.sidebar,
+                                    pinnedOpen: true,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
                         ),
                 ),
               ),
@@ -13177,6 +13317,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ],
       ),
     );
+  }
+
+  /// Records, from the propped navigator's layout, whether the keyboard
+  /// covers it. Keyboard focus on one of its rows goes back to the input.
+  void _handleProppedNavigatorCovered(bool covered) {
+    if (covered == _proppedNavigatorCovered) return;
+    if (covered && _isFocusWithinTmuxBar()) {
+      _restoreKeyboardInputFocusIfLost();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && covered != _proppedNavigatorCovered) {
+        setState(() => _proppedNavigatorCovered = covered);
+      }
+    });
   }
 
   // Rebuilds so the keyboard toggle button reflects the current
@@ -18045,10 +18199,96 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 }
 
-enum _ProppedTerminalSlot { terminal, navigator, toolbar }
+enum _ProppedTerminalSlot { terminal, controls, navigator, toolbar }
 
-/// Stacks the terminal above the fold and the navigator and keyboard toolbar
-/// below it.
+/// The connection screen's controls while it is propped up like a laptop: a
+/// row of keys in the vertical bar's style, with Back at its start and the
+/// keyboard key at its end, nearest the thumb.
+///
+/// It stands just below the fold, and above the keyboard while that covers
+/// the bottom page, so the controls stay one reach from the keys.
+class _ProppedTerminalControls extends StatelessWidget {
+  const _ProppedTerminalControls({
+    required this.leading,
+    required this.trailing,
+  });
+
+  /// Keys at the start of the row.
+  final List<Widget> leading;
+
+  /// Keys at the end of the row, listed from start to end.
+  final List<Widget> trailing;
+
+  /// Space kept between the keys and the window's sides.
+  static const double sidePadding = 12;
+
+  /// The size of one key: the smallest touch target the platform allows,
+  /// so Android's tabletop posture gets 48 dp keys.
+  static double keyExtent(TargetPlatform platform) =>
+      muxNavigatorMinTouchTarget(platform);
+
+  /// How many keys fit across [width].
+  static int capacityFor(double width, TargetPlatform platform) => max(
+    0,
+    ((width - 2 * sidePadding + verticalBarItemGap) /
+            (keyExtent(platform) + verticalBarItemGap))
+        .floor(),
+  );
+
+  static List<Widget> _spaced(List<Widget> keys) => [
+    for (final (index, key) in keys.indexed) ...[
+      if (index > 0) const SizedBox(width: verticalBarItemGap),
+      key,
+    ],
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final extent = keyExtent(theme.platform);
+    return Material(
+      color: theme.colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        minimum: const EdgeInsets.symmetric(horizontal: sidePadding),
+        // The gutter keeps the keys clear of the crease above or below.
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            vertical: displayFoldContentGutter,
+          ),
+          child: VerticalBarButtonTheme(
+            child: Builder(
+              builder: (context) {
+                final size = WidgetStatePropertyAll(Size.square(extent));
+                return IconButtonTheme(
+                  data: IconButtonThemeData(
+                    style: IconButtonTheme.of(context).style?.copyWith(
+                      fixedSize: size,
+                      minimumSize: size,
+                      maximumSize: size,
+                    ),
+                  ),
+                  child: SizedBox(
+                    height: extent,
+                    child: Row(
+                      children: [
+                        ..._spaced(leading),
+                        const Spacer(),
+                        ..._spaced(trailing),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// The bottom page of a fold propped up like a laptop when the session has
 /// no window navigator for it: a keyboard deck. A tap raises the system
 /// keyboard onto the page, below the terminal.
@@ -18061,9 +18301,11 @@ class _TerminalKeyboardDeck extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final mutedColor = colorScheme.onSurface.withAlpha(150);
+    // The name says what the deck shows, so voice control matches it.
     return Semantics(
       button: true,
-      label: 'Show keyboard',
+      label: 'Tap to type',
+      hint: 'Shows the keyboard',
       onTap: onShowKeyboard,
       excludeSemantics: true,
       child: Material(
@@ -18108,6 +18350,8 @@ class _TerminalKeyboardDeck extends StatelessWidget {
   }
 }
 
+/// Stacks the terminal above the fold, and the controls, navigator and
+/// keyboard toolbar below it.
 class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
   _ProppedTerminalLayoutDelegate({
     required this.topPageHeight,
@@ -18117,6 +18361,11 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
 
   /// Height of the navigator's handle row, the least it is laid out at.
   static const double navigatorMinHeight = 56;
+
+  /// Height that shows the handle and one window row. A shorter navigator
+  /// counts as covered.
+  static const double navigatorUsableHeight =
+      navigatorMinHeight + kMinInteractiveDimension;
 
   /// Distance from the top of the body to the fold.
   final double topPageHeight;
@@ -18145,12 +18394,35 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
       );
     }
     final aboveToolbar = max(0, size.height - toolbarHeight).toDouble();
+    final bottomPageTop = topPageHeight + foldThickness;
+    // The controls head the bottom page while they fit there. A keyboard that
+    // leaves them no room pushes them up to ride on it and the toolbar, and
+    // they never straddle the fold.
+    var controlsTop = bottomPageTop;
+    var controlsBottom = bottomPageTop;
+    if (hasChild(_ProppedTerminalSlot.controls)) {
+      final controlsHeight = layoutChild(
+        _ProppedTerminalSlot.controls,
+        BoxConstraints.tightFor(width: size.width),
+      ).height;
+      if (bottomPageTop + controlsHeight > aboveToolbar) {
+        controlsTop = max(
+          0,
+          min(aboveToolbar, topPageHeight) - controlsHeight,
+        ).toDouble();
+      }
+      controlsBottom = controlsTop + controlsHeight;
+      positionChild(_ProppedTerminalSlot.controls, Offset(0, controlsTop));
+    }
+    final controlsAboveFold = controlsTop < bottomPageTop;
     // The last terminal row stays a gutter clear of the crease. A keyboard
-    // taller than the bottom page pushes the toolbar above the fold; the
-    // terminal then ends at the toolbar instead.
+    // taller than the bottom page pushes the toolbar, or the controls on it,
+    // above the fold; the terminal then ends there instead.
     final terminalHeight = max(
       0,
-      min(topPageHeight - displayFoldContentGutter, aboveToolbar),
+      controlsAboveFold
+          ? controlsTop
+          : min(topPageHeight - displayFoldContentGutter, aboveToolbar),
     ).toDouble();
     final terminalSize = Size(size.width, terminalHeight);
     layoutChild(
@@ -18160,7 +18432,10 @@ class _ProppedTerminalLayoutDelegate extends MultiChildLayoutDelegate {
     positionChild(_ProppedTerminalSlot.terminal, Offset.zero);
     onTerminalSize(terminalSize);
 
-    final navigatorTop = min(topPageHeight + foldThickness, aboveToolbar);
+    final navigatorTop = min(
+      controlsAboveFold ? bottomPageTop : controlsBottom,
+      aboveToolbar,
+    );
     layoutChild(
       _ProppedTerminalSlot.navigator,
       BoxConstraints.tight(Size(size.width, aboveToolbar - navigatorTop)),
@@ -18180,12 +18455,20 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
     required this.state,
     required this.isConnecting,
     required this.connectedThroughJumpHost,
+    this.size = 20,
+    this.background,
   });
 
   final String label;
   final SshConnectionState state;
   final bool isConnecting;
   final bool connectedThroughJumpHost;
+
+  /// The glyph's size.
+  final double size;
+
+  /// The colour behind the glyph; the theme's surface when null.
+  final Color? background;
 
   IconData get _icon {
     if (isConnecting &&
@@ -18232,9 +18515,19 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final statusColor = _color(colorScheme);
+    final background = this.background ?? colorScheme.surface;
+    final hue = _color(colorScheme);
+    // The glyph is the only sign of the state, so it keeps 3:1 against what
+    // is behind it; a theme hue that falls short moves toward the text.
+    final statusColor = contrastRatio(hue, background) >= 3
+        ? hue
+        : legibleDiffColor(
+            hue,
+            background: background,
+            ink: colorScheme.onSurface,
+          );
 
-    final statusIcon = Icon(_icon, size: 20, color: statusColor);
+    final statusIcon = Icon(_icon, size: size, color: statusColor);
 
     return Semantics(
       label: 'Terminal connection status: $label',
@@ -18243,7 +18536,7 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
         excludeFromSemantics: true,
         child: connectedThroughJumpHost
             ? SizedBox.square(
-                dimension: 24,
+                dimension: size + 4,
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -18262,36 +18555,100 @@ class _TerminalConnectionStatusIcon extends StatelessWidget {
   }
 }
 
-/// The connection status as a key in the system vertical bar.
-///
-/// The vertical bar replaces the title bar, so a tap shows which host and
-/// session the screen is connected to.
-class _TerminalVerticalBarStatusKey extends StatelessWidget {
-  const _TerminalVerticalBarStatusKey({
+/// The host a terminal is connected to, the connection's state and its
+/// identity, on one line. It stands in for the title bar when the system
+/// vertical bar takes the bar's controls.
+class _TerminalIdentityLine extends StatelessWidget {
+  const _TerminalIdentityLine({
     required this.title,
     required this.subtitle,
+    required this.statusLabel,
     required this.status,
+    this.statusWidth = 20,
+    this.statusGap = 8,
   });
+
+  /// The line's least height, which holds the host's name at the default
+  /// text size.
+  static const double minHeight = 28;
+
+  static const double _titleFontSize = 13;
+
+  /// A set line height makes the line's height depend on the text scale
+  /// alone, so layouts can place the body below it before it lays out.
+  static const double _lineHeight = 1.3;
+
+  /// The line's height at [scaler]: [minHeight], or the host's name with
+  /// 4 pt above and below once larger text needs more.
+  static double heightFor(TextScaler scaler) =>
+      max(minHeight, scaler.scale(_titleFontSize) * _lineHeight + 8);
 
   final String title;
   final String subtitle;
+
+  /// The connection's state, as the status glyph shows it.
+  final String statusLabel;
+
+  /// The connection status glyph.
   final Widget status;
+
+  /// The width the glyph is centred in, which fits its jump host badge.
+  final double statusWidth;
+
+  /// The space between the glyph and the text.
+  final double statusGap;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Tooltip(
-      triggerMode: TooltipTriggerMode.tap,
-      message: subtitle.isEmpty ? title : '$title\n$subtitle',
-      child: Container(
-        width: verticalBarItemExtent,
-        height: verticalBarItemExtent,
-        alignment: Alignment.center,
-        decoration: ShapeDecoration(
-          color: colorScheme.surfaceContainerHighest,
-          shape: CircleBorder(side: BorderSide(color: colorScheme.outline)),
+    return Semantics(
+      container: true,
+      header: true,
+      label: [title, statusLabel, if (subtitle.isNotEmpty) subtitle].join(', '),
+      excludeSemantics: true,
+      child: Tooltip(
+        message: subtitle.isEmpty ? title : '$title\n$subtitle',
+        excludeFromSemantics: true,
+        child: SizedBox(
+          height: heightFor(MediaQuery.textScalerOf(context)),
+          child: Row(
+            children: [
+              SizedBox(
+                width: statusWidth,
+                child: Center(child: status),
+              ),
+              SizedBox(width: statusGap),
+              Expanded(
+                // The subtitle trails, so the ellipsis cuts it before the
+                // host's name.
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: title,
+                        style: FluttyTheme.displayMono(
+                          fontSize: _titleFontSize,
+                          color: colorScheme.onSurface,
+                        ).copyWith(height: _lineHeight),
+                      ),
+                      if (subtitle.isNotEmpty)
+                        TextSpan(
+                          text: '  $subtitle',
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 11,
+                            height: _lineHeight,
+                            color: colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
-        child: status,
       ),
     );
   }
