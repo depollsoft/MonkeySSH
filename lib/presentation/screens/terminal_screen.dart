@@ -3950,7 +3950,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _setShouldFollowLiveOutput(true);
   }
 
-  void _handleTerminalOutputForShellCompletion(String output) {
+  void _handleTerminalOutputForShellCompletion(String rawOutput) {
+    final output = unwrapBracketedPasteCompletionInput(rawOutput) ?? rawOutput;
     if (output.contains('\r') || output.contains('\n')) {
       _hideShellCompletionPopup();
       return;
@@ -4057,6 +4058,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     if (terminalSnapshot.text == optimisticSnapshot.text &&
         terminalSnapshot.cursorOffset == optimisticSnapshot.cursorOffset) {
+      _shellCompletionOptimisticSnapshot = null;
+      return;
+    }
+    // While echoes are pending the shell's line up to its cursor leads into
+    // the snapshot. A line that doesn't, such as one the shell redrew after
+    // Ctrl+U when the snapshot was seeded before the redraw, means the
+    // snapshot will never match: drop it and read the terminal.
+    final echoed = terminalSnapshot.text.substring(
+      0,
+      min(max(terminalSnapshot.cursorOffset, 0), terminalSnapshot.text.length),
+    );
+    if (!optimisticSnapshot.text.startsWith(echoed)) {
       _shellCompletionOptimisticSnapshot = null;
     }
   }

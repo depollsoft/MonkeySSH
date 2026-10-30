@@ -9360,11 +9360,17 @@ void main() {
     // Ctrl+U used to leave the popup over the cleared prompt, and, when it
     // came before the shell echoed the last key, the typed prefix behind in
     // the optimistic snapshot, so every later request completed a line nobody
-    // typed ("git chls ~/b"). A popup opened again after being hidden also
+    // typed ("git chls ~/b"), also when the next keys came before the shell
+    // redrew the cleared line. A popup opened again after being hidden also
     // stayed empty until something else rebuilt the screen.
-    for (final echoedFirst in [true, false]) {
+    for (final (echoedFirst, typedBeforeRedraw) in [
+      (true, false),
+      (false, false),
+      (true, true),
+    ]) {
       testWidgets('completes the new line after Ctrl+U clears the old one, '
-          'echoed first: $echoedFirst', (tester) async {
+          'echoed first: $echoedFirst, '
+          'typed before the redraw: $typedBeforeRedraw', (tester) async {
         final completionService = _TestShellCompletionService(
           cachedSuggestions: const <ShellCompletionSuggestion>[
             ShellCompletionSuggestion(
@@ -9401,15 +9407,22 @@ void main() {
         }
         expect(find.text('checkout'), findsOneWidget);
 
-        // Ctrl+U, then the shell redraws the empty prompt.
+        // Ctrl+U, then the shell redraws the empty prompt, before or after
+        // the next keys arrive (and echoes those).
         session.terminal!.textInput('\x15');
         await tester.pump();
-        session.terminal!.write('\rroot@host ~ % \x1b[K');
-        await tester.pump();
-        expect(find.text('checkout'), findsNothing);
+        if (!typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[K');
+          await tester.pump();
+          expect(find.text('checkout'), findsNothing);
+        }
 
         for (final character in 'ls ~/b'.split('')) {
           session.terminal!.textInput(character);
+          await tester.pump();
+        }
+        if (typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[Kls ~/b');
           await tester.pump();
         }
         await tester.pump(const Duration(milliseconds: 250));
@@ -9422,6 +9435,41 @@ void main() {
         expect(find.text('~/bin/'), findsOneWidget);
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
     }
+
+    // The keyboard can commit the end of a quickly typed or autocorrected word
+    // as a paste, which completion used to ignore.
+    testWidgets('completes after the keyboard commits text as a paste', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+        completionSuggestions: const <String, List<ShellCompletionSuggestion>>{
+          'sta': <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'status',
+              replacement: 'status',
+              replacementStart: 4,
+              replacementEnd: 7,
+              kind: ShellCompletionSuggestionKind.command,
+              commitSuffix: ' ',
+            ),
+          ],
+        },
+      );
+
+      session.terminal!.write('\x1b[?2004hroot@host ~ % git s');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.paste('ta');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        contains('git sta'),
+      );
+      expect(find.text('status'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',

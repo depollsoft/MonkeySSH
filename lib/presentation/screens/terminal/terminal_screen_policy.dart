@@ -435,6 +435,27 @@ bool shouldReviewTerminalCommandInsertion({
   return shellStatus != TerminalShellStatus.runningCommand;
 }
 
+/// The text of a bracketed paste of printable text, or null for any other
+/// input. The keyboard can commit the end of a word, such as an autocorrected
+/// or quickly typed one, as a paste, which completion follows like typing.
+String? unwrapBracketedPasteCompletionInput(String output) {
+  const start = '\x1B[200~';
+  const end = '\x1B[201~';
+  if (!output.startsWith(start) ||
+      !output.endsWith(end) ||
+      output.length <= start.length + end.length) {
+    return null;
+  }
+  final text = output.substring(start.length, output.length - end.length);
+  for (var index = 0; index < text.length; index++) {
+    final codeUnit = text.codeUnitAt(index);
+    if (codeUnit < 0x20 || codeUnit == 0x7F) {
+      return null;
+    }
+  }
+  return text;
+}
+
 /// Returns whether terminal input should start a shell completion refresh.
 bool canTerminalOutputTriggerShellCompletion({
   required String output,
