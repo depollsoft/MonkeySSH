@@ -2176,7 +2176,9 @@ class SshService {
           parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
 
-      Future<SSHSocket> openEndpointSocket() {
+      /// A [timeout] shorter than the connection timeout also bounds opening
+      /// the tunnel through a jump host, which otherwise has no limit.
+      Future<SSHSocket> openEndpointSocket({Duration? timeout}) {
         final tunnelClient = jumpClient;
         if (tunnelClient != null) {
           // Create forwarded connection through jump host.
@@ -2185,8 +2187,28 @@ class SshService {
             SshConnectionState.connecting,
             'Opening tunnel to destination…',
           );
+          final forwarding = tunnelClient.forwardLocal(
+            config.hostname,
+            config.port,
+          );
           return guard(
-            tunnelClient.forwardLocal(config.hostname, config.port),
+            timeout == null
+                ? forwarding
+                : forwarding.timeout(
+                    timeout,
+                    onTimeout: () {
+                      unawaited(
+                        forwarding.then(
+                          _closeAbandonedSocket,
+                          onError: (Object _, StackTrace _) {},
+                        ),
+                      );
+                      throw TimeoutException(
+                        'Opening the tunnel timed out',
+                        timeout,
+                      );
+                    },
+                  ),
             onAbandonedValue: _closeAbandonedSocket,
           );
         }
@@ -2201,21 +2223,28 @@ class SshService {
           _socketConnector(
             config.hostname,
             config.port,
-            timeout: config.connectionTimeout,
+            timeout: timeout ?? config.connectionTimeout,
           ),
           onAbandonedValue: _closeAbandonedSocket,
         );
       }
 
+      // Keeps every attempt and pause inside [reconnectAfterDropWindow].
       Future<SSHSocket> reopenEndpointSocket() async {
         final elapsed = Stopwatch()..start();
         for (var attempt = 1; ; attempt++) {
+          final remaining = reconnectAfterDropWindow - elapsed.elapsed;
           try {
-            return await openEndpointSocket();
+            return await openEndpointSocket(
+              timeout: remaining < config.connectionTimeout
+                  ? remaining
+                  : config.connectionTimeout,
+            );
           } on Object catch (error) {
             if (error is! Exception && error is! SSHError) rethrow;
             if (error is SshConnectionCancelledException ||
-                elapsed.elapsed >= reconnectAfterDropWindow) {
+                reconnectAfterDropWindow - elapsed.elapsed <=
+                    reconnectAfterDropRetryDelay) {
               rethrow;
             }
             DiagnosticsLogService.instance.info(

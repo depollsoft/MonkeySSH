@@ -219,6 +219,7 @@ typedef _ServerAuthStep = Future<void> Function(
 /// A trusted host whose successive connections play [steps] in order.
 class _ReconnectFixture {
   final clients = <_MockSshClient>[];
+  final socketTimeouts = <Duration?>[];
   int socketCount = 0;
   late final SshService service;
 
@@ -251,6 +252,7 @@ class _ReconnectFixture {
       reconnectAfterDropRetryDelay: Duration.zero,
       socketConnector: (host, port, {timeout}) async {
         fixture.socketCount++;
+        fixture.socketTimeouts.add(timeout);
         if (refusedSockets.contains(fixture.socketCount)) {
           throw const SocketException('Connection refused');
         }
@@ -8675,6 +8677,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         // A Mac unlocked over SSH restarts sshd, refusing connections
         // until it is back.
         refusedSockets: {2, 3},
+        reconnectWindow: const Duration(seconds: 10),
         steps: [
           (onPassword, _) async {
             await onPassword!();
@@ -8695,6 +8698,13 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(fixture.socketCount, 4);
       expect(fixture.clients, hasLength(2));
       expect(progress, contains('Waiting for the server to come back…'));
+      // The first connection gets the 30 s default; reconnect attempts get
+      // only what is left of the window.
+      expect(fixture.socketTimeouts.first, const Duration(seconds: 30));
+      expect(
+        fixture.socketTimeouts.skip(1),
+        everyElement(lessThanOrEqualTo(const Duration(seconds: 10))),
+      );
     });
 
     test('stops trying to reach the server when the window runs out', () async {
@@ -8716,6 +8726,93 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(result.success, isFalse);
       expect(fixture.socketCount, 2);
+    });
+
+    test('gives up on a tunnel that does not open within the window and '
+        'closes it when it opens late', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final knownHostsRepository = KnownHostsRepository(db);
+      final jumpHostKeyBytes = _ed25519HostKeyBlob([5, 1]);
+      final targetHostKeyBytes = _ed25519HostKeyBlob([5, 2]);
+      await _seedTrustedHost(
+        knownHostsRepository,
+        hostname: 'jump.example.com',
+        hostKeyBytes: jumpHostKeyBytes,
+      );
+      await _seedTrustedHost(
+        knownHostsRepository,
+        hostname: 'target.example.com',
+        hostKeyBytes: targetHostKeyBytes,
+      );
+
+      final jumpClient = _MockSshClient();
+      final targetClient = _MockSshClient();
+      final lateTunnel = Completer<SSHForwardChannel>();
+      final lateSocket = _FakeForwardHostKeySocket(targetHostKeyBytes);
+      var forwardCount = 0;
+      when(() => jumpClient.forwardLocal('target.example.com', 22)).thenAnswer(
+        (_) => ++forwardCount == 1
+            ? Future.value(_FakeForwardHostKeySocket(targetHostKeyBytes))
+            : lateTunnel.future,
+      );
+      when(jumpClient.close).thenAnswer((_) async {});
+      when(targetClient.close).thenAnswer((_) async {});
+      var clientIndex = 0;
+
+      final service = SshService(
+        knownHostsRepository: knownHostsRepository,
+        interactiveAuthPromptHandler: (_) async => ['typed-secret'],
+        reconnectAfterDropWindow: const Duration(milliseconds: 50),
+        reconnectAfterDropRetryDelay: Duration.zero,
+        socketConnector: (host, port, {timeout}) async =>
+            _FakeHostKeySocket(jumpHostKeyBytes),
+        clientFactory:
+            (
+              socket, {
+              required username,
+              onVerifyHostKey,
+              onPasswordRequest,
+              onUserInfoRequest,
+              identities,
+              keepAliveInterval,
+            }) {
+              final isJump = clientIndex++ == 0;
+              final client = isJump ? jumpClient : targetClient;
+              when(() => client.authenticated).thenAnswer((_) async {
+                final bytes = await (socket as HostKeySource).hostKeyBytes;
+                await onVerifyHostKey!(
+                  'ssh-ed25519',
+                  _hostKeyCallbackFingerprint(bytes),
+                );
+                if (isJump) return;
+                await onPasswordRequest!();
+                return Future<void>.error(
+                  SSHAuthAbortError('Connection closed before authentication'),
+                );
+              });
+              return client;
+            },
+      );
+
+      final result = await service.connect(
+        const SshConnectionConfig(
+          hostname: 'target.example.com',
+          port: 22,
+          username: 'target',
+          jumpHost: SshConnectionConfig(
+            hostname: 'jump.example.com',
+            port: 22,
+            username: 'jump',
+          ),
+        ),
+      );
+
+      expect(result.success, isFalse);
+      expect(forwardCount, 2);
+      lateTunnel.complete(lateSocket);
+      await pumpEventQueue();
+      expect(lateSocket.destroyed, isTrue);
     });
 
     test('reconnects only once', () async {
