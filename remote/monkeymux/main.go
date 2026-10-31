@@ -11593,8 +11593,10 @@ func (s *muxServer) replayBytesWithImagesLocked(
 // replay paints, and the cursor moves past it as before, so the output that
 // followed it stays below it. The images that display commands in the
 // replay show without the replay sending them go first, within the same
-// budget. Before all of it, the client's own placements go
-// (kittyVisiblePlacementsDelete), once the window has placed any.
+// budget, and the client's data of those it cannot send is deleted, so
+// that their commands fail rather than show another window's image. Before
+// all of it, the client's own placements go (kittyVisiblePlacementsDelete),
+// once the window has placed any.
 func (w *muxWindow) shellReplayHistoryLocked(
 	retained []byte,
 	retainedState terminalOutputParserSnapshot,
@@ -11624,8 +11626,17 @@ func (w *muxWindow) shellReplayHistoryLocked(
 		}
 	}
 	history := append(restore, retained[from:]...)
-	shown, _ := w.kittyImageTransmissionsOntoLocked(
-		w.kittyShownImagesLocked(history, clientHas),
+	// What the display commands in it show must be this window's image:
+	// sent first, or else gone, so that the command fails.
+	needed := w.kittyShownImagesLocked(history, clientHas, end-int64(len(retained)-from))
+	var roots []string
+	for _, image := range needed {
+		if image.root != "" {
+			roots = append(roots, image.root)
+		}
+	}
+	shown, served := w.kittyImageTransmissionsOntoLocked(
+		roots,
 		maxReplayedKittyImages,
 		maxReplayedKittyImageBytes-images,
 		false,
@@ -11634,6 +11645,11 @@ func (w *muxWindow) shellReplayHistoryLocked(
 	if screen.KittyPlacedImages() {
 		replay = append(replay, kittyVisiblePlacementsDelete...)
 	}
+	for _, image := range needed {
+		if image.root == "" || !slices.Contains(served, image.root) {
+			replay = image.appendDataDelete(replay)
+		}
+	}
 	replay = append(replay, shown...)
 	return append(replay, history...), images + len(shown)
 }
@@ -11641,13 +11657,14 @@ func (w *muxWindow) shellReplayHistoryLocked(
 // kittyVisiblePlacementsDelete deletes the placements on the screen shown,
 // keeping the images (a=d,d=a). A client reopened on a shell window, or a
 // ConPTY one showing its normal screen, keeps its placements through the
-// replay prefix's ED 2, and the replayed output places its images again: one sent by number or with no id gets a new id
-// each time, and a display command without a placement id adds a
-// placement, so the client's copy would stay beside the new one, pushed up
-// the screen by the output. The replay places again every image within its
-// reach (shellReplayHistoryLocked); one beyond it is left out, as it is
-// when the app changes windows. The prefix's ED 3 has already taken the
-// placements in the scrollback.
+// replay prefix's ED 2, and the replayed output places its images again:
+// one sent by number or with no id gets a new id each time, and a display
+// command without a placement id adds a placement, so the client's copy
+// would stay beside the new one, pushed up the screen by the output. The
+// replay places again every image within its reach
+// (shellReplayHistoryLocked); one beyond it is left out, as it is when the
+// app changes windows. The prefix's ED 3 has already taken the placements
+// in the scrollback.
 const kittyVisiblePlacementsDelete = "\x1b_Ga=d,d=a,q=2\x1b\\"
 
 // kittyCommandRootLocked returns the retained image that a transmission
@@ -11677,37 +11694,82 @@ func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
 	return ok && held == token
 }
 
-// kittyShownImagesLocked returns the retained main-screen images that the
-// commands in history which place one at the cursor show by id without
-// history sending them first, which the client may not hold (another window
-// may have sent an image with the same id since), and that clientHas does
-// not report it holding. Only the commands before history first enters the
-// alternate screen run on the main screen. Virtual and relative placements
-// are left to the follow-up, which sends their images before placing them
-// again (replayBytesWithImageFollowUpLocked).
-func (w *muxWindow) kittyShownImagesLocked(history []byte, clientHas map[string]uint32) []string {
-	if len(w.kittyImages) == 0 {
-		return nil
+// kittyShownImage is an image a display command in a replay shows without
+// the replay sending it first: named by its id, or by its number (I=).
+type kittyShownImage struct {
+	id, number string
+	// root is the retained image to send for it, "" when none will do.
+	root string
+}
+
+// appendDataDelete deletes the client's data of the image, with its
+// placements (a=d,d=I or d=N), so that a display command naming it fails
+// rather than show an image another window sent under that id or number.
+func (image kittyShownImage) appendDataDelete(out []byte) []byte {
+	if image.id != "" {
+		out = append(out, "\x1b_Ga=d,d=I,i="...)
+		out = append(out, image.id...)
+	} else {
+		out = append(out, "\x1b_Ga=d,d=N,I="...)
+		out = append(out, image.number...)
 	}
+	return append(out, ",q=2\x1b\\"...)
+}
+
+// kittyShownImagesLocked returns the images that display commands (a=p) in
+// history show without history sending them first, which the client may
+// not hold: another window may have sent a different image under the same
+// id or number since. One clientHas reports the client holding is left
+// out. Each comes with the retained main-screen image to send before
+// history: for an id, the one kept under it; for a number, the one it
+// named before replayedFrom, where the replayed output began in what the
+// model read, since a later one may be another image. A virtual placement
+// gets none: the follow-up sends its image and places it again
+// (replayBytesWithImageFollowUpLocked). Only the commands before history
+// first enters the alternate screen run on the main screen.
+func (w *muxWindow) kittyShownImagesLocked(
+	history []byte,
+	clientHas map[string]uint32,
+	replayedFrom int64,
+) []kittyShownImage {
 	if changes := kittyScreenModeChanges(history); len(changes) > 0 {
 		history = history[:changes[0].offset]
 	}
 	events, _ := scanKittyTransmissions(history)
-	var sent, shown []string
+	var named []string
+	var shown []kittyShownImage
 	for _, event := range events {
-		id := kittyIDValue(event.control["i"])
+		image := kittyShownImage{
+			id:     kittyIDValue(event.control["i"]),
+			number: kittyIDValue(event.control["I"]),
+		}
+		key := "i" + image.id
+		if image.id == "" {
+			key = "I" + image.number
+		}
 		switch {
-		case id == "" || slices.Contains(sent, id):
+		case image.id == "" && image.number == "" || slices.Contains(named, key):
 		case !event.placement:
 			if len(event.buf) > 0 && !event.animation {
-				sent = append(sent, id)
+				named = append(named, key)
 			}
-		case event.control["a"] != "p" || kittyNonZero(event.control["U"]) ||
-			kittyNonZero(event.control["P"]) || w.kittyImages[id] == nil || w.kittyTracking.rootAlt[id]:
-		case clientHolds(clientHas, id, w.kittyImageToken[id]):
+		case event.control["a"] != "p":
+		case image.id != "" && clientHolds(clientHas, image.id, w.kittyImageToken[image.id]):
+			named = append(named, key)
 		default:
-			sent = append(sent, id)
-			shown = append(shown, id)
+			named = append(named, key)
+			root := image.id
+			if root == "" {
+				root = w.kittyImageNumberToID[image.number]
+				if end, ok := w.kittyImageEnd[root]; !ok || end > replayedFrom {
+					root = ""
+				}
+			}
+			if !kittyNonZero(event.control["U"]) && w.kittyImages[root] != nil &&
+				!w.kittyTracking.rootAlt[root] {
+				image.root = root
+			}
+			shown = append(shown, image)
 		}
 	}
 	return shown

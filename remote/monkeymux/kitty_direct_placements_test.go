@@ -617,3 +617,58 @@ func TestConPtyReplayReplacesTheClientsPlacements(t *testing.T) {
 			deleted, image, got)
 	}
 }
+
+// TestShellReplayShowsNoOtherWindowsImage: window @1 transmitted five images
+// long before showing them, and window @2 then sent different images under
+// the same ids, or numbers. Switching back to @1 keeps the image data the
+// client holds, so a display command in @1's replay would show @2's image
+// unless the replay sent @1's first. It sends what fits in its budget and
+// deletes the client's data of the rest, so their display commands fail
+// instead.
+func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
+	for _, key := range []string{"i", "I"} {
+		t.Run(key, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 80, 24)
+			one := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+			two := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+			server.windows = []*muxWindow{one, two}
+			server.activeID = one.id
+			attach := &recordingConn{}
+			registerTestAttachClient(t, server, attach, "primary", server.width, server.height)
+
+			images := func(payload string) string {
+				var out strings.Builder
+				for n := 1; n <= 5; n++ {
+					fmt.Fprintf(&out, "\x1b_Ga=t,%s=%d,f=100;%s\x1b\\", key, n, payload)
+				}
+				return out.String()
+			}
+			var shows strings.Builder
+			for n := 1; n <= 5; n++ {
+				fmt.Fprintf(&shows, "\x1b_Ga=p,%s=%d,c=2,r=1\x1b\\\r\n", key, n)
+			}
+			server.handleWindowOutput(one.id, []byte(images("AAAA")+
+				strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18)+shows.String()+"$ "))
+			if err := server.selectWindow(two.id); err != nil {
+				t.Fatal(err)
+			}
+			server.handleWindowOutput(two.id, []byte(images("BBBB")+"$ "))
+			if err := server.selectWindow(one.id); err != nil {
+				t.Fatal(err)
+			}
+			waitForTestAttachWrites(t, server)
+			got := attach.String()
+			got = got[strings.LastIndex(got, windowReplayTag(one)):]
+			for n := 1; n <= 5; n++ {
+				show := strings.Index(got, fmt.Sprintf("\x1b_Ga=p,%s=%d,", key, n))
+				sent := strings.Index(got, fmt.Sprintf("\x1b_Ga=t,%s=%d,", key, n))
+				deleted := strings.Index(got, fmt.Sprintf("\x1b_Ga=d,d=%s,%s=%d,q=2\x1b\\",
+					map[string]string{"i": "I", "I": "N"}[key], key, n))
+				if show < 0 || !(sent >= 0 && sent < show || deleted >= 0 && deleted < show) {
+					t.Fatalf("image %d is shown (%d) without being sent (%d) or deleted (%d) first: %.600q",
+						n, show, sent, deleted, got)
+				}
+			}
+		})
+	}
+}

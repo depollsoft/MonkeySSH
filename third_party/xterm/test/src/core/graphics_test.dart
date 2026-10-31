@@ -2219,6 +2219,33 @@ void main() {
     });
   });
 
+  // A MonkeyMux shell window's replay can't send every image its display
+  // commands show. For the rest it deletes the client's data first, which
+  // another window may have sent under the same id or number, so those
+  // commands place nothing instead of showing the other window's image.
+  testWidgets('a replay deletes image data its display commands must not use', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      final terminal = Terminal()..resize(40, 10);
+      terminal
+        ..write('\x1b_Ga=t,i=5,f=100,q=2;$png\x1b\\')
+        ..write('\x1b_Ga=t,I=9,f=100,q=2;$png\x1b\\');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      terminal
+        ..write('\x1b_Ga=d,d=I,i=5,q=2\x1b\\\x1b_Ga=d,d=N,I=9,q=2\x1b\\')
+        ..write('\x1b_Ga=p,i=5,c=2,r=1,q=2\x1b\\X')
+        ..write('\x1b_Ga=p,I=9,c=2,r=1,q=2\x1b\\Y');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(terminal.graphics.placements, isEmpty);
+      expect(terminal.graphics.heldImageSignatures(), isEmpty);
+      // Neither command moved the cursor past an image.
+      expect(terminal.buffer.lines[0].getText().trimRight(), 'XY');
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);
