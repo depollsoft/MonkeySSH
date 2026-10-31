@@ -559,6 +559,14 @@ class TerminalXtermOutputDecoder {
             (_previousEscape &&
                 codeUnit == _terminalStringTerminatorCodeUnit)) {
           _state = null;
+        } else if (_previousEscape) {
+          // ESC and anything but `\` ends the string unfinished and starts an
+          // escape sequence, as in the terminal's parser; holding on would
+          // keep the text after it back until a later BEL or ST.
+          _previousEscape = false;
+          _state = _TerminalSequenceState.escape;
+          _scanSequenceCodeUnit(codeUnit);
+          return;
         }
         _previousEscape = codeUnit == _terminalEscapeCodeUnit;
       case _TerminalSequenceState.intermediate:

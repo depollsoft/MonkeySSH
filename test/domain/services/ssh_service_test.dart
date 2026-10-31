@@ -2418,6 +2418,22 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       }
     });
 
+    test('releases a string an escape sequence ends unfinished', () {
+      for (final start in ['\x1b]0;tit', '\x1b_Ga=q', '\x1bP1\$r']) {
+        final terminal = Terminal(maxLines: 100);
+        final decoder = TerminalXtermOutputDecoder();
+
+        terminal
+          ..write(decoder.add(input: '$start\x1b[31mVIS'))
+          ..write(decoder.add(input: '\x1b'))
+          ..write(decoder.add(input: '[0mIBLE'));
+
+        expect(decoder.pendingCodeUnits, 0, reason: start);
+        expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
+        expect(terminal.lines[0].getForeground(0), isNot(0), reason: start);
+      }
+    });
+
     test('adapts split insert mode sequences across chunks', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
