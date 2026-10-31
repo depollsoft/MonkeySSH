@@ -1974,7 +1974,7 @@ _flutty_dump_completions() {
     # matches -A reports are quoted as zsh would insert them. A call that only
     # asks which words match (-O, -A, -D) adds nothing and is not captured.
     local -a hits
-    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= base= opt letter value
+    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= base= outer= depth= k= opt letter value
     local -i i=1 j query=0
     while (( i <= \$# )); do
       opt=\${argv[i]}
@@ -2015,6 +2015,18 @@ _flutty_dump_completions() {
         done
         if [[ \$base == *'\${'(|'('*')') ]]; then
           hsuf+='}'
+          # Inside another \${ still open, as in \${A:-\${NAME, the outer
+          # expansion goes on after the }, so nothing follows it.
+          outer=\${base%'\${'*}
+          depth=0
+          for (( k = 1; k <= \${#outer}; k++ )); do
+            if [[ \${outer[k,k+1]} == '\${' ]]; then
+              (( depth++ ))
+            elif [[ \${outer[k]} == '}' ]] && (( depth > 0 )); then
+              (( depth-- ))
+            fi
+          done
+          (( depth > 0 )) && open=S
         else
           open=S
         fi

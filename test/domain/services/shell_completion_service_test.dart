@@ -1365,6 +1365,21 @@ void main() {
       ('tsuffix v', 'v', ['value='], argument, ''),
       (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
       (r'echo ${#PROBEP', r'${#PROBEP', [r'${#PROBEPARAM}'], argument, ' '),
+      // Closed inside an outer expansion that stays open.
+      (
+        r'echo ${A:-${PROBEP',
+        r'${A:-${PROBEP',
+        [r'${A:-${PROBEPARAM}'],
+        argument,
+        '',
+      ),
+      (
+        r'echo ${A:-${B}${PROBEP',
+        r'${A:-${B}${PROBEP',
+        [r'${A:-${B}${PROBEPARAM}'],
+        argument,
+        '',
+      ),
       // A modifier completed inside the braces leaves them open.
       (
         r'echo ${PROBEPARAM:-',
