@@ -401,8 +401,9 @@ func (s *terminalScreen) promptRows() (history, start, end int, ok bool) {
 // used: A at a line start (no fresh line there), P, B, I and VS Code's H, and
 // D for output (vtSemanticOutputMark); never C, which the app takes for a
 // command starting. So nothing is emitted unless the cursor is in a prompt or
-// its input, and cells written as output inside the prompt take the content
-// in force, except a glyph printed again to restore a deferred wrap (glyph).
+// its input, and inside the prompt every written cell takes the content it was
+// written as, as does a glyph printed again to restore a deferred wrap
+// (glyph).
 //
 // A row is marked only where the model marks it. The cursor can be in a
 // prompt on a row the model leaves unmarked (the prompt row was deleted
@@ -532,7 +533,9 @@ func (f *vtSemanticFrame) cell(out []byte, sem uint8) []byte {
 	case vtSemPrompt:
 		out = appendVTPromptContent(out, f.mark)
 	default:
-		return out
+		// Output a program wrote inside the prompt, such as text before a
+		// VS Code prompt that starts mid-line.
+		out = append(out, vtSemanticOutputMark...)
 	}
 	f.emitted = sem
 	return out

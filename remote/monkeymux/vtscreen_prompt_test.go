@@ -203,6 +203,23 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 			osc133("B") + "\x1b[2;3H"},
 		{"input before a saved pending wrap", [2]int{5, 4}, osc133("A;cl=line") + "$ " + osc133("B") + "abc\x1b7" +
 			"\x1b[2;2H" + osc133("P;k=i")},
+		// Output cells inside the prompt stay output, wherever they are.
+		{"output between input", [2]int{20, 5}, osc133("A;cl=line") + "$ " + osc133("B") + "ab" +
+			osc133("D") + "X" + osc133("B") + "cd"},
+		{"output before a VS Code prompt", [2]int{20, 5}, "out\x1b]633;A\x07$ \x1b]633;B\x07ls"},
+		{"output then prompt text", [2]int{20, 5}, osc133("A;cl=line") + "$ " + osc133("D") + "o" +
+			"\x1b]633;H\x07%" + osc133("B") + "x"},
+		{"output starting a wrapped row", [2]int{5, 4}, osc133("A;cl=m") + "$ " + osc133("B") + "abcd\r" +
+			osc133("D") + "X" + osc133("B") + "yz"},
+		{"output in the scrollback part", [2]int{6, 2}, osc133("A;cl=m") + "$ " + osc133("B") + "ab" +
+			osc133("D") + "X" + osc133("B") + "cdefghijk"},
+		{"output ending the scrollback part", [2]int{6, 2}, osc133("A;cl=m") + "$ " + osc133("B") + "ab" +
+			osc133("D") + "XY" + osc133("B") + "cdefghijk"},
+		{"output ending a scrollback line", [2]int{6, 3}, osc133("A;cl=m") + "$ " + osc133("B") + "ab" +
+			osc133("D") + "XY" + osc133("B") + "c\r\n" + osc133("P;k=c") + "> " + osc133("B") + "d\r\n\r\n\r\n" +
+			osc133("P;k=c") + "> " + osc133("B") + "e"},
+		{"output before the cursor's pending wrap", [2]int{5, 3}, osc133("A;cl=line") + "$ " + osc133("D") +
+			"xyz" + osc133("B")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
