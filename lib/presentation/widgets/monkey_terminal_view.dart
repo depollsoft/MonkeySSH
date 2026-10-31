@@ -37,6 +37,7 @@ import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/core/mouse/mode.dart';
+import 'package:xterm/src/core/prompt_click.dart';
 import 'package:xterm/src/terminal.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/cursor_type.dart';
@@ -519,6 +520,7 @@ class MonkeyTerminalView extends StatefulWidget {
     this.onInsertText,
     this.onPasteText,
     this.onUserInput,
+    this.onPromptCursorMove,
     this.inlineUnderlines = const <TerminalTextUnderline>[],
     this.searchHits,
     this.bottomScrollClearance = 0,
@@ -659,6 +661,11 @@ class MonkeyTerminalView extends StatefulWidget {
 
   /// Called immediately before accepted user input is sent to the terminal.
   final VoidCallback? onUserInput;
+
+  /// Called after a click on a shell prompt moved the shell's cursor (see
+  /// [MonkeyTerminalViewState.moveTerminalPromptCursor]), so an input method
+  /// can drop the text it remembers before the old cursor.
+  final VoidCallback? onPromptCursorMove;
 
   /// Cell ranges that should be painted with inline text underlines.
   final List<TerminalTextUnderline> inlineUnderlines;
@@ -1291,6 +1298,7 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
       key: ValueKey<int>(widget.scrollResetGeneration),
       terminalView: this,
       terminalController: _controller,
+      onSingleTapUp: _onSingleTapUp,
       onTapDown: _onTapDown,
       onDoubleTapDown: widget.onDoubleTapDown != null ? _onDoubleTapDown : null,
       suppressLongPressDragSelection: widget.suppressLongPressDragSelection,
@@ -1388,8 +1396,73 @@ class MonkeyTerminalViewState extends State<MonkeyTerminalView>
         renderTerminal.cellSize;
   }
 
+  /// Whether a tap could move the shell's cursor inside its prompt: the
+  /// prompt asked for clicks (OSC 133 `click_events` or `cl`) and no mouse
+  /// tracking takes the tap instead.
+  bool get canMoveTerminalPromptCursor =>
+      !widget.readOnly &&
+      !widget.terminal.isUsingAltBuffer &&
+      widget.terminal.mouseMode == MouseMode.none &&
+      widget.terminal.buffer.semanticPrompt.handlesClicks;
+
+  /// Moves the shell's cursor to the tapped cell when the tap is on the input
+  /// of the prompt the cursor is at, the prompt asked for it, nothing is
+  /// selected and the viewport shows the bottom of the terminal. The move is
+  /// user input ([MonkeyTerminalView.onUserInput]) that moves the cursor
+  /// under the input method ([MonkeyTerminalView.onPromptCursorMove]).
+  /// Returns whether it sent the input that moves the cursor.
+  bool moveTerminalPromptCursor(Offset globalPosition) {
+    if (!canMoveTerminalPromptCursor ||
+        _hasSelection ||
+        renderTerminal.isScrolledBack) {
+      return false;
+    }
+    final localPosition = renderTerminal.globalToLocal(globalPosition);
+    final cell = renderTerminal.getCellOffset(localPosition);
+    final input = widget.terminal.promptClickInput(cell);
+    if (input == null || input.isEmpty) {
+      return false;
+    }
+    widget.onUserInput?.call();
+    writePromptClick(() => widget.terminal.onOutput?.call(input));
+    widget.onPromptCursorMove?.call();
+    return true;
+  }
+
+  /// Whether a primary tap of [kind] is left to the parent. A system-selection
+  /// terminal neither reports a touch tap as a mouse event nor moves the
+  /// prompt cursor for it, and its selection takes mouse clicks, so a parent
+  /// that tells taps from its own gestures forwards them with
+  /// [sendTerminalPrimaryTap] and [moveTerminalPromptCursor]. The terminal
+  /// handles every other tap itself, and the parent must not.
+  bool leavesTapToParent(PointerDeviceKind kind) =>
+      widget.useSystemSelection &&
+      (kind == PointerDeviceKind.touch || kind == PointerDeviceKind.mouse);
+
+  // A system-selection terminal keeps a collapsed selection where it was
+  // last tapped, which selects nothing.
+  bool get _hasSelection {
+    final selection = _controller.selection;
+    return selection != null && !selection.isCollapsed;
+  }
+
+  bool _tapDownHadSelection = false;
+
+  // A primary click the terminal did not report as a mouse event. Taps on a
+  // system-selection (mobile) terminal are left to the screen, which tells
+  // them from its own gestures; see [leavesTapToParent].
+  void _onSingleTapUp(TapUpDetails details) {
+    final hadSelection = _tapDownHadSelection;
+    _tapDownHadSelection = false;
+    if (hadSelection || leavesTapToParent(details.kind)) {
+      return;
+    }
+    moveTerminalPromptCursor(details.globalPosition);
+  }
+
   void _onTapDown(TapDownDetails details) {
     _stopTouchScrollInertia();
+    _tapDownHadSelection = _hasSelection;
     if (_controller.selection != null) {
       _controller.clearSelection();
     } else if (!widget.useSystemSelection) {
@@ -4411,6 +4484,11 @@ class MonkeyRenderTerminal extends RenderBox
 
   double get _lineOffset => -_scrollOffset + _contentOrigin.dy;
 
+  /// Whether the viewport is scrolled back from the bottom by half a row or
+  /// more.
+  bool get isScrolledBack =>
+      _maxScrollExtent - _scrollOffset >= _painter.cellSize.height / 2;
+
   Offset get cursorOffset => Offset(
     _contentOrigin.dx + (_terminal.buffer.cursorX * _painter.cellSize.width),
     (_terminal.buffer.absoluteCursorY * _painter.cellSize.height) + _lineOffset,
@@ -4681,32 +4759,22 @@ class MonkeyRenderTerminal extends RenderBox
       if (src == null) {
         continue;
       }
-      final srcWidth = src.width;
-      final srcHeight = src.height;
-
-      final double dstWidth;
-      final double dstHeight;
-      if (placement.cols > 0 && placement.rows > 0) {
-        dstWidth = placement.cols * cellWidth;
-        dstHeight = placement.rows * cellHeight;
-      } else if (placement.cols > 0) {
-        dstWidth = placement.cols * cellWidth;
-        dstHeight = srcHeight * (dstWidth / srcWidth);
-      } else if (placement.rows > 0) {
-        dstHeight = placement.rows * cellHeight;
-        dstWidth = srcWidth * (dstHeight / srcHeight);
-      } else {
-        // No explicit cell span: fit the (cropped) source width within the row.
-        final maxWidth =
-            (_terminal.viewWidth - placement.col).clamp(
-              1,
-              _terminal.viewWidth,
-            ) *
-            cellWidth;
-        final scale = srcWidth > maxWidth ? maxWidth / srcWidth : 1.0;
-        dstWidth = srcWidth * scale;
-        dstHeight = srcHeight * scale;
-      }
+      // An explicit span keeps its far edges on the cell grid, so the in-cell
+      // offset shrinks the image; without one the (cropped) source is fitted
+      // within the row. Offsets never leave the top-left cell, as in Kitty.
+      final dstSize = terminalImagePlacementSize(
+        placement,
+        sourceWidth: src.width,
+        sourceHeight: src.height,
+        cellWidth: cellWidth,
+        cellHeight: cellHeight,
+        availableColumns: (_terminal.viewWidth - placement.col).clamp(
+          1,
+          _terminal.viewWidth,
+        ),
+      );
+      final dstWidth = dstSize.width;
+      final dstHeight = dstSize.height;
       if (!dstWidth.isFinite ||
           !dstHeight.isFinite ||
           dstWidth <= 0 ||
@@ -4716,8 +4784,8 @@ class MonkeyRenderTerminal extends RenderBox
 
       // Apply the in-cell pixel offset (X=,Y=) to the destination top-left.
       final topLeft = _linePaintOffset(offset, placement.row).translate(
-        placement.col * cellWidth + placement.xOffset,
-        placement.yOffset.toDouble(),
+        placement.col * cellWidth + placement.cellXOffset(cellWidth),
+        placement.cellYOffset(cellHeight),
       );
       if (!topLeft.dx.isFinite || !topLeft.dy.isFinite) {
         continue;

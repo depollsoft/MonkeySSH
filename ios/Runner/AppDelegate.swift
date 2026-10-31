@@ -16,6 +16,7 @@ import UserNotifications
     "xyz.depollsoft.monkeyssh/keyboard_visibility"
   private let pushNotificationContextChannelName =
     "xyz.depollsoft.monkeyssh/push_notification_context"
+  private let clipboardChannelName = "xyz.depollsoft.monkeyssh/clipboard"
   private let maxTransferPayloadBytes = 10 * 1024 * 1024
   private var backgroundSshChannel: FlutterMethodChannel?
   private var transferChannel: FlutterMethodChannel?
@@ -23,6 +24,7 @@ import UserNotifications
   private var keyboardVisibilityChannel: FlutterMethodChannel?
   private var socksBrowserProxyChannel: SocksBrowserProxyChannel?
   private var pushNotificationContextChannel: FlutterMethodChannel?
+  private var clipboardChannel: FlutterMethodChannel?
   /// Serial, so a delete and a later write reach the keychain in call order.
   private let pushNotificationContextQueue = DispatchQueue(
     label: "xyz.depollsoft.monkeyssh.push-notification-context",
@@ -113,6 +115,7 @@ import UserNotifications
     setupTransferChannel(with: registrar)
     setupAppleDatabaseChannel(with: registrar)
     setupKeyboardVisibilityChannel(with: registrar)
+    setupClipboardChannel(with: registrar)
     socksBrowserProxyChannel = SocksBrowserProxyChannel.register(with: registrar)
     setupPushNotificationContextChannel(with: registrar)
     registrar.addSceneDelegate(self)
@@ -131,6 +134,29 @@ import UserNotifications
       result(self?.keyboardVisible ?? false)
     }
     keyboardVisibilityChannel = channel
+  }
+
+  // Lets the kitty clipboard protocol list an image without reading it:
+  // hasImages, unlike reading the image, never shows the paste prompt. It
+  // looks at every pasteboard item, so the image is read from any item too
+  // (UIPasteboard.image reads only the first).
+  private func setupClipboardChannel(with registrar: FlutterPluginRegistrar) {
+    let channel = FlutterMethodChannel(
+      name: clipboardChannelName,
+      binaryMessenger: registrar.messenger()
+    )
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "hasImages":
+        result(UIPasteboard.general.hasImages)
+      case "imagePng":
+        let png = UIPasteboard.general.images?.first?.pngData()
+        result(png.map { FlutterStandardTypedData(bytes: $0) })
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    clipboardChannel = channel
   }
 
   // Shares the push device key and host labels with the notification service

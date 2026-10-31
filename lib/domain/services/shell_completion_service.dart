@@ -388,6 +388,7 @@ class ShellCompletionService {
     required Duration timeout,
     Future<void> Function()? writeInput,
   }) async {
+    var finished = false;
     try {
       final stdout = StringBuffer();
       final stdoutFuture = exec.stdout
@@ -409,9 +410,18 @@ class ShellCompletionService {
         exec.done,
         if (writeInput != null) writeInput(),
       ]).timeout(timeout);
+      finished = true;
       return stdout.toString();
     } finally {
-      exec.close();
+      if (finished) {
+        exec.close();
+      } else {
+        // EOF alone never ends a command that is still running, such as the
+        // PTY zsh of the native completion probe, which then kept its sshd
+        // session, one of the server's MaxSessions, until the connection
+        // closed.
+        unawaited(closeAbandonedSshExec(exec));
+      }
     }
   }
 
@@ -1468,7 +1478,8 @@ String normalizeShellCompletionToken(String token) {
 /// When [windows] is true, replacement text is quoted for the Windows shell the
 /// helper resolved (its leading `shell` line): PowerShell gets single-quoted
 /// literals, cmd.exe double quotes. A third field carries PowerShell's own
-/// insertion text, which is used verbatim.
+/// insertion text, which is used verbatim, as it is for the native zsh probe's
+/// `zsh_` kinds: a word such as `\$HOME` from `echo \$HO` must keep its syntax.
 @visibleForTesting
 List<ShellCompletionSuggestion> parseShellCompletionOutput(
   String output,
@@ -1495,10 +1506,28 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       continue;
     }
 
-    final rawKind = rawLine.substring(0, separatorIndex);
+    var rawKind = rawLine.substring(0, separatorIndex);
     var value = rawLine.substring(separatorIndex + 1).trimRight();
     var nativeReplacement = '';
-    if (windows) {
+    var endsWithSuffix = false;
+    if (rawKind.startsWith(_zshNativeKindPrefix)) {
+      // Untrimmed: an inserted word can end in an escaped space. A third
+      // field `S` says the word ends in its completer's own suffix, such as
+      // the } of ${PARAM}, which nothing follows.
+      final fields = rawLine.substring(separatorIndex + 1).split('\t');
+      if (fields.length < 2 ||
+          fields.length > 3 ||
+          (fields.length == 3 && fields[2] != '' && fields[2] != 'S')) {
+        continue;
+      }
+      rawKind = rawKind.substring(_zshNativeKindPrefix.length);
+      value = fields[0];
+      nativeReplacement = fields[1];
+      endsWithSuffix = fields.length == 3 && fields[2] == 'S';
+      if (nativeReplacement.isEmpty) {
+        continue;
+      }
+    } else if (windows) {
       if (rawKind == 'shell') {
         escape = _windowsCompletionEscape(value);
         continue;
@@ -1515,7 +1544,7 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
       continue;
     }
 
-    final suggestion = _suggestionFromRemoteValue(
+    var suggestion = _suggestionFromRemoteValue(
       rawKind: rawKind,
       value: value,
       invocation: invocation,
@@ -1523,6 +1552,15 @@ List<ShellCompletionSuggestion> parseShellCompletionOutput(
     );
     if (suggestion == null) {
       continue;
+    }
+    if (endsWithSuffix) {
+      suggestion = ShellCompletionSuggestion(
+        label: suggestion.label,
+        replacement: suggestion.replacement,
+        replacementStart: suggestion.replacementStart,
+        replacementEnd: suggestion.replacementEnd,
+        kind: suggestion.kind,
+      );
     }
 
     final key =
@@ -1754,6 +1792,10 @@ String shellCompletionReplacementLiteral(
 const _interactiveZshCompletionDoneMarker = '__FLUTTY_ZSH_NATIVE_DONE__';
 const _shellHistoryDoneMarker = '__FLUTTY_HISTORY_DONE__';
 
+/// Kind prefix of the native zsh probe's lines, which carry zsh's own
+/// insertion text as a third field.
+const _zshNativeKindPrefix = 'zsh_';
+
 /// Exit status of [buildInteractiveZshCompletionRemoteCommand] when the
 /// foreground shell is not zsh or zsh cannot be started.
 const _interactiveZshUnsupportedExitCode = 78;
@@ -1876,66 +1918,123 @@ TRAPEXIT() {
 }
 source_if_readable "\$HOME/.zprofile"
 source_if_readable "\$HOME/.zshrc"
+# The startup files may change directory; complete where the prompt is.
+if [ -n "\$FLUTTY_CWD" ]; then
+  builtin cd -q -- "\$FLUTTY_CWD" 2>/dev/null || builtin cd -q -- "\$HOME" 2>/dev/null || :
+fi
 autoload -Uz compinit
 compinit -C >/dev/null 2>&1 || compinit -u >/dev/null 2>&1 || :
 zstyle ':completion:*' verbose no
 zstyle ':completion:*' group-name ''
 zstyle ':completion:*' format ''
 emit_native_completion_item() {
-  local item=\$1
+  # The word as the shell reads it, to test its type and to show, and as zsh
+  # would insert it, which the app inserts unchanged.
+  # Inside an open quote the word is inserted after it, and anything but a
+  # directory closes it, as zsh does. A suffix the completer gave (-S), such
+  # as the } of \${PARAM} or the = of --opt=, is inserted too and the app
+  # adds no space after it (S); a space is what the app adds anyway.
+  local item=\$1 insert=\$2 suffix=\$3 target=\${4:-\$1} q=\$_flutty_quote end=\$5
+  if [[ -n \$suffix && \$suffix != ' ' ]]; then
+    insert=\$insert\$suffix end=S
+  fi
+  # A line break or tab in a file's name would end this line or its field and
+  # let the name forge a match of its own, with any text to insert.
+  [[ \$item\$insert == *[[:cntrl:]]* ]] && return 0
+  # Test the file the match names, a word that starts with ~/ where the
+  # shell would expand it.
+  [[ \$target == '~' || \$target == '~/'* ]] && target=\$HOME\${target#?}
   case "\$FLUTTY_MODE" in
     directory)
-      [ -d "\$item" ] && printf 'directory\\t%s\\n' "\$item"
-      ;;
-    path)
-      if [ -d "\$item" ]; then
-        printf 'directory\\t%s\\n' "\$item"
-      elif [ -e "\$item" ]; then
-        printf 'file\\t%s\\n' "\$item"
-      fi
+      [ -d "\$target" ] && printf 'zsh_directory\\t%s\\t%s%s/\\n' "\$item" "\$q" "\${insert%/}"
       ;;
     *)
-      if [ -d "\$item" ]; then
-        printf 'directory\\t%s\\n' "\$item"
-      elif [ -e "\$item" ]; then
-        printf 'file\\t%s\\n' "\$item"
+      if [ -d "\$target" ]; then
+        printf 'zsh_directory\\t%s\\t%s%s/\\n' "\$item" "\$q" "\${insert%/}"
+      elif [ -e "\$target" ]; then
+        printf 'zsh_file\\t%s\\t%s%s%s\\t%s\\n' "\$item" "\$q" "\$insert" "\$q" "\$end"
       else
-        printf 'argument\\t%s\\n' "\$item"
+        printf 'zsh_argument\\t%s\\t%s%s%s\\t%s\\n' "\$item" "\$q" "\$insert" "\$q" "\$end"
       fi
       ;;
   esac
 }
 _flutty_dump_completions() {
+  # The word as the shell reads it, as zsh would insert it, its suffix, the
+  # file it names when that differs from the word (the match in the directory
+  # the completer named, -W, as for cdpath), and S when nothing may follow it.
   typeset -ga _flutty_matches
   _flutty_matches=()
+  typeset -g _flutty_quote=
   compadd() {
-    local -a original_args capture_args out
-    original_args=("\$@")
-    while (( \$# )); do
-      case "\$1" in
-        -O|-A)
-          shift 2
-          ;;
-        -O*|-A*)
-          shift
-          ;;
-        *)
-          capture_args+=("\$1")
-          shift
-          ;;
-      esac
+    emulate -L zsh
+    # Reads compadd's options for the parts of the word that go before and
+    # after each match: the ignored prefix (-i, else IPREFIX), the visible
+    # (-P) and hidden (-p) prefixes and the hidden suffix (-s). They and the
+    # matches -A reports are quoted as zsh would insert them. A call that only
+    # asks which words match (-O, -A, -D) adds nothing and is not captured.
+    local -a hits
+    local ipre=\$IPREFIX apre= hpre= hsuf= asuf= wdir= file= open= base= opt letter value
+    local -i i=1 j query=0
+    while (( i <= \$# )); do
+      opt=\${argv[i]}
+      [[ \$opt == -?* && \$opt != -- ]] || break
+      for (( j = 2; j <= \${#opt}; j++ )); do
+        letter=\${opt[j]}
+        [[ \$letter == [PSpsiIWdJVXxrRMFEDOA] ]] || continue
+        if (( j < \${#opt} )); then
+          value=\${opt[j+1,-1]}
+        else
+          (( i++ ))
+          value=\${argv[i]}
+        fi
+        case \$letter in
+          [OAD]) query=1 ;;
+          i) ipre=\$value ;;
+          P) apre=\$value ;;
+          p) hpre=\$value ;;
+          s) hsuf=\$value ;;
+          S) asuf=\$value ;;
+          W) wdir=\$value ;;
+        esac
+        break
+      done
+      (( i++ ))
     done
-    builtin compadd -O out "\${capture_args[@]}" 2>/dev/null || :
-    _flutty_matches+=("\${out[@]}")
-    builtin compadd "\${original_args[@]}" 2>/dev/null
-    local status=\$?
-    return \$status
+    if (( ! query )); then
+      _flutty_quote=\${compstate[quote]}
+      builtin compadd -A hits "\$@" 2>/dev/null
+      # zsh closes a \${ parameter after its name itself, then adds its usual
+      # space; a modifier completed later in the braces stays open, with
+      # nothing after it.
+      if [[ \${compstate[context]} == brace_parameter ]]; then
+        # A name follows \${, its flags in parentheses and # + ^ = ~.
+        base=\$ipre
+        while [[ \$base == *[#+^=~] ]]; do
+          base=\${base%?}
+        done
+        if [[ \$base == *'\${'(|'('*')') ]]; then
+          hsuf+='}'
+        else
+          open=S
+        fi
+      fi
+      for value in "\${hits[@]}"; do
+        file=
+        [[ -n \$wdir && \$wdir != '('* ]] && file=\${wdir%/}/\${(Q)value}
+        value=\$ipre\$apre\$hpre\$value\$hsuf
+        _flutty_matches+=("\${(Q)value}" "\$value" "\$asuf" "\$file" "\$open")
+      done
+    fi
+    # Returns compadd's status. Never name a local `status`: zsh's is
+    # read-only, and assigning it aborts the whole widget before the marker.
+    builtin compadd "\$@" 2>/dev/null
   }
   _main_complete >/dev/null 2>&1 || :
   print -r -- __FLUTTY_ZSH_NATIVE_START__
-  local item
-  for item in "\${_flutty_matches[@]}"; do
-    emit_native_completion_item "\$item"
+  local item insert suffix file open
+  for item insert suffix file open in "\${_flutty_matches[@]}"; do
+    emit_native_completion_item "\$item" "\$insert" "\$suffix" "\$file" "\$open"
   done
   print -r -- $_interactiveZshCompletionDoneMarker
   exit 0

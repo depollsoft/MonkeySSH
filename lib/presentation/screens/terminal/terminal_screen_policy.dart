@@ -454,6 +454,27 @@ bool shouldReviewTerminalCommandInsertion({
   return shellStatus != TerminalShellStatus.runningCommand;
 }
 
+/// The text of a bracketed paste of printable text, or null for any other
+/// input. The keyboard can commit the end of a word, such as an autocorrected
+/// or quickly typed one, as a paste, which completion follows like typing.
+String? unwrapBracketedPasteCompletionInput(String output) {
+  const start = '\x1B[200~';
+  const end = '\x1B[201~';
+  if (!output.startsWith(start) ||
+      !output.endsWith(end) ||
+      output.length <= start.length + end.length) {
+    return null;
+  }
+  final text = output.substring(start.length, output.length - end.length);
+  for (var index = 0; index < text.length; index++) {
+    final codeUnit = text.codeUnitAt(index);
+    if (codeUnit < 0x20 || codeUnit == 0x7F) {
+      return null;
+    }
+  }
+  return text;
+}
+
 /// Returns whether terminal input should start a shell completion refresh.
 bool canTerminalOutputTriggerShellCompletion({
   required String output,
@@ -895,6 +916,32 @@ bool? resolveTmuxBarActiveWindowBracketedPasteMode(
   Iterable<TmuxWindow>? windows,
 ) => _activeTmuxWindowOrNull(windows)?.terminalBracketedPasteMode;
 
+/// Resolves whether the active mux window's program set kitty paste events
+/// (DEC private mode 5522). Null when the server does not report it.
+bool? resolveTmuxBarActiveWindowKittyPasteEventsMode(
+  Iterable<TmuxWindow>? windows,
+) => _activeTmuxWindowOrNull(windows)?.terminalKittyPasteEventsMode;
+
+/// Whether a clipboard paste should become a kitty paste event (mode 5522)
+/// rather than typed text.
+///
+/// A plain shell reads the mode from the terminal, which sees the program's
+/// own `CSI ? 5522 h`. A MonkeyMux window trusts only the server's snapshot of
+/// that window, so a paste right after a window switch never sends an event
+/// to a program that did not ask for one. tmux does not carry the protocol.
+bool shouldSendTerminalKittyPasteEvent({
+  required bool isMuxActive,
+  required RemoteMuxBackend muxBackend,
+  required bool terminalKittyPasteEventsMode,
+  required bool? activeWindowKittyPasteEventsMode,
+}) {
+  if (!isMuxActive) {
+    return terminalKittyPasteEventsMode;
+  }
+  return muxBackend == RemoteMuxBackend.monkeyMux &&
+      activeWindowKittyPasteEventsMode == true;
+}
+
 /// Resolves a stable identity for the active mux window.
 String? resolveTmuxBarActiveWindowKey(Iterable<TmuxWindow>? windows) =>
     _activeTmuxWindowOrNull(windows)?.stableKey;
@@ -929,6 +976,7 @@ Future<
     bool bracketedPasteMode,
     bool bracketedPasteModeKnown,
     String? activeWindowKey,
+    bool? kittyPasteEventsMode,
   })
 >
 refreshTerminalBracketedPasteModeFromMuxWindows({
@@ -946,6 +994,9 @@ refreshTerminalBracketedPasteModeFromMuxWindows({
     bracketedPasteMode: terminal.bracketedPasteMode,
     bracketedPasteModeKnown: activeWindowBracketedPasteMode != null,
     activeWindowKey: resolveTmuxBarActiveWindowKey(windows),
+    kittyPasteEventsMode: resolveTmuxBarActiveWindowKittyPasteEventsMode(
+      windows,
+    ),
   );
 }
 

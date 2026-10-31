@@ -1,0 +1,921 @@
+[
+ {
+  "expect": [
+   "P |$ ls -la|ppiiiiii",
+   "- |total 0|ooooooo",
+   "P |$ |pp",
+   "- ||",
+   "- ||",
+   "cursor 2,2 i click=1 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "prompt input output",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line;aid=7\u0007$ \u001b]133;B\u0007ls -la\r\n\u001b]133;C\u0007total 0\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=1\u0007$ \u001b]133;B\u0007"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |partial|ooooooo",
+   "P |$ x|ppi",
+   "C |y|i",
+   "- ||",
+   "- ||",
+   "cursor 1,2 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "fresh line after unterminated output",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "partial\u001b]133;A\u0007$ \u001b]133;B\u0007x\u001b]133;L\u0007y"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ abcdef|ppiiiiii",
+   "C+|ghij|iiii",
+   "S |> kl|ppii",
+   "- |zz|oo",
+   "- ||",
+   "- ||",
+   "cursor 2,3 o click=0 cl=multiple special=false redraw=true aid=-"
+  ],
+  "name": "wrapped and multi-line input with a secondary prompt",
+  "size": [
+   8,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=m\u0007$ \u001b]133;B\u0007abcdefghij\r\n\u001b]133;P;k=s\u0007> \u001b]133;B\u0007kl\u001b]133;I\u0007\r\nzz"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |> ls|ppii",
+   "- |a b c|ooooo",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 0,2 o click=1 cl=- special=true redraw=true aid=-"
+  ],
+  "name": "fish output starts on the row the newline marked",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=1;special_key=1\u0007> \u001b]133;B\u0007ls\r\n\u001b]133;C\u0007a b c\r\n\u001b]133;D;0\u0007"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |out$ echor|oooppiiiip",
+   "C |> x|ppi",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,1 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "VS Code marks",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "out\u001b]633;A\u0007$ \u001b]633;B\u0007echo\u001b]633;H\u0007r\u001b]633;I\u0007\r\n\u001b]633;F\u0007> \u001b]633;G\u0007x\u001b]633;C\u0007"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |out1|oooo",
+   "- |out2|oooo",
+   "P |$ ls|ppii",
+   "P |$ ls|ppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,0 i click=0 cl=line special=false redraw=true aid=-"
+  ],
+  "name": "ctrl-l at a prompt keeps the screen as history",
+  "size": [
+   16,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out1\r\nout2\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ls"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 0,0 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a clear from a command erases in place",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007x\r\n\u001b]133;C\u0007out\u001b[H\u001b[2J"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |new|ooo",
+   "- |row|ooo",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,1 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "clear with ED 3 ends the open prompt",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "1\r\n2\r\n3\r\n4\r\n5\r\n\u001b]133;A\u0007$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b[3Jnew\r\nrow"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ |pp",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 2,0 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "ED 2 on the alternate screen",
+  "size": [
+   16,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007\u001b[?1049h\u001b]133;A\u0007> \u001b[H\u001b[2J\u001b[?1049l"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ abcdefgh|ppiiiiiiii",
+   "C+|ijk|iii",
+   "- |1|o",
+   "- |2|o",
+   "P |$ |pp",
+   "cursor 2,2 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "reflow keeps marks",
+  "size": [
+   10,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijk\r\n\u001b]133;C\u00071\r\n2\r\n\u001b]133;D;0\u0007\u001b]133;A\u0007$ \u001b]133;B\u0007"
+   },
+   {
+    "resize": [
+     5,
+     4
+    ]
+   },
+   {
+    "resize": [
+     14,
+     6
+    ]
+   },
+   {
+    "resize": [
+     10,
+     3
+    ]
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- ||",
+   "- ||",
+   "- ||",
+   "C ||",
+   "C ||",
+   "- ||",
+   "cursor 0,0 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "insert and delete lines move marks",
+  "size": [
+   12,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007a\r\n\u001b]133;C\u0007o\r\n\u001b]133;A\u0007$ \u001b]133;B\u0007b\u001b[1;1H\u001b[L\u001b[3;1H\u001b[2M\u001b[2;5r\u001b[5;1H\n\n\u001b[r"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |x|o",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 1,0 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "RIS clears the prompt",
+  "size": [
+   12,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2;redraw=0\u0007$ \u001b]133;B\u0007ls\u001bcx"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ a界b界|ppiiii",
+   "C+|界c|ii",
+   "- ||",
+   "- ||",
+   "cursor 3,1 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "wide input",
+  "size": [
+   8,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007a界b界界c"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ abcdefgh|ppiiiiiiii",
+   "C+|ijklmnopqr|iiiiiiiiii",
+   "C+|stuv|iiii",
+   "- ||",
+   "cursor 4,2 i click=0 cl=line special=false redraw=true aid=-"
+  ],
+  "name": "a prompt scrolled into the scrollback comes back with its input",
+  "size": [
+   10,
+   2
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijklmnopqrstuv"
+   },
+   {
+    "resize": [
+     10,
+     4
+    ]
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ abcdefghij|ppiiiiiiiiii",
+   "C+|klmnopqr|iiiiiiii",
+   "- |out1|oooo",
+   "- |out2|oooo",
+   "P |> x|ppi",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,4 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "scrollback keeps cell contents through a reflow",
+  "size": [
+   10,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijklmnopqr\r\n\u001b]133;C\u0007out1\r\nout2\r\n\u001b]133;D;0\u0007\u001b]133;A\u0007> \u001b]133;B\u0007x"
+   },
+   {
+    "resize": [
+     7,
+     3
+    ]
+   },
+   {
+    "resize": [
+     12,
+     8
+    ]
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "C |$ abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a two-line prompt marked once continues on its second line",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007top\r\n$ \u001b]133;B\u0007abc"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "S |$ abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a two-line prompt marked on every line is a secondary prompt",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007\u001b]133;P;k=i\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007abc"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "S |$ abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a two-line prompt marked on its last line is a secondary prompt",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;A;k=s\u0007$ \u001b]133;B\u0007abc"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |$ a|ppi",
+   "C |> b|ppi",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 3,1 i click=0 cl=multiple special=false redraw=true aid=-"
+  ],
+  "name": "a continuation prompt k=c continues the prompt",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=m\u0007$ \u001b]133;B\u0007a\r\n\u001b]133;P;k=c\u0007> \u001b]133;B\u0007b"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |toplin|pppppp",
+   "C+|e!|pp",
+   "C |$ abcd|ppiiii",
+   "C+|efgh|iiii",
+   "- |o|o",
+   "P |top|ppp",
+   "S |$ abcd|ppiiii",
+   "C+|efgh|iiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,4 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "wrapped two-line prompts keep their marks through a reflow",
+  "size": [
+   6,
+   8
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007topline!\r\n$ \u001b]133;B\u0007abcdefgh\r\n\u001b]133;C\u0007o\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007abcdefgh"
+   },
+   {
+    "resize": [
+     10,
+     8
+    ]
+   },
+   {
+    "resize": [
+     4,
+     10
+    ]
+   },
+   {
+    "resize": [
+     6,
+     8
+    ]
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "- ||",
+   "S |$ ax|ppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,2 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "insert and delete lines move a secondary prompt",
+  "size": [
+   12,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007a\r\nb\u001b[2;1H\u001b[L\u001b[4;1H\u001b[M\u001b[3;4Hx"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "C |$ x|ppi",
+   "- ||",
+   "- ||",
+   "cursor 3,1 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "RIS clears a secondary prompt",
+  "size": [
+   12,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007ls\u001bc\u001b]133;A\u0007top\r\n$ \u001b]133;B\u0007x"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |out|ooo",
+   "P |top|ppp",
+   "C |$ ls|ppii",
+   "P |top|ppp",
+   "C |$ ls|ppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,1 i click=0 cl=line special=false redraw=true aid=-"
+  ],
+  "name": "ctrl-l at a two-line prompt keeps the screen as history",
+  "size": [
+   16,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007top\r\n$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b]133;A;cl=line\u0007top\r\n$ \u001b]133;B\u0007ls"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |out|ooo",
+   "P |top|ppp",
+   "S |$ ls|ppii",
+   "P |top|ppp",
+   "S |$ ls|ppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 4,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "ctrl-l at a two-line secondary prompt keeps the screen as history",
+  "size": [
+   16,
+   6
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007\u001b]133;P;k=i\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007ls\u001b[H\u001b[2J\u001b]133;A;click_events=2\u0007\u001b]133;P;k=i\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007ls"
+   }
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[H\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefgh\u001b[0m\u001b[10Gh\u001b[0mi\u001b[0m\r\u001b[10X\u001b]133;I\u0007\r\n\u001b[1;1H\u001b]133;P;k=c\u0007\u001b]133;B\u0007ijklmnopqr\u001b[0m\u001b[0m\u001b[10Gr\u001b[0ms\u001b[0m\rstuv\u001b[0m\u001b[10X\u001b[0m\u001b[2;5H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt that continues from the scrollback keeps its input",
+  "replayAfter": 1,
+  "size": [
+   10,
+   2
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007abcdefghijklmnopqrstuv"
+   },
+   {
+    "resize": [
+     10,
+     4
+    ]
+   }
+  ],
+  "expect": [
+   "P |$ abcdefgh|ppiiiiiiii",
+   "C+|ijklmnopqr|iiiiiiiiii",
+   "C+|stuv|iiii",
+   "- ||",
+   "cursor 4,2 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[Hout\u001b[0m\r\n\r\n\r\n\u001b[1;1H\u001b]133;A;click_events=1\u0007$ \u001b]133;B\u0007abcdefgh\u001b[0m\u001b[0m\u001b[10Gh\u001b[0mi\u001b[0m\rijklmnopqr\u001b[0m\u001b[3;1H\u001b]133;P;k=s\u0007> \u001b]133;B\u0007st\u001b[0m\u001b[K\u001b[0m\u001b[3;5H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt across output and a reflow",
+  "replayAfter": 1,
+  "size": [
+   10,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=1\u0007$ \u001b]133;B\u0007abcdefghijklmnopqr\r\n\u001b]133;P;k=s\u0007> \u001b]133;B\u0007st"
+   },
+   {
+    "resize": [
+     10,
+     6
+    ]
+   },
+   {
+    "resize": [
+     6,
+     6
+    ]
+   },
+   {
+    "resize": [
+     14,
+     3
+    ]
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |$ abcdefghijkl|ppiiiiiiiiiiii",
+   "C+|mnopqr|iiiiii",
+   "S |> st|ppii",
+   "cursor 4,2 i click=1 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[1;17H\u001bH\u001b[H\u001b]133;A\u0007\u001b[2J\u001b[3J\u001b[1;1H\u001b[K\u001b[2;1H\u001b[K\u001b[3;1H\u001b[K\u001b[4;1H\u001b[K\u001b[5;1H\u001b[K\u001b[0m\u001b[1;1H\u001b]633;H\u0007\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt whose row was deleted under the cursor stays unmarked",
+  "replayAfter": 1,
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;P;k=s\u0007\u001b[Mtext\u001b[H\u001b[J"
+   },
+   {
+    "write": "x"
+   }
+  ],
+  "expect": [
+   "- |x|p",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 1,0 p click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[1;17H\u001bH\u001b[H\u001b]133;A;click_events=1;cl=line\u0007\u001b[2J\u001b[3J\u001b[1;1Hout\u001b[0m\u001b[K\u001b[2;1H\u001b]133;B\u0007ls\u001b[0m\u001b[K\u001b[3;1H\u001b[K\u001b[4;1H\u001b[K\u001b[5;1H\u001b[K\u001b[0m\u001b[2;3H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed input on an unmarked row keeps its prompt options",
+  "replayAfter": 1,
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "out\r\n\u001b]133;A;cl=line;click_events=1\u0007$ \u001b[M\u001b]633;B\u0007ls"
+   },
+   {
+    "write": " -l\r\nmore"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "- |ls -l|iiiii",
+   "C |more|iiii",
+   "- ||",
+   "- ||",
+   "cursor 4,2 i click=1 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[Hout\u001b[0m\r\n\u001b]133;A;click_events=2\u0007topline!!!\u001b[0m\u001b[10G!\u001b[0mx\u001b[0m\r\u001b[10X\u001b]133;I\u0007\r\n\r\n\u001b[1;1H\u001b]133;P;k=c\u0007x\u001b[0m\u001b[10X\u001b[2;1H\u001b]133;P;k=c\u0007$ \u001b]133;B\u0007abcdefgh\u001b[0m\u001b[0m\u001b[10Gh\u001b[0mi\u001b[0m\rijkl\u001b[0m\u001b[10X\u001b[0m\u001b[3;5H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed two-line prompt keeps its second line a continuation",
+  "replayAfter": 1,
+  "size": [
+   10,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007topline!!!x\r\n$ \u001b]133;B\u0007abcdefghijkl"
+   },
+   {
+    "resize": [
+     14,
+     4
+    ]
+   },
+   {
+    "write": "m"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |topline!!!x|ppppppppppp",
+   "C |$ abcdefghijkl|ppiiiiiiiiiiii",
+   "C+|m|i",
+   "cursor 1,3 i click=2 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[Ho1\u001b[0m\r\no2\u001b[0m\r\n\u001b]133;A;click_events=2\u0007top\u001b[0m\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007abcdef\u001b[0m\u001b[8Gf\u001b[0mg\u001b[0m\r\u001b[8X\u001b]133;I\u0007\r\n\r\n\u001b[1;1H\u001b]133;P;k=c\u0007\u001b]133;B\u0007ghijklmn\u001b[0m\u001b[0m\u001b[8Gn\u001b[0mo\u001b[0m\ropqrstuv\u001b[0m\u001b[0m\u001b[8Gv\u001b[0mw\u001b[0m\rwxyz\u001b[0m\u001b[8X\u001b[0m\u001b[3;5H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt keeps its secondary line",
+  "replayAfter": 1,
+  "size": [
+   8,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007o1\r\no2\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007\u001b]133;P;k=i\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007abcdefghijklmnopqrstuvwxyz"
+   },
+   {
+    "resize": [
+     12,
+     4
+    ]
+   },
+   {
+    "write": "!"
+   }
+  ],
+  "expect": [
+   "- |o1|oo",
+   "- |o2|oo",
+   "P |top|ppp",
+   "S |$ abcdefghij|ppiiiiiiiiii",
+   "C+|klmnopqrstuv|iiiiiiiiiiii",
+   "C+|wxyz!|iiiii",
+   "cursor 5,3 i click=2 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[1;17H\u001bH\u001b[1;1H\u001b[K\u001b[2;1H\u001b[K\u001b[3;1H\u001b]133;A;click_events=2\u0007\u001b]133;P;k=s\u0007\u001b[1C \u001b]133;B\u0007a\u001b[0m\u001b[K\u001b[0m\u001b[3;4H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed secondary prompt whose first line was erased",
+  "replayAfter": 1,
+  "size": [
+   20,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;P;k=s\u0007$ \u001b]133;B\u0007a\u001b[3;1H\u001b[1J\u001b[3;4H"
+   },
+   {
+    "write": "b"
+   }
+  ],
+  "expect": [
+   "- ||",
+   "- ||",
+   "S |  ab|opii",
+   "cursor 4,2 i click=2 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "expect": [
+   "P |top|ppp",
+   "S |> abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a line feed back onto a secondary prompt keeps it",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u0007top\r\n\u001b]133;A;k=s\u0007> \u001b]133;B\u0007abc\u001b[A\n"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "- |out|ooo",
+   "P |$ abc|ppiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a line feed back onto a primary prompt keeps it",
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;click_events=2\u0007$ \u001b]133;B\u0007abc\u001b[A\n"
+   }
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;1Hout\u001b[0m\u001b[K\u001b[2;1H\u001b]133;A;cl=line\u0007ABCDE\u001b[0m\u001b[3;1H\u001b[K\u001b[0m\u001b[2;5HE\u001b]133;B\u0007\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt keeps the glyph its cursor waits to wrap after",
+  "replayAfter": 1,
+  "size": [
+   5,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007ABCDE\u001b]133;B\u0007"
+   },
+   {
+    "write": "x"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |ABCDE|ppppp",
+   "C+|x|i",
+   "cursor 1,2 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;1Hout\u001b[0m\u001b[K\u001b[2;1H\u001b]133;A;cl=line\u0007ABCDE\u001b[0m\u001b[3;1H\u001b[K\u001b[4;1H\u001b[K\u001b[0m\u001b[2;5HE\u001b[0m\u001b(B\u001b)B\u000f\u001b7\u001b[0m\u001b[?6l\u001b[r\u001b(B\u001b)B\u000f\u001b[2;3H\u001b]133;B\u0007\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt keeps the glyph a saved cursor waits to wrap after",
+  "replayAfter": 1,
+  "size": [
+   5,
+   4
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007ABCDE\u001b7\u001b]133;B\u0007\u001b[2;3H"
+   },
+   {
+    "write": "\u001b8x"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |ABCDE|ppppp",
+   "C+|x|i",
+   "- ||",
+   "cursor 1,2 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[1;17H\u001bH\u001b[1;1Hout\u001b[0m\u001b[K\u001b[2;1H\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ab\u001b]133;D\u0007X\u001b]133;B\u0007cd\u001b[0m\u001b[K\u001b[3;1H\u001b[K\u001b[4;1H\u001b[K\u001b[5;1H\u001b[K\u001b[0m\u001b[2;8H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt keeps output written inside it",
+  "replayAfter": 1,
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=line\u0007$ \u001b]133;B\u0007ab\u001b]133;D\u0007X\u001b]133;B\u0007cd"
+   },
+   {
+    "write": "e"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |$ abXcde|ppiioiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 8,1 i click=0 cl=line special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[1;9H\u001bH\u001b[1;17H\u001bH\u001b[1;1H\u001b]133;A\u0007\u001b]133;D\u0007out\u001b]133;P;k=i\u0007$ \u001b]133;B\u0007ls\u001b[0m\u001b[K\u001b[2;1H\u001b[K\u001b[3;1H\u001b[K\u001b[4;1H\u001b[K\u001b[5;1H\u001b[K\u001b[0m\u001b[1;8H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed VS Code prompt keeps the output before it on its row",
+  "replayAfter": 1,
+  "size": [
+   20,
+   5
+  ],
+  "steps": [
+   {
+    "write": "out\u001b]633;A\u0007$ \u001b]633;B\u0007ls"
+   },
+   {
+    "write": " -l"
+   }
+  ],
+  "expect": [
+   "P |out$ ls -l|oooppiiiii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 10,0 i click=0 cl=- special=false redraw=true aid=-"
+  ]
+ },
+ {
+  "frame": "\u001b\\\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?1007l\u001b[?2004l\u001b[?5522l\u001b[?2031l\u001b[?67l\u001b[?5l\u001b[?12l\u001b[?1047l\u001b[?1049l\u001b[?1l\u001b[?6l\u001b[?7h\u001b[4l\u001b>\u001b[r\u000f\u001b(B\u001b)B\u001b[0m\u001b[H\u001b[2J\u001b[3J\u001b[?1049h\u001b[H\u001b[2J\u001b[3J\u001b[?1049l\u001b[H\u001b[2J\u001b[3J\u001b[?6l\u001b[r\u001b[0m\u001b[4l\u001b[3g\u001b[Hout\u001b[0m\r\n\u001b]133;A;cl=m\u0007$ \u001b]133;B\u0007ab\u001b]133;D\u0007XY\u001b[0m\u001b[6GY\u001b[0mc\u001b[0m\r\u001b[6X\u001b]133;P;k=c\u0007\u001b]133;B\u0007c\u001b[0m\r\n\u001b]133;P;k=c\u0007> \u001b]133;B\u0007d\u001b]133;I\u0007\u001b[0m\r\n\r\n\r\n\u001b[1;1H\u001b]133;P;k=c\u0007\u001b[K\u001b[2;1H\u001b]133;P;k=c\u0007\u001b[K\u001b[3;1H\u001b]133;P;k=c\u0007> \u001b]133;B\u0007e\u001b[0m\u001b[K\u001b[0m\u001b[3;4H\u001b(B\u001b)B\u000f\u001b[0m",
+  "name": "a replayed prompt keeps output ending one of its scrollback lines",
+  "replayAfter": 1,
+  "size": [
+   6,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;C\u0007out\r\n\u001b]133;D;0\u0007\u001b]133;A;cl=m\u0007$ \u001b]133;B\u0007ab\u001b]133;D\u0007XY\u001b]133;B\u0007c\r\n\u001b]133;P;k=c\u0007> \u001b]133;B\u0007d\r\n\r\n\r\n\u001b]133;P;k=c\u0007> \u001b]133;B\u0007e"
+   },
+   {
+    "write": "f"
+   }
+  ],
+  "expect": [
+   "- |out|ooo",
+   "P |$ abXY|ppiioo",
+   "C+|c|i",
+   "C |> d|ppi",
+   "C ||",
+   "C ||",
+   "C |> ef|ppii",
+   "cursor 4,2 i click=0 cl=multiple special=false redraw=true aid=-"
+  ]
+ }
+]

@@ -122,6 +122,30 @@ void main() {
       expect(placement.rowSpan, 2);
     });
 
+    test('keeps a placement\'s in-cell offset as a fraction of a cell', () {
+      final terminal = Terminal(maxLines: 100)
+        ..resize(40, 12)
+        ..write('img:');
+      terminal.graphics
+        ..setCellPixelSize(10, 20)
+        ..storeImageWithId(1, _solidImage(const ui.Color(0xFF00FF00), 8, 8))
+        ..placeImage(
+          1,
+          terminal.buffer.createAnchorFromCursor(),
+          cols: 1,
+          rows: 1,
+          xOffset: 9,
+          yOffset: 5,
+        );
+
+      final image = SshSession.buildTerminalPreviewSnapshot(terminal)!
+          .images
+          .single;
+
+      expect(image.xOffset, closeTo(0.9, 1e-9));
+      expect(image.yOffset, closeTo(0.25, 1e-9));
+    });
+
     test('maps a source-space crop into a downsampled decoded image', () {
       final terminal = Terminal(maxLines: 100)
         ..resize(40, 12)

@@ -84,18 +84,21 @@ void main() {
       expect(responses, ['\x1b[99;0\$y']);
     });
 
-    test('leaves DEC-private DECRQM to the app layer (no core reply)', () {
+    test('answers DEC-private DECRQM once per query', () {
       final responses = <String>[];
-      // `CSI ? Ps $ p` is answered by the MonkeySSH app layer (which tracks the
-      // extra state, e.g. DEC mode 2031). The core must stay silent so the
-      // program does not receive two replies.
+      // `CSI ? Ps $ p` is answered by the core; modes it does not track, such
+      // as 2031, come from the host's externalDecModeState, or report 0.
       Terminal()
         ..onOutput = responses.add
         ..write('\x1b[?2004\$p')
         ..write('\x1b[?2026\$p')
         ..write('\x1b[?2031\$p');
 
-      expect(responses, isEmpty);
+      expect(responses, [
+        '\x1b[?2004;2\$y',
+        '\x1b[?2026;2\$y',
+        '\x1b[?2031;0\$y',
+      ]);
     });
 
     test('a soft reset (CSI ! p) does not emit a DECRQM reply', () {

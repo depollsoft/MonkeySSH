@@ -37,6 +37,13 @@ which runs `functions-test` only. `deploy-functions.yml` deploys them from `main
 through keyless Workload Identity Federation (`scripts/setup_functions_iam.sh`);
 never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 
+`third_party` changes also run `esctest`: Thomas Dickey's esctest2 conformance
+suite against the vendored terminal, on Linux. It fails on a failure missing from
+`third_party/xterm/test/esctest/expected_failures.txt` and on a listed test that
+now passes, so an emulation fix deletes its tests from that list. Locally, in
+`third_party/xterm`: `test/esctest/fetch_esctest.sh DIR`, then
+`ESCTEST_DIR=DIR flutter test test/esctest` (`ESCTEST_UPDATE=1` rewrites the list).
+
 ## Workflow lockfile
 
 Every workflow is onboarded to `.github/workflows/actions.lock`

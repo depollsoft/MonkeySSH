@@ -44,7 +44,7 @@ func assertInputActions(t *testing.T, routing attachInputRouting, want []attachI
 }
 
 func replayPrefixForTest(window *muxWindow) string {
-	return activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
+	return windowReplayTag(window) + activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
 }
 
 func replayPostHistorySuffixForTest(cursorVisible bool) string {
@@ -1186,6 +1186,7 @@ func TestWindowOutputSkipsClientsThatJoinedAfterObservation(t *testing.T) {
 		[]byte("once"),
 		[]byte("once"),
 		nil,
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1222,6 +1223,7 @@ func TestTerminalQueryRetryCanUseClientThatJoinedAfterObservation(t *testing.T) 
 		[]byte("\x1b[c"),
 		nil,
 		[]byte("\x1b[c"),
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1269,6 +1271,7 @@ func TestLiveQueryWaitDoesNotHoldAttachLock(t *testing.T) {
 			[]byte("before\x1b[>qafter"),
 			[]byte("beforeafter"),
 			[]byte("\x1b[>q"),
+			kittyClipboardDelivery{},
 			primary.sequence,
 			0,
 		)
@@ -1421,7 +1424,7 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 	fallback := string(
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
-			redrawFallbackHistory(window),
+			window.redrawForwardingFallbackScreen,
 		),
 	)
 	server.mu.Unlock()
@@ -1905,8 +1908,10 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	)
 	client.clipViewport = true
 
-	server.handleWindowOutput("@1", []byte("\x1b["))
-	waitForRecordedOutput(t, conn, "\x1b[")
+	// A bare "\x1b[" could still become a visibility-report sequence, which
+	// is held until it ends (terminal_visibility.go), so split after a digit.
+	server.handleWindowOutput("@1", []byte("\x1b[0"))
+	waitForRecordedOutput(t, conn, "\x1b[0")
 
 	server.resizeForClient("primary", 100, 30, false)
 	server.mu.Lock()
@@ -1915,11 +1920,11 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	if width != 100 || height != 30 {
 		t.Fatalf("desired size = %dx%d, want pending 100x30", width, height)
 	}
-	if got := conn.String(); got != "\x1b[" {
+	if got := conn.String(); got != "\x1b[0" {
 		t.Fatalf("mid-sequence output = %q, want no injected viewport CSI", got)
 	}
 
-	server.handleWindowOutput("@1", []byte("0mX"))
+	server.handleWindowOutput("@1", []byte("mX"))
 
 	waitForRecordedOutput(t, conn, "\x1b[0mX\x1b[?8;30;100t")
 	server.mu.Lock()
@@ -1996,7 +2001,7 @@ func TestWindowSwitchResetsParserBeforePendingViewport(t *testing.T) {
 	}
 
 	wantPrefix := terminalParserResetSequence + "\x1b[?8;30;100t" +
-		activeWindowReplayPrefix
+		windowReplayTag(second) + activeWindowReplayPrefix
 	waitForRecordedContains(t, conn, wantPrefix)
 }
 
@@ -2190,7 +2195,7 @@ func TestClientFocusBroadcastsSharedViewportToClippingClients(t *testing.T) {
 
 	const viewportResize = "\x1b[?8;28;72t"
 	waitForRecordedOutput(t, desktopConn, viewportResize)
-	waitForRecordedContains(t, phoneConn, viewportResize+activeWindowReplayPrefix)
+	waitForRecordedContains(t, phoneConn, viewportResize+windowReplayTag(window)+activeWindowReplayPrefix)
 	if got := phoneConn.String(); !strings.HasPrefix(got, viewportResize) {
 		t.Fatalf("focused client output = %q, want viewport resize first", got)
 	}
@@ -2248,6 +2253,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("new output"),
 		[]byte("new output"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -2265,6 +2271,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("next"),
 		[]byte("next"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		2,
 	)
@@ -2316,6 +2323,7 @@ func TestClientFocusReplayStillDeliversReplayedTerminalQuery(t *testing.T) {
 		query,
 		nil,
 		query,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -6667,8 +6675,8 @@ func TestAttachWriteSkipsStaleActiveWindowOutput(t *testing.T) {
 
 	stale := []byte("stale old output")
 	fresh := []byte("fresh new output")
-	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, ^uint64(0), 0)
-	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
 
 	waitForRecordedOutput(t, attach, "fresh new output")
 }
@@ -7764,40 +7772,24 @@ func TestObserveKittyGraphicsPreservesSameChunkHardDeleteOrder(t *testing.T) {
 	}
 }
 
-func TestObserveKittyGraphicsAppliesDeleteAllInStreamOrder(t *testing.T) {
-	window := &muxWindow{}
-	window.observeKittyGraphicsLocked([]byte(
-		"\x1b_Ga=t,i=7,I=5,f=100;ROOT7\x1b\\" +
-			"\x1b_Ga=t,i=8,I=6,f=100;ROOT8\x1b\\" +
-			"\x1b_Ga=d,d=A\x1b\\" +
-			"\x1b_Ga=t,i=9,I=7,f=100;ROOT9\x1b\\"))
-
-	replay := string(window.kittyImageReplayLocked(nil))
-	if strings.Contains(replay, "ROOT7") || strings.Contains(replay, "ROOT8") {
-		t.Fatalf("d=A retained image data transmitted before it: %q", replay)
-	}
-	if !strings.Contains(replay, "ROOT9") {
-		t.Fatalf("d=A removed image data transmitted after it: %q", replay)
-	}
-	if len(window.kittyImageNumberToID) != 1 ||
-		window.kittyImageNumberToID["7"] != "9" {
-		t.Fatalf("d=A left stale image-number mappings: %#v", window.kittyImageNumberToID)
-	}
-}
-
-func TestObserveKittyGraphicsInvalidatesForPositionalHardDeletes(t *testing.T) {
-	for _, selector := range []string{"C", "P", "X", "Y"} {
+// TestObserveKittyGraphicsKeepsImagesForPositionalDeletes covers d=A and the
+// other positional hard deletes. The client frees only the images placed at
+// the cells they name, which MonkeyMux cannot see; an image shown only through
+// Unicode placeholders survives them. Dropping every retained image left such
+// placeholders blank after an attach, while keeping one too many costs only
+// replay bytes.
+func TestObserveKittyGraphicsKeepsImagesForPositionalDeletes(t *testing.T) {
+	for _, selector := range []string{"A", "C", "P", "Q", "X", "Y", "Z"} {
 		t.Run(selector, func(t *testing.T) {
 			window := &muxWindow{}
 			window.observeKittyGraphicsLocked([]byte(
-				"\x1b_Ga=t,i=7,I=5,f=100;ROOT\x1b\\" +
-					"\x1b_Ga=d,d=" + selector + ",x=1,y=1\x1b\\"))
+				"\x1b_Ga=t,i=7,f=100;ROOT7\x1b\\" +
+					"\x1b_Ga=d,d=" + selector + ",x=1,y=1,z=0\x1b\\" +
+					"\x1b_Ga=t,i=9,f=100;ROOT9\x1b\\"))
 
-			if got := window.kittyImageReplayLocked(nil); len(got) != 0 {
-				t.Fatalf("d=%s retained conservatively matched image data: %q", selector, got)
-			}
-			if len(window.kittyImageNumberToID) != 0 {
-				t.Fatalf("d=%s retained image-number mappings", selector)
+			replay := string(window.kittyImageReplayLocked(nil))
+			if !strings.Contains(replay, "ROOT7") || !strings.Contains(replay, "ROOT9") {
+				t.Fatalf("d=%s dropped retained image data: %q", selector, replay)
 			}
 		})
 	}
@@ -8659,7 +8651,7 @@ func TestCreateWindowClearsAttachBeforePromptOutput(t *testing.T) {
 
 	waitForTestAttachWrites(t, server)
 	output := attach.String()
-	wantPrefix := replayPrefixForTest(&muxWindow{name: "sh", paneTitle: "sh"}) +
+	wantPrefix := replayPrefixForTest(&muxWindow{id: "@2", name: "sh", paneTitle: "sh"}) +
 		replayPostHistorySuffixForTest(true)
 	if !strings.HasPrefix(output, wantPrefix) {
 		t.Fatalf("attach output = %q, want replay prefix before prompt", output)

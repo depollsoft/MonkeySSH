@@ -28,7 +28,8 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	// it known: the tail of a Codex frame, titles, queries, erases.
 	s.Write([]byte("\x1b[0;1m\x1b]0;title\x07\x1b[?25h\x1b[?2026l\x1b[>7u" +
 		"\x1b[=0;1u\x1b[2 q\x1b[>q\x1b[c\x1b[?2004h\x1b[?1000;1006h\x1b[K\x1b[J" +
-		"\x07\x1b=\x1b(0\x1b(B\x1b_Ga=t,f=32,s=1,v=1;/wAA/w==\x1b\\"))
+		"\x07\x1b=\x1b(0\x1b(B\x1b_Ga=t,f=32,s=1,v=1;/wAA/w==\x1b\\" +
+		"\x1bXsos\x1b\\\x1b^pm\x1b\\"))
 	if got := report(); got != "\x1b[7;9R" {
 		t.Fatalf("report after cursor-neutral output = %q, want 7;9", got)
 	}
@@ -42,7 +43,7 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 		"\x1b[s", "\x1b[u", "\x1b[!p", "\x1b[2;10r", "\x1b[20h", "\x1b[4h", "\x1b[@", "\x1b[P",
 		"\x1b[X", "\x1b[L", "\x1b[S", "\x1b[?1049h\x1b[?1049l", "\x1b[?47h\x1b[?47l",
 		"\x1b[?1048h", "\x1b[?7l\x1b[?7h", "\x1b[?2C", "\x1b[2 A", "\x1b[?J",
-		"\x1bXsos\x1b\\", "\x1b^pm\x1b\\", "\x1bP$qm\x1b\\", "\x1b]0;a\x18b",
+		"\x1bP$qm\x1b\\", "\x1b]0;a\x18b",
 		"\x1b_Ga=T,f=32,s=1,v=1,r=2,c=2;/wAA/w==\x1b\\",
 		"\x1b_Ga=p,i=7,r=2,c=2\x1b\\",
 		"\x1b_Ga=T,f=32,s=1,v=1\x9c",
@@ -67,6 +68,10 @@ func TestVTScreenCursorPositionReport(t *testing.T) {
 	// Placements that do not move the client's cursor keep it known.
 	for _, command := range []string{
 		"a=T,f=32,s=1,v=1,C=1", "a=T,f=32,s=1,v=1,U=1", "a=d,d=a", "a=q,i=1",
+		// Kitty reads U as set for any non-zero value, and a placement
+		// relative to a parent never moves the cursor.
+		"a=T,f=32,s=1,v=1,U=2", "a=p,i=2,p=1,P=1,Q=1,H=3",
+		"a=T,i=2,f=32,s=1,v=1,P=1",
 	} {
 		s.Write([]byte("\x1b[3;4H\x1b_G" + command + ";/wAA/w==\x1b\\"))
 		if got := report(); got != "\x1b[3;4R" {
@@ -370,6 +375,18 @@ func TestRedrawPauseAnswersEachCursorQueryAtItsOwnPosition(t *testing.T) {
 
 	if got := pty.String(); got != "\x1b[1;1R\x1b[1;13R" {
 		t.Fatalf("window got %q, want one report per query", got)
+	}
+}
+
+// DECXCPR (CSI ? 6 n) is answered the way the app's terminal answers it.
+func TestRedrawPauseAnswersExtendedCursorPositionQuery(t *testing.T) {
+	server, window, pty, _ := newRedrawCursorQueryTestServer(t)
+
+	server.handleWindowOutput("@1", []byte("\x1b[3;7H"+extendedCursorPositionQuery+cursorPositionQuery))
+	waitForWindowReplies(t, window)
+
+	if got := pty.String(); got != "\x1b[?3;7R\x1b[3;7R" {
+		t.Fatalf("window got %q, want a DECXCPR then a CPR", got)
 	}
 }
 

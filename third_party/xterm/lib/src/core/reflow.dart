@@ -206,6 +206,9 @@ List<BufferLine> reflow(
 
     final reflow = _LineReflow(oldWidth, newWidth);
 
+    final firstMark = line.semanticPrompt;
+    var marked = firstMark != SemanticPromptRow.none;
+
     reflow.add(line);
 
     for (var offset = i + 1; offset < lines.length; offset++) {
@@ -217,10 +220,21 @@ List<BufferLine> reflow(
 
       i++;
 
+      marked |= nextLine.semanticPrompt != SemanticPromptRow.none;
       reflow.add(nextLine);
     }
 
-    result.addAll(reflow.finish());
+    // The line keeps its shell-integration mark on its first row; the rows it
+    // wraps onto continue it when any of its rows was part of a prompt.
+    final reflowed = reflow.finish();
+    for (var row = 0; row < reflowed.length; row++) {
+      reflowed[row].semanticPrompt = row == 0
+          ? firstMark
+          : marked
+              ? SemanticPromptRow.continuation
+              : SemanticPromptRow.none;
+    }
+    result.addAll(reflowed);
   }
 
   for (var line in result) {

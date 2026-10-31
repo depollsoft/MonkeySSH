@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -239,6 +240,116 @@ void main() {
       expect(terminal.buffer.getText(), beforeText);
       expect(terminal.buffer.absoluteCursorY, beforeCursorY);
       expect(terminal.buffer.height, beforeHeight);
+    });
+
+    // Growing pulls rows back from the scrollback only while the content
+    // reaches the bottom row. A screen cleared at the prompt has the cursor at
+    // the top and nothing below it, so the old screen must not come back above
+    // the prompt when the keyboard closes; the rows go below, as in Ghostty.
+    test('growing keeps a cleared screen clear', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(20, 10);
+      for (var i = 1; i <= 30; i++) {
+        terminal.write('line$i\r\n');
+      }
+      terminal.write('\x1b[H\x1b[2Jprompt>');
+      final scrollBack = terminal.buffer.scrollBack;
+
+      for (var height = 11; height <= 16; height++) {
+        terminal.resize(20, height);
+      }
+
+      expect(terminal.buffer.scrollBack, scrollBack);
+      expect(terminal.buffer.cursorY, 0);
+      expect(
+        terminal.buffer.lines[terminal.buffer.scrollBack]
+            .toString()
+            .trimRight(),
+        'prompt>',
+      );
+      for (var row = 1; row < 16; row++) {
+        final line = terminal.buffer.lines[terminal.buffer.scrollBack + row];
+        expect(line.toString().trim(), isEmpty, reason: 'row $row');
+      }
+    });
+
+    // ?1049l restores the cursor saved on the main screen, which has to move
+    // with the rows the keyboard's resizes scroll under vim, or the prompt
+    // comes back on the wrong row and overwrites the shell's output.
+    test('the saved cursor follows the main screen under vim', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(30, 12);
+      for (var i = 1; i <= 11; i++) {
+        terminal.write('line $i\r\n');
+      }
+      terminal.write('% vim');
+      String promptRow() =>
+          terminal.buffer.lines[terminal.buffer.absoluteCursorY]
+              .toString()
+              .trimRight();
+      expect(promptRow(), '% vim');
+
+      terminal.write('\x1b[?1049h\x1b[H\x1b[2Jvim');
+      for (final height in [10, 8, 6, 8, 10, 12]) {
+        terminal.resize(30, height);
+      }
+      terminal.write('\x1b[?1049l');
+
+      expect(promptRow(), '% vim');
+      expect(terminal.buffer.cursorY, 11);
+      expect(
+        terminal.buffer.lines[terminal.buffer.scrollBack]
+            .toString()
+            .trimRight(),
+        'line 1',
+      );
+    });
+
+    // Only text counts, as in the MonkeyMux model, which doesn't know where
+    // images were placed: an image alone on the bottom row pulls nothing.
+    test('growing ignores an image alone on the bottom row', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.resize(20, 10);
+      for (var i = 1; i <= 30; i++) {
+        terminal.write('line$i\r\n');
+      }
+      final pixel = base64.encode([0, 0, 0]);
+      terminal.write('\x1b[H\x1b[2J\x1b[10;1H'
+          '\x1b_Ga=T,f=24,s=1,v=1,i=9,c=2,r=1,C=1,q=2;$pixel\x1b\\'
+          '\x1b[Hprompt>');
+      expect(
+        terminal.graphics.physicalPlacementAnchorsInLine(
+          terminal.buffer.lines[terminal.buffer.height - 1],
+        ),
+        isNotEmpty,
+      );
+      final scrollBack = terminal.buffer.scrollBack;
+
+      terminal.resize(20, 13);
+
+      expect(terminal.buffer.scrollBack, scrollBack);
+      expect(terminal.buffer.cursorY, 0);
+    });
+
+    test('growing pulls rows back while the content reaches the bottom', () {
+      for (final (name, setup, cursorY) in [
+        ('cursor on the bottom row', 'prompt>', 9),
+        // An inline app's footer below its input line.
+        ('a footer on the bottom row', '\x1b[10;1H footer\x1b[8;1Hinput>', 7),
+      ]) {
+        final terminal = Terminal(maxLines: 200);
+        terminal.resize(20, 10);
+        for (var i = 1; i <= 30; i++) {
+          terminal.write('line$i\r\n');
+        }
+        terminal.write(setup);
+        final scrollBack = terminal.buffer.scrollBack;
+
+        terminal.resize(20, 13);
+
+        expect(terminal.buffer.scrollBack, scrollBack - 3, reason: name);
+        expect(terminal.buffer.cursorY, cursorY + 3, reason: name);
+      }
     });
 
     // The alternate screen has no scrollback, so the rows a shrink scrolls above

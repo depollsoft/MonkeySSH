@@ -14,7 +14,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
-import 'package:xterm/src/utils/unicode_v11.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../data/database/database.dart';
@@ -42,6 +41,8 @@ import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
+import 'kitty_clipboard_protocol.dart';
+import 'kitty_clipboard_service.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
@@ -72,19 +73,6 @@ typedef TerminalWindowMetrics = ({
   int rows,
   int pixelWidth,
   int pixelHeight,
-});
-
-/// Terminal mode state used to answer DECRQM mode-status queries.
-typedef TerminalControlModeState = ({
-  bool reportFocusMode,
-  bool bracketedPasteMode,
-  bool colorSchemeUpdatesMode,
-  bool isUsingAltBuffer,
-  bool mouseTrackingMode,
-  bool mouseDragTrackingMode,
-  bool mouseMoveTrackingMode,
-  bool sgrMouseReportMode,
-  bool synchronizedOutputMode,
 });
 
 /// Upper bound on withheld synchronized-output bytes. A program that opens a
@@ -343,7 +331,6 @@ buildTerminalWindowControlQueryResponses({
   required String input,
   required String pendingInput,
   required TerminalWindowMetrics? metrics,
-  TerminalControlModeState? modeState,
   TerminalThemeData? theme,
 }) {
   final combinedInput = pendingInput + input;
@@ -355,22 +342,6 @@ buildTerminalWindowControlQueryResponses({
     final response = _buildTerminalWindowQueryResponse(primaryParam, metrics);
     if (response != null) {
       responses.write(response);
-    }
-  }
-
-  for (final match in _terminalModeReportQueryPattern.allMatches(
-    combinedInput,
-  )) {
-    final params = match.group(1)?.split(';') ?? const <String>[];
-    for (final param in params) {
-      final mode = int.tryParse(param);
-      if (mode == null) {
-        continue;
-      }
-      final response = _buildTerminalModeReportResponse(mode, modeState);
-      if (response != null) {
-        responses.write(response);
-      }
     }
   }
 
@@ -483,27 +454,10 @@ const terminalWin32InputModeEscapeKeyEvents =
 String encodeTerminalInputForWin32InputMode(String data) =>
     data == '\x1b' ? terminalWin32InputModeEscapeKeyEvents : data;
 
-/// Normalizes terminal-generated output before it is sent to the remote shell.
+/// Adapts remote terminal output so xterm.dart renders it correctly, retaining
+/// split escape sequences until complete.
 ///
-/// xterm.dart currently emits cursor-position reports using its internal
-/// zero-based cursor coordinates. The terminal DSR wire protocol is one-based,
-/// and TUIs such as Codex can stall or mis-detect terminal state after receiving
-/// `CSI 0;0 R`.
-String normalizeTerminalOutputForRemoteShell(String data) =>
-    data.replaceAllMapped(_terminalCursorPositionReportPattern, (match) {
-      final row = int.parse(match.group(1)!);
-      final column = int.parse(match.group(2)!);
-      return '\x1b[${row + 1};${column + 1}R';
-    });
-
-/// Adapts remote terminal output so xterm.dart renders it correctly.
-///
-/// xterm.dart 4.0.0 tracks IRM (`CSI 4 h/l`) but does not shift existing cells
-/// when printable characters arrive while the mode is active. Injecting ICH
-/// before each printable cell preserves behavior from editors such as nano,
-/// while the decoder retains split escape sequences until complete.
-///
-/// xterm.dart also treats private `CSI > ... m` keyboard modifier controls as
+/// xterm.dart treats private `CSI > ... m` keyboard modifier controls as
 /// SGR attributes. Dropping those controls prevents TUIs such as OpenCode from
 /// accidentally enabling underline/bold while painting spaces.
 class TerminalXtermOutputDecoder {
@@ -511,7 +465,6 @@ class TerminalXtermOutputDecoder {
   _TerminalSequenceState? _state;
   bool _previousEscape = false;
   String _pendingSurrogate = '';
-  bool _insertMode = false;
 
   /// Number of code units retained until a sequence or surrogate completes.
   int get pendingCodeUnits => _sequence.length + _pendingSurrogate.length;
@@ -520,18 +473,17 @@ class TerminalXtermOutputDecoder {
   @visibleForTesting
   int materializedSequenceCodeUnits = 0;
 
-  /// Discards partial output and resets insert mode for a new shell.
+  /// Discards partial output for a new shell.
   void reset() {
     _sequence.clear();
     _state = null;
     _previousEscape = false;
     _pendingSurrogate = '';
-    _insertMode = false;
     materializedSequenceCodeUnits = 0;
   }
 
   /// Adapts the next chunk of remote output.
-  ({String output, bool insertMode}) add({required String input}) {
+  String add({required String input}) {
     final combinedInput = _pendingSurrogate.isEmpty
         ? input
         : _pendingSurrogate + input;
@@ -551,7 +503,6 @@ class TerminalXtermOutputDecoder {
         _sequence.clear();
         if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
           output.write(sequence);
-          _insertMode = _terminalInsertModeUpdate(sequence) ?? _insertMode;
         }
         continue;
       }
@@ -570,18 +521,20 @@ class TerminalXtermOutputDecoder {
       }
       final rune = _terminalRuneAt(combinedInput, cursor);
       final runeLength = _terminalRuneLength(rune);
-      if (_insertMode) {
-        for (var cell = 0; cell < unicodeV11.wcwidth(rune); cell++) {
-          output.write(_terminalInsertBlankCharacterSequence);
-        }
-      }
       output.write(combinedInput.substring(cursor, cursor + runeLength));
       cursor += runeLength;
     }
-    return (output: output.toString(), insertMode: _insertMode);
+    return output.toString();
   }
 
   void _scanSequenceCodeUnit(int codeUnit) {
+    // CAN and SUB cancel any sequence, as they do in the terminal's parser;
+    // holding on would keep the text after them back until a later BEL or ST.
+    if (codeUnit == _terminalCancelCodeUnit ||
+        codeUnit == _terminalSubstituteCodeUnit) {
+      _state = null;
+      return;
+    }
     switch (_state!) {
       case _TerminalSequenceState.escape:
         switch (codeUnit) {
@@ -617,15 +570,11 @@ class TerminalXtermOutputDecoder {
 enum _TerminalSequenceState { escape, csi, string, intermediate }
 
 final _terminalWindowQueryPattern = RegExp(r'\x1b\[([0-9;?]*)t');
-final _terminalModeReportQueryPattern = RegExp(r'\x1b\[\?([0-9;]+)\$p');
 final _terminalThemeModeQueryPattern = RegExp(r'\x1b\[\?996n');
 final _terminalControlQueryPrefixPattern = RegExp(r'^\x1b(?:$|\[[0-9;?\$]*)$');
 final _terminalPrivateModeSetResetPattern = RegExp(r'\x1b\[\?([0-9;]+)([hl])');
 final _terminalOscOrDcsSequencePattern = RegExp(
   r'\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)',
-);
-final _terminalCursorPositionReportPattern = RegExp(
-  r'\x1b\[([0-9]+);([0-9]+)R',
 );
 final _terminalCsiNumericParamsPattern = RegExp(r'^[0-9;]*$');
 
@@ -654,69 +603,11 @@ String? _buildTerminalWindowQueryResponse(
   }
 }
 
-String? _buildTerminalModeReportResponse(
-  int mode,
-  TerminalControlModeState? modeState,
-) {
-  if (modeState == null) {
-    return switch (mode) {
-      1016 ||
-      2026 ||
-      2027 ||
-      2031 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-      _ => null,
-    };
-  }
-
-  return switch (mode) {
-    1000 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1002 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseDragTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1003 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseMoveTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1004 => _formatTerminalModeReport(
-      mode,
-      modeState.reportFocusMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1006 => _formatTerminalModeReport(
-      mode,
-      modeState.sgrMouseReportMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1049 => _formatTerminalModeReport(
-      mode,
-      modeState.isUsingAltBuffer ? _terminalModeSet : _terminalModeReset,
-    ),
-    2004 => _formatTerminalModeReport(
-      mode,
-      modeState.bracketedPasteMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2031 => _formatTerminalModeReport(
-      mode,
-      modeState.colorSchemeUpdatesMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2026 => _formatTerminalModeReport(
-      mode,
-      modeState.synchronizedOutputMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1016 || 2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-    _ => null,
-  };
-}
-
-const _terminalModeNotRecognized = 0;
-const _terminalModeSet = 1;
-const _terminalModeReset = 2;
-
 const _terminalEscape = '\x1b';
 const _terminalEscapeCodeUnit = 0x1B;
 const _terminalBellCodeUnit = 0x07;
+const _terminalCancelCodeUnit = 0x18;
+const _terminalSubstituteCodeUnit = 0x1A;
 const _terminalCsiIntroducerCodeUnit = 0x5B;
 const _terminalDcsIntroducerCodeUnit = 0x50;
 const _terminalOscIntroducerCodeUnit = 0x5D;
@@ -724,57 +615,12 @@ const _terminalSosIntroducerCodeUnit = 0x58;
 const _terminalPmIntroducerCodeUnit = 0x5E;
 const _terminalApcIntroducerCodeUnit = 0x5F;
 const _terminalStringTerminatorCodeUnit = 0x5C;
-const _terminalInsertMode = 4;
-const _terminalSetModeFinalCodeUnit = 0x68;
-const _terminalResetModeFinalCodeUnit = 0x6C;
-const _terminalSoftResetFinalCodeUnit = 0x70;
-const _terminalFullResetFinalCodeUnit = 0x63;
 const _terminalPrivateMarkerCodeUnit = 0x3E;
 const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
-const _terminalInsertBlankCharacterSequence = '\x1b[@';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
-
-String _formatTerminalModeReport(int mode, int status) =>
-    '\x1b[?$mode;$status\$y';
 
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;
-
-bool? _terminalInsertModeUpdate(String sequence) {
-  if (sequence.length < 2 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit) {
-    return null;
-  }
-  if (sequence.length == 2 &&
-      sequence.codeUnitAt(1) == _terminalFullResetFinalCodeUnit) {
-    return false;
-  }
-  if (sequence.length < 4 ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-    return null;
-  }
-
-  final finalCodeUnit = sequence.codeUnitAt(sequence.length - 1);
-  final params = sequence.substring(2, sequence.length - 1);
-  if (finalCodeUnit == _terminalSoftResetFinalCodeUnit &&
-      (params == '!' || params.endsWith('"'))) {
-    return false;
-  }
-  if (finalCodeUnit != _terminalSetModeFinalCodeUnit &&
-      finalCodeUnit != _terminalResetModeFinalCodeUnit) {
-    return null;
-  }
-
-  if (params.startsWith('?')) {
-    return null;
-  }
-  for (final param in params.split(';')) {
-    if (int.tryParse(param) == _terminalInsertMode) {
-      return finalCodeUnit == _terminalSetModeFinalCodeUnit;
-    }
-  }
-  return null;
-}
 
 bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
   if (sequence.length < 4 ||
@@ -1007,7 +853,10 @@ applyTerminalShellIntegrationOsc(
         status: TerminalShellStatus.prompt,
         lastExitCode: previousExitCode,
       );
+    // `I` is input too: OSC 133's input to the end of the line, and the end
+    // of a right prompt in OSC 633. MonkeyMux replays end on it.
     case 'B':
+    case 'I':
       return (status: TerminalShellStatus.editingCommand, lastExitCode: null);
     case 'C':
       return (status: TerminalShellStatus.runningCommand, lastExitCode: null);
@@ -3840,6 +3689,10 @@ String _sshEndpointKey(SshConnectionConfig config) {
       : '${_sshEndpointKey(jumpHost)}->$endpoint';
 }
 
+/// The private OSC with which a MonkeyMux server tags each window replay with
+/// the window it paints (`remote/monkeymux` `monkeyMuxReplayWindowOSC`).
+const monkeyMuxReplayWindowOsc = '7502';
+
 /// An active SSH session.
 class SshSession {
   /// Creates a new [SshSession].
@@ -3962,10 +3815,18 @@ class SshSession {
     _plainProgramStatus = null;
     _muxProgramStatus = null;
     _muxProgramStatusReporter = false;
+    _runtime._syncKittyGraphicsAvailability();
     if (hadProgramStatus) _notifyMetadataChanged();
   }
 
   RemoteMuxBackend? _remoteMuxBackend;
+
+  /// Kitty graphics acknowledgements stay off behind a multiplexer, which
+  /// routes only the replies it expects; see
+  /// [Terminal.kittyGraphicsTransmissionReplies].
+  bool get _kittyGraphicsTransmissionReplies =>
+      remoteMuxBackend != RemoteMuxBackend.monkeyMux &&
+      remoteMuxBackend != RemoteMuxBackend.tmux;
 
   bool _canTerminalResizeFromHost() =>
       remoteMuxBackend == RemoteMuxBackend.monkeyMux;
@@ -4003,6 +3864,13 @@ class SshSession {
   /// Whether the attached MonkeyMux server publishes its shared PTY grid size.
   bool monkeyMuxViewportClippingEnabled = false;
 
+  /// Whether no app screen shows this session's terminal: the app is in the
+  /// background, or each screen that shows the session is covered or shows
+  /// something in the terminal's place. Kept with the session, so a
+  /// multiplexer it attaches to later, or over a new control connection,
+  /// learns it.
+  bool terminalViewHidden = false;
+
   /// Whether OSC 52 clipboard sharing is enabled for this session.
   bool clipboardSharingEnabled;
 
@@ -4014,6 +3882,19 @@ class SshSession {
 
   final ClipboardSharingService _clipboardSharingService =
       const ClipboardSharingService();
+
+  /// Answers the kitty clipboard protocol (OSC 5522) under the same settings
+  /// as OSC 52, and sends paste events to programs that set mode 5522.
+  late final KittyClipboardHandler kittyClipboard = KittyClipboardHandler(
+    canWrite: () => clipboardSharingEnabled,
+    canRead: () => clipboardSharingEnabled && localClipboardReadEnabled,
+    sendReply: (data) {
+      if (!_runtime.hasShell) return false;
+      _runtime.writeToShell(data);
+      return true;
+    },
+    connectionId: () => connectionId,
+  );
 
   late final _SshSessionRuntime _runtime = _SshSessionRuntime(this);
 
@@ -4654,7 +4535,42 @@ class SshSession {
     _notifyMetadataChanged();
   }
 
+  /// The MonkeyMux window whose replay each terminal last received
+  /// (`OSC 7502 ; window=<server instance>:<window id>`).
+  static final _monkeyMuxReplayWindows = Expando<String>();
+
+  /// Deletes the terminal's physical image placements when a MonkeyMux replay
+  /// paints another window than the one it shows, wherever the change was
+  /// started (this app, another client, a window that exited). The replay
+  /// keeps them otherwise, so a reopen of the same window keeps images whose
+  /// transmission is past the replayed history. The tag precedes the replay,
+  /// so the delete is ordered before the images it places.
+  void _handleMonkeyMuxReplayWindow(List<String> args) {
+    final terminal = this.terminal;
+    if (terminal == null) {
+      return;
+    }
+    String? window;
+    for (final arg in args) {
+      if (arg.startsWith('window=')) {
+        window = arg.substring('window='.length);
+      }
+    }
+    if (window == null || window.isEmpty) {
+      return;
+    }
+    final shown = _monkeyMuxReplayWindows[terminal];
+    if (shown != null && shown != window) {
+      terminal.deletePhysicalPlacements();
+    }
+    _monkeyMuxReplayWindows[terminal] = window;
+  }
+
   void _handlePrivateOsc(String code, List<String> args) {
+    if (code == monkeyMuxReplayWindowOsc) {
+      _handleMonkeyMuxReplayWindow(args);
+      return;
+    }
     final hasThemeQuery = args.any((arg) => arg.trim() == '?');
     if (hasThemeQuery && code == '4') {
       _lastTerminalPaletteQueryAt = DateTime.now();
@@ -4810,6 +4726,11 @@ class SshSession {
 
     if (code == ClipboardSharingService.oscCode) {
       _handleOsc52(args);
+      return;
+    }
+
+    if (code == kittyClipboardOscCode) {
+      kittyClipboard.handleOsc(args);
       return;
     }
 
@@ -6969,6 +6890,7 @@ while($true){
     }
     await stopAllForwards();
     await closeShell();
+    kittyClipboard.dispose();
     _sftpClientFuture = null;
     discardSftpClient(_sftpClient);
     await _portForwardChanges.close();

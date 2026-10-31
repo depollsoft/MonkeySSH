@@ -103,6 +103,7 @@ class TmuxWindow {
     this.terminalReportsMouseWheel,
     this.terminalMouseReportSgr,
     this.terminalBracketedPasteMode,
+    this.terminalKittyPasteEventsMode,
     this.terminalProgress,
     this.programStatus,
     this.programStatusReporter = false,
@@ -232,6 +233,11 @@ class TmuxWindow {
   /// Whether the foreground application requested bracketed paste mode.
   final bool? terminalBracketedPasteMode;
 
+  /// Whether the foreground application set kitty paste events (DEC private
+  /// mode 5522), so a paste is announced with its MIME types instead of
+  /// typed. Unset when the server does not report the mode.
+  final bool? terminalKittyPasteEventsMode;
+
   /// OSC 9;4 progress reported by this MonkeyMux window, when available.
   ///
   /// Plain tmux snapshots leave this unset.
@@ -347,6 +353,7 @@ class TmuxWindow {
     terminalReportsMouseWheel: terminalReportsMouseWheel,
     terminalMouseReportSgr: terminalMouseReportSgr,
     terminalBracketedPasteMode: terminalBracketedPasteMode,
+    terminalKittyPasteEventsMode: terminalKittyPasteEventsMode,
     terminalProgress: terminalProgress,
     programStatus: programStatus,
     programStatusReporter: programStatusReporter,
@@ -657,6 +664,7 @@ class TmuxWindow {
           terminalReportsMouseWheel == other.terminalReportsMouseWheel &&
           terminalMouseReportSgr == other.terminalMouseReportSgr &&
           terminalBracketedPasteMode == other.terminalBracketedPasteMode &&
+          terminalKittyPasteEventsMode == other.terminalKittyPasteEventsMode &&
           terminalProgress == other.terminalProgress &&
           programStatus == other.programStatus &&
           programStatusReporter == other.programStatusReporter &&
@@ -687,6 +695,7 @@ class TmuxWindow {
     terminalReportsMouseWheel,
     terminalMouseReportSgr,
     terminalBracketedPasteMode,
+    terminalKittyPasteEventsMode,
     terminalProgress,
     programStatus,
     programStatusReporter,

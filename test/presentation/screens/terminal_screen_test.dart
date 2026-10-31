@@ -6,7 +6,8 @@ import 'dart:ui';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -54,6 +55,8 @@ import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
@@ -390,6 +393,43 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
 }
 
 class _FakeSshSession extends Fake implements SshSession {}
+
+/// A clipboard whose program reads or paste snapshot wait until [release].
+class _BlockingKittyClipboardPlatform implements KittyClipboardPlatform {
+  Completer<void>? _readGate;
+  Completer<void>? _snapshotGate;
+
+  void blockRead() => _readGate = Completer<void>();
+
+  void blockSnapshot() => _snapshotGate = Completer<void>();
+
+  void release() {
+    _readGate?.complete();
+    _snapshotGate?.complete();
+  }
+
+  @override
+  Future<List<String>> availableTypes() async => const ['text/plain'];
+
+  @override
+  Future<Uint8List?> read(String mime) async {
+    await _readGate?.future;
+    return utf8.encode('clip');
+  }
+
+  @override
+  Future<List<String>?> write(List<KittyClipboardEntry> entries) async => [
+    for (final entry in entries) entry.mime,
+  ];
+
+  @override
+  Future<KittyClipboardPasteRead> readPasteSnapshot() async {
+    await _snapshotGate?.future;
+    return KittyClipboardPasteRead.snapshot(
+      KittyClipboardSnapshot({'text/plain': utf8.encode('caption')}),
+    );
+  }
+}
 
 class _MockTmuxService extends Mock implements TmuxService {
   String? detectedVersionValue;
@@ -2376,6 +2416,147 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets(
+      'pastes as a kitty paste event when the program set mode 5522',
+      (tester) async {
+        String b64(String value) => base64Encode(utf8.encode(value));
+        final png = Uint8List.fromList([
+          0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 7, //
+        ]);
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'caption'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        const pasteboard = MethodChannel('pasteboard');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          pasteboard,
+          (call) async => switch (call.method) {
+            'files' => <String>[],
+            'image' => png,
+            _ => null,
+          },
+        );
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger
+            ..setMockMethodCallHandler(SystemChannels.platform, null)
+            ..setMockMethodCallHandler(pasteboard, null);
+        });
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        session.terminal!.write('\x1b[?2004;5522h');
+        shellWrites.clear();
+
+        await tester.ensureVisible(find.byTooltip('Paste'));
+        await tester.tap(find.byTooltip('Paste'));
+        await tester.pumpAndSettle();
+
+        // The program gets the clipboard's types, not the text, and the image
+        // is not uploaded.
+        final event = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(),
+        );
+        expect(event, startsWith('\x1b]5522;type=read:status=OK:pw='));
+        expect(event, contains(b64('image/png text/plain\n')));
+        expect(event, isNot(contains('caption')));
+        expect(event, isNot(contains('\x1b[200~')));
+
+        // It then reads the image with the event's one-time password.
+        final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+            .firstMatch(event)!
+            .group(1)!;
+        shellWrites.clear();
+        session.debugHandlePrivateOsc('5522', [
+          'type=read:pw=$password:name=${b64('Paste event')}',
+          b64('image/png'),
+        ]);
+        await tester.pumpAndSettle();
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          contains(';${base64Encode(png)}\x1b\\'),
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    for (final whileQueued in [false, true]) {
+      testWidgets(
+        'pastes normally when the program turns paste events off first, '
+        'whileQueued=$whileQueued',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async => call.method == 'files' ? <String>[] : null,
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpScreen(
+            tester,
+            sharedClipboard: true,
+            sharedClipboardLocalRead: true,
+          );
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          if (whileQueued) {
+            // The paste event waits behind the program's own clipboard read.
+            platform.blockRead();
+            session.debugHandlePrivateOsc('5522', [
+              'type=read:id=r',
+              b64('text/plain'),
+            ]);
+          } else {
+            platform.blockSnapshot();
+          }
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(written, contains('\x1b[200~caption\x1b[201~'));
+          expect(
+            find.text('Paste canceled because terminal input changed.'),
+            findsNothing,
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
 
     Future<void> openTerminalOverflowMenu(WidgetTester tester) async {
       await tester.tap(find.byIcon(Icons.more_vert));
@@ -5320,7 +5501,13 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-    for (final interruption in ['none', 'typing', 'window', 'partial']) {
+    for (final interruption in [
+      'none',
+      'typing',
+      'window',
+      'windowBeforeConfirm',
+      'partial',
+    ]) {
       testWidgets('clipboard content URI upload handles $interruption', (
         tester,
       ) async {
@@ -5386,7 +5573,7 @@ void main() {
             null,
           );
         });
-        if (interruption == 'window') {
+        if (interruption.startsWith('window')) {
           await pumpTmuxScreen(
             tester,
             _MockTmuxService(),
@@ -5403,6 +5590,17 @@ void main() {
         await tester.tap(find.byTooltip('Paste'));
         await tester.pumpAndSettle();
         expect(find.text('Upload clipboard files?'), findsOneWidget);
+        if (interruption == 'windowBeforeConfirm') {
+          // The paste stays with the window it was asked for in, even when
+          // the upload is confirmed after the switch.
+          events.add(
+            const TmuxWindowListEvent([
+              TmuxWindow(index: 0, name: 'shell', isActive: false),
+              TmuxWindow(index: 1, name: 'agent', isActive: true),
+            ]),
+          );
+          await tester.pump();
+        }
         await tester.tap(find.text('Upload and paste'));
         await tester.pumpAndSettle();
         expect(uploaded, [
@@ -5440,7 +5638,7 @@ void main() {
         );
         expect(
           output,
-          interruption == 'typing' || interruption == 'window'
+          interruption == 'typing' || interruption.startsWith('window')
               ? isNot(contains('one.txt'))
               : contains('one.txt'),
         );
@@ -5452,6 +5650,85 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    for (final windowChange in ['none', 'away', 'awayAndBack']) {
+      testWidgets(
+        'a clipboard paste stops when the window changes while the clipboard '
+        'is read, windowChange=$windowChange',
+        (tester) async {
+          final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+          addTearDown(events.close);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpTmuxScreen(
+            tester,
+            _MockTmuxService(),
+            windowEvents: events.stream,
+          );
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          if (windowChange != 'none') {
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: false),
+                TmuxWindow(index: 1, name: 'agent', isActive: true),
+              ]),
+            );
+            await tester.pump();
+          }
+          if (windowChange == 'awayAndBack') {
+            // Coming back does not revive the paste: another window was
+            // shown in between.
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: true),
+                TmuxWindow(index: 1, name: 'agent', isActive: false),
+              ]),
+            );
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          expect(
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+            windowChange == 'none'
+                ? contains('caption')
+                : isNot(contains('caption')),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
     }
 
     testWidgets('shows the detected tmux version in terminal info', (
@@ -6024,6 +6301,200 @@ void main() {
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]11;')));
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]4;')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    for (final switchWindow in [false, true]) {
+      testWidgets(
+        'a kitty paste that falls back to a normal paste stays with its '
+        'MonkeyMux window, switchWindow=$switchWindow',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          final tmuxService = _MockTmuxService();
+          final monkeyMuxService = _MockMonkeyMuxService();
+          const sessionName = 'work';
+          TmuxWindow window(int index, {required bool active}) => TmuxWindow(
+            index: index,
+            id: '@$index',
+            name: index == 0 ? 'editor' : 'shell',
+            isActive: active,
+            terminalBracketedPasteMode: true,
+            terminalKittyPasteEventsMode: index == 0,
+          );
+          var windows = [window(0, active: true), window(1, active: false)];
+          host = _buildHost(
+            id: host.id,
+            tmuxSessionName: sessionName,
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          );
+          final muxFixture =
+              createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+                ..stubPrefetch()
+                ..stubForegroundClient()
+                ..stubWindows(() => windows)
+                ..stubWindowEvents()
+                ..stubPaneContext()
+                ..stubThemeRefresh();
+          when(
+            () => monkeyMuxService.refreshWindows(
+              session,
+              sessionName,
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async => windows);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+
+          await muxFixture.pump(tester);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..clipboardSharingEnabled = true
+            ..localClipboardReadEnabled = true
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          // The paste event waits behind the program's own clipboard read.
+          platform.blockRead();
+          session.debugHandlePrivateOsc('5522', [
+            'type=read:id=r',
+            b64('text/plain'),
+          ]);
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          // The program turns paste events off, so the paste falls back to
+          // text, and the user moves to the other window while the fallback
+          // reads the clipboard.
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pump();
+          await tester.pump();
+          if (switchWindow) {
+            windows = [window(0, active: false), window(1, active: true)];
+            muxFixture.windowEvents.add(TmuxWindowListEvent(windows));
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(
+            written,
+            switchWindow
+                ? isNot(contains('caption'))
+                : contains('\x1b[200~caption\x1b[201~'),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'a MonkeyMux shell prompt gets its click while stale mouse reports stay '
+      'suppressed',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        const sessionName = 'work';
+        const initialWindows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            id: '@0',
+            name: 'shell',
+            isActive: true,
+            currentCommand: 'zsh',
+            panePid: 100,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => initialWindows)
+              ..stubWindowEvents()
+              ..stubPaneContext()
+              ..stubThemeRefresh();
+
+        await muxFixture.pump(tester);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+
+        // fish asks for clicks with click_events=1; mouse tracking stays off.
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07> \x1b]133;B\x07ls -la',
+        );
+        await tester.pumpAndSettle();
+        String written() => shellWrites.map(String.fromCharCodes).join();
+
+        // A mouse report nothing asked for is still dropped.
+        shellWrites.clear();
+        session.terminal!.onOutput!('\x1b[<0;3;1M\x1b[<0;3;1m');
+        await tester.pump();
+        expect(written(), isNot(contains('\x1b[<')));
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        final row = session.terminal!.buffer.absoluteCursorY;
+        final target = render.localToGlobal(
+          render.getOffset(CellOffset(3, row)) +
+              render.cellSize.center(Offset.zero),
+        );
+        final isDesktop = defaultTargetPlatform == TargetPlatform.macOS;
+        await tester.tapAt(
+          target,
+          kind: isDesktop ? PointerDeviceKind.mouse : PointerDeviceKind.touch,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        final screenRow = row - session.terminal!.buffer.scrollBack + 1;
+        expect(written(), contains('\x1b[<0;4;${screenRow}M'));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+      }),
+    );
 
     testWidgets(
       'keeps IME text when a MonkeyMux command exits in the active window',
@@ -8908,6 +9379,210 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    // Ctrl+U used to leave the popup over the cleared prompt, and, when it
+    // came before the shell echoed the last key, the typed prefix behind in
+    // the optimistic snapshot, so every later request completed a line nobody
+    // typed ("git chls ~/b"), also when the next keys came before the shell
+    // redrew the cleared line. A popup opened again after being hidden also
+    // stayed empty until something else rebuilt the screen.
+    for (final (echoedFirst, typedBeforeRedraw) in [
+      (true, false),
+      (false, false),
+      (true, true),
+    ]) {
+      testWidgets('completes the new line after Ctrl+U clears the old one, '
+          'echoed first: $echoedFirst, '
+          'typed before the redraw: $typedBeforeRedraw', (tester) async {
+        final completionService = _TestShellCompletionService(
+          cachedSuggestions: const <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'checkout',
+              replacement: 'checkout',
+              replacementStart: 4,
+              replacementEnd: 6,
+              kind: ShellCompletionSuggestionKind.history,
+              commitSuffix: ' ',
+            ),
+          ],
+          completionSuggestions:
+              const <String, List<ShellCompletionSuggestion>>{
+                '~/b': <ShellCompletionSuggestion>[
+                  ShellCompletionSuggestion(
+                    label: '~/bin/',
+                    replacement: '~/bin/',
+                    replacementStart: 3,
+                    replacementEnd: 6,
+                    kind: ShellCompletionSuggestionKind.directory,
+                  ),
+                ],
+              },
+        );
+
+        session.terminal!.write('root@host ~ % git c');
+        await pumpScreen(tester, shellCompletionService: completionService);
+        session.terminal!.textInput('h');
+        await tester.pump();
+        await tester.pump();
+        if (echoedFirst) {
+          session.terminal!.write('h');
+          await tester.pump();
+        }
+        expect(find.text('checkout'), findsOneWidget);
+
+        // Ctrl+U, then the shell redraws the empty prompt, before or after
+        // the next keys arrive (and echoes those).
+        session.terminal!.textInput('\x15');
+        await tester.pump();
+        if (!typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[K');
+          await tester.pump();
+          expect(find.text('checkout'), findsNothing);
+        }
+
+        for (final character in 'ls ~/b'.split('')) {
+          session.terminal!.textInput(character);
+          await tester.pump();
+        }
+        if (typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[Kls ~/b');
+          await tester.pump();
+        }
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump();
+
+        expect(
+          completionService.completeInvocations.last.commandLine,
+          'ls ~/b',
+        );
+        expect(find.text('~/bin/'), findsOneWidget);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    // The keyboard can commit the end of a quickly typed or autocorrected word
+    // as a paste, which completion used to ignore.
+    testWidgets('completes after the keyboard commits text as a paste', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+        completionSuggestions: const <String, List<ShellCompletionSuggestion>>{
+          'sta': <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'status',
+              replacement: 'status',
+              replacementStart: 4,
+              replacementEnd: 7,
+              kind: ShellCompletionSuggestionKind.command,
+              commitSuffix: ' ',
+            ),
+          ],
+        },
+      );
+
+      session.terminal!.write('\x1b[?2004hroot@host ~ % git s');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.paste('ta');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        contains('git sta'),
+      );
+      expect(find.text('status'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // Input notifies listeners before the shell echoes it, so a Backspace
+    // followed by a key used to look like a line that stopped leading into
+    // the snapshot, which was dropped and seeded again from "cat ab".
+    testWidgets('completes edits typed before their echo', (tester) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % cat ab');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.textInput('c');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('cat abc')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'cat ac');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // An echo can show more than the snapshot while a Backspace for it is
+    // still pending ("git che" on the way to "git ch"), which is no reason to
+    // drop the snapshot and complete the echoed line.
+    testWidgets('keeps the snapshot through an echo a Backspace will undo', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % git c');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('h');
+      await tester.pump();
+      session.terminal!.write('h');
+      await tester.pump();
+      session.terminal!.textInput('e');
+      await tester.pump();
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.write('e');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+      session.terminal!.write('\b \b');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('git che')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'git ch');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // The shell can echo a paste in pieces; a piece is a line on the way,
+    // not a sign the snapshot went stale.
+    testWidgets('keeps the snapshot through a paste echoed in pieces', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % ');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('c');
+      await tester.pump();
+      session.terminal!.write('c');
+      await tester.pump();
+      session.terminal!.textInput('at abc');
+      await tester.pump();
+      session.terminal!.write('at a');
+      await tester.pump();
+      session.terminal!.textInput('d');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.last.commandLine,
+        'cat abcd',
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {
@@ -10621,6 +11296,134 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    testWidgets('a native agent conversation hides the terminal it replaces', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const bridgeId = '0123456789abcdef0123456789abcdef';
+      final key = fakeAcpKey(
+        hostId: host.id,
+        providerId: AcpBuiltinProviderIds.pi,
+        bridgeId: bridgeId,
+        acpSessionId: 'native-session',
+      );
+      final acpManager = FakeAcpSessionManager(
+        sessions: [fakeAcpSession(key: key, providerLabel: 'Pi')],
+      );
+      addTearDown(acpManager.dispose);
+      session.activeNativeAcpSessionKey = key;
+      addTearDown(() => session.activeNativeAcpSessionKey = null);
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: bridgeId,
+            nativeAcpProviderId: AcpBuiltinProviderIds.pi,
+          ),
+        ],
+      );
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        acpSessionManager: acpManager,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsOneWidget);
+      expect(session.terminal!.visible, isFalse);
+      // The chat replaced the terminal before the attach was detected, and
+      // MonkeyMux still learns it once it is.
+      expect(hiddenStates.last, isTrue);
+
+      tester
+          .widget<AgentChatScreen>(find.byType(AgentChatScreen))
+          .onExitEmbedded!();
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsNothing);
+      expect(session.terminal!.visible, isTrue);
+      expect(hiddenStates.last, isFalse);
+    });
+
+    testWidgets('MonkeyMux learns the app went away before the attach landed', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final windows = Completer<List<TmuxWindow>>();
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work'))
+          .thenAnswer((_) => windows.future);
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(session.remoteMuxBackend, isNot(RemoteMuxBackend.monkeyMux));
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      windows.complete(const [
+        TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(session.remoteMuxBackend, RemoteMuxBackend.monkeyMux);
+      expect(hiddenStates, [true]);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(hiddenStates.last, isFalse);
+    });
 
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
@@ -17732,6 +18535,188 @@ void main() {
         );
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'a tap on a shell prompt input moves its cursor and shows the keyboard',
+      (tester) async {
+        await pumpScreen(tester);
+        // The shell asked for clicks to move its cursor with arrow keys.
+        session.terminal!.write(
+          'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+        );
+        await tester.pumpAndSettle();
+        expect(tester.testTextInput.isVisible, isFalse);
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x, int y) => render.localToGlobal(
+          render.getOffset(CellOffset(x, y)) +
+              render.cellSize.center(Offset.zero),
+        );
+        String written() => shellWrites.map(String.fromCharCodes).join();
+        // Test taps carry no timestamps, so later ones are spaced out to stay
+        // single taps.
+        Future<void> tapAt(Offset position, Duration at) async {
+          final gesture = await tester.createGesture();
+          await gesture.down(position, timeStamp: at);
+          await gesture.up(timeStamp: at);
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+
+        shellWrites.clear();
+        await tapAt(cell(2, 1), Duration.zero);
+        expect(written(), '\x1b[D' * 7);
+        expect(tester.testTextInput.isVisible, isTrue);
+
+        // Output above the prompt is not its input.
+        shellWrites.clear();
+        await tapAt(cell(1, 0), const Duration(seconds: 1));
+        expect(written(), isEmpty);
+
+        tester.testTextInput.updateEditingValue(
+          _editingValue('hello', selectionOffset: 5),
+        );
+        await tester.pump();
+        shellWrites.clear();
+        await tapAt(cell(4, 1), const Duration(seconds: 2));
+        expect(written(), '\x1b[D' * 5);
+        // The shell moves its cursor, so the IME's text before it is stale.
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
+        expect(
+          client.currentTextEditingValue,
+          const TextEditingValue(
+            text: _deleteDetectionMarker,
+            selection: TextSelection.collapsed(offset: 2),
+          ),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a touch tap on a desktop terminal reaches the program once', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write(
+        'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+      );
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      Offset cell(int x, int y) => render.localToGlobal(
+        render.getOffset(CellOffset(x, y)) +
+            render.cellSize.center(Offset.zero),
+      );
+      String written() => shellWrites.map(String.fromCharCodes).join();
+
+      shellWrites.clear();
+      await tester.tapAt(cell(2, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[D' * 7);
+
+      // With mouse tracking on, the tap is one click.
+      session.terminal!.write('\x1b[?1000h\x1b[?1006h');
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      await tester.tapAt(cell(4, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[<0;5;2M\x1b[<0;5;2m');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a mouse click on a shell prompt input keeps the IME in step', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write('\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi');
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      final target = render.localToGlobal(
+        render.getOffset(const CellOffset(4, 0)) +
+            render.cellSize.center(Offset.zero),
+      );
+      await tester.tapAt(target);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.testTextInput.updateEditingValue(
+        _editingValue('hello', selectionOffset: 5),
+      );
+      await tester.pump();
+
+      // A trackpad or mouse on a tablet with the soft keyboard up.
+      shellWrites.clear();
+      await tester.tapAt(target, kind: PointerDeviceKind.mouse);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[D' * 5);
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
+      expect(
+        client.currentTextEditingValue,
+        const TextEditingValue(
+          text: _deleteDetectionMarker,
+          selection: TextSelection.collapsed(offset: 2),
+        ),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets(
+      'a tap that dismisses a selection leaves the prompt cursor alone',
+      (tester) async {
+        await pumpScreen(tester);
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07\$ \x1b]133;B\x07alpha beta',
+        );
+        await tester.pumpAndSettle();
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x) => render.localToGlobal(
+          render.getOffset(CellOffset(x, 0)) +
+              render.cellSize.center(Offset.zero),
+        );
+        await tester.longPressAt(cell(3));
+        await tester.pumpAndSettle();
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+
+        shellWrites.clear();
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        // The next tap reports the click, as fish asks with click_events=1.
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;9;1M');
+
+        // So does a mouse click, unless it dismisses a selection made with
+        // the mouse.
+        final drag = await tester.startGesture(
+          cell(0),
+          kind: PointerDeviceKind.mouse,
+        );
+        await drag.moveTo(cell(6));
+        await drag.up();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+        shellWrites.clear();
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;4;1M');
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
     testWidgets('toolbar Ctrl state flows into the screen IME handler', (

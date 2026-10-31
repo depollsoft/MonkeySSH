@@ -20,18 +20,26 @@ import (
 // A line that soft-wraps from the one above is reached by wrapping onto it
 // instead (appendVTSoftWrap), so the client marks it as a continuation just as
 // the model does and reflows it the same way on the next width change.
+//
+// The direct Kitty placements on the screen are placed again on their cells
+// once the rows are painted, before the cursor is restored (see
+// vtscreen_kitty_placements.go).
 func (s *terminalScreen) RenderFrame() []byte {
+	return s.RenderFrameReplacing(nil)
+}
+
+// RenderFrameReplacing is RenderFrame placing again only the direct
+// placements of the images replace accepts, those the replay carries, or
+// every one for nil. A replay that places a main-screen image again first
+// deletes the client's copies of it (KittyMainPlacementDeletes).
+func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil
 	}
 	g := s.grid()
-	out := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
-	if sco := s.scoCursor; sco.valid {
-		// SCOSC state for a later CSI u.
-		out = appendVTCursor(out, g.rows[sco.row], sco.row, sco.col, sco.pendingWrap)
-		out = append(out, "\x1b[s"...)
-	}
-	out = s.appendSavedCursor(out, g, *s.saved())
+	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
+	out = s.appendKittyPlacements(out, s.altActive, replace)
+	out = s.appendSavedCursor(out, g, *s.saved(), marks)
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
 	}
@@ -48,7 +56,10 @@ func (s *terminalScreen) RenderFrame() []byte {
 			row = 0
 		}
 	}
-	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap)
+	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks)
+	// Last, since restoring a deferred wrap prints a glyph again under the
+	// content it was written as.
+	out = marks.finish(out)
 	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
 	out = appendVTSGR(out, s.attrs)
 	return out
@@ -60,28 +71,45 @@ func (s *terminalScreen) RenderFrame() []byte {
 // alternate screen, so the application's exit finds the main screen the model
 // kept rather than a cleared one. The cursor is left where that exit puts it:
 // on the cursor mode 1049 saved on entry (home with the default rendition
-// once a DECSTR reset it), which the replayed 1049 entry saves again, or on
-// the main cursor for 47 and 1047. It is nil while the main screen shows;
-// RenderFrame paints it then.
+// once a DECSTR reset it), with the origin mode, rendition and charsets it
+// saved, all of which the replayed 1049 entry saves again, or on the main
+// cursor for 47 and 1047. It is nil while the main screen shows; RenderFrame
+// paints it then. Its direct Kitty placements are placed again as RenderFrame
+// places them.
 func (s *terminalScreen) RenderMainScreen() []byte {
+	return s.RenderMainScreenReplacing(nil)
+}
+
+// RenderMainScreenReplacing is RenderMainScreen placing again only the direct
+// placements of the images replace accepts, as RenderFrameReplacing does.
+func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) bool) []byte {
 	if s == nil || !s.altActive {
 		return nil
 	}
 	g := &s.main
-	out := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	// The alternate screen shows, so the frame carries no prompt marks.
+	out, _ := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	out = s.appendKittyPlacements(out, false, replace)
 	if saved := s.savedMain; s.altSavedCursor {
-		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap)
+		// DECSET 6 homes the cursor, so it goes first. The frame left the
+		// scroll region full, where an origin-relative row is the row.
+		if saved.originMode {
+			out = append(out, "\x1b[?6h"...)
+		}
+		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, nil)
 		out = appendVTSGR(out, saved.attrs)
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	}
-	out = s.appendSavedCursor(out, g, s.savedMain)
-	return appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap)
+	out = s.appendSavedCursor(out, g, s.savedMain, nil)
+	return appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, nil)
 }
 
 // appendGridFrame paints g onto a reset client, after the main screen's
 // retained scrollback when withScrollback is set, and leaves the rendition
-// reset. Scroll region, origin mode and insert mode are left off.
-func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback bool) []byte {
+// reset. Scroll region, origin mode and insert mode are left off. It returns
+// the marks of the prompt it painted, whose finish the caller appends once
+// it has restored the cursor.
+func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback bool) ([]byte, *vtSemanticFrame) {
 	// Insert mode stays off until RenderFrame restores it; painting under it
 	// would shift cells instead of replacing them, such as the glyphs a soft
 	// wrap prints and the row then paints over.
@@ -89,6 +117,8 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	out = s.appendTabStops(out)
 	withScrollback = withScrollback && s.scrollback.len() > 0
 	softWraps := s.renderedSoftWraps(g, withScrollback)
+	marks := s.semanticFrame(g)
+	out = marks.begin(out)
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}
@@ -117,17 +147,30 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			out = append(out, line.text...)
+			var inPrompt bool
+			out, inPrompt = marks.beginHistoryLine(out, i, line.prompt, i > 0 && line.wrapped)
+			if inPrompt {
+				// A line of the current prompt is painted from its cells, so
+				// its marks and cell contents travel with it.
+				cells = line.decode(&decoder, s.width)
+				out = renderVTCellsMarked(out, cells, marks)
+			} else {
+				out = append(out, line.text...)
+			}
 			prev = cells
 		}
 		if g.wrapped[0] {
 			if prev == nil {
 				prev = decoder.decode(s.scrollback.at(history-1).text, s.width)
 			}
+			// The wrap reprints the last glyph, which keeps the content the
+			// line ended with, so the prompt's marks end after it.
 			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
 			// Erased for the same reason; the row is painted below.
 			out = appendVTCSICount(out, s.width, 'X')
+			out = marks.endHistory(out)
 		} else {
+			out = marks.endHistory(out)
 			out = append(out, "\x1b[0m\r\n"...)
 		}
 		for i := 1; i < s.height; i++ {
@@ -135,13 +178,15 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		}
 	}
 	for r, row := range g.rows {
-		if r > 0 && g.wrapped[r] {
+		softWrap := r > 0 && g.wrapped[r]
+		if softWrap {
 			out = appendVTSoftWrap(out, g.rows[r-1], row, true)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
+		out = marks.beginRow(out, r, softWrap)
 		before := len(out)
-		out = renderVTCells(out, row)
+		out = renderVTCellsMarked(out, row, marks)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
 		if len(out) != before || full {
 			out = append(out, "\x1b[0m"...)
@@ -158,14 +203,15 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7l"...)
 	}
-	return append(out, "\x1b[0m"...)
+	return append(out, "\x1b[0m"...), marks
 }
 
 // appendSavedCursor reproduces the DECSC state saved on g's screen, which
 // live output may DECRC into after the frame. DECSC captures position,
 // deferred wrap, rendition, origin mode and charsets, so all of them are
-// staged, saved, and the staging undone.
-func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedCursor) []byte {
+// staged, saved, and the staging undone. marks are those of the prompt the
+// frame painted, if any.
+func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedCursor, marks *vtSemanticFrame) []byte {
 	if !saved.valid {
 		return out
 	}
@@ -177,7 +223,7 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 		out = append(out, "\x1b[?6h"...)
 		row -= s.top
 	}
-	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap)
+	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks)
 	out = appendVTSGR(out, saved.attrs)
 	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
@@ -187,10 +233,11 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 // appendVTCursor moves the client cursor to row, col of a row holding cells.
 // A deferred wrap cannot be addressed directly, so the glyph in the last
 // column is printed again and the client defers the wrap exactly as the
-// model. A last column with nothing in it, which a tab with no stop left
-// reaches, is reached by that tab again rather than by printing a space into
-// it. The rendition is left at the reprinted glyph's.
-func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool) []byte {
+// model, under the semantic content it was written as when marks are those
+// of a painted prompt. A last column with nothing in it, which a tab with no
+// stop left reaches, is reached by that tab again rather than by printing a
+// space into it. The rendition is left at the reprinted glyph's.
+func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame) []byte {
 	if !pendingWrap || len(cells) == 0 {
 		return appendVTCursorPosition(out, row, col)
 	}
@@ -203,6 +250,7 @@ func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool) 
 		last--
 	}
 	out = appendVTCursorPosition(out, row, last)
+	out = marks.glyph(out, cells[last].sem)
 	return renderVTGlyphs(out, cells[last:])
 }
 
@@ -345,6 +393,12 @@ func appendVTCharsets(out []byte, g0Graphics, g1Graphics, shiftOut bool) []byte 
 // alike, so a repainted or restored row has to keep it. Never-written default
 // cells at the end of the row are left out.
 func renderVTCells(out []byte, row []vtCell) []byte {
+	return renderVTCellsMarked(out, row, nil)
+}
+
+// renderVTCellsMarked is renderVTCells with the semantic prompt marks of the
+// prompt being painted, if any, put before the written cells they change.
+func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byte {
 	end := len(row)
 	for end > 0 && row[end-1].isDefaultUnwritten() {
 		end--
@@ -375,6 +429,7 @@ func renderVTCells(out []byte, row []vtCell) []byte {
 			i = run
 			continue
 		}
+		out = marks.cell(out, cell.sem)
 		if cell.attrs != current {
 			out = appendVTSGR(out, cell.attrs)
 			current = cell.attrs

@@ -215,7 +215,10 @@ if(!$__flResolved){$__flResolved='cmd'}
       ..onIconChange = _session._handleIconNameChange
       ..onFullReset = _session._handleTerminalFullReset
       ..canResizeFromHost = _session._canTerminalResizeFromHost
-      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty;
+      ..externalDecModeState = _externalDecModeState
+      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty
+      ..kittyGraphicsTransmissionReplies =
+          _session._kittyGraphicsTransmissionReplies;
     _session.terminalHyperlinkTracker.attach(_terminal!);
     _session.terminalCommandMarkTracker.attach(_terminal!);
     _terminal!.onPrivateOSC = _session._handlePrivateOsc;
@@ -831,7 +834,7 @@ if(!$__flResolved){$__flResolved='cmd'}
 
     final previousRuntimeHandler = _runtimeTerminalOutputHandler;
     void handleTerminalOutput(String data) {
-      writeToShell(normalizeTerminalOutputForRemoteShell(data));
+      writeToShell(data);
     }
 
     _runtimeTerminalOutputHandler = handleTerminalOutput;
@@ -943,7 +946,10 @@ if(!$__flResolved){$__flResolved='cmd'}
     if (terminal == null) {
       return;
     }
-    terminal.kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty;
+    terminal
+      ..kittyGraphicsEnabled = !_session.remoteIsWindows || !_shellHasPty
+      ..kittyGraphicsTransmissionReplies =
+          _session._kittyGraphicsTransmissionReplies;
   }
 
   void _finishShellTransition(SSHSession shell) {
@@ -972,6 +978,9 @@ if(!$__flResolved){$__flResolved='cmd'}
   void _resetShellChannelState() {
     _clearPendingShellOutput();
     _session._resetShellRuntimeMetadata();
+    // Replies the closed channel's program still waits for must not reach
+    // whatever shell comes next.
+    _session.kittyClipboard.abandonChannel();
     _terminalWindowQueryPendingInput = '';
     _terminalTmuxPassthroughDecoder.reset();
     _terminalControlModeUpdatePendingInput = '';
@@ -1503,9 +1512,12 @@ if(!$__flResolved){$__flResolved='cmd'}
     return true;
   }
 
-  /// DECRQM (`CSI ? Ps $ p`). A query is answered from the terminal state at
-  /// its own position in the stream, so a slice is applied in pieces around
-  /// each one: `2026h`, query, `2026l` in one chunk reports the mode as set.
+  /// DECRQM (`CSI ? Ps $ p`). The terminal answers a query as it parses it,
+  /// and asks [_externalDecModeState] for the modes this runtime tracks by
+  /// scanning each piece before the terminal parses it. A slice is applied in
+  /// pieces around each query so those are current at the query's own
+  /// position too: `2031h`, query, `2031l` in one chunk reports the mode as
+  /// set.
   static final _terminalModeReportQuery = RegExp(r'\x1b\[\?\d+\$p');
 
   void _applyTerminalParseSlice(Terminal terminal, String slice) {
@@ -1530,8 +1542,8 @@ if(!$__flResolved){$__flResolved='cmd'}
     // mode change (for example ConPTY's win32-input-mode request) is answered
     // under the new mode.
     _trackTerminalControlModeUpdates(slice);
-    if (terminalOutput.output.isNotEmpty) {
-      terminal.writeSilently(terminalOutput.output);
+    if (terminalOutput.isNotEmpty) {
+      terminal.writeSilently(terminalOutput);
     }
     _respondToTerminalWindowControlQueries(slice, terminal);
   }
@@ -1611,6 +1623,9 @@ if(!$__flResolved){$__flResolved='cmd'}
     _discardSynchronizedOutputHold();
     _lastTerminalParseNotifyAtMs = null;
     _terminalOutputDecoder.reset();
+    // Insert mode belongs to the program on the old channel; the next one
+    // starts in replace mode.
+    _terminal?.setInsertMode(false);
   }
 
   /// Drains any queued terminal parse backlog immediately, ignoring the frame
@@ -1681,7 +1696,6 @@ if(!$__flResolved){$__flResolved='cmd'}
       input: data,
       pendingInput: _terminalWindowQueryPendingInput,
       metrics: _terminalWindowMetrics,
-      modeState: _terminalModeState(terminal),
       theme: _session.terminalTheme,
     );
     _terminalWindowQueryPendingInput = result.pendingInput;
@@ -1694,17 +1708,14 @@ if(!$__flResolved){$__flResolved='cmd'}
     _shell?.write(utf8.encode(response));
   }
 
-  TerminalControlModeState _terminalModeState(Terminal terminal) => (
-    reportFocusMode: terminal.reportFocusMode,
-    bracketedPasteMode: terminal.bracketedPasteMode,
-    colorSchemeUpdatesMode: _terminalColorSchemeUpdatesMode,
-    isUsingAltBuffer: terminal.isUsingAltBuffer,
-    mouseTrackingMode: terminal.mouseMode == MouseMode.upDownScroll,
-    mouseDragTrackingMode: terminal.mouseMode == MouseMode.upDownScrollDrag,
-    mouseMoveTrackingMode: terminal.mouseMode == MouseMode.upDownScrollMove,
-    sgrMouseReportMode: terminal.mouseReportMode == MouseReportMode.sgr,
-    synchronizedOutputMode: terminal.synchronizedOutputMode,
-  );
+  /// DECRQM states of the DEC private modes this runtime tracks outside the
+  /// terminal: colour-scheme updates (2031) and ConPTY's win32-input-mode
+  /// (9001).
+  int? _externalDecModeState(int mode) => switch (mode) {
+    2031 => ModeReportState.of(_terminalColorSchemeUpdatesMode),
+    9001 => ModeReportState.of(_terminalWin32InputMode),
+    _ => null,
+  };
 
   void _scheduleTerminalPreviewRefresh() {
     if (_previewRefreshTimer?.isActive ?? false) {

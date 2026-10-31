@@ -1005,6 +1005,23 @@ void registerTerminalScreenLayoutTests() {
         );
       }
 
+      test('reads a bracketed paste of plain text as typed input', () {
+        expect(
+          unwrapBracketedPasteCompletionInput('\x1B[200~ta\x1B[201~'),
+          'ta',
+        );
+        expect(unwrapBracketedPasteCompletionInput('ta'), isNull);
+        expect(
+          unwrapBracketedPasteCompletionInput('\x1B[200~\x1B[201~'),
+          isNull,
+        );
+        expect(
+          unwrapBracketedPasteCompletionInput('\x1B[200~a\nb\x1B[201~'),
+          isNull,
+        );
+        expect(unwrapBracketedPasteCompletionInput('\x1B[200~ta'), isNull);
+      });
+
       test('applies printable completion input before remote echo arrives', () {
         final snapshot = applyShellCompletionOutputToSnapshot(
           snapshot: (text: 'depoll@host % git ', cursorOffset: 18),

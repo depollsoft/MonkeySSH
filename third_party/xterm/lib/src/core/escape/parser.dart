@@ -131,6 +131,8 @@ class EscapeParser {
     'H'.charCode: _escHandleTabSet,
     'M'.charCode: _escHandleReverseIndex,
     'P'.charCode: _escHandleDCS, // DCS - XTGETTCAP (others skipped to ST)
+    'X'.charCode: _skipPrivacyString, // SOS - ignored
+    '^'.charCode: _skipPrivacyString, // PM - ignored
     'c'.charCode: _escHandleFullReset, // RIS - Reset to Initial State
     // '#'.charCode: _unsupportedHandler,
     '('.charCode: _escHandleDesignateCharset0, //  SCS - G0
@@ -434,7 +436,10 @@ class EscapeParser {
     'q'.codeUnitAt(0): _csiHandleRequestTerminalVersion,
     'p'.codeUnitAt(0): _csiHandleRequestMode,
     'r'.codeUnitAt(0): _csiHandleSetMargins,
+    's'.codeUnitAt(0): _csiHandleSaveCursor,
+    'u'.codeUnitAt(0): _csiHandleRestoreCursor,
     't'.codeUnitAt(0): _csiWindowManipulation,
+    'y'.codeUnitAt(0): _csiHandleChecksum,
     'A'.codeUnitAt(0): _csiHandleCursorUp,
     'B'.codeUnitAt(0): _csiHandleCursorDown,
     'C'.codeUnitAt(0): _csiHandleCursorForward,
@@ -466,6 +471,25 @@ class EscapeParser {
   //     handler.cursorHorizontal(_csi.params[0]);
   //   }
   // }
+
+  /// `ESC [ s` Save Cursor (SCOSC). Without left and right margins xterm
+  /// runs DECSC here, so SCOSC and DECSC share one saved cursor.
+  void _csiHandleSaveCursor() {
+    if (_csi.prefix != null || _csi.intermediate != null) {
+      return handler.unknownCSI(_csi.finalByte);
+    }
+    handler.saveCursor();
+  }
+
+  /// `ESC [ u` Restore Cursor (SCORC), which runs DECRC as in xterm. The Kitty
+  /// keyboard requests that share the final byte carry a prefix and are
+  /// handled before this.
+  void _csiHandleRestoreCursor() {
+    if (_csi.prefix != null || _csi.intermediate != null) {
+      return handler.unknownCSI(_csi.finalByte);
+    }
+    handler.restoreCursor();
+  }
 
   /// `ESC [ Ps b` Repeat Previous Character (REP)
   ///
@@ -509,17 +533,15 @@ class EscapeParser {
     }
   }
 
-  /// `ESC [ ! p` Soft Terminal Reset (DECSTR) and `ESC [ Ps $ p` Request ANSI
-  /// Mode (DECRQM), which share the `p` final byte and are told apart by their
+  /// `ESC [ ! p` Soft Terminal Reset (DECSTR) and `ESC [ Ps $ p` Request Mode
+  /// (DECRQM), which share the `p` final byte and are told apart by their
   /// intermediate byte.
   ///
-  /// Only the ANSI-mode form (no prefix) is answered here. The DEC-private form
-  /// (`CSI ? Ps $ p`) is answered by the MonkeySSH app layer, which scans shell
-  /// output and has the extra state it needs (notably DEC mode 2031 colour
-  /// scheme updates); answering it here as well would send the program two
-  /// replies. The `$` intermediate distinguishes DECRQM from the other `p`
-  /// finals (`CSI ! p` DECSTR, `CSI Ps " p` DECSCL, `CSI > Ps p` XTSMPOINTER),
-  /// which fall through to [EscapeHandler.unknownCSI].
+  /// Both DECRQM forms are answered: the ANSI form (no prefix) and the DEC
+  /// private form (`CSI ? Ps $ p`). The `$` intermediate distinguishes DECRQM
+  /// from the other `p` finals (`CSI ! p` DECSTR, `CSI Ps " p` DECSCL,
+  /// `CSI > Ps p` XTSMPOINTER), which fall through to
+  /// [EscapeHandler.unknownCSI].
   ///
   /// https://vt100.net/docs/vt510-rm/DECRQM.html
   void _csiHandleRequestMode() {
@@ -539,12 +561,12 @@ class EscapeParser {
       return;
     }
 
+    final mode = _csi.params.isEmpty ? 0 : _csi.params[0];
     if (_csi.prefix == null) {
-      final mode = _csi.params.isEmpty ? 0 : _csi.params[0];
       handler.sendModeReport(mode);
-    } else if (_csi.prefix != Ascii.questionMark) {
-      // `?` (DEC private) is consumed without a reply so the app layer can
-      // answer it; any other prefix is an unrecognized `$ p` sequence.
+    } else if (_csi.prefix == Ascii.questionMark) {
+      handler.sendDecModeReport(mode);
+    } else {
       handler.unknownCSI(_csi.finalByte);
     }
   }
@@ -912,11 +934,23 @@ class EscapeParser {
     }
   }
 
-  /// `ESC [ Ps n` Device Status Report [Dispatch] (DSR)
+  /// `ESC [ Ps n` Device Status Report [Dispatch] (DSR), plus the DEC forms
+  /// `ESC [ ? 6 n` (DECXCPR) and `ESC [ ? 998 n` (visibility query).
   ///
   /// https://terminalguide.namepad.de/seq/csi_sn/
   void _csiHandleDeviceStatusReport() {
     if (_csi.params.isEmpty) return;
+
+    if (_csi.prefix == Ascii.questionMark) {
+      switch (_csi.params[0]) {
+        case 6:
+          return handler.sendExtendedCursorPosition();
+        case 998:
+          return handler.sendVisibilityReport();
+      }
+      return;
+    }
+    if (_csi.prefix != null) return;
 
     switch (_csi.params[0]) {
       case 5:
@@ -995,6 +1029,28 @@ class EscapeParser {
       default:
         return;
     }
+  }
+
+  /// `CSI Pi ; Pg ; Pt ; Pl ; Pb ; Pr * y` Request Checksum of Rectangular
+  /// Area (DECRQCRA) and `CSI Ps # y` Select Checksum Extension (XTCHECKSUM).
+  /// Like Ghostty, a request with too many parameters is ignored.
+  ///
+  /// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+  void _csiHandleChecksum() {
+    if (_csi.prefix == null) {
+      final params = _csi.params;
+      if (_csi.intermediate == '*'.charCode) {
+        if (params.length <= 6) handler.sendRectangularAreaChecksum(params);
+        return;
+      }
+      if (_csi.intermediate == '#'.charCode) {
+        if (params.length <= 1) {
+          handler.setChecksumExtension(params.isEmpty ? 0 : params[0]);
+        }
+        return;
+      }
+    }
+    handler.unknownCSI(_csi.finalByte);
   }
 
   /// `ESC [ Ps A` Cursor Up (CUU)
@@ -1250,6 +1306,8 @@ class EscapeParser {
         }
         return;
       case 1048:
+        // Also reported as a mode, so DECRQM can answer for it.
+        handler.setUnknownDecMode(mode, enabled);
         if (enabled) {
           return handler.saveCursor();
         } else {
@@ -1326,6 +1384,12 @@ class EscapeParser {
       }
 
       final char = _queue.consume();
+
+      // CAN and SUB cancel the string; like xterm, a cancelled OSC runs
+      // nothing.
+      if (char == Ascii.CAN || char == Ascii.SUB) {
+        return _SeqParse.aborted;
+      }
 
       // OSC terminates with BEL
       if (char == Ascii.BEL) {
@@ -1471,6 +1535,7 @@ class EscapeParser {
       if (_queue.isEmpty) return _ApcParse.incomplete;
       final char = _queue.consume();
 
+      if (_cancelsGraphicsCommand(char)) return _ApcParse.aborted;
       if (char == Ascii.semicolon) {
         flush();
         return _ApcParse.payloadFollows;
@@ -1530,6 +1595,7 @@ class EscapeParser {
         return terminator;
       }
       if (char == Ascii.BEL) break;
+      if (_cancelsGraphicsCommand(char)) return _SeqParse.aborted;
 
       final value = char >= 0 && char < 128 ? _base64DecodeTable[char] : -1;
       if (value < 0) continue; // whitespace, padding or non-base64 byte
@@ -1545,20 +1611,32 @@ class EscapeParser {
     return _SeqParse.complete;
   }
 
-  /// Skips an unrecognized string sequence up to ST. Returns false when the
-  /// terminator has not arrived yet.
-  bool _skipToStringTerminator() {
+  /// Whether [char] cuts a Kitty graphics APC short. CAN and SUB cancel it and
+  /// a C1 control aborts it; either way ECMA-48 has the string discarded, and
+  /// xterm and Ghostty run nothing for it.
+  static bool _cancelsGraphicsCommand(int char) =>
+      char == Ascii.CAN || char == Ascii.SUB || (char >= 0x80 && char <= 0x9f);
+
+  /// Skips an unrecognized string sequence up to ST, or to a CAN or SUB that
+  /// cancels it. Returns false when the terminator has not arrived yet.
+  bool _skipToStringTerminator({bool bellTerminates = true}) {
     while (true) {
       if (_queue.isEmpty) return false;
       final char = _queue.consume();
+      if (char == Ascii.CAN || char == Ascii.SUB) return true;
       if (char == Ascii.ESC) {
         final terminator = _consumeStringTerminator();
         // Aborted counts as handled: the rolled-back ESC starts a new sequence.
         return terminator != _SeqParse.incomplete;
       }
-      if (char == Ascii.BEL) return true;
+      if (char == Ascii.BEL && bellTerminates) return true;
     }
   }
+
+  /// Skips an SOS or PM string. BEL doesn't end these in xterm, which keeps
+  /// it for OSC, so the payload stays hidden up to ST as in the MonkeyMux
+  /// screen model.
+  bool _skipPrivacyString() => _skipToStringTerminator(bellTerminates: false);
 }
 
 /// Maps an ASCII byte to its 6-bit base64 value, or -1 when the byte is not a
@@ -1583,9 +1661,10 @@ enum _ApcParse { incomplete, payloadFollows, terminated, aborted }
 /// Outcome of parsing a sequence whose end is only known once its terminator
 /// arrives.
 ///
-/// [aborted] means an ESC appeared where the terminator was expected. ECMA-48
-/// treats that ESC as the start of a new sequence, so the consumer rolls it
-/// back and discards whatever it had gathered.
+/// [aborted] means an ESC appeared where the terminator was expected, or a CAN
+/// or SUB cancelled the sequence. ECMA-48 treats that ESC as the start of a new
+/// sequence, so the consumer rolls it back; either way it discards whatever it
+/// had gathered.
 enum _SeqParse { complete, incomplete, aborted }
 
 class _Csi {

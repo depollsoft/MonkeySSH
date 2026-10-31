@@ -813,6 +813,15 @@ void main() {
 
       expect(find.text('notes.txt'), findsOneWidget);
       expect(find.text('0 B'), findsOneWidget);
+      expect(find.byTooltip('Upload files'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNotNull,
+      );
     });
 
     testWidgets('handles stale SSH errors while opening the browser', (
@@ -836,6 +845,17 @@ void main() {
           'SFTP connection failed. Check the connection and try again.',
         ),
         findsOneWidget,
+      );
+      // With no SFTP client there is nothing to upload or create a folder
+      // with.
+      expect(find.byType(FloatingActionButton), findsNothing);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNull,
       );
 
       await tester.pumpWidget(const SizedBox.shrink());
@@ -1528,6 +1548,75 @@ void main() {
       expect(find.text('notes.txt'), findsOneWidget);
       expect(sftpOpenAttempts, 2);
       verify(staleSftp.close).called(1);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('hides Upload and New folder while SFTP reopens', (
+      tester,
+    ) async {
+      final sshClient = _MockSshClient();
+      final staleSftp = _MockSftpClient();
+      final freshSftp = _MockSftpClient();
+      final session = _sftpSession(sshClient);
+      addTearDown(session.close);
+      final reopening = Completer<SftpClient>();
+      var sftpOpenAttempts = 0;
+      when(sshClient.sftp).thenAnswer((_) {
+        sftpOpenAttempts++;
+        return sftpOpenAttempts == 1
+            ? Future.value(staleSftp)
+            : reopening.future;
+      });
+      when(() => staleSftp.absolute('.')).thenAnswer((_) async => '/home/demo');
+      when(() => staleSftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt')]);
+      when(staleSftp.close).thenAnswer((_) async {});
+      when(() => freshSftp.listdir('/home/demo'))
+          .thenAnswer((_) async => [_fileEntry('notes.txt')]);
+
+      await tester.pumpWidget(
+        _buildSftpTestApp(
+          session: session,
+          child: const SftpScreen(hostId: 1, connectionId: 7),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Upload files'), findsOneWidget);
+
+      // The listing channel goes stale after a frame, as over a network, and
+      // the replacement is still opening.
+      final listing = Completer<List<SftpName>>();
+      when(() => staleSftp.listdir('/home/demo'))
+          .thenAnswer((_) => listing.future);
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pump();
+      listing.completeError(SSHStateError('Connection closed'));
+      await tester.pump();
+
+      expect(sftpOpenAttempts, 2);
+      // The scaffold's own button: the old one may still be animating out.
+      Widget? uploadButton() => tester
+          .widget<Scaffold>(
+            find.ancestor(
+              of: find.byType(SftpBrowserToolbar),
+              matching: find.byType(Scaffold),
+            ),
+          )
+          .floatingActionButton;
+      expect(uploadButton(), isNull);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.create_new_folder),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      reopening.complete(freshSftp);
+      await tester.pumpAndSettle();
+      expect(uploadButton(), isNotNull);
 
       await tester.pumpWidget(const SizedBox.shrink());
     });

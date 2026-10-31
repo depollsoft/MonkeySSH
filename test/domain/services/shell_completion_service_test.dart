@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart' as ssh;
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/domain/services/shell_completion_service.dart';
@@ -348,6 +350,47 @@ void main() {
       }
       return probes;
     }
+
+    // A PTY zsh still at its prompt ignores EOF, so a probe that times out
+    // kept its channel, and the sshd session behind it, for the life of the
+    // connection, until the server's MaxSessions refused SFTP.
+    test('that never finishes has its channel destroyed', () {
+      fakeAsync((async) {
+        final client = MockSshClient();
+        final session = _buildShellCompletionSession(
+          client,
+          connectionId: 106,
+          hostId: 106,
+        );
+        final probe = _MockSshExecSession();
+        final input = _MockByteSink();
+        when(() => probe.stdout)
+            .thenAnswer((_) => StreamController<Uint8List>().stream);
+        when(() => probe.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => probe.done).thenAnswer((_) => Completer<void>().future);
+        when(() => probe.stdin).thenReturn(input);
+        when(() => probe.write(any())).thenAnswer((_) {});
+        when(input.close).thenAnswer((_) async {});
+        final fallback = _MockSshExecSession();
+        when(() => fallback.stdout).thenAnswer((_) => const Stream.empty());
+        when(() => fallback.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => fallback.done).thenAnswer((_) => Future<void>.value());
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+          (call) async => call.namedArguments[#pty] == null ? fallback : probe,
+        );
+        final service = ShellCompletionService(
+          interactiveZshTimeout: const Duration(milliseconds: 10),
+        );
+
+        unawaited(service.complete(session, argument('a')));
+        async.elapse(const Duration(milliseconds: 500));
+        verify(probe.close).called(1);
+        verifyNever(probe.channel.destroy);
+
+        async.elapse(abandonedSshExecCloseGrace);
+        verify(probe.channel.destroy).called(1);
+      });
+    });
 
     test('is skipped when the invocation names a non-zsh shell', () async {
       expect(
@@ -1249,10 +1292,166 @@ void main() {
       expect(input, contains(r'source "$FLUTTY_ZSH_COMPLETION_SETUP"'));
       expect(input, contains('git c\t'));
       expect(command, contains('__FLUTTY_ZSH_NATIVE_DONE__'));
-      expect(command, contains(r'''printf 'argument\t%s\n' "$item"'''));
+      expect(
+        command,
+        contains(r'''printf 'zsh_argument\t%s\t%s%s%s\t%s\n' '''),
+      );
     },
   );
+
+  // Runs the probe the way sshd does, in a PTY, against the local zsh. Its
+  // compadd wrapper once assigned zsh's read-only `status`, which aborted the
+  // widget as soon as a completer added a match: no marker, no exit, and the
+  // shell waited at its prompt for good.
+  test('interactive zsh probe completes and exits in a real zsh', () async {
+    final zsh = [
+      '/bin/zsh',
+      '/usr/bin/zsh',
+    ].where((path) => File(path).existsSync()).firstOrNull;
+    final python = Platform.isWindows
+        ? null
+        : (await Process.run('which', ['python3'])).stdout.toString().trim();
+    if (zsh == null || python == null || python.isEmpty) {
+      markTestSkipped('needs zsh and python3');
+      return;
+    }
+    final home = await Directory.systemTemp.createTemp('flutty-zsh-probe');
+    addTearDown(() => home.delete(recursive: true));
+    File('${home.path}/notes.txt').writeAsStringSync('');
+    File('${home.path}/notebook.md').writeAsStringSync('');
+    File('${home.path}/xnotes.md').writeAsStringSync('');
+    // A name that would forge a match inserting more than it shows.
+    File(
+      '${home.path}/xnotes\nzsh_file\txnotes.txt\txnotes.txt; echo PWNED\nzz',
+    ).writeAsStringSync('');
+    File('${home.path}/sub/notes.txt').createSync(recursive: true);
+    File('${home.path}/my dir/inner.txt').createSync(recursive: true);
+    Directory('${home.path}/cdp/proj1').createSync(recursive: true);
+    // Completers that quote their matches and pass their own ignored prefix.
+    File('${home.path}/comp/_tspace')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        '#compdef tspace\ncompadd -- "space file" "it\'s" \'\$HOME\'\n',
+      );
+    File('${home.path}/comp/_topt').writeAsStringSync(
+      '#compdef topt\ncompset -P "*="\ncompadd -U -i "\$IPREFIX" -- hello\n',
+    );
+    // A completer whose matches end in their own suffix, as `--opt=` does.
+    File('${home.path}/comp/_tsuffix')
+        .writeAsStringSync('#compdef tsuffix\ncompadd -S = -- value\n');
+    // A startup file that changes directory must not move the completion.
+    File('${home.path}/.zshrc').writeAsStringSync(
+      'fpath=(~/comp \$fpath)\nPROBEPARAM=1\ncdpath=(~/cdp)\ncd /\n',
+    );
+
+    // Each match comes back as the word the shell reads, to show, and as zsh
+    // would insert it, with the path the completer passed as a compadd prefix,
+    // the quote the word is in and any syntax such as a parameter's `$`.
+    const file = ShellCompletionSuggestionKind.file;
+    const directory = ShellCompletionSuggestionKind.directory;
+    const argument = ShellCompletionSuggestionKind.command;
+    // The suffix is what follows the inserted word: a space, nothing after a
+    // completer's own suffix, or the slash a directory already ends in.
+    for (final (line, token, replacements, kind, suffix) in [
+      ('cat no', 'no', ['notebook.md', 'notes.txt'], file, ' '),
+      ('cat sub/no', 'sub/no', ['sub/notes.txt'], file, ' '),
+      ('cat xno', 'xno', ['xnotes.md'], file, ' '),
+      ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt'], file, ' '),
+      (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt'], file, ' '),
+      ('cat "my d', '"my d', ['"my dir/'], directory, ''),
+      ("cat 'sub/no", "'sub/no", ["'sub/notes.txt'"], file, ' '),
+      ('tspace ', '', [r'\$HOME', r"it\'s", r'space\ file'], argument, ' '),
+      ('topt --opt=he', '--opt=he', ['--opt=hello'], argument, ' '),
+      ('tsuffix v', 'v', ['value='], argument, ''),
+      (r'echo ${PROBEP', r'${PROBEP', [r'${PROBEPARAM}'], argument, ' '),
+      (r'echo ${#PROBEP', r'${#PROBEP', [r'${#PROBEPARAM}'], argument, ' '),
+      // A modifier completed inside the braces leaves them open.
+      (
+        r'echo ${PROBEPARAM:-',
+        r'${PROBEPARAM:-',
+        [r'${PROBEPARAM:-', r'${PROBEPARAM:-:'],
+        argument,
+        '',
+      ),
+      // Found through cdpath: the type is tested where the completer looked.
+      ('cd pro', 'pro', ['proj1/'], directory, ''),
+    ]) {
+      final command = line.substring(0, line.indexOf(' '));
+      final invocation = ShellCompletionInvocation(
+        commandLine: line,
+        cursorOffset: line.length,
+        token: token,
+        tokenStart: command.length + 1,
+        mode: ShellCompletionMode.argument,
+        commandName: command,
+        shellCommand: zsh,
+        words: [command, token],
+        wordIndex: 1,
+        workingDirectory: home.path,
+      );
+
+      final result = await Process.run(python, [
+        '-c',
+        _ptyRunner,
+        buildInteractiveZshCompletionRemoteCommand(invocation),
+        buildInteractiveZshCompletionInput(invocation),
+        home.path,
+      ]).timeout(const Duration(seconds: 30));
+
+      final output = result.stdout.toString();
+      expect(result.exitCode, 0, reason: '$line: $output');
+      expect(output, contains('__FLUTTY_ZSH_NATIVE_DONE__'), reason: line);
+      final suggestions = parseShellCompletionOutput(
+        output.substring(output.indexOf('__FLUTTY_ZSH_NATIVE_START__')),
+        invocation,
+      );
+      expect(
+        suggestions.map((s) => s.replacement).toList()..sort(),
+        replacements,
+        reason: line,
+      );
+      expect(suggestions.map((s) => s.kind).toSet(), {kind}, reason: line);
+      expect(suggestions.map((s) => s.commitSuffix).toSet(), {
+        suffix,
+      }, reason: line);
+    }
+    expect(
+      home.listSync().map((entry) => entry.uri.pathSegments.last),
+      isNot(contains(startsWith('flutty-zsh-completion.'))),
+      reason: 'the setup file is removed when the shell exits',
+    );
+  });
 }
+
+/// Runs `sh -c COMMAND` in a PTY with HOME and TMPDIR set to HOME, writes
+/// INPUT, and prints what the PTY printed. Exits with the shell's status, or
+/// 124 when it is still running after ten seconds.
+const _ptyRunner = '''
+import os, pty, select, signal, sys, time
+command, data, home = sys.argv[1], sys.argv[2].encode(), sys.argv[3]
+env = {'HOME': home, 'ZDOTDIR': home, 'TMPDIR': home, 'TERM': 'xterm-256color',
+       'PATH': '/usr/bin:/bin'}
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(home)
+    os.execve('/bin/sh', ['sh', '-c', command], env)
+os.write(fd, data)
+out, status, deadline = b'', None, time.time() + 10
+while status is None and time.time() < deadline:
+    if select.select([fd], [], [], 0.1)[0]:
+        try:
+            out += os.read(fd, 65536)
+        except OSError:
+            pass
+    done, code = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = os.waitstatus_to_exitcode(code)
+if status is None:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+sys.exit(124 if status is None else status)
+''';
 
 ShellCompletionInvocation _commandInvocation(String token, String cwd) =>
     ShellCompletionInvocation(

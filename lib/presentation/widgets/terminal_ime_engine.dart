@@ -529,7 +529,7 @@ class TerminalImeEngine {
       if (activeBackspace.raw) {
         _isFramingImeText = false;
         _notifyUserInput();
-        terminal.textInput('\x7f');
+        terminal.textInput(terminal.backspaceInput);
         _pendingAndroidHardwareBackspaces++;
       } else if (sendHardwareTerminalKey(
         TerminalKey.backspace,
@@ -578,9 +578,10 @@ class TerminalImeEngine {
       );
       _notifyUserInput();
       // Some Android IMEs omit the editing-value deletion after emitting a
-      // standard-HID Backspace. Send DEL immediately, bypassing Kitty mode,
-      // and only use a later IME deletion to synchronize local state.
-      terminal.textInput('\x7f');
+      // standard-HID Backspace. Send DEL (BS under DECBKM) immediately,
+      // bypassing Kitty mode, and only use a later IME deletion to synchronize
+      // local state.
+      terminal.textInput(terminal.backspaceInput);
       _pendingAndroidHardwareBackspaces++;
       return;
     }

@@ -506,9 +506,22 @@ void registerMonkeyTerminalGraphicsTests() {
         final viewKey = GlobalKey<MonkeyTerminalViewState>();
         final terminal = Terminal();
         await tester.runAsync(() async {
-          terminal.write(
-            '\x1b_Ga=T,i=58,f=100,c=4,r=2,X=10000;$_animatedGifBase64\x1b\\',
-          );
+          // X= cannot leave the first cell, so shift it with a relative
+          // placement far to the right of a still parent instead.
+          terminal
+            ..write(
+              '\x1b_Ga=t,i=59,f=32,s=1,v=1,q=2;'
+              '${base64.encode(<int>[255, 0, 0, 255])}\x1b\\',
+            )
+            ..write('\x1b_Ga=p,i=59,c=1,r=1,C=1,q=2\x1b\\')
+            ..write(
+              '\x1b_Ga=T,i=58,f=100,c=4,r=2,P=59,H=1000,q=2;'
+              '$_animatedGifBase64\x1b\\',
+            );
+          // Nothing paints the shifted placement, so decode it directly; the
+          // parent is decoded here too, outside the fake-async paint.
+          await terminal.graphics.resolveImage(58);
+          await terminal.graphics.resolveImage(59);
           var waited = 0;
           while ((terminal.graphics.imageById(58)?.frameCount ?? 0) != 2 &&
               waited < 2000) {
@@ -532,7 +545,7 @@ void registerMonkeyTerminalGraphicsTests() {
         );
         await tester.pump();
 
-        expect(terminal.graphics.placements, hasLength(1));
+        expect(terminal.graphics.placements, hasLength(2));
         expect(viewKey.currentState!.graphicsAnimationTickerActive, isFalse);
         final image = terminal.graphics.imageById(58)!;
         await tester.pump(const Duration(milliseconds: 100));

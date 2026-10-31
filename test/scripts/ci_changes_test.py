@@ -191,10 +191,11 @@ class ClassificationTest(unittest.TestCase):
             with self.subTest(path=path):
                 result = changes.classify([path])
                 self.assertTrue(result['run_check'])
-                # terminal-test is gated on third_party alone: the vendored
-                # package has no path dependency on lib/.
+                # terminal-test and esctest are gated on third_party alone: the
+                # vendored package has no path dependency on lib/.
                 self.assertTrue(result['third_party'])
-        # ci.yml defines the terminal-test job and pins the SDK it runs on.
+        # ci.yml defines the terminal-test and esctest jobs and pins the SDK
+        # they run on.
         self.assertTrue(changes.classify(['.github/workflows/ci.yml'])['third_party'])
         for path in ['lib/main.dart', 'test/widget/example_test.dart', 'pubspec.yaml',
                      'remote/monkeymux/main.go']:
@@ -490,13 +491,31 @@ class WorkflowContractsTest(unittest.TestCase):
         jobs = self.workflows['ci.yml']['jobs']
         self.assertIn('tooling', jobs['ci']['needs'])
         self.assertIn('terminal-test', jobs['ci']['needs'])
+        self.assertIn('esctest', jobs['ci']['needs'])
+        self.assertIn('"esctest:$ESCTEST_RESULT"', jobs['ci']['steps'][0]['run'])
         self.assertEqual(jobs['tooling']['needs'], 'changes')
         self.assertNotIn('monkeymux-assets', jobs['terminal-test']['needs'])
+        self.assertEqual(jobs['esctest']['needs'], 'changes')
         # The gate itself must stay unconditional so it reports on pull_request,
         # merge_group and the cache-warm push run alike; `skipped` counts as
         # success there, which is what keeps the push run green.
         self.assertNotIn('push', jobs['ci']['if'])
         self.assertIn('skipped)', jobs['ci']['steps'][0]['run'])
+
+    def test_esctest_runs_on_linux_against_the_fetched_pin(self):
+        job = self.workflows['ci.yml']['jobs']['esctest']
+        # No goldens, so it stays off the 5-slot macOS pool.
+        self.assertTrue(job['runs-on'].startswith('ubicloud-'))
+        fetch = next(s for s in job['steps'] if s.get('id') == 'esctest-fetch')
+        self.assertIn('third_party/xterm/test/esctest/fetch_esctest.sh', fetch['run'])
+        run = next(s for s in job['steps'] if s.get('name') == 'Run esctest')
+        self.assertEqual(run['working-directory'], 'third_party/xterm')
+        self.assertIn('flutter test --no-pub test/esctest', run['run'])
+        self.assertEqual(run['env']['ESCTEST_DIR'], '${{ runner.temp }}/esctest2')
+        # esctest2 is GPL-2.0: fetched at a pinned commit, never vendored.
+        script = (ROOT / 'third_party/xterm/test/esctest/fetch_esctest.sh').read_text()
+        self.assertRegex(script, r'(?m)^ESCTEST2_COMMIT=[0-9a-f]{40}$')
+        self.assertFalse((ROOT / 'third_party/xterm/test/esctest/esctest').exists())
 
     def test_push_to_main_only_warms_caches(self):
         jobs = self.workflows['ci.yml']['jobs']
@@ -532,8 +551,9 @@ class WorkflowContractsTest(unittest.TestCase):
             self.assertNotIn('pull_request', jobs[f'build-{platform}']['if'])
         self.assertEqual(outputs['third_party'], '${{ steps.filter.outputs.third_party }}')
         self.assertEqual(outputs['deps'], '${{ steps.filter.outputs.deps }}')
-        self.assertIn("needs.changes.outputs.third_party == 'true'",
-                      jobs['terminal-test']['if'])
+        for name in ['terminal-test', 'esctest']:
+            self.assertIn("needs.changes.outputs.third_party == 'true'",
+                          jobs[name]['if'])
 
     def test_shards_use_the_whole_runner_and_no_build_artifacts_are_uploaded(self):
         jobs = self.workflows['ci.yml']['jobs']
@@ -548,7 +568,7 @@ class WorkflowContractsTest(unittest.TestCase):
                    if step.get('uses', '').startswith('actions/upload-artifact@')
                    and 'name' in step.get('with', {})]
         self.assertEqual(sorted(uploads), [
-            'ci-ios-build-log', 'ci-macos-build-log',
+            'ci-ios-build-log', 'ci-macos-build-log', 'esctest-logs',
             'flutter-test-failures-${{ matrix.shard-index }}',
             'monkeymux-assets', 'terminal-test-failures',
         ])
@@ -580,9 +600,11 @@ class WorkflowContractsTest(unittest.TestCase):
             for name, job in jobs.items():
                 for step in job.get('steps', []):
                     if step.get('uses', '').startswith('subosito/flutter-action@'):
-                        # terminal-test runs pub get inside third_party/xterm, so it
-                        # is the one job that is not the setup trio.
-                        self.assertEqual((workflow, name), ('ci.yml', 'terminal-test'))
+                        # terminal-test and esctest run pub get inside
+                        # third_party/xterm, so they are the jobs that are not
+                        # the setup trio.
+                        self.assertIn((workflow, name),
+                                      {('ci.yml', 'terminal-test'), ('ci.yml', 'esctest')})
         jobs = self.workflows['ci.yml']['jobs']
         windows = next(s for s in jobs['build-windows']['steps']
                        if s.get('uses') == '$/.github/actions/flutter-setup')

@@ -125,9 +125,6 @@ func vtRoundTrip(t *testing.T, s *terminalScreen) *terminalScreen {
 	if a, b := *s.saved(), *replica.saved(); a.valid && a != b {
 		t.Fatalf("round trip changed the saved cursor: %+v vs %+v", a, b)
 	}
-	if a, b := s.scoCursor, replica.scoCursor; a.valid && (a.row != b.row || a.col != b.col) {
-		t.Fatalf("round trip changed the SCO cursor: %+v vs %+v", a, b)
-	}
 	if !s.AlternateScreenActive() {
 		if s.scrollback.len() != replica.scrollback.len() {
 			t.Fatalf("round trip changed scrollback length: want %d got %d", s.scrollback.len(), replica.scrollback.len())
@@ -658,7 +655,7 @@ func TestVTScreenRenderRoundTrip(t *testing.T) {
 		}},
 		{"saved cursor with origin mode and charsets", func() *terminalScreen {
 			s := newTerminalScreen(20, 8)
-			s.Write([]byte("\x1b[3;6r\x1b[?6h\x1b[2;4H\x1b[1;35m\x1b(0\x1b)0\x0e\x1b7\x1b[0m\x0f\x1b(B\x1b[1;1Hqq\x1b[5;2H\x1b[s"))
+			s.Write([]byte("\x1b[3;6r\x1b[?6h\x1b[2;4H\x1b[1;35m\x1b(0\x1b)0\x0e\x1b7\x1b[0m\x0f\x1b(B\x1b[1;1Hqq\x1b[5;2H"))
 			return s
 		}},
 		{"pending wrap after a wide glyph", func() *terminalScreen {
@@ -773,13 +770,13 @@ func TestVTScreenSavedCursorKeepsPendingWrap(t *testing.T) {
 		t.Fatalf("DECRC dropped the deferred wrap: %q", got)
 	}
 	s = newTerminalScreen(5, 3)
-	s.Write([]byte("ABCDE\x1b7\x1b[s\r\x1b[2;2H"))
+	s.Write([]byte("ABCDE\x1b7\r\x1b[2;2H"))
 	replica := newTerminalScreen(5, 3)
 	replica.Write([]byte("\x1b[?6l\x1b[r\x1b[0m"))
 	replica.Write(s.RenderFrame())
-	replica.Write([]byte("\x1b8Z\x1b[uY"))
-	if got := replica.TextRows(); got[0] != "ABCDE" || got[1] != "Y" {
-		t.Fatalf("saved deferred wraps did not survive the frame: %q", got)
+	replica.Write([]byte("\x1b8Z"))
+	if got := replica.TextRows(); got[0] != "ABCDE" || got[1] != "Z" {
+		t.Fatalf("a saved deferred wrap did not survive the frame: %q", got)
 	}
 	// A resize ends it, keeping the column past the old edge.
 	s = newTerminalScreen(5, 3)
@@ -821,6 +818,67 @@ func TestVTScreenRawC1AndMode47(t *testing.T) {
 	s.Write([]byte("\x1b[?47h\x1b[HALT\x1b[?47l\x1b[?47h"))
 	if got := s.TextRows()[0]; got != "ALT" {
 		t.Fatalf("mode 47 must keep the alternate screen: %q", got)
+	}
+}
+
+// Switching screens leaves the cursor where it was, deferred wrap included,
+// as in xterm and the client (esctest's DECSET ALTBUF tests). 1047 clears the
+// alternate screen on the way out; 1049 saves and restores the cursor even
+// when the screen doesn't change.
+func TestVTScreenScreenSwitchKeepsCursor(t *testing.T) {
+	for _, mode := range []string{"47", "1047"} {
+		s := newTerminalScreen(10, 4)
+		s.Write([]byte("abc\r\nabc\x1b[?" + mode + "h"))
+		if g := s.grid(); g.cursorRow != 1 || g.cursorCol != 3 {
+			t.Fatalf("%s entry moved the cursor to %d,%d", mode, g.cursorRow, g.cursorCol)
+		}
+		s.Write([]byte("\x1b[2J\x1b[2;1Hdef\r\ndef\x1b[?" + mode + "l"))
+		if g := s.grid(); g.cursorRow != 2 || g.cursorCol != 3 {
+			t.Fatalf("%s exit moved the cursor to %d,%d", mode, g.cursorRow, g.cursorCol)
+		}
+		if got := s.TextRows(); got[0] != "abc" || got[1] != "abc" {
+			t.Fatalf("%s exit: %q", mode, got)
+		}
+		s.Write([]byte("\x1b[?" + mode + "h"))
+		want := "def"
+		if mode == "1047" {
+			want = ""
+		}
+		if got := s.TextRows()[1]; got != want {
+			t.Fatalf("%s re-entry shows %q, want %q", mode, got, want)
+		}
+	}
+	s := newTerminalScreen(5, 3)
+	s.Write([]byte("ABCDE\x1b[?47hZ"))
+	if got := s.TextRows(); got[0] != "" || got[1] != "Z" {
+		t.Fatalf("the deferred wrap must cross to the alternate screen: %q", got)
+	}
+	s = newTerminalScreen(10, 3)
+	s.Write([]byte("\x1b[2;3H\x1b7\x1b[3;5H\x1b[?1049lX"))
+	if got := s.TextRows()[1]; got != "  X" {
+		t.Fatalf("1049 exit on the main screen must restore the cursor: %q", s.TextRows())
+	}
+	s.Write([]byte("\x1b[?1049h\x1b[Hfoo\x1b[2;2H\x1b[?1049hY"))
+	if got := s.TextRows(); got[0] != "" || got[1] != " Y" {
+		t.Fatalf("1049 entry on the alternate screen must clear it and keep the cursor: %q", got)
+	}
+}
+
+// SCOSC and SCORC, and mode 1048, are DECSC and DECRC, origin mode included,
+// as in xterm and the client.
+func TestVTScreenSCOCursorIsDECSC(t *testing.T) {
+	s := newTerminalScreen(10, 8)
+	s.Write([]byte("\x1b[6;5H\x1b[s\x1b[5;7r\x1b[?6h\x1b[u\x1b[1;1HX"))
+	if s.originMode || s.TextRows()[0] != "X" {
+		t.Fatalf("SCORC must restore origin mode: origin=%v rows=%q", s.originMode, s.TextRows())
+	}
+	s.Write([]byte("\x1b[r\x1b[2;2H\x1b7\x1b[4;4H\x1b[uY"))
+	if got := s.TextRows()[1]; got != " Y" {
+		t.Fatalf("SCORC must restore what DECSC saved: %q", got)
+	}
+	s.Write([]byte("\x1b[6;5H\x1b[?1048h\x1b[5;7r\x1b[?6h\x1b[?1048l\x1b[1;1HZ"))
+	if s.originMode || s.TextRows()[0] != "Z" {
+		t.Fatalf("mode 1048 must save and restore like DECSC: origin=%v rows=%q", s.originMode, s.TextRows())
 	}
 }
 
@@ -1127,5 +1185,19 @@ func TestVTScreenPlaceholderImageIDsAreBounded(t *testing.T) {
 	}
 	if got[0] != "17" || got[len(got)-1] != fmt.Sprint(vtKittyPlaceholderIDLimit+16) {
 		t.Fatalf("oldest ids were not evicted first: %q..%q", got[0], got[len(got)-1])
+	}
+}
+
+// REP repeats the glyph shown, whatever the character set is now, and nothing
+// after RIS, as the client does.
+func TestVTScreenRepeatAfterCharsetChangeAndReset(t *testing.T) {
+	s := newTerminalScreen(10, 2)
+	s.Write([]byte("\x1b(0q\x1b(B\x1b[2b"))
+	if got := s.TextRows()[0]; got != "───" {
+		t.Fatalf("REP after the charset change: %q", got)
+	}
+	s.Write([]byte("x\x1bc\x1b[2b"))
+	if got := s.TextRows()[0]; got != "" {
+		t.Fatalf("REP after RIS: %q", got)
 	}
 }

@@ -1105,6 +1105,8 @@ class _TerminalPreviewPainter extends CustomPainter {
       if (belowText ? image.z >= 0 : image.z < 0) {
         continue;
       }
+      final xOffset = image.xOffset * cellWidth;
+      final yOffset = image.yOffset * lineHeight;
       final double dstWidth;
       final double dstHeight;
       if (image.fitToWidth) {
@@ -1115,11 +1117,13 @@ class _TerminalPreviewPainter extends CustomPainter {
         dstWidth = image.src.width * scale;
         dstHeight = image.src.height * scale;
       } else {
-        dstWidth = image.colSpan * cellWidth;
-        dstHeight = image.rowSpan * lineHeight;
+        // The far edges stay on cell boundaries, so an offset shrinks the
+        // image, as the live terminal draws it.
+        dstWidth = image.colSpan * cellWidth - xOffset;
+        dstHeight = image.rowSpan * lineHeight - yOffset;
       }
-      final x = image.col * cellWidth + image.xOffset;
-      final y = (image.row - startRow) * lineHeight + image.yOffset;
+      final x = image.col * cellWidth + xOffset;
+      final y = (image.row - startRow) * lineHeight + yOffset;
       if (!dstWidth.isFinite ||
           !dstHeight.isFinite ||
           dstWidth <= 0 ||

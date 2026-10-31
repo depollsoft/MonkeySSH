@@ -9,6 +9,7 @@ import 'package:xterm/src/core/charset.dart';
 import 'package:xterm/src/core/cursor.dart';
 import 'package:xterm/src/core/graphics_manager.dart';
 import 'package:xterm/src/core/reflow.dart';
+import 'package:xterm/src/core/semantic_prompt.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 import 'package:xterm/src/utils/unicode_v11.dart';
@@ -27,6 +28,9 @@ class Buffer {
   /// Kitty-graphics-protocol images placed in this buffer. Each buffer (main and
   /// alternate) keeps its own set so images do not leak between them.
   final GraphicsManager graphics = GraphicsManager();
+
+  /// Shell integration (OSC 133) state of this screen.
+  final semanticPrompt = SemanticPromptState();
 
   Buffer(
     this.terminal, {
@@ -55,6 +59,12 @@ class Buffer {
 
   final _savedCursorStyle = CursorStyle();
 
+  var _savedOriginMode = false;
+
+  /// The origin mode [saveCursor] recorded, which DECRC restores along with
+  /// the position, as in xterm.
+  bool get savedOriginMode => _savedOriginMode;
+
   final charset = Charset();
 
   /// Width of the viewport in columns. Also the index of the last column.
@@ -78,6 +88,11 @@ class Buffer {
   /// Vertical position of the cursor relative to the top-left cornor of the
   /// screen, starting from 0.
   int get cursorY => _cursorY;
+
+  /// Whether a wrap is pending: the glyph just printed filled the row and the
+  /// cursor sits past it until the next one wraps. [cursorX] reports the last
+  /// column then.
+  bool get isWrapPending => _cursorX >= viewWidth;
 
   /// Index of the first line in the scroll region.
   int get marginTop => _marginTop;
@@ -144,6 +159,11 @@ class Buffer {
         _cursorX = viewWidth - 2;
       }
     }
+    if (terminal.insertMode) {
+      // IRM: the glyph pushes the rest of the row right, after any pending
+      // wrap above, so a full row keeps its last cell.
+      insertBlankChars(cellWidth);
+    }
 
     final line = currentLine;
     // Overwriting the second half of a wide glyph blanks its first half;
@@ -152,13 +172,19 @@ class Buffer {
       line.eraseCell(_cursorX - 1, terminal.cursor);
     }
     graphics.removePlaceholderAt(line, _cursorX);
-    line.setCell(_cursorX, codePoint, cellWidth, terminal.cursor);
+    line.setCell(
+      _cursorX,
+      codePoint,
+      cellWidth,
+      terminal.cursor,
+      semanticPrompt.content,
+    );
     _cursorX++;
 
     // A one-column screen has no room for the second half.
     if (cellWidth == 2 && _cursorX < viewWidth) {
       graphics.removePlaceholderAt(line, _cursorX);
-      line.setCell(_cursorX, 0, 0, terminal.cursor);
+      line.setCell(_cursorX, 0, 0, terminal.cursor, semanticPrompt.content);
       _cursorX++;
     }
     return true;
@@ -184,6 +210,7 @@ class Buffer {
     for (var i = absoluteCursorY + 1; i < height; i++) {
       final line = lines[i];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -196,6 +223,7 @@ class Buffer {
     for (var i = 0; i < _cursorY; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -205,6 +233,7 @@ class Buffer {
     for (var i = 0; i < viewHeight; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
+      line.semanticPrompt = SemanticPromptRow.none;
       _eraseRange(line, 0, viewWidth);
     }
   }
@@ -252,6 +281,7 @@ class Buffer {
     if (regionHeight <= 0) return;
     final count = lines < regionHeight ? lines : regionHeight;
     if (count <= 0) return;
+    final images = _beginImageScroll(top, bottom, count);
     for (var i = bottom - count + 1; i <= bottom; i++) {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
@@ -260,6 +290,7 @@ class Buffer {
       for (var i = top; i <= bottom - count; i++) this.lines[i],
     ];
     this.lines.reassignRange(top, reordered);
+    graphics.endRegionScroll(this.lines, images);
     _endContinuation(top + count);
     _endContinuation(bottom + 1);
   }
@@ -305,6 +336,7 @@ class Buffer {
       _endContinuation(absoluteMarginBottom + 1);
       return;
     }
+    final images = _beginImageScroll(top, bottom, -count);
     for (var i = top; i < top + count; i++) {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
@@ -313,9 +345,21 @@ class Buffer {
       for (var i = 0; i < count; i++) _newEmptyLine(),
     ];
     this.lines.reassignRange(top, reordered);
+    graphics.endRegionScroll(this.lines, images);
     _endContinuation(top);
     _endContinuation(bottom + 1);
   }
+
+  /// Lets Kitty images in the scroll region move with its text, clipped to the
+  /// region; see [GraphicsManager.beginRegionScroll].
+  GraphicsRegionScroll? _beginImageScroll(int top, int bottom, int delta) =>
+      graphics.beginRegionScroll(
+        lines,
+        top: top,
+        bottom: bottom,
+        delta: delta,
+        hasMargins: _marginTop != 0 || _marginBottom != viewHeight - 1,
+      );
 
   /// https://vt100.net/docs/vt100-ug/chapter3.html#IND IND – Index
   ///
@@ -332,24 +376,16 @@ class Buffer {
       } else {
         moveCursorY(1);
       }
+      semanticPrompt.afterIndex(currentLine);
       return;
     }
 
-    // the cursor is not in the scrollable region
-    if (_cursorY >= viewHeight - 1) {
-      // we are at the bottom
-      if (isAltBuffer) {
-        scrollUp(1);
-      } else {
-        if (lines.isFull) {
-          graphics.removeGraphicsAnchoredToLine(lines[0]);
-        }
-        lines.push(_newEmptyLine());
-      }
-    } else {
-      // there're still lines so we simply move cursor down.
+    // Outside the scroll region the cursor moves down until the last row and
+    // nothing scrolls, as in xterm and the MonkeyMux screen model.
+    if (_cursorY < viewHeight - 1) {
       moveCursorY(1);
     }
+    semanticPrompt.afterIndex(currentLine);
   }
 
   void lineFeed() {
@@ -380,8 +416,10 @@ class Buffer {
     _cursorX = cursorX.clamp(0, viewWidth - 1);
   }
 
+  /// Moves the cursor [offset] columns. A pending wrap counts from the last
+  /// column, so BS and CUB from it land where they do in xterm.
   void moveCursorX(int offset) {
-    setCursorX(_cursorX + offset);
+    setCursorX(cursorX + offset);
   }
 
   /// Moves the cursor [offset] rows. A cursor inside the scroll region stops
@@ -413,7 +451,7 @@ class Buffer {
     _cursorY = cursorY.clamp(minY, maxY);
   }
 
-  /// Save cursor position, charmap and text attributes.
+  /// Save cursor position, origin mode, charmap and text attributes.
   void saveCursor() {
     _savedCursorX = _cursorX;
     _savedCursorY = _cursorY;
@@ -421,6 +459,7 @@ class Buffer {
     _savedCursorStyle.background = terminal.cursor.background;
     _savedCursorStyle.attrs = terminal.cursor.attrs;
     _savedCursorStyle.underlineColor = terminal.cursor.underlineColor;
+    _savedOriginMode = terminal.originMode;
     charset.save();
   }
 
@@ -453,6 +492,15 @@ class Buffer {
     _savedCursorX = 0;
     _savedCursorY = 0;
     _savedCursorStyle.reset();
+    _savedOriginMode = false;
+  }
+
+  /// Puts the cursor where [other]'s is, pending wrap included. Switching
+  /// screens with modes 47, 1047 and 1049 leaves the cursor where it was, as
+  /// in xterm, though each screen keeps its own.
+  void takeCursorFrom(Buffer other) {
+    _cursorX = other._cursorX;
+    _cursorY = other._cursorY;
   }
 
   /// Sets the vertical scrolling margin to [top] and [bottom].
@@ -501,8 +549,10 @@ class Buffer {
     }
   }
 
+  /// ICH. Like xterm, it drops a pending wrap.
   void insertBlankChars(int count) {
-    currentLine.insertCells(cursorX, count, terminal.cursor);
+    _cursorX = cursorX;
+    currentLine.insertCells(_cursorX, count, terminal.cursor);
   }
 
   void insertLines(int count) {
@@ -563,14 +613,28 @@ class Buffer {
   }
 
   void resize(int oldWidth, int oldHeight, int newWidth, int newHeight) {
+    final cursorYBefore = _cursorY;
     // 1. Adjust the height.
     if (newHeight > oldHeight) {
-      // Grow larger
+      // Grow larger. Rows come back from the scrollback above the content
+      // while the content reaches the bottom row: the cursor is on it, or
+      // something was written there, such as an inline app's footer under its
+      // input line, which then stays at the bottom when the keyboard closes.
+      // Otherwise blank rows go below, as Ghostty and xterm.js add them when
+      // the cursor is above the bottom row, so a screen cleared at the prompt
+      // doesn't come back above it. The MonkeyMux screen model applies the
+      // same rule (resizeMainRows), so only text counts: the model doesn't
+      // know where an image was placed.
+      final pullScrollback = _cursorY >= oldHeight - 1 ||
+          lines[lines.length - 1].getTrimmedLength() != 0;
       for (var i = 0; i < newHeight - oldHeight; i++) {
-        if (newHeight > lines.length) {
-          lines.push(_newEmptyLine(newWidth));
-        } else {
+        if (pullScrollback && newHeight <= lines.length) {
           _cursorY++;
+        } else {
+          if (lines.isFull) {
+            graphics.removeGraphicsAnchoredToLine(lines[0]);
+          }
+          lines.push(_newEmptyLine(newWidth));
         }
       }
     } else {
@@ -663,6 +727,13 @@ class Buffer {
     // The cursor's cell before it is clamped, past the last column when a
     // wrap is pending, for a reflow to carry along.
     final cursorCellX = min(_cursorX, oldWidth);
+
+    // The saved cursor moves with the rows the height change scrolled, as the
+    // cursor did; it is what ?1049l restores after an alternate-screen app,
+    // and clamping it alone put the shell's prompt back on the wrong row after
+    // the keyboard opened and closed under vim. The MonkeyMux screen model
+    // moves it the same way.
+    _savedCursorY += _cursorY - cursorYBefore;
 
     // Ensure cursor is within the screen.
     _cursorX = _cursorX.clamp(0, newWidth - 1);
