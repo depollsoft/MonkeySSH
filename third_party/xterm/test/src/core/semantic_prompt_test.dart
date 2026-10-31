@@ -288,6 +288,19 @@ void main() {
       expect(terminal.promptClickInput(const CellOffset(8, 0)), '\x1bOC' * 4);
     });
 
+    test('a prompt whose command started takes no clicks', () {
+      // C before the newline leaves the cursor on the prompt's row.
+      final keys = prompt('cl=line', 'sleep 10')..write(_mark('133;C'));
+      expect(keys.promptClickInput(const CellOffset(3, 0)), isNull);
+      final events = prompt('click_events=1', 'sleep 10')
+        ..write(_mark('133;C'));
+      expect(events.promptClickInput(const CellOffset(3, 0)), isNull);
+      // So does one the command moved the cursor back onto.
+      final moved = prompt('cl=line', 'sleep 10')
+        ..write('${_mark('133;C')}\r\n\x1b[A');
+      expect(moved.promptClickInput(const CellOffset(3, 0)), isNull);
+    });
+
     test('clickPrompt writes the input through onOutput', () {
       final out = <String>[];
       final terminal = prompt('cl=line', 'ab')..onOutput = out.add;

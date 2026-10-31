@@ -26,7 +26,9 @@ extension TerminalPromptClick on Terminal {
 
   /// The input that moves the shell's cursor to [position], a cell in absolute
   /// buffer rows. It is null unless the cursor is at a prompt that asked for
-  /// clicks to be handled, on the main screen with mouse tracking off, and
+  /// clicks to be handled and whose command hasn't started (`OSC 133 ; C`
+  /// can leave the cursor on the prompt's row, and the keys would reach the
+  /// command), on the main screen with mouse tracking off, and
   /// [position] is in that prompt's input: on its rows, at or after the first
   /// input cell (or the cursor, before anything is typed), and not on prompt
   /// text. It is empty when the cursor is already there.
@@ -39,7 +41,9 @@ extension TerminalPromptClick on Terminal {
     if (isUsingAltBuffer || mouseMode != MouseMode.none) return null;
     final buffer = this.buffer;
     final state = buffer.semanticPrompt;
-    if (!state.handlesClicks) return null;
+    if (!state.handlesClicks || state.content == SemanticContent.output) {
+      return null;
+    }
     final rows = buffer.currentPromptRows;
     if (rows == null || position.y < rows.start || position.y > rows.end) {
       return null;
