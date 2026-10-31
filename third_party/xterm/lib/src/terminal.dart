@@ -1034,6 +1034,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _buffer = _mainBuffer;
     _resetModesSoftResetKeeps();
     _monkeyMuxSynchronizedOutput = false; // DEC mode 9002
+    // The program's prompt is not the next shell's: without this, its input
+    // and click options would take the next shell's line as their own. The
+    // rows keep their marks.
+    _mainBuffer.semanticPrompt.reset();
+    _altBuffer.semanticPrompt.reset();
     // Last: it notifies listeners.
     softReset();
   }

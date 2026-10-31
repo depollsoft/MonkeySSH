@@ -301,6 +301,16 @@ void main() {
       expect(moved.promptClickInput(const CellOffset(3, 0)), isNull);
     });
 
+    test('a prompt left by a program that ended takes no clicks', () {
+      // A dropped MonkeyMux attach ends at a fish prompt and a shell without
+      // integration takes over.
+      final terminal = prompt('click_events=1', '')
+        ..resetForNextProgram()
+        ..write('\r\nlogin% ls');
+      expect(terminal.promptClickInput(const CellOffset(8, 1)), isNull);
+      expect(terminal.buffer.semanticPrompt.handlesClicks, isFalse);
+    });
+
     test('clickPrompt writes the input through onOutput', () {
       final out = <String>[];
       final terminal = prompt('cl=line', 'ab')..onOutput = out.add;
