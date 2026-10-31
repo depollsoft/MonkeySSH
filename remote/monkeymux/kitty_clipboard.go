@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -38,6 +39,11 @@ import (
 // later packets miss the client it went to. So is one whose client goes away
 // before its final reply, once the replies the client did send have reached
 // the window.
+//
+// A client MonkeyMux answers for may still send its own reply, which is
+// dropped. Its input holds back the start of a reply split across reads as
+// for a request still open, until that reply ends or the grace passes
+// without any of it, so none of it is typed into the program on screen.
 
 const (
 	kittyClipboardOscCode = "5522"
@@ -67,7 +73,9 @@ const (
 	// holding it back after this long, rather than delaying that key by
 	// kittyClipboardAmbiguousCarryTimeout for as long as the request stays
 	// open. A read the client has begun answering owes the rest of its
-	// answer however long it takes.
+	// answer however long it takes. A request MonkeyMux answered in the
+	// client's place is waited on for this long after that answer, or after
+	// the last reply to it passed through.
 	kittyClipboardRepliesOwedGrace = 5 * time.Second
 
 	// kittyClipboardAmbiguousCarryTimeout releases input held back because
@@ -187,7 +195,12 @@ type kittyClipboardInputState struct {
 	// departed is set once MonkeyMux has answered the requests the client
 	// left when it went away; a request handed to it later is answered the
 	// same way.
-	departed   atomic.Bool
+	departed atomic.Bool
+	// answered are the requests MonkeyMux answered in the client's place
+	// whose own reply the client may still be sending, oldest first. Guarded
+	// by answeredMu, a leaf lock.
+	answeredMu sync.Mutex
+	answered   []kittyClipboardAnsweredRequest
 	carry      []byte
 	generation uint64
 	// pasteActive tracks bracketed paste in the client's input as it arrives,
@@ -195,6 +208,13 @@ type kittyClipboardInputState struct {
 	// marker split across reads still opens or closes the paste.
 	pasteActive      bool
 	pasteMarkerCarry []byte
+}
+
+// kittyClipboardAnsweredRequest is a request MonkeyMux answered in a
+// client's place, until its tag stops being waited on.
+type kittyClipboardAnsweredRequest struct {
+	tag     string
+	expires time.Time
 }
 
 func isKittyClipboardOscPayload(payload []byte) bool {
@@ -676,17 +696,25 @@ func (w *muxWindow) kittyClipboardRequestIndexLocked(tag string) int {
 }
 
 // removeKittyClipboardRequestLocked forgets the window's request at index.
-// Requires the server's mu.
-func (w *muxWindow) removeKittyClipboardRequestLocked(index int) {
+// finished says its client sent its final reply. Otherwise MonkeyMux is
+// answering in the client's place, and the client may still send its own,
+// as a bystander may: both go on waiting for it. Requires the server's mu.
+func (w *muxWindow) removeKittyClipboardRequestLocked(index int, finished bool) {
 	state := &w.kittyClipboard
-	if client := state.requests[index].client; client != nil {
+	request := state.requests[index]
+	now := time.Now()
+	if client := request.client; client != nil {
 		client.kittyClipboardInput.outstanding.Add(-1)
-		if state.requests[index].replied {
+		if request.replied {
 			client.kittyClipboardInput.replying.Add(-1)
 		}
+		if !finished {
+			client.awaitAnsweredKittyClipboardReply(request.tag, now)
+		}
 	}
-	for _, bystander := range state.requests[index].bystanders {
+	for _, bystander := range request.bystanders {
 		bystander.kittyClipboardInput.outstanding.Add(-1)
+		bystander.awaitAnsweredKittyClipboardReply(request.tag, now)
 	}
 	state.requests = append(state.requests[:index], state.requests[index+1:]...)
 }
@@ -700,7 +728,7 @@ func (w *muxWindow) failKittyClipboardRequestLocked(index int) []byte {
 	if request.open {
 		w.kittyClipboard.write = kittyClipboardWriteRejected
 	}
-	w.removeKittyClipboardRequestLocked(index)
+	w.removeKittyClipboardRequestLocked(index, false)
 	return kittyClipboardStatusReply(request.op, "EBUSY", request.id)
 }
 
@@ -708,7 +736,7 @@ func (w *muxWindow) failKittyClipboardRequestLocked(index int) []byte {
 // is closing. Requires the server's mu.
 func (w *muxWindow) forgetKittyClipboardRequestsLocked() {
 	for len(w.kittyClipboard.requests) > 0 {
-		w.removeKittyClipboardRequestLocked(0)
+		w.removeKittyClipboardRequestLocked(0, false)
 	}
 }
 
@@ -722,11 +750,12 @@ func (w *muxWindow) openKittyClipboardWriteLocked() int {
 }
 
 // forgetOpenKittyClipboardWriteLocked forgets the window's open write when a
-// new write replaces it: the client drops it without a reply. Requires the
-// server's mu.
+// new write replaces it: the client drops it without a reply, unless one
+// refusing an earlier packet is already on its way. Requires the server's
+// mu.
 func (w *muxWindow) forgetOpenKittyClipboardWriteLocked() {
 	if index := w.openKittyClipboardWriteLocked(); index >= 0 {
-		w.removeKittyClipboardRequestLocked(index)
+		w.removeKittyClipboardRequestLocked(index, false)
 	}
 }
 
@@ -749,7 +778,7 @@ func (w *muxWindow) refuseKittyClipboardWriteLocked(status string) []byte {
 	if index < 0 {
 		return nil
 	}
-	w.removeKittyClipboardRequestLocked(index)
+	w.removeKittyClipboardRequestLocked(index, false)
 	return kittyClipboardStatusReply("write", status, state.writeID)
 }
 
@@ -785,8 +814,10 @@ func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, c
 			continue
 		}
 		if request.client != client {
-			if request.client != nil {
-				request.client.kittyClipboardInput.outstanding.Add(-1)
+			if previous := request.client; previous != nil {
+				previous.kittyClipboardInput.outstanding.Add(-1)
+				// Its write may have failed after it read the request.
+				previous.awaitAnsweredKittyClipboardReply(tag, now)
 			}
 			request.client = client
 			client.kittyClipboardInput.outstanding.Add(1)
@@ -872,8 +903,12 @@ func (s *muxServer) takeKittyClipboardReply(
 	if !ok || metadata.idIndex < 0 {
 		return nil
 	}
+	final := metadata.op == "write" || (metadata.status != "OK" && metadata.status != "DATA")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Under s.mu, which MonkeyMux answers a request under, so the reply ends
+	// or extends the wait for it if MonkeyMux got there first.
+	client.kittyClipboardInput.takeAnsweredReply(metadata.id, final, time.Now())
 	window := s.windowByIDLocked(windowID)
 	if window == nil {
 		return nil
@@ -884,8 +919,8 @@ func (s *muxServer) takeKittyClipboardReply(
 		return nil
 	}
 	id := window.kittyClipboard.requests[index].id
-	if metadata.op == "write" || (metadata.status != "OK" && metadata.status != "DATA") {
-		window.removeKittyClipboardRequestLocked(index)
+	if final {
+		window.removeKittyClipboardRequestLocked(index, true)
 	} else if request := &window.kittyClipboard.requests[index]; !request.replied {
 		request.replied = true
 		client.kittyClipboardInput.replying.Add(1)
@@ -925,7 +960,69 @@ func (s *muxServer) failKittyClipboardRequestsLocked(client *attachClient) {
 // reply at now.
 func (state *kittyClipboardInputState) repliesOwed(now time.Time) bool {
 	return state.replying.Load() > 0 ||
-		(state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load())
+		(state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load()) ||
+		state.answeredReplyOwed(now)
+}
+
+// awaitAnsweredKittyClipboardReply notes that MonkeyMux answered the request
+// tagged tag in c's place at now. c may still send its own reply, which is
+// dropped, unless it does not speak the protocol.
+func (c *attachClient) awaitAnsweredKittyClipboardReply(tag string, now time.Time) {
+	if c.answersKittyClipboard() {
+		c.kittyClipboardInput.noteAnsweredRequest(tag, now)
+	}
+}
+
+// noteAnsweredRequest waits on the client's own reply to the request tagged
+// tag, which MonkeyMux answered at now, for kittyClipboardRepliesOwedGrace.
+func (state *kittyClipboardInputState) noteAnsweredRequest(tag string, now time.Time) {
+	state.answeredMu.Lock()
+	defer state.answeredMu.Unlock()
+	state.pruneAnsweredLocked(now)
+	if len(state.answered) >= maxTrackedKittyClipboardRequests {
+		// Dropping the oldest leaves the newer ones, which wait longer.
+		state.answered = slices.Delete(state.answered, 0, 1)
+	}
+	state.answered = append(state.answered, kittyClipboardAnsweredRequest{
+		tag:     tag,
+		expires: now.Add(kittyClipboardRepliesOwedGrace),
+	})
+}
+
+// takeAnsweredReply notes a reply to the request tagged tag, if MonkeyMux
+// answered it in the client's place: the final reply ends the wait for it,
+// and any other extends it by the grace.
+func (state *kittyClipboardInputState) takeAnsweredReply(tag string, final bool, now time.Time) {
+	state.answeredMu.Lock()
+	defer state.answeredMu.Unlock()
+	for index := range state.answered {
+		if state.answered[index].tag != tag {
+			continue
+		}
+		if final {
+			state.answered = slices.Delete(state.answered, index, index+1)
+		} else {
+			state.answered[index].expires = now.Add(kittyClipboardRepliesOwedGrace)
+		}
+		return
+	}
+}
+
+// answeredReplyOwed reports whether the client may be partway through its
+// own reply to a request MonkeyMux answered in its place at now.
+func (state *kittyClipboardInputState) answeredReplyOwed(now time.Time) bool {
+	state.answeredMu.Lock()
+	defer state.answeredMu.Unlock()
+	state.pruneAnsweredLocked(now)
+	return len(state.answered) > 0
+}
+
+// pruneAnsweredLocked stops waiting on replies whose grace has run out by
+// now. Requires answeredMu.
+func (state *kittyClipboardInputState) pruneAnsweredLocked(now time.Time) {
+	state.answered = slices.DeleteFunc(state.answered, func(request kittyClipboardAnsweredRequest) bool {
+		return !now.Before(request.expires)
+	})
 }
 
 func noteKittyClipboardRepliesOwed(owedUntil *atomic.Int64, now time.Time) {
@@ -962,8 +1059,10 @@ func kittyClipboardReplyWindow(payload []byte) (string, bool) {
 // A reply split across reads is held back until it is complete. So is a read
 // ending in a bare prefix of `ESC ] 5522 ;` while the client owes a reply,
 // released after kittyClipboardAmbiguousCarryTimeout if nothing completes
-// it: from forwarding a request until its final reply, so the Escape key is
-// held back only while a reply can actually follow it.
+// it: from forwarding a request until its final reply, or until the client's
+// own final reply to a request MonkeyMux answered in its place, so the
+// Escape key, or an Alt+] (`ESC ]`), is held back only while a reply can
+// actually follow it.
 // Requires inputDispatchMu.
 func (c *attachClient) splitKittyClipboardRepliesLocked(
 	data []byte,
