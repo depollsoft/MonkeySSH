@@ -1718,6 +1718,7 @@ func (s *terminalScreen) escapeDispatch(final byte) {
 		g.cursorCol = 0
 		g.pendingWrap = false
 		s.index()
+		s.kittyColumnFound()
 	case 'H':
 		if g.cursorCol < len(s.tabs) {
 			s.tabs[g.cursorCol] = true

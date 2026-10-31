@@ -746,6 +746,7 @@ func TestVTKittyColumnLostUntilSetAgain(t *testing.T) {
 	}{
 		{"nothing", "", true},
 		{"CR", "\r", false},
+		{"NEL", "\x1bE", false},
 		{"CUP", "\x1b[1;3H", false},
 		{"RIS", "\x1bc", false},
 		{"DECRC of a cursor saved lost", "\x1b7\r\x1b8", true},
