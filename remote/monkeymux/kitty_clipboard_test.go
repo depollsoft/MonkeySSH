@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -2038,5 +2039,50 @@ func TestKittyClipboardSplitC1PacketIsHeldWholeOrDropped(t *testing.T) {
 	}
 	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EFBIG:id=big\x1b\\" {
 		t.Fatalf("writer got %q", got)
+	}
+}
+
+// The attach reader asks whether a reply is owed without the server's lock,
+// so forgetting a request MonkeyMux answered in its clients' place starts the
+// wait on their own replies before it stops counting the request. In between
+// nothing would be owed, and the rest of a reply a client is partway through
+// would reach the program as typed input.
+func TestAnsweredKittyClipboardRequestStaysOwedWhileForgotten(t *testing.T) {
+	for range 2000 {
+		client := &attachClient{capabilityHint: []byte(kittyClipboardHintFixture)}
+		bystander := &attachClient{capabilityHint: []byte(kittyClipboardHintFixture)}
+		oweKittyClipboardReplies(client)
+		client.kittyClipboardInput.replying.Add(1)
+		oweKittyClipboardReplies(bystander)
+		window := &muxWindow{id: "@1"}
+		window.kittyClipboard.requests = []kittyClipboardRequest{{
+			tag: kittyClipboardTagWindow1 + ".1", op: "read", client: client, delivering: true,
+			replied: true, bystanders: []*attachClient{bystander},
+		}}
+		var gap atomic.Bool
+		started, stop, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			for first := true; ; first = false {
+				if !kittyClipboardRepliesOwed(client) || !kittyClipboardRepliesOwed(bystander) {
+					gap.Store(true)
+				}
+				if first {
+					close(started)
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+		<-started
+		window.removeKittyClipboardRequestLocked(0, false)
+		close(stop)
+		<-done
+		if gap.Load() {
+			t.Fatal("no reply was owed while the answered request was being forgotten")
+		}
 	}
 }

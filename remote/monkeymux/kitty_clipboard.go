@@ -703,23 +703,25 @@ func (w *muxWindow) kittyClipboardRequestIndexLocked(tag string) int {
 // removeKittyClipboardRequestLocked forgets the window's request at index.
 // finished says its client sent its final reply. Otherwise MonkeyMux is
 // answering in the client's place, and the client may still send its own,
-// as a bystander may: both go on waiting for it. Requires the server's mu.
+// as a bystander may: both go on waiting for it, from before the request
+// stops counting, since the attach reader asks without the server's lock.
+// Requires the server's mu.
 func (w *muxWindow) removeKittyClipboardRequestLocked(index int, finished bool) {
 	state := &w.kittyClipboard
 	request := state.requests[index]
 	now := time.Now()
 	if client := request.client; client != nil {
+		if !finished {
+			client.awaitAnsweredKittyClipboardReply(request.tag, now)
+		}
 		client.kittyClipboardInput.outstanding.Add(-1)
 		if request.replied {
 			client.kittyClipboardInput.replying.Add(-1)
 		}
-		if !finished {
-			client.awaitAnsweredKittyClipboardReply(request.tag, now)
-		}
 	}
 	for _, bystander := range request.bystanders {
-		bystander.kittyClipboardInput.outstanding.Add(-1)
 		bystander.awaitAnsweredKittyClipboardReply(request.tag, now)
+		bystander.kittyClipboardInput.outstanding.Add(-1)
 	}
 	state.requests = append(state.requests[:index], state.requests[index+1:]...)
 }
@@ -820,9 +822,11 @@ func (s *muxServer) handKittyClipboardRequests(windowID string, tags []string, c
 		}
 		if request.client != client {
 			if previous := request.client; previous != nil {
-				previous.kittyClipboardInput.outstanding.Add(-1)
-				// Its write may have failed after it read the request.
+				// Its write may have failed after it read the request. The
+				// wait starts before the request stops counting, as in
+				// removeKittyClipboardRequestLocked.
 				previous.awaitAnsweredKittyClipboardReply(tag, now)
+				previous.kittyClipboardInput.outstanding.Add(-1)
 			}
 			request.client = client
 			client.kittyClipboardInput.outstanding.Add(1)
