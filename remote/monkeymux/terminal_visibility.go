@@ -240,10 +240,14 @@ func visibilityCsiReplacement(sequence []byte) (replacement []byte, ok bool) {
 }
 
 // visibilityCsiMayFollow reports whether partial, the start of a CSI that has
-// not ended yet (ESC [ and what follows), could still become a sequence
-// visibilityCsiReplacement changes, so the stripper holds it until it ends.
+// not ended yet (ESC [ or 0x9b and what follows), could still become a
+// sequence visibilityCsiReplacement changes, so the stripper holds it until
+// it ends.
 func visibilityCsiMayFollow(partial []byte) bool {
-	body := partial[2:]
+	body := partial[1:]
+	if partial[0] == '\x1b' {
+		body = partial[2:]
+	}
 	if len(body) == 0 {
 		return true
 	}

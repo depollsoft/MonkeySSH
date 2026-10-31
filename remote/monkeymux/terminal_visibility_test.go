@@ -148,6 +148,80 @@ func TestVisibilityModeIsStrippedFromForwardedOutput(t *testing.T) {
 	}
 }
 
+// The 8-bit CSI the server's parsers accept sets and queries the mode as the
+// 7-bit form does, and is stripped the same way, including when it is split
+// across reads. A 0x9b that continues a character is text.
+func TestC1VisibilitySequencesAreAnsweredAndStripped(t *testing.T) {
+	server, ptys, _, attach := newVisibilityTestServer(t)
+
+	server.handleWindowOutput("@1", []byte("a\x9b?2033h\x1b[?2033$p\x9b?2033$pb"))
+	if got := windowReplies(t, server, 0, ptys[0]); got != visibleReport+"\x1b[?2033;1$y\x1b[?2033;1$y" {
+		t.Fatalf("replies = %q", got)
+	}
+	setClientVisibility(server, "phone", true)
+	if got := windowReplies(t, server, 0, ptys[0]); got != hiddenReport {
+		t.Fatalf("replies after hiding = %q, want %q", got, hiddenReport)
+	}
+	setClientVisibility(server, "phone", false)
+	_ = windowReplies(t, server, 0, ptys[0])
+
+	for _, chunk := range []string{"c\x9b", "?25;2033", "ld\x9b?99", "8ne\x9b", "?2033l"} {
+		server.handleWindowOutput("@1", []byte(chunk))
+	}
+	if got := windowReplies(t, server, 0, ptys[0]); got != visibleReport {
+		t.Fatalf("split replies = %q, want %q", got, visibleReport)
+	}
+	server.mu.Lock()
+	enabled := server.windows[0].visibility.enabled
+	server.mu.Unlock()
+	if enabled {
+		t.Fatal("a split 8-bit reset left the mode enabled")
+	}
+
+	// U+201B ends in 0x9b; split after its lead bytes, that byte starts the
+	// next read and is not held back or read as CSI.
+	server.handleWindowOutput("@1", []byte("f\xe2\x80"))
+	server.handleWindowOutput("@1", []byte("\x9b"))
+	server.handleWindowOutput("@1", []byte("g\xe2\x80"))
+	server.handleWindowOutput("@1", []byte("\x9b?2033h"))
+	if got := windowReplies(t, server, 0, ptys[0]); got != "" {
+		t.Fatalf("replies to text = %q, want none", got)
+	}
+	waitForTestAttachWrites(t, server)
+	if got := attach.String(); !strings.Contains(got, "ab") ||
+		!strings.Contains(got, "c\x9b?25lde") ||
+		!strings.HasSuffix(got, "f\xe2\x80\x9bg\xe2\x80\x9b?2033h") {
+		t.Fatalf("attach output = %q", got)
+	}
+}
+
+// The 8-bit CSI changes the visibility mode, which MonkeyMux owns, and no
+// mode of the attached terminal, which does not read it as CSI.
+func TestC1CsiChangesOnlyTheVisibilityMode(t *testing.T) {
+	window := &muxWindow{id: "@1", lastActivity: time.Now()}
+	window.observeTerminalModesLocked([]byte("\x9b?5;20"))
+	window.observeTerminalModesLocked([]byte("33h\x9b4h"))
+	if !window.visibility.enabled {
+		t.Fatal("a split 8-bit set left visibility reports off")
+	}
+	if window.privateModes["5"] || window.insertModeEnabled {
+		t.Fatalf("modes = %v, insert %v; want the terminal's modes untouched",
+			window.privateModes, window.insertModeEnabled)
+	}
+	// A continuation byte is text, even at the start of a read.
+	window.terminalOutputUtf8Remaining = 1
+	window.observeTerminalModesLocked([]byte("\x9b?2033l"))
+	window.terminalOutputUtf8Remaining = 0
+	window.observeTerminalModesLocked([]byte("\xe2\x80\x9b?2033l"))
+	if !window.visibility.enabled {
+		t.Fatal("a 0x9b continuing a character reset visibility reports")
+	}
+	window.observeTerminalModesLocked([]byte("\x9b?2033l"))
+	if window.visibility.enabled {
+		t.Fatal("an 8-bit reset left visibility reports on")
+	}
+}
+
 func TestVisibilityModeIsStrippedFromReplays(t *testing.T) {
 	history := []byte("a\x1b[?2033hb\x1b[?1049;2033hc\x9b?998nd\x1b[?2033$pe\x1b[?2031h")
 	got := string(stripTerminalQueriesFromReplay(history))

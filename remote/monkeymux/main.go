@@ -927,6 +927,11 @@ type muxWindow struct {
 	// terminalOutputOscOverflow reports that the in-progress OSC payload
 	// exceeded its bound and is being discarded until its terminator.
 	terminalOutputOscOverflow bool
+	// attachUtf8Remaining is the continuation bytes a character split across
+	// the forwarded output's reads still owes, so that
+	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b among them
+	// for CSI.
+	attachUtf8Remaining int
 	// notificationOscSeq counts background desktop notifications captured
 	// from this window. It never resets so clients can tell new arrivals
 	// from replays of already-seen state.
@@ -7447,6 +7452,7 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.screen = nil
 	window.oscBuffer = nil
 	window.attachOscBuffer = nil
+	window.attachUtf8Remaining = 0
 	window.csiBuffer = nil
 	window.pendingTerminalQueries = nil
 	window.pendingTerminalQueriesInFlight = nil
@@ -14293,18 +14299,27 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 }
 
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
+	utf8Remaining := w.attachUtf8Remaining
+	if w.kittyClipboard.discarding {
+		// What follows the dropped packet starts afresh.
+		utf8Remaining = 0
+	}
 	chunk = w.skipDiscardedKittyClipboardOscLocked(chunk)
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
+		w.attachUtf8Remaining = utf8Remaining
 		return chunk
 	}
 	data := chunk
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(chunk, utf8Remaining)
 	if len(w.attachOscBuffer) > 0 {
 		combined := make([]byte, 0, len(w.attachOscBuffer)+len(chunk))
 		combined = append(combined, w.attachOscBuffer...)
 		combined = append(combined, chunk...)
 		data = combined
+		leadingUtf8Prefix = 0
 		w.attachOscBuffer = nil
 	}
+	w.attachUtf8Remaining = nextQueryUtf8Remaining(data, utf8Remaining, leadingUtf8Prefix)
 
 	var responses map[string][]byte
 	answerable := func(queryKeys []string) bool {
@@ -14328,24 +14343,20 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 	var output []byte
 	copyStart := 0
 	for i := 0; i < len(data); {
-		if data[i] != '\x1b' {
-			i++
-			continue
-		}
-		if i+1 >= len(data) {
-			if w.storeAttachPartialOscLocked(data[i:]) {
-				if output == nil {
-					return data[:i]
-				}
-				output = append(output, data[copyStart:i]...)
-				return output
+		csiParams := -1
+		switch {
+		case data[i] == 0x9b:
+			if i >= leadingUtf8Prefix && !isUtf8ContinuationAt(data, i) {
+				csiParams = i + 1
 			}
-			break
+		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == '[':
+			csiParams = i + 2
 		}
-		if data[i+1] == '[' {
+		if csiParams >= 0 {
 			// Visibility reports belong to MonkeyMux (terminal_visibility.go):
-			// the mode, its query and its DECRQM never reach the terminal.
-			end := csiSequenceEnd(data, i+2)
+			// the mode, its query and its DECRQM never reach the terminal,
+			// in either CSI form.
+			end := csiSequenceEnd(data, csiParams)
 			if end < 0 {
 				if visibilityCsiMayFollow(data[i:]) &&
 					w.storeAttachPartialOscLocked(data[i:]) {
@@ -14368,6 +14379,22 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 				i = end + 1
 				continue
 			}
+			i++
+			continue
+		}
+		if data[i] != '\x1b' {
+			i++
+			continue
+		}
+		if i+1 >= len(data) {
+			if w.storeAttachPartialOscLocked(data[i:]) {
+				if output == nil {
+					return data[:i]
+				}
+				output = append(output, data[copyStart:i]...)
+				return output
+			}
+			break
 		}
 		if data[i+1] != ']' {
 			i++
@@ -17442,71 +17469,98 @@ func leadingShellToken(value string) string {
 	return fields[0]
 }
 
+// observeTerminalModesLocked tracks the modes a replay restores from a chunk
+// of the window's output. Called before observeTerminalOutputStateLocked
+// takes in the chunk, so terminalOutputUtf8Remaining tells whether it starts
+// inside a character.
 func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
 	data := chunk
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(chunk, w.terminalOutputUtf8Remaining)
 	if len(w.csiBuffer) > 0 {
 		combined := make([]byte, 0, len(w.csiBuffer)+len(chunk))
 		combined = append(combined, w.csiBuffer...)
 		combined = append(combined, chunk...)
 		data = combined
+		leadingUtf8Prefix = 0
 		w.csiBuffer = nil
 	}
 
-	for len(data) > 0 {
-		escapeIndex := bytes.IndexByte(data, '\x1b')
-		if escapeIndex < 0 {
+	for index := 0; index < len(data); index++ {
+		paramsStart := index + 1
+		eightBit := false
+		switch {
+		case data[index] == 0x9b:
+			if index < leadingUtf8Prefix || isUtf8ContinuationAt(data, index) {
+				continue
+			}
+			eightBit = true
+		case data[index] != '\x1b':
+			continue
+		case index+1 >= len(data):
+			w.storePartialCsiLocked(data[index:])
 			return
-		}
-		if escapeIndex+1 >= len(data) {
-			w.storePartialCsiLocked(data[escapeIndex:])
-			return
-		}
-		switch data[escapeIndex+1] {
-		case '[':
-		case 'c':
-			w.resetTerminalModesLocked(true)
-			data = data[escapeIndex+2:]
-			continue
-		case '=':
-			w.applicationKeypadEnabled = true
-			w.applicationKeypadKnown = true
-			data = data[escapeIndex+2:]
-			continue
-		case '>':
-			w.applicationKeypadEnabled = false
-			w.applicationKeypadKnown = true
-			data = data[escapeIndex+2:]
-			continue
 		default:
-			data = data[escapeIndex+1:]
-			continue
+			switch data[index+1] {
+			case '[':
+				paramsStart = index + 2
+			case 'c':
+				w.resetTerminalModesLocked(true)
+				index++
+				continue
+			case '=':
+				w.applicationKeypadEnabled = true
+				w.applicationKeypadKnown = true
+				index++
+				continue
+			case '>':
+				w.applicationKeypadEnabled = false
+				w.applicationKeypadKnown = true
+				index++
+				continue
+			default:
+				continue
+			}
 		}
 
-		end := csiSequenceEnd(data, escapeIndex+2)
+		end := csiSequenceEnd(data, paramsStart)
 		if end < 0 {
-			w.storePartialCsiLocked(data[escapeIndex:])
+			w.storePartialCsiLocked(data[index:])
 			return
 		}
 		final := data[end]
+		params := string(data[paramsStart:end])
+		index = end
 		switch final {
 		case 'n', 'p':
-			w.observeVisibilityCsiLocked(string(data[escapeIndex+2:end]), final)
+			w.observeVisibilityCsiLocked(params, final)
+		}
+		if eightBit {
+			// A terminal that decodes UTF-8 does not read a raw 0x9b as CSI,
+			// so it changes none of the attached terminal's modes. The
+			// visibility mode is MonkeyMux's own, and its parsers do.
+			if (final == 'h' || final == 'l') && strings.HasPrefix(params, "?") {
+				for _, mode := range csiModeParams(params[1:]) {
+					if isVisibilityReportsMode(mode) {
+						w.setVisibilityReportsLocked(final == 'h')
+					}
+				}
+			}
+			continue
 		}
 		switch final {
 		case 'u':
-			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
+			w.observeKittyKeyboardLocked(params)
 		case 'm':
-			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+			w.observeModifyOtherKeysLocked(params)
 		case 'p':
-			if string(data[escapeIndex+2:end]) == "!" {
+			if params == "!" {
 				w.resetTerminalModesLocked(false)
 			}
 		}
 		if final == 'h' || final == 'l' {
-			params := string(data[escapeIndex+2 : end])
 			enabled := final == 'h'
 			if strings.HasPrefix(params, "?") {
 				for _, mode := range csiModeParams(strings.TrimPrefix(params, "?")) {
@@ -17521,7 +17575,6 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 				}
 			}
 		}
-		data = data[end+1:]
 	}
 }
 
