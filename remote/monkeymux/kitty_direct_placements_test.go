@@ -595,3 +595,25 @@ func TestShellReplayFindsItsCutCommandBehindManyImages(t *testing.T) {
 		t.Fatalf("replay does not start with the image its cut falls on (image %d): %.300q", root, got)
 	}
 }
+
+// TestConPtyReplayReplacesTheClientsPlacements: a ConPTY window keeps its
+// normal screen and replays its whole retained output, which places its
+// images again, so a reopened client's own placements go first there too.
+func TestConPtyReplayReplacesTheClientsPlacements(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	window := &muxWindow{id: "@1", index: 0, win32InputMode: true, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.handleWindowOutput(window.id, []byte("> show\r\n\x1b_Ga=T,I=9,"+kittyPixelRoot+"\x1b\\\r\n> "))
+	server.mu.Lock()
+	conPty := window.retainsConPtyNormalScreenLocked()
+	replay, _ := server.activeReplayWithImageFollowUpLocked()
+	server.mu.Unlock()
+	got := string(replay)
+	deleted := strings.Index(got, kittyVisiblePlacementsDelete)
+	image := strings.Index(got, "\x1b_Ga=T,I=9,")
+	if !conPty || deleted < 0 || deleted > image || strings.Count(got, "a=d") != 1 {
+		t.Fatalf("ConPTY replay does not delete the client's placements first (delete %d, image %d): %q",
+			deleted, image, got)
+	}
+}

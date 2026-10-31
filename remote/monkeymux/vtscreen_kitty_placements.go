@@ -23,8 +23,8 @@ import (
 // cannot name an image sent by number (I=) or with neither, since the client
 // gives those an id of its own. A client reopened on the window it showed
 // keeps what it holds (activeWindowReplayPrefix leaves physical placements),
-// unless a shell window's replay deletes it to place its images again
-// (kittyVisiblePlacementsDelete); a replay of another window makes the app
+// unless a replay of the window's output deletes it to place its images
+// again (kittyVisiblePlacementsDelete); a replay of another window makes the app
 // delete them first, from the window it names (monkeyMuxReplayWindowOSC).
 //
 // The client places an image only when the store of the screen it is on

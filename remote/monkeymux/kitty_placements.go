@@ -19,9 +19,9 @@ import (
 // the ones on its screen again, after deleting the client's copies of their
 // images (KittyMainPlacementDeletes). A client reopened on the window it
 // showed keeps the rest of what it holds, since ED 2 leaves physical
-// placements, unless the window is a shell: its replayed output places its
-// images again, so the replay deletes the client's copies first
-// (kittyVisiblePlacementsDelete). Each replay names its window
+// placements, unless the replay is of the window's output (a shell, or a
+// ConPTY normal screen), which places its images again, so the replay
+// deletes the client's copies first (kittyVisiblePlacementsDelete). Each replay names its window
 // (monkeyMuxReplayWindowOSC), and the app deletes its physical placements
 // when a replay names another window than the one it shows, however the
 // change was started.

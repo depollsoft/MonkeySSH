@@ -11520,7 +11520,12 @@ func (s *muxServer) replayBytesWithImagesLocked(
 		history = stripTerminalQueriesFromReplay(history[start:])
 		history = window.withheldAttachOscSuffixTrimmedLocked(history)
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
-		replayHistory := append(images, history...)
+		var replayHistory []byte
+		if window.screenLocked().KittyPlacedImages() {
+			// Its output places its images again, as a shell's does.
+			replayHistory = append(replayHistory, kittyVisiblePlacementsDelete...)
+		}
+		replayHistory = append(append(replayHistory, images...), history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
 				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed),
@@ -11634,9 +11639,9 @@ func (w *muxWindow) shellReplayHistoryLocked(
 }
 
 // kittyVisiblePlacementsDelete deletes the placements on the screen shown,
-// keeping the images (a=d,d=a). A client reopened on a shell window keeps
-// its placements through the replay prefix's ED 2, and the replayed output
-// places its images again: one sent by number or with no id gets a new id
+// keeping the images (a=d,d=a). A client reopened on a shell window, or a
+// ConPTY one showing its normal screen, keeps its placements through the
+// replay prefix's ED 2, and the replayed output places its images again: one sent by number or with no id gets a new id
 // each time, and a display command without a placement id adds a
 // placement, so the client's copy would stay beside the new one, pushed up
 // the screen by the output. The replay places again every image within its
