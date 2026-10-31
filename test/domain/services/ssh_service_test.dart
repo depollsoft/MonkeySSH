@@ -2326,6 +2326,18 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(promptState.status, TerminalShellStatus.prompt);
       expect(promptState.lastExitCode, isNull);
 
+      for (final mark in ['B', 'I']) {
+        expect(
+          applyTerminalShellIntegrationOsc(
+            [mark],
+            previousStatus: TerminalShellStatus.prompt,
+            previousExitCode: 3,
+          ),
+          (status: TerminalShellStatus.editingCommand, lastExitCode: null),
+          reason: mark,
+        );
+      }
+
       final runningState = applyTerminalShellIntegrationOsc(
         const ['C'],
         previousStatus: promptState.status,

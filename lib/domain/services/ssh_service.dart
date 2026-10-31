@@ -853,7 +853,10 @@ applyTerminalShellIntegrationOsc(
         status: TerminalShellStatus.prompt,
         lastExitCode: previousExitCode,
       );
+    // `I` is input too: OSC 133's input to the end of the line, and the end
+    // of a right prompt in OSC 633. MonkeyMux replays end on it.
     case 'B':
+    case 'I':
       return (status: TerminalShellStatus.editingCommand, lastExitCode: null);
     case 'C':
       return (status: TerminalShellStatus.runningCommand, lastExitCode: null);
