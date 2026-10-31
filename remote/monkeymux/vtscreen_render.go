@@ -66,22 +66,6 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	return out
 }
 
-// AlternateShellStatus is what a replay sends on entering the alternate
-// screen again after painting the main screen behind it (RenderMainScreen),
-// before that screen's frame or the program's redraw. The main screen's
-// frame ends with that screen's content, and input there while the shell
-// runs a command whose C came on the alternate screen leaves the app editing
-// it, which neither a redraw nor a frame without marks puts right. C on the
-// alternate screen, whose content is output, puts the app back to running
-// without touching the main screen's content.
-func (s *terminalScreen) AlternateShellStatus() []byte {
-	if s == nil || !s.altActive || s.shell.status != vtShellRunning ||
-		s.semMain.content != vtSemInput || s.semAlt.content != vtSemOutput {
-		return nil
-	}
-	return []byte("\x1b]133;C\x07")
-}
-
 // RenderMainScreen paints the main screen an alternate-screen application
 // hides, with its scrollback and saved cursor, for a client that was reset
 // onto its main screen. A window replay sends it before re-entering the

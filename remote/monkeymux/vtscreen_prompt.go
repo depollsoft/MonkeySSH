@@ -684,6 +684,12 @@ func (f *vtSemanticFrame) content(out []byte, sem uint8) []byte {
 	f.pushed = false
 	switch sem {
 	case vtSemInput:
+		if f.shell.status == vtShellRunning && f.status == vtShellRunning {
+			// VS Code's G makes the next cells input as B does, but the app
+			// keeps its status, so the running command stays running.
+			f.emitted = vtSemInput
+			return append(out, "\x1b]633;G\x07"...)
+		}
 		return f.inputMark(out)
 	case vtSemPrompt:
 		f.emitted = vtSemPrompt

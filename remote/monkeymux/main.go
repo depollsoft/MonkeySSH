@@ -11988,9 +11988,6 @@ func buildWindowReplay(
 	replay = append(replay, mainScreen...)
 	replay = append(replay, preModes...)
 	replay = append(replay, preHistoryClear...)
-	if len(mainScreen) > 0 {
-		replay = append(replay, window.screenLocked().AlternateShellStatus()...)
-	}
 	replay = append(replay, history...)
 	replay = append(replay, postParser...)
 	replay = append(replay, postModes...)

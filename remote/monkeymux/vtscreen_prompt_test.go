@@ -156,18 +156,18 @@ func TestSemanticPromptReadsLongOptions(t *testing.T) {
 // replaySequence is the replay that paints s on an attaching client, as
 // buildWindowReplay builds it: the prefix, which ends with CSI 3 J, the main
 // screen behind an alternate-screen application and the alternate screen
-// entered again, with the shell status put right there, then the frame.
+// entered again, then the frame.
 func replaySequence(s *terminalScreen) string {
 	replay := activeWindowReplayPrefix + string(s.RenderMainScreen())
 	if s.altActive {
-		replay += "\x1b[?1049h" + string(s.AlternateShellStatus())
+		replay += "\x1b[?1049h"
 	}
 	return replay + string(s.RenderFrame())
 }
 
 // A program that answers the replay's resize by redrawing itself paints the
-// alternate screen in place of the model's frame: the replay puts the shell
-// status right before it, after the main screen behind the program.
+// alternate screen in place of the model's frame: the main screen behind the
+// program, painted before it, leaves the app at running itself.
 // That holds also when the alternate screen has prompt options of its own,
 // which the redraw does not carry.
 func TestWindowReplayKeepsTheCommandRunningBehindARedraw(t *testing.T) {
@@ -658,6 +658,8 @@ func TestRenderFrameKeepsTheCommandRunning(t *testing.T) {
 		// which the app reads as editing until the alternate screen's frame.
 		{"C after the program entered the alternate screen", osc133("A") + "$ " + osc133("B") + "vi\r\n\x1b[?1049h" +
 			osc133("C") + "TUI", ""},
+		{"C on the alternate screen, back on the main screen before D", osc133("A") + "$ " + osc133("B") +
+			"vi\r\n\x1b[?1049h" + osc133("C") + "TUI\x1b[?1049l", ""},
 		// A glyph printed again as prompt text changes no status, but D
 		// would end the prompt content.
 		{"saved cursor deferring a wrap on prompt text", osc133("A") + "1234567890\x1b7" + osc133("B") + "cmd\r\n" +
