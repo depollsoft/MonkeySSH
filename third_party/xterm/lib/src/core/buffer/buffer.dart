@@ -230,6 +230,7 @@ class Buffer {
 
   /// Erases the whole viewport.
   void eraseDisplay() {
+    resetWrap();
     for (var i = 0; i < viewHeight; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
@@ -241,6 +242,7 @@ class Buffer {
   /// Erases the line from the cursor to the end of the line, including the
   /// cursor position.
   void eraseLineFromCursor() {
+    resetWrap();
     currentLine.isWrapped = false;
     _eraseRange(currentLine, cursorX, viewWidth);
   }
@@ -248,18 +250,21 @@ class Buffer {
   /// Erases the line from the start of the line to the cursor, including the
   /// cursor.
   void eraseLineToCursor() {
+    resetWrap();
     currentLine.isWrapped = false;
     _eraseRange(currentLine, 0, cursorX + 1);
   }
 
   /// Erases the line at the current cursor position.
   void eraseLine() {
+    resetWrap();
     currentLine.isWrapped = false;
     _eraseRange(currentLine, 0, viewWidth);
   }
 
   /// Erases [count] cells starting at the cursor position.
   void eraseChars(int count) {
+    resetWrap();
     final start = cursorX;
     _eraseRange(currentLine, start, start + count);
   }
@@ -369,6 +374,7 @@ class Buffer {
   /// changing the column position. If the active position is at the bottom
   /// margin, a scroll up is performed.
   void index() {
+    resetWrap();
     if (isInVerticalMargin) {
       if (_cursorY == _marginBottom) {
         // [scrollUp] decides whether the departing row becomes history.
@@ -397,6 +403,7 @@ class Buffer {
 
   /// https://terminalguide.namepad.de/seq/a_esc_cm/
   void reverseIndex() {
+    resetWrap();
     if (isInVerticalMargin) {
       if (_cursorY == _marginTop) {
         scrollDown(1);
@@ -426,6 +433,7 @@ class Buffer {
   /// at the margin it moves toward, as in xterm and the MonkeyMux screen
   /// model; one outside it can reach any row.
   void moveCursorY(int offset) {
+    resetWrap();
     var minY = 0;
     var maxY = viewHeight - 1;
     if (isInVerticalMargin) {
@@ -522,6 +530,7 @@ class Buffer {
   }
 
   void deleteChars(int count) {
+    resetWrap();
     final start = cursorX;
     count = min(count, viewWidth - start);
     currentLine.removeCells(start, count, terminal.cursor);
@@ -549,9 +558,17 @@ class Buffer {
     }
   }
 
+  /// Ends a pending wrap, leaving the cursor on the last column. xterm's
+  /// ResetWrap: every cursor move, erase and line or character edit does
+  /// this, so the glyph after one lands on the last column, not the next
+  /// row. The MonkeyMux screen model does the same.
+  void resetWrap() {
+    _cursorX = cursorX;
+  }
+
   /// ICH. Like xterm, it drops a pending wrap.
   void insertBlankChars(int count) {
-    _cursorX = cursorX;
+    resetWrap();
     currentLine.insertCells(_cursorX, count, terminal.cursor);
   }
 

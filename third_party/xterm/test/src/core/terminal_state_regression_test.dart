@@ -272,6 +272,40 @@ void main() {
       expect(row(terminal, 1), 'ABYDE');
     });
 
+    test('cursor moves, erases and line edits end a pending wrap', () {
+      // xterm resets its deferred wrap (ResetWrap) in CursorUp/Down, IND, RI,
+      // every EL and ED, ECH, DCH, IL and DL; the MonkeyMux screen model does the
+      // same. Keeping it put the next glyph on the following row in the app
+      // where the model overwrote the last column.
+      const sequences = {
+        'CUU': '\x1b[A',
+        'CUD': '\x1b[B',
+        'IND': '\x1bD',
+        'RI': '\x1bM',
+        'LF': '\n',
+        'EL 0': '\x1b[K',
+        'EL 1': '\x1b[1K',
+        'EL 2': '\x1b[2K',
+        'ED 0': '\x1b[J',
+        'ED 1': '\x1b[1J',
+        'ED 2': '\x1b[2J',
+        'ECH': '\x1b[X',
+        'DCH': '\x1b[P',
+        'IL': '\x1b[L',
+        'DL': '\x1b[M',
+      };
+      for (final entry in sequences.entries) {
+        final terminal = Terminal()..resize(5, 4);
+        terminal.write('\x1b[2;1HABCDE');
+        expect(terminal.buffer.isWrapPending, isTrue, reason: entry.key);
+        terminal.write(entry.value);
+        expect(terminal.buffer.isWrapPending, isFalse, reason: entry.key);
+        // IL and DL also move the cursor to the first column, in both.
+        final column = entry.key == 'IL' || entry.key == 'DL' ? 0 : 4;
+        expect(terminal.buffer.cursorX, column, reason: entry.key);
+      }
+    });
+
     test('SOS and PM strings are skipped', () {
       final terminal = Terminal()..resize(10, 1);
       terminal.write('A\x1bXsos\x1b\\B\x1b^pm\x1b\\C');
