@@ -631,6 +631,10 @@ func TestRenderFrameKeepsTheCommandRunning(t *testing.T) {
 			"\r\n\x1b[H", "\x1b[1;6H"},
 		{"program erasing its prompt from home", osc133("A;cl=line") + "$ " + osc133("B") + "cmd" + osc133("C") +
 			"\r\n\x1b[H\x1b[J", "\x1b[1;2H"},
+		// The main screen behind the program keeps its input content,
+		// which the app reads as editing until the alternate screen's frame.
+		{"C after the program entered the alternate screen", osc133("A") + "$ " + osc133("B") + "vi\r\n\x1b[?1049h" +
+			osc133("C") + "TUI", ""},
 		// A glyph printed again as prompt text changes no status, but D
 		// would end the prompt content.
 		{"saved cursor deferring a wrap on prompt text", osc133("A") + "1234567890\x1b7" + osc133("B") + "cmd\r\n" +

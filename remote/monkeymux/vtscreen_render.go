@@ -61,9 +61,24 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	// Last, since restoring a deferred wrap prints a glyph again under the
 	// content it was written as.
 	out = marks.finish(out)
+	out = s.appendAlternateShellStatus(out, marks)
 	out = appendVTCharsets(out, s.g0Graphics, s.g1Graphics, s.shiftOut)
 	out = appendVTSGR(out, s.attrs)
 	return out
+}
+
+// appendAlternateShellStatus puts right the shell status after a frame of the
+// alternate screen that carries no marks of its own. The main screen's
+// frame, painted before it, ends with that screen's content, and input there
+// while the shell runs a command whose C came on the alternate screen leaves
+// the app editing it. C on the alternate screen, whose content is output,
+// puts the app back to running without touching the main screen's content.
+func (s *terminalScreen) appendAlternateShellStatus(out []byte, marks *vtSemanticFrame) []byte {
+	if !s.altActive || marks != nil || s.shell.status != vtShellRunning ||
+		s.semMain.content != vtSemInput || s.semAlt.content != vtSemOutput {
+		return out
+	}
+	return append(out, "\x1b]133;C\x07"...)
 }
 
 // RenderMainScreen paints the main screen an alternate-screen application
