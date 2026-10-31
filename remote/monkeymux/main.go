@@ -11694,6 +11694,25 @@ func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
 	return ok && held == token
 }
 
+// kittyShownImageRootLocked returns the retained main-screen image to send
+// for image, which a display command at the cursor or relative to a parent
+// shows: for an id, the one kept under it; for a number, the one it named
+// before replayedFrom, where the replayed output began in what the model
+// read, since a later one may be another image. It is "" when none will do.
+func (w *muxWindow) kittyShownImageRootLocked(image kittyShownImage, replayedFrom int64) string {
+	root := image.id
+	if root == "" {
+		root = w.kittyImageNumberToID[image.number]
+		if end, ok := w.kittyImageEnd[root]; !ok || end > replayedFrom {
+			return ""
+		}
+	}
+	if w.kittyImages[root] == nil || w.kittyTracking.rootAlt[root] {
+		return ""
+	}
+	return root
+}
+
 // kittyShownImage is an image a display command in a replay shows without
 // the replay sending it first: named by its id, or by its number (I=).
 type kittyShownImage struct {
@@ -11720,11 +11739,11 @@ func (image kittyShownImage) appendDataDelete(out []byte) []byte {
 // history show without history sending them first, which the client may
 // not hold: another window may have sent a different image under the same
 // id or number since. One clientHas reports the client holding is left
-// out. Each comes with the retained main-screen image to send before
-// history: for an id, the one kept under it; for a number, the one it
-// named before replayedFrom, where the replayed output began in what the
-// model read, since a later one may be another image. A virtual placement
-// gets none: the follow-up sends its image and places it again
+// out. Each comes with the retained image to send before history when a
+// placement at the cursor or relative to a parent shows it
+// (kittyShownImageRootLocked), whatever other commands show it and in
+// whatever order. An image only virtual placements show gets none: the
+// follow-up sends it and places them again
 // (replayBytesWithImageFollowUpLocked). Only the commands before history
 // first enters the alternate screen run on the main screen.
 func (w *muxWindow) kittyShownImagesLocked(
@@ -11736,8 +11755,11 @@ func (w *muxWindow) kittyShownImagesLocked(
 		history = history[:changes[0].offset]
 	}
 	events, _ := scanKittyTransmissions(history)
-	var named []string
+	var sent []string
 	var shown []kittyShownImage
+	// shownAt is where each image is in shown: any later command showing it
+	// counts too, whatever its kind.
+	shownAt := map[string]int{}
 	for _, event := range events {
 		image := kittyShownImage{
 			id:     kittyIDValue(event.control["i"]),
@@ -11747,29 +11769,31 @@ func (w *muxWindow) kittyShownImagesLocked(
 		if image.id == "" {
 			key = "I" + image.number
 		}
+		at, known := shownAt[key]
 		switch {
-		case image.id == "" && image.number == "" || slices.Contains(named, key):
+		case image.id == "" && image.number == "" || slices.Contains(sent, key):
 		case !event.placement:
 			if len(event.buf) > 0 && !event.animation {
-				named = append(named, key)
+				sent = append(sent, key)
 			}
 		case event.control["a"] != "p":
 		case image.id != "" && clientHolds(clientHas, image.id, w.kittyImageToken[image.id]):
-			named = append(named, key)
+			sent = append(sent, key)
+		case kittyNonZero(event.control["U"]):
+			// The follow-up places a virtual placement again, after its image.
+			if !known {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
+			}
+		case known && shown[at].root != "":
 		default:
-			named = append(named, key)
-			root := image.id
-			if root == "" {
-				root = w.kittyImageNumberToID[image.number]
-				if end, ok := w.kittyImageEnd[root]; !ok || end > replayedFrom {
-					root = ""
-				}
+			image.root = w.kittyShownImageRootLocked(image, replayedFrom)
+			if known {
+				shown[at].root = image.root
+			} else {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
 			}
-			if !kittyNonZero(event.control["U"]) && w.kittyImages[root] != nil &&
-				!w.kittyTracking.rootAlt[root] {
-				image.root = root
-			}
-			shown = append(shown, image)
 		}
 	}
 	return shown

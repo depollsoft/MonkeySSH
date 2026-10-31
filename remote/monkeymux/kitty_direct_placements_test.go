@@ -672,3 +672,37 @@ func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
 		})
 	}
 }
+
+// TestShellReplaySendsTheImageADirectPlacementShowsBesideAVirtualOne: one
+// image shown by a virtual placement and a direct one, in either order. The
+// follow-up places the virtual one again, but nothing does the direct one,
+// so the replay sends the image before both.
+func TestShellReplaySendsTheImageADirectPlacementShowsBesideAVirtualOne(t *testing.T) {
+	const (
+		virtual = "\x1b_Ga=p,U=1,i=7,p=1,c=1,r=1\x1b\\"
+		direct  = "\x1b_Ga=p,i=7,p=2,c=1,r=1\x1b\\"
+	)
+	for name, shows := range map[string]string{
+		"virtual first": virtual + direct,
+		"direct first":  direct + virtual,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 80, 24)
+			window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+			server.windows = []*muxWindow{window}
+			server.activeID = window.id
+			server.handleWindowOutput(window.id, []byte("\x1b_Ga=t,i=7,"+kittyPixelRoot+"\x1b\\"+
+				strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18)+shows+"\r\n$ "))
+			server.mu.Lock()
+			replay, _ := server.replayBytesWithImageFollowUpLocked(window, map[string]uint32{})
+			server.mu.Unlock()
+			got := string(replay)
+			sent := strings.Index(got, "\x1b_Ga=t,i=7,")
+			placed := strings.Index(got, "\x1b_Ga=p,i=7,p=2,")
+			if sent < 0 || placed < sent || strings.Contains(got, "a=d,d=I") {
+				t.Fatalf("image 7 not sent before its direct placement (image %d, placement %d): %.300q",
+					sent, placed, got)
+			}
+		})
+	}
+}
