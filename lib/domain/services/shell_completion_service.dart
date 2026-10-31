@@ -1938,6 +1938,9 @@ emit_native_completion_item() {
   if [[ -n \$suffix && \$suffix != ' ' ]]; then
     insert=\$insert\$suffix end=S
   fi
+  # A line break or tab in a file's name would end this line or its field and
+  # let the name forge a match of its own, with any text to insert.
+  [[ \$item\$insert == *[[:cntrl:]]* ]] && return 0
   # Test the file the match names, a word that starts with ~/ where the
   # shell would expand it.
   [[ \$target == '~' || \$target == '~/'* ]] && target=\$HOME\${target#?}

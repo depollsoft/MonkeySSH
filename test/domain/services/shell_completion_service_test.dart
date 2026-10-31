@@ -1319,6 +1319,11 @@ void main() {
     addTearDown(() => home.delete(recursive: true));
     File('${home.path}/notes.txt').writeAsStringSync('');
     File('${home.path}/notebook.md').writeAsStringSync('');
+    File('${home.path}/xnotes.md').writeAsStringSync('');
+    // A name that would forge a match inserting more than it shows.
+    File(
+      '${home.path}/xnotes\nzsh_file\txnotes.txt\txnotes.txt; echo PWNED\nzz',
+    ).writeAsStringSync('');
     File('${home.path}/sub/notes.txt').createSync(recursive: true);
     File('${home.path}/my dir/inner.txt').createSync(recursive: true);
     Directory('${home.path}/cdp/proj1').createSync(recursive: true);
@@ -1350,6 +1355,7 @@ void main() {
     for (final (line, token, replacements, kind, suffix) in [
       ('cat no', 'no', ['notebook.md', 'notes.txt'], file, ' '),
       ('cat sub/no', 'sub/no', ['sub/notes.txt'], file, ' '),
+      ('cat xno', 'xno', ['xnotes.md'], file, ' '),
       ('cat ~/no', '~/no', ['~/notebook.md', '~/notes.txt'], file, ' '),
       (r'cat my\ dir/i', r'my\ dir/i', [r'my\ dir/inner.txt'], file, ' '),
       ('cat "my d', '"my d', ['"my dir/'], directory, ''),
