@@ -851,9 +851,10 @@ type muxServer struct {
 	// push holds push notification state, created on first use.
 	push     *pushNotifier
 	pushOnce sync.Once
-	// hiddenClientIDs names the attach clients whose view is hidden
-	// (terminal_visibility.go). Guarded by mu.
-	hiddenClientIDs map[string]struct{}
+	// hiddenClientIDs names the attach clients whose view is hidden, each
+	// with the control connection that said so (terminal_visibility.go).
+	// Guarded by mu.
+	hiddenClientIDs map[string]*controlClient
 }
 
 type muxWindow struct {
@@ -9836,7 +9837,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			return
 		}
 		s.mu.Lock()
-		s.setClientHiddenLocked(request.ClientID, request.Hidden)
+		s.setClientHiddenLocked(request.ClientID, request.Hidden, client)
 		s.mu.Unlock()
 		client.send(controlResponse{ID: request.ID, Type: "client_visibility", Status: "ok"})
 	case "focus_changed":
@@ -9868,6 +9869,7 @@ func (s *muxServer) removeControl(client *controlClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.controls, client)
+	s.releaseClientVisibilityLocked(client)
 }
 
 func (s *muxServer) hasAttachClientByID(clientID string) bool {
