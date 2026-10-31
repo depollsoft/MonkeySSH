@@ -1335,9 +1335,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     top = top.clamp(0, lastRow);
     bottom = (bottom ?? lastRow).clamp(0, lastRow);
     // Like xterm and the MonkeyMux screen model, a region of fewer than two
-    // rows is ignored and a valid one homes the cursor.
+    // rows is ignored and a valid one homes the cursor. The region is the
+    // terminal's, not the screen's: switching screens keeps it, so a program
+    // that leaves the alternate screen without `CSI r` leaves it set for the
+    // shell, as in xterm and the model.
     if (top >= bottom) return;
-    _buffer.setVerticalMargins(top, bottom);
+    _mainBuffer.setVerticalMargins(top, bottom);
+    _altBuffer.setVerticalMargins(top, bottom);
     _buffer.setCursor(0, 0);
   }
 

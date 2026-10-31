@@ -174,5 +174,28 @@ void main() {
 
       expect(terminal.buffer.lines.length, 6);
     });
+
+    test('a region set on the alternate screen stays set on the main screen',
+        () {
+      // xterm keeps one scroll region for both screens, and leaving the
+      // alternate screen does not reset it; the MonkeyMux screen model does
+      // the same. A program that exits without `CSI r` leaves the region
+      // behind, and the shell's next line feed on the bottom row, outside the
+      // region, then moves nothing, while a region of the main screen's own
+      // scrolled the whole screen and put the prompt a row away from the
+      // model's.
+      final terminal = sixRowTerminal();
+
+      terminal.write('\x1b[?1049h\x1b[2;4r\x1b[?1049l');
+
+      expect(terminal.buffer.marginTop, 1);
+      expect(terminal.buffer.marginBottom, 3);
+
+      terminal.write('\r\n');
+
+      expect(terminal.buffer.cursorY, 5);
+      expect(visible(terminal), ['L0', 'L1', 'L2', 'L3', 'L4', 'L5']);
+      expect(terminal.buffer.lines.length, 6);
+    });
   });
 }
