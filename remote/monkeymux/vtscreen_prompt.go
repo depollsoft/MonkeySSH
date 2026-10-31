@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 )
 
@@ -414,16 +415,21 @@ func vtRowEmpty(row []vtCell) bool {
 // history on a clear, and every earlier one in the screen and the replayed
 // scrollback. Only marks without side effects on the screen are used: A at
 // the home of a blank screen, whose mark ED 2 and ED 3 undo again (begin), P
-// for a row's mark, B for input, VS Code's H for prompt text and D for output
-// (vtShellState.appendOutputMark); never C, which the app takes for a
-// command starting, nor I except to end with input that ends with its line.
+// for a row's mark, B for input, VS Code's H for prompt text, D for output
+// (vtShellState.appendOutputMark) and C where a command's output begins; I
+// only to end with input that ends with its line.
 //
-// The client marks a row a newline or a wrap reaches as continuing the prompt
-// while it writes a prompt or its input, so the content is set to output
-// before a row the model leaves unmarked is reached (beforeIndex), and any
-// other mark is set once the row is (beginLine). Inside a row every written
-// cell takes the content it was written as, as does a glyph printed again to
-// restore a deferred wrap (content).
+// The app adds a command mark at the cursor on C and reads it as a command
+// running, which gates its completion and command-review features, so C is
+// emitted where the command started: on the unmarked row that follows a
+// prompt or its input (commandMark), which is also where the client marked
+// the row as continuing the prompt when a newline or a wrap reached it, a
+// mark that C at the start of the row undoes. Any other mark is set once the
+// row is reached (beginLine), and inside a row every written cell takes the
+// content it was written as, as does a glyph printed again to restore a
+// deferred wrap (content). A command the replay shows no start of, its prompt
+// above the replayed scrollback, gets its C before anything is painted
+// (finish).
 type vtSemanticFrame struct {
 	state *vtSemanticState
 	shell *vtShellState
@@ -431,19 +437,28 @@ type vtSemanticFrame struct {
 	// shows from the marks so far.
 	emitted uint8
 	status  uint8
+	// pushed is set while the newlines that push the scrollback above the
+	// screen run with output in force although the last painted cell was
+	// prompt or input (push); commands once a C was emitted; beginAt is where
+	// in the output begin ended, for a C that has to come first.
+	pushed   bool
+	commands bool
+	beginAt  int
 }
 
 // semanticFrame returns the marks to paint g with, and the scrollback when
 // withScrollback is set, or nil when there is nothing to carry: no mark and no
-// cell written as prompt or input, no prompt options and no exit status. The
-// app reads the marks for its shell status, which a screen without shell
-// integration leaves alone.
+// cell written as prompt or input, no prompt options, and, for the main
+// screen, which a replay paints first, no shell status. The app reads the
+// marks for its shell status, which a screen without shell integration
+// leaves alone.
 func (s *terminalScreen) semanticFrame(g *vtGrid, withScrollback bool) *vtSemanticFrame {
 	state := &s.semAlt
 	if g == &s.main {
 		state = &s.semMain
 	}
-	if *state == (vtSemanticState{}) && s.shell == (vtShellState{}) && !s.semanticMarked(g, withScrollback) {
+	if *state == (vtSemanticState{}) && (g != &s.main || s.shell == (vtShellState{})) &&
+		!s.semanticMarked(g, withScrollback) {
 		return nil
 	}
 	return &vtSemanticFrame{state: state, shell: &s.shell}
@@ -487,32 +502,53 @@ func (f *vtSemanticFrame) begin(out []byte) []byte {
 	if f.shell.exit != "" {
 		out = f.outputMark(out)
 	}
+	f.beginAt = len(out)
 	return append(out, "\x1b[2J\x1b[3J"...)
 }
 
-// beforeIndex is called before a newline or a soft wrap reaches a line with
-// mark: the client marks the row it reaches as continuing the prompt unless
-// output is in force.
-func (f *vtSemanticFrame) beforeIndex(out []byte, mark uint8) []byte {
-	if f == nil || mark != vtPromptNone {
+// push is called before the newlines that push the scrollback above the
+// screen: the rows they push in are painted afterwards, where a row's mark
+// is set, so here they must take none.
+func (f *vtSemanticFrame) push(out []byte) []byte {
+	if f == nil || f.emitted == vtSemOutput {
 		return out
 	}
-	return f.content(out, vtSemOutput)
+	out = f.outputMark(out)
+	f.pushed = true
+	return out
 }
 
 // beginLine is called with the cursor at the start of a line with mark, which
-// a newline or a soft wrap reached when indexed is set. The mark the client
-// gave the row on reaching it is kept; any other is set, which makes the next
-// cells prompt.
-func (f *vtSemanticFrame) beginLine(out []byte, mark uint8, indexed bool) []byte {
-	if f == nil || mark == vtPromptNone {
+// a newline or a soft wrap reached when indexed is set, and which has a
+// written cell or the cursor on it when written is set. An unmarked line
+// after a prompt or its input is where its command's output begins (C, which
+// also undoes the continuation mark the client gave a line reached by a
+// newline or a wrap), unless it is a blank line the shell never reached. On a
+// marked line the mark the client gave the row on reaching it is kept; any
+// other is set, which makes the next cells prompt.
+func (f *vtSemanticFrame) beginLine(out []byte, mark uint8, indexed, written bool) []byte {
+	if f == nil {
 		return out
 	}
+	if mark == vtPromptNone {
+		if indexed && f.emitted != vtSemOutput || !indexed && written && (f.emitted != vtSemOutput || f.pushed) {
+			return f.commandMark(out)
+		}
+		return out
+	}
+	f.pushed = false
 	if indexed && f.emitted != vtSemOutput && mark == vtPromptContinuation {
 		return out
 	}
 	f.emitted = vtSemPrompt
 	return appendVTPromptMark(out, mark)
+}
+
+// commandMark is C: the command whose prompt or input was painted last runs
+// from here. The app clears the exit status with it, as the shell's C did.
+func (f *vtSemanticFrame) commandMark(out []byte) []byte {
+	f.emitted, f.status, f.pushed, f.commands = vtSemOutput, vtShellRunning, false, true
+	return append(out, "\x1b]133;C\x07"...)
 }
 
 // content is called before a cell is written as sem, or printed again as it
@@ -521,6 +557,7 @@ func (f *vtSemanticFrame) content(out []byte, sem uint8) []byte {
 	if f == nil || sem == f.emitted {
 		return out
 	}
+	f.pushed = false
 	switch sem {
 	case vtSemInput:
 		return f.inputMark(out)
@@ -542,17 +579,22 @@ func (f *vtSemanticFrame) outputMark(out []byte) []byte {
 }
 
 // finish leaves the client writing what the model is, whatever the last
-// painted cell was, and the app showing the status the model has, as far as
-// a mark without side effects can say: the prompt (D, with the exit status)
-// or the command being edited (B), set before the content when the content
-// alone would leave the app elsewhere. A command running (C) cannot be said,
-// and the content comes first: input that ended with its line (I) before its
-// command started leaves the app showing the prompt rather than the command
-// being edited. The cursor's row is painted already, so only the content is
-// set, never a mark.
+// painted cell was, and the app showing the status the model has: the prompt
+// (D, with the exit status) or the command being edited (B), set before the
+// content when the content alone would leave the app elsewhere, or a command
+// running, whose C the frame emitted where its output begins, or, when its
+// prompt is above what the frame replays, puts before everything painted,
+// where the app marks the first replayed line. The content comes first:
+// input that ended with its line (I) before its command started leaves the
+// app showing the prompt rather than the command being edited. The cursor's
+// row is painted already, so only the content is set, never a mark.
 func (f *vtSemanticFrame) finish(out []byte) []byte {
 	if f == nil {
 		return out
+	}
+	if f.shell.status == vtShellRunning && !f.commands {
+		out = slices.Insert(out, f.beginAt, []byte("\x1b]133;C\x07")...)
+		f.commands = true
 	}
 	if f.state.content == vtSemInput && f.state.eolInput {
 		f.status = vtShellEditing

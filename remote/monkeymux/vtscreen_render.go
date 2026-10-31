@@ -141,17 +141,16 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 					prev = s.scrollback.at(i-1).decode(&decoder, s.width)
 				}
 				cells = line.decode(&decoder, s.width)
-				out = appendVTSoftWrap(out, prev, cells, s.height > 1, marks, line.prompt)
+				out = appendVTSoftWrap(out, prev, cells, s.height > 1, marks)
 				// The wrap scrolled this row in while the glyph it printed set
 				// the rendition, so the row may be filled with that background,
 				// and the stored line skips the cells it leaves default. Erase
 				// the row first, with ECH since EL would also clear the wrap.
 				out = appendVTCSICount(out, s.width, 'X')
 			case i > 0:
-				out = marks.beforeIndex(out, line.prompt)
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			out = marks.beginLine(out, line.prompt, i > 0)
+			out = marks.beginLine(out, line.prompt, i > 0, true)
 			if marks != nil && (line.prompt != vtPromptNone || len(line.sem) > 0) {
 				// A line with a mark, or a cell written as prompt or input,
 				// is painted from its cells, so they travel with it.
@@ -168,16 +167,14 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			if prev == nil {
 				prev = s.scrollback.at(history-1).decode(&decoder, s.width)
 			}
-			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1, marks, g.prompt[0])
+			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1, marks)
 			// Erased for the same reason; the row is painted below.
 			out = appendVTCSICount(out, s.width, 'X')
 		} else {
-			out = marks.beforeIndex(out, vtPromptNone)
 			out = append(out, "\x1b[0m\r\n"...)
 		}
-		// The blank rows the newlines push in are painted below, where a
-		// row's mark is set; here they must take none.
-		out = marks.beforeIndex(out, vtPromptNone)
+		out = marks.beginLine(out, g.prompt[0], true, true)
+		out = marks.push(out)
 		for i := 1; i < s.height; i++ {
 			out = append(out, "\r\n"...)
 		}
@@ -185,11 +182,11 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	for r, row := range g.rows {
 		softWrap := r > 0 && g.wrapped[r]
 		if softWrap {
-			out = appendVTSoftWrap(out, g.rows[r-1], row, true, marks, g.prompt[r])
+			out = appendVTSoftWrap(out, g.rows[r-1], row, true, marks)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
-		out = marks.beginLine(out, g.prompt[r], softWrap)
+		out = marks.beginLine(out, g.prompt[r], softWrap, !vtRowReclaimable(row) || r == g.cursorRow)
 		before := len(out)
 		out = renderVTCellsMarked(out, row, marks)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
@@ -293,22 +290,21 @@ func (s *terminalScreen) renderedSoftWraps(g *vtGrid, withScrollback bool) bool 
 // the erase, so a stand-in there would stay written. That wrap is dropped
 // instead, unless it needs no stand-in.
 //
-// A glyph printed again keeps the content it was written as, and the wrap
-// finds the content the row it reaches, with mark, needs (marks).
-func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks *vtSemanticFrame, mark uint8) []byte {
+// A glyph printed again keeps the content it was written as (marks); the
+// row's own cells are painted again afterwards, so the content the glyph that
+// wraps onto it is printed under does not matter.
+func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks *vtSemanticFrame) []byte {
 	width := len(prev)
 	if last := prev[width-1]; last.unwritten() && width > 1 && len(next) > 1 &&
 		next[0].r != 0 && next[0].width == 2 && last.attrs == (vtAttrs{bg: next[0].attrs.bg}) {
 		// How the client gets here itself: a wide glyph printed in the last
 		// column erases that cell with the glyph's background and wraps.
-		out = marks.beforeIndex(out, mark)
 		out = append(out, "\x1b[0m"...)
 		out = appendVTCSICount(out, width, 'G')
 		out = renderVTGlyphs(out, next[:2])
 		return append(out, "\x1b[0m\r"...)
 	}
 	if !prevOnScreen && !vtSoftWrapEdgePrintable(prev) {
-		out = marks.beforeIndex(out, mark)
 		return append(out, "\x1b[0m\r\n"...)
 	}
 	out = append(out, "\x1b[0m"...)
@@ -328,7 +324,6 @@ func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks 
 		eraseLast = true
 	}
 	out = append(out, "\x1b[0m"...)
-	out = marks.beforeIndex(out, mark)
 	eraseFirst := false
 	switch first := next[0]; {
 	case first.r != 0 && first.width == 2 && len(next) > 1:

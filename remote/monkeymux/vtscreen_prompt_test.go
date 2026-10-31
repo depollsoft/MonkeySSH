@@ -290,8 +290,8 @@ func TestRenderFrameCarriesEveryPrompt(t *testing.T) {
 			if got := dumpSemanticPrompt(replica); strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
-			if got, want := replica.shell.exit, s.shell.exit; got != want {
-				t.Fatalf("exit status %q, want %q", got, want)
+			if got, want := replica.shell, s.shell; got != want {
+				t.Fatalf("shell state %+v, want %+v", got, want)
 			}
 			if s.altActive {
 				replica.Write([]byte("\x1b[?1049l"))
@@ -304,14 +304,61 @@ func TestRenderFrameCarriesEveryPrompt(t *testing.T) {
 	}
 }
 
-// A frame never carries C, which the app reads as a command starting and
-// marks, and carries no mark at all for a screen without shell integration.
+// A frame carries C, which the app reads as a command running and marks at
+// the cursor, only where a command's output begins: on the row after its
+// prompt's input, on the screen or in the scrollback, before the first output
+// when the prompt is above what the frame replays, and not at all for a
+// prompt whose command ended, a screen without shell integration or the
+// alternate screen a running program shows.
 func TestRenderFrameMarksOnlyWhatTheModelMarks(t *testing.T) {
 	s := newTerminalScreen(20, 5)
 	s.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "sleep 9\r\n" + osc133("C") + "running"))
-	if frame := string(s.RenderFrame()); strings.Contains(frame, "\x1b]133;C") {
-		t.Fatalf("frame carries C: %q", frame)
+	frame := string(s.RenderFrame())
+	if !strings.Contains(frame, "\x1b[2;1H"+osc133("C")+"running") || strings.Count(frame, osc133("C")) != 1 {
+		t.Fatalf("frame does not start the command on its output row: %q", frame)
 	}
+	if status, _ := shellStatusAfter(t, []byte(frame), "prompt", ""); status != "running" {
+		t.Fatalf("after the frame the app shows %s, want running", status)
+	}
+
+	history := newTerminalScreen(20, 1)
+	history.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "sleep 9\r\n" + osc133("C") + "line\r\nmore"))
+	frame = string(history.RenderFrame())
+	if !strings.Contains(frame, "\r\n"+osc133("C")+"line") || strings.Count(frame, osc133("C")) != 1 {
+		t.Fatalf("frame does not start the command on its scrollback line: %q", frame)
+	}
+
+	scrolled := newTerminalScreen(20, 2)
+	scrolled.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "yes\r\n" + osc133("C") +
+		strings.Repeat("y\r\n", vtScrollbackLimit+5)))
+	frame = string(scrolled.RenderFrame())
+	if !strings.HasPrefix(frame[strings.Index(frame, "\x1b]133;A"):], osc133("A;cl=line")+osc133("C")+"\x1b[2J\x1b[3J") ||
+		strings.Count(frame, osc133("C")) != 1 {
+		t.Fatalf("frame of a scrolled-out prompt does not start the command first: %q", frame)
+	}
+	if status, _ := shellStatusAfter(t, []byte(frame), "prompt", "3"); status != "running" {
+		t.Fatalf("after the frame the app shows %s, want running", status)
+	}
+
+	ended := newTerminalScreen(20, 5)
+	ended.Write([]byte(osc133("A") + "$ " + osc133("B") + "x\r\n" + osc133("C") + "out\r\n" + osc133("D;0") + osc133("A") + "$ "))
+	frame = string(ended.RenderFrame())
+	if !strings.Contains(frame, "\x1b[2;1H"+osc133("C")+"out") || strings.Count(frame, osc133("C")) != 1 {
+		t.Fatalf("frame does not mark the earlier command: %q", frame)
+	}
+	if status, exit := shellStatusAfter(t, []byte(frame), "running", ""); status != "prompt" || exit != "0" {
+		t.Fatalf("after the frame the app shows %s %q, want prompt 0", status, exit)
+	}
+
+	alt := newTerminalScreen(20, 5)
+	alt.Write([]byte(osc133("A") + "$ " + osc133("B") + "vi\r\n" + osc133("C") + "\x1b[?1049hediting"))
+	if frame := string(alt.RenderFrame()); strings.Contains(frame, "\x1b]133") {
+		t.Fatalf("alternate screen frame carries marks: %q", frame)
+	}
+	if frame := string(alt.RenderMainScreen()); !strings.Contains(frame, "\x1b[2;1H"+osc133("C")) {
+		t.Fatalf("main screen behind the program does not start its command: %q", frame)
+	}
+
 	plain := newTerminalScreen(20, 5)
 	plain.Write([]byte("$ ls\r\nout\r\n$ "))
 	if frame := string(plain.RenderFrame()); strings.Contains(frame, "\x1b]133") || strings.Contains(frame, "\x1b]633") {
@@ -348,6 +395,13 @@ func TestRenderFrameEndsWithTheExitStatus(t *testing.T) {
 	}
 	if status, exit := shellStatusAfter(t, s.RenderFrame(), "editing", ""); status != "prompt" || exit != "0" {
 		t.Fatalf("after the frame the app shows %s %q, want prompt 0", status, exit)
+	}
+	s.Write([]byte(osc133("B") + "sleep\r\n" + osc133("C")))
+	if s.shell != (vtShellState{status: vtShellRunning}) {
+		t.Fatalf("after C: %+v", s.shell)
+	}
+	if status, exit := shellStatusAfter(t, s.RenderFrame(), "prompt", "4"); status != "running" || exit != "" {
+		t.Fatalf("after the frame the app shows %s %q, want running", status, exit)
 	}
 }
 

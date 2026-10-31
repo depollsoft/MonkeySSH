@@ -45,6 +45,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
+import 'package:monkeyssh/domain/services/terminal_command_mark_tracker.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
@@ -2379,8 +2380,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
     test('reads the shell status a MonkeyMux replay ends with', () {
       // The screen model's frames (remote/monkeymux/vtscreen_prompt.go)
       // re-emit the marks of every prompt they paint, and end with the status
-      // and exit code the model has. A command running cannot be said: the
-      // frame never carries C, which would add a command mark.
+      // and exit code the model has. A running command's C is emitted where
+      // its output begins, so the command mark lands on that row.
       final fixture = File(
         'remote/monkeymux/testdata/semantic_prompt_parity.json',
       );
@@ -2389,53 +2390,64 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         return;
       }
       final cases = jsonDecode(fixture.readAsStringSync()) as List<dynamic>;
-      const expected = <String, ({TerminalShellStatus status, int? exit})>{
-        'a replayed screen keeps every earlier prompt': (
-          status: TerminalShellStatus.editingCommand,
-          exit: null,
-        ),
-        'a replayed prompt keeps the exit status of the last command': (
-          status: TerminalShellStatus.prompt,
-          exit: 1,
-        ),
-        'a replayed running command keeps the prompt above it': (
-          status: TerminalShellStatus.prompt,
-          exit: null,
-        ),
-        'a replayed alternate screen keeps the marks of both screens': (
-          status: TerminalShellStatus.editingCommand,
-          exit: null,
-        ),
-      };
+      const expected =
+          <String, ({TerminalShellStatus status, int? exit, List<int> marks})>{
+            'a replayed screen keeps every earlier prompt': (
+              status: TerminalShellStatus.editingCommand,
+              exit: null,
+              marks: [1],
+            ),
+            // A command without output started on the row its prompt's successor
+            // took, which the frame paints as a prompt: no mark comes back.
+            'a replayed prompt keeps the exit status of the last command': (
+              status: TerminalShellStatus.prompt,
+              exit: 1,
+              marks: [],
+            ),
+            'a replayed running command keeps the prompt above it': (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [1],
+            ),
+            'a replayed alternate screen keeps the marks of both screens': (
+              status: TerminalShellStatus.editingCommand,
+              exit: null,
+              marks: [],
+            ),
+          };
       final seen = <String>{};
       for (final raw in cases) {
         final testCase = raw as Map<String, dynamic>;
         final frame = testCase['frame'] as String?;
         if (frame == null) continue;
         final name = testCase['name'] as String;
+        final size = (testCase['size'] as List).cast<int>();
+        final terminal = Terminal()..resize(size[0], size[1]);
+        final tracker = TerminalCommandMarkTracker()..attach(terminal);
         // The status another window left behind.
         ({TerminalShellStatus? status, int? lastExitCode}) state = (
           status: TerminalShellStatus.runningCommand,
           lastExitCode: 7,
         );
-        for (final osc in frame.split('\x1b]').skip(1)) {
-          final payload = osc.substring(0, osc.indexOf('\x07'));
-          if (!payload.startsWith('133;') && !payload.startsWith('633;')) {
-            continue;
+        terminal
+          ..onPrivateOSC = (code, args) {
+            tracker.handlePrivateOsc(code, args);
+            if (code != '133' && code != '633') return;
+            state = applyTerminalShellIntegrationOsc(
+              args,
+              previousStatus: state.status,
+              previousExitCode: state.lastExitCode,
+            );
           }
-          final args = payload.substring(4).split(';');
-          expect(args.first, isNot('C'), reason: name);
-          state = applyTerminalShellIntegrationOsc(
-            args,
-            previousStatus: state.status,
-            previousExitCode: state.lastExitCode,
-          );
-        }
+          ..write(frame);
         final want = expected[name];
         if (want == null) continue;
         seen.add(name);
         expect(state.status, want.status, reason: name);
         expect(state.lastExitCode, want.exit, reason: name);
+        // On the main screen: the alternate screen a program shows has none.
+        if (terminal.isUsingAltBuffer) terminal.write('\x1b[?1049l');
+        expect(tracker.debugMarkRows, want.marks, reason: name);
       }
       expect(seen, expected.keys.toSet());
     });
