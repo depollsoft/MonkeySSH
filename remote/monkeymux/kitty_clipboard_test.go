@@ -1723,6 +1723,17 @@ var answerKittyClipboardRequestInPlaceOf = []struct {
 		server.handleWindowOutput("@1", []byte("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"))
 		return "\x1b]5522;type=write:status=EPERM:id=" + tag + "\x1b\\", client
 	}},
+	{"write replaced", func(t *testing.T, server *muxServer, first *muxWindow, client *attachClient) (string, *attachClient) {
+		// The program starts another write off screen, which replaces the
+		// one the client has without a reply from MonkeyMux.
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=w\x1b\\"))
+		tag := forwardedKittyClipboardTag(t, server, first, "w")
+		server.mu.Lock()
+		server.activeID = "@2"
+		server.mu.Unlock()
+		server.handleWindowOutput("@1", []byte("\x1b]5522;type=write:id=v\x1b\\"))
+		return "\x1b]5522;type=write:status=EPERM:id=" + tag + "\x1b\\", client
+	}},
 	{"failed over", func(t *testing.T, server *muxServer, first *muxWindow, client *attachClient) (string, *attachClient) {
 		// The write to the stalled client fails after it has read the
 		// request, which then fails over to the other client.
