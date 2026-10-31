@@ -89,8 +89,12 @@ List<TerminalPreviewImage> _resolveClassicPlacements(
         colSpan: colSpan,
         rowSpan: rowSpan,
         // Kitty keeps the offsets inside the live terminal's first cell.
-        xOffset: placement.cellXOffset(graphics.cellPixelWidth),
-        yOffset: placement.cellYOffset(graphics.cellPixelHeight),
+        xOffset:
+            placement.cellXOffset(graphics.cellPixelWidth) /
+            graphics.cellPixelWidth,
+        yOffset:
+            placement.cellYOffset(graphics.cellPixelHeight) /
+            graphics.cellPixelHeight,
         z: placement.z,
         order: placement.placementId,
         fitToWidth: fitToWidth,

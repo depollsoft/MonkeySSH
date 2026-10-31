@@ -82,10 +82,12 @@ class TerminalPreviewImage {
   /// true (the height is derived from the fitted width).
   final int rowSpan;
 
-  /// Horizontal pixel offset within the top-left cell (Kitty `X=`).
+  /// Horizontal offset within the top-left cell (Kitty `X=`), as a fraction
+  /// of a cell so it scales with the preview's cells.
   final double xOffset;
 
-  /// Vertical pixel offset within the top-left cell (Kitty `Y=`).
+  /// Vertical offset within the top-left cell (Kitty `Y=`), as a fraction of
+  /// a cell.
   final double yOffset;
 
   /// Z-index. Negative values are drawn behind the terminal text.
