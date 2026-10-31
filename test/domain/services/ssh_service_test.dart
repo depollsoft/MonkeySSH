@@ -2387,6 +2387,25 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(terminal.lines[1].getText().trimRight(), 'f');
     });
 
+    test('releases a sequence CAN or SUB cancels', () {
+      for (final cancel in ['\x18', '\x1a']) {
+        for (final start in [
+          '\x1b]0;tit',
+          '\x1b_Ga=q',
+          '\x1bP1\$r',
+          '\x1b[3',
+        ]) {
+          final terminal = Terminal(maxLines: 100);
+          final decoder = TerminalXtermOutputDecoder();
+
+          terminal.write(decoder.add(input: '$start${cancel}VISIBLE'));
+
+          expect(decoder.pendingCodeUnits, 0, reason: start);
+          expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
+        }
+      }
+    });
+
     test('adapts split insert mode sequences across chunks', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();

@@ -528,6 +528,13 @@ class TerminalXtermOutputDecoder {
   }
 
   void _scanSequenceCodeUnit(int codeUnit) {
+    // CAN and SUB cancel any sequence, as they do in the terminal's parser;
+    // holding on would keep the text after them back until a later BEL or ST.
+    if (codeUnit == _terminalCancelCodeUnit ||
+        codeUnit == _terminalSubstituteCodeUnit) {
+      _state = null;
+      return;
+    }
     switch (_state!) {
       case _TerminalSequenceState.escape:
         switch (codeUnit) {
@@ -599,6 +606,8 @@ String? _buildTerminalWindowQueryResponse(
 const _terminalEscape = '\x1b';
 const _terminalEscapeCodeUnit = 0x1B;
 const _terminalBellCodeUnit = 0x07;
+const _terminalCancelCodeUnit = 0x18;
+const _terminalSubstituteCodeUnit = 0x1A;
 const _terminalCsiIntroducerCodeUnit = 0x5B;
 const _terminalDcsIntroducerCodeUnit = 0x50;
 const _terminalOscIntroducerCodeUnit = 0x5D;
