@@ -64,7 +64,10 @@ const (
 	// reply is assumed to be sending it. Only then is an input read that ends
 	// in a partial `ESC ] 5522 ;` held back, since otherwise a lone trailing
 	// ESC is the Escape key; a request the client never answers stops
-	// holding it back after this long.
+	// holding it back after this long, rather than delaying that key by
+	// kittyClipboardAmbiguousCarryTimeout for as long as the request stays
+	// open. A read the client has begun answering owes the rest of its
+	// answer however long it takes.
 	kittyClipboardRepliesOwedGrace = 5 * time.Second
 
 	// kittyClipboardAmbiguousCarryTimeout releases input held back because
@@ -174,9 +177,13 @@ type kittyClipboardInputState struct {
 	// outstanding counts the requests forwarded to the client that it has
 	// not finished answering. owedUntil is kittyClipboardRepliesOwedGrace
 	// after a packet of one last went to it or a reply last came back, in
-	// unix nanoseconds. A reply is owed while both say so.
+	// unix nanoseconds. replying counts the reads among them the client has
+	// begun answering, which owe the rest of their answer however long it
+	// takes. A reply is owed while outstanding and owedUntil both say so, or
+	// replying does.
 	outstanding atomic.Int32
 	owedUntil   atomic.Int64
+	replying    atomic.Int32
 	// departed is set once MonkeyMux has answered the requests the client
 	// left when it went away; a request handed to it later is answered the
 	// same way.
@@ -674,6 +681,9 @@ func (w *muxWindow) removeKittyClipboardRequestLocked(index int) {
 	state := &w.kittyClipboard
 	if client := state.requests[index].client; client != nil {
 		client.kittyClipboardInput.outstanding.Add(-1)
+		if state.requests[index].replied {
+			client.kittyClipboardInput.replying.Add(-1)
+		}
 	}
 	for _, bystander := range state.requests[index].bystanders {
 		bystander.kittyClipboardInput.outstanding.Add(-1)
@@ -876,8 +886,9 @@ func (s *muxServer) takeKittyClipboardReply(
 	id := window.kittyClipboard.requests[index].id
 	if metadata.op == "write" || (metadata.status != "OK" && metadata.status != "DATA") {
 		window.removeKittyClipboardRequestLocked(index)
-	} else {
-		window.kittyClipboard.requests[index].replied = true
+	} else if request := &window.kittyClipboard.requests[index]; !request.replied {
+		request.replied = true
+		client.kittyClipboardInput.replying.Add(1)
 	}
 	restored := "\x1b]" + kittyClipboardOscCode + ";" + metadata.withID(id)
 	if hasData {
@@ -908,6 +919,13 @@ func (s *muxServer) failKittyClipboardRequestsLocked(client *attachClient) {
 			s.queueWindowReply(window, replies)
 		}
 	}
+}
+
+// repliesOwed reports whether the client may be partway through sending a
+// reply at now.
+func (state *kittyClipboardInputState) repliesOwed(now time.Time) bool {
+	return state.replying.Load() > 0 ||
+		(state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load())
 }
 
 func noteKittyClipboardRepliesOwed(owedUntil *atomic.Int64, now time.Time) {
@@ -968,7 +986,7 @@ func (c *attachClient) splitKittyClipboardRepliesLocked(
 	if bytes.IndexByte(data, '\x1b') < 0 {
 		return data, nil
 	}
-	owed := state.outstanding.Load() > 0 && now.UnixNano() < state.owedUntil.Load()
+	owed := state.repliesOwed(now)
 	inPaste := func(index int) bool {
 		for len(pasted) > 0 && pasted[0][1] <= index {
 			pasted = pasted[1:]

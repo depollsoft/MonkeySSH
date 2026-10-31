@@ -29,8 +29,7 @@ func oweKittyClipboardReplies(client *attachClient) {
 }
 
 func kittyClipboardRepliesOwed(client *attachClient) bool {
-	state := &client.kittyClipboardInput
-	return state.outstanding.Load() > 0 && time.Now().UnixNano() < state.owedUntil.Load()
+	return client.kittyClipboardInput.repliesOwed(time.Now())
 }
 
 func newKittyClipboardTestServer(t *testing.T) (*muxServer, *muxWindow, *muxWindow, *recordingConn) {
@@ -1175,6 +1174,48 @@ func TestKittyClipboardRepliesAreOwedOnlyWhileARequestIsOpen(t *testing.T) {
 	}
 }
 
+// Once a client has begun answering a read, the rest of its answer is held
+// back when a read splits it, however long it takes to come: the grace only
+// covers a request the client never answers.
+func TestKittyClipboardReadBeingAnsweredOwesItsRestPastTheGrace(t *testing.T) {
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	server.mu.Lock()
+	client := server.attachClients[attach]
+	server.mu.Unlock()
+	split := func(data string, now time.Time) string {
+		t.Helper()
+		client.inputDispatchMu.Lock()
+		input, replies := client.splitKittyClipboardRepliesLocked([]byte(data), now)
+		client.inputDispatchMu.Unlock()
+		for _, action := range replies {
+			server.takeKittyClipboardReply(client, action.windowID, action.data)
+		}
+		return string(input)
+	}
+
+	server.handleWindowOutput("@1", []byte("\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\"))
+	tag := ":id=" + forwardedKittyClipboardTag(t, server, first, "r")
+	split("\x1b]5522;type=read:status=OK"+tag+"\x1b\\", time.Now())
+
+	late := time.Now().Add(kittyClipboardRepliesOwedGrace + time.Second)
+	data := "\x1b]5522;type=read:status=DATA" + tag + ":mime=dGV4dC9wbGFpbg==;aGk=\x1b\\"
+	for cut := 1; cut < len(kittyClipboardOscIntroducer); cut++ {
+		if got := split("x"+data[:cut], late); got != "x" {
+			t.Fatalf("cut %d: input = %q, want the start of the DATA packet held", cut, got)
+		}
+		if got := split(data[cut:]+"y", late); got != "y" {
+			t.Fatalf("cut %d: input = %q, want only what follows the DATA packet", cut, got)
+		}
+	}
+	split("\x1b]5522;type=read:status=DONE"+tag+"\x1b\\", late)
+	if got := split("x\x1b", late.Add(kittyClipboardRepliesOwedGrace+time.Second)); got != "x\x1b" {
+		t.Fatalf("input = %q, want the Escape key kept once the read is done", got)
+	}
+	if got := client.kittyClipboardInput.replying.Load(); got != 0 {
+		t.Fatalf("client is still answering %d reads", got)
+	}
+}
+
 // forwardedKittyClipboardTag returns the id MonkeyMux gave the request in a
 // client's output whose own id was id.
 func forwardedKittyClipboardTag(t *testing.T, server *muxServer, window *muxWindow, id string) string {
@@ -1535,6 +1576,7 @@ func TestKittyClipboardBystanderOwesTheReadWhileItIsOpen(t *testing.T) {
 	server.mu.Lock()
 	clientB := server.attachClients[attachB]
 	clientA.kittyClipboardInput.outstanding.Add(1)
+	clientA.kittyClipboardInput.replying.Add(1)
 	first.kittyClipboard.requests = append(first.kittyClipboard.requests, kittyClipboardRequest{
 		tag: "mmx1.1", op: "read", id: "r", client: clientA, delivering: true, replied: true,
 	})
@@ -1563,6 +1605,9 @@ func TestKittyClipboardBystanderOwesTheReadWhileItIsOpen(t *testing.T) {
 	server.mu.Unlock()
 	if a, b := clientA.kittyClipboardInput.outstanding.Load(), clientB.kittyClipboardInput.outstanding.Load(); a != 0 || b != 0 {
 		t.Fatalf("after the read ends the clients owe %d and %d replies, want 0", a, b)
+	}
+	if got := clientA.kittyClipboardInput.replying.Load(); got != 0 {
+		t.Fatalf("after the read ends client A is answering %d reads, want 0", got)
 	}
 }
 
