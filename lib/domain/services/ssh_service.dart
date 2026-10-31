@@ -1262,16 +1262,31 @@ class _InteractiveAuthHandlers {
   final SSHUserInfoRequestHandler? onUserInfoRequest;
 }
 
-/// Tracks whether an interactive authentication prompt is currently open so
-/// the authentication timeout can pause while the user types.
+/// Tracks the interactive authentication prompts of one connection attempt:
+/// whether one is open, so the authentication timeout can pause while the
+/// user types, and whether the last one was answered, so a connection the
+/// server drops while checking the answer can be retried without asking the
+/// user to type the password again.
 class _InteractiveAuthGate {
   int _activePrompts = 0;
+  Completer<void>? _idle;
+  bool _answeredLastPrompt = false;
+  String? _typedPassword;
+  String? _replayPassword;
 
   /// Invoked whenever a prompt opens or closes.
   void Function()? onActivityChanged;
 
   /// Whether at least one interactive prompt is currently awaiting input.
   bool get isPrompting => _activePrompts > 0;
+
+  /// Whether the last password or keyboard-interactive request was answered
+  /// rather than declined.
+  bool get answeredLastPrompt => _answeredLastPrompt;
+
+  /// Completes once no prompt is open.
+  Future<void> get idle =>
+      isPrompting ? (_idle ??= Completer<void>()).future : Future.value();
 
   /// Runs [action] while marking a prompt as active for its duration.
   Future<T> guard<T>(Future<T> Function() action) async {
@@ -1281,8 +1296,45 @@ class _InteractiveAuthGate {
       return await action();
     } finally {
       _activePrompts--;
+      if (_activePrompts == 0) {
+        _idle?.complete();
+        _idle = null;
+      }
       onActivityChanged?.call();
     }
+  }
+
+  /// Records that a request was answered. [typedPassword] is a password the
+  /// user typed, which [startRetry] offers to the next attempt.
+  void recordAnswer({String? typedPassword}) {
+    _answeredLastPrompt = true;
+    if (typedPassword != null) {
+      _typedPassword = typedPassword;
+    }
+  }
+
+  /// Records that the user declined a request.
+  void recordDeclined() => _answeredLastPrompt = false;
+
+  /// Prepares to authenticate again on a new connection. The first password
+  /// request of that attempt is answered with the password the user typed.
+  void startRetry() {
+    _answeredLastPrompt = false;
+    _replayPassword = _typedPassword;
+  }
+
+  /// Returns the password saved by [startRetry], once.
+  String? takeReplayPassword() {
+    final password = _replayPassword;
+    _replayPassword = null;
+    return password;
+  }
+
+  /// Drops the typed password once it can no longer be needed. The client's
+  /// auth callbacks keep this gate alive for as long as the connection.
+  void forgetTypedPassword() {
+    _typedPassword = null;
+    _replayPassword = null;
   }
 }
 
@@ -1297,6 +1349,8 @@ class SshService {
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
     this.wifiPermissionTimeout = const Duration(seconds: 15),
+    this.reconnectAfterDropWindow = const Duration(seconds: 45),
+    this.reconnectAfterDropRetryDelay = const Duration(seconds: 2),
     this.onNonFatalError,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
@@ -1343,6 +1397,16 @@ class SshService {
   /// connecting through the jump host. A prompt the user leaves open, or one
   /// the OS never answers, must not hold the connection.
   final Duration wifiPermissionTimeout;
+
+  /// How long reconnecting after the server dropped the connection during
+  /// sign-in keeps trying to reach it. A Mac unlocked over SSH after a
+  /// restart (FileVault) restarts every process, sshd and its network
+  /// included, and takes several seconds to accept connections again.
+  final Duration reconnectAfterDropWindow;
+
+  /// Pause between attempts to reach the server within
+  /// [reconnectAfterDropWindow].
+  final Duration reconnectAfterDropRetryDelay;
 
   /// Reports an error the connection recovered from but that points at a bug,
   /// such as the permissions channel never having been registered.
@@ -1956,6 +2020,95 @@ class SshService {
           parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
 
+      /// A [timeout] shorter than the connection timeout also bounds opening
+      /// the tunnel through a jump host, which otherwise has no limit.
+      Future<SSHSocket> openEndpointSocket({Duration? timeout}) {
+        final tunnelClient = jumpClient;
+        if (tunnelClient != null) {
+          // Create forwarded connection through jump host.
+          // SSHForwardChannel implements SSHSocket.
+          report(
+            SshConnectionState.connecting,
+            'Opening tunnel to destination…',
+          );
+          final forwarding = tunnelClient.forwardLocal(
+            config.hostname,
+            config.port,
+          );
+          return guard(
+            timeout == null
+                ? forwarding
+                : forwarding.timeout(
+                    timeout,
+                    onTimeout: () {
+                      forwarding.then(_closeAbandonedSocket).ignore();
+                      throw TimeoutException(
+                        'Opening the tunnel timed out',
+                        timeout,
+                      );
+                    },
+                  ),
+            onAbandonedValue: _closeAbandonedSocket,
+          );
+        }
+
+        report(
+          SshConnectionState.connecting,
+          isJumpHost
+              ? 'Opening jump host connection…'
+              : 'Opening network connection…',
+        );
+        return guard(
+          _socketConnector(
+            config.hostname,
+            config.port,
+            timeout: timeout ?? config.connectionTimeout,
+          ),
+          onAbandonedValue: _closeAbandonedSocket,
+        );
+      }
+
+      // Keeps every attempt and pause inside [reconnectAfterDropWindow].
+      Future<SSHSocket> reopenEndpointSocket() async {
+        final elapsed = Stopwatch()..start();
+        for (var attempt = 1; ; attempt++) {
+          final remaining = reconnectAfterDropWindow - elapsed.elapsed;
+          try {
+            return await openEndpointSocket(
+              timeout: remaining < config.connectionTimeout
+                  ? remaining
+                  : config.connectionTimeout,
+            );
+          } on Object catch (error) {
+            if (error is! Exception && error is! SSHError) rethrow;
+            if (error is SshConnectionCancelledException ||
+                (jumpClient?.isClosed ?? false) ||
+                reconnectAfterDropWindow - elapsed.elapsed <=
+                    reconnectAfterDropRetryDelay) {
+              rethrow;
+            }
+            DiagnosticsLogService.instance.info(
+              'ssh.connect',
+              'auth_reconnect_retry',
+              fields: {
+                'isJumpHost': isJumpHost,
+                'attempt': attempt,
+                'errorType': error.runtimeType,
+              },
+            );
+            report(
+              SshConnectionState.connecting,
+              'Waiting for the server to come back…',
+            );
+            await guard(Future<void>.delayed(reconnectAfterDropRetryDelay));
+            // The timer can fire after the window has run out.
+            if (elapsed.elapsed >= reconnectAfterDropWindow) rethrow;
+          }
+        }
+      }
+
+      var reconnectedAfterDrop = false;
+
       Future<void> authenticate(
         SSHSocket socket,
         SSHHostkeyVerifyHandler verify,
@@ -1989,13 +2142,42 @@ class SshService {
         agentForwarding?.attachClient(createdClient);
         client = createdClient;
         unownedSocket = null;
-        await _awaitAuthentication(
-          createdClient,
-          authGate,
-          timeout: config.connectionTimeout,
-          isJumpHost: isJumpHost,
-          cancellationToken: cancellationToken,
-        );
+        try {
+          await _awaitAuthentication(
+            createdClient,
+            authGate,
+            timeout: config.connectionTimeout,
+            isJumpHost: isJumpHost,
+            cancellationToken: cancellationToken,
+          );
+          authGate.forgetTypedPassword();
+        } on SSHAuthAbortError catch (error) {
+          // A Mac unlocked over SSH after a restart (FileVault) drops the
+          // connection once the password is in, restarts every process and
+          // then accepts the key; sshd also drops it when LoginGraceTime runs
+          // out while the user types. Reconnect once rather than make the
+          // user do it. A prompt still open is waited for, so its answer is
+          // not lost.
+          if (reconnectedAfterDrop || !_isDroppedConnection(error)) rethrow;
+          await guard(authGate.idle);
+          // A dropped jump connection can't carry the reconnect.
+          if (!authGate.answeredLastPrompt || (jumpClient?.isClosed ?? false)) {
+            rethrow;
+          }
+          reconnectedAfterDrop = true;
+          DiagnosticsLogService.instance.info(
+            'ssh.connect',
+            'auth_reconnect_after_drop',
+            fields: {
+              'isJumpHost': isJumpHost,
+              'reasonType': error.reason?.runtimeType ?? 'none',
+            },
+          );
+          client = null;
+          await createdClient.close();
+          authGate.startRetry();
+          await authenticate(await reopenEndpointSocket(), verify);
+        }
       }
 
       SSHHostkeyVerifyHandler verifyProbedKey(VerifiedHostKey key) =>
@@ -2038,36 +2220,6 @@ class SshService {
           ..add(jumpResult.client!)
           ..addAll(jumpResult.dependentClients);
         jumpClient = jumpResult.client;
-      }
-
-      Future<SSHSocket> openEndpointSocket() {
-        if (jumpClient != null) {
-          // Create forwarded connection through jump host.
-          // SSHForwardChannel implements SSHSocket.
-          report(
-            SshConnectionState.connecting,
-            'Opening tunnel to destination…',
-          );
-          return guard(
-            jumpClient.forwardLocal(config.hostname, config.port),
-            onAbandonedValue: _closeAbandonedSocket,
-          );
-        }
-
-        report(
-          SshConnectionState.connecting,
-          isJumpHost
-              ? 'Opening jump host connection…'
-              : 'Opening network connection…',
-        );
-        return guard(
-          _socketConnector(
-            config.hostname,
-            config.port,
-            timeout: config.connectionTimeout,
-          ),
-          onAbandonedValue: _closeAbandonedSocket,
-        );
       }
 
       final knownHosts = knownHostsRepository!;
@@ -2200,7 +2352,16 @@ class SshService {
       DiagnosticsLogService.instance.warning(
         'ssh.connect',
         'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
+        fields: {
+          'isJumpHost': isJumpHost,
+          'errorType': e.runtimeType,
+          if (e is SSHAuthAbortError)
+            'reasonType': e.reason?.runtimeType ?? 'none',
+          if (e case SSHAuthAbortError(
+            reason: SSHDisconnectError(:final reasonCode),
+          ))
+            'disconnectReasonCode': reasonCode,
+        },
       );
       return SshConnectionResult(success: false, error: error);
     } finally {
@@ -2230,23 +2391,35 @@ class SshService {
 
     SSHPasswordRequestHandler? onPasswordRequest;
     if (staticPassword != null) {
-      onPasswordRequest = () => staticPassword;
+      onPasswordRequest = () {
+        gate.recordAnswer();
+        return staticPassword;
+      };
     } else if (promptHandler != null) {
-      onPasswordRequest = () => gate.guard(() async {
-        final responses = await promptHandler(
-          SshAuthChallenge(
-            hostLabel: hostLabel,
-            username: config.username,
-            name: '',
-            instruction: '',
-            prompts: const [SshAuthPrompt(prompt: 'Password:', echo: false)],
-          ),
-        );
-        if (responses == null || responses.isEmpty) {
-          return null;
+      onPasswordRequest = () {
+        final replayed = gate.takeReplayPassword();
+        if (replayed != null) {
+          gate.recordAnswer(typedPassword: replayed);
+          return replayed;
         }
-        return responses.first;
-      });
+        return gate.guard(() async {
+          final responses = await promptHandler(
+            SshAuthChallenge(
+              hostLabel: hostLabel,
+              username: config.username,
+              name: '',
+              instruction: '',
+              prompts: const [SshAuthPrompt(prompt: 'Password:', echo: false)],
+            ),
+          );
+          if (responses == null || responses.isEmpty) {
+            gate.recordDeclined();
+            return null;
+          }
+          gate.recordAnswer(typedPassword: responses.first);
+          return responses.first;
+        });
+      };
     }
 
     SSHUserInfoRequestHandler? onUserInfoRequest;
@@ -2259,25 +2432,41 @@ class SshService {
         if (prompts.isEmpty) {
           return const <String>[];
         }
-        // Reuse the stored password only for a single hidden prompt that
-        // clearly asks for a password, so OTP/2FA/password-change challenges
-        // still reach the user instead of silently receiving the saved
+        // Reuse a stored or already typed password only for a single hidden
+        // prompt that clearly asks for a password, so OTP/2FA/password-change
+        // challenges still reach the user instead of silently receiving the
         // password (which the server would reject, breaking the login).
-        if (staticPassword != null &&
+        final isPasswordPrompt =
             prompts.length == 1 &&
             !prompts.first.echo &&
             _isPlainPasswordPrompt(
               request.name,
               request.instruction,
               prompts.first.promptText,
-            )) {
+            );
+        if (staticPassword != null && isPasswordPrompt) {
+          gate.recordAnswer();
           return <String>[staticPassword];
         }
         if (promptHandler == null) {
+          gate.recordDeclined();
           return null;
         }
-        return gate.guard(
-          () => promptHandler(
+        // Only a prompt that names a password trades a typed answer with a
+        // reconnect: one that asks for a passphrase may be for a key, not the
+        // account.
+        final isReplayable =
+            isPasswordPrompt &&
+            prompts.first.promptText.toLowerCase().contains('password');
+        if (isReplayable) {
+          final replayed = gate.takeReplayPassword();
+          if (replayed != null) {
+            gate.recordAnswer(typedPassword: replayed);
+            return <String>[replayed];
+          }
+        }
+        return gate.guard(() async {
+          final responses = await promptHandler(
             SshAuthChallenge(
               hostLabel: hostLabel,
               username: config.username,
@@ -2292,8 +2481,18 @@ class SshService {
                   )
                   .toList(growable: false),
             ),
-          ),
-        );
+          );
+          if (responses == null) {
+            gate.recordDeclined();
+          } else {
+            gate.recordAnswer(
+              typedPassword: isReplayable && responses.length == 1
+                  ? responses.single
+                  : null,
+            );
+          }
+          return responses;
+        });
       };
     }
 
@@ -2418,6 +2617,15 @@ class SshService {
 
   static void _closeAbandonedSocket(SSHSocket socket) {
     socket.destroy();
+  }
+
+  /// Whether the connection behind [error] ended without the server saying
+  /// why: the stream ended or the socket failed. A disconnect message (such
+  /// as sshd's "Too many authentication failures") or a rejected host key is
+  /// not a drop.
+  static bool _isDroppedConnection(SSHAuthAbortError error) {
+    final reason = error.reason;
+    return reason == null || reason is SSHSocketError;
   }
 
   HostKeyVerificationService _createHostKeyVerificationService(
