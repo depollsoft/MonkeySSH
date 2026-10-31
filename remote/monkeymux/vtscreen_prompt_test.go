@@ -550,3 +550,42 @@ func TestRenderFrameStartsACommandOnItsInputRow(t *testing.T) {
 		})
 	}
 }
+
+// Earlier commands' Cs do not count for the running command: it gets its own
+// C after its input however many commands the replay shows before it, on the
+// screen and in the scrollback.
+func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
+	earlier := ""
+	for i := range 4 {
+		earlier += osc133("A;cl=line") + "$ " + osc133("B") + "echo x\r\n" + osc133("C") + "x\r\n" + osc133("D;"+string(rune('0'+i)))
+	}
+	cases := []struct {
+		name, output, want string
+		height             int
+	}{
+		{"program on its input row", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "vi" + osc133("C") + "\x1b[?1049hTUI",
+			"\x1b[6;5H" + osc133("C"), 6},
+		{"program on its input row, earlier commands in the scrollback", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "vi" + osc133("C") + "\x1b[?1049hTUI",
+			"\x1b[3;5H" + osc133("C"), 3},
+		{"output on the input row", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "cat" + osc133("C") + "out",
+			"cat" + osc133("C") + "out", 4},
+		{"prompt above the replay", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "yes\r\n" + osc133("C") + strings.Repeat("y\r\n", vtScrollbackLimit+5),
+			osc133("C") + "\x1b[2J\x1b[3J", 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTerminalScreen(20, c.height)
+			s.Write([]byte(c.output))
+			replay := replaySequence(s)
+			if status, exit := shellStatusAfter(t, []byte(replay), "prompt", "9"); status != "running" || exit != "" {
+				t.Fatalf("after the replay the app shows %s %q, want running: %q", status, exit, replay)
+			}
+			if !strings.Contains(replay, c.want) {
+				t.Fatalf("the running command does not start after its input: %q", replay)
+			}
+			if got, want := dumpSemanticPrompt(replayFrame(s)), dumpSemanticPrompt(s); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}

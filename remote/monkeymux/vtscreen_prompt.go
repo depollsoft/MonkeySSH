@@ -441,16 +441,17 @@ type vtSemanticFrame struct {
 	status  uint8
 	// pushed is set while the newlines that push the scrollback above the
 	// screen run with output in force although the last painted cell was
-	// prompt or input (push); commands once a C was emitted; beginAt is where
-	// in the output begin ended, for a C that has to come first.
-	pushed   bool
-	commands bool
-	beginAt  int
+	// prompt or input (push); beginAt is where in the output begin ended, for
+	// a C that has to come first.
+	pushed  bool
+	beginAt int
 	// line is the line being painted, counted from the first painted
 	// scrollback line, and command the last cell written as prompt or input
-	// (line -1 for none): a running command's output starts after it.
+	// (line -1 for none): the running command's output starts after it, and
+	// started is set once its C, not an earlier command's, was emitted.
 	line    int
 	command vtCellPosition
+	started bool
 }
 
 // vtCellPosition is a cell of a frame: its line in paint order and column.
@@ -567,7 +568,9 @@ func (f *vtSemanticFrame) beginLine(out []byte, line int, mark uint8, indexed, w
 	f.line = line
 	if mark == vtPromptNone {
 		if indexed && f.emitted != vtSemOutput || !indexed && written && (f.emitted != vtSemOutput || f.pushed) {
-			return f.commandMark(out)
+			// After the last prompt or input cell it is the running
+			// command's; before it an earlier command's.
+			return f.commandMark(out, line > f.command.line)
 		}
 		return out
 	}
@@ -580,9 +583,11 @@ func (f *vtSemanticFrame) beginLine(out []byte, line int, mark uint8, indexed, w
 }
 
 // commandMark is C: the command whose prompt or input was painted last runs
-// from here. The app clears the exit status with it, as the shell's C did.
-func (f *vtSemanticFrame) commandMark(out []byte) []byte {
-	f.emitted, f.status, f.pushed, f.commands = vtSemOutput, vtShellRunning, false, true
+// from here, the running one when running is set. The app clears the exit
+// status with it, as the shell's C did.
+func (f *vtSemanticFrame) commandMark(out []byte, running bool) []byte {
+	f.emitted, f.status, f.pushed = vtSemOutput, vtShellRunning, false
+	f.started = f.started || running
 	return append(out, "\x1b]133;C\x07"...)
 }
 
@@ -595,7 +600,7 @@ func (f *vtSemanticFrame) cell(out []byte, col int, sem uint8) []byte {
 	}
 	if sem == vtSemOutput && f.shell.status == vtShellRunning &&
 		f.line == f.command.line && col > f.command.col {
-		return f.commandMark(out)
+		return f.commandMark(out, true)
 	}
 	return f.content(out, sem)
 }
@@ -642,12 +647,12 @@ func (f *vtSemanticFrame) finish(out []byte) []byte {
 	if f == nil {
 		return out
 	}
-	if f.shell.status == vtShellRunning && !f.commands {
+	if f.shell.status == vtShellRunning && !f.started {
 		if f.command.line < 0 {
 			out = slices.Insert(out, f.beginAt, []byte("\x1b]133;C\x07")...)
-			f.commands = true
+			f.started = true
 		} else {
-			out = f.commandMark(out)
+			out = f.commandMark(out, true)
 		}
 	}
 	if f.state.content == vtSemInput && f.state.eolInput {
