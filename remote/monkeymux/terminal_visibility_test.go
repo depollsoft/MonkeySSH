@@ -130,6 +130,37 @@ func TestVisibilityReportsFollowTheActiveWindowAndClients(t *testing.T) {
 	}
 }
 
+// The app sends its visibility once per control connection, so an attach that
+// reconnects under the same id while that connection lives keeps it hidden.
+func TestHiddenFlagOutlivesAnAttachWhileItsControlConnectionLives(t *testing.T) {
+	server, _, client, _ := newVisibilityTestServer(t)
+	control := newControlClient(nil)
+	server.mu.Lock()
+	server.controls[control] = struct{}{}
+	server.mu.Unlock()
+	server.handleControlRequest(control, controlMessage{
+		Type:     "client_visibility",
+		ClientID: "phone",
+		Hidden:   true,
+	})
+
+	server.removeAttachClient(client)
+	server.mu.Lock()
+	_, remembered := server.hiddenClientIDs["phone"]
+	server.mu.Unlock()
+	if !remembered {
+		t.Fatal("hidden flag dropped while its control connection lives")
+	}
+
+	server.removeControl(control)
+	server.mu.Lock()
+	_, remembered = server.hiddenClientIDs["phone"]
+	server.mu.Unlock()
+	if remembered {
+		t.Fatal("hidden flag outlived its control connection and attach")
+	}
+}
+
 func TestVisibilityModeIsStrippedFromForwardedOutput(t *testing.T) {
 	server, ptys, _, attach := newVisibilityTestServer(t)
 

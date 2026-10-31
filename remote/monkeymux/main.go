@@ -64,7 +64,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.250"
+	monkeyMuxVersion                  = "0.1.251"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -206,9 +206,9 @@ const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?104
 // monkeyMuxReplayWindowOSC tags each window replay, before its prefix, with
 // the window it paints as "window=<server instance>:<window id>". The app
 // keeps the tag its terminal last received and deletes its physical image
-// placements only when a replay names another window: a reopen of the window
-// it shows keeps images whose transmission is past the replayed history, and
-// a change to another window, wherever it was started, drops the old one's.
+// placements only when a replay names another window: a reopen of a window
+// whose program owns the screen keeps the images the program placed, and a
+// change to another window, wherever it was started, drops the old one's.
 // Other terminals ignore the unknown OSC.
 const monkeyMuxReplayWindowOSC = "7502"
 
@@ -851,9 +851,10 @@ type muxServer struct {
 	// push holds push notification state, created on first use.
 	push     *pushNotifier
 	pushOnce sync.Once
-	// hiddenClientIDs names the attach clients whose view is hidden
-	// (terminal_visibility.go). Guarded by mu.
-	hiddenClientIDs map[string]struct{}
+	// hiddenClientIDs names the attach clients whose view is hidden, each
+	// with the control connection that said so (terminal_visibility.go).
+	// Guarded by mu.
+	hiddenClientIDs map[string]*controlClient
 }
 
 type muxWindow struct {
@@ -929,8 +930,8 @@ type muxWindow struct {
 	terminalOutputOscOverflow bool
 	// attachUtf8Remaining is the continuation bytes a character split across
 	// the forwarded output's reads still owes, so that
-	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b among them
-	// for CSI.
+	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b or 0x9d
+	// among them for CSI or OSC.
 	attachUtf8Remaining int
 	// notificationOscSeq counts background desktop notifications captured
 	// from this window. It never resets so clients can tell new arrivals
@@ -1047,7 +1048,11 @@ type muxWindow struct {
 	// reports the signatures of the images it still holds on a window switch so
 	// the replay can omit re-sending — and the client re-parsing — several
 	// megabytes of image data it already has. Kept in sync with kittyImages.
-	kittyImageToken          map[string]uint32
+	kittyImageToken map[string]uint32
+	// kittyImageEnd is where each retained root's transmission ended, as an
+	// offset in what the screen model has read, which tells a replay that
+	// makes a command again the image that command sent (vtKittyCommand).
+	kittyImageEnd            map[string]int64
 	kittyGraphicsPending     []byte
 	kittyGraphicsPendingScan int
 	kittyGraphicsPendingTerm int
@@ -9836,7 +9841,7 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			return
 		}
 		s.mu.Lock()
-		s.setClientHiddenLocked(request.ClientID, request.Hidden)
+		s.setClientHiddenLocked(request.ClientID, request.Hidden, client)
 		s.mu.Unlock()
 		client.send(controlResponse{ID: request.ID, Type: "client_visibility", Status: "ok"})
 	case "focus_changed":
@@ -9868,6 +9873,7 @@ func (s *muxServer) removeControl(client *controlClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.controls, client)
+	s.releaseClientVisibilityLocked(client)
 }
 
 func (s *muxServer) hasAttachClientByID(clientID string) bool {
@@ -11514,7 +11520,12 @@ func (s *muxServer) replayBytesWithImagesLocked(
 		history = stripTerminalQueriesFromReplay(history[start:])
 		history = window.withheldAttachOscSuffixTrimmedLocked(history)
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
-		replayHistory := append(images, history...)
+		var replayHistory []byte
+		if window.screenLocked().KittyPlacedImages() {
+			// Its output places its images again, as a shell's does.
+			replayHistory = append(replayHistory, kittyVisiblePlacementsDelete...)
+		}
+		replayHistory = append(append(replayHistory, images...), history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
 				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed),
@@ -11554,7 +11565,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 				maxKittyImageRepairBytes-len(images)-mainImages,
 			)
 	}
-	history = trimReplayHistoryForAttachWithParser(history, historyStart)
+	history, images := window.shellReplayHistoryLocked(history, historyStart, clientHas)
 	history = stripTerminalQueriesFromReplay(history)
 	history = window.withheldAttachOscSuffixTrimmedLocked(history)
 	// The replayed tail is cut to windowReplayLimitBytes, which can drop a
@@ -11566,8 +11577,255 @@ func (s *muxServer) replayBytesWithImagesLocked(
 			nil,
 			history,
 			clientHas,
-			maxKittyImageRepairBytes,
+			maxKittyImageRepairBytes-images,
 		)
+}
+
+// shellReplayHistoryLocked returns the output a shell window's replay
+// paints from retained, the output the window keeps, which began in the
+// parser state retainedState, and how many bytes it adds for images. It is
+// the end of the output (trimReplayHistoryForAttachWithParser), unless that
+// end cuts off a command that placed an image (KittyCutCommand), such as a
+// transmission whose first chunks it leaves out. The replay then starts
+// with that command, at the column it ran at: from the output while the
+// output holds all of it, else made again from the retained image if that
+// fits in maxReplayedKittyImageBytes. The image lands on the first row the
+// replay paints, and the cursor moves past it as before, so the output that
+// followed it stays below it. The images that display commands in the
+// replay show without the replay sending them go first, within the same
+// budget, and the client's data of those it cannot send is deleted, so
+// that their commands fail rather than show another window's image. Before
+// all of it, the client's own placements go (kittyVisiblePlacementsDelete),
+// once the window has placed any.
+func (w *muxWindow) shellReplayHistoryLocked(
+	retained []byte,
+	retainedState terminalOutputParserSnapshot,
+	clientHas map[string]uint32,
+) ([]byte, int) {
+	tail := trimReplayHistoryForAttachWithParser(retained, retainedState)
+	from := len(retained) - len(tail)
+	screen := w.screenLocked()
+	end := screen.Written()
+	// The model read retained last, so an offset in what it read is this
+	// far into retained.
+	at := func(offset int64) int { return len(retained) - int(end-offset) }
+	cut := end - int64(min(len(retained), windowReplayLimitBytes))
+	var restore []byte
+	images := 0
+	// One at a column the model lost stays out rather than land elsewhere.
+	if command, ok := screen.KittyCutCommand(cut, end-int64(len(tail))); ok && command.col >= 0 {
+		column := appendVTCSICount(nil, command.col+1, 'G')
+		if start := at(command.start); start >= 0 {
+			images = from - start
+			restore = column
+			from = start
+		} else if root := w.kittyCommandRootLocked(command); len(root) > 0 &&
+			len(root) <= maxReplayedKittyImageBytes {
+			images = len(root)
+			restore = append(append(root, column...), command.place...)
+			from = at(command.end)
+		}
+	}
+	history := append(restore, retained[from:]...)
+	// What the display commands in it show must be this window's image:
+	// sent first, or else gone, so that the command fails.
+	needed := w.kittyShownImagesLocked(history, clientHas, end-int64(len(retained)-from))
+	var roots []string
+	for _, image := range needed {
+		if image.root != "" {
+			roots = append(roots, image.root)
+		}
+	}
+	shown, served := w.kittyImageTransmissionsOntoLocked(
+		roots,
+		maxReplayedKittyImages,
+		maxReplayedKittyImageBytes-images,
+		false,
+	)
+	var replay []byte
+	if screen.KittyPlacedImages() {
+		replay = append(replay, kittyVisiblePlacementsDelete...)
+	}
+	for _, image := range needed {
+		if image.root == "" || !slices.Contains(served, image.root) {
+			replay = image.appendDataDelete(replay)
+		}
+	}
+	replay = append(replay, shown...)
+	return append(replay, history...), images + len(shown)
+}
+
+// kittyVisiblePlacementsDelete deletes the placements on the screen shown,
+// keeping the images (a=d,d=a). A client reopened on a shell window, or a
+// ConPTY one showing its normal screen, keeps its placements through the
+// replay prefix's ED 2, and the replayed output places its images again:
+// one sent by number or with no id gets a new id each time, and a display
+// command without a placement id adds a placement, so the client's copy
+// would stay beside the new one, pushed up the screen by the output. The
+// replay places again every image within its reach
+// (shellReplayHistoryLocked); one beyond it is left out, as it is when the
+// app changes windows. The prefix's ED 3 has already taken the placements
+// in the scrollback.
+const kittyVisiblePlacementsDelete = "\x1b_Ga=d,d=a,q=2\x1b\\"
+
+// kittyCommandRootLocked returns the retained image that a transmission
+// which placed one sent, to send again store-only, or nil. Only the image
+// whose transmission ended where the command did will do: the window may
+// have sent another under its id or number since, on the alternate screen,
+// whose store the client keeps apart, or too large to keep.
+func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
+	if !command.transmits {
+		return nil
+	}
+	for id, end := range w.kittyImageEnd {
+		if end != command.end || w.kittyImages[id] == nil {
+			continue
+		}
+		root := append([]byte(nil), w.kittyImageRootReplayOnLocked(id, false)...)
+		root = append(root, w.kittyImageNumberReplayLocked(id)...)
+		return append(root, w.kittyImageAnimations[id]...)
+	}
+	return nil
+}
+
+// kittyAlternateScreenAt returns whether the client shows the alternate
+// screen at an offset of history, a shell window's, which it replays from
+// its main screen: also what a program cut off from the start of history
+// wrote to its alternate screen. Setting mode 1047 or 1049 enters it, and
+// resetting either leaves it, as RIS does. Ask for offsets in increasing
+// order.
+func kittyAlternateScreenAt(history []byte) func(offset int) bool {
+	changes := kittyScreenModeChanges(history)
+	for index := 0; ; {
+		at := bytes.Index(history[index:], []byte("\x1bc"))
+		if at < 0 {
+			break
+		}
+		index += at + 2
+		// RIS, at its final byte.
+		changes = append(changes, kittyScreenModeChange{offset: index - 1})
+	}
+	slices.SortStableFunc(changes, func(a, b kittyScreenModeChange) int { return a.offset - b.offset })
+	alternate, next := false, 0
+	return func(offset int) bool {
+		for ; next < len(changes) && changes[next].offset < offset; next++ {
+			alternate = changes[next].set
+		}
+		return alternate
+	}
+}
+
+// clientHolds reports whether clientHas, the images a client reports holding,
+// has the image id with the signature token.
+func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
+	held, ok := clientHas[id]
+	return ok && held == token
+}
+
+// kittyShownImageRootLocked returns the retained main-screen image to send
+// for image, which a display command at the cursor or relative to a parent
+// shows: for an id, the one kept under it; for a number, the one it named
+// before replayedFrom, where the replayed output began in what the model
+// read, since a later one may be another image. It is "" when none will do.
+func (w *muxWindow) kittyShownImageRootLocked(image kittyShownImage, replayedFrom int64) string {
+	root := image.id
+	if root == "" {
+		root = w.kittyImageNumberToID[image.number]
+		if end, ok := w.kittyImageEnd[root]; !ok || end > replayedFrom {
+			return ""
+		}
+	}
+	if w.kittyImages[root] == nil || w.kittyTracking.rootAlt[root] {
+		return ""
+	}
+	return root
+}
+
+// kittyShownImage is an image a display command in a replay shows without
+// the replay sending it first: named by its id, or by its number (I=).
+type kittyShownImage struct {
+	id, number string
+	// root is the retained image to send for it, "" when none will do.
+	root string
+}
+
+// appendDataDelete deletes the client's data of the image, with its
+// placements (a=d,d=I or d=N), so that a display command naming it fails
+// rather than show an image another window sent under that id or number.
+func (image kittyShownImage) appendDataDelete(out []byte) []byte {
+	if image.id != "" {
+		out = append(out, "\x1b_Ga=d,d=I,i="...)
+		out = append(out, image.id...)
+	} else {
+		out = append(out, "\x1b_Ga=d,d=N,I="...)
+		out = append(out, image.number...)
+	}
+	return append(out, ",q=2\x1b\\"...)
+}
+
+// kittyShownImagesLocked returns the images that display commands (a=p) in
+// history show without history sending them first, which the client may
+// not hold: another window may have sent a different image under the same
+// id or number since. One clientHas reports the client holding is left
+// out. Each comes with the retained image to send before history when a
+// placement at the cursor or relative to a parent shows it
+// (kittyShownImageRootLocked), whatever other commands show it and in
+// whatever order. An image only virtual placements show gets none: the
+// follow-up sends it and places them again
+// (replayBytesWithImageFollowUpLocked). Only the commands that run on the
+// main screen count (kittyAlternateScreenAt).
+func (w *muxWindow) kittyShownImagesLocked(
+	history []byte,
+	clientHas map[string]uint32,
+	replayedFrom int64,
+) []kittyShownImage {
+	events, _ := scanKittyTransmissions(history)
+	alternate := kittyAlternateScreenAt(history)
+	var sent []string
+	var shown []kittyShownImage
+	// shownAt is where each image is in shown: any later command showing it
+	// counts too, whatever its kind.
+	shownAt := map[string]int{}
+	for _, event := range events {
+		if alternate(event.offset) {
+			continue
+		}
+		image := kittyShownImage{
+			id:     kittyIDValue(event.control["i"]),
+			number: kittyIDValue(event.control["I"]),
+		}
+		key := "i" + image.id
+		if image.id == "" {
+			key = "I" + image.number
+		}
+		at, known := shownAt[key]
+		switch {
+		case image.id == "" && image.number == "" || slices.Contains(sent, key):
+		case !event.placement:
+			if len(event.buf) > 0 && !event.animation {
+				sent = append(sent, key)
+			}
+		case event.control["a"] != "p":
+		case image.id != "" && clientHolds(clientHas, image.id, w.kittyImageToken[image.id]):
+			sent = append(sent, key)
+		case kittyNonZero(event.control["U"]):
+			// The follow-up places a virtual placement again, after its image.
+			if !known {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
+			}
+		case known && shown[at].root != "":
+		default:
+			image.root = w.kittyShownImageRootLocked(image, replayedFrom)
+			if known {
+				shown[at].root = image.root
+			} else {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
+			}
+		}
+	}
+	return shown
 }
 
 // releaseRedrawForwardingStateLocked drops every buffer a redraw pause retains
@@ -11651,9 +11909,9 @@ func kittyCarriedImages(replayed map[string]struct{}, served []string) func(stri
 // image data; it is nil while the main screen shows. Each screen keeps its
 // own images on the client, so the images its direct placements show are
 // sent store-only while it is the screen shown, as many as fit in budget,
-// after deleting the client's own copies of their placements (as the
-// fallback frame does); a placement whose image does not fit is left out,
-// with that delete. So is one whose image the
+// after deleting the client's own copies of their placements, as the
+// fallback frame does (KittyMainPlacementDeletes); a placement whose image
+// does not fit is left out. So is one whose image the
 // window last transmitted on the alternate screen: the client keeps that data
 // apart from the main screen's, and the main screen's store may hold another
 // window's image under the same id, which a placement made again would show.
@@ -11679,8 +11937,6 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 	}
 	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
 	carried := kittyCarriedImages(nil, sent)
-	// Known limitation: a reopened client keeps its placement of an image left
-	// out here, which this main screen's scrollback can push off its cell.
 	out := screen.KittyMainPlacementDeletes(carried)
 	out = append(out, images...)
 	out = append(out, screen.RenderMainScreenReplacing(carried)...)
@@ -14344,13 +14600,22 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 	copyStart := 0
 	for i := 0; i < len(data); {
 		csiParams := -1
+		payloadStart := -1
 		switch {
-		case data[i] == 0x9b:
+		case data[i] == 0x9b || data[i] == 0x9d:
+			// The C1 forms of CSI and OSC, unless the byte continues a
+			// character.
 			if i >= leadingUtf8Prefix && !isUtf8ContinuationAt(data, i) {
-				csiParams = i + 1
+				if data[i] == 0x9b {
+					csiParams = i + 1
+				} else {
+					payloadStart = i + 1
+				}
 			}
 		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == '[':
 			csiParams = i + 2
+		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == ']':
+			payloadStart = i + 2
 		}
 		if csiParams >= 0 {
 			// Visibility reports belong to MonkeyMux (terminal_visibility.go):
@@ -14382,25 +14647,17 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 			i++
 			continue
 		}
-		if data[i] != '\x1b' {
-			i++
-			continue
-		}
-		if i+1 >= len(data) {
-			if w.storeAttachPartialOscLocked(data[i:]) {
+		if payloadStart < 0 {
+			if data[i] == '\x1b' && i+1 >= len(data) && w.storeAttachPartialOscLocked(data[i:]) {
 				if output == nil {
 					return data[:i]
 				}
 				output = append(output, data[copyStart:i]...)
 				return output
 			}
-			break
-		}
-		if data[i+1] != ']' {
 			i++
 			continue
 		}
-		payloadStart := i + 2
 		if resume, cancelled := kittyClipboardOscCancelled(data[payloadStart:]); cancelled {
 			// The terminal abandons the packet there and goes on with what
 			// follows as ordinary output.
@@ -14941,7 +15198,7 @@ func scanKittyTransmissions(
 			args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
-				control: args, offset: i,
+				control: args, offset: i, end: end,
 			})
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
@@ -15209,6 +15466,11 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	changed := false
 	screen := w.newKittyScreenTrackerLocked(data)
 	defer screen.finish()
+	// data ends with the output the screen model read last, when it has one.
+	var modelOffset int64
+	if w.screen != nil {
+		modelOffset = w.screen.Written() - int64(len(data))
+	}
 	for _, event := range events {
 		if event.placement {
 			if w.observeKittyPlacementLocked(
@@ -15279,6 +15541,12 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			w.dropKittyImagePlacementsLocked(id)
 			w.noteKittyRootScreenLocked(id, screen.at(event.offset))
 			w.storeKittyImageLocked(id, event.buf)
+			if w.screen != nil && w.kittyImages[id] != nil {
+				if w.kittyImageEnd == nil {
+					w.kittyImageEnd = map[string]int64{}
+				}
+				w.kittyImageEnd[id] = modelOffset + int64(event.end)
+			}
 			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
 				!kittyNonZero(event.control["P"]) {
 				w.noteKittyPhysicalPlacementLocked(
@@ -15345,6 +15613,7 @@ func (w *muxWindow) removeKittyImageLocked(id string) bool {
 	delete(w.kittyImageAnimations, id)
 	delete(w.kittyImageSeq, id)
 	delete(w.kittyImageToken, id)
+	delete(w.kittyImageEnd, id)
 	for number, mappedID := range w.kittyImageNumberToID {
 		if mappedID == id {
 			delete(w.kittyImageNumberToID, number)
@@ -15393,6 +15662,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageOrder = nil
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
+	w.kittyImageEnd = nil
 	w.kittyPlacements = nil
 	w.kittyTracking.physical = nil
 	w.kittyTracking.rootAlt = nil
@@ -17906,10 +18176,10 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 			return observedThemeQueries
 		}
 		payload := data[payloadStart : payloadStart+payloadEnd]
-		// MonkeyMux answers 7-bit OSC 7501 queries (C1 ones are left for the
-		// attached terminal), and the asker becomes the window's reporter.
-		// Noted here, in byte order with RIS and the reports around it.
-		if payloadStart-sequenceStart == 2 && isProgramStatusQueryPayload(payload) {
+		// MonkeyMux answers OSC 7501 queries in either form, and the asker
+		// becomes the window's reporter. Noted here, in byte order with RIS
+		// and the reports around it.
+		if isProgramStatusQueryPayload(payload) {
 			w.noteProgramStatusReporterLocked()
 		}
 		observedThemeQueries = appendThemeQueryKeys(

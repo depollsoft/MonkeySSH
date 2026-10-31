@@ -45,6 +45,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
+import 'package:monkeyssh/domain/services/terminal_command_mark_tracker.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
@@ -2376,6 +2377,109 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test('reads the shell status a MonkeyMux replay ends with', () {
+      // The screen model's frames (remote/monkeymux/vtscreen_prompt.go)
+      // re-emit the marks of every prompt they paint, and end with the status
+      // and exit code the model has. A running command's C is emitted where
+      // its output begins, so the command mark lands on that row.
+      final fixture = File(
+        'remote/monkeymux/testdata/semantic_prompt_parity.json',
+      );
+      if (!fixture.existsSync()) {
+        markTestSkipped('fixture unavailable');
+        return;
+      }
+      final cases = jsonDecode(fixture.readAsStringSync()) as List<dynamic>;
+      const expected = <String, ({TerminalShellStatus status, int? exit, List<int> marks})>{
+        'a replayed screen keeps every earlier prompt': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [1],
+        ),
+        // A command without output started on the row its prompt's successor
+        // took, which the frame paints as a prompt: no mark comes back.
+        'a replayed prompt keeps the exit status of the last command': (
+          status: TerminalShellStatus.prompt,
+          exit: 1,
+          marks: [],
+        ),
+        'a replayed running command keeps the prompt above it': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [1],
+        ),
+        'a replayed alternate screen keeps the marks of both screens': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [],
+        ),
+        // C arrived on the input row: the command starts there.
+        'a replayed program started on its input row keeps the prompt behind it':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [0],
+            ),
+        // The prompt is above the model's scrollback: the command starts
+        // on the first replayed line.
+        'a replayed running command whose prompt scrolled out keeps its mark': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [0],
+        ),
+        'a replayed running command that wrote over its prompt row keeps running':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [0],
+            ),
+        // The C comes again where it was after the saved cursor's glyph
+        // is printed again as input: no mark on the cursor's row.
+        'a replayed running command keeps the saved cursor waiting to wrap on its input':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [1],
+            ),
+      };
+      final seen = <String>{};
+      for (final raw in cases) {
+        final testCase = raw as Map<String, dynamic>;
+        final frame = testCase['frame'] as String?;
+        if (frame == null) continue;
+        final name = testCase['name'] as String;
+        final size = (testCase['size'] as List).cast<int>();
+        // As many lines as the app keeps: more than the model's scrollback.
+        final terminal = Terminal(maxLines: 10000)..resize(size[0], size[1]);
+        final tracker = TerminalCommandMarkTracker()..attach(terminal);
+        // The status another window left behind.
+        ({TerminalShellStatus? status, int? lastExitCode}) state = (
+          status: TerminalShellStatus.runningCommand,
+          lastExitCode: 7,
+        );
+        terminal
+          ..onPrivateOSC = (code, args) {
+            tracker.handlePrivateOsc(code, args);
+            if (code != '133' && code != '633') return;
+            state = applyTerminalShellIntegrationOsc(
+              args,
+              previousStatus: state.status,
+              previousExitCode: state.lastExitCode,
+            );
+          }
+          ..write(frame);
+        final want = expected[name];
+        if (want == null) continue;
+        seen.add(name);
+        expect(state.status, want.status, reason: name);
+        expect(state.lastExitCode, want.exit, reason: name);
+        // On the main screen: the alternate screen a program shows has none.
+        if (terminal.isUsingAltBuffer) terminal.write('\x1b[?1049l');
+        expect(tracker.debugMarkRows, want.marks, reason: name);
+      }
+      expect(seen, expected.keys.toSet());
+    });
+
     test('passes insert mode through for the terminal to shift cells', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
@@ -2415,6 +2519,22 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
           expect(decoder.pendingCodeUnits, 0, reason: start);
           expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
         }
+      }
+    });
+
+    test('releases a string an escape sequence ends unfinished', () {
+      for (final start in ['\x1b]0;tit', '\x1b_Ga=q', '\x1bP1\$r']) {
+        final terminal = Terminal(maxLines: 100);
+        final decoder = TerminalXtermOutputDecoder();
+
+        terminal
+          ..write(decoder.add(input: '$start\x1b[31mVIS'))
+          ..write(decoder.add(input: '\x1b'))
+          ..write(decoder.add(input: '[0mIBLE'));
+
+        expect(decoder.pendingCodeUnits, 0, reason: start);
+        expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
+        expect(terminal.lines[0].getForeground(0), isNot(0), reason: start);
       }
     });
 
@@ -3295,6 +3415,34 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       await Future<void>.delayed(const Duration(milliseconds: 100));
       expect(anchors(), 0, reason: 'another window drops it');
       expect(terminal.heldImageSignatures(), contains(1));
+    });
+
+    // The shell status and exit code are the window's: a replay of another
+    // window starts without them, since one without shell integration, or
+    // with no exit status yet, sends nothing that would replace them.
+    test('MonkeyMux replay tags of another window drop its shell status', () {
+      final session = _testSession(_MockSshClient());
+      final terminal = session.getOrCreateTerminal()..resize(20, 6);
+      String tag(String window) =>
+          '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
+
+      terminal.write(
+        '${tag('@1')}\x1b]133;A\x07\$ \x1b]133;B\x07false\r\n'
+        '\x1b]133;C\x07\x1b]133;D;7\x07\x1b]133;A\x07\$ \x1b]133;B\x07vi\r\n'
+        '\x1b]133;C\x07',
+      );
+      expect(session.shellStatus, TerminalShellStatus.runningCommand);
+      expect(session.lastExitCode, isNull);
+      terminal.write('\x1b]133;D;7\x07');
+      expect(session.lastExitCode, 7);
+
+      terminal.write(tag('@1'));
+      expect(session.shellStatus, TerminalShellStatus.prompt);
+      expect(session.lastExitCode, 7, reason: 'a reopen keeps them');
+
+      terminal.write('${tag('@2')}plain');
+      expect(session.shellStatus, isNull);
+      expect(session.lastExitCode, isNull);
     });
 
     test('returns completed startup commands to a login shell without disconnecting', () async {

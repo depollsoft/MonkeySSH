@@ -674,3 +674,89 @@ func TestVTKittyFreedImageLeavesNoRowToKeep(t *testing.T) {
 		t.Fatalf("rows = %q", got)
 	}
 }
+
+// TestVTKittyMainFrameDeletesWhatItsScrollMoves: a frame of the main screen
+// that paints its scrollback scrolls the client's screen, which would carry
+// the placements the client kept away from their cells, so it deletes all of
+// them; one that does not scroll deletes only the images it places again.
+func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
+	s := newTerminalScreen(40, 10)
+	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;1H\x1b_Ga=p,i=1,C=1,q=2\x1b\\\x1b[4;1H\x1b_Ga=p,i=2,C=1,q=2\x1b\\"))
+	onlyOne := func(id string) bool { return id == "1" }
+	if got := string(s.KittyMainPlacementDeletes(onlyOne)); got != "\x1b_Ga=d,d=i,i=1,q=2\x1b\\" {
+		t.Fatalf("deletes without scrollback = %q", got)
+	}
+	s.Write([]byte("\x1b[10;1H\r\n\r\n"))
+	if got := string(s.KittyMainPlacementDeletes(onlyOne)); got != kittyVisiblePlacementsDelete {
+		t.Fatalf("deletes with scrollback = %q", got)
+	}
+}
+
+// TestVTKittyCommandsRecordWhereTheyRan: the model remembers each command that
+// placed an image at the cursor on the main screen, with an id, a number or
+// neither, where in its output it began and ended, however that output was
+// split, and the column it ran at; and for a transmission, how to place its
+// image again. It forgets those that ended further back than a replay
+// reaches.
+func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
+	stream := "ab\x1b_Ga=T,I=9,f=100,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\cd" +
+		"\x1b_Ga=t,i=3,f=100;AAAA\x1b\\\x1b_Ga=p,i=3,c=2,C=1\x1b\\" +
+		"\x1b[?1049h\x1b_Ga=T,i=4,f=100;AAAA\x1b\\\x1b[?1049l\x1b_Ga=T,U=1,i=5,c=1,r=1,f=100;AAAA\x1b\\"
+	first := strings.Index(stream, "\x1b_Ga=T,I=9")
+	second := strings.Index(stream, "cd")
+	display := strings.Index(stream, "\x1b_Ga=p,i=3")
+	for _, read := range []int{len(stream), 1, 7} {
+		s := newTerminalScreen(40, 10)
+		for at := 0; at < len(stream); at += read {
+			s.Write([]byte(stream[at:min(at+read, len(stream))]))
+		}
+		want := []vtKittyCommand{
+			{start: int64(first), end: int64(second), col: 2, transmits: true,
+				place: []byte("\x1b_Ga=p,I=9,q=2\x1b\\")},
+			// The transmission before it moved the client's cursor, which
+			// the model does not follow: its column is lost.
+			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: -1},
+		}
+		if !reflect.DeepEqual(s.kittyCommands, want) || s.Written() != int64(len(stream)) {
+			t.Fatalf("in reads of %d: commands = %+v, written %d", read, s.kittyCommands, s.Written())
+		}
+		if command, ok := s.KittyCutCommand(int64(first), int64(first+5)); !ok || command.start != int64(first) {
+			t.Fatalf("in reads of %d: the cut inside the transmission finds %+v, %v", read, command, ok)
+		}
+		if _, ok := s.KittyCutCommand(int64(len(stream)-1), int64(len(stream))); ok {
+			t.Fatalf("in reads of %d: a command that ended before the cut was found", read)
+		}
+	}
+	s := newTerminalScreen(40, 10)
+	s.Write([]byte(stream + strings.Repeat("x", vtKittyCommandReach) + "\x1b_Ga=p,i=3\x1b\\"))
+	if len(s.kittyCommands) != 1 || !s.KittyPlacedImages() {
+		t.Fatalf("commands past the reach = %+v", s.kittyCommands)
+	}
+}
+
+// TestVTKittyColumnLostUntilSetAgain: an image placed at the cursor moves the
+// client's cursor past it, which the model does not follow, so the column of
+// the next command is lost until the main screen's column is set again: by
+// CR, CUP or RIS, or by DECRC of a cursor saved while the model had it.
+func TestVTKittyColumnLostUntilSetAgain(t *testing.T) {
+	const image = "\x1b_Ga=T,i=6,f=100,c=4,r=1;AAAA\x1b\\"
+	for _, c := range []struct {
+		name, between string
+		lost          bool
+	}{
+		{"nothing", "", true},
+		{"CR", "\r", false},
+		{"NEL", "\x1bE", false},
+		{"CUP", "\x1b[1;3H", false},
+		{"RIS", "\x1bc", false},
+		{"DECRC of a cursor saved lost", "\x1b7\r\x1b8", true},
+		{"DECRC of a cursor saved found", "\r\x1b7" + image + "\x1b8", false},
+		{"CR on the alternate screen", "\x1b[?1049h\r\x1b[?1049l", true},
+	} {
+		s := newTerminalScreen(40, 10)
+		s.Write([]byte(image + c.between + image))
+		if last := s.kittyCommands[len(s.kittyCommands)-1]; (last.col < 0) != c.lost {
+			t.Errorf("%s: the second command's column is %d, want lost %v", c.name, last.col, c.lost)
+		}
+	}
+}

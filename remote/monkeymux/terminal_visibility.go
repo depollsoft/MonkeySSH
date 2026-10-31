@@ -86,23 +86,30 @@ func (s *muxServer) refreshWindowVisibilityLocked() {
 }
 
 // setClientHiddenLocked records whether the attach client with id says its
-// view is hidden.
-func (s *muxServer) setClientHiddenLocked(id string, hidden bool) {
+// view is hidden, as told over the control connection owner.
+func (s *muxServer) setClientHiddenLocked(id string, hidden bool, owner *controlClient) {
 	if hidden {
 		if s.hiddenClientIDs == nil {
-			s.hiddenClientIDs = map[string]struct{}{}
+			s.hiddenClientIDs = map[string]*controlClient{}
 		}
-		s.hiddenClientIDs[id] = struct{}{}
+		s.hiddenClientIDs[id] = owner
 	} else {
 		delete(s.hiddenClientIDs, id)
 	}
 	s.refreshWindowVisibilityLocked()
 }
 
-// forgetClientVisibilityLocked drops a hidden flag once no attach client with
-// id remains, so a later attach under the same id starts out visible.
+// forgetClientVisibilityLocked drops a hidden flag once neither an attach
+// client with id nor the control connection that set it remains, so a later
+// attach under the same id starts out visible. The app sends its state once
+// per control connection, so an attach that reconnects under the same id
+// while that connection lives must find the flag still set.
 func (s *muxServer) forgetClientVisibilityLocked(id string) {
-	if _, ok := s.hiddenClientIDs[id]; !ok {
+	owner, ok := s.hiddenClientIDs[id]
+	if !ok {
+		return
+	}
+	if _, live := s.controls[owner]; live && owner != nil {
 		return
 	}
 	for _, client := range s.attachClients {
@@ -111,6 +118,17 @@ func (s *muxServer) forgetClientVisibilityLocked(id string) {
 		}
 	}
 	delete(s.hiddenClientIDs, id)
+}
+
+// releaseClientVisibilityLocked forgets the hidden flags control set once it
+// has gone, unless an attach client still holds them.
+func (s *muxServer) releaseClientVisibilityLocked(control *controlClient) {
+	for id, owner := range s.hiddenClientIDs {
+		if owner == control {
+			s.hiddenClientIDs[id] = nil
+			s.forgetClientVisibilityLocked(id)
+		}
+	}
 }
 
 // setVisibilityReportsLocked applies `CSI ? 2033 h/l`. Enabling reports the

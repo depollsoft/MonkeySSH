@@ -798,6 +798,12 @@ func TestVTScreenRepeatSoftResetAndAlignment(t *testing.T) {
 	if s.top != 0 || s.bottom != 2 || s.originMode || s.insertMode || s.attrs != (vtAttrs{}) {
 		t.Fatal("DECSTR did not reset region, modes and rendition")
 	}
+	// It keeps a pending wrap: the next glyph goes to the next row.
+	wrap := newTerminalScreen(5, 2)
+	wrap.Write([]byte("\rxxxxx\x1b[!pa"))
+	if got := wrap.TextRows(); got[0] != "xxxxx" || got[1] != "a" {
+		t.Fatalf("DECSTR at a pending wrap: %q", got)
+	}
 	s.Write([]byte("\x1b[H0123456789ab\x1b#8"))
 	if got := s.TextRows(); got[0] != "EEEEEEEEEE" || got[2] != "EEEEEEEEEE" {
 		t.Fatalf("DECALN: %q", got)

@@ -221,6 +221,27 @@ void main() {
     });
   });
 
+  group('Terminal.resize', () {
+    test('a resize to the current size changes nothing', () {
+      // MonkeyMux publishes the grid on every resize, changed or not, and
+      // its screen model ignores one to the current size, as xterm never
+      // sees one. Resetting the scroll region and ending a deferred wrap
+      // here left the client's screen scrolling whole while the model
+      // scrolled the program's region.
+      final terminal = Terminal()..resize(10, 6);
+      terminal.write('\x1b[2;4r\x1b[4;1H${'x' * 10}');
+
+      expect(terminal.buffer.isWrapPending, isTrue);
+
+      terminal.resize(10, 6);
+
+      expect(terminal.buffer.marginTop, 1);
+      expect(terminal.buffer.marginBottom, 3);
+      expect(terminal.buffer.isWrapPending, isTrue);
+      expect(terminal.buffer.cursorY, 3);
+    });
+  });
+
   group('Terminal.resizeFromHost', () {
     test('ignores private host resizes unless explicitly enabled', () {
       final terminal = Terminal(maxLines: 10)..resize(80, 24);

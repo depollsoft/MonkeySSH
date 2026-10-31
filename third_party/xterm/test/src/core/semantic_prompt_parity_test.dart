@@ -54,7 +54,8 @@ List<String> dumpSemanticPrompt(Terminal terminal) {
 /// Runs [testCase] on a client terminal and returns it.
 Terminal runSemanticParityCase(Map<String, dynamic> testCase) {
   final size = (testCase['size'] as List).cast<int>();
-  final terminal = Terminal(maxLines: 1000);
+  // As many lines as the app keeps: more than the model's whole scrollback.
+  final terminal = Terminal(maxLines: 10000);
   terminal.resize(size[0], size[1]);
   var steps = testCase['steps'] as List;
   final frame = testCase['frame'] as String?;

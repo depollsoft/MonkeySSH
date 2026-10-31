@@ -184,6 +184,35 @@ func TestVTScreenRowProvenanceSurvivesScrollbackAndFrames(t *testing.T) {
 // TestVTScreenSavedCursorFollowsMainScreenUnderAltScreen: ?1049l restores the
 // cursor saved on the main screen, which moves with the rows the keyboard's
 // resizes scroll while vim runs, as the client's does (Buffer.resize).
+// TestVTScreenUnsavedCursorFollowsResizes: a DECRC without a DECSC restores
+// the power-up saved cursor, which a height change under the alternate
+// screen moves like a saved one; xterm's AdjustSavedCursor and the client's
+// Buffer.resize do not ask whether it was ever saved.
+func TestVTScreenUnsavedCursorFollowsResizes(t *testing.T) {
+	s := newTerminalScreen(30, 12)
+	for line := 1; line <= 11; line++ {
+		s.Write([]byte(fmt.Sprintf("line %d\r\n", line)))
+	}
+	s.Write([]byte("% viewer\x1b[?47h\x1b[H\x1b[2Jviewer"))
+	s.Resize(30, 8)
+	s.Resize(30, 12)
+	s.Write([]byte("\x1b[?47l\x1b8Z"))
+
+	rows := s.TextRows()
+	if row, _ := s.CursorPosition(); row != 4 || rows[4] != "Zine 5" {
+		t.Fatalf("cursor row %d, rows %q", row, rows)
+	}
+
+	// A frame carries that cursor to the client.
+	client := newTerminalScreen(30, 12)
+	client.Write([]byte("\x1b[?6l\x1b[r\x1b[0m"))
+	client.Write(s.RenderFrame())
+	client.Write([]byte("\x1b[1;1H\x1b8Y"))
+	if got := client.TextRows(); got[4] != "Yine 5" {
+		t.Fatalf("DECRC after the frame: %q", got)
+	}
+}
+
 func TestVTScreenSavedCursorFollowsMainScreenUnderAltScreen(t *testing.T) {
 	s := newTerminalScreen(30, 12)
 	for line := 1; line <= 11; line++ {

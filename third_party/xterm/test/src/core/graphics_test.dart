@@ -2083,6 +2083,169 @@ void main() {
     });
   }
 
+  // A MonkeyMux shell window's replay carries only the end of its output. When
+  // that end begins among a transmission's later chunks, the replay starts at
+  // the command's column with the command again: the whole command from the
+  // output, or the image sent store-only and an a=p placing it. Each lands
+  // the image on the replay's first row and moves the cursor past it as the
+  // command did, so the output after it keeps its place below the image.
+  testWidgets('a replayed image command lays out as the command did', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(240, 160);
+      final half = png.length ~/ 8 * 4;
+      String chunked(String keys) => '\x1b_G$keys,m=1;${png.substring(0, half)}'
+          '\x1b\\\x1b_Gm=0;${png.substring(half)}\x1b\\';
+      const after = '\r\n\$ ls\r\nfoo  bar\r\n\$ ';
+      Future<Terminal> fed(String output) async {
+        final terminal = Terminal()
+          ..graphics.setCellPixelSize(10, 20)
+          ..write(output);
+        for (var waited = 0;
+            !terminal.graphics.hasPlacements && waited < 2000;
+            waited += 20) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        return terminal;
+      }
+
+      List<String> text(Terminal terminal, int from) => [
+            for (var row = from; row < from + 12; row++)
+              terminal.buffer.lines[row].getText().trimRight(),
+          ];
+
+      final shown =
+          await fed('\$ icat img.png\r\n  ${chunked('a=T,i=7,f=100')}$after');
+      for (final replay in [
+        '\x1b[3G${chunked('a=T,i=7,f=100,q=2')}$after',
+        '${chunked('a=t,i=7,f=100,q=2')}\x1b[3G\x1b_Ga=p,i=7,q=2\x1b\\$after',
+        '${chunked('a=t,I=9,f=100,q=2')}\x1b[3G\x1b_Ga=p,I=9,q=2\x1b\\$after',
+      ]) {
+        final replayed = await fed(replay);
+        // The replay paints from the row after the shell's command line.
+        expect(text(replayed, 0), text(shown, 1), reason: replay);
+        expect(
+          replayed.graphics.placements.map((p) => (p.row, p.col)),
+          [(0, 2)],
+          reason: replay,
+        );
+      }
+      expect(shown.graphics.placements.map((p) => (p.row, p.col)), [(1, 2)]);
+      expect(text(shown, 9).first, '\$ ls');
+    });
+  });
+
+  // A MonkeyMux replay of the window a client shows keeps the client's
+  // placements through its clear (ED 2 leaves them), and a shell window's
+  // replayed output places its images again. An image sent by number or with
+  // no id gets a new id each time, so the kept copy stays beside the new one
+  // unless the replay deletes the client's placements first.
+  testWidgets('a reopened shell window replay leaves one copy of each image', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      // Output above the images, which the replay scrolls through again.
+      final output = '${List.filled(30, 'output\r\n').join()}'
+          '\$ icat a.png b.png\r\n'
+          '\x1b_Ga=T,I=9,f=100,q=2;$png\x1b\\\r\n'
+          '\x1b_Ga=T,f=100,q=2;$png\x1b\\\r\n\$ ';
+      const clear = '\x1b[H\x1b[2J\x1b[3J';
+      const prefix = '$clear\x1b[?1049h$clear\x1b[?1049l$clear';
+      Future<List<int>> rows(String replay) async {
+        final terminal = Terminal(maxLines: 1000)..resize(40, 10);
+        terminal.write(output);
+        terminal.write(replay);
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        return [for (final p in terminal.graphics.placements) p.row]..sort();
+      }
+
+      final original = await rows('');
+      expect(original, hasLength(2));
+      // Without the delete, the kept copies stay, pushed up by the output.
+      final kept = await rows('$prefix$output');
+      expect(kept, hasLength(4));
+      expect(kept.take(2), everyElement(lessThan(original.first)));
+      expect(await rows('$prefix\x1b_Ga=d,d=a,q=2\x1b\\$output'), original);
+    });
+  });
+
+  // A MonkeyMux replay of an alternate-screen program's window paints the
+  // main screen behind it again, scrollback first, which scrolls the main
+  // screen. A placement the client kept there for an image the replay
+  // cannot carry would go up with the rows, away from its cell, unless the
+  // replay deletes it first.
+  testWidgets('a replayed main screen leaves out cleanly what it cannot carry',
+      (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      final earlier = List.filled(20, 'earlier output\r\n').join();
+      final output = '$earlier\x1b_Ga=T,i=8,C=1,f=100,q=2;$png\x1b\\'
+          '\r\n\$ vim\r\n\x1b[?1049h\x1b[H\x1b[2Jalternate';
+      const clear = '\x1b[H\x1b[2J\x1b[3J';
+      const prefix = '\x1b[?1049l$clear\x1b[?1049h$clear\x1b[?1049l$clear';
+      // The main screen as the replay paints it: its scrollback, pushed
+      // above the screen, then its rows; then the program's screen again.
+      final mainScreen = '\x1b[H$earlier${'\r\n' * 9}'
+          '\x1b[1;1H\x1b[K\x1b[2;1H\$ vim\x1b[K\x1b[3;1H';
+      const enter = '\x1b[?1049h$clear';
+      Future<(List<int>, String)> replayed(String deletes) async {
+        final terminal = Terminal(maxLines: 1000)..resize(40, 10);
+        terminal.write(output);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        terminal.write('$prefix$deletes$mainScreen$enter\x1b[?1049l');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final rows = [
+          for (final p in terminal.mainBuffer.graphics.placements) p.row
+        ];
+        final shown = [
+          for (var row = 0; row < terminal.mainBuffer.lines.length; row++)
+            terminal.mainBuffer.lines[row].getText().trimRight(),
+        ].join('\n').trimRight();
+        return (rows, shown);
+      }
+
+      final (kept, keptText) = await replayed('');
+      final (deleted, deletedText) = await replayed('\x1b_Ga=d,d=a,q=2\x1b\\');
+      // The image was on the row above the prompt, now scrolled away from it.
+      final promptRow = keptText.split('\n').indexOf('\$ vim');
+      expect(kept, hasLength(1));
+      expect(kept.single, isNot(promptRow - 1));
+      expect(deleted, isEmpty);
+      expect(deletedText, keptText);
+    });
+  });
+
+  // A MonkeyMux shell window's replay can't send every image its display
+  // commands show. For the rest it deletes the client's data first, which
+  // another window may have sent under the same id or number, so those
+  // commands place nothing instead of showing the other window's image.
+  testWidgets('a replay deletes image data its display commands must not use', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      final terminal = Terminal()..resize(40, 10);
+      terminal
+        ..write('\x1b_Ga=t,i=5,f=100,q=2;$png\x1b\\')
+        ..write('\x1b_Ga=t,I=9,f=100,q=2;$png\x1b\\');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      terminal
+        ..write('\x1b_Ga=d,d=I,i=5,q=2\x1b\\\x1b_Ga=d,d=N,I=9,q=2\x1b\\')
+        ..write('\x1b_Ga=p,i=5,c=2,r=1,q=2\x1b\\X')
+        ..write('\x1b_Ga=p,I=9,c=2,r=1,q=2\x1b\\Y');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(terminal.graphics.placements, isEmpty);
+      expect(terminal.graphics.heldImageSignatures(), isEmpty);
+      // Neither command moved the cursor past an image.
+      expect(terminal.buffer.lines[0].getText().trimRight(), 'XY');
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

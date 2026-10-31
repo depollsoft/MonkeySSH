@@ -40,6 +40,7 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
 	out = s.appendKittyPlacements(out, s.altActive, replace)
 	out = s.appendSavedCursor(out, g, *s.saved(), marks)
+	out = marks.resume(out)
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
 	}
@@ -56,7 +57,7 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 			row = 0
 		}
 	}
-	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks)
+	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	// Last, since restoring a deferred wrap prints a glyph again under the
 	// content it was written as.
 	out = marks.finish(out)
@@ -87,28 +88,33 @@ func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) 
 		return nil
 	}
 	g := &s.main
-	// The alternate screen shows, so the frame carries no prompt marks.
-	out, _ := s.appendGridFrame(make([]byte, 0, 4096), g, true)
+	// The main screen's marks are painted into the client's main buffer,
+	// which keeps its own prompt state for the application's exit to find.
+	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, true)
 	out = s.appendKittyPlacements(out, false, replace)
 	if saved := s.savedMain; s.altSavedCursor {
+		out = marks.resume(out)
 		// DECSET 6 homes the cursor, so it goes first. The frame left the
 		// scroll region full, where an origin-relative row is the row.
 		if saved.originMode {
 			out = append(out, "\x1b[?6h"...)
 		}
-		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, nil)
+		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks, saved.row)
+		out = marks.finish(out)
 		out = appendVTSGR(out, saved.attrs)
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	}
-	out = s.appendSavedCursor(out, g, s.savedMain, nil)
-	return appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, nil)
+	out = s.appendSavedCursor(out, g, s.savedMain, marks)
+	out = marks.resume(out)
+	out = appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
+	return marks.finish(out)
 }
 
 // appendGridFrame paints g onto a reset client, after the main screen's
 // retained scrollback when withScrollback is set, and leaves the rendition
 // reset. Scroll region, origin mode and insert mode are left off. It returns
-// the marks of the prompt it painted, whose finish the caller appends once
-// it has restored the cursor.
+// the prompt marks it painted with, whose finish the caller appends once it
+// has restored the cursor.
 func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback bool) ([]byte, *vtSemanticFrame) {
 	// Insert mode stays off until RenderFrame restores it; painting under it
 	// would shift cells instead of replacing them, such as the glyphs a soft
@@ -117,8 +123,13 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	out = s.appendTabStops(out)
 	withScrollback = withScrollback && s.scrollback.len() > 0
 	softWraps := s.renderedSoftWraps(g, withScrollback)
-	marks := s.semanticFrame(g)
+	marks := s.semanticFrame(g, withScrollback)
 	out = marks.begin(out)
+	// Lines are counted from the first painted scrollback line for marks.
+	history := 0
+	if withScrollback {
+		history = s.scrollback.len()
+	}
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}
@@ -128,17 +139,16 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		// last line's cells when its own wrap needed them.
 		var decoder vtLineDecoder
 		var prev []vtCell
-		history := s.scrollback.len()
 		for i := range history {
 			line := s.scrollback.at(i)
 			var cells []vtCell
 			switch {
 			case i > 0 && line.wrapped:
 				if prev == nil {
-					prev = decoder.decode(s.scrollback.at(i-1).text, s.width)
+					prev = s.scrollback.at(i-1).decode(&decoder, s.width)
 				}
-				cells = decoder.decode(line.text, s.width)
-				out = appendVTSoftWrap(out, prev, cells, s.height > 1)
+				cells = line.decode(&decoder, s.width)
+				out = appendVTSoftWrap(out, prev, cells, s.height > 1, marks)
 				// The wrap scrolled this row in while the glyph it printed set
 				// the rendition, so the row may be filled with that background,
 				// and the stored line skips the cells it leaves default. Erase
@@ -147,12 +157,13 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			var inPrompt bool
-			out, inPrompt = marks.beginHistoryLine(out, i, line.prompt, i > 0 && line.wrapped)
-			if inPrompt {
-				// A line of the current prompt is painted from its cells, so
-				// its marks and cell contents travel with it.
-				cells = line.decode(&decoder, s.width)
+			out = marks.beginLine(out, i, line.prompt, i > 0, true)
+			if marks != nil && (line.prompt != vtPromptNone || len(line.sem) > 0) {
+				// A line with a mark, or a cell written as prompt or input,
+				// is painted from its cells, so they travel with it.
+				if cells == nil {
+					cells = line.decode(&decoder, s.width)
+				}
 				out = renderVTCellsMarked(out, cells, marks)
 			} else {
 				out = append(out, line.text...)
@@ -161,18 +172,16 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		}
 		if g.wrapped[0] {
 			if prev == nil {
-				prev = decoder.decode(s.scrollback.at(history-1).text, s.width)
+				prev = s.scrollback.at(history-1).decode(&decoder, s.width)
 			}
-			// The wrap reprints the last glyph, which keeps the content the
-			// line ended with, so the prompt's marks end after it.
-			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1)
+			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1, marks)
 			// Erased for the same reason; the row is painted below.
 			out = appendVTCSICount(out, s.width, 'X')
-			out = marks.endHistory(out)
 		} else {
-			out = marks.endHistory(out)
 			out = append(out, "\x1b[0m\r\n"...)
 		}
+		out = marks.beginLine(out, history, g.prompt[0], true, true)
+		out = marks.push(out)
 		for i := 1; i < s.height; i++ {
 			out = append(out, "\r\n"...)
 		}
@@ -180,11 +189,11 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	for r, row := range g.rows {
 		softWrap := r > 0 && g.wrapped[r]
 		if softWrap {
-			out = appendVTSoftWrap(out, g.rows[r-1], row, true)
+			out = appendVTSoftWrap(out, g.rows[r-1], row, true, marks)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
-		out = marks.beginRow(out, r, softWrap)
+		out = marks.beginLine(out, history+r, g.prompt[r], softWrap, !vtRowReclaimable(row) || r == g.cursorRow)
 		before := len(out)
 		out = renderVTCellsMarked(out, row, marks)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
@@ -212,7 +221,8 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 // staged, saved, and the staging undone. marks are those of the prompt the
 // frame painted, if any.
 func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedCursor, marks *vtSemanticFrame) []byte {
-	if !saved.valid {
+	// A cursor never saved is home unless a resize moved it (restoreCursor).
+	if !saved.valid && saved.row == 0 && saved.col == 0 {
 		return out
 	}
 	if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {
@@ -223,7 +233,7 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 		out = append(out, "\x1b[?6h"...)
 		row -= s.top
 	}
-	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks)
+	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks, -1)
 	out = appendVTSGR(out, saved.attrs)
 	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
@@ -236,8 +246,10 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 // model, under the semantic content it was written as when marks are those
 // of a painted prompt. A last column with nothing in it, which a tab with no
 // stop left reaches, is reached by that tab again rather than by printing a
-// space into it. The rendition is left at the reprinted glyph's.
-func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame) []byte {
+// space into it. The rendition is left at the reprinted glyph's. screenRow
+// is the cursor's row on the client's screen when it is the cursor the frame
+// ends at (vtSemanticFrame.cursorContent), and -1 otherwise.
+func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame, screenRow int) []byte {
 	if !pendingWrap || len(cells) == 0 {
 		return appendVTCursorPosition(out, row, col)
 	}
@@ -250,7 +262,11 @@ func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, 
 		last--
 	}
 	out = appendVTCursorPosition(out, row, last)
-	out = marks.glyph(out, cells[last].sem)
+	if screenRow >= 0 {
+		out = marks.cursorContent(out, cells[last].sem, screenRow)
+	} else {
+		out = marks.content(out, cells[last].sem)
+	}
 	return renderVTGlyphs(out, cells[last:])
 }
 
@@ -286,7 +302,11 @@ func (s *terminalScreen) renderedSoftWraps(g *vtGrid, withScrollback bool) bool 
 // wrap has scrolled: on a one-row screen it is in the history, out of reach of
 // the erase, so a stand-in there would stay written. That wrap is dropped
 // instead, unless it needs no stand-in.
-func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool) []byte {
+//
+// A glyph printed again keeps the content it was written as (marks); the
+// row's own cells are painted again afterwards, so the content the glyph that
+// wraps onto it is printed under does not matter.
+func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks *vtSemanticFrame) []byte {
 	width := len(prev)
 	if last := prev[width-1]; last.unwritten() && width > 1 && len(next) > 1 &&
 		next[0].r != 0 && next[0].width == 2 && last.attrs == (vtAttrs{bg: next[0].attrs.bg}) {
@@ -305,9 +325,11 @@ func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool) []byte
 	switch last := prev[width-1]; {
 	case last.width == 0 && width > 1 && prev[width-2].width == 2:
 		out = appendVTCSICount(out, width-1, 'G')
+		out = marks.content(out, prev[width-2].sem)
 		out = renderVTGlyphs(out, prev[width-2:])
 	case last.width == 1 && last.r != 0:
 		out = appendVTCSICount(out, width, 'G')
+		out = marks.content(out, last.sem)
 		out = renderVTGlyphs(out, prev[width-1:])
 	default:
 		out = appendVTCSICount(out, width, 'G')
@@ -429,7 +451,7 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byt
 			i = run
 			continue
 		}
-		out = marks.cell(out, cell.sem)
+		out = marks.cell(out, i, cell.sem)
 		if cell.attrs != current {
 			out = appendVTSGR(out, cell.attrs)
 			current = cell.attrs

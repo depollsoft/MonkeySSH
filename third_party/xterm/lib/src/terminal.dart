@@ -734,6 +734,16 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
       onResize?.call(newWidth, newHeight, pixelWidth ?? 0, pixelHeight ?? 0);
     }
 
+    // A resize to the current size is reported but changes nothing, as in
+    // xterm, which never sees one, and the MonkeyMux screen model, which
+    // ignores one. MonkeyMux publishes its grid on every resize, changed or
+    // not; resetting the scroll region and ending a deferred wrap here left
+    // this terminal scrolling whole where the model scrolled the program's
+    // region.
+    if (newWidth == _viewWidth && newHeight == _viewHeight) {
+      return;
+    }
+
     //we need to resize both buffers so that they are ready when we switch between them
     _altBuffer.resize(_viewWidth, _viewHeight, newWidth, newHeight);
     _mainBuffer.resize(_viewWidth, _viewHeight, newWidth, newHeight);
@@ -1335,9 +1345,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     top = top.clamp(0, lastRow);
     bottom = (bottom ?? lastRow).clamp(0, lastRow);
     // Like xterm and the MonkeyMux screen model, a region of fewer than two
-    // rows is ignored and a valid one homes the cursor.
+    // rows is ignored and a valid one homes the cursor. The region is the
+    // terminal's, not the screen's: switching screens keeps it, so a program
+    // that leaves the alternate screen without `CSI r` leaves it set for the
+    // shell, as in xterm and the model.
     if (top >= bottom) return;
-    _buffer.setVerticalMargins(top, bottom);
+    _mainBuffer.setVerticalMargins(top, bottom);
+    _altBuffer.setVerticalMargins(top, bottom);
     _buffer.setCursor(0, 0);
   }
 

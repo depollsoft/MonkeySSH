@@ -109,10 +109,24 @@ type terminalScreen struct {
 	kittyDirect []vtKittyPlacement
 	kittyStores [2]vtKittyStore
 	kittyChunk  vtKittyChunk
+	// kittyCommands are the latest commands that placed an image at the
+	// cursor on the main screen (vtKittyCommand). written counts the bytes
+	// Write has read, escAt is the offset of the last ESC among them, and
+	// kittyAPCStart that of the ESC that began the APC string being read.
+	kittyCommands []vtKittyCommand
+	written       int64
+	escAt         int64
+	kittyAPCStart int64
+	// kittyColumnLost is set once an image placed at the cursor on the main
+	// screen moved the client's cursor past it, which the model does not
+	// follow, until the main screen's column is set again.
+	kittyColumnLost bool
 
-	// Semantic prompt (OSC 133) state of each screen; see vtscreen_prompt.go.
+	// Semantic prompt (OSC 133) state of each screen, and the shell status
+	// the app keeps from both; see vtscreen_prompt.go.
 	semMain vtSemanticState
 	semAlt  vtSemanticState
+	shell   vtShellState
 
 	parser vtParser
 }
@@ -281,6 +295,8 @@ type vtGrid struct {
 }
 
 type vtSavedCursor struct {
+	// valid records a DECSC; the zero value is the power-up state DECRC
+	// restores otherwise, whose row a resize can still move.
 	valid bool
 	row   int
 	col   int
@@ -292,6 +308,9 @@ type vtSavedCursor struct {
 	g0Graphics  bool
 	g1Graphics  bool
 	shiftOut    bool
+	// kittyColumnLost is the screen's when it was saved: DECRC puts back
+	// the column the client's cursor had then.
+	kittyColumnLost bool
 }
 
 // vtCell holds one grid cell. r == 0 means blank. width is 1 or 2 for a cell
@@ -421,6 +440,8 @@ func (s *terminalScreen) Reset() {
 	s.kittyStores[0].relative, s.kittyStores[1].relative = nil, nil
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
+	s.shell = vtShellState{}
+	s.kittyColumnLost = false
 	s.resetState()
 }
 
@@ -567,6 +588,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
+	c.kittyCommands = append([]vtKittyCommand(nil), s.kittyCommands...)
 	for i, store := range s.kittyStores {
 		c.kittyStores[i] = store.clone()
 	}
@@ -1124,12 +1146,24 @@ func (s *terminalScreen) Write(data []byte) {
 		b := data[i]
 		if s.parser.state == vtGround && s.parser.utf8Need == 0 &&
 			b >= 0x20 && b < 0x7f {
-			i += s.printASCIIRun(data[i:])
+			n := s.printASCIIRun(data[i:])
+			s.written += int64(n)
+			i += n
 			continue
 		}
+		s.written++
 		s.step(b)
 		i++
 	}
+}
+
+// Written is how many bytes of output the model has read: the offset just
+// past the last one, in the terms vtKittyCommand gives offsets in.
+func (s *terminalScreen) Written() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.written
 }
 
 // printASCIIRun writes a run of printable ASCII straight into the grid, the
@@ -1200,6 +1234,9 @@ func (s *terminalScreen) step(b byte) {
 		s.decoderInString = false
 	}
 	s.lastByteESC = b == 0x1b
+	if s.lastByteESC {
+		s.escAt = s.written - 1
+	}
 	switch p.state {
 	case vtGround:
 		if p.utf8Need > 0 {
@@ -1276,6 +1313,9 @@ func (s *terminalScreen) step(b byte) {
 			p.oscHead = p.oscHead[:0]
 		case b == 'P' || b == 'X' || b == '^' || b == '_':
 			p.beginString(b)
+			// Another ESC would have begun the sequence again, so the last
+			// one began this one.
+			s.kittyAPCStart = s.escAt
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
 			p.state = vtEscapeIntermediate
@@ -1639,6 +1679,7 @@ func (s *terminalScreen) execute(b byte) {
 	case 0x0d: // CR
 		g.cursorCol = 0
 		g.pendingWrap = false
+		s.kittyColumnFound()
 	case 0x0e: // SO
 		s.shiftOut = true
 	case 0x0f: // SI
@@ -1677,6 +1718,7 @@ func (s *terminalScreen) escapeDispatch(final byte) {
 		g.cursorCol = 0
 		g.pendingWrap = false
 		s.index()
+		s.kittyColumnFound()
 	case 'H':
 		if g.cursorCol < len(s.tabs) {
 			s.tabs[g.cursorCol] = true
@@ -1707,6 +1749,8 @@ func (s *terminalScreen) saveCursor() {
 		g0Graphics:  s.g0Graphics,
 		g1Graphics:  s.g1Graphics,
 		shiftOut:    s.shiftOut,
+
+		kittyColumnLost: s.kittyColumnLost,
 	}
 }
 
@@ -1730,19 +1774,18 @@ func (s *terminalScreen) restoreCursor() {
 	saved := *s.saved()
 	g := s.grid()
 	defer s.noteCursorRow(g.cursorRow)
-	if !saved.valid {
-		g.cursorRow, g.cursorCol = 0, 0
-		s.attrs = vtAttrs{}
-		s.originMode = false
-		g.pendingWrap = false
-		return
-	}
+	// A cursor never saved restores the power-up state, home with the
+	// default rendition, which a height change moves like a saved cursor
+	// (resizeMain), as the client's and xterm's AdjustSavedCursor do.
 	s.restoreSavedPosition(g, saved)
 	s.attrs = saved.attrs
 	s.originMode = saved.originMode
 	s.g0Graphics = saved.g0Graphics
 	s.g1Graphics = saved.g1Graphics
 	s.shiftOut = saved.shiftOut
+	if !s.altActive {
+		s.kittyColumnLost = saved.kittyColumnLost
+	}
 }
 
 // restoreSavedPosition puts the cursor back where saved left it, deferred
@@ -2170,13 +2213,17 @@ func (s *terminalScreen) csiDispatch(final byte) {
 	case 'E':
 		g.cursorCol = 0
 		s.moveCursorRelative(n, 0)
+		s.kittyColumnFound()
 	case 'F':
 		g.cursorCol = 0
 		s.moveCursorRelative(-n, 0)
+		s.kittyColumnFound()
 	case 'G', '`':
 		g.cursorCol = clampInt(n-1, 0, s.width-1)
 		g.pendingWrap = false
+		s.kittyColumnFound()
 	case 'H', 'f':
+		s.kittyColumnFound()
 		row := p.param(groups, 0, 1) - 1
 		col := p.param(groups, 1, 1) - 1
 		if s.originMode {
@@ -2341,7 +2388,8 @@ func (s *terminalScreen) softReset() {
 	// saved cursors go, as in the client's softReset.
 	s.savedMain = vtSavedCursor{}
 	s.savedAlt = vtSavedCursor{}
-	s.grid().pendingWrap = false
+	// The cursor stays where it is, a pending wrap included, as in xterm and
+	// the client.
 }
 
 // screenAlignment is DECALN: fill the screen with E and home the cursor.

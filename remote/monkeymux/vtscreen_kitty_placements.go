@@ -22,9 +22,10 @@ import (
 // placements of an image with an explicit id (i=) are followed: a frame
 // cannot name an image sent by number (I=) or with neither, since the client
 // gives those an id of its own. A client reopened on the window it showed
-// keeps what it holds (activeWindowReplayPrefix leaves physical placements);
-// a replay of another window makes the app delete them first, from the
-// window it names (monkeyMuxReplayWindowOSC).
+// keeps what it holds (activeWindowReplayPrefix leaves physical placements),
+// unless a replay of the window's output deletes it to place its images
+// again (kittyVisiblePlacementsDelete); a replay of another window makes the app
+// delete them first, from the window it names (monkeyMuxReplayWindowOSC).
 //
 // The client places an image only when the store of the screen it is on
 // holds it, and answers ENOENT otherwise. The model follows each screen's
@@ -65,12 +66,100 @@ func (p *vtKittyPlacement) span() kittyCellSpan {
 	return kittyCellSpan{col: p.col, row: p.row, cols: p.cols, rows: p.rows}
 }
 
+// vtKittyCommandReach is how far back in its output the model remembers
+// commands. A replay carries at most windowReplayLimitBytes of output, so
+// only a command that ended within that much can be the one its cut falls
+// on (KittyCutCommand); every command takes bytes, so this bounds how many
+// the model keeps.
+const vtKittyCommandReach = windowReplayLimitBytes
+
+// vtKittyCommand is a command that placed an image at the cursor on the main
+// screen (a=T, or a=p, neither virtual nor relative), of an image with an
+// id, a number or neither. A shell window's replay carries only the end of
+// its output, which can begin among a transmission's later chunks, or just
+// after it, and so place nothing; the replay places the image again with the
+// command (KittyCutCommand).
+type vtKittyCommand struct {
+	// start and end are where its first APC string began and its last one
+	// ended, as offsets in what the model has read (Written).
+	start, end int64
+	// col is the cursor's column when it placed the image, or -1 when the
+	// model lost it (kittyColumnLost).
+	col int
+	// transmits records an image transmission (a=T), and place an a=p that
+	// places its image again, moving the cursor past it unless the command
+	// kept it where it was (C=1).
+	transmits bool
+	place     []byte
+}
+
+// noteKittyCommand remembers a command that placed an image at the cursor
+// on the main screen, which began at start and ends here.
+func (s *terminalScreen) noteKittyCommand(args map[string]string, start int64, transmits bool) {
+	stale := 0
+	for stale < len(s.kittyCommands) && s.kittyCommands[stale].end < s.written-vtKittyCommandReach {
+		stale++
+	}
+	s.kittyCommands = append(s.kittyCommands[:0], s.kittyCommands[stale:]...)
+	command := vtKittyCommand{start: start, end: s.written, col: s.grid().cursorCol, transmits: transmits}
+	if s.kittyColumnLost {
+		command.col = -1
+	}
+	if kittyIntValue(args["C"]) != 1 {
+		s.kittyColumnLost = true
+	}
+	if transmits {
+		tail := ",q=2\x1b\\"
+		if kittyIntValue(args["C"]) == 1 {
+			tail = ",C=1" + tail
+		}
+		command.place = kittyPlacementCommand(args, tail)
+	}
+	s.kittyCommands = append(s.kittyCommands, command)
+}
+
+// kittyColumnFound notes that the cursor's column was set, CR or CUP, which
+// puts the client's main-screen cursor back where the model's is. One the
+// alternate screen sets leaves it.
+func (s *terminalScreen) kittyColumnFound() {
+	if !s.altActive {
+		s.kittyColumnLost = false
+	}
+}
+
+// KittyPlacedImages reports whether the output placed an image at the
+// cursor on the main screen, which a client showing it may still hold.
+func (s *terminalScreen) KittyPlacedImages() bool {
+	return s != nil && len(s.kittyCommands) > 0
+}
+
+// KittyCutCommand returns the command that a replay of the output from
+// carried on leaves out, if the output after it is within the replay's
+// reach: the newest command that began before carried, if it ended at or
+// after cut, where the replay's limit cut the output. A replay that starts
+// with it again paints everything after it. One that ended before cut had
+// output after it that the replay leaves out, so its row is above the first
+// one the replay paints.
+func (s *terminalScreen) KittyCutCommand(cut, carried int64) (vtKittyCommand, bool) {
+	if s == nil {
+		return vtKittyCommand{}, false
+	}
+	for i := len(s.kittyCommands) - 1; i >= 0; i-- {
+		if command := s.kittyCommands[i]; command.start < carried {
+			return command, command.end >= cut
+		}
+	}
+	return vtKittyCommand{}, false
+}
+
 // vtKittyChunk is a transmission (m=1) still arriving. The client takes
 // the keys of its first chunk and runs the command when the last one
 // arrives, at the cursor as it is then.
 type vtKittyChunk struct {
 	open bool
 	args map[string]string
+	// start is where its first chunk began (vtKittyCommand).
+	start int64
 }
 
 // vtKittyImageLimit bounds each set a vtKittyStore keeps; the oldest goes
@@ -209,17 +298,17 @@ func (s *terminalScreen) observeKittyGraphics(control []byte, truncated bool) {
 		if s.kittyChunk.open && args["m"] != "1" {
 			chunk := s.kittyChunk
 			s.kittyChunk = vtKittyChunk{}
-			s.runKittyGraphics(chunk.args)
+			s.runKittyGraphics(chunk.args, chunk.start)
 		}
 		return
 	}
 	// A new command abandons a transmission still open.
 	s.abandonKittyChunk()
 	if args["m"] == "1" {
-		s.kittyChunk = vtKittyChunk{open: true, args: args}
+		s.kittyChunk = vtKittyChunk{open: true, args: args, start: s.kittyAPCStart}
 		return
 	}
-	s.runKittyGraphics(args)
+	s.runKittyGraphics(args, s.kittyAPCStart)
 }
 
 // abandonKittyChunk follows the client dropping a transmission that will
@@ -241,8 +330,8 @@ func (s *terminalScreen) abandonKittyChunk() {
 }
 
 // runKittyGraphics follows a complete graphics command, as graphicsCommandEnd
-// runs it.
-func (s *terminalScreen) runKittyGraphics(args map[string]string) {
+// runs it; its first APC string began at start.
+func (s *terminalScreen) runKittyGraphics(args map[string]string, start int64) {
 	if !kittyGraphicsKeysValid(args) ||
 		(kittyNonZero(args["i"]) && kittyNonZero(args["I"])) {
 		// The client rejects the command outright, as Kitty does.
@@ -255,6 +344,11 @@ func (s *terminalScreen) runKittyGraphics(args map[string]string) {
 	imageID := kittyIDValue(args["i"])
 	store := s.kittyStore()
 	virtual, relative := kittyNonZero(args["U"]), kittyNonZero(args["P"])
+	if !s.altActive && !virtual && !relative &&
+		(action == "T" && kittyTransmissionAccepted(args) ||
+			action == "p" && (imageID != "" || kittyNonZero(args["I"]))) {
+		s.noteKittyCommand(args, start, action == "T")
+	}
 	switch action {
 	case "t", "T":
 		accepted := kittyTransmissionAccepted(args)
@@ -823,17 +917,27 @@ func (s *terminalScreen) kittyPlacementReplaced(
 
 // KittyMainPlacementDeletes returns what a replay sends, before the images,
 // when it paints the main screen and places its direct placements again
-// (replace as for RenderFrameReplacing): a lowercase delete by id (a=d,d=i),
-// which keeps the image data, of each image it places again. The replay
-// prefix's ED 2 leaves a reopened client's own placements on the main screen,
-// where the frame scrolls them into the scrollback or paints over them, so
-// placing one without a placement id again would leave a second copy. The
-// delete takes every placement of the image, wherever it is, and only those,
-// so what the replay does not place again keeps whatever the client had. The
-// alternate screen needs none: entering it cleared it.
+// (replace as for RenderFrameReplacing). The replay prefix's ED 2 leaves a
+// reopened client's own placements on the main screen. A frame that paints
+// the scrollback scrolls the screen, which carries each of them up with its
+// row, away from the cell it belongs on, so all of them go
+// (kittyVisiblePlacementsDelete), and an image the replay leaves out, too
+// large for it or sent without an id it can name, is left out cleanly; the
+// prefix's ED 2 erased the placeholder cells that position relative
+// placements of virtual ones, which the delete therefore keeps. A frame
+// without scrollback paints over the client's placements in place: only a
+// lowercase delete by id (a=d,d=i), which keeps the image data, of each
+// image it places again, so that placing one without a placement id does
+// not leave a second copy. That delete takes every placement of the image,
+// wherever it is, and only those, so what the replay does not place again
+// keeps whatever the client had. The alternate screen needs none: entering
+// it cleared it.
 func (s *terminalScreen) KittyMainPlacementDeletes(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil
+	}
+	if s.scrollback.len() > 0 {
+		return []byte(kittyVisiblePlacementsDelete)
 	}
 	var out []byte
 	var deleted []string
