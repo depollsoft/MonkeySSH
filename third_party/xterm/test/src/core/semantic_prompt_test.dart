@@ -231,7 +231,8 @@ void main() {
       final joined = _terminal(width: 6, height: 8);
       joined.write('${_mark('133;A;click_events=2')}1234567'
           '${_mark('133;P;k=s')}> ${_mark('133;B')}ab');
-      expect(joined.buffer.lines[1].semanticPrompt, SemanticPromptRow.secondary);
+      expect(
+          joined.buffer.lines[1].semanticPrompt, SemanticPromptRow.secondary);
       joined.resize(12, 8);
       expect(joined.buffer.lines[0].toString(), '1234567> ab');
       expect(_rowMarks(joined).take(2), [
