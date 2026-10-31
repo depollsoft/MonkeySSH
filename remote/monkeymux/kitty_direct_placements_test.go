@@ -626,9 +626,14 @@ func TestConPtyReplayReplacesTheClientsPlacements(t *testing.T) {
 // deletes the client's data of the rest, so their display commands fail
 // instead.
 func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
-	// The display commands run on the main screen, also after a program
-	// used the alternate screen in what the replay carries.
-	visits := map[string]string{"": "", "after an alternate screen": "\x1b[?1049hTUI\x1b[?1049l"}
+	// The display commands run on the main screen, where the client starts
+	// the replay: also after a program used the alternate screen in what the
+	// replay carries, and before a reset of a mode that was not set.
+	visits := map[string][2]string{
+		"":                          {"", ""},
+		"after an alternate screen": {"\x1b[?1049hTUI\x1b[?1049l", ""},
+		"before a redundant reset":  {"", "\x1b[?1049l"},
+	}
 	for _, key := range []string{"i", "I"} {
 		for visitName, visit := range visits {
 			t.Run(strings.TrimSpace(key+" "+visitName), func(t *testing.T) {
@@ -652,7 +657,7 @@ func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
 					fmt.Fprintf(&shows, "\x1b_Ga=p,%s=%d,c=2,r=1\x1b\\\r\n", key, n)
 				}
 				server.handleWindowOutput(one.id, []byte(images("AAAA")+
-					strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18)+visit+shows.String()+"$ "))
+					strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18)+visit[0]+shows.String()+visit[1]+"$ "))
 				if err := server.selectWindow(two.id); err != nil {
 					t.Fatal(err)
 				}

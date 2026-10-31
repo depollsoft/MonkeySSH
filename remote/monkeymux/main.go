@@ -11687,19 +11687,13 @@ func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
 	return nil
 }
 
-// kittyAlternateScreenAt returns whether the alternate screen is up at an
-// offset of history, a shell window's: the main screen shows at its end.
-// History can start inside a program's alternate screen, so each of modes
-// 1047 and 1049 is taken to start the other way from its first change. Ask
-// for offsets in increasing order.
+// kittyAlternateScreenAt returns whether the client shows the alternate
+// screen at an offset of history, a shell window's, which it replays from
+// its main screen: also what a program cut off from the start of history
+// wrote to its alternate screen. Ask for offsets in increasing order.
 func kittyAlternateScreenAt(history []byte) func(offset int) bool {
 	changes := kittyScreenModeChanges(history)
 	set := map[int]bool{}
-	for _, change := range changes {
-		if _, seen := set[change.mode]; !seen {
-			set[change.mode] = !change.set
-		}
-	}
 	next := 0
 	return func(offset int) bool {
 		for ; next < len(changes) && changes[next].offset < offset; next++ {
