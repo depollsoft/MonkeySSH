@@ -11612,7 +11612,8 @@ func (w *muxWindow) shellReplayHistoryLocked(
 	cut := end - int64(min(len(retained), windowReplayLimitBytes))
 	var restore []byte
 	images := 0
-	if command, ok := screen.KittyCutCommand(cut, end-int64(len(tail))); ok {
+	// One at a column the model lost stays out rather than land elsewhere.
+	if command, ok := screen.KittyCutCommand(cut, end-int64(len(tail))); ok && command.col >= 0 {
 		column := appendVTCSICount(nil, command.col+1, 'G')
 		if start := at(command.start); start >= 0 {
 			images = from - start
@@ -11690,16 +11691,27 @@ func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
 // kittyAlternateScreenAt returns whether the client shows the alternate
 // screen at an offset of history, a shell window's, which it replays from
 // its main screen: also what a program cut off from the start of history
-// wrote to its alternate screen. Ask for offsets in increasing order.
+// wrote to its alternate screen. Setting mode 1047 or 1049 enters it, and
+// resetting either leaves it, as RIS does. Ask for offsets in increasing
+// order.
 func kittyAlternateScreenAt(history []byte) func(offset int) bool {
 	changes := kittyScreenModeChanges(history)
-	set := map[int]bool{}
-	next := 0
+	for index := 0; ; {
+		at := bytes.Index(history[index:], []byte("\x1bc"))
+		if at < 0 {
+			break
+		}
+		index += at + 2
+		// RIS, at its final byte.
+		changes = append(changes, kittyScreenModeChange{offset: index - 1})
+	}
+	slices.SortStableFunc(changes, func(a, b kittyScreenModeChange) int { return a.offset - b.offset })
+	alternate, next := false, 0
 	return func(offset int) bool {
 		for ; next < len(changes) && changes[next].offset < offset; next++ {
-			set[changes[next].mode] = changes[next].set
+			alternate = changes[next].set
 		}
-		return set[1047] || set[1049]
+		return alternate
 	}
 }
 

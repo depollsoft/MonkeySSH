@@ -437,6 +437,22 @@ func TestShellReplayPlacesAgainAnImageItsTailCutsOff(t *testing.T) {
 	}
 }
 
+// TestShellReplayLeavesOutACutImageAtAColumnTheModelLost: an image placed at
+// the cursor moves the client's cursor past it, which the model does not
+// follow, so the column of the next image on that row is unknown. A replay
+// that cuts that one's transmission leaves it out rather than place it at
+// the wrong column.
+func TestShellReplayLeavesOutACutImageAtAColumnTheModelLost(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "$ icat a.png b.png\r\n\x1b_Ga=T,i=6,f=100,c=4,r=1;AAAA\x1b\\" +
+		kittyChunkedTransmission("a=T,i=7,f=100,c=4,r=1", 64*1024) + "\r\n$ ls\r\nfoo  bar\r\n$ "
+	got := selectWindowReplay(t, window, stream, "")
+	got = got[strings.LastIndex(got, windowReplayTag(window)):]
+	if strings.Contains(got, "\x1b_Ga=T,i=7,") {
+		t.Fatalf("replay places an image at a column the model lost: %.300q", got)
+	}
+}
+
 // TestShellReplayLeavesOutImagesAboveWhatItPaints: the output after an image
 // is longer than the replay carries, so the image's row is above the first
 // one the replay paints, and the replay does not place it.
@@ -633,6 +649,9 @@ func TestShellReplayShowsNoOtherWindowsImage(t *testing.T) {
 		"":                          {"", ""},
 		"after an alternate screen": {"\x1b[?1049hTUI\x1b[?1049l", ""},
 		"before a redundant reset":  {"", "\x1b[?1049l"},
+		// Resetting either mode leaves the alternate screen, as RIS does.
+		"after another mode's reset": {"\x1b[?1049h\x1b[?1047l", "\x1b[?1049l"},
+		"after RIS":                  {"\x1b[?1049hTUI\x1bc", ""},
 	}
 	for _, key := range []string{"i", "I"} {
 		for visitName, visit := range visits {

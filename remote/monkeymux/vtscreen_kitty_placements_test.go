@@ -713,7 +713,9 @@ func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
 		want := []vtKittyCommand{
 			{start: int64(first), end: int64(second), col: 2, transmits: true,
 				place: []byte("\x1b_Ga=p,I=9,q=2\x1b\\")},
-			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: 4},
+			// The transmission before it moved the client's cursor, which
+			// the model does not follow: its column is lost.
+			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: -1},
 		}
 		if !reflect.DeepEqual(s.kittyCommands, want) || s.Written() != int64(len(stream)) {
 			t.Fatalf("in reads of %d: commands = %+v, written %d", read, s.kittyCommands, s.Written())

@@ -83,7 +83,8 @@ type vtKittyCommand struct {
 	// start and end are where its first APC string began and its last one
 	// ended, as offsets in what the model has read (Written).
 	start, end int64
-	// col is the cursor's column when it placed the image.
+	// col is the cursor's column when it placed the image, or -1 when the
+	// model lost it (kittyColumnLost).
 	col int
 	// transmits records an image transmission (a=T), and place an a=p that
 	// places its image again, moving the cursor past it unless the command
@@ -101,6 +102,12 @@ func (s *terminalScreen) noteKittyCommand(args map[string]string, start int64, t
 	}
 	s.kittyCommands = append(s.kittyCommands[:0], s.kittyCommands[stale:]...)
 	command := vtKittyCommand{start: start, end: s.written, col: s.grid().cursorCol, transmits: transmits}
+	if s.kittyColumnLost {
+		command.col = -1
+	}
+	if kittyIntValue(args["C"]) != 1 {
+		s.kittyColumnLost = true
+	}
 	if transmits {
 		tail := ",q=2\x1b\\"
 		if kittyIntValue(args["C"]) == 1 {
@@ -109,6 +116,15 @@ func (s *terminalScreen) noteKittyCommand(args map[string]string, start int64, t
 		command.place = kittyPlacementCommand(args, tail)
 	}
 	s.kittyCommands = append(s.kittyCommands, command)
+}
+
+// kittyColumnFound notes that the cursor's column was set, CR or CUP, which
+// puts the client's main-screen cursor back where the model's is. One the
+// alternate screen sets leaves it.
+func (s *terminalScreen) kittyColumnFound() {
+	if !s.altActive {
+		s.kittyColumnLost = false
+	}
 }
 
 // KittyPlacedImages reports whether the output placed an image at the

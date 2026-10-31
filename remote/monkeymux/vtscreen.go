@@ -117,6 +117,10 @@ type terminalScreen struct {
 	written       int64
 	escAt         int64
 	kittyAPCStart int64
+	// kittyColumnLost is set once an image placed at the cursor on the main
+	// screen moved the client's cursor past it, which the model does not
+	// follow, until the main screen's column is set again.
+	kittyColumnLost bool
 
 	// Semantic prompt (OSC 133) state of each screen, and the shell status
 	// the app keeps from both; see vtscreen_prompt.go.
@@ -1671,6 +1675,7 @@ func (s *terminalScreen) execute(b byte) {
 	case 0x0d: // CR
 		g.cursorCol = 0
 		g.pendingWrap = false
+		s.kittyColumnFound()
 	case 0x0e: // SO
 		s.shiftOut = true
 	case 0x0f: // SI
@@ -2198,13 +2203,17 @@ func (s *terminalScreen) csiDispatch(final byte) {
 	case 'E':
 		g.cursorCol = 0
 		s.moveCursorRelative(n, 0)
+		s.kittyColumnFound()
 	case 'F':
 		g.cursorCol = 0
 		s.moveCursorRelative(-n, 0)
+		s.kittyColumnFound()
 	case 'G', '`':
 		g.cursorCol = clampInt(n-1, 0, s.width-1)
 		g.pendingWrap = false
+		s.kittyColumnFound()
 	case 'H', 'f':
+		s.kittyColumnFound()
 		row := p.param(groups, 0, 1) - 1
 		col := p.param(groups, 1, 1) - 1
 		if s.originMode {
