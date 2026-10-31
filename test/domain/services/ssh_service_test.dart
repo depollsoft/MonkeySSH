@@ -3396,6 +3396,34 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(terminal.heldImageSignatures(), contains(1));
     });
 
+    // The shell status and exit code are the window's: a replay of another
+    // window starts without them, since one without shell integration, or
+    // with no exit status yet, sends nothing that would replace them.
+    test('MonkeyMux replay tags of another window drop its shell status', () {
+      final session = _testSession(_MockSshClient());
+      final terminal = session.getOrCreateTerminal()..resize(20, 6);
+      String tag(String window) =>
+          '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
+
+      terminal.write(
+        '${tag('@1')}\x1b]133;A\x07\$ \x1b]133;B\x07false\r\n'
+        '\x1b]133;C\x07\x1b]133;D;7\x07\x1b]133;A\x07\$ \x1b]133;B\x07vi\r\n'
+        '\x1b]133;C\x07',
+      );
+      expect(session.shellStatus, TerminalShellStatus.runningCommand);
+      expect(session.lastExitCode, isNull);
+      terminal.write('\x1b]133;D;7\x07');
+      expect(session.lastExitCode, 7);
+
+      terminal.write(tag('@1'));
+      expect(session.shellStatus, TerminalShellStatus.prompt);
+      expect(session.lastExitCode, 7, reason: 'a reopen keeps them');
+
+      terminal.write('${tag('@2')}plain');
+      expect(session.shellStatus, isNull);
+      expect(session.lastExitCode, isNull);
+    });
+
     test('returns completed startup commands to a login shell without disconnecting', () async {
       final client = _MockSshClient();
       final startupShell = _MockExecSession();

@@ -4571,6 +4571,14 @@ class SshSession {
     final shown = _monkeyMuxReplayWindows[terminal];
     if (shown != null && shown != window) {
       terminal.deletePhysicalPlacements();
+      // The shell status and exit code were the other window's. This one's
+      // replay sets its own, unless it has no shell integration or exit
+      // status to send.
+      if (_shellStatus != null || _lastExitCode != null) {
+        _shellStatus = null;
+        _lastExitCode = null;
+        _notifyMetadataChanged();
+      }
     }
     _monkeyMuxReplayWindows[terminal] = window;
   }
