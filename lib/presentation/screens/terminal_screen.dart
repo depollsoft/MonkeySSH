@@ -14996,7 +14996,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         continue;
       }
 
-      builder.writeCharCode(codePoint);
+      builder.write(line.getGrapheme(col));
       final step = (width <= 0 ? 1 : width).clamp(1, viewWidth - col);
       for (var i = col + 1; i < col + step; i++) {
         columnOffsets[i] = startOffset;

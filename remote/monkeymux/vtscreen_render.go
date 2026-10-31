@@ -57,7 +57,7 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 			row = 0
 		}
 	}
-	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
+	out = s.appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	// Last, since restoring a deferred wrap prints a glyph again under the
 	// content it was written as.
 	out = marks.finish(out)
@@ -99,26 +99,28 @@ func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) 
 		if saved.originMode {
 			out = append(out, "\x1b[?6h"...)
 		}
-		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks, saved.row)
+		out = s.appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks, saved.row)
 		out = marks.finish(out)
 		out = appendVTSGR(out, saved.attrs)
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	}
 	out = s.appendSavedCursor(out, g, s.savedMain, marks)
 	out = marks.resume(out)
-	out = appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
+	out = s.appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	return marks.finish(out)
 }
 
 // appendGridFrame paints g onto a reset client, after the main screen's
 // retained scrollback when withScrollback is set, and leaves the rendition
-// reset. Scroll region, origin mode and insert mode are left off. It returns
-// the prompt marks it painted with, whose finish the caller appends once it
-// has restored the cursor.
+// reset. Scroll region, origin mode and insert mode are left off, and mode
+// 2027 as the model has it. It returns the prompt marks it painted with,
+// whose finish the caller appends once it has restored the cursor.
 func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback bool) ([]byte, *vtSemanticFrame) {
 	// Insert mode stays off until RenderFrame restores it; painting under it
 	// would shift cells instead of replacing them, such as the glyphs a soft
-	// wrap prints and the row then paints over.
+	// wrap prints and the row then paints over. Grapheme clustering is set as
+	// the model has it before any cell, which is painted for that mode.
+	out = appendVTGraphemeMode(out, s.graphemeCluster)
 	out = append(out, "\x1b[?6l\x1b[r\x1b[0m\x1b[4l"...)
 	out = s.appendTabStops(out)
 	withScrollback = withScrollback && s.scrollback.len() > 0
@@ -134,6 +136,10 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		out = append(out, "\x1b[?7h"...)
 	}
 	if withScrollback {
+		// Stored lines are painted for a client that clusters graphemes.
+		if !s.graphemeCluster {
+			out = appendVTGraphemeMode(out, true)
+		}
 		out = append(out, "\x1b[H"...)
 		// Stored lines are decoded only around a soft wrap; prev keeps the
 		// last line's cells when its own wrap needed them.
@@ -148,7 +154,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 					prev = s.scrollback.at(i-1).decode(&decoder, s.width)
 				}
 				cells = line.decode(&decoder, s.width)
-				out = appendVTSoftWrap(out, prev, cells, s.height > 1, marks)
+				out = appendVTSoftWrap(out, prev, cells, s.height > 1, marks, true)
 				// The wrap scrolled this row in while the glyph it printed set
 				// the rendition, so the row may be filled with that background,
 				// and the stored line skips the cells it leaves default. Erase
@@ -164,17 +170,20 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 				if cells == nil {
 					cells = line.decode(&decoder, s.width)
 				}
-				out = renderVTCellsMarked(out, cells, marks)
+				out = renderVTCellsMarked(out, cells, marks, true)
 			} else {
 				out = append(out, line.text...)
 			}
 			prev = cells
 		}
+		if !s.graphemeCluster {
+			out = appendVTGraphemeMode(out, false)
+		}
 		if g.wrapped[0] {
 			if prev == nil {
 				prev = s.scrollback.at(history-1).decode(&decoder, s.width)
 			}
-			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1, marks)
+			out = appendVTSoftWrap(out, prev, g.rows[0], s.height > 1, marks, s.graphemeCluster)
 			// Erased for the same reason; the row is painted below.
 			out = appendVTCSICount(out, s.width, 'X')
 		} else {
@@ -189,13 +198,13 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	for r, row := range g.rows {
 		softWrap := r > 0 && g.wrapped[r]
 		if softWrap {
-			out = appendVTSoftWrap(out, g.rows[r-1], row, true, marks)
+			out = appendVTSoftWrap(out, g.rows[r-1], row, true, marks, s.graphemeCluster)
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
 		out = marks.beginLine(out, history+r, g.prompt[r], softWrap, !vtRowReclaimable(row) || r == g.cursorRow)
 		before := len(out)
-		out = renderVTCellsMarked(out, row, marks)
+		out = renderVTCellsMarked(out, row, marks, s.graphemeCluster)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
 		if len(out) != before || full {
 			out = append(out, "\x1b[0m"...)
@@ -233,7 +242,7 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 		out = append(out, "\x1b[?6h"...)
 		row -= s.top
 	}
-	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks, -1)
+	out = s.appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks, -1)
 	out = appendVTSGR(out, saved.attrs)
 	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
@@ -248,8 +257,9 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 // stop left reaches, is reached by that tab again rather than by printing a
 // space into it. The rendition is left at the reprinted glyph's. screenRow
 // is the cursor's row on the client's screen when it is the cursor the frame
-// ends at (vtSemanticFrame.cursorContent), and -1 otherwise.
-func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame, screenRow int) []byte {
+// ends at (vtSemanticFrame.cursorContent), and -1 otherwise. The client is in
+// the model's clustering mode.
+func (s *terminalScreen) appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame, screenRow int) []byte {
 	if !pendingWrap || len(cells) == 0 {
 		return appendVTCursorPosition(out, row, col)
 	}
@@ -262,12 +272,21 @@ func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, 
 		last--
 	}
 	out = appendVTCursorPosition(out, row, last)
+	// A second half a code point writes takes its content as the glyph
+	// does.
+	content := vtContentSwitch(marks.content)
 	if screenRow >= 0 {
-		out = marks.cursorContent(out, cells[last].sem, screenRow)
-	} else {
-		out = marks.content(out, cells[last].sem)
+		content = func(out []byte, sem uint8) []byte { return marks.cursorContent(out, sem, screenRow) }
 	}
-	return renderVTGlyphs(out, cells[last:])
+	out = content(out, cells[last].sem)
+	plan := planVTGlyph(cells[last], vtGlyphBefore(cells, last), s.graphemeCluster, last == len(cells)-1)
+	if !plan.whole(cells[last]) {
+		// The row holds the glyph already; a tab with no stop left reaches
+		// the deferred wrap after it.
+		out = appendVTCursorPosition(out, row, len(cells)-1)
+		return append(out, '\t')
+	}
+	return renderVTGlyph(out, cells, last, plan, s.graphemeCluster, content)
 }
 
 // renderedSoftWraps reports whether painting g has to reproduce a soft wrap:
@@ -305,45 +324,79 @@ func (s *terminalScreen) renderedSoftWraps(g *vtGrid, withScrollback bool) bool 
 //
 // A glyph printed again keeps the content it was written as (marks); the
 // row's own cells are painted again afterwards, so the content the glyph that
-// wraps onto it is printed under does not matter.
-func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks *vtSemanticFrame) []byte {
+// wraps onto it is printed under does not matter. Nor does that glyph, which
+// a space stands in for when the client would join it to the glyph before
+// the wrap. But the content in force when it wraps decides whether the client
+// marks the new row as continuing a prompt, which the row's beginLine then
+// corrects from what the marks emitted last, so the whole glyph, a second
+// half its code points write included, keeps that content. clustered is the
+// client's mode 2027.
+func appendVTSoftWrap(out []byte, prev, next []vtCell, prevOnScreen bool, marks *vtSemanticFrame, clustered bool) []byte {
 	width := len(prev)
 	if last := prev[width-1]; last.unwritten() && width > 1 && len(next) > 1 &&
-		next[0].r != 0 && next[0].width == 2 && last.attrs == (vtAttrs{bg: next[0].attrs.bg}) {
+		next[0].r != 0 && next[0].width == 2 {
 		// How the client gets here itself: a wide glyph printed in the last
-		// column erases that cell with the glyph's background and wraps.
-		out = append(out, "\x1b[0m"...)
-		out = appendVTCSICount(out, width, 'G')
-		out = renderVTGlyphs(out, next[:2])
-		return append(out, "\x1b[0m\r"...)
+		// column erases that cell with the background it is printed in, and
+		// wraps. That is its second half's when the code point that first
+		// widens it is the one that writes that half (appendVTGlyph).
+		plan := planVTGlyph(next[0], vtGlyphBefore(prev, width-1), clustered, false)
+		bg := next[0].attrs.bg
+		if plan.widens > 0 && plan.wideAt == plan.widens {
+			bg = vtGlyphHalf(next, 0).attrs.bg
+		}
+		if plan.whole(next[0]) && last.attrs == (vtAttrs{bg: bg}) {
+			out = append(out, "\x1b[0m"...)
+			out = appendVTCSICount(out, width, 'G')
+			out = renderVTGlyph(out, next, 0, plan, clustered, nil)
+			return append(out, "\x1b[0m\r"...)
+		}
 	}
 	if !prevOnScreen && !vtSoftWrapEdgePrintable(prev) {
 		return append(out, "\x1b[0m\r\n"...)
 	}
 	out = append(out, "\x1b[0m"...)
 	eraseLast := false
+	// end is the glyph the wrap follows on the client.
+	var end vtCell
 	switch last := prev[width-1]; {
 	case last.width == 0 && width > 1 && prev[width-2].width == 2:
 		out = appendVTCSICount(out, width-1, 'G')
 		out = marks.content(out, prev[width-2].sem)
-		out = renderVTGlyphs(out, prev[width-2:])
+		plan := planVTGlyph(prev[width-2], vtGlyphBefore(prev, width-2), clustered, false)
+		if plan.whole(prev[width-2]) {
+			out = renderVTGlyph(out, prev, width-2, plan, clustered, marks.content)
+		} else {
+			out = appendVTCSICount(out, width, 'G')
+			out = append(out, '\t')
+		}
+		end = prev[width-2]
 	case last.width == 1 && last.r != 0:
 		out = appendVTCSICount(out, width, 'G')
 		out = marks.content(out, last.sem)
-		out = renderVTGlyphs(out, prev[width-1:])
+		plan := planVTGlyph(last, vtGlyphBefore(prev, width-1), clustered, true)
+		if plan.whole(last) {
+			out = renderVTGlyph(out, prev, width-1, plan, clustered, marks.content)
+		} else {
+			// The row holds the glyph already; a tab with no stop left
+			// reaches the deferred wrap after it.
+			out = append(out, '\t')
+		}
+		end = last
 	default:
 		out = appendVTCSICount(out, width, 'G')
 		out = append(out, ' ')
 		eraseLast = true
+		end = vtCell{r: ' ', width: 1}
 	}
 	out = append(out, "\x1b[0m"...)
 	eraseFirst := false
-	switch first := next[0]; {
-	case first.r != 0 && first.width == 2 && len(next) > 1:
-		out = renderVTGlyphs(out, next[:2])
-	case first.r != 0 && first.width == 1:
-		out = renderVTGlyphs(out, next[:1])
-	default:
+	var plan vtGlyphPlan
+	if first := next[0]; first.r != 0 && (first.width == 1 || first.width == 2 && len(next) > 1) {
+		plan = planVTGlyph(first, end, clustered, len(next) == 1)
+	}
+	if plan.whole(next[0]) {
+		out = renderVTGlyph(out, next, 0, plan, clustered, nil)
+	} else {
 		out = append(out, ' ')
 		eraseFirst = true
 	}
@@ -413,20 +466,59 @@ func appendVTCharsets(out []byte, g0Graphics, g1Graphics, shiftOut bool) []byte 
 // up with the same never-written cells as the source. Which cells were written
 // decides which rows a resize may reclaim, in the model and in the client
 // alike, so a repainted or restored row has to keep it. Never-written default
-// cells at the end of the row are left out.
+// cells at the end of the row are left out. Each glyph is printed for a client
+// that clusters graphemes (planVTGlyph), as a frame paints a stored line.
 func renderVTCells(out []byte, row []vtCell) []byte {
-	return renderVTCellsMarked(out, row, nil)
+	return renderVTCellsMarked(out, row, nil, true)
 }
 
 // renderVTCellsMarked is renderVTCells with the semantic prompt marks of the
-// prompt being painted, if any, put before the written cells they change.
-func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byte {
+// prompt being painted, if any, put before the written cells they change, for
+// a client whose mode 2027 is clustered.
+func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clustered bool) []byte {
 	end := len(row)
 	for end > 0 && row[end-1].isDefaultUnwritten() {
 		end--
 	}
 	current := vtAttrs{}
-	var buf [utf8Max]byte
+	// left is the glyph the client holds before the cursor.
+	left := vtCell{width: 1}
+	// The glyphs from moved on, which printing in place would push to the
+	// next row or erase, are printed one column to their left while the row
+	// is still blank and moved right with ICH, each as the content it was
+	// written as. That is set with the cursor where they are printed, perhaps
+	// the start of the row, where a C would end the row's mark, so as content
+	// alone; the cells before them then set the content again, so the last
+	// one's is set once more after them, where they are, as any cell's is.
+	moved := vtMovedRun(row, clustered)
+	if moved < len(row) {
+		if moved > 1 {
+			out = appendVTCSICount(out, moved-1, 'C')
+		}
+		// The glyph left of that column may be there already, from a soft
+		// wrap.
+		printed := vtGlyphBefore(row, moved-1)
+		for i := moved; i < len(row); i++ {
+			cell := row[i]
+			plan := planVTGlyph(cell, printed, clustered, false)
+			if plan.n == 0 {
+				out = appendVTCSICount(out, 1, 'C')
+				printed = vtCell{width: 1}
+				continue
+			}
+			out = marks.content(out, cell.sem)
+			if cell.attrs != current {
+				out = appendVTSGR(out, cell.attrs)
+				current = cell.attrs
+			}
+			out = appendVTGlyph(out, cell, plan, clustered, cell, marks.content)
+			printed = plan.printed(cell)
+		}
+		out = append(out, "\x1b[0m"...)
+		out = appendVTCSICount(out, len(row)-moved, 'D')
+		out = append(out, "\x1b[@\r"...)
+		current, end = vtAttrs{}, moved
+	}
 	for i := 0; i < end; {
 		cell := row[i]
 		if cell.width == 0 {
@@ -448,7 +540,29 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byt
 			if run < len(row) {
 				out = appendVTCSICount(out, run-i, 'C')
 			}
+			left = vtCell{width: 1}
 			i = run
+			continue
+		}
+		if cell.r < 0x80 && len(cell.comb) == 0 {
+			// Most cells: ASCII prints alike in both modes and joins nothing.
+			out = marks.cell(out, i, cell.sem)
+			if cell.attrs != current {
+				out = appendVTSGR(out, cell.attrs)
+				current = cell.attrs
+			}
+			out = append(out, byte(cell.r))
+			left = cell
+			i++
+			continue
+		}
+		// The glyph before moved ones must not widen over them on its way.
+		plan := planVTGlyph(cell, left, clustered, i == len(row)-1 || i == moved-1 && cell.width == 1)
+		if plan.n == 0 {
+			// A glyph the client cannot start here stays unwritten.
+			out = appendVTCSICount(out, int(cell.width), 'C')
+			left = vtCell{width: 1}
+			i++
 			continue
 		}
 		out = marks.cell(out, i, cell.sem)
@@ -456,38 +570,89 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byt
 			out = appendVTSGR(out, cell.attrs)
 			current = cell.attrs
 		}
-		out = append(out, encodeRune(buf[:], cell.r)...)
-		for _, comb := range cell.comb {
-			out = append(out, encodeRune(buf[:], comb)...)
+		half := vtGlyphHalf(row, i)
+		var content vtContentSwitch
+		if plan.widens > 0 {
+			content = func(out []byte, sem uint8) []byte { return marks.cell(out, i+1, sem) }
 		}
+		out = appendVTGlyph(out, cell, plan, clustered, half, content)
+		if plan.widens > 0 {
+			current = half.attrs
+		}
+		left = plan.printed(cell)
 		i++
+		if plan.spills && i < len(row) && row[i].unwritten() {
+			// The glyph was wide on its way to one column and left its
+			// second half behind, which the model may have erased since.
+			if row[i].attrs != current {
+				out = appendVTSGR(out, row[i].attrs)
+				current = row[i].attrs
+			}
+			out = append(out, "\x1b[X"...)
+		}
+	}
+	if moved < len(row) {
+		out = marks.cell(out, len(row)-1, row[len(row)-1].sem)
 	}
 	return out
 }
 
-// renderVTGlyphs prints cells as glyphs, a space for a never-written cell, so
-// the cursor ends up after them with any deferred wrap the last one causes.
-func renderVTGlyphs(out []byte, cells []vtCell) []byte {
-	current := vtAttrs{}
-	var buf [utf8Max]byte
-	for _, cell := range cells {
-		if cell.width == 0 {
-			continue
-		}
-		if cell.attrs != current {
-			out = appendVTSGR(out, cell.attrs)
-			current = cell.attrs
-		}
-		r := cell.r
-		if r == 0 {
-			r = ' '
-		}
-		out = append(out, encodeRune(buf[:], r)...)
-		for _, comb := range cell.comb {
-			out = append(out, encodeRune(buf[:], comb)...)
-		}
+// vtMovedRun is the first column of the glyphs renderVTCellsMarked moves into
+// place at the end of row, or len(row) for none. The last column may hold a
+// cluster wide on its way to one column, which a resize or an insertion left
+// there: printed there, it would move to the next row. So it is moved in from
+// the column before, and so is every such cluster before it, since printing
+// one in place would write over the next, as long as a column is left before
+// them to move them in from. Without one, the first is printed short of what
+// would widen it, or not at all.
+func vtMovedRun(row []vtCell, clustered bool) int {
+	edge := len(row) - 1
+	if edge < 1 || row[edge].width != 1 || row[edge].r == 0 {
+		return len(row)
 	}
-	return out
+	cell := row[edge]
+	fit := planVTGlyph(cell, vtGlyphBefore(row, edge), clustered, true)
+	if fit.whole(cell) || planVTGlyph(cell, vtGlyphBefore(row, edge-1), clustered, false).n <= fit.n {
+		return len(row)
+	}
+	moved := edge
+	for moved > 1 {
+		prev := row[moved-1]
+		if prev.width != 1 || prev.r == 0 ||
+			planVTGlyph(prev, vtGlyphBefore(row, moved-1), clustered, true).whole(prev) {
+			break
+		}
+		moved--
+	}
+	return moved
+}
+
+// vtGlyphHalf is the second half of the glyph at col of row, or the glyph
+// itself for a glyph one column wide.
+func vtGlyphHalf(row []vtCell, col int) vtCell {
+	if row[col].width == 2 && col+1 < len(row) {
+		return row[col+1]
+	}
+	return row[col]
+}
+
+// renderVTGlyph prints the glyph at col of row as plan says, in its
+// rendition, so the client's cursor ends up after it with any deferred wrap
+// it causes. Spaces stand in for a never-written cell and for one the plan
+// cannot start. clustered is the client's mode 2027, and content sets the
+// content of a second half a code point writes, as the glyph's was set.
+func renderVTGlyph(out []byte, row []vtCell, col int, plan vtGlyphPlan, clustered bool, content vtContentSwitch) []byte {
+	cell := row[col]
+	if cell.attrs != (vtAttrs{}) {
+		out = appendVTSGR(out, cell.attrs)
+	}
+	if cell.r == 0 || plan.n == 0 {
+		for range max(int(cell.width), 1) {
+			out = append(out, ' ')
+		}
+		return out
+	}
+	return appendVTGlyph(out, cell, plan, clustered, vtGlyphHalf(row, col), content)
 }
 
 func appendVTCSICount(out []byte, count int, final byte) []byte {

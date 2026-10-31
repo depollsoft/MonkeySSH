@@ -12,6 +12,8 @@ import 'package:xterm/src/core/reflow.dart';
 import 'package:xterm/src/core/semantic_prompt.dart';
 import 'package:xterm/src/core/state.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
+import 'package:xterm/src/utils/grapheme.dart';
+import 'package:xterm/src/utils/unicode_grapheme.dart';
 import 'package:xterm/src/utils/unicode_v11.dart';
 
 class Buffer {
@@ -125,17 +127,32 @@ class Buffer {
 
   /// Writes a single character to the _terminal. Escape sequences or special
   /// characters are not interpreted and directly added to the buffer. Returns
-  /// whether the character took a cell.
+  /// whether the character took a cell; one that joined the glyph before it,
+  /// or was dropped, did not.
+  ///
+  /// The MonkeyMux screen model (remote/monkeymux) prints the same way, and
+  /// both run the cases in its testdata/grapheme_cluster_parity.json.
   ///
   /// See also: [Terminal.writeChar]
   bool writeChar(int codePoint) {
     codePoint = charset.translate(codePoint);
 
-    final cellWidth = unicodeV11.wcwidth(codePoint);
+    final clustering = terminal.graphemeClusterMode;
+    if (clustering &&
+        mayContinueGrapheme(codePoint) &&
+        cursorX > 0 &&
+        _joinGraphemeCluster(codePoint)) {
+      return false;
+    }
+
+    final cellWidth = clustering && codePoint > 0xFF
+        ? graphemeStartWidth(codePoint)
+        : unicodeV11.wcwidth(codePoint);
     if (cellWidth == 0) {
       // Combining marks, variation selectors and ZWJ take no column on the
-      // host (xterm, tmux, the MonkeyMux screen model). A cell has nowhere to
-      // keep them, so drop them rather than shift every later cell right.
+      // host. Clustering joined the ones that continue a cluster above; the
+      // rest have nothing to attach to.
+      if (!clustering) _joinZeroWidth(codePoint);
       return false;
     }
     if (_cursorX >= viewWidth) {
@@ -188,6 +205,118 @@ class Buffer {
       _cursorX++;
     }
     return true;
+  }
+
+  /// Carries the grapheme break rules from one code point pair to the next
+  /// in [_joinGraphemeCluster], kept to save an allocation per code point.
+  final _graphemeBreakState = GraphemeBreakState();
+
+  /// The column of the cell [left] cells before the cursor, at the last
+  /// column while a wrap is pending, or of the wide glyph whose right half
+  /// is there.
+  int _glyphColumnBefore(BufferLine line, int left) {
+    final column = cursorX - left;
+    if (column > 0 && line.getWidth(column - 1) == 2) return column - 1;
+    return column;
+  }
+
+  /// Mode 2027: joins [codePoint] to the grapheme cluster in the cell before
+  /// the cursor when no cluster boundary falls between them, widening or
+  /// narrowing that cell as Ghostty does. Returns false when [codePoint]
+  /// starts a new cluster instead, for [writeChar] to print it.
+  bool _joinGraphemeCluster(int codePoint) {
+    var line = currentLine;
+    // With a wrap pending, with or without autowrap, the glyph is in the
+    // cursor's own cell. Ghostty instead checks, without autowrap, whether
+    // the last column holds anything, which picks an old glyph there after a
+    // cursor move.
+    final left = isWrapPending ? 0 : 1;
+    var column = _glyphColumnBefore(line, left);
+    final base = line.getCodePoint(column);
+    if (base == 0) return false;
+
+    final extras = line.getGraphemeExtras(column);
+    // Most text (letters, CJK, symbols) is class other, which only joins a
+    // cluster that ends with a prepended mark (GB9b): skip the replay.
+    if (graphemeClassOf(codePoint) == GraphemeClass.other &&
+        graphemeClassOf(extras.isEmpty ? base : extras.last) !=
+            GraphemeClass.prepend) {
+      return false;
+    }
+
+    // The break rules need the state the cluster's code points leave.
+    final state = _graphemeBreakState..reset();
+    var last = base;
+    for (final extra in extras) {
+      graphemeBreak(last, extra, state);
+      last = extra;
+    }
+    if (graphemeBreak(last, codePoint, state)) return false;
+    if (extras.length >= BufferLine.maxGraphemeExtras) return true;
+
+    switch (graphemeWidthEffect(last, codePoint)) {
+      case GraphemeWidthEffect.ignore:
+        return true;
+      case GraphemeWidthEffect.noChange:
+        break;
+      case GraphemeWidthEffect.narrow:
+        if (line.getWidth(column) == 2) {
+          // The right half becomes an empty cell that keeps only its
+          // background, as the MonkeyMux model blanks half a wide glyph.
+          line.setWidth(column, 1);
+          if (column + 1 < viewWidth) {
+            line.eraseCell(
+              column + 1,
+              CursorStyle(background: line.getBackground(column + 1)),
+            );
+          }
+          _cursorX = min(column + 1, viewWidth - 1);
+        }
+      case GraphemeWidthEffect.wide:
+        if (line.getWidth(column) == 2) break;
+        if (column == viewWidth - 1) {
+          // No room for the right half: like a wide glyph printed in the last
+          // column, the cluster moves to the next row, or stays as it is
+          // without autowrap.
+          if (!terminal.autoWrapMode) return true;
+          graphics.removePlaceholderAt(line, column);
+          line.eraseCell(column, terminal.cursor);
+          _wrapToNextLine();
+          line = currentLine;
+          column = 0;
+          graphics.removePlaceholderAt(line, column);
+          line.setCell(
+              column, base, 2, terminal.cursor, semanticPrompt.content);
+          line.setGraphemeExtras(column, extras);
+        } else {
+          line.setWidth(column, 2);
+        }
+        graphics.removePlaceholderAt(line, column + 1);
+        line.setCell(column + 1, 0, 0, terminal.cursor, semanticPrompt.content);
+        // Past the last column, this is a pending wrap.
+        _cursorX = column + 2;
+    }
+    line.addGraphemeExtra(column, codePoint);
+    return true;
+  }
+
+  /// Mode 2027 reset: joins the zero-width [codePoint] to the glyph before
+  /// the cursor, without changing its width. An emoji variation selector
+  /// joins only an emoji.
+  void _joinZeroWidth(int codePoint) {
+    final left = isWrapPending ? 0 : 1;
+    if (cursorX < left) return;
+    final line = currentLine;
+    final column = _glyphColumnBefore(line, left);
+    final base = line.getCodePoint(column);
+    if (base == 0) return;
+    if (isEmojiVariationSelector(codePoint) && !isExtendedPictographic(base)) {
+      return;
+    }
+    if (line.getGraphemeExtras(column).length >= BufferLine.maxGraphemeExtras) {
+      return;
+    }
+    line.addGraphemeExtra(column, codePoint);
   }
 
   /// Autowrap: moves to the start of the next line, which continues this one.

@@ -168,7 +168,8 @@ bool _bufferLineEquals(BufferLine a, BufferLine b) {
         cellA.background != cellB.background ||
         cellA.flags != cellB.flags ||
         cellA.content != cellB.content ||
-        cellA.underlineColor != cellB.underlineColor) {
+        cellA.underlineColor != cellB.underlineColor ||
+        !listEquals(cellA.graphemeExtras, cellB.graphemeExtras)) {
       return false;
     }
   }

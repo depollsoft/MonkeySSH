@@ -2139,6 +2139,11 @@ class MonkeyTerminalPainter extends TerminalPainter {
   @visibleForTesting
   int get runParagraphCacheLength => _runParagraphCache.length;
 
+  /// Number of per-line foreground pictures currently cached, one per distinct
+  /// line content painted.
+  @visibleForTesting
+  int get foregroundPictureCacheLength => _foregroundPictureCache.length;
+
   @override
   set textStyle(TerminalStyle value) {
     if (value == textStyle) {
@@ -2242,7 +2247,8 @@ class MonkeyTerminalPainter extends TerminalPainter {
       )
       ..background = _encodeRgbCellColor(theme.cursor)
       ..flags = cellData.flags & ~CellFlags.inverse & ~CellFlags.faint
-      ..content = cellData.content;
+      ..content = cellData.content
+      ..graphemeExtras = cellData.graphemeExtras;
 
     canvas
       ..save()
@@ -2457,22 +2463,28 @@ class MonkeyTerminalPainter extends TerminalPainter {
       final overline = flags & CellFlags.overline != 0;
       final strikethrough = flags & CellFlags.strikethrough != 0;
       // Cells that draw nothing in the foreground pass: an empty cell, a Kitty
-      // graphics placeholder, a concealed (SGR 8) cell, or a plain space whose
-      // background/underline are handled by the other passes. Each ends the run
-      // but is otherwise skipped, matching [paintCellForeground]'s early returns.
+      // graphics placeholder, a concealed (SGR 8) cell, or a plain space (no
+      // mark joined to it) whose background/underline are handled by the other
+      // passes. Each ends the run but is otherwise skipped, matching
+      // [paintCellForeground]'s early returns.
       final drawsNothing =
           charCode == 0 ||
           charCode == kittyGraphicsPlaceholderCodePoint ||
           flags & CellFlags.invisible != 0 ||
-          (charCode == 0x20 && !overline && !strikethrough);
+          (charCode == 0x20 &&
+              content & CellContent.graphemeFlag == 0 &&
+              !overline &&
+              !strikethrough);
       // Cells that must be drawn individually at their exact column: block
-      // elements (painted as rectangles), wide (2-cell) and zero-width
-      // (combining-mark) glyphs — which shape and advance with their neighbours
-      // inside one paragraph — and code points that are not safe to concatenate
-      // (complex/joining scripts, non-monospace fallbacks). These break the run
-      // and defer to the per-cell path, preserving the pre-batching output.
+      // elements (painted as rectangles), wide (2-cell) glyphs and grapheme
+      // clusters (a glyph with marks, joiners or selectors after it) — which
+      // shape and advance with their neighbours inside one paragraph — and code
+      // points that are not safe to concatenate (complex/joining scripts,
+      // non-monospace fallbacks). These break the run and defer to the
+      // per-cell path, preserving the pre-batching output.
       final drawIndividually =
           charWidth != 1 ||
+          content & CellContent.graphemeFlag != 0 ||
           _isRectPaintedBlockElement(charCode) ||
           !_isBatchableForegroundCodePoint(charCode);
 
@@ -2553,7 +2565,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
       return;
     }
     final text = String.fromCharCodes(charCodes);
-    final cacheKey = Object.hash(
+    final cacheKey = (
       text,
       color,
       bold,
@@ -2609,6 +2621,9 @@ class MonkeyTerminalPainter extends TerminalPainter {
       hash = ((hash ^ cellData.background) * prime) & mask;
       hash = ((hash ^ cellData.flags) * prime) & mask;
       hash = ((hash ^ cellData.underlineColor) * prime) & mask;
+      for (final codePoint in cellData.graphemeExtras) {
+        hash = ((hash ^ codePoint) * prime) & mask;
+      }
     }
     return hash;
   }
@@ -2706,7 +2721,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
       return;
     }
 
-    final cacheKey = cellData.getHash() ^ textScaler.hashCode;
+    final cacheKey = (cellData.paintKey, textScaler);
     var paragraph = _inlineUnderlineParagraphCache.getLayoutFromCache(cacheKey);
 
     if (paragraph == null) {
@@ -2722,10 +2737,7 @@ class MonkeyTerminalPainter extends TerminalPainter {
             decorationColor: resolveMonkeyTerminalCellForegroundColor(cellData),
           );
 
-      var char = String.fromCharCode(charCode);
-      if (charCode == 0x20) {
-        char = String.fromCharCode(0xA0);
-      }
+      final char = _cellGlyphText(charCode == 0x20 ? 0xA0 : charCode, cellData);
 
       paragraph = _inlineUnderlineParagraphCache.performAndCacheLayout(
         char,
@@ -2767,23 +2779,26 @@ class MonkeyTerminalPainter extends TerminalPainter {
     // A typical terminal screen is mostly blank cells (indentation, padding,
     // gaps between columns), so skipping them is a large cut to the per-frame
     // paint that dominates build-thread time while a full-screen TUI redraws.
+    // A space with a mark joined to it is a glyph.
     if (charCode == 0x20 &&
+        cellData.graphemeExtras.isEmpty &&
         cellFlags & CellFlags.overline == 0 &&
         cellFlags & CellFlags.strikethrough == 0) {
       return;
     }
     final color = resolveMonkeyTerminalCellForegroundColor(cellData);
-    if (_paintBlockElementForeground(
-      canvas,
-      offset,
-      cellData,
-      charCode,
-      color,
-    )) {
+    if (cellData.graphemeExtras.isEmpty &&
+        _paintBlockElementForeground(
+          canvas,
+          offset,
+          cellData,
+          charCode,
+          color,
+        )) {
       return;
     }
 
-    final cacheKey = cellData.getHash() ^ textScaler.hashCode;
+    final cacheKey = (cellData.paintKey, textScaler);
     var paragraph = _paragraphCache.getLayoutFromCache(cacheKey);
 
     if (paragraph == null) {
@@ -2804,20 +2819,32 @@ class MonkeyTerminalPainter extends TerminalPainter {
             : null,
       );
 
-      var char = String.fromCharCode(charCode);
-      if ((overline || strikethrough) && charCode == 0x20) {
-        char = String.fromCharCode(0xA0);
-      }
+      final char = _cellGlyphText(
+        (overline || strikethrough) && charCode == 0x20 ? 0xA0 : charCode,
+        cellData,
+      );
 
       paragraph = _paragraphCache.performAndCacheLayout(
         char,
-        style,
+        requestsEmojiPresentation(cellData.graphemeExtras)
+            ? withEmojiPresentation(style)
+            : style,
         textScaler,
         cacheKey,
       );
     }
 
     canvas.drawParagraph(paragraph, offset);
+  }
+
+  /// The text a cell draws: [charCode] (its code point, or a stand-in for
+  /// it) followed by the rest of the cell's grapheme cluster.
+  String _cellGlyphText(int charCode, CellData cellData) {
+    final extras = cellData.graphemeExtras;
+    if (extras.isEmpty) {
+      return String.fromCharCode(charCode);
+    }
+    return String.fromCharCodes([charCode, ...extras]);
   }
 
   bool _paintBlockElementForeground(

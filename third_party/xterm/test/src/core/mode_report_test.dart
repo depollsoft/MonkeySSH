@@ -40,6 +40,7 @@ void main() {
         (1048, '\x1b[?1048h', 2),
         (2004, '\x1b[?2004h', 2),
         (2026, '\x1b[?2026h', 2),
+        (2027, '\x1b[?2027l', 1),
         (5522, '\x1b[?5522h', 2),
       ];
       for (final (mode, change, initial) in cases) {
@@ -81,7 +82,7 @@ void main() {
 
     test('reports unknown modes, including large ones, as not recognized', () {
       final (:terminal, :output) = _terminal();
-      for (final mode in [1001, 1016, 2027, 2048, 9999, 32772, 65535, 70000]) {
+      for (final mode in [1001, 1016, 2048, 9999, 32772, 65535, 70000]) {
         expect(_decQuery(terminal, output, mode), '\x1b[?$mode;0\$y');
       }
     });

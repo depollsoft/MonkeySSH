@@ -64,7 +64,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.251"
+	monkeyMuxVersion                  = "0.1.252"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -256,7 +256,7 @@ func stripWindowReplayTags(history []byte) []byte {
 // under the race detector, where a cold process launch can take longer.
 var processMetadataTimeout = 500 * time.Millisecond
 
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[?2027h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -264,6 +264,7 @@ var (
 		"1049",
 		"6",
 		"7",
+		"2027",
 		"1",
 		"1000",
 		"1002",
@@ -280,6 +281,7 @@ var (
 	}
 	postReplayPrivateModes = []string{
 		"7",
+		"2027",
 		"1",
 		"1000",
 		"1002",
@@ -318,6 +320,7 @@ var (
 		"1047": {},
 		"1049": {},
 		"2004": {},
+		"2027": {},
 		"2031": {},
 		"67":   {},
 		"5":    {},
@@ -13799,7 +13802,13 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 		// A window that already holds retained output (restored from a
 		// snapshot, or created before the model existed) is bootstrapped from
 		// that history, skipping any control sequence eviction left open.
+		// A replay paints that history after setting the window's grapheme
+		// clustering mode (terminalModePreReplaySequence), so the model
+		// reads it under that mode too.
 		if len(w.history) > 0 {
+			if enabled, ok := w.privateModes["2027"]; ok {
+				w.screen.setPrivateMode(2027, enabled)
+			}
 			start := advanceReplayStartToTerminalGround(
 				w.history,
 				0,
@@ -17860,19 +17869,19 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 // DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
 // and focus reporting to their power-up values; RIS also leaves the alternate
 // screen and resets mouse reporting, the keyboard encodings, DECBKM, reverse
-// video, cursor blink and visibility reports. Neither touches colour-scheme
-// updates (2031), which the client keeps outside its terminal state, or
-// ConPTY's win32-input-mode.
+// video, cursor blink and visibility reports, and turns grapheme clustering
+// (2027) back on. Neither touches colour-scheme updates (2031), which the
+// client keeps outside its terminal state, or ConPTY's win32-input-mode.
 func (w *muxWindow) resetTerminalModesLocked(full bool) {
 	modes := []string{"1", "6", "7", "1004", "2004"}
 	if full {
-		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67", "5", "12", "5522")
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67", "5", "12", "5522", "2027")
 		w.resetKeyboardModesLocked()
 		w.resetVisibilityReportsLocked()
 	}
 	for _, mode := range modes {
 		if _, ok := w.privateModes[mode]; ok {
-			w.setPrivateModeLocked(mode, mode == "7")
+			w.setPrivateModeLocked(mode, mode == "7" || mode == "2027")
 		}
 	}
 	w.setPrivateModeLocked("25", true)
