@@ -521,3 +521,40 @@ func TestShellReplayReplacesTheClientsPlacements(t *testing.T) {
 			prefix, deleted, first, got)
 	}
 }
+
+// TestMainScreenReplayLeavesOutCleanlyAnImageOverItsBudget: a main-screen
+// image too large for the replay, behind an alternate-screen program. The
+// replay paints the main screen with its scrollback, which scrolls the
+// client's screen, so the client's own copy of the image would go up the
+// screen with the rows, away from its cell. Every placement the client kept
+// there goes before the main screen is painted; the image is left out.
+func TestMainScreenReplayLeavesOutCleanlyAnImageOverItsBudget(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	big := strings.Repeat("A", maxReplayedKittyImageBytes)
+	stream := strings.Repeat("earlier output\r\n", 60) +
+		"\x1b_Ga=T,i=8,C=1,f=100;" + big + "\x1b\\\r\n$ vim\r\n" +
+		"\x1b[?1049h\x1b[H\x1b[2J\x1b[10;1Halternate"
+	server := newMuxServerWithSize("test", 80, 40)
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.mu.Lock()
+	window.recordScreenGeometryLocked(80, 40)
+	window.screenWidth, window.screenHeight = 80, 40
+	server.mu.Unlock()
+	server.handleWindowOutput(window.id, []byte(stream))
+
+	server.mu.Lock()
+	replay, followUp := server.replayBytesWithImageFollowUpLocked(window, nil)
+	server.mu.Unlock()
+	got := string(replay)
+	deleted := strings.Index(got, kittyVisiblePlacementsDelete)
+	frame := strings.Index(got, "earlier output")
+	enter := strings.LastIndex(got, "\x1b[?1049h")
+	if !(deleted >= 0 && deleted < frame && frame < enter) || strings.Count(got, "a=d") != 1 {
+		t.Fatalf("client's main-screen placements not deleted before the main screen is painted (delete %d, frame %d, 1049h %d): %.400q",
+			deleted, frame, enter, got)
+	}
+	if strings.Contains(got, "i=8") || strings.Contains(string(followUp), "i=8") {
+		t.Fatalf("replay places an image it does not carry: %.400q", got)
+	}
+}

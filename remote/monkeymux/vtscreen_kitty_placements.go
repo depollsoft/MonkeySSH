@@ -907,17 +907,27 @@ func (s *terminalScreen) kittyPlacementReplaced(
 
 // KittyMainPlacementDeletes returns what a replay sends, before the images,
 // when it paints the main screen and places its direct placements again
-// (replace as for RenderFrameReplacing): a lowercase delete by id (a=d,d=i),
-// which keeps the image data, of each image it places again. The replay
-// prefix's ED 2 leaves a reopened client's own placements on the main screen,
-// where the frame scrolls them into the scrollback or paints over them, so
-// placing one without a placement id again would leave a second copy. The
-// delete takes every placement of the image, wherever it is, and only those,
-// so what the replay does not place again keeps whatever the client had. The
-// alternate screen needs none: entering it cleared it.
+// (replace as for RenderFrameReplacing). The replay prefix's ED 2 leaves a
+// reopened client's own placements on the main screen. A frame that paints
+// the scrollback scrolls the screen, which carries each of them up with its
+// row, away from the cell it belongs on, so all of them go
+// (kittyVisiblePlacementsDelete), and an image the replay leaves out, too
+// large for it or sent without an id it can name, is left out cleanly; the
+// prefix's ED 2 erased the placeholder cells that position relative
+// placements of virtual ones, which the delete therefore keeps. A frame
+// without scrollback paints over the client's placements in place: only a
+// lowercase delete by id (a=d,d=i), which keeps the image data, of each
+// image it places again, so that placing one without a placement id does
+// not leave a second copy. That delete takes every placement of the image,
+// wherever it is, and only those, so what the replay does not place again
+// keeps whatever the client had. The alternate screen needs none: entering
+// it cleared it.
 func (s *terminalScreen) KittyMainPlacementDeletes(replace func(imageID string) bool) []byte {
 	if s == nil {
 		return nil
+	}
+	if s.scrollback.len() > 0 {
+		return []byte(kittyVisiblePlacementsDelete)
 	}
 	var out []byte
 	var deleted []string

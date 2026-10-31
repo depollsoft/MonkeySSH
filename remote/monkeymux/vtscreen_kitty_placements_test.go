@@ -674,3 +674,20 @@ func TestVTKittyFreedImageLeavesNoRowToKeep(t *testing.T) {
 		t.Fatalf("rows = %q", got)
 	}
 }
+
+// TestVTKittyMainFrameDeletesWhatItsScrollMoves: a frame of the main screen
+// that paints its scrollback scrolls the client's screen, which would carry
+// the placements the client kept away from their cells, so it deletes all of
+// them; one that does not scroll deletes only the images it places again.
+func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
+	s := newTerminalScreen(40, 10)
+	s.Write([]byte(vtKittyUploads(1, 2) + "\x1b[2;1H\x1b_Ga=p,i=1,C=1,q=2\x1b\\\x1b[4;1H\x1b_Ga=p,i=2,C=1,q=2\x1b\\"))
+	onlyOne := func(id string) bool { return id == "1" }
+	if got := string(s.KittyMainPlacementDeletes(onlyOne)); got != "\x1b_Ga=d,d=i,i=1,q=2\x1b\\" {
+		t.Fatalf("deletes without scrollback = %q", got)
+	}
+	s.Write([]byte("\x1b[10;1H\r\n\r\n"))
+	if got := string(s.KittyMainPlacementDeletes(onlyOne)); got != kittyVisiblePlacementsDelete {
+		t.Fatalf("deletes with scrollback = %q", got)
+	}
+}

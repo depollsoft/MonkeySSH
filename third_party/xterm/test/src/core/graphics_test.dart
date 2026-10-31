@@ -2171,6 +2171,54 @@ void main() {
     });
   });
 
+  // A MonkeyMux replay of an alternate-screen program's window paints the
+  // main screen behind it again, scrollback first, which scrolls the main
+  // screen. A placement the client kept there for an image the replay
+  // cannot carry would go up with the rows, away from its cell, unless the
+  // replay deletes it first.
+  testWidgets('a replayed main screen leaves out cleanly what it cannot carry',
+      (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      final earlier = List.filled(20, 'earlier output\r\n').join();
+      final output = '$earlier\x1b_Ga=T,i=8,C=1,f=100,q=2;$png\x1b\\'
+          '\r\n\$ vim\r\n\x1b[?1049h\x1b[H\x1b[2Jalternate';
+      const clear = '\x1b[H\x1b[2J\x1b[3J';
+      const prefix = '\x1b[?1049l$clear\x1b[?1049h$clear\x1b[?1049l$clear';
+      // The main screen as the replay paints it: its scrollback, pushed
+      // above the screen, then its rows; then the program's screen again.
+      final mainScreen = '\x1b[H$earlier${'\r\n' * 9}'
+          '\x1b[1;1H\x1b[K\x1b[2;1H\$ vim\x1b[K\x1b[3;1H';
+      const enter = '\x1b[?1049h$clear';
+      Future<(List<int>, String)> replayed(String deletes) async {
+        final terminal = Terminal(maxLines: 1000)..resize(40, 10);
+        terminal.write(output);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        terminal.write('$prefix$deletes$mainScreen$enter\x1b[?1049l');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        final rows = [
+          for (final p in terminal.mainBuffer.graphics.placements) p.row
+        ];
+        final shown = [
+          for (var row = 0; row < terminal.mainBuffer.lines.length; row++)
+            terminal.mainBuffer.lines[row].getText().trimRight(),
+        ].join('\n').trimRight();
+        return (rows, shown);
+      }
+
+      final (kept, keptText) = await replayed('');
+      final (deleted, deletedText) = await replayed('\x1b_Ga=d,d=a,q=2\x1b\\');
+      // The image was on the row above the prompt, now scrolled away from it.
+      final promptRow = keptText.split('\n').indexOf('\$ vim');
+      expect(kept, hasLength(1));
+      expect(kept.single, isNot(promptRow - 1));
+      expect(deleted, isEmpty);
+      expect(deletedText, keptText);
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

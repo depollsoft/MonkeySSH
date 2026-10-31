@@ -11796,9 +11796,9 @@ func kittyCarriedImages(replayed map[string]struct{}, served []string) func(stri
 // image data; it is nil while the main screen shows. Each screen keeps its
 // own images on the client, so the images its direct placements show are
 // sent store-only while it is the screen shown, as many as fit in budget,
-// after deleting the client's own copies of their placements (as the
-// fallback frame does); a placement whose image does not fit is left out,
-// with that delete. So is one whose image the
+// after deleting the client's own copies of their placements, as the
+// fallback frame does (KittyMainPlacementDeletes); a placement whose image
+// does not fit is left out. So is one whose image the
 // window last transmitted on the alternate screen: the client keeps that data
 // apart from the main screen's, and the main screen's store may hold another
 // window's image under the same id, which a placement made again would show.
@@ -11824,8 +11824,6 @@ func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
 	}
 	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
 	carried := kittyCarriedImages(nil, sent)
-	// Known limitation: a reopened client keeps its placement of an image left
-	// out here, which this main screen's scrollback can push off its cell.
 	out := screen.KittyMainPlacementDeletes(carried)
 	out = append(out, images...)
 	out = append(out, screen.RenderMainScreenReplacing(carried)...)
