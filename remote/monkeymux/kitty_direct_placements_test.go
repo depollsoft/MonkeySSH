@@ -558,3 +558,40 @@ func TestMainScreenReplayLeavesOutCleanlyAnImageOverItsBudget(t *testing.T) {
 		t.Fatalf("replay places an image it does not carry: %.400q", got)
 	}
 }
+
+// TestShellReplayRebuildsOnlyTheImageItsCutCommandSent: the image a cut
+// command sent is gone from the history, and the window has since sent
+// another image with its id, on the alternate screen, whose store the
+// client keeps apart. Placing that one on the main screen would show the
+// wrong image, so the replay leaves the cut command out.
+func TestShellReplayRebuildsOnlyTheImageItsCutCommandSent(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "$ icat img.png\r\n" + kittyChunkedTransmission("a=T,i=7,f=100", 300*1024) +
+		"\r\n$ vim\r\n\x1b[?1049h\x1b_Ga=T,i=7,f=100,c=2,r=1;BBBB\x1b\\\x1b[?1049l\r\n$ "
+	got := selectWindowReplay(t, window, stream, "")
+	got = got[strings.LastIndex(got, windowReplayTag(window)):]
+	enter := strings.Index(got, "\x1b[?1049h\x1b_Ga=T,i=7")
+	if strings.Contains(got, "a=t,i=7") || strings.Contains(got, "a=p,i=7") ||
+		strings.Index(got, "BBBB") < enter {
+		t.Fatalf("replay places the alternate screen's image on the main screen: %.600q", got)
+	}
+}
+
+// TestShellReplayFindsItsCutCommandBehindManyImages: many small images follow
+// the one the replay's cut falls on, all within what it carries; the model
+// still knows the cut command.
+func TestShellReplayFindsItsCutCommandBehindManyImages(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	var thumbnails strings.Builder
+	for id := 100; id < 300; id++ {
+		fmt.Fprintf(&thumbnails, "\x1b_Ga=T,i=%d,C=1,%s\x1b\\", id, kittyPixelRoot)
+	}
+	stream := "$ icat img.png\r\n" + kittyChunkedTransmission("a=T,i=7,f=100", 64*1024) +
+		"\r\n" + thumbnails.String() + "\r\n$ "
+	got := selectWindowReplay(t, window, stream, "")
+	got = got[strings.LastIndex(got, windowReplayTag(window)):]
+	root := strings.Index(got, "\x1b[1G\x1b_Ga=T,i=7,f=100,m=1,")
+	if root < 0 || root > strings.Index(got, "a=T,i=100,") {
+		t.Fatalf("replay does not start with the image its cut falls on (image %d): %.300q", root, got)
+	}
+}

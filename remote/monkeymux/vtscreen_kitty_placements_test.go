@@ -695,7 +695,9 @@ func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
 // TestVTKittyCommandsRecordWhereTheyRan: the model remembers each command that
 // placed an image at the cursor on the main screen, with an id, a number or
 // neither, where in its output it began and ended, however that output was
-// split, and the column it ran at.
+// split, and the column it ran at; and for a transmission, how to place its
+// image again. It forgets those that ended further back than a replay
+// reaches.
 func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
 	stream := "ab\x1b_Ga=T,I=9,f=100,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\cd" +
 		"\x1b_Ga=t,i=3,f=100;AAAA\x1b\\\x1b_Ga=p,i=3,c=2,C=1\x1b\\" +
@@ -709,19 +711,23 @@ func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
 			s.Write([]byte(stream[at:min(at+read, len(stream))]))
 		}
 		want := []vtKittyCommand{
-			{start: int64(first), end: int64(second), col: 2, number: "9", transmits: true,
+			{start: int64(first), end: int64(second), col: 2, transmits: true,
 				place: []byte("\x1b_Ga=p,I=9,q=2\x1b\\")},
-			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: 4,
-				imageID: "3", place: []byte("\x1b_Ga=p,i=3,c=2,C=1,q=2\x1b\\")},
+			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: 4},
 		}
 		if !reflect.DeepEqual(s.kittyCommands, want) || s.Written() != int64(len(stream)) {
 			t.Fatalf("in reads of %d: commands = %+v, written %d", read, s.kittyCommands, s.Written())
 		}
-		if command, ok := s.KittyCutCommand(int64(first), int64(first+5)); !ok || command.number != "9" {
+		if command, ok := s.KittyCutCommand(int64(first), int64(first+5)); !ok || command.start != int64(first) {
 			t.Fatalf("in reads of %d: the cut inside the transmission finds %+v, %v", read, command, ok)
 		}
 		if _, ok := s.KittyCutCommand(int64(len(stream)-1), int64(len(stream))); ok {
 			t.Fatalf("in reads of %d: a command that ended before the cut was found", read)
 		}
+	}
+	s := newTerminalScreen(40, 10)
+	s.Write([]byte(stream + strings.Repeat("x", vtKittyCommandReach) + "\x1b_Ga=p,i=3\x1b\\"))
+	if len(s.kittyCommands) != 1 || !s.KittyPlacedImages() {
+		t.Fatalf("commands past the reach = %+v", s.kittyCommands)
 	}
 }

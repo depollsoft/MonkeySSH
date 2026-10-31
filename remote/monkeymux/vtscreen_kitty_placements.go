@@ -66,10 +66,12 @@ func (p *vtKittyPlacement) span() kittyCellSpan {
 	return kittyCellSpan{col: p.col, row: p.row, cols: p.cols, rows: p.rows}
 }
 
-// vtKittyCommandLimit bounds the commands the model remembers; the oldest
-// goes first. A replay needs only the one its cut falls on, the newest that
-// began before the output it carries.
-const vtKittyCommandLimit = 64
+// vtKittyCommandReach is how far back in its output the model remembers
+// commands. A replay carries at most windowReplayLimitBytes of output, so
+// only a command that ended within that much can be the one its cut falls
+// on (KittyCutCommand); every command takes bytes, so this bounds how many
+// the model keeps.
+const vtKittyCommandReach = windowReplayLimitBytes
 
 // vtKittyCommand is a command that placed an image at the cursor on the main
 // screen (a=T, or a=p, neither virtual nor relative), of an image with an
@@ -83,38 +85,30 @@ type vtKittyCommand struct {
 	start, end int64
 	// col is the cursor's column when it placed the image.
 	col int
-	// imageID and number are its i= and I= keys, "" without.
-	imageID, number string
-	// transmits records an image transmission (a=T).
+	// transmits records an image transmission (a=T), and place an a=p that
+	// places its image again, moving the cursor past it unless the command
+	// kept it where it was (C=1).
 	transmits bool
-	// place places the image again with an a=p, moving the cursor past it
-	// unless the command kept it where it was (C=1).
-	place []byte
+	place     []byte
 }
 
 // noteKittyCommand remembers a command that placed an image at the cursor
 // on the main screen, which began at start and ends here.
 func (s *terminalScreen) noteKittyCommand(args map[string]string, start int64, transmits bool) {
-	tail := ",q=2\x1b\\"
-	if kittyIntValue(args["C"]) == 1 {
-		tail = ",C=1" + tail
+	stale := 0
+	for stale < len(s.kittyCommands) && s.kittyCommands[stale].end < s.written-vtKittyCommandReach {
+		stale++
 	}
-	number := ""
-	if kittyIDValue(args["i"]) == "" {
-		number = kittyIDValue(args["I"])
+	s.kittyCommands = append(s.kittyCommands[:0], s.kittyCommands[stale:]...)
+	command := vtKittyCommand{start: start, end: s.written, col: s.grid().cursorCol, transmits: transmits}
+	if transmits {
+		tail := ",q=2\x1b\\"
+		if kittyIntValue(args["C"]) == 1 {
+			tail = ",C=1" + tail
+		}
+		command.place = kittyPlacementCommand(args, tail)
 	}
-	s.kittyCommands = append(s.kittyCommands, vtKittyCommand{
-		start:     start,
-		end:       s.written,
-		col:       s.grid().cursorCol,
-		imageID:   kittyIDValue(args["i"]),
-		number:    number,
-		transmits: transmits,
-		place:     kittyPlacementCommand(args, tail),
-	})
-	if extra := len(s.kittyCommands) - vtKittyCommandLimit; extra > 0 {
-		s.kittyCommands = append(s.kittyCommands[:0], s.kittyCommands[extra:]...)
-	}
+	s.kittyCommands = append(s.kittyCommands, command)
 }
 
 // KittyPlacedImages reports whether the output placed an image at the

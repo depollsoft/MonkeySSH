@@ -11621,7 +11621,7 @@ func (w *muxWindow) shellReplayHistoryLocked(
 	history := append(restore, retained[from:]...)
 	shown, _ := w.kittyImageTransmissionsOntoLocked(
 		w.kittyShownImagesLocked(history, clientHas),
-		0,
+		maxReplayedKittyImages,
 		maxReplayedKittyImageBytes-images,
 		false,
 	)
@@ -11645,34 +11645,24 @@ func (w *muxWindow) shellReplayHistoryLocked(
 // placements in the scrollback.
 const kittyVisiblePlacementsDelete = "\x1b_Ga=d,d=a,q=2\x1b\\"
 
-// kittyCommandRootLocked returns the retained image a command that placed
-// one sent or showed, to send again store-only before it, or nil. An id
-// names the image the window kept for it: a later transmission of that id
-// replaces the image on the client too, with the placements it had. A
-// number names the newest image with it, which a later transmission takes
-// over, so only the image the command sent, or one sent before it, will do.
+// kittyCommandRootLocked returns the retained image that a transmission
+// which placed one sent, to send again store-only, or nil. Only the image
+// whose transmission ended where the command did will do: the window may
+// have sent another under its id or number since, on the alternate screen,
+// whose store the client keeps apart, or too large to keep.
 func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
-	id := command.imageID
-	switch {
-	case id != "":
-	case command.transmits:
-		for candidate, end := range w.kittyImageEnd {
-			if end == command.end {
-				id = candidate
-			}
-		}
-	default:
-		id = w.kittyImageNumberToID[command.number]
-		if end, ok := w.kittyImageEnd[id]; ok && end > command.start {
-			return nil
-		}
-	}
-	if w.kittyImages[id] == nil {
+	if !command.transmits {
 		return nil
 	}
-	root := append([]byte(nil), w.kittyImageRootReplayOnLocked(id, false)...)
-	root = append(root, w.kittyImageNumberReplayLocked(id)...)
-	return append(root, w.kittyImageAnimations[id]...)
+	for id, end := range w.kittyImageEnd {
+		if end != command.end || w.kittyImages[id] == nil {
+			continue
+		}
+		root := append([]byte(nil), w.kittyImageRootReplayOnLocked(id, false)...)
+		root = append(root, w.kittyImageNumberReplayLocked(id)...)
+		return append(root, w.kittyImageAnimations[id]...)
+	}
+	return nil
 }
 
 // clientHolds reports whether clientHas, the images a client reports holding,
@@ -11683,11 +11673,13 @@ func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
 }
 
 // kittyShownImagesLocked returns the retained main-screen images that the
-// display commands in history show by id without history sending them
-// first, which the client may not hold (another window may have sent an
-// image with the same id since), and that clientHas does not report it
-// holding. Only the commands before history first enters the alternate
-// screen run on the main screen.
+// commands in history which place one at the cursor show by id without
+// history sending them first, which the client may not hold (another window
+// may have sent an image with the same id since), and that clientHas does
+// not report it holding. Only the commands before history first enters the
+// alternate screen run on the main screen. Virtual and relative placements
+// are left to the follow-up, which sends their images before placing them
+// again (replayBytesWithImageFollowUpLocked).
 func (w *muxWindow) kittyShownImagesLocked(history []byte, clientHas map[string]uint32) []string {
 	if len(w.kittyImages) == 0 {
 		return nil
@@ -11705,7 +11697,8 @@ func (w *muxWindow) kittyShownImagesLocked(history []byte, clientHas map[string]
 			if len(event.buf) > 0 && !event.animation {
 				sent = append(sent, id)
 			}
-		case event.control["a"] != "p" || w.kittyImages[id] == nil || w.kittyTracking.rootAlt[id]:
+		case event.control["a"] != "p" || kittyNonZero(event.control["U"]) ||
+			kittyNonZero(event.control["P"]) || w.kittyImages[id] == nil || w.kittyTracking.rootAlt[id]:
 		case clientHolds(clientHas, id, w.kittyImageToken[id]):
 		default:
 			sent = append(sent, id)
