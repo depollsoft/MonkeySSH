@@ -308,6 +308,9 @@ type vtSavedCursor struct {
 	g0Graphics  bool
 	g1Graphics  bool
 	shiftOut    bool
+	// kittyColumnLost is the screen's when it was saved: DECRC puts back
+	// the column the client's cursor had then.
+	kittyColumnLost bool
 }
 
 // vtCell holds one grid cell. r == 0 means blank. width is 1 or 2 for a cell
@@ -438,6 +441,7 @@ func (s *terminalScreen) Reset() {
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
 	s.shell = vtShellState{}
+	s.kittyColumnLost = false
 	s.resetState()
 }
 
@@ -1744,6 +1748,8 @@ func (s *terminalScreen) saveCursor() {
 		g0Graphics:  s.g0Graphics,
 		g1Graphics:  s.g1Graphics,
 		shiftOut:    s.shiftOut,
+
+		kittyColumnLost: s.kittyColumnLost,
 	}
 }
 
@@ -1776,6 +1782,9 @@ func (s *terminalScreen) restoreCursor() {
 	s.g0Graphics = saved.g0Graphics
 	s.g1Graphics = saved.g1Graphics
 	s.shiftOut = saved.shiftOut
+	if !s.altActive {
+		s.kittyColumnLost = saved.kittyColumnLost
+	}
 }
 
 // restoreSavedPosition puts the cursor back where saved left it, deferred

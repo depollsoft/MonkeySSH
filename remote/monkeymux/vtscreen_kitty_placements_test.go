@@ -733,3 +733,29 @@ func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
 		t.Fatalf("commands past the reach = %+v", s.kittyCommands)
 	}
 }
+
+// TestVTKittyColumnLostUntilSetAgain: an image placed at the cursor moves the
+// client's cursor past it, which the model does not follow, so the column of
+// the next command is lost until the main screen's column is set again: by
+// CR, CUP or RIS, or by DECRC of a cursor saved while the model had it.
+func TestVTKittyColumnLostUntilSetAgain(t *testing.T) {
+	const image = "\x1b_Ga=T,i=6,f=100,c=4,r=1;AAAA\x1b\\"
+	for _, c := range []struct {
+		name, between string
+		lost          bool
+	}{
+		{"nothing", "", true},
+		{"CR", "\r", false},
+		{"CUP", "\x1b[1;3H", false},
+		{"RIS", "\x1bc", false},
+		{"DECRC of a cursor saved lost", "\x1b7\r\x1b8", true},
+		{"DECRC of a cursor saved found", "\r\x1b7" + image + "\x1b8", false},
+		{"CR on the alternate screen", "\x1b[?1049h\r\x1b[?1049l", true},
+	} {
+		s := newTerminalScreen(40, 10)
+		s.Write([]byte(image + c.between + image))
+		if last := s.kittyCommands[len(s.kittyCommands)-1]; (last.col < 0) != c.lost {
+			t.Errorf("%s: the second command's column is %d, want lost %v", c.name, last.col, c.lost)
+		}
+	}
+}
