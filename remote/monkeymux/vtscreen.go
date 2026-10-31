@@ -98,6 +98,10 @@ type terminalScreen struct {
 	kittyPlaceholderOrder []string
 	kittyPending          vtKittyPlaceholder
 	kittyLast             vtKittyPlaceholder
+	// kittyEvictedPlaceholders has bit n set once a line the scrollback
+	// dropped held a placeholder cell whose image id's low byte is n. The
+	// client keeps a longer scrollback, so it may still hold that cell.
+	kittyEvictedPlaceholders [4]uint64
 	// kittyDirect are the direct Kitty placements the client keeps,
 	// kittyStores what it holds in the image store of the main screen and
 	// of the alternate one, and kittyChunk a transmission still arriving;
@@ -964,6 +968,7 @@ func (s *terminalScreen) trimScrollback() {
 	b := &s.scrollback
 	trimmed := false
 	for b.len() > vtScrollbackLimit || (b.len() > 0 && b.bytes > vtScrollbackByteLimit) {
+		s.noteEvictedKittyPlaceholders(b.at(0))
 		b.popFront()
 		trimmed = true
 	}
@@ -2413,6 +2418,8 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		// this erases nothing, as in the client's Buffer.clearScrollback.
 		if !s.altActive {
 			s.scrollback = vtScrollback{}
+			// The client empties its own, however long.
+			s.kittyEvictedPlaceholders = [4]uint64{}
 			s.dropKittyScrollbackPlacements()
 		}
 		// A replay prefix ends with it, so the client ends an open prompt.

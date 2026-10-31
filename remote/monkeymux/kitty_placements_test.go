@@ -356,13 +356,76 @@ func TestKittyDeletesMatchKeptPlacementsAsTheClientDoes(t *testing.T) {
 	if got := fmt.Sprint(kittyPlacementKeys(window)); got != "[1/virtual 3/virtual 2/5]" {
 		t.Fatalf("d=a kept %s", got)
 	}
-	// One whose cells may only be in the scrollback could be anywhere:
-	// MonkeyMux cannot tell, so it drops the child.
+	// Nor does it once ED 2 has erased every cell of the root.
 	window = kittyPlacementWindow(t, "H=1,V=1,c=1,r=1")
 	window.screen.Write([]byte("\x1b[2J"))
 	window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d\x1b\\"))
-	if len(window.kittyPlacements) != 1 {
-		t.Fatalf("d=a kept a child it could not place: %v", kittyPlacementKeys(window))
+	if len(window.kittyPlacements) != 2 {
+		t.Fatalf("d=a removed a child the client has not placed: %v", kittyPlacementKeys(window))
+	}
+}
+
+// The client finds a virtual placement's origin among the placeholder cells
+// of its whole buffer, the scrollback included, so a positional delete
+// matches a relative placement there too.
+func TestKittyPositionalDeletesPlaceChildrenOfRootsInTheScrollback(t *testing.T) {
+	// Image 2 relative to root's virtual placement, after cells are written
+	// to a 4-row screen.
+	window := func(t *testing.T, cells, root, child string) *muxWindow {
+		t.Helper()
+		window := &muxWindow{id: "@1", screen: newTerminalScreen(80, 4)}
+		window.screen.Write([]byte(cells))
+		window.observeKittyGraphicsLocked([]byte(
+			"\x1b_Ga=t,i=" + root + "," + kittyPixelRoot + "\x1b\\" +
+				"\x1b_Ga=t,i=2," + kittyPixelRoot + "\x1b\\" +
+				"\x1b_Ga=p,U=1,i=" + root + "\x1b\\" +
+				"\x1b_Ga=p,i=2,p=1,P=" + root + "," + child + "\x1b\\"))
+		if len(window.kittyPlacements) != 2 {
+			t.Fatalf("kept placements = %v", kittyPlacementKeys(window))
+		}
+		return window
+	}
+	// Cells on rows 1 and 2, then a scroll: the first is in the scrollback,
+	// row -1, so a child one row down is on row 0, 1-based y=1.
+	spanning := "\x1b[38;5;1m\x1b[1;1H\U0010EEEE\x1b[2;1H\U0010EEEE\x1b[m\x1b[4;1H\n"
+	// A cell showing all of id 0x01000001 (a third diacritic) in the
+	// scrollback, at column 4, and one showing only its low byte on screen,
+	// at column 1: the client places the image by the one with the whole id.
+	exact := "\x1b[38;5;1m\x1b[1;4H\U0010EEEE\u0305\u0305\u030D\x1b[m\x1b[4;1H\n" +
+		"\x1b[38;5;1m\x1b[1;1H\U0010EEEE\u0305\u0305\u0305\x1b[m"
+	for _, tc := range []struct {
+		name, cells, root, child, command string
+		removed                           bool
+	}{
+		{"the row it is on", spanning, "1", "V=1,c=1,r=1", "d=y,y=1", true},
+		{"the row below", spanning, "1", "V=1,c=1,r=1", "d=y,y=2", false},
+		{"everything visible", spanning, "1", "c=1,r=1", "d=a", false},
+		{"its cell", spanning, "1", "V=1,c=1,r=1", "d=p,x=1,y=1", true},
+		{"the whole id's cell", exact, "16777217", "V=1,c=1,r=1", "d=p,x=4,y=1", true},
+		{"the low byte's cell", exact, "16777217", "V=1,c=1,r=1", "d=p,x=1,y=2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := window(t, tc.cells, tc.root, tc.child)
+			window.observeKittyGraphicsLocked([]byte("\x1b_Ga=d," + tc.command + "\x1b\\"))
+			kept := len(window.kittyPlacements) == 2
+			if kept == tc.removed {
+				t.Fatalf("after %s kept placements = %v", tc.command,
+					kittyPlacementKeys(window))
+			}
+		})
+	}
+
+	// A cell the model's scrollback dropped may still be in the client's
+	// longer one, at the origin's column: MonkeyMux cannot tell where the
+	// child is, so a delete that may reach it drops it.
+	evicted := "\x1b[38;5;1m\x1b[1;1H\U0010EEEE\x1b[m" +
+		strings.Repeat("\n", vtScrollbackLimit+8) +
+		"\x1b[38;5;1m\x1b[1;6H\U0010EEEE\x1b[m"
+	w := window(t, evicted, "1", "c=1,r=1")
+	w.observeKittyGraphicsLocked([]byte("\x1b_Ga=d,d=x,x=1\x1b\\"))
+	if len(w.kittyPlacements) != 1 {
+		t.Fatalf("a delete at the column of an evicted cell kept %v",
+			kittyPlacementKeys(w))
 	}
 }
 

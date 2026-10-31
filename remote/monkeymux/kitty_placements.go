@@ -614,7 +614,8 @@ func (w *muxWindow) dropKittyImagePlacementsLocked(imageID string) bool {
 // keeping it could bring back an image the client deleted. That covers a
 // position delete without the screen at the command, an image sized by its
 // own pixels (a side without c= or r= may reach any further cell), and a
-// virtual root whose placeholder cells are only in the scrollback.
+// virtual root that may have a placeholder cell in lines the model's
+// scrollback dropped, which the client's longer one may still hold.
 func (w *muxWindow) observeKittyPlacementDeleteLocked(
 	args map[string]string,
 	alt bool,
@@ -707,20 +708,16 @@ func (w *muxWindow) kittyPositionalDeleteMatch(
 	cursorRow, cursorCol := screen.CursorPosition()
 	cell := kittyDeleteCellOf(selector, args, cursorRow, cursorCol)
 	_, height := screen.Size()
-	seen := make(map[string]bool)
-	for _, id := range screen.PlaceholderImageIDs() {
-		seen[id] = true
-	}
 	return func(p kittyRetainedPlacement) bool {
 		if p.virtual() || !zMatches(p) {
 			return false
 		}
-		col, row, root, placed := w.kittyPlacementCellLocked(p, screen)
+		col, row, placed, known := w.kittyPlacementCellLocked(p, screen)
 		if !placed {
-			// No placeholder cell of the root on screen. If it has none at
-			// all the client has not placed this one either; one in the
-			// scrollback could still put it anywhere.
-			return seen[root]
+			// Without a placeholder cell of its root the client has not
+			// placed it either, and no position matches it; one only the
+			// client still holds could put it anywhere.
+			return !known
 		}
 		span := kittyPlacementSpan(col, row, p.cols, p.rows)
 		return span.deletedBy(selector, cell, height)
@@ -829,13 +826,16 @@ func kittyCellValue(value string) (int, bool) {
 	return int(n - 1), true
 }
 
-// kittyPlacementCellLocked resolves a kept relative placement to the screen
-// cell the client puts it at: the top-left placeholder cell of its virtual
-// root in screen, plus every offset on the way down. root is the root image.
+// kittyPlacementCellLocked resolves a kept relative placement to the cell
+// the client puts it at, a scrollback line as a negative row: the top-left
+// placeholder cell of its virtual root in screen, plus every offset on the
+// way down. placed is false when the client has not placed it, and known
+// false when MonkeyMux cannot tell where the client put it
+// (PlaceholderOrigin).
 func (w *muxWindow) kittyPlacementCellLocked(
 	p kittyRetainedPlacement,
 	screen *terminalScreen,
-) (col, row int, root string, placed bool) {
+) (col, row int, placed, known bool) {
 	col, row = p.horizontal, p.vertical
 	link := p.parent
 	for depth := 0; depth <= kittyRelativePlacementDepthLimit; depth++ {
@@ -851,7 +851,7 @@ func (w *muxWindow) kittyPlacementCellLocked(
 			}
 		}
 		if parent == nil {
-			return 0, 0, "", false
+			return 0, 0, false, true
 		}
 		if parent.virtual() {
 			return kittyVirtualOrigin(screen, parent.imageID, col, row)
@@ -860,23 +860,21 @@ func (w *muxWindow) kittyPlacementCellLocked(
 		row += parent.vertical
 		link = parent.parent
 	}
-	return 0, 0, "", false
+	return 0, 0, false, true
 }
 
 func kittyVirtualOrigin(
 	screen *terminalScreen,
 	imageID string,
 	col, row int,
-) (int, int, string, bool) {
+) (int, int, bool, bool) {
 	id, err := strconv.ParseUint(imageID, 10, 32)
 	if err != nil {
-		return 0, 0, imageID, false
+		// No placeholder cell can name an id this large.
+		return 0, 0, false, true
 	}
-	originCol, originRow, ok := screen.PlaceholderOrigin(uint32(id))
-	if !ok {
-		return 0, 0, imageID, false
-	}
-	return originCol + col, originRow + row, imageID, true
+	originCol, originRow, ok, known := screen.PlaceholderOrigin(uint32(id))
+	return originCol + col, originRow + row, ok, known
 }
 
 // snapshotKittyScreenLocked copies the screen model before chunk is written
