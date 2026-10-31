@@ -58,11 +58,13 @@ const _workspacePath = String.fromEnvironment(
   'STORE_SCREENSHOT_WORKSPACE_PATH',
   defaultValue: '/Users/Shared/monkeyssh-release-workspace',
 );
+// A phone's code block shows about 40 characters a line; longer lines run
+// past its edge in the screenshot.
 const _nativeCopilotPrompt =
     'Review this reconnect plan: keep the remote agent running, retry SSH with '
     'backoff, then resume the same conversation. Give four short test cases '
-    'and a four-line retry example. Keep the reply under 90 words. '
-    'Do not run tools, read files, or load skills.';
+    'and a four-line retry example with lines under 40 characters. Keep the '
+    'reply under 90 words. Do not run tools, read files, or load skills.';
 const _themeMode = String.fromEnvironment(
   'STORE_SCREENSHOT_THEME_MODE',
   defaultValue: 'dark',
