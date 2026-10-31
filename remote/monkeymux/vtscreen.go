@@ -2369,7 +2369,8 @@ func (s *terminalScreen) softReset() {
 	// saved cursors go, as in the client's softReset.
 	s.savedMain = vtSavedCursor{}
 	s.savedAlt = vtSavedCursor{}
-	s.grid().pendingWrap = false
+	// The cursor stays where it is, a pending wrap included, as in xterm and
+	// the client.
 }
 
 // screenAlignment is DECALN: fill the screen with E and home the cursor.
