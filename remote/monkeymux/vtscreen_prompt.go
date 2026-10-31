@@ -397,11 +397,12 @@ func (s *terminalScreen) promptRows() (history, start, end int, ok bool) {
 // the model can move the shell's cursor and keep history on a clear right
 // away, and resizes it the way the model does. A frame paints onto a client
 // whose replay prefix ended any open prompt (CSI 3 J), so the lines before the
-// prompt need nothing. Only marks without side effects are used: A at a line
-// start (no fresh line there), P, B, I and VS Code's H; never C or D, which
-// the app takes for a command starting or finishing. So nothing is emitted
-// unless the cursor is in a prompt or its input, and cells written as output
-// inside the prompt take the content in force.
+// prompt need nothing. Only marks without side effects on the screen are
+// used: A at a line start (no fresh line there), P, B, I and VS Code's H, and
+// D for output (vtSemanticOutputMark); never C, which the app takes for a
+// command starting. So nothing is emitted unless the cursor is in a prompt or
+// its input, and cells written as output inside the prompt take the content
+// in force, except a glyph printed again to restore a deferred wrap (glyph).
 //
 // A row is marked only where the model marks it. The cursor can be in a
 // prompt on a row the model leaves unmarked (the prompt row was deleted
@@ -536,6 +537,29 @@ func (f *vtSemanticFrame) cell(out []byte, sem uint8) []byte {
 	f.emitted = sem
 	return out
 }
+
+// glyph is called before a cell is printed again after the rows, to restore
+// a deferred wrap. The cell keeps the content it was written as, which is set
+// alone: its row has its mark already. finish then sets the content in force.
+func (f *vtSemanticFrame) glyph(out []byte, sem uint8) []byte {
+	if f == nil || sem == f.emitted {
+		return out
+	}
+	f.emitted = sem
+	switch sem {
+	case vtSemInput:
+		return append(out, "\x1b]133;B\x07"...)
+	case vtSemPrompt:
+		return append(out, "\x1b]633;H\x07"...)
+	}
+	return append(out, vtSemanticOutputMark...)
+}
+
+// vtSemanticOutputMark makes the next cells output and keeps the row marks
+// and the prompt's options. The app also reads it as a command finishing
+// without an exit status: it shows the shell at a prompt and keeps the last
+// status, and the transition the frame ends with sets what it shows.
+const vtSemanticOutputMark = "\x1b]133;D\x07"
 
 // appendVTPromptContent makes the next cells prompt on a line with mark, and
 // marks the line as P does with the kind that gives mark exactly: k=c a

@@ -196,6 +196,13 @@ func TestRenderFrameReemitsTheCurrentPromptMarks(t *testing.T) {
 		// the screen, and that glyph is prompt text.
 		{"prompt text wrapping from the scrollback", [2]int{10, 3}, osc133("A;click_events=2") + "topline!!!x\r\n$ " +
 			osc133("B") + "abcdefghijkl"},
+		// The frame reprints the glyph before a pending wrap to restore it,
+		// for the cursor and for a saved cursor, and that glyph is prompt.
+		{"prompt text before the cursor's pending wrap", [2]int{5, 3}, osc133("A;cl=line") + "ABCDE" + osc133("B")},
+		{"prompt text before a saved pending wrap", [2]int{5, 4}, osc133("A;cl=line") + "ABCDE\x1b7" +
+			osc133("B") + "\x1b[2;3H"},
+		{"input before a saved pending wrap", [2]int{5, 4}, osc133("A;cl=line") + "$ " + osc133("B") + "abc\x1b7" +
+			"\x1b[2;2H" + osc133("P;k=i")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
