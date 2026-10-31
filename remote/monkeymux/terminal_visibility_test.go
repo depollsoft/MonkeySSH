@@ -187,11 +187,39 @@ func TestC1VisibilitySequencesAreAnsweredAndStripped(t *testing.T) {
 	if got := windowReplies(t, server, 0, ptys[0]); got != "" {
 		t.Fatalf("replies to text = %q, want none", got)
 	}
+	// A lead byte followed by ASCII ends no character, so a 0x9b in the next
+	// read is CSI.
+	server.handleWindowOutput("@1", []byte("h\xe2x"))
+	server.handleWindowOutput("@1", []byte("\x9b?2033hi"))
+	if got := windowReplies(t, server, 0, ptys[0]); got != visibleReport {
+		t.Fatalf("replies after an invalid character = %q, want %q", got, visibleReport)
+	}
 	waitForTestAttachWrites(t, server)
 	if got := attach.String(); !strings.Contains(got, "ab") ||
 		!strings.Contains(got, "c\x9b?25lde") ||
-		!strings.HasSuffix(got, "f\xe2\x80\x9bg\xe2\x80\x9b?2033h") {
+		!strings.HasSuffix(got, "f\xe2\x80\x9bg\xe2\x80\x9b?2033hh\xe2xi") {
 		t.Fatalf("attach output = %q", got)
+	}
+}
+
+func TestTrailingUtf8ContinuationCount(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want int
+	}{
+		{"", 0},
+		{"a", 0},
+		{"\xe2", 2},
+		{"\xe2\x80", 1},
+		{"\xe2\x80\x9b", 0},
+		{"a\xf0\x9f", 2},
+		{"\xe2x", 0},
+		{"\xe2\x80x", 0},
+		{"\x80", 0},
+	} {
+		if got := trailingUtf8ContinuationCount([]byte(tc.data)); got != tc.want {
+			t.Errorf("trailingUtf8ContinuationCount(%q) = %d, want %d", tc.data, got, tc.want)
+		}
 	}
 }
 

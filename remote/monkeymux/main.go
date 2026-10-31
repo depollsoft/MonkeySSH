@@ -16736,7 +16736,11 @@ func trailingUtf8ContinuationCount(data []byte) int {
 	for index := len(data) - 1; index >= 0 && len(data)-index <= 4; index-- {
 		remaining := utf8ContinuationCount(data[index])
 		if remaining == 0 {
-			continue
+			if data[index]&0xc0 == 0x80 {
+				continue
+			}
+			// Any other byte ends a character before it, valid or not.
+			return 0
 		}
 		available := len(data) - index - 1
 		if available < remaining {
