@@ -221,7 +221,7 @@ func isKittyClipboardOscPayload(payload []byte) bool {
 	return bytes.HasPrefix(payload, []byte(kittyClipboardOscCode+";"))
 }
 
-// isKittyClipboardOscSequence reports whether sequence is a complete OSC 5522
+// isKittyClipboardOscSequence reports whether sequence starts an OSC 5522
 // control string in its 7-bit or C1 form.
 func isKittyClipboardOscSequence(sequence []byte) bool {
 	switch {
@@ -273,11 +273,11 @@ func (s *muxServer) kittyClipboardRouteLocked(window *muxWindow) kittyClipboardR
 }
 
 // attachPartialOscLimitBytes is how much of an OSC split across reads the
-// live stream holds back. An OSC 5522 packet is held whole, so its routing
-// (tagging, rejection, primary-only delivery) applies to all of it rather
-// than to whatever arrived in the read that completed it.
+// live stream holds back. An OSC 5522 packet is held whole, in either form,
+// so its routing (tagging, rejection, primary-only delivery) applies to all
+// of it rather than to whatever arrived in the read that completed it.
 func attachPartialOscLimitBytes(partial []byte) int {
-	if bytes.HasPrefix(partial, kittyClipboardOscIntroducer) {
+	if isKittyClipboardOscSequence(partial) {
 		return kittyClipboardPacketLimitBytes
 	}
 	return oscBufferLimitBytes
@@ -524,8 +524,13 @@ func (w *muxWindow) forwardKittyClipboardLocked(payload []byte, terminator []byt
 // kittyClipboardPacketLocked decides what the attached client receives for
 // one OSC 5522 packet of this window: the packet with its id tagged, the
 // packet unchanged, or nothing when MonkeyMux answers it itself. terminator
-// is the packet's string terminator. Requires the server's mu.
+// is the packet's string terminator. Whatever form the program wrote, the
+// client gets the 7-bit one: its terminal decodes UTF-8, so a raw 0x9d or
+// 0x9c is no control to it. Requires the server's mu.
 func (w *muxWindow) kittyClipboardPacketLocked(payload []byte, terminator []byte) []byte {
+	if len(terminator) == 1 && terminator[0] == 0x9c {
+		terminator = []byte("\x1b\\")
+	}
 	state := &w.kittyClipboard
 	forwarding := state.route.forwarding()
 	body := string(payload[len(kittyClipboardOscCode)+1:])

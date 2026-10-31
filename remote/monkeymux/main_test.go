@@ -8625,6 +8625,57 @@ func TestStripLocallyAnsweredThemeQueriesPreservesSplitOsc8(t *testing.T) {
 	}
 }
 
+// The C1 OSC (0x9d) carries the queries and markers the stripper removes as
+// the 7-bit form does, ended by BEL, ST or the C1 ST (0x9c), and is held
+// whole when a read splits it: the client's terminal decodes UTF-8 and would
+// show the raw sequence as text. A 0x9d that continues a character is text,
+// also when it starts a read, and is neither stripped nor held back.
+func TestStripLocallyAnsweredThemeQueriesStripsC1Osc(t *testing.T) {
+	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
+	for _, terminator := range []string{"\a", "\x1b\\", "\x9c"} {
+		for _, payload := range []string{
+			"11;?",
+			"1337;MonkeyMuxPi=abc",
+			"1337;" + monkeyMuxAgentIdentityOSCPrefix + "invalid",
+			programStatusOscCode + ";?",
+		} {
+			sequence := "\x9d" + payload + terminator
+			for cut := 0; cut < len(sequence); cut++ {
+				window := &muxWindow{}
+				var got string
+				if cut == 0 {
+					got = string(window.stripLocallyAnsweredThemeQueriesLocked([]byte("a"+sequence+"b"), hint))
+				} else {
+					got = string(window.stripLocallyAnsweredThemeQueriesLocked([]byte("a"+sequence[:cut]), hint))
+					got += string(window.stripLocallyAnsweredThemeQueriesLocked([]byte(sequence[cut:]+"b"), hint))
+				}
+				if got != "ab" {
+					t.Fatalf("%q split at %d: forwarded %q, want it stripped", sequence, cut, got)
+				}
+				if payload == programStatusOscCode+";?" && window.programStatusQueries != 1 {
+					t.Fatalf("%q split at %d: %d queries to answer, want 1", sequence, cut, window.programStatusQueries)
+				}
+			}
+		}
+		// Other OSCs, and text, go on unchanged.
+		for _, data := range []string{
+			"\x9d2;title" + terminator + "c",
+			"\xe2\x80\x9d11;?" + terminator + "c",
+		} {
+			window := &muxWindow{}
+			if got := string(window.stripLocallyAnsweredThemeQueriesLocked([]byte(data), hint)); got != data {
+				t.Fatalf("forwarded %q, want %q unchanged", got, data)
+			}
+		}
+	}
+	window := &muxWindow{}
+	first := window.stripLocallyAnsweredThemeQueriesLocked([]byte("c\xe2\x80"), hint)
+	second := window.stripLocallyAnsweredThemeQueriesLocked([]byte("\x9d11;?"), hint)
+	if got := string(first) + string(second); got != "c\xe2\x80\x9d11;?" {
+		t.Fatalf("forwarded %q, want the character's last byte and what follows at once", got)
+	}
+}
+
 func TestCreateWindowClearsAttachBeforePromptOutput(t *testing.T) {
 	server := newMuxServer("test")
 	t.Cleanup(server.close)
@@ -12973,6 +13024,39 @@ func TestReplayOmitsTheAttachOscTailStillWithheldFromLiveOutput(t *testing.T) {
 		"\x1b\x1b]8;",
 	) {
 		t.Fatalf("replay+live stream = %q, want no duplicated ESC", got)
+	}
+}
+
+// The replay reads the C1 OSC as the live stream does: it leaves out what
+// the stripper removes or routes live, keeps a 0x9d that continues a
+// character, and is cut where the live stream still holds back a C1 OSC a
+// read split, so it ends where the live stream did.
+func TestReplayAgreesWithTheLiveStreamOnC1Osc(t *testing.T) {
+	for _, sequence := range []string{
+		"\x9d11;?\x9c",
+		"\x9d5522;type=read:id=r;Lg==\a",
+		"\x9d1337;MonkeyMuxPi=abc\x1b\\",
+		"\x9d" + programStatusOscCode + ";?\x9c",
+	} {
+		if got := string(stripTerminalQueriesFromReplay([]byte("a" + sequence + "b"))); got != "ab" {
+			t.Fatalf("replay of %q = %q, want it left out", sequence, got)
+		}
+	}
+	text := "a\xe2\x80\x9d11;?\ab"
+	if got := string(stripTerminalQueriesFromReplay([]byte(text))); got != text {
+		t.Fatalf("replay = %q, want the text %q", got, text)
+	}
+
+	server := &muxServer{}
+	window := &muxWindow{id: "@1"}
+	chunk := []byte("shown \x9d5522;type=re")
+	window.appendHistoryLocked(chunk)
+	if got := string(window.stripLocallyAnsweredThemeQueriesLocked(chunk, nil)); got != "shown " {
+		t.Fatalf("forwarded %q, want the split request held back", got)
+	}
+	replay := server.replayBytesLocked(window)
+	if !bytes.Contains(replay, []byte("shown ")) || bytes.Contains(replay, []byte("type=re")) {
+		t.Fatalf("replay = %q, want the delivered output without the held request", replay)
 	}
 }
 

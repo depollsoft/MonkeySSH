@@ -930,8 +930,8 @@ type muxWindow struct {
 	terminalOutputOscOverflow bool
 	// attachUtf8Remaining is the continuation bytes a character split across
 	// the forwarded output's reads still owes, so that
-	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b among them
-	// for CSI.
+	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b or 0x9d
+	// among them for CSI or OSC.
 	attachUtf8Remaining int
 	// notificationOscSeq counts background desktop notifications captured
 	// from this window. It never resets so clients can tell new arrivals
@@ -14346,13 +14346,22 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 	copyStart := 0
 	for i := 0; i < len(data); {
 		csiParams := -1
+		payloadStart := -1
 		switch {
-		case data[i] == 0x9b:
+		case data[i] == 0x9b || data[i] == 0x9d:
+			// The C1 forms of CSI and OSC, unless the byte continues a
+			// character.
 			if i >= leadingUtf8Prefix && !isUtf8ContinuationAt(data, i) {
-				csiParams = i + 1
+				if data[i] == 0x9b {
+					csiParams = i + 1
+				} else {
+					payloadStart = i + 1
+				}
 			}
 		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == '[':
 			csiParams = i + 2
+		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == ']':
+			payloadStart = i + 2
 		}
 		if csiParams >= 0 {
 			// Visibility reports belong to MonkeyMux (terminal_visibility.go):
@@ -14384,25 +14393,17 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 			i++
 			continue
 		}
-		if data[i] != '\x1b' {
-			i++
-			continue
-		}
-		if i+1 >= len(data) {
-			if w.storeAttachPartialOscLocked(data[i:]) {
+		if payloadStart < 0 {
+			if data[i] == '\x1b' && i+1 >= len(data) && w.storeAttachPartialOscLocked(data[i:]) {
 				if output == nil {
 					return data[:i]
 				}
 				output = append(output, data[copyStart:i]...)
 				return output
 			}
-			break
-		}
-		if data[i+1] != ']' {
 			i++
 			continue
 		}
-		payloadStart := i + 2
 		if resume, cancelled := kittyClipboardOscCancelled(data[payloadStart:]); cancelled {
 			// The terminal abandons the packet there and goes on with what
 			// follows as ordinary output.
@@ -17908,10 +17909,10 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 			return observedThemeQueries
 		}
 		payload := data[payloadStart : payloadStart+payloadEnd]
-		// MonkeyMux answers 7-bit OSC 7501 queries (C1 ones are left for the
-		// attached terminal), and the asker becomes the window's reporter.
-		// Noted here, in byte order with RIS and the reports around it.
-		if payloadStart-sequenceStart == 2 && isProgramStatusQueryPayload(payload) {
+		// MonkeyMux answers OSC 7501 queries in either form, and the asker
+		// becomes the window's reporter. Noted here, in byte order with RIS
+		// and the reports around it.
+		if isProgramStatusQueryPayload(payload) {
 			w.noteProgramStatusReporterLocked()
 		}
 		observedThemeQueries = appendThemeQueryKeys(

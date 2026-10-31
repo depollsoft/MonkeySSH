@@ -1935,3 +1935,97 @@ func TestKittyClipboardAltBracketAroundALateSplitReplyThroughAttach(t *testing.T
 		t.Fatalf("asking window got %q, want only MonkeyMux's answer", got)
 	}
 }
+
+// A request in the C1 form (0x9d), ended by BEL, ST or the C1 ST (0x9c), is
+// routed as the 7-bit form is, held whole when a read splits it. It reaches
+// the client in the 7-bit form with a 7-bit terminator: the client's
+// terminal decodes UTF-8, so a raw 0x9d or 0x9c would reach it as
+// replacement characters followed by the request's text. A 0x9d that
+// continues a character is text.
+func TestKittyClipboardC1RequestIsRoutedInTheSevenBitForm(t *testing.T) {
+	for _, introducer := range []string{"\x1b]", "\x9d"} {
+		for _, terminator := range []string{"\a", "\x1b\\", "\x9c"} {
+			request := introducer + "5522;type=read:id=r;Lg==" + terminator
+			forwarded := terminator
+			if terminator == "\x9c" {
+				forwarded = "\x1b\\"
+			}
+			want := "a\x1b]5522;type=read:id=" + kittyClipboardTagWindow1 + ".1;Lg==" + forwarded + "!end"
+			for cut := 0; cut < len(request); cut++ {
+				server, first, _, attach := newKittyClipboardTestServer(t)
+				if cut == 0 {
+					server.handleWindowOutput("@1", []byte("a"+request+"!end"))
+				} else {
+					server.handleWindowOutput("@1", []byte("a"+request[:cut]))
+					server.handleWindowOutput("@1", []byte(request[cut:]+"!end"))
+				}
+				if got := waitForAttachOutput(t, attach, "!end"); got != want {
+					t.Fatalf("request %q split at %d: attach got %q, want %q", request, cut, got, want)
+				}
+				if out := windowPtyOutput(t, first); out != "" {
+					t.Fatalf("request %q split at %d: window got %q", request, cut, out)
+				}
+			}
+		}
+	}
+
+	// A background window's C1 request is answered EBUSY and goes nowhere.
+	server, _, second, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@2", []byte("\x9d5522;type=read:id=q;Lg==\x9c"))
+	server.handleWindowOutput("@1", []byte("!end"))
+	if got := windowPtyOutput(t, second); got != "\x1b]5522;type=read:status=EBUSY:id=q\x1b\\" {
+		t.Fatalf("background window got %q", got)
+	}
+	if got := waitForAttachOutput(t, attach, "!end"); got != "!end" {
+		t.Fatalf("attach got %q, want nothing from the background window", got)
+	}
+
+	// U+201D ends in 0x9d, also when a read splits it after its lead bytes.
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	text := "\xe2\x80\x9d5522;type=read:id=t;Lg==\a"
+	server.handleWindowOutput("@1", []byte("c"+text+"d\xe2\x80"))
+	server.handleWindowOutput("@1", []byte(text[2:]+"!end"))
+	if got := waitForAttachOutput(t, attach, "!end"); got != "c"+text+"d"+text+"!end" {
+		t.Fatalf("attach got %q, want the text unchanged", got)
+	}
+	server.mu.Lock()
+	tracked := len(first.kittyClipboard.requests)
+	server.mu.Unlock()
+	if tracked != 0 {
+		t.Fatalf("text was taken for %d requests", tracked)
+	}
+}
+
+// A C1 data packet is held whole up to the packet limit when reads split it,
+// as the 7-bit form is, and one that outgrows it is dropped up to its C1 ST.
+func TestKittyClipboardSplitC1PacketIsHeldWholeOrDropped(t *testing.T) {
+	random := rand.New(rand.NewSource(157))
+	server, first, _, attach := newKittyClipboardTestServer(t)
+	server.handleWindowOutput("@1", []byte("\x9d5522;type=write:id=one\x9c"))
+	sevenBit := maxKittyClipboardDataPacket(random)
+	packet := "\x9d" + strings.TrimSuffix(strings.TrimPrefix(sevenBit, "\x1b]"), "\x1b\\") + "\x9c"
+	split := oscBufferLimitBytes + 1 + random.Intn(len(packet)-oscBufferLimitBytes-1)
+	server.handleWindowOutput("@1", []byte(packet[:split]))
+	server.handleWindowOutput("@1", []byte(packet[split:]+"\x9d5522;type=wdata\x9c"))
+	got := waitForAttachOutput(t, attach, "\x1b]5522;type=wdata\x1b\\")
+	if !strings.Contains(got, sevenBit+"\x1b]5522;type=wdata\x1b\\") {
+		t.Fatal("the open write's split C1 packet did not reach the client whole")
+	}
+
+	attach.Reset()
+	server.handleWindowOutput("@1", []byte("\x9d5522;type=write:id=big\x9c"))
+	waitForAttachOutput(t, attach, "id="+kittyClipboardTagWindow1+".2")
+	attach.Reset()
+	huge := "\x9d5522;type=wdata:mime=dGV4dC9wbGFpbg==;" +
+		strings.Repeat("QUFB", kittyClipboardPacketLimitBytes) + "\x9c"
+	for offset := 0; offset < len(huge); offset += 16 * 1024 {
+		server.handleWindowOutput("@1", []byte(huge[offset:min(offset+16*1024, len(huge))]))
+	}
+	server.handleWindowOutput("@1", []byte("\x9d5522;type=wdata\x9cafter"))
+	if got := waitForAttachOutput(t, attach, "after"); got != "after" {
+		t.Fatalf("attach got %d bytes ending %q, want only the output after the packet", len(got), got[len(got)-min(len(got), 40):])
+	}
+	if got := windowPtyOutput(t, first); got != "\x1b]5522;type=write:status=EFBIG:id=big\x1b\\" {
+		t.Fatalf("writer got %q", got)
+	}
+}
