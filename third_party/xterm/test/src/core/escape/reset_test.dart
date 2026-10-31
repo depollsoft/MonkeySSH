@@ -353,6 +353,8 @@ void main() {
       terminal
           .write('\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b='); // focus, paste, keys
       terminal.write('\x1b[?25l\x1b[?2026h\x1b[?9002h');
+      // Backarrow, visibility reports, paste events, saving the cursor.
+      terminal.write('\x1b[?67h\x1b[?2033h\x1b[?5522h\x1b[?1048h');
 
       terminal.resetForNextProgram();
 
@@ -367,6 +369,10 @@ void main() {
       expect(terminal.synchronizedOutputMode, isFalse);
       expect(terminal.isMonkeyMuxSynchronizedOutputOpen, isFalse);
       expect(terminal.kittyKeyboardFlags, 0);
+      expect(terminal.backarrowKeyMode, isFalse);
+      expect(terminal.reportVisibilityMode, isFalse);
+      expect(terminal.kittyPasteEventsMode, isFalse);
+      expect(terminal.saveCursorMode, isFalse);
       terminal.write('\x1b[?1049h');
       expect(terminal.kittyKeyboardFlags, 0);
     });

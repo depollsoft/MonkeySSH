@@ -974,22 +974,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   void fullReset() {
     softReset();
-
-    // Modes DECSTR leaves alone.
-    _mouseMode = MouseMode.none;
-    _mouseReportMode = MouseReportMode.normal;
-    _altBufferMouseScrollMode = false;
-    _reverseDisplayMode = false; // DECSCNM
-    _cursorBlinkMode = false;
-    _ansiMode = true; // DECANM
-    _synchronizedOutput = false; // DEC mode 2026
-    _backarrowKeyMode = false; // DECBKM
-    _saveCursorMode = false;
-    // The view's visibility belongs to the host and survives the reset.
-    _reportVisibilityMode = false;
-    _kittyPasteEvents = false; // DEC mode 5522
-    _mainKittyKeyboardState.reset();
-    _altKittyKeyboardState.reset();
+    _resetModesSoftResetKeeps();
 
     _tabStops.reset();
 
@@ -1047,6 +1032,15 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // [useMainBuffer] would carry the alternate screen's cursor over, as
     // `CSI ? 47 l` does.
     _buffer = _mainBuffer;
+    _resetModesSoftResetKeeps();
+    _monkeyMuxSynchronizedOutput = false; // DEC mode 9002
+    // Last: it notifies listeners.
+    softReset();
+  }
+
+  /// Switches off the modes DECSTR leaves alone, for [fullReset] and
+  /// [resetForNextProgram].
+  void _resetModesSoftResetKeeps() {
     _mouseMode = MouseMode.none;
     _mouseReportMode = MouseReportMode.normal;
     _altBufferMouseScrollMode = false;
@@ -1054,11 +1048,13 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     _cursorBlinkMode = false;
     _ansiMode = true; // DECANM
     _synchronizedOutput = false; // DEC mode 2026
-    _monkeyMuxSynchronizedOutput = false; // DEC mode 9002
+    _backarrowKeyMode = false; // DECBKM
+    _saveCursorMode = false;
+    // The view's visibility belongs to the host and survives the reset.
+    _reportVisibilityMode = false;
+    _kittyPasteEvents = false; // DEC mode 5522
     _mainKittyKeyboardState.reset();
     _altKittyKeyboardState.reset();
-    // Last: it notifies listeners.
-    softReset();
   }
 
   @override
