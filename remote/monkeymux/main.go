@@ -1048,7 +1048,11 @@ type muxWindow struct {
 	// reports the signatures of the images it still holds on a window switch so
 	// the replay can omit re-sending — and the client re-parsing — several
 	// megabytes of image data it already has. Kept in sync with kittyImages.
-	kittyImageToken          map[string]uint32
+	kittyImageToken map[string]uint32
+	// kittyImageEnd is where each retained root's transmission ended, as an
+	// offset in what the screen model has read, which tells a replay that
+	// makes a command again the image that command sent (vtKittyCommand).
+	kittyImageEnd            map[string]int64
 	kittyGraphicsPending     []byte
 	kittyGraphicsPendingScan int
 	kittyGraphicsPendingTerm int
@@ -11556,7 +11560,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 				maxKittyImageRepairBytes-len(images)-mainImages,
 			)
 	}
-	history = trimReplayHistoryForAttachWithParser(history, historyStart)
+	history, images := window.shellReplayHistoryLocked(history, historyStart, clientHas)
 	history = stripTerminalQueriesFromReplay(history)
 	history = window.withheldAttachOscSuffixTrimmedLocked(history)
 	// The replayed tail is cut to windowReplayLimitBytes, which can drop a
@@ -11568,8 +11572,132 @@ func (s *muxServer) replayBytesWithImagesLocked(
 			nil,
 			history,
 			clientHas,
-			maxKittyImageRepairBytes,
+			maxKittyImageRepairBytes-images,
 		)
+}
+
+// shellReplayHistoryLocked returns the output a shell window's replay
+// paints from retained, the output the window keeps, which began in the
+// parser state retainedState, and how many bytes it adds for images. It is
+// the end of the output (trimReplayHistoryForAttachWithParser), unless that
+// end cuts off a command that placed an image (KittyCutCommand), such as a
+// transmission whose first chunks it leaves out. The replay then starts
+// with that command, at the column it ran at: from the output while the
+// output holds all of it, else made again from the retained image if that
+// fits in maxReplayedKittyImageBytes. The image lands on the first row the
+// replay paints, and the cursor moves past it as before, so the output that
+// followed it stays below it. The images that display commands in the
+// replay show without the replay sending them go first, within the same
+// budget.
+func (w *muxWindow) shellReplayHistoryLocked(
+	retained []byte,
+	retainedState terminalOutputParserSnapshot,
+	clientHas map[string]uint32,
+) ([]byte, int) {
+	tail := trimReplayHistoryForAttachWithParser(retained, retainedState)
+	from := len(retained) - len(tail)
+	screen := w.screenLocked()
+	end := screen.Written()
+	// The model read retained last, so an offset in what it read is this
+	// far into retained.
+	at := func(offset int64) int { return len(retained) - int(end-offset) }
+	cut := end - int64(min(len(retained), windowReplayLimitBytes))
+	var restore []byte
+	images := 0
+	if command, ok := screen.KittyCutCommand(cut, end-int64(len(tail))); ok {
+		column := appendVTCSICount(nil, command.col+1, 'G')
+		if start := at(command.start); start >= 0 {
+			images = from - start
+			restore = column
+			from = start
+		} else if root := w.kittyCommandRootLocked(command); len(root) > 0 &&
+			len(root) <= maxReplayedKittyImageBytes {
+			images = len(root)
+			restore = append(append(root, column...), command.place...)
+			from = at(command.end)
+		}
+	}
+	history := append(restore, retained[from:]...)
+	shown, _ := w.kittyImageTransmissionsOntoLocked(
+		w.kittyShownImagesLocked(history, clientHas),
+		0,
+		maxReplayedKittyImageBytes-images,
+		false,
+	)
+	if len(shown) == 0 {
+		return history, images
+	}
+	return append(shown, history...), images + len(shown)
+}
+
+// kittyCommandRootLocked returns the retained image a command that placed
+// one sent or showed, to send again store-only before it, or nil. An id
+// names the image the window kept for it: a later transmission of that id
+// replaces the image on the client too, with the placements it had. A
+// number names the newest image with it, which a later transmission takes
+// over, so only the image the command sent, or one sent before it, will do.
+func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
+	id := command.imageID
+	switch {
+	case id != "":
+	case command.transmits:
+		for candidate, end := range w.kittyImageEnd {
+			if end == command.end {
+				id = candidate
+			}
+		}
+	default:
+		id = w.kittyImageNumberToID[command.number]
+		if end, ok := w.kittyImageEnd[id]; ok && end > command.start {
+			return nil
+		}
+	}
+	if w.kittyImages[id] == nil {
+		return nil
+	}
+	root := append([]byte(nil), w.kittyImageRootReplayOnLocked(id, false)...)
+	root = append(root, w.kittyImageNumberReplayLocked(id)...)
+	return append(root, w.kittyImageAnimations[id]...)
+}
+
+// clientHolds reports whether clientHas, the images a client reports holding,
+// has the image id with the signature token.
+func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
+	held, ok := clientHas[id]
+	return ok && held == token
+}
+
+// kittyShownImagesLocked returns the retained main-screen images that the
+// display commands in history show by id without history sending them
+// first, which the client may not hold (another window may have sent an
+// image with the same id since), and that clientHas does not report it
+// holding. Only the commands before history first enters the alternate
+// screen run on the main screen.
+func (w *muxWindow) kittyShownImagesLocked(history []byte, clientHas map[string]uint32) []string {
+	if len(w.kittyImages) == 0 {
+		return nil
+	}
+	if changes := kittyScreenModeChanges(history); len(changes) > 0 {
+		history = history[:changes[0].offset]
+	}
+	events, _ := scanKittyTransmissions(history)
+	var sent, shown []string
+	for _, event := range events {
+		id := kittyIDValue(event.control["i"])
+		switch {
+		case id == "" || slices.Contains(sent, id):
+		case !event.placement:
+			if len(event.buf) > 0 && !event.animation {
+				sent = append(sent, id)
+			}
+		case event.control["a"] != "p" || w.kittyImages[id] == nil || w.kittyTracking.rootAlt[id]:
+		case clientHolds(clientHas, id, w.kittyImageToken[id]):
+		default:
+			sent = append(sent, id)
+			shown = append(shown, id)
+		}
+	}
+	return shown
 }
 
 // releaseRedrawForwardingStateLocked drops every buffer a redraw pause retains
@@ -14944,7 +15072,7 @@ func scanKittyTransmissions(
 			args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
-				control: args, offset: i,
+				control: args, offset: i, end: end,
 			})
 			if !isAnimation {
 				// An a=T root placed relative to a parent replays as an
@@ -15212,6 +15340,11 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	changed := false
 	screen := w.newKittyScreenTrackerLocked(data)
 	defer screen.finish()
+	// data ends with the output the screen model read last, when it has one.
+	var modelOffset int64
+	if w.screen != nil {
+		modelOffset = w.screen.Written() - int64(len(data))
+	}
 	for _, event := range events {
 		if event.placement {
 			if w.observeKittyPlacementLocked(
@@ -15282,6 +15415,12 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			w.dropKittyImagePlacementsLocked(id)
 			w.noteKittyRootScreenLocked(id, screen.at(event.offset))
 			w.storeKittyImageLocked(id, event.buf)
+			if w.screen != nil && w.kittyImages[id] != nil {
+				if w.kittyImageEnd == nil {
+					w.kittyImageEnd = map[string]int64{}
+				}
+				w.kittyImageEnd[id] = modelOffset + int64(event.end)
+			}
 			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
 				!kittyNonZero(event.control["P"]) {
 				w.noteKittyPhysicalPlacementLocked(
@@ -15348,6 +15487,7 @@ func (w *muxWindow) removeKittyImageLocked(id string) bool {
 	delete(w.kittyImageAnimations, id)
 	delete(w.kittyImageSeq, id)
 	delete(w.kittyImageToken, id)
+	delete(w.kittyImageEnd, id)
 	for number, mappedID := range w.kittyImageNumberToID {
 		if mappedID == id {
 			delete(w.kittyImageNumberToID, number)
@@ -15396,6 +15536,7 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageOrder = nil
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
+	w.kittyImageEnd = nil
 	w.kittyPlacements = nil
 	w.kittyTracking.physical = nil
 	w.kittyTracking.rootAlt = nil

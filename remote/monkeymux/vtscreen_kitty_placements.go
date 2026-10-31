@@ -65,12 +65,84 @@ func (p *vtKittyPlacement) span() kittyCellSpan {
 	return kittyCellSpan{col: p.col, row: p.row, cols: p.cols, rows: p.rows}
 }
 
+// vtKittyCommandLimit bounds the commands the model remembers; the oldest
+// goes first. A replay needs only the one its cut falls on, the newest that
+// began before the output it carries.
+const vtKittyCommandLimit = 64
+
+// vtKittyCommand is a command that placed an image at the cursor on the main
+// screen (a=T, or a=p, neither virtual nor relative), of an image with an
+// id, a number or neither. A shell window's replay carries only the end of
+// its output, which can begin among a transmission's later chunks, or just
+// after it, and so place nothing; the replay places the image again with the
+// command (KittyCutCommand).
+type vtKittyCommand struct {
+	// start and end are where its first APC string began and its last one
+	// ended, as offsets in what the model has read (Written).
+	start, end int64
+	// col is the cursor's column when it placed the image.
+	col int
+	// imageID and number are its i= and I= keys, "" without.
+	imageID, number string
+	// transmits records an image transmission (a=T).
+	transmits bool
+	// place places the image again with an a=p, moving the cursor past it
+	// unless the command kept it where it was (C=1).
+	place []byte
+}
+
+// noteKittyCommand remembers a command that placed an image at the cursor
+// on the main screen, which began at start and ends here.
+func (s *terminalScreen) noteKittyCommand(args map[string]string, start int64, transmits bool) {
+	tail := ",q=2\x1b\\"
+	if kittyIntValue(args["C"]) == 1 {
+		tail = ",C=1" + tail
+	}
+	number := ""
+	if kittyIDValue(args["i"]) == "" {
+		number = kittyIDValue(args["I"])
+	}
+	s.kittyCommands = append(s.kittyCommands, vtKittyCommand{
+		start:     start,
+		end:       s.written,
+		col:       s.grid().cursorCol,
+		imageID:   kittyIDValue(args["i"]),
+		number:    number,
+		transmits: transmits,
+		place:     kittyPlacementCommand(args, tail),
+	})
+	if extra := len(s.kittyCommands) - vtKittyCommandLimit; extra > 0 {
+		s.kittyCommands = append(s.kittyCommands[:0], s.kittyCommands[extra:]...)
+	}
+}
+
+// KittyCutCommand returns the command that a replay of the output from
+// carried on leaves out, if the output after it is within the replay's
+// reach: the newest command that began before carried, if it ended at or
+// after cut, where the replay's limit cut the output. A replay that starts
+// with it again paints everything after it. One that ended before cut had
+// output after it that the replay leaves out, so its row is above the first
+// one the replay paints.
+func (s *terminalScreen) KittyCutCommand(cut, carried int64) (vtKittyCommand, bool) {
+	if s == nil {
+		return vtKittyCommand{}, false
+	}
+	for i := len(s.kittyCommands) - 1; i >= 0; i-- {
+		if command := s.kittyCommands[i]; command.start < carried {
+			return command, command.end >= cut
+		}
+	}
+	return vtKittyCommand{}, false
+}
+
 // vtKittyChunk is a transmission (m=1) still arriving. The client takes
 // the keys of its first chunk and runs the command when the last one
 // arrives, at the cursor as it is then.
 type vtKittyChunk struct {
 	open bool
 	args map[string]string
+	// start is where its first chunk began (vtKittyCommand).
+	start int64
 }
 
 // vtKittyImageLimit bounds each set a vtKittyStore keeps; the oldest goes
@@ -209,17 +281,17 @@ func (s *terminalScreen) observeKittyGraphics(control []byte, truncated bool) {
 		if s.kittyChunk.open && args["m"] != "1" {
 			chunk := s.kittyChunk
 			s.kittyChunk = vtKittyChunk{}
-			s.runKittyGraphics(chunk.args)
+			s.runKittyGraphics(chunk.args, chunk.start)
 		}
 		return
 	}
 	// A new command abandons a transmission still open.
 	s.abandonKittyChunk()
 	if args["m"] == "1" {
-		s.kittyChunk = vtKittyChunk{open: true, args: args}
+		s.kittyChunk = vtKittyChunk{open: true, args: args, start: s.kittyAPCStart}
 		return
 	}
-	s.runKittyGraphics(args)
+	s.runKittyGraphics(args, s.kittyAPCStart)
 }
 
 // abandonKittyChunk follows the client dropping a transmission that will
@@ -241,8 +313,8 @@ func (s *terminalScreen) abandonKittyChunk() {
 }
 
 // runKittyGraphics follows a complete graphics command, as graphicsCommandEnd
-// runs it.
-func (s *terminalScreen) runKittyGraphics(args map[string]string) {
+// runs it; its first APC string began at start.
+func (s *terminalScreen) runKittyGraphics(args map[string]string, start int64) {
 	if !kittyGraphicsKeysValid(args) ||
 		(kittyNonZero(args["i"]) && kittyNonZero(args["I"])) {
 		// The client rejects the command outright, as Kitty does.
@@ -255,6 +327,11 @@ func (s *terminalScreen) runKittyGraphics(args map[string]string) {
 	imageID := kittyIDValue(args["i"])
 	store := s.kittyStore()
 	virtual, relative := kittyNonZero(args["U"]), kittyNonZero(args["P"])
+	if !s.altActive && !virtual && !relative &&
+		(action == "T" && kittyTransmissionAccepted(args) ||
+			action == "p" && (imageID != "" || kittyNonZero(args["I"]))) {
+		s.noteKittyCommand(args, start, action == "T")
+	}
 	switch action {
 	case "t", "T":
 		accepted := kittyTransmissionAccepted(args)

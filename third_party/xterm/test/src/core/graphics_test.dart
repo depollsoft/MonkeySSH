@@ -2083,6 +2083,59 @@ void main() {
     });
   }
 
+  // A MonkeyMux shell window's replay carries only the end of its output. When
+  // that end begins among a transmission's later chunks, the replay starts at
+  // the command's column with the command again: the whole command from the
+  // output, or the image sent store-only and an a=p placing it. Each lands
+  // the image on the replay's first row and moves the cursor past it as the
+  // command did, so the output after it keeps its place below the image.
+  testWidgets('a replayed image command lays out as the command did', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(240, 160);
+      final half = png.length ~/ 8 * 4;
+      String chunked(String keys) => '\x1b_G$keys,m=1;${png.substring(0, half)}'
+          '\x1b\\\x1b_Gm=0;${png.substring(half)}\x1b\\';
+      const after = '\r\n\$ ls\r\nfoo  bar\r\n\$ ';
+      Future<Terminal> fed(String output) async {
+        final terminal = Terminal()
+          ..graphics.setCellPixelSize(10, 20)
+          ..write(output);
+        for (var waited = 0;
+            !terminal.graphics.hasPlacements && waited < 2000;
+            waited += 20) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        return terminal;
+      }
+
+      List<String> text(Terminal terminal, int from) => [
+            for (var row = from; row < from + 12; row++)
+              terminal.buffer.lines[row].getText().trimRight(),
+          ];
+
+      final shown =
+          await fed('\$ icat img.png\r\n  ${chunked('a=T,i=7,f=100')}$after');
+      for (final replay in [
+        '\x1b[3G${chunked('a=T,i=7,f=100,q=2')}$after',
+        '${chunked('a=t,i=7,f=100,q=2')}\x1b[3G\x1b_Ga=p,i=7,q=2\x1b\\$after',
+        '${chunked('a=t,I=9,f=100,q=2')}\x1b[3G\x1b_Ga=p,I=9,q=2\x1b\\$after',
+      ]) {
+        final replayed = await fed(replay);
+        // The replay paints from the row after the shell's command line.
+        expect(text(replayed, 0), text(shown, 1), reason: replay);
+        expect(
+          replayed.graphics.placements.map((p) => (p.row, p.col)),
+          [(0, 2)],
+          reason: replay,
+        );
+      }
+      expect(shown.graphics.placements.map((p) => (p.row, p.col)), [(1, 2)]);
+      expect(text(shown, 9).first, '\$ ls');
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

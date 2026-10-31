@@ -109,6 +109,14 @@ type terminalScreen struct {
 	kittyDirect []vtKittyPlacement
 	kittyStores [2]vtKittyStore
 	kittyChunk  vtKittyChunk
+	// kittyCommands are the latest commands that placed an image at the
+	// cursor on the main screen (vtKittyCommand). written counts the bytes
+	// Write has read, escAt is the offset of the last ESC among them, and
+	// kittyAPCStart that of the ESC that began the APC string being read.
+	kittyCommands []vtKittyCommand
+	written       int64
+	escAt         int64
+	kittyAPCStart int64
 
 	// Semantic prompt (OSC 133) state of each screen, and the shell status
 	// the app keeps from both; see vtscreen_prompt.go.
@@ -572,6 +580,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.parser = s.parser.clone()
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
+	c.kittyCommands = append([]vtKittyCommand(nil), s.kittyCommands...)
 	for i, store := range s.kittyStores {
 		c.kittyStores[i] = store.clone()
 	}
@@ -1129,12 +1138,24 @@ func (s *terminalScreen) Write(data []byte) {
 		b := data[i]
 		if s.parser.state == vtGround && s.parser.utf8Need == 0 &&
 			b >= 0x20 && b < 0x7f {
-			i += s.printASCIIRun(data[i:])
+			n := s.printASCIIRun(data[i:])
+			s.written += int64(n)
+			i += n
 			continue
 		}
+		s.written++
 		s.step(b)
 		i++
 	}
+}
+
+// Written is how many bytes of output the model has read: the offset just
+// past the last one, in the terms vtKittyCommand gives offsets in.
+func (s *terminalScreen) Written() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.written
 }
 
 // printASCIIRun writes a run of printable ASCII straight into the grid, the
@@ -1205,6 +1226,9 @@ func (s *terminalScreen) step(b byte) {
 		s.decoderInString = false
 	}
 	s.lastByteESC = b == 0x1b
+	if s.lastByteESC {
+		s.escAt = s.written - 1
+	}
 	switch p.state {
 	case vtGround:
 		if p.utf8Need > 0 {
@@ -1281,6 +1305,9 @@ func (s *terminalScreen) step(b byte) {
 			p.oscHead = p.oscHead[:0]
 		case b == 'P' || b == 'X' || b == '^' || b == '_':
 			p.beginString(b)
+			// Another ESC would have begun the sequence again, so the last
+			// one began this one.
+			s.kittyAPCStart = s.escAt
 		case b >= 0x20 && b <= 0x2f:
 			p.intermediates = append(p.intermediates, b)
 			p.state = vtEscapeIntermediate

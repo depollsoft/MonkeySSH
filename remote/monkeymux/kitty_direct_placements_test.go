@@ -51,6 +51,13 @@ const kittyDemoPlacement = "\x1b[4;2H\x1b_Ga=p,i=1,p=1,c=8,r=3,C=1,q=2\x1b\\"
 // the client received.
 func selectWindowReplay(t *testing.T, window *muxWindow, stream, redraw string) string {
 	t.Helper()
+	return selectWindowReplayReads(t, window, stream, redraw, len(stream))
+}
+
+// selectWindowReplayReads is selectWindowReplay with the window reading
+// stream in reads of readBytes.
+func selectWindowReplayReads(t *testing.T, window *muxWindow, stream, redraw string, readBytes int) string {
+	t.Helper()
 	server := newMuxServerWithSize("test", 80, 40)
 	attach := &recordingConn{}
 	server.windows = []*muxWindow{{id: "@1", index: 0, lastActivity: time.Now()}, window}
@@ -68,7 +75,9 @@ func selectWindowReplay(t *testing.T, window *muxWindow, stream, redraw string) 
 	window.recordScreenGeometryLocked(80, 40)
 	window.screenWidth, window.screenHeight = 80, 40
 	server.mu.Unlock()
-	server.handleWindowOutput(window.id, []byte(stream))
+	for read := 0; read < len(stream); read += readBytes {
+		server.handleWindowOutput(window.id, []byte(stream[read:min(read+readBytes, len(stream))]))
+	}
 	if err := server.selectWindow(window.id); err != nil {
 		t.Fatal(err)
 	}
@@ -195,10 +204,10 @@ func TestHistoryReplayPlacesNoImagesAgain(t *testing.T) {
 }
 
 // TestReplayPrefixKeepsTheClientsPlacements: ED 2 leaves the client's
-// physical placements on the main screen, and no replay deletes them all. A
-// client reopened on a shell window keeps an image whose transmission is
-// older than the history tail; the app deletes its own placements before it
-// changes windows itself.
+// physical placements on the main screen, and no replay deletes them all;
+// the app deletes its own placements before it changes windows itself. A
+// shell window's image whose transmission is older than the history tail
+// comes back with the replay, replacing the client's copy.
 func TestReplayPrefixKeepsTheClientsPlacements(t *testing.T) {
 	if strings.Contains(activeWindowReplayPrefix, "a=d") {
 		t.Fatalf("replay prefix %q deletes placements", activeWindowReplayPrefix)
@@ -217,8 +226,12 @@ func TestReplayPrefixKeepsTheClientsPlacements(t *testing.T) {
 	server.mu.Lock()
 	replay, _ := server.activeReplayWithImageFollowUpLocked()
 	server.mu.Unlock()
-	if strings.Contains(string(replay), "a=d") || strings.Contains(string(replay), big) {
-		t.Fatalf("attach replay deletes the placement or carries the image: %.300q", replay)
+	image := strings.Index(string(replay), "\x1b_Ga=t,i=7,C=1,f=100,q=2;"+big+"\x1b\\")
+	placed := strings.Index(string(replay), "\x1b[1G\x1b_Ga=p,i=7,C=1,q=2\x1b\\\r\n$ ")
+	if strings.Contains(string(replay), "a=d") || image < 0 || placed < image ||
+		strings.Count(string(replay), big) != 1 {
+		t.Fatalf("attach replay does not place the image again once (image %d, placement %d): %.300q",
+			image, placed, replay)
 	}
 }
 
@@ -337,5 +350,144 @@ func TestWindowReplayStartsWithItsWindowTag(t *testing.T) {
 	captured = string(normalizeCapturedReplayHistory([]byte(wrapped)))
 	if strings.Contains(captured, "\x1b]7502;") || !strings.Contains(captured, "hello") {
 		t.Fatalf("captured synchronized history = %q", captured)
+	}
+}
+
+// kittyChunkedTransmission is an image transmission of payloadBytes of
+// base64 in 4096-byte chunks, as kitten icat sends one: keys name the image
+// and its placement in the first chunk.
+func kittyChunkedTransmission(keys string, payloadBytes int) string {
+	const chunkBytes = 4096
+	var out strings.Builder
+	for sent := 0; sent < payloadBytes; sent += chunkBytes {
+		n := min(chunkBytes, payloadBytes-sent)
+		more := 0
+		if sent+n < payloadBytes {
+			more = 1
+		}
+		control := fmt.Sprintf("m=%d", more)
+		if sent == 0 {
+			control = keys + "," + control
+		}
+		fmt.Fprintf(&out, "\x1b_G%s;%s\x1b\\", control, strings.Repeat("A", n))
+	}
+	return out.String()
+}
+
+// TestShellReplayPlacesAgainAnImageItsTailCutsOff: a shell window showed an
+// image, then a little more output. Its replay carries only the last
+// windowReplayLimitBytes of output, which start among the transmission's
+// later chunks: the client ignores those, so the image would not come back
+// after switching away and back. The replay starts with the command
+// instead, at the column it ran at: from the history while the history holds
+// it, else made again from the retained image. The image goes on the row it
+// had, above the output that followed it, with the cursor moved past it as
+// the command moved it.
+func TestShellReplayPlacesAgainAnImageItsTailCutsOff(t *testing.T) {
+	for _, tc := range []struct {
+		name, keys, root, place string
+		payload                 int
+	}{
+		// 47 KB of PNG: the history holds the whole transmission.
+		{"from history by id", "a=T,i=7,f=100", "\x1b_Ga=T,i=7,f=100,m=1,", "", 64 * 1024},
+		{"from history by number", "a=T,I=9,f=100", "\x1b_Ga=T,I=9,f=100,m=1,", "", 64 * 1024},
+		{"from history without an id", "a=T,f=100", "\x1b_Ga=T,f=100,m=1,", "", 64 * 1024},
+		// Larger than the history: the retained image is sent again.
+		{"retained by id", "a=T,i=7,f=100", "\x1b_Ga=t,i=7,f=100,m=1,q=2;", "\x1b_Ga=p,i=7,q=2\x1b\\", 300 * 1024},
+		{"retained by number", "a=T,I=9,f=100,c=20,r=10", "\x1b_Ga=t,I=9,f=100,c=20,r=10,m=1,q=2;", "\x1b_Ga=p,I=9,c=20,r=10,q=2\x1b\\", 300 * 1024},
+	} {
+		// The window reads the output whole, and in reads that split its
+		// sequences anywhere.
+		for _, readBytes := range []int{1 << 30, 997} {
+			t.Run(fmt.Sprintf("%s in reads of %d", tc.name, readBytes), func(t *testing.T) {
+				window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+				stream := "$ icat img.png\r\n  " + kittyChunkedTransmission(tc.keys, tc.payload) +
+					"\r\n$ ls\r\nfoo  bar\r\n$ "
+				got := selectWindowReplayReads(t, window, stream, "", readBytes)
+				tag := strings.LastIndex(got, windowReplayTag(window))
+				if tag < 0 {
+					t.Fatalf("no replay of the window: %.300q", got)
+				}
+				got = got[tag:]
+				root := strings.Index(got, tc.root)
+				text := strings.Index(got, "\r\n$ ls")
+				if root < 0 || text < 0 || strings.Count(got, tc.root) != 1 {
+					t.Fatalf("replay does not carry the image once before its output (image %d, output %d): %.400q",
+						root, text, got)
+				}
+				// It goes at the column the command ran at.
+				column := "\x1b[3G"
+				at := strings.Index(got, column)
+				if tc.place == "" {
+					if !(at >= 0 && at+len(column) == root && root < text) {
+						t.Fatalf("command not replayed at its column (column %d, image %d, output %d): %.400q",
+							at, root, text, got)
+					}
+					return
+				}
+				place := strings.Index(got, column+tc.place)
+				if !(root < place && place < text) || strings.Count(got, "a=p") != 1 {
+					t.Fatalf("image not placed again at its column before its output (image %d, placement %d, output %d): %.400q",
+						root, place, text, got)
+				}
+			})
+		}
+	}
+}
+
+// TestShellReplayLeavesOutImagesAboveWhatItPaints: the output after an image
+// is longer than the replay carries, so the image's row is above the first
+// one the replay paints, and the replay does not place it.
+func TestShellReplayLeavesOutImagesAboveWhatItPaints(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "$ icat img.png\r\n" + kittyChunkedTransmission("a=T,i=7,f=100", 64*1024) +
+		strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18) + "$ "
+	got := selectWindowReplay(t, window, stream, "")
+	if strings.Contains(got, "i=7") {
+		t.Fatalf("replay places an image above what it paints: %.400q", got)
+	}
+}
+
+// TestShellReplaySendsTheImagesItsDisplayCommandsShow: an image transmitted
+// long before a display command in a shell window's replayed output. The
+// client keeps image data per id, and another window may since have sent a
+// different image with that id, so the replay sends the image first, unless
+// the client reports holding these bytes.
+func TestShellReplaySendsTheImagesItsDisplayCommandsShow(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "$ show\r\n" + kittyChunkedTransmission("a=t,i=5,f=100", 16*1024) +
+		strings.Repeat("a line of output\r\n", 2*windowReplayLimitBytes/18) +
+		"\x1b_Ga=p,i=5,c=4,r=2\x1b\\\r\n$ "
+	got := selectWindowReplay(t, window, stream, "")
+	got = got[strings.LastIndex(got, windowReplayTag(window)):]
+	root := strings.Index(got, "\x1b_Ga=t,i=5,f=100,m=1,q=2;")
+	place := strings.Index(got, "\x1b_Ga=p,i=5,c=4,r=2")
+	if root < 0 || place < 0 || root > place || strings.Count(got, "a=t,i=5,") != 1 {
+		t.Fatalf("replay does not send image 5 once before showing it (image %d, display %d): %.300q",
+			root, place, got)
+	}
+
+	server := newMuxServerWithSize("test", 80, 40)
+	server.windows = []*muxWindow{window}
+	server.mu.Lock()
+	held := map[string]uint32{"5": window.kittyImageToken["5"]}
+	replay, followUp := server.replayBytesWithImageFollowUpLocked(window, held)
+	server.mu.Unlock()
+	if strings.Contains(string(replay)+string(followUp), "a=t,i=5") {
+		t.Fatalf("replay sends an image the client holds: %.300q", replay)
+	}
+}
+
+// TestShellReplayLeavesOutAnImageOverItsBudget: an image cut off by the
+// replayed output and gone from the history is made again only if it fits
+// in what a replay carries for images.
+func TestShellReplayLeavesOutAnImageOverItsBudget(t *testing.T) {
+	window := &muxWindow{id: "@2", index: 1, lastActivity: time.Now()}
+	stream := "$ icat img.png\r\n" +
+		kittyChunkedTransmission("a=T,i=7,f=100", maxReplayedKittyImageBytes+4096) + "\r\n$ "
+	got := selectWindowReplay(t, window, stream, "")
+	got = got[strings.LastIndex(got, windowReplayTag(window)):]
+	if strings.Contains(got, "i=7") || !strings.Contains(got, "\r\n$ ") {
+		t.Fatalf("replay = %.300q", got)
 	}
 }
