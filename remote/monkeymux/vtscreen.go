@@ -110,9 +110,11 @@ type terminalScreen struct {
 	kittyStores [2]vtKittyStore
 	kittyChunk  vtKittyChunk
 
-	// Semantic prompt (OSC 133) state of each screen; see vtscreen_prompt.go.
+	// Semantic prompt (OSC 133) state of each screen, and the shell status
+	// the app keeps from both; see vtscreen_prompt.go.
 	semMain vtSemanticState
 	semAlt  vtSemanticState
+	shell   vtShellState
 
 	parser vtParser
 }
@@ -423,6 +425,7 @@ func (s *terminalScreen) Reset() {
 	s.kittyStores[0].relative, s.kittyStores[1].relative = nil, nil
 	s.semMain = vtSemanticState{}
 	s.semAlt = vtSemanticState{}
+	s.shell = vtShellState{}
 	s.resetState()
 }
 

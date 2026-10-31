@@ -2376,6 +2376,70 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    test('reads the shell status a MonkeyMux replay ends with', () {
+      // The screen model's frames (remote/monkeymux/vtscreen_prompt.go)
+      // re-emit the marks of every prompt they paint, and end with the status
+      // and exit code the model has. A command running cannot be said: the
+      // frame never carries C, which would add a command mark.
+      final fixture = File(
+        'remote/monkeymux/testdata/semantic_prompt_parity.json',
+      );
+      if (!fixture.existsSync()) {
+        markTestSkipped('fixture unavailable');
+        return;
+      }
+      final cases = jsonDecode(fixture.readAsStringSync()) as List<dynamic>;
+      const expected = <String, ({TerminalShellStatus status, int? exit})>{
+        'a replayed screen keeps every earlier prompt': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+        ),
+        'a replayed prompt keeps the exit status of the last command': (
+          status: TerminalShellStatus.prompt,
+          exit: 1,
+        ),
+        'a replayed running command keeps the prompt above it': (
+          status: TerminalShellStatus.prompt,
+          exit: null,
+        ),
+        'a replayed alternate screen keeps the marks of both screens': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+        ),
+      };
+      final seen = <String>{};
+      for (final raw in cases) {
+        final testCase = raw as Map<String, dynamic>;
+        final frame = testCase['frame'] as String?;
+        if (frame == null) continue;
+        final name = testCase['name'] as String;
+        // The status another window left behind.
+        ({TerminalShellStatus? status, int? lastExitCode}) state = (
+          status: TerminalShellStatus.runningCommand,
+          lastExitCode: 7,
+        );
+        for (final osc in frame.split('\x1b]').skip(1)) {
+          final payload = osc.substring(0, osc.indexOf('\x07'));
+          if (!payload.startsWith('133;') && !payload.startsWith('633;')) {
+            continue;
+          }
+          final args = payload.substring(4).split(';');
+          expect(args.first, isNot('C'), reason: name);
+          state = applyTerminalShellIntegrationOsc(
+            args,
+            previousStatus: state.status,
+            previousExitCode: state.lastExitCode,
+          );
+        }
+        final want = expected[name];
+        if (want == null) continue;
+        seen.add(name);
+        expect(state.status, want.status, reason: name);
+        expect(state.lastExitCode, want.exit, reason: name);
+      }
+      expect(seen, expected.keys.toSet());
+    });
+
     test('passes insert mode through for the terminal to shift cells', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
