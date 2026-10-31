@@ -691,3 +691,37 @@ func TestVTKittyMainFrameDeletesWhatItsScrollMoves(t *testing.T) {
 		t.Fatalf("deletes with scrollback = %q", got)
 	}
 }
+
+// TestVTKittyCommandsRecordWhereTheyRan: the model remembers each command that
+// placed an image at the cursor on the main screen, with an id, a number or
+// neither, where in its output it began and ended, however that output was
+// split, and the column it ran at.
+func TestVTKittyCommandsRecordWhereTheyRan(t *testing.T) {
+	stream := "ab\x1b_Ga=T,I=9,f=100,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\cd" +
+		"\x1b_Ga=t,i=3,f=100;AAAA\x1b\\\x1b_Ga=p,i=3,c=2,C=1\x1b\\" +
+		"\x1b[?1049h\x1b_Ga=T,i=4,f=100;AAAA\x1b\\\x1b[?1049l\x1b_Ga=T,U=1,i=5,c=1,r=1,f=100;AAAA\x1b\\"
+	first := strings.Index(stream, "\x1b_Ga=T,I=9")
+	second := strings.Index(stream, "cd")
+	display := strings.Index(stream, "\x1b_Ga=p,i=3")
+	for _, read := range []int{len(stream), 1, 7} {
+		s := newTerminalScreen(40, 10)
+		for at := 0; at < len(stream); at += read {
+			s.Write([]byte(stream[at:min(at+read, len(stream))]))
+		}
+		want := []vtKittyCommand{
+			{start: int64(first), end: int64(second), col: 2, number: "9", transmits: true,
+				place: []byte("\x1b_Ga=p,I=9,q=2\x1b\\")},
+			{start: int64(display), end: int64(display + len("\x1b_Ga=p,i=3,c=2,C=1\x1b\\")), col: 4,
+				imageID: "3", place: []byte("\x1b_Ga=p,i=3,c=2,C=1,q=2\x1b\\")},
+		}
+		if !reflect.DeepEqual(s.kittyCommands, want) || s.Written() != int64(len(stream)) {
+			t.Fatalf("in reads of %d: commands = %+v, written %d", read, s.kittyCommands, s.Written())
+		}
+		if command, ok := s.KittyCutCommand(int64(first), int64(first+5)); !ok || command.number != "9" {
+			t.Fatalf("in reads of %d: the cut inside the transmission finds %+v, %v", read, command, ok)
+		}
+		if _, ok := s.KittyCutCommand(int64(len(stream)-1), int64(len(stream))); ok {
+			t.Fatalf("in reads of %d: a command that ended before the cut was found", read)
+		}
+	}
+}
