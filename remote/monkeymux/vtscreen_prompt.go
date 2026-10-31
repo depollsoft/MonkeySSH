@@ -626,7 +626,8 @@ func (f *vtSemanticFrame) commandMark(out []byte, running bool, col int) []byte 
 // app has a command mark on already, so it adds none. A place in the
 // scrollback, out of the cursor's reach, is left to finish.
 func (f *vtSemanticFrame) resume(out []byte) []byte {
-	if f == nil || f.shell.status != vtShellRunning || f.started && f.status == vtShellRunning {
+	if f == nil || f.shell.status != vtShellRunning ||
+		f.started && f.status == vtShellRunning && f.emitted == vtSemOutput {
 		return out
 	}
 	at := f.commandAt
@@ -641,6 +642,21 @@ func (f *vtSemanticFrame) resume(out []byte) []byte {
 	}
 	out = appendVTCursorPosition(out, at.line-f.history, at.col)
 	return f.commandMark(out, true, at.col)
+}
+
+// cursorContent is content for the glyph printed again to restore the
+// deferred wrap of the cursor the frame ends at, on row of the client's
+// screen. After the running command's C, a glyph written as prompt or input
+// leaves the app elsewhere, which only C again puts right (finish); on
+// another row than the C's that adds a command mark there, so the glyph is
+// printed as the output in force instead, the one cell the client then
+// classifies apart from the model.
+func (f *vtSemanticFrame) cursorContent(out []byte, sem uint8, row int) []byte {
+	if f != nil && f.started && f.shell.status == vtShellRunning && f.emitted == vtSemOutput &&
+		row != f.commandAt.line-f.history {
+		return out
+	}
+	return f.content(out, sem)
 }
 
 // cell is called before the cell at col of the line being painted is
@@ -720,10 +736,11 @@ func (f *vtSemanticFrame) finish(out []byte) []byte {
 		out = f.outputMark(out)
 	case f.shell.status == vtShellEditing && f.status != vtShellEditing:
 		out = f.inputMark(out)
-	case f.shell.status == vtShellRunning && f.status != vtShellRunning:
-		// A glyph printed again as input after the command's C, to restore
-		// the cursor's deferred wrap or a saved one resume could not reach,
-		// left the app editing; D would leave it at the prompt.
+	case f.shell.status == vtShellRunning && (f.status != vtShellRunning || f.emitted != vtSemOutput):
+		// A glyph printed again as prompt or input after the command's C,
+		// to restore a deferred wrap resume could not reach or the cursor's
+		// on the C's row, left the app elsewhere or the content so; D would
+		// leave the app at the prompt.
 		out = f.commandMark(out, true, -1)
 	}
 	return f.content(out, f.state.content)

@@ -57,7 +57,7 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 			row = 0
 		}
 	}
-	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks)
+	out = appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	// Last, since restoring a deferred wrap prints a glyph again under the
 	// content it was written as.
 	out = marks.finish(out)
@@ -99,14 +99,14 @@ func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) 
 		if saved.originMode {
 			out = append(out, "\x1b[?6h"...)
 		}
-		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks)
+		out = appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks, saved.row)
 		out = marks.finish(out)
 		out = appendVTSGR(out, saved.attrs)
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	}
 	out = s.appendSavedCursor(out, g, s.savedMain, marks)
 	out = marks.resume(out)
-	out = appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks)
+	out = appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	return marks.finish(out)
 }
 
@@ -233,7 +233,7 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 		out = append(out, "\x1b[?6h"...)
 		row -= s.top
 	}
-	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks)
+	out = appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks, -1)
 	out = appendVTSGR(out, saved.attrs)
 	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
@@ -246,8 +246,10 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 // model, under the semantic content it was written as when marks are those
 // of a painted prompt. A last column with nothing in it, which a tab with no
 // stop left reaches, is reached by that tab again rather than by printing a
-// space into it. The rendition is left at the reprinted glyph's.
-func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame) []byte {
+// space into it. The rendition is left at the reprinted glyph's. screenRow
+// is the cursor's row on the client's screen when it is the cursor the frame
+// ends at (vtSemanticFrame.cursorContent), and -1 otherwise.
+func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame, screenRow int) []byte {
 	if !pendingWrap || len(cells) == 0 {
 		return appendVTCursorPosition(out, row, col)
 	}
@@ -260,7 +262,11 @@ func appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, 
 		last--
 	}
 	out = appendVTCursorPosition(out, row, last)
-	out = marks.content(out, cells[last].sem)
+	if screenRow >= 0 {
+		out = marks.cursorContent(out, cells[last].sem, screenRow)
+	} else {
+		out = marks.content(out, cells[last].sem)
+	}
 	return renderVTGlyphs(out, cells[last:])
 }
 

@@ -590,6 +590,27 @@ func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
 	}
 }
 
+// A running command whose cursor a program moved back onto its input row,
+// deferring a wrap: C again on that row would add a command mark there, so
+// the glyph the cursor waits after is printed again as output, the one cell
+// the client classifies apart from the model.
+func TestRenderFrameKeepsTheCommandMarkWithTheCursorOnItsInput(t *testing.T) {
+	s := newTerminalScreen(10, 5)
+	s.Write([]byte(osc133("A") + "$ " + osc133("B") + "abcdefgh\x1b7\r\n" + osc133("C") + "out\x1b8"))
+	replay := replaySequence(s)
+	if status, _ := shellStatusAfter(t, []byte(replay), "prompt", "0"); status != "running" {
+		t.Fatalf("after the replay the app shows %s, want running: %q", status, replay)
+	}
+	if strings.Count(replay, osc133("C")) != strings.Count(replay, "\x1b[2;1H"+osc133("C")) {
+		t.Fatalf("a C lands off the command's row: %q", replay)
+	}
+	want := dumpSemanticPrompt(s)
+	want[0] = strings.TrimSuffix(want[0], "i") + "o"
+	if got := dumpSemanticPrompt(replayFrame(s)); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // However the frame paints the running command's screen, the app ends at
 // running: when the command's output overwrote its whole prompt row, which
 // keeps the row's mark, and when a glyph printed again as input restores a
@@ -610,6 +631,10 @@ func TestRenderFrameKeepsTheCommandRunning(t *testing.T) {
 			"\r\n\x1b[H", "\x1b[1;6H"},
 		{"program erasing its prompt from home", osc133("A;cl=line") + "$ " + osc133("B") + "cmd" + osc133("C") +
 			"\r\n\x1b[H\x1b[J", "\x1b[1;2H"},
+		// A glyph printed again as prompt text changes no status, but D
+		// would end the prompt content.
+		{"saved cursor deferring a wrap on prompt text", osc133("A") + "1234567890\x1b7" + osc133("B") + "cmd\r\n" +
+			osc133("C") + "out", "\x1b[3;1H"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
