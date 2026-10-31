@@ -206,9 +206,9 @@ const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?104
 // monkeyMuxReplayWindowOSC tags each window replay, before its prefix, with
 // the window it paints as "window=<server instance>:<window id>". The app
 // keeps the tag its terminal last received and deletes its physical image
-// placements only when a replay names another window: a reopen of the window
-// it shows keeps images whose transmission is past the replayed history, and
-// a change to another window, wherever it was started, drops the old one's.
+// placements only when a replay names another window: a reopen of a window
+// whose program owns the screen keeps the images the program placed, and a
+// change to another window, wherever it was started, drops the old one's.
 // Other terminals ignore the unknown OSC.
 const monkeyMuxReplayWindowOSC = "7502"
 
@@ -11588,7 +11588,8 @@ func (s *muxServer) replayBytesWithImagesLocked(
 // replay paints, and the cursor moves past it as before, so the output that
 // followed it stays below it. The images that display commands in the
 // replay show without the replay sending them go first, within the same
-// budget.
+// budget. Before all of it, the client's own placements go
+// (kittyVisiblePlacementsDelete), once the window has placed any.
 func (w *muxWindow) shellReplayHistoryLocked(
 	retained []byte,
 	retainedState terminalOutputParserSnapshot,
@@ -11624,11 +11625,25 @@ func (w *muxWindow) shellReplayHistoryLocked(
 		maxReplayedKittyImageBytes-images,
 		false,
 	)
-	if len(shown) == 0 {
-		return history, images
+	var replay []byte
+	if screen.KittyPlacedImages() {
+		replay = append(replay, kittyVisiblePlacementsDelete...)
 	}
-	return append(shown, history...), images + len(shown)
+	replay = append(replay, shown...)
+	return append(replay, history...), images + len(shown)
 }
+
+// kittyVisiblePlacementsDelete deletes the placements on the screen shown,
+// keeping the images (a=d,d=a). A client reopened on a shell window keeps
+// its placements through the replay prefix's ED 2, and the replayed output
+// places its images again: one sent by number or with no id gets a new id
+// each time, and a display command without a placement id adds a
+// placement, so the client's copy would stay beside the new one, pushed up
+// the screen by the output. The replay places again every image within its
+// reach (shellReplayHistoryLocked); one beyond it is left out, as it is
+// when the app changes windows. The prefix's ED 3 has already taken the
+// placements in the scrollback.
+const kittyVisiblePlacementsDelete = "\x1b_Ga=d,d=a,q=2\x1b\\"
 
 // kittyCommandRootLocked returns the retained image a command that placed
 // one sent or showed, to send again store-only before it, or nil. An id

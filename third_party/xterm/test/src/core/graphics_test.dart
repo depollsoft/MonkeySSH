@@ -2136,6 +2136,41 @@ void main() {
     });
   });
 
+  // A MonkeyMux replay of the window a client shows keeps the client's
+  // placements through its clear (ED 2 leaves them), and a shell window's
+  // replayed output places its images again. An image sent by number or with
+  // no id gets a new id each time, so the kept copy stays beside the new one
+  // unless the replay deletes the client's placements first.
+  testWidgets('a reopened shell window replay leaves one copy of each image', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      final png = await _buildPngBase64(20, 20);
+      // Output above the images, which the replay scrolls through again.
+      final output = '${List.filled(30, 'output\r\n').join()}'
+          '\$ icat a.png b.png\r\n'
+          '\x1b_Ga=T,I=9,f=100,q=2;$png\x1b\\\r\n'
+          '\x1b_Ga=T,f=100,q=2;$png\x1b\\\r\n\$ ';
+      const clear = '\x1b[H\x1b[2J\x1b[3J';
+      const prefix = '$clear\x1b[?1049h$clear\x1b[?1049l$clear';
+      Future<List<int>> rows(String replay) async {
+        final terminal = Terminal(maxLines: 1000)..resize(40, 10);
+        terminal.write(output);
+        terminal.write(replay);
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        return [for (final p in terminal.graphics.placements) p.row]..sort();
+      }
+
+      final original = await rows('');
+      expect(original, hasLength(2));
+      // Without the delete, the kept copies stay, pushed up by the output.
+      final kept = await rows('$prefix$output');
+      expect(kept, hasLength(4));
+      expect(kept.take(2), everyElement(lessThan(original.first)));
+      expect(await rows('$prefix\x1b_Ga=d,d=a,q=2\x1b\\$output'), original);
+    });
+  });
+
   testWidgets('REP repeats a Kitty Unicode placeholder', (tester) async {
     final placeholder = String.fromCharCode(kittyGraphicsPlaceholderCodePoint);
     final terminal = Terminal()..resize(10, 3);

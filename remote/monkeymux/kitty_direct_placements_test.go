@@ -204,10 +204,11 @@ func TestHistoryReplayPlacesNoImagesAgain(t *testing.T) {
 }
 
 // TestReplayPrefixKeepsTheClientsPlacements: ED 2 leaves the client's
-// physical placements on the main screen, and no replay deletes them all;
-// the app deletes its own placements before it changes windows itself. A
-// shell window's image whose transmission is older than the history tail
-// comes back with the replay, replacing the client's copy.
+// physical placements on the main screen, and a window whose program owns
+// the screen keeps them; the app deletes its own placements before it
+// changes windows itself. A shell window's replay deletes them, and an
+// image whose transmission is older than the history tail comes back with
+// it.
 func TestReplayPrefixKeepsTheClientsPlacements(t *testing.T) {
 	if strings.Contains(activeWindowReplayPrefix, "a=d") {
 		t.Fatalf("replay prefix %q deletes placements", activeWindowReplayPrefix)
@@ -228,7 +229,8 @@ func TestReplayPrefixKeepsTheClientsPlacements(t *testing.T) {
 	server.mu.Unlock()
 	image := strings.Index(string(replay), "\x1b_Ga=t,i=7,C=1,f=100,q=2;"+big+"\x1b\\")
 	placed := strings.Index(string(replay), "\x1b[1G\x1b_Ga=p,i=7,C=1,q=2\x1b\\\r\n$ ")
-	if strings.Contains(string(replay), "a=d") || image < 0 || placed < image ||
+	deleted := strings.Index(string(replay), kittyVisiblePlacementsDelete)
+	if strings.Count(string(replay), "a=d") != 1 || deleted < 0 || image < deleted || placed < image ||
 		strings.Count(string(replay), big) != 1 {
 		t.Fatalf("attach replay does not place the image again once (image %d, placement %d): %.300q",
 			image, placed, replay)
@@ -489,5 +491,33 @@ func TestShellReplayLeavesOutAnImageOverItsBudget(t *testing.T) {
 	got = got[strings.LastIndex(got, windowReplayTag(window)):]
 	if strings.Contains(got, "i=7") || !strings.Contains(got, "\r\n$ ") {
 		t.Fatalf("replay = %.300q", got)
+	}
+}
+
+// TestShellReplayReplacesTheClientsPlacements: a client reopened on a shell
+// window keeps its placements through the replay prefix (ED 2 leaves them),
+// and the replayed output places each image it carries again. One sent by
+// number or with no id gets a new id from the client each time, so the
+// copy the client kept would stay beside the new one, pushed up into the
+// scrollback by the output. The replay deletes the client's placements
+// first; it places again every image it reaches.
+func TestShellReplayReplacesTheClientsPlacements(t *testing.T) {
+	server := newMuxServerWithSize("test", 80, 24)
+	shell := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	server.windows = []*muxWindow{shell}
+	server.activeID = shell.id
+	server.handleWindowOutput(shell.id, []byte("$ icat a.png b.png\r\n"+
+		"\x1b_Ga=T,I=9,"+kittyPixelRoot+"\x1b\\\r\n"+
+		"\x1b_Ga=T,"+kittyPixelRoot+"\x1b\\\r\n$ "))
+	server.mu.Lock()
+	replay, _ := server.activeReplayWithImageFollowUpLocked()
+	server.mu.Unlock()
+	got := string(replay)
+	prefix := strings.Index(got, activeWindowReplayPrefix)
+	deleted := strings.Index(got, "\x1b_Ga=d,d=a,q=2\x1b\\")
+	first := strings.Index(got, "\x1b_Ga=T,I=9,")
+	if prefix < 0 || !(prefix < deleted && deleted < first) || strings.Count(got, "a=d") != 1 {
+		t.Fatalf("replay does not delete the client's placements before its own (prefix %d, delete %d, image %d): %q",
+			prefix, deleted, first, got)
 	}
 }

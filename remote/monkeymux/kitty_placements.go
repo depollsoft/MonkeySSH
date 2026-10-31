@@ -18,9 +18,10 @@ import (
 // follow (vtscreen_kitty_placements.go); a frame painted from the model places
 // the ones on its screen again, after deleting the client's copies of their
 // images (KittyMainPlacementDeletes). A client reopened on the window it
-// showed keeps the rest of what it holds: ED 2 leaves physical placements,
-// and a shell window's images often have transmissions older than the
-// history its replay carries. Each replay names its window
+// showed keeps the rest of what it holds, since ED 2 leaves physical
+// placements, unless the window is a shell: its replayed output places its
+// images again, so the replay deletes the client's copies first
+// (kittyVisiblePlacementsDelete). Each replay names its window
 // (monkeyMuxReplayWindowOSC), and the app deletes its physical placements
 // when a replay names another window than the one it shows, however the
 // change was started.

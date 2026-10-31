@@ -4549,10 +4549,11 @@ class SshSession {
 
   /// Deletes the terminal's physical image placements when a MonkeyMux replay
   /// paints another window than the one it shows, wherever the change was
-  /// started (this app, another client, a window that exited). The replay
-  /// keeps them otherwise, so a reopen of the same window keeps images whose
-  /// transmission is past the replayed history. The tag precedes the replay,
-  /// so the delete is ordered before the images it places.
+  /// started (this app, another client, a window that exited). A reopen of
+  /// the same window keeps them, so a program that owns the screen keeps the
+  /// images it placed; a shell window's replay deletes them itself and places
+  /// its images again. The tag precedes the replay, so the delete is ordered
+  /// before the images it places.
   void _handleMonkeyMuxReplayWindow(List<String> args) {
     final terminal = this.terminal;
     if (terminal == null) {
