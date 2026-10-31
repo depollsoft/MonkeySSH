@@ -379,3 +379,48 @@ func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
 		}
 	}
 }
+
+// vtPromptMarks is the semantic prompt mark of every main-screen line, the
+// scrollback first.
+func vtPromptMarks(s *terminalScreen) []uint8 {
+	var marks []uint8
+	for i := range s.scrollback.len() {
+		marks = append(marks, s.scrollback.at(i).prompt)
+	}
+	return append(marks, s.main.prompt...)
+}
+
+// A prompt the shell marked on a row inside a logical line (a secondary
+// prompt after prompt text that wrapped, VS Code's A after output that did)
+// stays on the row that holds the start of that row's text, as in the client,
+// unless a prompt starts on that row already.
+func TestVTScreenReflowKeepsMarksInsideLogicalLines(t *testing.T) {
+	s := newTerminalScreen(6, 8)
+	s.Write([]byte(osc133("A;click_events=2") + "12345678" + osc133("P;k=s") + "> " + osc133("B") + "ab"))
+	if got := s.main.prompt[:3]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptSecondary, vtPromptNone}) {
+		t.Fatalf("marks before the resize: %v", got)
+	}
+	// The rows above the screen are in the scrollback.
+	s.Resize(3, 8)
+	want := []uint8{vtPromptPrimary, vtPromptContinuation, vtPromptSecondary, vtPromptContinuation, vtPromptNone}
+	if got := vtPromptMarks(s)[:5]; !slices.Equal(got, want) || s.TextRows()[0] != "78>" {
+		t.Fatalf("narrow: marks %v rows %q, want %v", got, s.TextRows(), want)
+	}
+
+	vscode := newTerminalScreen(6, 8)
+	vscode.Write([]byte("xxxxxxxx\x1b]633;A\x07$ \x1b]633;B\x07ls"))
+	if vscode.main.prompt[1] != vtPromptPrimary || !vscode.main.wrapped[1] {
+		t.Fatalf("VS Code prompt row: mark %d wrapped %v", vscode.main.prompt[1], vscode.main.wrapped[1])
+	}
+	vscode.Resize(12, 8)
+	if got := vscode.main.prompt[:2]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptNone}) || vscode.TextRows()[0] != "xxxxxxxx$ ls" {
+		t.Fatalf("widen: marks %v rows %q", got, vscode.TextRows())
+	}
+
+	joined := newTerminalScreen(6, 8)
+	joined.Write([]byte(osc133("A;click_events=2") + "1234567" + osc133("P;k=s") + "> " + osc133("B") + "ab"))
+	joined.Resize(12, 8)
+	if got := joined.main.prompt[:2]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptNone}) || joined.TextRows()[0] != "1234567> ab" {
+		t.Fatalf("joined: marks %v rows %q", got, joined.TextRows())
+	}
+}

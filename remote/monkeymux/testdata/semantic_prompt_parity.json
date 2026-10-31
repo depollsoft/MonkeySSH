@@ -917,5 +917,72 @@
    "C |> ef|ppii",
    "cursor 4,2 i click=0 cl=multiple special=false redraw=true aid=-"
   ]
+ },
+ {
+  "expect": [
+   "P |123|ppp",
+   "C+|456|ppp",
+   "S+|78>|ppp",
+   "C+| ab|pii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 2,1 i click=2 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a reflow keeps a secondary prompt on the row that holds its text",
+  "size": [
+   6,
+   8
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A;click_events=2\u000712345678\u001b]133;P;k=s\u0007> \u001b]133;B\u0007ab"
+   },
+   {
+    "resize": [
+     3,
+     8
+    ]
+   }
+  ]
+ },
+ {
+  "expect": [
+   "P |xxxxxx|oooooo",
+   "C+|xx$ ls|ooppii",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "- ||",
+   "cursor 5,0 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a reflow keeps a VS Code prompt joined with the output before it",
+  "size": [
+   6,
+   8
+  ],
+  "steps": [
+   {
+    "write": "xxxxxxxx\u001b]633;A\u0007$ \u001b]633;B\u0007ls"
+   },
+   {
+    "resize": [
+     12,
+     8
+    ]
+   },
+   {
+    "resize": [
+     6,
+     8
+    ]
+   }
+  ]
  }
 ]

@@ -47,6 +47,11 @@ enum SemanticPromptRow {
 
   /// Whether the row continues the prompt on the row above.
   bool get continuesPrompt => this == continuation || this == secondary;
+
+  /// Whether the shell marked a prompt as starting on the row, rather than
+  /// the row being reached inside one: a mark a reflow keeps with the row's
+  /// text.
+  bool get startsPrompt => this == prompt || this == secondary;
 }
 
 class BufferLine with IndexedItem {

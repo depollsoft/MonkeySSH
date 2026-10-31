@@ -22,6 +22,18 @@ type vtReflowAnchor struct {
 // vtReflowCursorAnchor identifies the cursor's anchor.
 const vtReflowCursorAnchor = -1
 
+// vtReflowMarkAnchor is the anchor id of a prompt mark carried through a
+// reflow with the first cell of its row, with the mark below it: vtReflow adds
+// and removes them itself, so no other anchor id is this low.
+const vtReflowMarkAnchor = -2
+
+// vtStartsPrompt reports a mark the shell set as a prompt starting on its row
+// (SemanticPromptRow.startsPrompt in the client), which a reflow keeps with the
+// row's text, rather than one a row got by being reached inside a prompt.
+func vtStartsPrompt(mark uint8) bool {
+	return mark == vtPromptPrimary || mark == vtPromptSecondary
+}
+
 // vtReflow rewraps lines from oldWidth to newWidth. Each logical line, a line
 // and the wrapped lines after it, is joined and split again; every resulting
 // line has newWidth cells. Each anchor moves with its cell.
@@ -41,11 +53,22 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 		r.add(lines[i])
 		for i+1 < len(lines) && lines[i+1].wrapped {
 			i++
-			marked = marked || lines[i].prompt != vtPromptNone
-			r.add(lines[i])
+			line := lines[i]
+			marked = marked || line.prompt != vtPromptNone
+			if vtStartsPrompt(line.prompt) {
+				// A prompt the shell marked on a row inside the logical line
+				// (VS Code's A after output that wrapped, a secondary prompt
+				// after prompt text that did) travels with the first cell of
+				// that row, like any anchor.
+				line.anchors = append(line.anchors,
+					vtReflowAnchor{id: vtReflowMarkAnchor - int(line.prompt)})
+			}
+			r.add(line)
 		}
 		// The line keeps its prompt mark on its first row; the rows it wraps
-		// onto continue it when any of its rows was part of a prompt.
+		// onto continue it when any of its rows was part of a prompt, and the
+		// row that now holds the start of a marked row's text takes its mark,
+		// unless a prompt starts on it already.
 		reflowed := r.finish()
 		for j := range reflowed {
 			switch {
@@ -57,6 +80,9 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 				reflowed[j].prompt = vtPromptNone
 			}
 		}
+		for j := range reflowed {
+			reflowed[j].anchors = vtTakeMarkAnchors(reflowed[j].anchors, &reflowed[j].prompt)
+		}
 		out = append(out, reflowed...)
 	}
 	for i := range out {
@@ -64,6 +90,22 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 		vtClampAnchors(out[i].anchors, newWidth)
 	}
 	return out
+}
+
+// vtTakeMarkAnchors removes the mark anchors from anchors, in place, and sets
+// the first of them as the line's mark unless a prompt starts on it already.
+func vtTakeMarkAnchors(anchors []vtReflowAnchor, mark *uint8) []vtReflowAnchor {
+	kept := anchors[:0]
+	for _, anchor := range anchors {
+		if anchor.id > vtReflowMarkAnchor {
+			kept = append(kept, anchor)
+			continue
+		}
+		if !vtStartsPrompt(*mark) {
+			*mark = uint8(vtReflowMarkAnchor - anchor.id)
+		}
+	}
+	return kept
 }
 
 // vtCloseSplitGlyphs blanks a wide glyph's half left alone at either edge of

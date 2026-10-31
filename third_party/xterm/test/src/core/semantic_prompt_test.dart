@@ -193,6 +193,53 @@ void main() {
       expect(lines[1].semanticPrompt, SemanticPromptRow.none);
     });
 
+    test('a reflow keeps a mark inside a logical line on the row with its text',
+        () {
+      // "123456" / "78> ab": the secondary prompt sits on the row the prompt
+      // text wrapped onto.
+      final terminal = _terminal(width: 6, height: 8);
+      terminal.write('${_mark('133;A;click_events=2')}12345678'
+          '${_mark('133;P;k=s')}> ${_mark('133;B')}ab');
+      expect(_rowMarks(terminal).take(3), [
+        SemanticPromptRow.prompt,
+        SemanticPromptRow.secondary,
+        SemanticPromptRow.none,
+      ]);
+      terminal.resize(3, 8);
+      expect(_rowMarks(terminal).take(5), [
+        SemanticPromptRow.prompt,
+        SemanticPromptRow.continuation,
+        SemanticPromptRow.secondary,
+        SemanticPromptRow.continuation,
+        SemanticPromptRow.none,
+      ]);
+      expect(terminal.buffer.lines[2].toString(), '78>');
+      expect(terminal.buffer.currentPromptRows, (start: 0, end: 3));
+
+      // VS Code's A marks the row it is on, which output may have wrapped
+      // onto; widening joins that row with the one above.
+      final vscode = _terminal(width: 6, height: 8);
+      vscode.write('xxxxxxxx${_mark('633;A')}\$ ${_mark('633;B')}ls');
+      expect(vscode.buffer.lines[1].semanticPrompt, SemanticPromptRow.prompt);
+      expect(vscode.buffer.lines[1].isWrapped, isTrue);
+      vscode.resize(12, 8);
+      expect(vscode.buffer.lines[0].toString(), r'xxxxxxxx$ ls');
+      expect(vscode.buffer.lines[0].semanticPrompt, SemanticPromptRow.prompt);
+      expect(vscode.buffer.lines[1].semanticPrompt, SemanticPromptRow.none);
+      // A primary prompt that starts a row keeps the row over a mark that
+      // moves onto it.
+      final joined = _terminal(width: 6, height: 8);
+      joined.write('${_mark('133;A;click_events=2')}1234567'
+          '${_mark('133;P;k=s')}> ${_mark('133;B')}ab');
+      expect(joined.buffer.lines[1].semanticPrompt, SemanticPromptRow.secondary);
+      joined.resize(12, 8);
+      expect(joined.buffer.lines[0].toString(), '1234567> ab');
+      expect(_rowMarks(joined).take(2), [
+        SemanticPromptRow.prompt,
+        SemanticPromptRow.none,
+      ]);
+    });
+
     test('RIS clears the state, erased rows lose their marks', () {
       final terminal = _terminal();
       terminal.write('${_mark('133;A;cl=line')}\$ ${_mark('133;B')}ls');
@@ -477,6 +524,19 @@ void main() {
           reason: continuation,
         );
       }
+    });
+
+    test('click_events=2 counts from a secondary prompt after a resize', () {
+      // "123456" / "78> ab": the secondary prompt is on a wrapped row.
+      final terminal = _terminal(width: 6, height: 8);
+      terminal.write('${_mark('133;A;click_events=2')}12345678'
+          '${_mark('133;P;k=s')}> ${_mark('133;B')}ab');
+      expect(terminal.promptClickInput(const CellOffset(4, 1)), '\x1b[<0;5;1M');
+      // "123" / "456" / "78>" / " ab": the reflow keeps it on the row that
+      // holds its text, so the click is still counted from there.
+      terminal.resize(3, 8);
+      expect(terminal.promptClickInput(const CellOffset(1, 3)), '\x1b[<0;2;2M');
+      expect(terminal.promptClickInput(const CellOffset(2, 3)), '\x1b[<0;3;2M');
     });
 
     test('a line feed back onto a marked prompt row keeps its mark', () {

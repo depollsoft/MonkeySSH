@@ -209,6 +209,11 @@ List<BufferLine> reflow(
     final firstMark = line.semanticPrompt;
     var marked = firstMark != SemanticPromptRow.none;
 
+    // A prompt the shell marked on a row inside the logical line (VS Code's A
+    // after output that wrapped, a secondary prompt after prompt text that
+    // did) travels with the first cell of that row, like any anchor.
+    final markAnchors = <(CellAnchor, SemanticPromptRow)>[];
+
     reflow.add(line);
 
     for (var offset = i + 1; offset < lines.length; offset++) {
@@ -220,12 +225,18 @@ List<BufferLine> reflow(
 
       i++;
 
-      marked |= nextLine.semanticPrompt != SemanticPromptRow.none;
+      final mark = nextLine.semanticPrompt;
+      marked |= mark != SemanticPromptRow.none;
+      if (mark.startsPrompt) {
+        markAnchors.add((nextLine.createAnchor(0), mark));
+      }
       reflow.add(nextLine);
     }
 
     // The line keeps its shell-integration mark on its first row; the rows it
-    // wraps onto continue it when any of its rows was part of a prompt.
+    // wraps onto continue it when any of its rows was part of a prompt, and
+    // the row that now holds the start of a marked row's text takes its mark,
+    // unless a prompt starts on it already.
     final reflowed = reflow.finish();
     for (var row = 0; row < reflowed.length; row++) {
       reflowed[row].semanticPrompt = row == 0
@@ -233,6 +244,13 @@ List<BufferLine> reflow(
           : marked
               ? SemanticPromptRow.continuation
               : SemanticPromptRow.none;
+    }
+    for (final (anchor, mark) in markAnchors) {
+      final target = anchor.line;
+      anchor.dispose();
+      if (target != null && !target.semanticPrompt.startsPrompt) {
+        target.semanticPrompt = mark;
+      }
     }
     result.addAll(reflowed);
   }
