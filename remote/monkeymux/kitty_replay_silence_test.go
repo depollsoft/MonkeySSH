@@ -19,6 +19,25 @@ func TestReplayedGraphicsCommandsAreSilenced(t *testing.T) {
 	if replay != want {
 		t.Fatalf("replay = %q\nwant     %q", replay, want)
 	}
+
+	// The replay scanner also takes the 8-bit APC introducer and ST, which
+	// keep their place around the quiet flag. The app ends a command only at
+	// ESC \ and reads a raw 0x9c inside it as a replacement character, so it
+	// runs the first one to the ESC \ that follows: silently.
+	replay = string(stripTerminalQueriesFromReplay([]byte(
+		"a\x1b_Ga=T,I=1,f=24,s=1,v=1;AAAA\x9c\x1b\\b" +
+			"\x9fGa=t,i=4;AAAA\x1b\\" +
+			"\x9fGa=d,i=4\x9c" +
+			"\x1b_Ga=f,i=1,q=1;AAAA\x9c" +
+			"\x9fGa=t,i=5,q=2\x9cc")))
+	want = "a\x1b_Ga=T,I=1,f=24,s=1,v=1,q=2;AAAA\x9c\x1b\\b" +
+		"\x9fGa=t,i=4,q=2;AAAA\x1b\\" +
+		"\x9fGa=d,i=4,q=2\x9c" +
+		"\x1b_Ga=f,i=1,q=2;AAAA\x9c" +
+		"\x9fGa=t,i=5,q=2\x9cc"
+	if replay != want {
+		t.Fatalf("8-bit replay = %q\nwant           %q", replay, want)
+	}
 }
 
 // TestBackgroundKittyQueryReplyReachesItsWindow covers a capability probe a

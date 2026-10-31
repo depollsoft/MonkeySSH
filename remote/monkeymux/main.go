@@ -16044,14 +16044,11 @@ func parseKittyControl(control string) map[string]string {
 // for roots, downgrades a=T to store-only a=t so replay never draws or moves
 // the cursor before the foreground app redraws its placements.
 func rewriteKittyReplayCommand(seq []byte, storeOnly bool) []byte {
-	if len(seq) < 5 {
+	controlStart, controlEnd, ok := kittyCommandControl(seq)
+	if !ok {
 		return append([]byte(nil), seq...)
 	}
-	controlEnd := len(seq) - 2 // before ST
-	if semi := bytes.IndexByte(seq, ';'); semi >= 0 && semi < controlEnd {
-		controlEnd = semi
-	}
-	parts := strings.Split(string(seq[3:controlEnd]), ",")
+	parts := strings.Split(string(seq[controlStart:controlEnd]), ",")
 	foundQuiet := false
 	for index, part := range parts {
 		key, _, _ := strings.Cut(part, "=")
@@ -16069,7 +16066,7 @@ func rewriteKittyReplayCommand(seq []byte, storeOnly bool) []byte {
 		parts = append(parts, "q=2")
 	}
 	out := make([]byte, 0, len(seq)+4)
-	out = append(out, seq[:3]...)
+	out = append(out, seq[:controlStart]...)
 	out = append(out, strings.Join(parts, ",")...)
 	out = append(out, seq[controlEnd:]...)
 	return out
