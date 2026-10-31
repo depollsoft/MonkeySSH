@@ -168,18 +168,23 @@ func replaySequence(s *terminalScreen) string {
 // A program that answers the replay's resize by redrawing itself paints the
 // alternate screen in place of the model's frame: the replay puts the shell
 // status right before it, after the main screen behind the program.
+// That holds also when the alternate screen has prompt options of its own,
+// which the redraw does not carry.
 func TestWindowReplayKeepsTheCommandRunningBehindARedraw(t *testing.T) {
-	server := newMuxServerWithSize("test", 20, 5)
-	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
-	server.windows = []*muxWindow{window}
-	server.activeID = window.id
-	server.handleWindowOutput(window.id, []byte(osc133("A")+"$ "+osc133("B")+"vi\r\n\x1b[?1049h"+osc133("C")+"TUI"))
-	server.mu.Lock()
-	mainScreen, _ := window.mainScreenReplayLocked(1 << 20)
-	replay := buildWindowReplay(window, mainScreen, []byte("\x1b[H\x1b[2JTUI"), false)
-	server.mu.Unlock()
-	if status, _ := shellStatusAfter(t, replay, "prompt", "0"); status != "running" {
-		t.Fatalf("after the replay the app shows %s, want running: %q", status, replay)
+	for _, alternate := range []string{"", osc133("A;cl=line")} {
+		server := newMuxServerWithSize("test", 20, 5)
+		window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+		server.windows = []*muxWindow{window}
+		server.activeID = window.id
+		server.handleWindowOutput(window.id, []byte(osc133("A")+"$ "+osc133("B")+"vi\r\n\x1b[?1049h"+alternate+
+			osc133("C")+"TUI"))
+		server.mu.Lock()
+		mainScreen, _ := window.mainScreenReplayLocked(1 << 20)
+		replay := buildWindowReplay(window, mainScreen, []byte("\x1b[H\x1b[2JTUI"), false)
+		server.mu.Unlock()
+		if status, _ := shellStatusAfter(t, replay, "prompt", "0"); status != "running" {
+			t.Fatalf("%q: after the replay the app shows %s, want running: %q", alternate, status, replay)
+		}
 	}
 }
 

@@ -71,13 +71,12 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 // before that screen's frame or the program's redraw. The main screen's
 // frame ends with that screen's content, and input there while the shell
 // runs a command whose C came on the alternate screen leaves the app editing
-// it, which a frame of the alternate screen with marks of its own puts
-// right, but one without or a redraw does not. C on the alternate screen,
-// whose content is output, puts the app back to running without touching
-// the main screen's content.
+// it, which neither a redraw nor a frame without marks puts right. C on the
+// alternate screen, whose content is output, puts the app back to running
+// without touching the main screen's content.
 func (s *terminalScreen) AlternateShellStatus() []byte {
 	if s == nil || !s.altActive || s.shell.status != vtShellRunning ||
-		s.semMain.content != vtSemInput || s.semanticFrame(&s.alt, false) != nil {
+		s.semMain.content != vtSemInput || s.semAlt.content != vtSemOutput {
 		return nil
 	}
 	return []byte("\x1b]133;C\x07")
