@@ -174,8 +174,16 @@ String? _pngError(Uint8List data, {required bool deep}) {
         height = view.getUint32(dataStart + 4);
         bitDepth = data[dataStart + 8];
         colorType = data[dataStart + 9];
-        interlaced = data[dataStart + 12] == 1;
-        if (width == 0 || height == 0 || _pngChannels(colorType) == 0) {
+        final compression = data[dataStart + 10];
+        final filter = data[dataStart + 11];
+        final interlace = data[dataStart + 12];
+        interlaced = interlace == 1;
+        if (width == 0 ||
+            height == 0 ||
+            !_pngBitDepthAllowed(colorType, bitDepth) ||
+            compression != 0 ||
+            filter != 0 ||
+            interlace > 1) {
           return invalid;
         }
       case 'IDAT':
@@ -197,6 +205,14 @@ String? _pngError(Uint8List data, {required bool deep}) {
     offset = dataEnd + 4;
   }
 }
+
+/// The bit depths PNG allows for [colorType]; none for an unknown type.
+bool _pngBitDepthAllowed(int colorType, int bitDepth) => switch (colorType) {
+      0 => const [1, 2, 4, 8, 16].contains(bitDepth),
+      3 => const [1, 2, 4, 8].contains(bitDepth),
+      2 || 4 || 6 => bitDepth == 8 || bitDepth == 16,
+      _ => false,
+    };
 
 int _pngChannels(int colorType) => switch (colorType) {
       0 || 3 => 1,

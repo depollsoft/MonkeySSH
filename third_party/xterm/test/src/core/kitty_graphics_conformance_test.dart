@@ -770,6 +770,60 @@ void main() {
       );
     });
 
+    test('the PNG check rejects header fields PNG does not allow', () {
+      Uint8List chunk(String type, List<int> data) {
+        final body = Uint8List.fromList([...utf8.encode(type), ...data]);
+        final out = BytesBuilder()
+          ..add((ByteData(4)..setUint32(0, data.length)).buffer.asUint8List())
+          ..add(body)
+          ..add(
+            (ByteData(4)..setUint32(0, _crc32(body))).buffer.asUint8List(),
+          );
+        return out.takeBytes();
+      }
+
+      // A 1x1 image with the given header fields and enough image data for
+      // its one scanline at any of them.
+      Uint8List png({
+        int bitDepth = 8,
+        int colorType = 6,
+        int compression = 0,
+        int filter = 0,
+        int interlace = 0,
+      }) {
+        final header = (ByteData(13)
+              ..setUint32(0, 1)
+              ..setUint32(4, 1)
+              ..setUint8(8, bitDepth)
+              ..setUint8(9, colorType)
+              ..setUint8(10, compression)
+              ..setUint8(11, filter)
+              ..setUint8(12, interlace))
+            .buffer
+            .asUint8List();
+        return Uint8List.fromList([
+          0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+          ...chunk('IHDR', header),
+          ...chunk('IDAT', const ZLibEncoder().encode(Uint8List(9))),
+          ...chunk('IEND', const []),
+        ]);
+      }
+
+      String? error(Uint8List data) =>
+          kittyGraphicsPayloadError(kittyGraphicsFormatPng, data, deep: true);
+
+      expect(error(png()), isNull);
+      expect(error(png(bitDepth: 16)), isNull);
+      expect(error(png(bitDepth: 1, colorType: 0)), isNull);
+      expect(error(png(bitDepth: 4, colorType: 3)), isNull);
+      expect(error(png(bitDepth: 0)), isNotNull);
+      expect(error(png(bitDepth: 4)), isNotNull);
+      expect(error(png(bitDepth: 16, colorType: 3)), isNotNull);
+      expect(error(png(compression: 7)), isNotNull);
+      expect(error(png(filter: 1)), isNotNull);
+      expect(error(png(interlace: 9)), isNotNull);
+    });
+
     testWidgets('chunked transmissions keep their ids in the reply', (
       tester,
     ) async {
