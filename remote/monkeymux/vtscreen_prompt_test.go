@@ -156,13 +156,31 @@ func TestSemanticPromptReadsLongOptions(t *testing.T) {
 // replaySequence is the replay that paints s on an attaching client, as
 // buildWindowReplay builds it: the prefix, which ends with CSI 3 J, the main
 // screen behind an alternate-screen application and the alternate screen
-// entered again, then the frame.
+// entered again, with the shell status put right there, then the frame.
 func replaySequence(s *terminalScreen) string {
 	replay := activeWindowReplayPrefix + string(s.RenderMainScreen())
 	if s.altActive {
-		replay += "\x1b[?1049h"
+		replay += "\x1b[?1049h" + string(s.AlternateShellStatus())
 	}
 	return replay + string(s.RenderFrame())
+}
+
+// A program that answers the replay's resize by redrawing itself paints the
+// alternate screen in place of the model's frame: the replay puts the shell
+// status right before it, after the main screen behind the program.
+func TestWindowReplayKeepsTheCommandRunningBehindARedraw(t *testing.T) {
+	server := newMuxServerWithSize("test", 20, 5)
+	window := &muxWindow{id: "@1", index: 0, lastActivity: time.Now()}
+	server.windows = []*muxWindow{window}
+	server.activeID = window.id
+	server.handleWindowOutput(window.id, []byte(osc133("A")+"$ "+osc133("B")+"vi\r\n\x1b[?1049h"+osc133("C")+"TUI"))
+	server.mu.Lock()
+	mainScreen, _ := window.mainScreenReplayLocked(1 << 20)
+	replay := buildWindowReplay(window, mainScreen, []byte("\x1b[H\x1b[2JTUI"), false)
+	server.mu.Unlock()
+	if status, _ := shellStatusAfter(t, replay, "prompt", "0"); status != "running" {
+		t.Fatalf("after the replay the app shows %s, want running: %q", status, replay)
+	}
 }
 
 // replayFrame paints s's replay onto a fresh model the way an attaching client
