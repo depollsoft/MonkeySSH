@@ -203,15 +203,16 @@ func TestWindowTracksGraphemeClusterMode(t *testing.T) {
 
 // TestWindowReplayRestoresGraphemeClusterMode covers a window whose program
 // turned clustering off before the history a replay paints, as an upgrade
-// restore leaves it: the model reads that history under the window's mode,
-// and the replay sets that mode before the history, after its prefix put back
-// the default for windows that never changed it.
+// restore leaves it: the model reads that history in that mode, and the
+// replay sets it before the history, after its prefix put back the default
+// for windows that never changed it.
 func TestWindowReplayRestoresGraphemeClusterMode(t *testing.T) {
 	server := newMuxServerWithSize("test", 10, 3)
 	legacy := &muxWindow{
 		id: "@1", index: 0, lastActivity: time.Now(), screenWidth: 10, screenHeight: 3,
-		history:      []byte("\U0001F468\u200d\U0001F469x"),
-		privateModes: map[string]bool{"2027": false},
+		history:                   []byte("\U0001F468\u200d\U0001F469x"),
+		historyGraphemeClusterOff: true,
+		privateModes:              map[string]bool{"2027": false},
 	}
 	shell := &muxWindow{id: "@2", index: 1, lastActivity: time.Now(), history: []byte("\U0001F468\u200d\U0001F469x")}
 	server.windows = []*muxWindow{legacy, shell}
@@ -242,6 +243,130 @@ func TestWindowReplayRestoresGraphemeClusterMode(t *testing.T) {
 	client.Write([]byte(shellReplay))
 	if got := graphemeRows(client); !client.graphemeCluster || got[0][0] != "\U0001F468\u200d\U0001F469" {
 		t.Fatalf("client after the shell's replay = %q, clustering %v", got, client.graphemeCluster)
+	}
+}
+
+// TestShellReplayStartsInTheModeItsHistoryDid covers a shell window whose
+// program switched clustering partway through the output a replay paints:
+// the output before the switch is laid out in the mode in force where the
+// replay starts, as the model laid it out, whether that is where the output
+// began or past a switch the kept history no longer holds, and a model
+// rebuilt from a snapshot of the window starts in that mode too.
+func TestShellReplayStartsInTheModeItsHistoryDid(t *testing.T) {
+	family := "\U0001F468\u200d\U0001F469"
+	clustered := []string{family, "<"}
+	legacy := []string{"\U0001F468\u200d", "<", "\U0001F469", "<"}
+	filler := strings.Repeat("a\r\n", windowHistoryLimitBytes)
+	for _, tc := range []struct {
+		name, output string
+		y            int
+		row          []string
+		startsOff    bool
+	}{
+		{
+			name:   "from where the output began",
+			output: family + "\x1b[?2027lx" + family,
+			row:    append(append(append([]string{}, clustered...), "x"), legacy...),
+		},
+		{
+			name:      "past a switch the history lost",
+			output:    "\x1b[?2027l" + filler + family + "\x1b[?2027hx" + family,
+			y:         2,
+			row:       append(append(append([]string{}, legacy...), "x"), clustered...),
+			startsOff: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := &muxWindow{
+				id: "@1", name: "zsh", command: "zsh", foregroundCommand: "zsh",
+				lastActivity: time.Now(), screenWidth: 10, screenHeight: 3,
+			}
+			server := newMuxServerWithSize("test", 10, 3)
+			server.windows = []*muxWindow{window}
+			server.activeID = window.id
+			server.mu.Lock()
+			window.observeTerminalModesLocked([]byte(tc.output))
+			window.appendHistoryLocked([]byte(tc.output))
+			model := window.screenLocked()
+			replay := server.replayBytesLocked(window)
+			server.mu.Unlock()
+
+			if got := graphemeRows(model)[tc.y]; !reflect.DeepEqual(got, tc.row) {
+				t.Fatalf("model = %q, want %q", got, tc.row)
+			}
+			client := newTerminalScreen(10, 3)
+			client.Write(replay)
+			if got, want := graphemeRows(client), graphemeRows(model); !reflect.DeepEqual(got, want) ||
+				client.graphemeCluster != model.graphemeCluster {
+				t.Fatalf("client = %q (clustering %v), want the model's %q (%v)",
+					got, client.graphemeCluster, want, model.graphemeCluster)
+			}
+
+			restore := server.restoreSnapshot()
+			if len(restore.Windows) != 1 {
+				t.Fatalf("snapshot has %d windows", len(restore.Windows))
+			}
+			state := restore.Windows[0]
+			if state.HistoryGraphemeClusterOff != tc.startsOff {
+				t.Fatalf("snapshot history starts with clustering off = %v, want %v",
+					state.HistoryGraphemeClusterOff, tc.startsOff)
+			}
+			options := createWindowOptionsForRestore(state, false)
+			restored := &muxWindow{
+				history:                   options.history,
+				historyGraphemeClusterOff: options.historyGraphemeClusterOff,
+				privateModes:              options.privateModes,
+				screenWidth:               10,
+				screenHeight:              3,
+			}
+			if got := graphemeRows(restored.screenLocked())[tc.y]; !reflect.DeepEqual(got, tc.row) {
+				t.Fatalf("restored model = %q, want %q", got, tc.row)
+			}
+		})
+	}
+}
+
+// TestGraphemeClusterAtKeepsTheChangesAReplayReaches covers the record of
+// mode 2027 changes a replay looks its starting mode up in: each change holds
+// from just past its sequence, and one no replay can start before only sets
+// the mode before the next.
+func TestGraphemeClusterAtKeepsTheChangesAReplayReaches(t *testing.T) {
+	s := newTerminalScreen(10, 2)
+	s.Write([]byte("ab\x1b[?2027lcd\x1b[?2027hef"))
+	for at, want := range map[int64]bool{0: true, 9: true, 10: false, 19: false, 20: true, 22: true} {
+		if got := s.GraphemeClusterAt(at); got != want {
+			t.Errorf("mode at %d = %v, want %v", at, got, want)
+		}
+	}
+	s.Write([]byte("\x1b[?2027l" + strings.Repeat("a", vtModeChangeReach) + "\x1b[?2027h"))
+	if len(s.graphemeChanges) != 2 {
+		t.Fatalf("kept %d changes, want the last 2", len(s.graphemeChanges))
+	}
+	if s.GraphemeClusterAt(s.Written()-vtModeChangeReach) || !s.GraphemeClusterAt(s.Written()) {
+		t.Fatal("pruning lost the mode a replay within reach starts in")
+	}
+	for range vtModeChangeLimit {
+		s.Write([]byte("\x1b[?2027l\x1b[?2027h"))
+	}
+	if len(s.graphemeChanges) > vtModeChangeLimit || !s.GraphemeClusterAt(s.Written()) ||
+		s.GraphemeClusterAt(s.Written()-int64(len("\x1b[?2027h"))) {
+		t.Fatalf("after many changes: kept %d", len(s.graphemeChanges))
+	}
+	if c := s.Clone(); len(c.graphemeChanges) != len(s.graphemeChanges) || &c.graphemeChanges[0] == &s.graphemeChanges[0] {
+		t.Fatal("a clone shares the record of changes")
+	}
+}
+
+// TestWidenedClusterBlanksTheWideGlyphItCovers pins the attributes the shared
+// case "a cluster widened over a wide glyph blanks that glyph's right half"
+// leaves: that right half keeps only its background, as in the client.
+func TestWidenedClusterBlanksTheWideGlyphItCovers(t *testing.T) {
+	s := newTerminalScreen(10, 2)
+	s.Write([]byte("\u2665\x1b[7;31;44m\u754c\x1b[2G\x1b[0m\ufe0f"))
+	ref := newTerminalScreen(1, 1)
+	ref.Write([]byte("\x1b[7;31;44m"))
+	if got, want := s.grid().rows[0][2], (vtCell{width: 1, attrs: vtAttrs{bg: ref.attrs.bg}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("right half = %+v, want %+v", got, want)
 	}
 }
 

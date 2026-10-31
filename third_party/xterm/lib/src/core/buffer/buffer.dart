@@ -138,9 +138,11 @@ class Buffer {
     codePoint = charset.translate(codePoint);
 
     final clustering = terminal.graphemeClusterMode;
+    // A pending wrap follows the glyph in the cursor's own cell, which on a
+    // one-column screen is in column 0.
     if (clustering &&
         mayContinueGrapheme(codePoint) &&
-        cursorX > 0 &&
+        (cursorX > 0 || isWrapPending) &&
         _joinGraphemeCluster(codePoint)) {
       return false;
     }
@@ -277,8 +279,9 @@ class Buffer {
         if (column == viewWidth - 1) {
           // No room for the right half: like a wide glyph printed in the last
           // column, the cluster moves to the next row, or stays as it is
-          // without autowrap.
-          if (!terminal.autoWrapMode) return true;
+          // without autowrap or on a one-column screen, which has no room on
+          // any row.
+          if (!terminal.autoWrapMode || viewWidth < 2) return true;
           graphics.removePlaceholderAt(line, column);
           line.eraseCell(column, terminal.cursor);
           _wrapToNextLine();
@@ -290,6 +293,15 @@ class Buffer {
           line.setGraphemeExtras(column, extras);
         } else {
           line.setWidth(column, 2);
+        }
+        // A wide glyph the right half replaces the first half of leaves its
+        // own right half an empty cell with only its background, as the
+        // MonkeyMux model blanks it.
+        if (column + 2 < viewWidth && line.getWidth(column + 1) == 2) {
+          line.eraseCell(
+            column + 2,
+            CursorStyle(background: line.getBackground(column + 2)),
+          );
         }
         graphics.removePlaceholderAt(line, column + 1);
         line.setCell(column + 1, 0, 0, terminal.cursor, semanticPrompt.content);

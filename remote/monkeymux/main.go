@@ -760,6 +760,9 @@ type restoreWindowState struct {
 	ApplicationKeypadKnown   bool                      `json:"applicationKeypadKnown,omitempty"`
 	TerminalProgress         *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
 	Active                   bool                      `json:"active,omitempty"`
+	// HistoryGraphemeClusterOff records that grapheme clustering (mode
+	// 2027) was reset where HistoryBase64 starts.
+	HistoryGraphemeClusterOff bool `json:"historyGraphemeClusterOff,omitempty"`
 }
 
 type muxServer struct {
@@ -949,6 +952,10 @@ type muxWindow struct {
 	// notifications, oldest first. Bounded; selecting the window clears it.
 	notificationOscs           []pendingWindowOscNotification
 	historyStartTerminalOutput terminalOutputParserSnapshot
+	// historyGraphemeClusterOff records that grapheme clustering (mode 2027)
+	// was reset where the history restored from a snapshot starts, for the
+	// screen model built from it.
+	historyGraphemeClusterOff  bool
 	terminalOutputForwarding   bool
 	kittyClipboard             kittyClipboardWindowState
 	lastActivity               time.Time
@@ -6679,6 +6686,7 @@ func createWindowOptionsForRestore(
 		launchCommand:             state.LaunchCommand,
 		restoreCommand:            state.RestoreCommand,
 		history:                   history,
+		historyGraphemeClusterOff: len(history) > 0 && state.HistoryGraphemeClusterOff,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
 		agentToolConfirmed:        agentToolConfirmed,
@@ -6723,6 +6731,7 @@ type createWindowOptions struct {
 	launchCommand             string
 	restoreCommand            string
 	history                   []byte
+	historyGraphemeClusterOff bool
 	paneTitle                 string
 	agentTool                 string
 	agentToolConfirmed        bool
@@ -6894,6 +6903,7 @@ func (s *muxServer) createWindowWithStarter(
 		screenHeight:              rows,
 		proc:                      proc,
 		history:                   append([]byte(nil), options.history...),
+		historyGraphemeClusterOff: options.historyGraphemeClusterOff,
 		lastActivity:              time.Now(),
 		cursorVisible:             cursorVisible,
 		cursorVisibilityKnown:     options.cursorVisibilityKnown,
@@ -10313,11 +10323,16 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 		}
 		s.snapshotAgentIdentityLocked(window, &state)
 		if isShellRestoreWindow(state) && len(window.history) > 0 {
-			history, historyStart := window.historyTailWithParserLocked()
-			history = terminalHistoryAtGroundBoundaries(history, historyStart)
+			tail, historyStart := window.historyTailWithParserLocked()
+			history := terminalHistoryAtGroundBoundaries(tail, historyStart)
 			if len(history) > 0 {
 				state.HistoryBase64 = base64.StdEncoding.EncodeToString(history)
 				state.HistoryStartsAtGround = true
+				skipped := advanceReplayStartToTerminalGround(tail, 0, historyStart)
+				screen := window.screenLocked()
+				state.HistoryGraphemeClusterOff = !screen.GraphemeClusterAt(
+					screen.Written() - int64(len(tail)-skipped),
+				)
 			}
 		}
 		restore.Windows = append(restore.Windows, state)
@@ -11525,6 +11540,9 @@ func (s *muxServer) replayBytesWithImagesLocked(
 		// Keep the full bounded screen history: differential updates may leave
 		// the composer untouched beyond the short shell scrollback limit.
 		start := advanceReplayStartToTerminalGround(history, 0, historyStart)
+		mode := window.graphemeModeBeforeHistoryLocked(
+			window.screenLocked().Written() - int64(len(history)-start),
+		)
 		history = stripTerminalQueriesFromReplay(history[start:])
 		history = window.withheldAttachOscSuffixTrimmedLocked(history)
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
@@ -11533,7 +11551,7 @@ func (s *muxServer) replayBytesWithImagesLocked(
 			// Its output places its images again, as a shell's does.
 			replayHistory = append(replayHistory, kittyVisiblePlacementsDelete...)
 		}
-		replayHistory = append(append(replayHistory, images...), history...)
+		replayHistory = append(append(append(replayHistory, images...), mode...), history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
 				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed),
@@ -11660,7 +11678,26 @@ func (w *muxWindow) shellReplayHistoryLocked(
 		}
 	}
 	replay = append(replay, shown...)
+	replay = append(replay, w.graphemeModeBeforeHistoryLocked(end-int64(len(retained)-from))...)
 	return append(replay, history...), images + len(shown)
+}
+
+// graphemeModeBeforeHistoryLocked returns what a replay of the window's
+// retained output from offset at of what the screen model read (Written)
+// needs before that output so the client reads it in the grapheme
+// clustering mode (2027) in force there, or nil when that is the mode
+// terminalModePreReplaySequence leaves, the window's current one. Output a
+// later switch followed would otherwise be laid out at the other mode's
+// widths. terminalModePostReplaySequence sets the current mode again after.
+func (w *muxWindow) graphemeModeBeforeHistoryLocked(at int64) []byte {
+	current := true
+	if enabled, ok := w.privateModes["2027"]; ok {
+		current = enabled
+	}
+	if on := w.screenLocked().GraphemeClusterAt(at); on != current {
+		return appendVTGraphemeMode(nil, on)
+	}
+	return nil
 }
 
 // kittyVisiblePlacementsDelete deletes the placements on the screen shown,
@@ -13802,13 +13839,10 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 		// A window that already holds retained output (restored from a
 		// snapshot, or created before the model existed) is bootstrapped from
 		// that history, skipping any control sequence eviction left open.
-		// A replay paints that history after setting the window's grapheme
-		// clustering mode (terminalModePreReplaySequence), so the model
-		// reads it under that mode too.
+		// It starts in the grapheme clustering mode in force where that
+		// history does, as a replay of it does (graphemeModeBeforeHistoryLocked).
 		if len(w.history) > 0 {
-			if enabled, ok := w.privateModes["2027"]; ok {
-				w.screen.setPrivateMode(2027, enabled)
-			}
+			w.screen.StartGraphemeCluster(!w.historyGraphemeClusterOff)
 			start := advanceReplayStartToTerminalGround(
 				w.history,
 				0,

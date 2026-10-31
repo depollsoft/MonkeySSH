@@ -48,5 +48,8 @@
 {"name": "without autowrap a mark joins a glyph printed in the last column", "size": [5, 2], "write": "\u001b[?7labcde\u0301", "rows": [["a", "b", "c", "d", "e\u0301"]], "cursor": [0, 4, true], "wrapped": []},
 {"name": "without autowrap a mark joins a glyph printed in the last column in legacy mode", "size": [5, 2], "write": "\u001b[?2027l\u001b[?7labcde\u0301", "rows": [["a", "b", "c", "d", "e\u0301"]], "cursor": [0, 4, true], "wrapped": []},
 {"name": "a Latin-1 pictograph continues a ZWJ sequence", "size": [10, 2], "write": "\ud83d\udc68\u200d\u00a9x", "rows": [["\ud83d\udc68\u200d\u00a9", "<", "x"]], "cursor": [0, 3, false], "wrapped": []},
-{"name": "a mark joins a space", "size": [10, 2], "write": " \u0301x", "rows": [[" \u0301", "x"]], "cursor": [0, 2, false], "wrapped": []}
+{"name": "a mark joins a space", "size": [10, 2], "write": " \u0301x", "rows": [[" \u0301", "x"]], "cursor": [0, 2, false], "wrapped": []},
+{"name": "a pending wrap on a one-column screen joins its glyph", "size": [1, 3], "write": "ab\u0301", "rows": [["a"], ["b\u0301"]], "cursor": [1, 0, true], "wrapped": [1]},
+{"name": "a code point widening a glyph on a one-column screen leaves it as it is", "size": [1, 2], "write": "\u2665\ufe0fx", "rows": [["\u2665"], ["x"]], "cursor": [1, 0, true], "wrapped": [1]},
+{"name": "a cluster widened over a wide glyph blanks that glyph's right half", "size": [10, 2], "write": "\u2665\u001b[7;31;44m\u754c\u001b[2G\u001b[0m\ufe0f", "rows": [["\u2665\ufe0f", "<"]], "cursor": [0, 2, false], "wrapped": []}
 ]

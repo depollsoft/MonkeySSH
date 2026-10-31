@@ -46,8 +46,12 @@ type terminalScreen struct {
 	g1Graphics bool
 	shiftOut   bool
 	// graphemeCluster is DEC private mode 2027: printed code points join
-	// into grapheme clusters (vtscreen_grapheme.go).
+	// into grapheme clusters (vtscreen_grapheme.go). graphemeChanges are
+	// where it changed since, oldest first, and graphemeBefore what it was
+	// before the first of them (GraphemeClusterAt).
 	graphemeCluster bool
+	graphemeChanges []vtModeChange
+	graphemeBefore  bool
 
 	// cursorKnown records that the cursor is where the app's terminal has it
 	// too: the last thing that moved it was an absolute position (CUP or HVP
@@ -379,7 +383,7 @@ type vtAttrs struct {
 
 func newTerminalScreen(width, height int) *terminalScreen {
 	width, height = clampVTSize(width, height)
-	s := &terminalScreen{width: width, height: height}
+	s := &terminalScreen{width: width, height: height, graphemeCluster: true, graphemeBefore: true}
 	s.main = newVTGrid(width, height)
 	s.alt = newVTGrid(width, height)
 	s.resetState()
@@ -410,7 +414,7 @@ func (s *terminalScreen) resetState() {
 	s.autowrap = true
 	s.insertMode = false
 	s.cursorOn = true
-	s.graphemeCluster = true
+	s.setGraphemeCluster(true)
 	s.tabs = make([]bool, s.width)
 	for i := 8; i < s.width; i += 8 {
 		s.tabs[i] = true
@@ -595,6 +599,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
 	c.kittyCommands = append([]vtKittyCommand(nil), s.kittyCommands...)
+	c.graphemeChanges = append([]vtModeChange(nil), s.graphemeChanges...)
 	for i, store := range s.kittyStores {
 		c.kittyStores[i] = store.clone()
 	}
@@ -2361,7 +2366,7 @@ func (s *terminalScreen) setPrivateMode(mode int, on bool) {
 	case 7:
 		s.autowrap = on
 	case 2027:
-		s.graphemeCluster = on
+		s.setGraphemeCluster(on)
 	case 12, 25:
 		if mode == 25 {
 			s.cursorOn = on

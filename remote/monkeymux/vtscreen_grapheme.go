@@ -10,6 +10,61 @@ package main
 // both pass testdata/grapheme_cluster_parity.json: a frame painted from the
 // model has to land on the cells the client laid out from the same output.
 
+// vtModeChange is a change of a mode at an offset of the output, just past
+// the sequence that made it, in the terms of Written.
+type vtModeChange struct {
+	at int64
+	on bool
+}
+
+const (
+	// vtModeChangeReach is how far back from the latest output a replay of
+	// retained output can start: the longest history a window keeps.
+	vtModeChangeReach = windowFullReplayHistoryLimitBytes
+	// vtModeChangeLimit bounds the changes kept within that reach; a replay
+	// from before the oldest of them starts in the mode it set.
+	vtModeChangeLimit = 64
+)
+
+// setGraphemeCluster sets mode 2027, recording where it changed for
+// GraphemeClusterAt.
+func (s *terminalScreen) setGraphemeCluster(on bool) {
+	if on == s.graphemeCluster {
+		return
+	}
+	s.graphemeCluster = on
+	s.graphemeChanges = append(s.graphemeChanges, vtModeChange{at: s.written, on: on})
+	// A change no replay starts before only sets the mode before the next.
+	for len(s.graphemeChanges) > 1 &&
+		(len(s.graphemeChanges) > vtModeChangeLimit ||
+			s.graphemeChanges[1].at <= s.written-vtModeChangeReach) {
+		s.graphemeBefore = s.graphemeChanges[0].on
+		s.graphemeChanges = s.graphemeChanges[1:]
+	}
+}
+
+// StartGraphemeCluster sets mode 2027 as it was before the output the model
+// reads first, for a model built from a window's retained output.
+func (s *terminalScreen) StartGraphemeCluster(on bool) {
+	s.graphemeCluster, s.graphemeBefore = on, on
+	s.graphemeChanges = nil
+}
+
+// GraphemeClusterAt reports whether mode 2027 was set at offset at of the
+// output, in the terms of Written. A replay of retained output from there
+// has to start in that mode to lay the output out as the model did, when
+// the output changes the mode later on.
+func (s *terminalScreen) GraphemeClusterAt(at int64) bool {
+	on := s.graphemeBefore
+	for _, change := range s.graphemeChanges {
+		if change.at > at {
+			break
+		}
+		on = change.on
+	}
+	return on
+}
+
 // joinCluster prints r into the glyph before the cursor, with clustering on,
 // when no grapheme cluster boundary falls between that glyph's code points and
 // r. It reports whether it took r, appended to the glyph or dropped as part
@@ -17,7 +72,9 @@ package main
 func (s *terminalScreen) joinCluster(r rune) bool {
 	g := s.grid()
 	col := g.cursorCol
-	if col == 0 {
+	// A pending wrap follows the glyph in the cursor's own cell, which on a
+	// one-column screen is in column 0.
+	if col == 0 && !g.pendingWrap {
 		return false
 	}
 	row := g.rows[g.cursorRow]
@@ -51,7 +108,9 @@ func (s *terminalScreen) joinCluster(r rune) bool {
 			break
 		}
 		if prevCol == s.width-1 {
-			if !s.autowrap {
+			// Without autowrap, or on a one-column screen, which has no room
+			// for the second half on any row, the glyph stays as it is.
+			if !s.autowrap || s.width < 2 {
 				return true
 			}
 			// A glyph widened in the last column moves to the next row, as a

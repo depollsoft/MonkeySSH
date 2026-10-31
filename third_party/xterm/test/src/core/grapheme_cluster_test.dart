@@ -71,6 +71,23 @@ void main() {
       expect(line.getSemanticContent(1), SemanticContent.output);
     });
 
+    test(
+        'a widened cluster keeps only the background on the right half of '
+        'the wide glyph it covers', () {
+      // As the MonkeyMux model blanks it; the shared case "a cluster widened
+      // over a wide glyph blanks that glyph's right half" checks the cells.
+      final terminal = _terminal(10, 2);
+      terminal.write('\u2665\x1b[7;31;44m\u754C\x1b[2G\x1b[0m\uFE0F');
+      final line = _row(terminal, 0);
+      expect(line.getWidth(0), 2);
+      expect(line.getContent(2), 0);
+      final half = CellData.empty();
+      line.getCellData(2, half);
+      expect(half.flags, 0);
+      expect(half.foreground, 0);
+      expect(half.background, CellColor.named | 4);
+    });
+
     test('covers both screens', () {
       final terminal = _terminal(10, 2);
       terminal.write('\x1b[?2027l\x1b[?1049h$family');
