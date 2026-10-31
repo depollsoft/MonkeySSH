@@ -11687,6 +11687,28 @@ func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
 	return nil
 }
 
+// kittyAlternateScreenAt returns whether the alternate screen is up at an
+// offset of history, a shell window's: the main screen shows at its end.
+// History can start inside a program's alternate screen, so each of modes
+// 1047 and 1049 is taken to start the other way from its first change. Ask
+// for offsets in increasing order.
+func kittyAlternateScreenAt(history []byte) func(offset int) bool {
+	changes := kittyScreenModeChanges(history)
+	set := map[int]bool{}
+	for _, change := range changes {
+		if _, seen := set[change.mode]; !seen {
+			set[change.mode] = !change.set
+		}
+	}
+	next := 0
+	return func(offset int) bool {
+		for ; next < len(changes) && changes[next].offset < offset; next++ {
+			set[changes[next].mode] = changes[next].set
+		}
+		return set[1047] || set[1049]
+	}
+}
+
 // clientHolds reports whether clientHas, the images a client reports holding,
 // has the image id with the signature token.
 func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
@@ -11744,23 +11766,24 @@ func (image kittyShownImage) appendDataDelete(out []byte) []byte {
 // (kittyShownImageRootLocked), whatever other commands show it and in
 // whatever order. An image only virtual placements show gets none: the
 // follow-up sends it and places them again
-// (replayBytesWithImageFollowUpLocked). Only the commands before history
-// first enters the alternate screen run on the main screen.
+// (replayBytesWithImageFollowUpLocked). Only the commands that run on the
+// main screen count (kittyAlternateScreenAt).
 func (w *muxWindow) kittyShownImagesLocked(
 	history []byte,
 	clientHas map[string]uint32,
 	replayedFrom int64,
 ) []kittyShownImage {
-	if changes := kittyScreenModeChanges(history); len(changes) > 0 {
-		history = history[:changes[0].offset]
-	}
 	events, _ := scanKittyTransmissions(history)
+	alternate := kittyAlternateScreenAt(history)
 	var sent []string
 	var shown []kittyShownImage
 	// shownAt is where each image is in shown: any later command showing it
 	// counts too, whatever its kind.
 	shownAt := map[string]int{}
 	for _, event := range events {
+		if alternate(event.offset) {
+			continue
+		}
 		image := kittyShownImage{
 			id:     kittyIDValue(event.control["i"]),
 			number: kittyIDValue(event.control["I"]),
