@@ -212,7 +212,8 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 // staged, saved, and the staging undone. marks are those of the prompt the
 // frame painted, if any.
 func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedCursor, marks *vtSemanticFrame) []byte {
-	if !saved.valid {
+	// A cursor never saved is home unless a resize moved it (restoreCursor).
+	if !saved.valid && saved.row == 0 && saved.col == 0 {
 		return out
 	}
 	if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {

@@ -281,6 +281,8 @@ type vtGrid struct {
 }
 
 type vtSavedCursor struct {
+	// valid records a DECSC; the zero value is the power-up state DECRC
+	// restores otherwise, whose row a resize can still move.
 	valid bool
 	row   int
 	col   int
@@ -1730,13 +1732,9 @@ func (s *terminalScreen) restoreCursor() {
 	saved := *s.saved()
 	g := s.grid()
 	defer s.noteCursorRow(g.cursorRow)
-	if !saved.valid {
-		g.cursorRow, g.cursorCol = 0, 0
-		s.attrs = vtAttrs{}
-		s.originMode = false
-		g.pendingWrap = false
-		return
-	}
+	// A cursor never saved restores the power-up state, home with the
+	// default rendition, which a height change moves like a saved cursor
+	// (resizeMain), as the client's and xterm's AdjustSavedCursor do.
 	s.restoreSavedPosition(g, saved)
 	s.attrs = saved.attrs
 	s.originMode = saved.originMode
