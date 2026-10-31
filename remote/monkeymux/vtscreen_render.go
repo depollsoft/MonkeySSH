@@ -40,6 +40,7 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
 	out = s.appendKittyPlacements(out, s.altActive, replace)
 	out = s.appendSavedCursor(out, g, *s.saved(), marks)
+	out = marks.resume(out)
 	if s.insertMode {
 		out = append(out, "\x1b[4h"...)
 	}
@@ -92,6 +93,7 @@ func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) 
 	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, true)
 	out = s.appendKittyPlacements(out, false, replace)
 	if saved := s.savedMain; s.altSavedCursor {
+		out = marks.resume(out)
 		// DECSET 6 homes the cursor, so it goes first. The frame left the
 		// scroll region full, where an origin-relative row is the row.
 		if saved.originMode {
@@ -103,6 +105,7 @@ func (s *terminalScreen) RenderMainScreenReplacing(replace func(imageID string) 
 		return appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	}
 	out = s.appendSavedCursor(out, g, s.savedMain, marks)
+	out = marks.resume(out)
 	out = appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks)
 	return marks.finish(out)
 }

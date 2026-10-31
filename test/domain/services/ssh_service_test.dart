@@ -2390,38 +2390,58 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         return;
       }
       final cases = jsonDecode(fixture.readAsStringSync()) as List<dynamic>;
-      const expected =
-          <String, ({TerminalShellStatus status, int? exit, List<int> marks})>{
-            'a replayed screen keeps every earlier prompt': (
-              status: TerminalShellStatus.editingCommand,
+      const expected = <String, ({TerminalShellStatus status, int? exit, List<int> marks})>{
+        'a replayed screen keeps every earlier prompt': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [1],
+        ),
+        // A command without output started on the row its prompt's successor
+        // took, which the frame paints as a prompt: no mark comes back.
+        'a replayed prompt keeps the exit status of the last command': (
+          status: TerminalShellStatus.prompt,
+          exit: 1,
+          marks: [],
+        ),
+        'a replayed running command keeps the prompt above it': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [1],
+        ),
+        'a replayed alternate screen keeps the marks of both screens': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [],
+        ),
+        // C arrived on the input row: the command starts there.
+        'a replayed program started on its input row keeps the prompt behind it':
+            (
+              status: TerminalShellStatus.runningCommand,
               exit: null,
-              marks: [1],
+              marks: [0],
             ),
-            // A command without output started on the row its prompt's successor
-            // took, which the frame paints as a prompt: no mark comes back.
-            'a replayed prompt keeps the exit status of the last command': (
-              status: TerminalShellStatus.prompt,
-              exit: 1,
-              marks: [],
+        // The prompt is above the model's scrollback: the command starts
+        // on the first replayed line.
+        'a replayed running command whose prompt scrolled out keeps its mark': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [0],
+        ),
+        'a replayed running command that wrote over its prompt row keeps running':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [0],
             ),
-            'a replayed running command keeps the prompt above it': (
+        // The C comes again where it was after the saved cursor's glyph
+        // is printed again as input: no mark on the cursor's row.
+        'a replayed running command keeps the saved cursor waiting to wrap on its input':
+            (
               status: TerminalShellStatus.runningCommand,
               exit: null,
               marks: [1],
             ),
-            'a replayed alternate screen keeps the marks of both screens': (
-              status: TerminalShellStatus.editingCommand,
-              exit: null,
-              marks: [],
-            ),
-            // C arrived on the input row: the command starts there.
-            'a replayed program started on its input row keeps the prompt behind it':
-                (
-                  status: TerminalShellStatus.runningCommand,
-                  exit: null,
-                  marks: [0],
-                ),
-          };
+      };
       final seen = <String>{};
       for (final raw in cases) {
         final testCase = raw as Map<String, dynamic>;
@@ -2429,7 +2449,8 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         if (frame == null) continue;
         final name = testCase['name'] as String;
         final size = (testCase['size'] as List).cast<int>();
-        final terminal = Terminal()..resize(size[0], size[1]);
+        // As many lines as the app keeps: more than the model's scrollback.
+        final terminal = Terminal(maxLines: 10000)..resize(size[0], size[1]);
         final tracker = TerminalCommandMarkTracker()..attach(terminal);
         // The status another window left behind.
         ({TerminalShellStatus? status, int? lastExitCode}) state = (

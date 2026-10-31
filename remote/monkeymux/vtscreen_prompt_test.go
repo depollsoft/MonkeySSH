@@ -332,7 +332,7 @@ func TestRenderFrameMarksOnlyWhatTheModelMarks(t *testing.T) {
 	scrolled.Write([]byte(osc133("A;cl=line") + "$ " + osc133("B") + "yes\r\n" + osc133("C") +
 		strings.Repeat("y\r\n", vtScrollbackLimit+5)))
 	frame = string(scrolled.RenderFrame())
-	if !strings.HasPrefix(frame[strings.Index(frame, "\x1b]133;A"):], osc133("A;cl=line")+osc133("C")+"\x1b[2J\x1b[3J") ||
+	if !strings.HasPrefix(frame[strings.Index(frame, "\x1b]133;A"):], osc133("A;cl=line")+"\x1b[2J\x1b[3J"+osc133("C")) ||
 		strings.Count(frame, osc133("C")) != 1 {
 		t.Fatalf("frame of a scrolled-out prompt does not start the command first: %q", frame)
 	}
@@ -570,7 +570,7 @@ func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
 		{"output on the input row", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "cat" + osc133("C") + "out",
 			"cat" + osc133("C") + "out", 4},
 		{"prompt above the replay", earlier + osc133("A;cl=line") + "$ " + osc133("B") + "yes\r\n" + osc133("C") + strings.Repeat("y\r\n", vtScrollbackLimit+5),
-			osc133("C") + "\x1b[2J\x1b[3J", 3},
+			"\x1b[2J\x1b[3J" + osc133("C"), 3},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -582,6 +582,45 @@ func TestRenderFrameStartsTheRunningCommandAfterEarlierOnes(t *testing.T) {
 			}
 			if !strings.Contains(replay, c.want) {
 				t.Fatalf("the running command does not start after its input: %q", replay)
+			}
+			if got, want := dumpSemanticPrompt(replayFrame(s)), dumpSemanticPrompt(s); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// However the frame paints the running command's screen, the app ends at
+// running: when the command's output overwrote its whole prompt row, which
+// keeps the row's mark, and when a glyph printed again as input restores a
+// saved cursor's deferred wrap after the command's C, which then comes again
+// where it was (at mark), so the app adds no command mark on another row.
+func TestRenderFrameKeepsTheCommandRunning(t *testing.T) {
+	cases := []struct {
+		name, output, mark string
+	}{
+		{"output over its prompt row", osc133("A") + "$ " + osc133("B") + "app" + osc133("C") + "\rloading...", ""},
+		{"saved cursor deferring a wrap on input", osc133("A") + "$ " + osc133("B") + "abcdefgh\x1b7\r\n" + osc133("C") + "out",
+			"\x1b[2;1H"},
+		{"saved cursor deferring a wrap on input, cursor rows below", osc133("A") + "$ " + osc133("B") + "abcdefgh\x1b7\r\n" +
+			osc133("C") + "out\r\nmore", "\x1b[2;1H"},
+		// The C goes after the input, not at the cursor: in column 0 it
+		// would end the row's mark.
+		{"program homing the cursor onto its prompt row", osc133("A;cl=line") + "$ " + osc133("B") + "cmd" + osc133("C") +
+			"\r\n\x1b[H", "\x1b[1;6H"},
+		{"program erasing its prompt from home", osc133("A;cl=line") + "$ " + osc133("B") + "cmd" + osc133("C") +
+			"\r\n\x1b[H\x1b[J", "\x1b[1;2H"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTerminalScreen(10, 5)
+			s.Write([]byte(c.output))
+			replay := replaySequence(s)
+			if status, _ := shellStatusAfter(t, []byte(replay), "prompt", "0"); status != "running" {
+				t.Fatalf("after the replay the app shows %s, want running: %q", status, replay)
+			}
+			if c.mark != "" && strings.Count(replay, osc133("C")) != strings.Count(replay, c.mark+osc133("C")) {
+				t.Fatalf("a C lands off the command's row: %q", replay)
 			}
 			if got, want := dumpSemanticPrompt(replayFrame(s)), dumpSemanticPrompt(s); strings.Join(got, "\n") != strings.Join(want, "\n") {
 				t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
