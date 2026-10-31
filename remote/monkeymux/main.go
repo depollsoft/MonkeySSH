@@ -74,7 +74,6 @@ const (
 	piSessionActivityMatchTolerance   = 15 * time.Second
 	agentSessionStartTolerance        = 2 * time.Second
 	oscBufferLimitBytes               = 4096
-	processMetadataTimeout            = 500 * time.Millisecond
 	processMetadataInterval           = 500 * time.Millisecond
 	agentSessionTitleRefreshInterval  = 2 * time.Second
 	runCommandOutputMaxBytes          = 8 * 1024 * 1024
@@ -250,6 +249,12 @@ func stripWindowReplayTags(history []byte) []byte {
 		history = history[start+end+2:]
 	}
 }
+
+// processMetadataTimeout bounds each external probe for process and agent
+// session metadata (ps, lsof, sqlite3). A probe that runs out reads as
+// nothing found. Tests raise it: their probes run on loaded machines and
+// under the race detector, where a cold process launch can take longer.
+var processMetadataTimeout = 500 * time.Millisecond
 
 const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 

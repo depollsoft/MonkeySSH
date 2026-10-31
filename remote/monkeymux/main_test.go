@@ -5566,6 +5566,12 @@ func TestNaturalExitDeliversBufferedFinalOutput(t *testing.T) {
 }
 
 func TestCreateWindowClosesNonAgentWindowOnExit(t *testing.T) {
+	// The window runs the command in an interactive login $SHELL; the
+	// developer's own shell and startup files can outlast the deadline below.
+	setTestHomeDir(t, t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("ENV", "")
+	t.Setenv("BASH_ENV", "")
 	server := newMuxServer("test")
 	t.Cleanup(server.close)
 
