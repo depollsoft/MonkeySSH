@@ -2414,6 +2414,13 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
               exit: null,
               marks: [],
             ),
+            // C arrived on the input row: the command starts there.
+            'a replayed program started on its input row keeps the prompt behind it':
+                (
+                  status: TerminalShellStatus.runningCommand,
+                  exit: null,
+                  marks: [0],
+                ),
           };
       final seen = <String>{};
       for (final raw in cases) {

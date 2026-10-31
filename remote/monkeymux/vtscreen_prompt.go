@@ -427,9 +427,11 @@ func vtRowEmpty(row []vtCell) bool {
 // mark that C at the start of the row undoes. Any other mark is set once the
 // row is reached (beginLine), and inside a row every written cell takes the
 // content it was written as, as does a glyph printed again to restore a
-// deferred wrap (content). A command the replay shows no start of, its prompt
-// above the replayed scrollback, gets its C before anything is painted
-// (finish).
+// deferred wrap (content). A running command whose C arrived on its input
+// row starts at the first output cell after that input on the row (cell), or
+// at the cursor when nothing follows; one the replay shows no start of, its
+// prompt above the replayed scrollback, gets its C before anything is
+// painted (finish).
 type vtSemanticFrame struct {
 	state *vtSemanticState
 	shell *vtShellState
@@ -444,6 +446,16 @@ type vtSemanticFrame struct {
 	pushed   bool
 	commands bool
 	beginAt  int
+	// line is the line being painted, counted from the first painted
+	// scrollback line, and command the last cell written as prompt or input
+	// (line -1 for none): a running command's output starts after it.
+	line    int
+	command vtCellPosition
+}
+
+// vtCellPosition is a cell of a frame: its line in paint order and column.
+type vtCellPosition struct {
+	line, col int
 }
 
 // semanticFrame returns the marks to paint g with, and the scrollback when
@@ -461,7 +473,29 @@ func (s *terminalScreen) semanticFrame(g *vtGrid, withScrollback bool) *vtSemant
 		!s.semanticMarked(g, withScrollback) {
 		return nil
 	}
-	return &vtSemanticFrame{state: state, shell: &s.shell}
+	return &vtSemanticFrame{state: state, shell: &s.shell, command: s.lastSemanticCell(g, withScrollback)}
+}
+
+// lastSemanticCell is the last cell of g, after the scrollback when
+// withScrollback is set, that was written as prompt or input, in paint order.
+func (s *terminalScreen) lastSemanticCell(g *vtGrid, withScrollback bool) vtCellPosition {
+	history := 0
+	if withScrollback {
+		history = s.scrollback.len()
+	}
+	for r := len(g.rows) - 1; r >= 0; r-- {
+		for col := len(g.rows[r]) - 1; col >= 0; col-- {
+			if g.rows[r][col].sem != vtSemOutput {
+				return vtCellPosition{history + r, col}
+			}
+		}
+	}
+	for i := history - 1; i >= 0; i-- {
+		if sem := s.scrollback.at(i).sem; len(sem) > 0 {
+			return vtCellPosition{i, len(sem) - 1}
+		}
+	}
+	return vtCellPosition{-1, -1}
 }
 
 func (s *terminalScreen) semanticMarked(g *vtGrid, withScrollback bool) bool {
@@ -518,7 +552,7 @@ func (f *vtSemanticFrame) push(out []byte) []byte {
 	return out
 }
 
-// beginLine is called with the cursor at the start of a line with mark, which
+// beginLine is called with the cursor at the start of line, with mark, which
 // a newline or a soft wrap reached when indexed is set, and which has a
 // written cell or the cursor on it when written is set. An unmarked line
 // after a prompt or its input is where its command's output begins (C, which
@@ -526,10 +560,11 @@ func (f *vtSemanticFrame) push(out []byte) []byte {
 // newline or a wrap), unless it is a blank line the shell never reached. On a
 // marked line the mark the client gave the row on reaching it is kept; any
 // other is set, which makes the next cells prompt.
-func (f *vtSemanticFrame) beginLine(out []byte, mark uint8, indexed, written bool) []byte {
+func (f *vtSemanticFrame) beginLine(out []byte, line int, mark uint8, indexed, written bool) []byte {
 	if f == nil {
 		return out
 	}
+	f.line = line
 	if mark == vtPromptNone {
 		if indexed && f.emitted != vtSemOutput || !indexed && written && (f.emitted != vtSemOutput || f.pushed) {
 			return f.commandMark(out)
@@ -549,6 +584,20 @@ func (f *vtSemanticFrame) beginLine(out []byte, mark uint8, indexed, written boo
 func (f *vtSemanticFrame) commandMark(out []byte) []byte {
 	f.emitted, f.status, f.pushed, f.commands = vtSemOutput, vtShellRunning, false, true
 	return append(out, "\x1b]133;C\x07"...)
+}
+
+// cell is called before the cell at col of the line being painted is
+// written as sem. Output after the last prompt or input cell on its row is
+// where a running command, whose C arrived on that row, started.
+func (f *vtSemanticFrame) cell(out []byte, col int, sem uint8) []byte {
+	if f == nil || sem == f.emitted {
+		return out
+	}
+	if sem == vtSemOutput && f.shell.status == vtShellRunning &&
+		f.line == f.command.line && col > f.command.col {
+		return f.commandMark(out)
+	}
+	return f.content(out, sem)
 }
 
 // content is called before a cell is written as sem, or printed again as it
@@ -582,9 +631,10 @@ func (f *vtSemanticFrame) outputMark(out []byte) []byte {
 // painted cell was, and the app showing the status the model has: the prompt
 // (D, with the exit status) or the command being edited (B), set before the
 // content when the content alone would leave the app elsewhere, or a command
-// running, whose C the frame emitted where its output begins, or, when its
-// prompt is above what the frame replays, puts before everything painted,
-// where the app marks the first replayed line. The content comes first:
+// running, whose C the frame emitted where its output begins, or else puts at
+// the cursor, after the input nothing follows on its row, or, when its prompt
+// is above what the frame replays, before everything painted, where the app
+// marks the first replayed line. The content comes first:
 // input that ended with its line (I) before its command started leaves the
 // app showing the prompt rather than the command being edited. The cursor's
 // row is painted already, so only the content is set, never a mark.
@@ -593,8 +643,12 @@ func (f *vtSemanticFrame) finish(out []byte) []byte {
 		return out
 	}
 	if f.shell.status == vtShellRunning && !f.commands {
-		out = slices.Insert(out, f.beginAt, []byte("\x1b]133;C\x07")...)
-		f.commands = true
+		if f.command.line < 0 {
+			out = slices.Insert(out, f.beginAt, []byte("\x1b]133;C\x07")...)
+			f.commands = true
+		} else {
+			out = f.commandMark(out)
+		}
 	}
 	if f.state.content == vtSemInput && f.state.eolInput {
 		f.status = vtShellEditing

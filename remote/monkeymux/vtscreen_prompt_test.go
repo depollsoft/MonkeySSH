@@ -519,3 +519,34 @@ func TestRenderFrameLeavesUnmarkedPromptRowsUnmarked(t *testing.T) {
 		})
 	}
 }
+
+// A command whose C arrived on its input row, with no newline before it,
+// starts there: at the first output cell after the input on that row, or at
+// the cursor when nothing follows, and never with a D after its C, so the
+// app reads a program started that way as running rather than at a prompt.
+func TestRenderFrameStartsACommandOnItsInputRow(t *testing.T) {
+	cases := []struct {
+		name, output, want string
+	}{
+		{"output on the input row", osc133("A") + "$ " + osc133("B") + "vi" + osc133("C") + "out", "vi" + osc133("C") + "out"},
+		{"nothing after the input", osc133("A") + "$ " + osc133("B") + "vi" + osc133("C"), "\x1b[1;5H" + osc133("C")},
+		{"alternate screen program", osc133("A") + "$ " + osc133("B") + "vi" + osc133("C") + "\x1b[?1049hTUI", "\x1b[1;5H" + osc133("C")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTerminalScreen(20, 5)
+			s.Write([]byte(c.output))
+			replay := replaySequence(s)
+			if status, _ := shellStatusAfter(t, []byte(replay), "prompt", "0"); status != "running" {
+				t.Fatalf("after the replay the app shows %s, want running: %q", status, replay)
+			}
+			if !strings.Contains(replay, c.want) || strings.Count(replay, osc133("C")) != 1 {
+				t.Fatalf("the command does not start on its input row: %q", replay)
+			}
+			want := dumpSemanticPrompt(s)
+			if got := dumpSemanticPrompt(replayFrame(s)); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("frame lost marks\n got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}

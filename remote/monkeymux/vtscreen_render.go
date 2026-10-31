@@ -122,6 +122,11 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 	softWraps := s.renderedSoftWraps(g, withScrollback)
 	marks := s.semanticFrame(g, withScrollback)
 	out = marks.begin(out)
+	// Lines are counted from the first painted scrollback line for marks.
+	history := 0
+	if withScrollback {
+		history = s.scrollback.len()
+	}
 	if softWraps && !s.autowrap {
 		out = append(out, "\x1b[?7h"...)
 	}
@@ -131,7 +136,6 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		// last line's cells when its own wrap needed them.
 		var decoder vtLineDecoder
 		var prev []vtCell
-		history := s.scrollback.len()
 		for i := range history {
 			line := s.scrollback.at(i)
 			var cells []vtCell
@@ -150,7 +154,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 			case i > 0:
 				out = append(out, "\x1b[0m\r\n"...)
 			}
-			out = marks.beginLine(out, line.prompt, i > 0, true)
+			out = marks.beginLine(out, i, line.prompt, i > 0, true)
 			if marks != nil && (line.prompt != vtPromptNone || len(line.sem) > 0) {
 				// A line with a mark, or a cell written as prompt or input,
 				// is painted from its cells, so they travel with it.
@@ -173,7 +177,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		} else {
 			out = append(out, "\x1b[0m\r\n"...)
 		}
-		out = marks.beginLine(out, g.prompt[0], true, true)
+		out = marks.beginLine(out, history, g.prompt[0], true, true)
 		out = marks.push(out)
 		for i := 1; i < s.height; i++ {
 			out = append(out, "\r\n"...)
@@ -186,7 +190,7 @@ func (s *terminalScreen) appendGridFrame(out []byte, g *vtGrid, withScrollback b
 		} else {
 			out = appendVTCursorPosition(out, r, 0)
 		}
-		out = marks.beginLine(out, g.prompt[r], softWrap, !vtRowReclaimable(row) || r == g.cursorRow)
+		out = marks.beginLine(out, history+r, g.prompt[r], softWrap, !vtRowReclaimable(row) || r == g.cursorRow)
 		before := len(out)
 		out = renderVTCellsMarked(out, row, marks)
 		full := len(row) > 0 && !row[len(row)-1].isDefaultUnwritten()
@@ -438,7 +442,7 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame) []byt
 			i = run
 			continue
 		}
-		out = marks.content(out, cell.sem)
+		out = marks.cell(out, i, cell.sem)
 		if cell.attrs != current {
 			out = appendVTSGR(out, cell.attrs)
 			current = cell.attrs
