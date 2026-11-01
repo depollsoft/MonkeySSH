@@ -2030,8 +2030,10 @@ func (s *terminalScreen) print(r rune) {
 	if s.insertMode {
 		// Never split a wide glyph: blank the pair straddling the insertion
 		// point, and the pair whose continuation falls off the right edge.
+		// The client erases the first half and the glyph at the edge in the
+		// current background, and moves the second half on as it was.
 		if row[g.cursorCol].width == 0 && g.cursorCol > 0 {
-			row[g.cursorCol-1] = blankedHalf(row[g.cursorCol-1])
+			row[g.cursorCol-1] = s.blankCell()
 			row[g.cursorCol] = blankedHalf(row[g.cursorCol])
 		}
 		if g.cursorCol+width <= len(row) {
@@ -2041,7 +2043,7 @@ func (s *terminalScreen) print(r rune) {
 			row[i] = vtCell{width: 1}
 		}
 		if last := len(row) - 1; last >= 0 && row[last].width == 2 {
-			row[last] = blankedHalf(row[last])
+			row[last] = s.blankCell()
 		}
 		s.shiftKittyPlacementCells(g.cursorCol, width)
 	}
@@ -2508,6 +2510,9 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		}
 		// A replay prefix ends with it, so the client ends an open prompt.
 		s.semantic().resetCursor()
+		// It erases only the scrollback, so a deferred wrap stays, as in the
+		// client and Ghostty.
+		return
 	}
 	g.pendingWrap = false
 }
@@ -2586,8 +2591,11 @@ func (s *terminalScreen) insertChars(n int) {
 	if n > s.width-col {
 		n = s.width - col
 	}
+	// As in the client's BufferLine.insertCells: the first half of a wide
+	// glyph the insertion splits, and one at the edge, are erased in the
+	// current background; the second half moves on as it was.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 		row[col] = blankedHalf(row[col])
 	}
 	copy(row[col+n:], row[col:s.width-n])
@@ -2595,7 +2603,7 @@ func (s *terminalScreen) insertChars(n int) {
 		row[i] = s.blankCell()
 	}
 	if row[s.width-1].width == 2 {
-		row[s.width-1] = blankedHalf(row[s.width-1])
+		row[s.width-1] = s.blankCell()
 	}
 	s.shiftKittyPlacementCells(col, n)
 	g.pendingWrap = false
@@ -2608,8 +2616,11 @@ func (s *terminalScreen) deleteChars(n int) {
 	if n > s.width-col {
 		n = s.width - col
 	}
+	// As in the client's BufferLine.removeCells: the first half of a wide
+	// glyph the deletion splits is erased in the current background; a second
+	// half moved to the cursor stays as it was.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 	}
 	copy(row[col:], row[col+n:])
 	for i := s.width - n; i < s.width; i++ {

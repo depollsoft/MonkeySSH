@@ -57,5 +57,7 @@
 {"name": "a glyph narrowed while waiting to wrap takes the next one beside it", "size": [4, 2], "write": "ab\u231a\ufe0ex", "rows": [["a", "b", "\u231a\ufe0e", "x"]], "cursor": [0, 3, true], "wrapped": []},
 {"name": "a glyph narrowed while waiting to wrap takes the next one beside it without autowrap", "size": [4, 2], "write": "\u001b[?7lab\u231a\ufe0exy", "rows": [["a", "b", "\u231a\ufe0e", "y"]], "cursor": [0, 3, true], "wrapped": []},
 {"name": "tmux redrawing a conjunct by backspacing keeps every glyph", "size": [10, 2], "write": "\u0915\b\u0915\u094d\u0937\b\u0937\u093f", "rows": [["\u0915\u094d", "\u0937\u093f", "<"]], "cursor": [0, 3, false], "wrapped": []},
-{"name": "a wide glyph that does not fit erases the wide glyph ending in the last column", "size": [3, 2], "write": "a\ud83d\udc68\u001b[3G\ud83d\udc69", "rows": [["a"], ["\ud83d\udc69", "<"]], "cursor": [1, 2, false], "wrapped": [1]}
+{"name": "a wide glyph that does not fit erases the wide glyph ending in the last column", "size": [3, 2], "write": "a\ud83d\udc68\u001b[3G\ud83d\udc69", "rows": [["a"], ["\ud83d\udc69", "<"]], "cursor": [1, 2, false], "wrapped": [1]},
+{"name": "a scrollback erase keeps a deferred wrap", "size": [4, 2], "write": "abcd\u001b[3Jx", "rows": [["a", "b", "c", "d"], ["x"]], "cursor": [1, 1, false], "wrapped": [1]},
+{"name": "designating a charset after DECRC leaves the saved one", "size": [4, 2], "write": "\u001b7\u001b8\u001b(0\u001b8z", "rows": [["z"]], "cursor": [0, 1, false], "wrapped": []}
 ]

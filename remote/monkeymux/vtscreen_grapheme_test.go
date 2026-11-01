@@ -1020,27 +1020,32 @@ func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
 	}
 }
 
-// TestBlankingHalfAWideGlyphUsesTheCurrentBackground covers the other half of
-// a wide glyph that an erase, a glyph printed over one half, or a wide glyph
-// that does not fit in the last column blanks: it takes the current
-// background, as in the client (grapheme_cluster_test.dart) and xterm.
+// TestBlankingHalfAWideGlyphUsesTheCurrentBackground covers the first half of
+// a wide glyph that an erase, a glyph printed or inserted over its second
+// half, ICH, DCH or a wide glyph that does not fit in the last column blanks:
+// it is erased in the current background alone, as in the client
+// (grapheme_cluster_test.dart), xterm.js and Ghostty.
 func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
-	blue := vtColor{kind: vtColorIndexed, index: 4}
+	blank := vtCell{width: 1, attrs: vtAttrs{bg: vtColor{kind: vtColorIndexed, index: 4}}}
 	for _, c := range []struct {
 		stream string
-		width  int
 		blanks []int
 	}{
-		{"\x1b[41m\x1b[1;3H\u754c\x1b[44m\x1b[1;4H\u754c", 4, []int{2, 3}},
-		{"\x1b[41m\u754c\x1b[44m\x1b[2G\x1b[X", 4, []int{0, 1}},
-		{"\x1b[41m\u754c\x1b[44m\x1b[1;1H\x1b[X", 4, []int{0, 1}},
-		{"\x1b[41m\u754c\x1b[44m\x1b[2Gx", 4, []int{0}},
+		{"\x1b[41m\x1b[1;3H\u754c\x1b[32;44;7m\x1b[1;4H\u754c", []int{2, 3}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[X", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[1;1H\x1b[X", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[K", []int{0, 1, 2, 3}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2Gx", []int{0}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[4hx", []int{0}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[@", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[P", []int{0, 3}},
+		{"\x1b[41m\x1b[1;3H\u754c\x1b[32;44;7m\x1b[1;1H\x1b[@", []int{0}},
 	} {
-		s := newTerminalScreen(c.width, 3)
+		s := newTerminalScreen(4, 3)
 		s.Write([]byte(c.stream))
 		for _, col := range c.blanks {
-			if cell := s.grid().rows[0][col]; cell.r != 0 || cell.width != 1 || cell.attrs.bg != blue {
-				t.Fatalf("%+q left column %d as %+v, want a blank in the current background", c.stream, col, cell)
+			if cell := s.grid().rows[0][col]; !vtRowsEqual([][]vtCell{{cell}}, [][]vtCell{{blank}}) {
+				t.Fatalf("%+q left column %d as %+v, want a blank in the current background alone", c.stream, col, cell)
 			}
 		}
 		requirePromptFrameRoundTrip(t, s, c.stream)
