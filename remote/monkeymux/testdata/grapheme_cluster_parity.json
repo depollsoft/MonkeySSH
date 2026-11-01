@@ -30,7 +30,7 @@
 {"name": "Hangul jamo join into one syllable", "size": [10, 2], "write": "\u1100\u1161\u11a8x", "rows": [["\u1100\u1161\u11a8", "<", "x"]], "cursor": [0, 3, false], "wrapped": []},
 {"name": "a spacing mark widens its cluster", "size": [10, 2], "write": "\u0915\u093fx", "rows": [["\u0915\u093f", "<", "x"]], "cursor": [0, 3, false], "wrapped": []},
 {"name": "a spacing mark in legacy mode takes its own cell", "size": [10, 2], "write": "\u001b[?2027l\u0915\u093fx", "rows": [["\u0915", "\u093f", "x"]], "cursor": [0, 3, false], "wrapped": []},
-{"name": "a conjunct joins across a virama", "size": [10, 2], "write": "\u0915\u094d\u0937x", "rows": [["\u0915\u094d\u0937", "<", "x"]], "cursor": [0, 3, false], "wrapped": []},
+{"name": "a virama leaves the next consonant a cell of its own, as tmux and wcwidth do", "size": [10, 2], "write": "\u0915\u094d\u0937x", "rows": [["\u0915\u094d", "\u0937", "x"]], "cursor": [0, 3, false], "wrapped": []},
 {"name": "a conjunct in legacy mode keeps the virama on the first consonant", "size": [10, 2], "write": "\u001b[?2027l\u0915\u094d\u0937x", "rows": [["\u0915\u094d", "\u0937", "x"]], "cursor": [0, 3, false], "wrapped": []},
 {"name": "turning clustering off ends the cluster", "size": [10, 2], "write": "\ud83d\udc68\u001b[?2027l\u200d\ud83d\udc69", "rows": [["\ud83d\udc68\u200d", "<", "\ud83d\udc69", "<"]], "cursor": [0, 4, false], "wrapped": []},
 {"name": "turning clustering on continues a legacy cell", "size": [10, 2], "write": "\u001b[?2027l\ud83d\udc68\u200d\u001b[?2027h\ud83d\udc69x", "rows": [["\ud83d\udc68\u200d\ud83d\udc69", "<", "x"]], "cursor": [0, 3, false], "wrapped": []},
@@ -55,5 +55,6 @@
 {"name": "a wide glyph on a one-column screen stays in its row", "size": [1, 2], "write": "\ud83c\udffd", "rows": [["\ud83c\udffd"]], "cursor": [0, 0, true], "wrapped": []},
 {"name": "a wide glyph on a one-column screen without autowrap is replaced in place", "size": [1, 2], "write": "\u001b[?7l\ud83c\udffdx", "rows": [["x"]], "cursor": [0, 0, true], "wrapped": []},
 {"name": "a glyph narrowed while waiting to wrap takes the next one beside it", "size": [4, 2], "write": "ab\u231a\ufe0ex", "rows": [["a", "b", "\u231a\ufe0e", "x"]], "cursor": [0, 3, true], "wrapped": []},
-{"name": "a glyph narrowed while waiting to wrap takes the next one beside it without autowrap", "size": [4, 2], "write": "\u001b[?7lab\u231a\ufe0exy", "rows": [["a", "b", "\u231a\ufe0e", "y"]], "cursor": [0, 3, true], "wrapped": []}
+{"name": "a glyph narrowed while waiting to wrap takes the next one beside it without autowrap", "size": [4, 2], "write": "\u001b[?7lab\u231a\ufe0exy", "rows": [["a", "b", "\u231a\ufe0e", "y"]], "cursor": [0, 3, true], "wrapped": []},
+{"name": "tmux redrawing a conjunct by backspacing keeps every glyph", "size": [10, 2], "write": "\u0915\b\u0915\u094d\u0937\b\u0937\u093f", "rows": [["\u0915\u094d", "\u0937\u093f", "<"]], "cursor": [0, 3, false], "wrapped": []}
 ]

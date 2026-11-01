@@ -34,7 +34,8 @@ void main() {
   // The Unicode break tests, which the MonkeyMux screen model runs through
   // its port of the same rules. Tests with controls are skipped: terminals
   // never print them. Ghostty's tailoring breaks before an emoji modifier
-  // that does not follow an emoji modifier base.
+  // that does not follow an emoji modifier base, and without GB9c a
+  // consonant joins only a prepended mark.
   test('graphemeBreak passes the Unicode grapheme break tests', () {
     final failures = <String>[];
     var tested = 0;
@@ -56,6 +57,11 @@ void main() {
                 GraphemeClass.emojiModifier &&
             graphemeProperty(codePoints[i]) & 0x1F !=
                 GraphemeClass.emojiModifierBase) {
+          want = true;
+        }
+        if (graphemeProperty(codePoints[i + 1]) & 0x1F ==
+                GraphemeClass.incbConsonant &&
+            graphemeProperty(codePoints[i]) & 0x1F != GraphemeClass.prepend) {
           want = true;
         }
         if (graphemeBreak(codePoints[i], codePoints[i + 1], state) != want) {
