@@ -2080,7 +2080,9 @@ func (s *terminalScreen) wrapToNextLine() {
 	g := s.grid()
 	g.cursorCol = 0
 	s.index()
-	g.wrapped[g.cursorRow] = true
+	// On a one-row alternate screen the row it continues has scrolled away
+	// for good, and a row continues nothing then, as in the client.
+	g.wrapped[g.cursorRow] = !s.altActive || s.height > 1
 }
 
 // attachCombining adds r, a code point of width 0, to the glyph before the

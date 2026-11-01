@@ -334,7 +334,10 @@ class Buffer {
   void _wrapToNextLine() {
     index();
     setCursorX(0);
-    currentLine.isWrapped = true;
+    // On a one-row alternate screen the line it continues has scrolled away
+    // for good, and a line continues nothing then, as in the MonkeyMux
+    // screen model.
+    currentLine.isWrapped = !isAltBuffer || viewHeight > 1;
   }
 
   /// The line at the current cursor position.
@@ -472,12 +475,17 @@ class Buffer {
     final count = lines < regionHeight ? lines : regionHeight;
     if (count <= 0) return;
     if (_marginTop == 0 && !isAltBuffer) {
+      var evicted = false;
       for (var i = 0; i < count; i++) {
         if (this.lines.isFull) {
           graphics.removeGraphicsAnchoredToLine(this.lines[0]);
+          evicted = true;
         }
         this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
       }
+      // The oldest line kept continues nothing once the one before it is
+      // dropped, as when the MonkeyMux screen model trims its scrollback.
+      if (evicted) _endContinuation(0);
       _endContinuation(absoluteMarginBottom + 1);
       return;
     }

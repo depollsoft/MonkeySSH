@@ -2279,5 +2279,33 @@
     ]
    }
   ]
+ },
+ {
+  "expect": [
+   "- |j|o",
+   "cursor 1,0 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a one-row alternate screen keeps nothing continuing through ED 3 and a resize",
+  "size": [
+   4,
+   1
+  ],
+  "steps": [
+   {
+    "write": "\u001b[?1049habcde"
+   },
+   {
+    "write": "\u001b[3J"
+   },
+   {
+    "resize": [
+     5,
+     1
+    ]
+   },
+   {
+    "write": "fghij"
+   }
+  ]
  }
 ]
