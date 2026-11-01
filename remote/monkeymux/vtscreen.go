@@ -737,6 +737,8 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 			g.cursorRow -= fromTop
 			s.savedAlt.row -= fromTop
 			drop -= fromTop
+			// The new top row continues nothing, as in the client.
+			g.wrapped[0] = false
 		}
 		if drop > 0 {
 			g.rows = g.rows[:len(g.rows)-drop]
@@ -1009,6 +1011,8 @@ func (s *terminalScreen) trimScrollback() {
 	}
 	if trimmed && b.len() > 0 {
 		b.at(0).wrapped = false
+	} else if trimmed {
+		s.main.wrapped[0] = false
 	}
 }
 
@@ -1221,7 +1225,7 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 			count = s.width - col
 		}
 		if row[col].width == 0 && col > 0 {
-			row[col-1] = blankedHalf(row[col-1])
+			row[col-1] = s.blankCell()
 		}
 		for j := 0; j < count; j++ {
 			row[col+j] = vtCell{r: rune(data[i+j]), width: 1, sem: sem, attrs: s.attrs}
@@ -2016,7 +2020,7 @@ func (s *terminalScreen) print(r rune) {
 		// room for it anywhere, and prints it there without its second half,
 		// as the client does.
 		if s.autowrap {
-			g.rows[g.cursorRow][g.cursorCol] = s.blankCell()
+			s.eraseCells(g.rows[g.cursorRow], g.cursorCol, g.cursorCol+1)
 			s.wrapToNextLine()
 		} else {
 			g.cursorCol = s.width - 2
@@ -2026,8 +2030,10 @@ func (s *terminalScreen) print(r rune) {
 	if s.insertMode {
 		// Never split a wide glyph: blank the pair straddling the insertion
 		// point, and the pair whose continuation falls off the right edge.
+		// The client erases the first half and the glyph at the edge in the
+		// current background, and moves the second half on as it was.
 		if row[g.cursorCol].width == 0 && g.cursorCol > 0 {
-			row[g.cursorCol-1] = blankedHalf(row[g.cursorCol-1])
+			row[g.cursorCol-1] = s.blankCell()
 			row[g.cursorCol] = blankedHalf(row[g.cursorCol])
 		}
 		if g.cursorCol+width <= len(row) {
@@ -2037,14 +2043,15 @@ func (s *terminalScreen) print(r rune) {
 			row[i] = vtCell{width: 1}
 		}
 		if last := len(row) - 1; last >= 0 && row[last].width == 2 {
-			row[last] = blankedHalf(row[last])
+			row[last] = s.blankCell()
 		}
 		s.shiftKittyPlacementCells(g.cursorCol, width)
 	}
 	col := g.cursorCol
-	// Overwriting half of a wide glyph blanks the other half.
+	// Overwriting half of a wide glyph blanks the other half: the first one
+	// in the current background, as the client erases it.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 	}
 	if width == 1 && row[col].width == 2 && col+1 < len(row) {
 		row[col+1] = blankedHalf(row[col+1])
@@ -2073,7 +2080,9 @@ func (s *terminalScreen) wrapToNextLine() {
 	g := s.grid()
 	g.cursorCol = 0
 	s.index()
-	g.wrapped[g.cursorRow] = true
+	// On a one-row alternate screen the row it continues has scrolled away
+	// for good, and a row continues nothing then, as in the client.
+	g.wrapped[g.cursorRow] = !s.altActive || s.height > 1
 }
 
 // attachCombining adds r, a code point of width 0, to the glyph before the
@@ -2495,12 +2504,17 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		// this erases nothing, as in the client's Buffer.clearScrollback.
 		if !s.altActive {
 			s.scrollback = vtScrollback{}
+			// The top row continues nothing now, as in the client.
+			g.wrapped[0] = false
 			// The client empties its own, however long.
 			s.kittyEvictedPlaceholders = [4]uint64{}
 			s.dropKittyScrollbackPlacements()
 		}
 		// A replay prefix ends with it, so the client ends an open prompt.
 		s.semantic().resetCursor()
+		// It erases only the scrollback, so a deferred wrap stays, as in the
+		// client and Ghostty.
+		return
 	}
 	g.pendingWrap = false
 }
@@ -2553,11 +2567,13 @@ func (s *terminalScreen) eraseLine(mode int) {
 func (s *terminalScreen) eraseCells(row []vtCell, from, to int) {
 	from = clampInt(from, 0, len(row))
 	to = clampInt(to, 0, len(row))
+	// The other half of a wide glyph the range cuts is erased with it, in
+	// the current background, as the client's BufferLine.eraseRange does.
 	if from > 0 && from < len(row) && row[from].width == 0 {
-		row[from-1] = blankedHalf(row[from-1])
+		row[from-1] = s.blankCell()
 	}
 	if to < len(row) && row[to].width == 0 {
-		row[to] = blankedHalf(row[to])
+		row[to] = s.blankCell()
 	}
 	for i := from; i < to; i++ {
 		row[i] = s.blankCell()
@@ -2577,8 +2593,11 @@ func (s *terminalScreen) insertChars(n int) {
 	if n > s.width-col {
 		n = s.width - col
 	}
+	// As in the client's BufferLine.insertCells: the first half of a wide
+	// glyph the insertion splits, and one at the edge, are erased in the
+	// current background; the second half moves on as it was.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 		row[col] = blankedHalf(row[col])
 	}
 	copy(row[col+n:], row[col:s.width-n])
@@ -2586,7 +2605,7 @@ func (s *terminalScreen) insertChars(n int) {
 		row[i] = s.blankCell()
 	}
 	if row[s.width-1].width == 2 {
-		row[s.width-1] = blankedHalf(row[s.width-1])
+		row[s.width-1] = s.blankCell()
 	}
 	s.shiftKittyPlacementCells(col, n)
 	g.pendingWrap = false
@@ -2599,8 +2618,11 @@ func (s *terminalScreen) deleteChars(n int) {
 	if n > s.width-col {
 		n = s.width - col
 	}
+	// As in the client's BufferLine.removeCells: the first half of a wide
+	// glyph the deletion splits is erased in the current background; a second
+	// half moved to the cursor stays as it was.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 	}
 	copy(row[col:], row[col+n:])
 	for i := s.width - n; i < s.width; i++ {

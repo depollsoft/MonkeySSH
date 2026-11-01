@@ -658,6 +658,23 @@ void main() {
     expect(terminal.buffer.lines[9].toString(), 'line10');
   });
 
+  group('a line whose predecessor is dropped', () {
+    test('continues nothing, before and after a scrollback erase', () {
+      // maxLines equal to the screen height keeps no scrollback, so the row
+      // a soft wrap continued from leaves as soon as it scrolls off.
+      final terminal = Terminal(maxLines: 24)..resize(4, 24);
+      terminal.write('x' * 97);
+      expect(terminal.buffer.height, terminal.viewHeight);
+      expect(terminal.buffer.lines[0].isWrapped, isFalse);
+      expect(terminal.buffer.lines[1].isWrapped, isTrue);
+
+      terminal.write('\x1b[3J');
+
+      expect(terminal.buffer.lines[0].isWrapped, isFalse);
+      expect(terminal.buffer.lines[1].isWrapped, isTrue);
+    });
+  });
+
   group('Buffer.eraseDisplayFromCursor()', () {
     test('works', () {
       final terminal = Terminal();

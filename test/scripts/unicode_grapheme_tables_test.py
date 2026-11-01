@@ -18,32 +18,23 @@ C = generator.CLASS
 
 
 def grapheme_break(gb1, gb2, state):
-    """uucode's computeGraphemeBreakNoControl, except that GB9c needs a
-    consonant before the linker, as UAX #29 says. state is [incb, base]: incb
-    is what the code points up to gb1 end with, 'consonant' (a consonant, then
-    any InCB extends) or 'linker' (one of those, then a linker and any further
-    linkers and extends)."""
+    """uucode's computeGraphemeBreakNoControl without GB9c: a terminal gives a
+    consonant after a virama a cell of its own, as tmux and wcwidth do. state
+    is [base]."""
     def extend(gb):
         return gb in (C['zwnj'], C['incb_extend'], C['incb_linker_extend'])
 
     def pictographic(gb):
         return gb in (C['extended_pictographic'], C['emoji_modifier_base'])
 
-    if gb1 == C['incb_consonant']:
-        state[0] = 'consonant'
-    elif gb1 in (C['incb_linker_extend'], C['incb_linker_other']):
-        state[0] = 'linker' if state[0] != 'none' else 'none'
-    elif gb1 not in (C['incb_extend'], C['zwj']):
-        state[0] = 'none'
-    after_linker = state[0] == 'linker'
     joins_emoji = (C['incb_extend'], C['incb_linker_extend'], C['zwnj'], C['zwj'],
                    C['extended_pictographic'], C['emoji_modifier_base'], C['emoji_modifier'])
-    if state[1] == 'ri':
+    if state[0] == 'ri':
         if gb1 != C['regional_indicator'] or gb2 != C['regional_indicator']:
-            state[1] = 'default'
-    elif state[1] == 'pict':
+            state[0] = 'default'
+    elif state[0] == 'pict':
         if gb1 not in joins_emoji or gb2 not in joins_emoji:
-            state[1] = 'default'
+            state[0] = 'default'
     if gb1 == C['l'] and gb2 in (C['l'], C['v'], C['lv'], C['lvt']):
         return False
     if gb1 in (C['lv'], C['v']) and gb2 in (C['v'], C['t']):
@@ -52,27 +43,24 @@ def grapheme_break(gb1, gb2, state):
         return False
     if gb2 == C['spacing_mark'] or gb1 == C['prepend']:
         return False
-    if after_linker and gb2 == C['incb_consonant']:
-        state[1] = 'default'
-        return False
     if pictographic(gb1):
         if extend(gb2) or gb2 == C['zwj']:
-            state[1] = 'pict'
+            state[0] = 'pict'
             return False
         if gb1 == C['emoji_modifier_base'] and gb2 == C['emoji_modifier']:
-            state[1] = 'pict'
+            state[0] = 'pict'
             return False
-    elif state[1] == 'pict':
+    elif state[0] == 'pict':
         if (extend(gb1) or gb1 == C['emoji_modifier']) and (extend(gb2) or gb2 == C['zwj']):
             return False
-        state[1] = 'default'
+        state[0] = 'default'
         if gb1 == C['zwj'] and pictographic(gb2):
             return False
     if gb1 == C['regional_indicator'] and gb2 == C['regional_indicator']:
-        if state[1] == 'default':
-            state[1] = 'ri'
+        if state[0] == 'default':
+            state[0] = 'ri'
             return False
-        state[1] = 'default'
+        state[0] = 'default'
         return True
     return not (extend(gb2) or gb2 == C['zwj'])
 
@@ -102,8 +90,10 @@ class GraphemeTableTest(unittest.TestCase):
 
     def test_break_rules_pass_the_unicode_tests(self):
         """The rules both sides port, against GraphemeBreakTest.txt, with
-        uucode's tailoring: an emoji modifier joins only an emoji modifier base.
-        Tests with controls are skipped, as terminals never print them."""
+        uucode's tailoring (an emoji modifier joins only an emoji modifier
+        base) and without GB9c (a consonant joins only after a prepended
+        mark). Tests with controls are skipped, as terminals never print
+        them."""
         failures = []
         for line in generator.break_tests(Path(UCD_DIR)):
             parts = line.split()
@@ -111,11 +101,13 @@ class GraphemeTableTest(unittest.TestCase):
             expected = [part == '÷' for part in parts[2:-1:2]]
             if any(cp in _CONTROLS for cp in code_points):
                 continue
-            state = ['none', 'default']
+            state = ['default']
             for i, want in enumerate(expected):
                 gb1 = self.table[code_points[i]] & 0x1F
                 gb2 = self.table[code_points[i + 1]] & 0x1F
                 if gb2 == C['emoji_modifier'] and gb1 != C['emoji_modifier_base']:
+                    want = True
+                if gb2 == C['incb_consonant'] and gb1 != C['prepend']:
                     want = True
                 if grapheme_break(gb1, gb2, state) != want:
                     failures.append(line)

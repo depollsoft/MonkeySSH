@@ -227,14 +227,18 @@ class BufferLine with IndexedItem {
     _data[offset + _cellUnderlineColor] = style.underlineColor;
   }
 
+  /// Erases a cell to a blank in [style]'s background, the only part of the
+  /// rendition an erase keeps, as in xterm.js, Ghostty and the MonkeyMux
+  /// screen model: a blank painted in an inverse or coloured foreground
+  /// would come back without it in a MonkeyMux replay.
   void eraseCell(int index, CursorStyle style) {
     _clearGraphemeExtras(index);
     final offset = index * _cellSize;
-    _data[offset + _cellForeground] = style.foreground;
+    _data[offset + _cellForeground] = 0;
     _data[offset + _cellBackground] = style.background;
-    _data[offset + _cellAttributes] = style.attrs;
+    _data[offset + _cellAttributes] = 0;
     _data[offset + _cellContent] = 0;
-    _data[offset + _cellUnderlineColor] = style.underlineColor;
+    _data[offset + _cellUnderlineColor] = 0;
   }
 
   void resetCell(int index) {

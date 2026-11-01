@@ -171,8 +171,7 @@ class Buffer {
       // autowrap, take the last two columns) instead of splitting it across
       // rows.
       if (terminal.autoWrapMode) {
-        graphics.removePlaceholderAt(currentLine, _cursorX);
-        currentLine.eraseCell(_cursorX, terminal.cursor);
+        _eraseRange(currentLine, _cursorX, _cursorX + 1);
         _wrapToNextLine();
       } else {
         _cursorX = viewWidth - 2;
@@ -335,7 +334,10 @@ class Buffer {
   void _wrapToNextLine() {
     index();
     setCursorX(0);
-    currentLine.isWrapped = true;
+    // On a one-row alternate screen the line it continues has scrolled away
+    // for good, and a line continues nothing then, as in the MonkeyMux
+    // screen model.
+    currentLine.isWrapped = !isAltBuffer || viewHeight > 1;
   }
 
   /// The line at the current cursor position.
@@ -473,12 +475,17 @@ class Buffer {
     final count = lines < regionHeight ? lines : regionHeight;
     if (count <= 0) return;
     if (_marginTop == 0 && !isAltBuffer) {
+      var evicted = false;
       for (var i = 0; i < count; i++) {
         if (this.lines.isFull) {
           graphics.removeGraphicsAnchoredToLine(this.lines[0]);
+          evicted = true;
         }
         this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
       }
+      // The oldest line kept continues nothing once the one before it is
+      // dropped, as when the MonkeyMux screen model trims its scrollback.
+      if (evicted) _endContinuation(0);
       _endContinuation(absoluteMarginBottom + 1);
       return;
     }
@@ -679,15 +686,16 @@ class Buffer {
 
   /// Remove all lines above the top of the viewport.
   void clearScrollback() {
-    if (height <= viewHeight) {
-      return;
+    if (height > viewHeight) {
+      graphics.removePlacementsInRows(0, scrollBack - 1);
+      for (var row = 0; row < scrollBack; row++) {
+        graphics.removeGraphicsAnchoredToLine(lines[row]);
+      }
+      lines.trimStart(scrollBack);
     }
-
-    graphics.removePlacementsInRows(0, scrollBack - 1);
-    for (var row = 0; row < scrollBack; row++) {
-      graphics.removeGraphicsAnchoredToLine(lines[row]);
-    }
-    lines.trimStart(scrollBack);
+    // The top line continues nothing now, as in the MonkeyMux screen model,
+    // also when a buffer one screen tall already dropped the line above it.
+    lines[0].isWrapped = false;
   }
 
   /// Clears the viewport and scrollback buffer. Then fill with empty lines.
@@ -861,6 +869,7 @@ class Buffer {
             graphics.removePlacementsInRows(0, 0);
             graphics.removeGraphicsAnchoredToLine(lines[0]);
             lines.trimStart(1);
+            lines[0].isWrapped = false;
             _cursorY--;
           } else {
             graphics.removePlacementsInRows(lastIndex, lastIndex);

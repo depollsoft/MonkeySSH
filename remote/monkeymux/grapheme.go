@@ -15,19 +15,9 @@ const (
 // graphemeBreakState is the context graphemeBreak carries from one code point
 // pair to the next.
 type graphemeBreakState struct {
-	// incb is what the code points before the pair end with, for GB9c: nothing
-	// that counts, an Indic consonant and any extends, or one of those
-	// followed by a linker and any further linkers and extends.
-	incb uint8
 	// base is the sequence the pair is inside, for GB11 to GB13.
 	base uint8
 }
-
-const (
-	graphemeAfterNone uint8 = iota
-	graphemeAfterConsonant
-	graphemeAfterLinker
-)
 
 const (
 	graphemeBaseDefault uint8 = iota
@@ -45,23 +35,15 @@ func graphemeClassOf(r rune) graphemeClass {
 //
 // These are Ghostty's rules (its uucode library's no-control variant): UAX
 // #29 with an emoji modifier joining only an emoji modifier base, as UTS #51
-// has it. Unlike uucode, GB9c joins a consonant only after a linker that
-// itself follows a consonant, as UAX #29 says. Controls never reach a
-// terminal's print path and count as other.
+// has it. Unlike Ghostty, there is no GB9c: a consonant after a virama starts
+// a cluster of its own. tmux and wcwidth give each consonant its own cell, and
+// a conjunct joined into one wide cell put the two out of step: tmux redraws
+// the second consonant by backspacing onto that cell's right half, which
+// erased the conjunct. Controls never reach a terminal's print path and count
+// as other.
 func graphemeBreak(r1, r2 rune, state *graphemeBreakState) bool {
 	gb1 := graphemeClassOf(r1)
 	gb2 := graphemeClassOf(r2)
-
-	switch {
-	case gb1 == graphemeIncbConsonant:
-		state.incb = graphemeAfterConsonant
-	case gb1 == graphemeIncbLinkerExtend || gb1 == graphemeIncbLinkerOther:
-		if state.incb != graphemeAfterNone {
-			state.incb = graphemeAfterLinker
-		}
-	case gb1 != graphemeIncbExtend && gb1 != graphemeZwj:
-		state.incb = graphemeAfterNone
-	}
 
 	switch state.base {
 	case graphemeBaseRegionalIndicator:
@@ -87,13 +69,6 @@ func graphemeBreak(r1, r2 rune, state *graphemeBreakState) bool {
 
 	// GB9a, GB9b.
 	if gb2 == graphemeSpacingMark || gb1 == graphemePrepend {
-		return false
-	}
-
-	// GB9c: consonant, then linkers and extends with at least one linker, then
-	// a consonant.
-	if state.incb == graphemeAfterLinker && gb2 == graphemeIncbConsonant {
-		state.base = graphemeBaseDefault
 		return false
 	}
 

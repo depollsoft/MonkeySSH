@@ -88,6 +88,39 @@ void main() {
       expect(half.background, CellColor.named | 4);
     });
 
+    test(
+        'blanking half a wide glyph erases the other half in the current '
+        'background alone', () {
+      // As the MonkeyMux model blanks it
+      // (TestBlankingHalfAWideGlyphUsesTheCurrentBackground): an erase, a
+      // glyph printed or inserted over the second half, ICH, DCH, and a wide
+      // glyph that does not fit in the last column.
+      for (final (input, blanks) in [
+        ('\x1b[41m\x1b[1;3H\u754C\x1b[32;44;7m\x1b[1;4H\u754C', [2, 3]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2G\x1b[X', [0, 1]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[1;1H\x1b[X', [0, 1]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2G\x1b[K', [0, 1, 2, 3]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2Gx', [0]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2G\x1b[4hx', [0]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2G\x1b[@', [0, 1]),
+        ('\x1b[41m\u754C\x1b[32;44;7m\x1b[2G\x1b[P', [0, 3]),
+        ('\x1b[41m\x1b[1;3H\u754C\x1b[32;44;7m\x1b[1;1H\x1b[@', [0]),
+      ]) {
+        final terminal = _terminal(4, 3);
+        terminal.write(input);
+        final line = _row(terminal, 0);
+        final cell = CellData.empty();
+        for (final column in blanks) {
+          line.getCellData(column, cell);
+          final reason = '$input $column';
+          expect(cell.content, 0, reason: reason);
+          expect(cell.background, CellColor.named | 4, reason: reason);
+          expect(cell.foreground, 0, reason: reason);
+          expect(cell.flags, 0, reason: reason);
+        }
+      }
+    });
+
     test('covers both screens', () {
       final terminal = _terminal(10, 2);
       terminal.write('\x1b[?2027l\x1b[?1049h$family');

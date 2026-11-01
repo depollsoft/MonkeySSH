@@ -36,7 +36,8 @@ func TestGraphemePropertyMatchesSharedTable(t *testing.T) {
 // TestGraphemeBreakPassesUnicodeTests runs the Unicode break tests, which the
 // client runs through its port of the same rules. Tests with controls are
 // skipped: terminals never print them. Ghostty's tailoring breaks before an
-// emoji modifier that does not follow an emoji modifier base.
+// emoji modifier that does not follow an emoji modifier base, and without
+// GB9c a consonant joins only a prepended mark.
 func TestGraphemeBreakPassesUnicodeTests(t *testing.T) {
 	data, err := os.ReadFile("testdata/grapheme_break_test.txt")
 	if err != nil {
@@ -66,6 +67,9 @@ lines:
 		for i := 0; i+1 < len(runes); i++ {
 			want := parts[2*i+2] == "÷"
 			if graphemeClassOf(runes[i+1]) == graphemeEmojiModifier && graphemeClassOf(runes[i]) != graphemeEmojiModifierBase {
+				want = true
+			}
+			if graphemeClassOf(runes[i+1]) == graphemeIncbConsonant && graphemeClassOf(runes[i]) != graphemePrepend {
 				want = true
 			}
 			if graphemeBreak(runes[i], runes[i+1], &state) != want {

@@ -931,10 +931,134 @@ func TestFramesRepaintPromptMarksAroundRandomClusters(t *testing.T) {
 	}
 }
 
+// TestFramesRepaintPromptMarksAroundRandomEdits paints random prompts, input
+// and output from frames after edits, cursor moves, scroll regions, origin
+// mode, saved cursors, both screens, resets and resizes have moved them
+// around: the client must end as requirePromptFrameRoundTrip says. Cases
+// with a picture no frame paints are skipped (graphemeFrameCannotPaint).
+func TestFramesRepaintPromptMarksAroundRandomEdits(t *testing.T) {
+	a, b, c := osc133("A"), osc133("B"), osc133("C")
+	tokens := []string{
+		"a", "b", "$ ", "abc", a, b, c, osc133("D;0"), osc133("P;k=s"), "\r\n", "\r", "\t",
+		"\u754c", "\u2665" + c + "\ufe0f", "\u0915" + b + "\u093f", "\U0001F468" + b + "\u200d\U0001F469", "\U0001F1FA\U0001F1F8",
+		"\x1b[D", "\x1b[2D", "\x1b[C", "\x1b[A", "\x1b[B", "\x1b[1;1H", "\x1b[2;3H", "\x1b[1;99Hx", "\x1b[3G",
+		"\x1b[@", "\x1b[P", "\x1b[X", "\x1b[L", "\x1b[M", "\x1b[J", "\x1b[1J", "\x1b[2J", "\x1b[K", "\x1b[1K",
+		"\x1b[S", "\x1b[T", "\x1b[2;3r", "\x1b[r", "\x1bD", "\x1bM", "\x1b[3J", "\x1b[?6h", "\x1b[?6l", "\x1b7", "\x1b8",
+		"\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1047h", "\x1b[?1047l", "\x1bc", "\x1b[!p",
+		"\x1b[?7l", "\x1b[?7h", "\x1b[4h", "\x1b[4l", "\x1b[?2027l", "\x1b[?2027h", "\x1b[41m", "\x1b[44m", "\x1b[0m",
+		"\x1b(0", "\x1b(B", "\x1b)0", "\x0e", "\x0f",
+	}
+	rng := rand.New(rand.NewSource(1336))
+	skipped := 0
+	const runs = 5000
+	for range runs {
+		width, height := 3+rng.Intn(5), 2+rng.Intn(3)
+		s := newTerminalScreen(width, height)
+		var stream strings.Builder
+		fmt.Fprintf(&stream, "<%dx%d>", width, height)
+		tainted := false
+		for range 5 + rng.Intn(40) {
+			if rng.Intn(12) == 0 {
+				width, height = 3+rng.Intn(5), 2+rng.Intn(3)
+				s.Resize(width, height)
+				fmt.Fprintf(&stream, "<resize %dx%d>", width, height)
+				continue
+			}
+			token := tokens[rng.Intn(len(tokens))]
+			stream.WriteString(token)
+			s.Write([]byte(token))
+			tainted = tainted || graphemeFrameCannotPaint(s)
+		}
+		if tainted {
+			skipped++
+			continue
+		}
+		requirePromptFrameRoundTrip(t, s, stream.String())
+	}
+	if skipped > runs/10 {
+		t.Fatalf("%d of %d cases skipped", skipped, runs)
+	}
+}
+
+// TestFramesPutTheCursorOutsideTheRegionInOriginMode covers a cursor DECRC
+// left above or below the scroll region in origin mode, where CUP cannot put
+// it, and a saved cursor there.
+func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
+	for _, stream := range []string{
+		// Restored above the region, by DECRC and by leaving the alternate
+		// screen.
+		"\x1b[?6h\x1b7\x1b[2;3r\x1b8",
+		"\x1b[?6h\x1b7\x1b[2;3r\x1b[?1049l",
+		// Waiting to wrap there, after a glyph whose reprint must not land
+		// on the region's top row, nor take the saved charsets and rendition.
+		"\x1b[?6h\u754c\u0915\x1b[?1049h\x1b[2;3r\x1b[?1049l",
+		"\x1b[?6h\x1b)0\x0e\x1b[41m\x1b7\x1b[2;4r\x1b8\x0f\x1b[0mabcde",
+		// Moved along and up from where it was restored, which a later
+		// DECRC still goes back to.
+		"\x1b[?6h\x1b[2;1H\x1b7\x1b[4;5r\x1b8\x1b[Aab",
+		// Below the region.
+		"\x1b[?6h\x1b[5;2H\x1b7\x1b[1;2r\x1b8xy",
+		// Saved above the region, with the cursor inside it.
+		"\x1b[?6h\x1b7\x1b[2;3rab",
+	} {
+		s := newTerminalScreen(5, 5)
+		s.Write([]byte(stream))
+		requirePromptFrameRoundTrip(t, s, stream)
+		requireGraphemeFrameRoundTrip(t, s, stream)
+	}
+	// Carried onto the other screen, whose saved cursor never went there:
+	// the frame saves the cursor to restore it, so a DECRC now goes back to
+	// it rather than home.
+	s := newTerminalScreen(5, 5)
+	s.Write([]byte("\x1b[?6h\x1b[2;2H\x1b7\x1b[4;5r\x1b8\x1b[?1047h"))
+	replica := replayFrame(s)
+	if g, r := s.grid(), replica.grid(); r.cursorRow != g.cursorRow || r.cursorCol != g.cursorCol || !replica.originMode {
+		t.Fatalf("the cursor carried above the region replays at %d,%d origin %v, want %d,%d", r.cursorRow, r.cursorCol, replica.originMode, g.cursorRow, g.cursorCol)
+	}
+	if saved := replica.savedAlt; saved.row != 1 || saved.col != 1 || !saved.originMode {
+		t.Fatalf("saved cursor %+v, want the cursor", saved)
+	}
+}
+
+// TestBlankingHalfAWideGlyphUsesTheCurrentBackground covers the first half of
+// a wide glyph that an erase, a glyph printed or inserted over its second
+// half, ICH, DCH or a wide glyph that does not fit in the last column blanks:
+// it is erased in the current background alone, as in the client
+// (grapheme_cluster_test.dart), xterm.js and Ghostty.
+func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
+	blank := vtCell{width: 1, attrs: vtAttrs{bg: vtColor{kind: vtColorIndexed, index: 4}}}
+	for _, c := range []struct {
+		stream string
+		blanks []int
+	}{
+		{"\x1b[41m\x1b[1;3H\u754c\x1b[32;44;7m\x1b[1;4H\u754c", []int{2, 3}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[X", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[1;1H\x1b[X", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[K", []int{0, 1, 2, 3}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2Gx", []int{0}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[4hx", []int{0}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[@", []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[32;44;7m\x1b[2G\x1b[P", []int{0, 3}},
+		{"\x1b[41m\x1b[1;3H\u754c\x1b[32;44;7m\x1b[1;1H\x1b[@", []int{0}},
+	} {
+		s := newTerminalScreen(4, 3)
+		s.Write([]byte(c.stream))
+		for _, col := range c.blanks {
+			if cell := s.grid().rows[0][col]; !vtRowsEqual([][]vtCell{{cell}}, [][]vtCell{{blank}}) {
+				t.Fatalf("%+q left column %d as %+v, want a blank in the current background alone", c.stream, col, cell)
+			}
+		}
+		requirePromptFrameRoundTrip(t, s, c.stream)
+	}
+}
+
 // requirePromptFrameRoundTrip replays s, written by stream, onto a fresh
 // model: it must end with the same cells, row marks and cell contents, but
-// for the glyph the cursor waits to wrap after (cursorContent), and a clear
-// must then save as many rows.
+// for the glyph the cursor waits to wrap after (cursorContent), the same
+// scrollback, cursor and saved cursor, and a clear must then save as many
+// rows. A cursor outside the scroll region in origin mode that the saved
+// cursor cannot restore to is saved first (appendVTCursorOutsideRegion), so
+// the saved cursor is not compared then.
 func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string) {
 	t.Helper()
 	marks := func(s *terminalScreen) []string {
@@ -962,6 +1086,39 @@ func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string)
 			if got := replica.grid().rows[r][col].sem; got != cell.sem {
 				t.Fatalf("replay of %+q changed the content of %d,%d to %d, want %d", stream, r, col, got, cell.sem)
 			}
+		}
+	}
+	if !s.altActive {
+		if got, want := replica.scrollback.len(), s.scrollback.len(); got != want {
+			t.Fatalf("replay of %+q has %d scrollback lines, want %d", stream, got, want)
+		}
+		var decoder vtLineDecoder
+		for i := range s.scrollback.len() {
+			want, got := s.scrollback.at(i).decode(&decoder, s.width), replica.scrollback.at(i).decode(&decoder, s.width)
+			if !vtRowsEqual([][]vtCell{want}, [][]vtCell{got}) || !slices.EqualFunc(want, got, func(w, g vtCell) bool { return w.sem == g.sem }) {
+				t.Fatalf("replay of %+q changed scrollback line %d", stream, i)
+			}
+		}
+	}
+	r := replica.grid()
+	if r.cursorRow != g.cursorRow || r.cursorCol != g.cursorCol || r.pendingWrap != g.pendingWrap {
+		t.Fatalf("replay of %+q moved the cursor to %d,%d,%v, want %d,%d,%v", stream,
+			r.cursorRow, r.cursorCol, r.pendingWrap, g.cursorRow, g.cursorCol, g.pendingWrap)
+	}
+	if replica.originMode != s.originMode || replica.top != s.top || replica.bottom != s.bottom || replica.insertMode != s.insertMode ||
+		replica.attrs != s.attrs || replica.g0Graphics != s.g0Graphics || replica.g1Graphics != s.g1Graphics || replica.shiftOut != s.shiftOut {
+		t.Fatalf("replay of %+q left origin mode %v, region %d-%d, insert mode %v, rendition %+v, charsets %v %v %v", stream,
+			replica.originMode, replica.top, replica.bottom, replica.insertMode, replica.attrs, replica.g0Graphics, replica.g1Graphics, replica.shiftOut)
+	}
+	outside := func(row int) bool { return row < s.top || row > s.bottom }
+	want, got := *s.saved(), *replica.saved()
+	if !s.originMode || !outside(g.cursorRow) || want.originMode && outside(clampInt(want.row, 0, s.height-1)) {
+		// Whether DECSC ran, and the Kitty column the client cannot know,
+		// change nothing a DECRC restores here.
+		want.valid, got.valid = false, false
+		want.kittyColumnLost, got.kittyColumnLost = false, false
+		if got != want {
+			t.Fatalf("replay of %+q changed the saved cursor to %+v, want %+v", stream, got, want)
 		}
 	}
 	s.Write([]byte("\x1b[2J"))

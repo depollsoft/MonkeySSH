@@ -12,28 +12,17 @@ const emojiPresentationSelector = 0xFE0F;
 /// The MonkeyMux screen model ports the same rules
 /// (remote/monkeymux/grapheme.go); both run the Unicode break tests.
 class GraphemeBreakState {
-  /// What the code points before the pair end with, for GB9c: nothing that
-  /// counts, an Indic consonant and any extends, or one of those followed by
-  /// a linker and any further linkers and extends.
-  int _incb = _incbNone;
-
   /// The sequence the pair is inside, for GB11 to GB13.
   int _base = _baseDefault;
 
   void reset() {
-    _incb = _incbNone;
     _base = _baseDefault;
   }
 
   /// Copies [other] into this state.
   void copyFrom(GraphemeBreakState other) {
-    _incb = other._incb;
     _base = other._base;
   }
-
-  static const _incbNone = 0;
-  static const _incbConsonant = 1;
-  static const _incbLinker = 2;
 
   static const _baseDefault = 0;
   static const _basePictographic = 1;
@@ -57,23 +46,15 @@ int graphemeClassOf(int codePoint) => graphemeProperty(codePoint) & _classMask;
 ///
 /// These are Ghostty's rules (its uucode library's no-control variant):
 /// UAX #29 with an emoji modifier joining only an emoji modifier base, as
-/// UTS #51 has it. Unlike uucode, GB9c joins a consonant only after a linker
-/// that itself follows a consonant, as UAX #29 says. Controls never reach a
-/// terminal's print path and count as other.
+/// UTS #51 has it. Unlike Ghostty, there is no GB9c: a consonant after a
+/// virama starts a cluster of its own. tmux and wcwidth give each consonant
+/// its own cell, and a conjunct joined into one wide cell put the two out of
+/// step: tmux redraws the second consonant by backspacing onto that cell's
+/// right half, which erased the conjunct. Controls never reach a terminal's
+/// print path and count as other.
 bool graphemeBreak(int cp1, int cp2, GraphemeBreakState state) {
   final gb1 = graphemeProperty(cp1) & _classMask;
   final gb2 = graphemeProperty(cp2) & _classMask;
-
-  if (gb1 == GraphemeClass.incbConsonant) {
-    state._incb = GraphemeBreakState._incbConsonant;
-  } else if (gb1 == GraphemeClass.incbLinkerExtend ||
-      gb1 == GraphemeClass.incbLinkerOther) {
-    if (state._incb != GraphemeBreakState._incbNone) {
-      state._incb = GraphemeBreakState._incbLinker;
-    }
-  } else if (gb1 != GraphemeClass.incbExtend && gb1 != GraphemeClass.zwj) {
-    state._incb = GraphemeBreakState._incbNone;
-  }
 
   switch (state._base) {
     case GraphemeBreakState._baseRegionalIndicator:
@@ -106,14 +87,6 @@ bool graphemeBreak(int cp1, int cp2, GraphemeBreakState state) {
 
   // GB9a, GB9b.
   if (gb2 == GraphemeClass.spacingMark || gb1 == GraphemeClass.prepend) {
-    return false;
-  }
-
-  // GB9c: consonant, then linkers and extends with at least one linker,
-  // then a consonant.
-  if (state._incb == GraphemeBreakState._incbLinker &&
-      gb2 == GraphemeClass.incbConsonant) {
-    state._base = GraphemeBreakState._baseDefault;
     return false;
   }
 
