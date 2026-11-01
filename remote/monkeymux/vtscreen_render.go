@@ -51,14 +51,15 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 	if s.originMode {
 		out = append(out, "\x1b[?6h"...)
 	}
-	row := g.cursorRow
-	if s.originMode {
-		row -= s.top
-		if row < 0 {
-			row = 0
+	if s.originMode && (g.cursorRow < s.top || g.cursorRow > s.bottom) {
+		out = s.appendVTCursorOutsideRegion(out, g, marks)
+	} else {
+		row := g.cursorRow
+		if s.originMode {
+			row -= s.top
 		}
+		out = s.appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	}
-	out = s.appendVTCursor(out, g.rows[g.cursorRow], row, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 	// Last, since restoring a deferred wrap prints a glyph again under the
 	// content it was written as.
 	out = marks.finish(out)
@@ -235,19 +236,51 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 	if !saved.valid && saved.row == 0 && saved.col == 0 {
 		return out
 	}
-	if saved.originMode && (s.top != 0 || s.bottom != s.height-1) {
-		out = appendVTRegion(out, s.top, s.bottom)
-	}
-	row := saved.row
+	// DECSET 6 homes the cursor, so it goes first. The scroll region is
+	// still full, where an origin-relative row is the row, so a row outside
+	// the region, which only DECRC itself goes to, is reached too.
 	if saved.originMode {
 		out = append(out, "\x1b[?6h"...)
-		row -= s.top
 	}
-	out = s.appendVTCursor(out, g.rows[saved.row], row, saved.col, saved.pendingWrap, marks, -1)
+	out = s.appendVTCursor(out, g.rows[saved.row], saved.row, saved.col, saved.pendingWrap, marks, -1)
 	out = appendVTSGR(out, saved.attrs)
 	out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
 	out = append(out, "\x1b7\x1b[0m\x1b[?6l\x1b[r"...)
 	return appendVTCharsets(out, false, false, false)
+}
+
+// appendVTCursorOutsideRegion puts the client's cursor on g's cursor row,
+// which in origin mode is outside the scroll region RenderFrame has set. CUP
+// counts rows from the region's top and stops at its margins there, so only
+// DECRC, which restores a saved row as it is, puts a cursor on such a row;
+// outside the region it then moves up and down freely. When the saved cursor
+// is outside the region in origin mode too, as the one restored to get there
+// usually is, the frame restores it and moves on from there. Otherwise it
+// saves the cursor first and restores that, which leaves it, with the saved
+// rendition and charsets, as the saved cursor.
+func (s *terminalScreen) appendVTCursorOutsideRegion(out []byte, g *vtGrid, marks *vtSemanticFrame) []byte {
+	saved := *s.saved()
+	restored := clampInt(saved.row, 0, s.height-1)
+	if !saved.originMode || (restored >= s.top && restored <= s.bottom) {
+		out = append(out, "\x1b[r"...)
+		out = s.appendVTCursor(out, g.rows[g.cursorRow], g.cursorRow, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
+		out = appendVTSGR(out, saved.attrs)
+		out = appendVTCharsets(out, saved.g0Graphics, saved.g1Graphics, saved.shiftOut)
+		out = append(out, "\x1b7"...)
+		out = appendVTRegion(out, s.top, s.bottom)
+		return append(out, "\x1b8"...)
+	}
+	out = append(out, "\x1b8"...)
+	if rows := g.cursorRow - restored; rows != 0 {
+		out = append(out, "\x1b["...)
+		final := byte('B')
+		if rows < 0 {
+			rows, final = -rows, 'A'
+		}
+		out = strconv.AppendInt(out, int64(rows), 10)
+		out = append(out, final)
+	}
+	return s.appendVTCursor(out, g.rows[g.cursorRow], -1, g.cursorCol, g.pendingWrap, marks, g.cursorRow)
 }
 
 // appendVTCursor moves the client cursor to row, col of a row holding cells.
@@ -259,20 +292,29 @@ func (s *terminalScreen) appendSavedCursor(out []byte, g *vtGrid, saved vtSavedC
 // space into it. The rendition is left at the reprinted glyph's. screenRow
 // is the cursor's row on the client's screen when it is the cursor the frame
 // ends at (vtSemanticFrame.cursorContent), and -1 otherwise. The client is in
-// the model's clustering mode.
+// the model's clustering mode. A row of -1 leaves the client's cursor on the
+// row it is on, and moves it along that row (CHA).
 func (s *terminalScreen) appendVTCursor(out []byte, cells []vtCell, row, col int, pendingWrap bool, marks *vtSemanticFrame, screenRow int) []byte {
-	if !pendingWrap || len(cells) == 0 {
+	position := func(out []byte, col int) []byte {
+		if row < 0 {
+			out = append(out, "\x1b["...)
+			out = strconv.AppendInt(out, int64(col+1), 10)
+			return append(out, 'G')
+		}
 		return appendVTCursorPosition(out, row, col)
+	}
+	if !pendingWrap || len(cells) == 0 {
+		return position(out, col)
 	}
 	last := len(cells) - 1
 	if !vtSoftWrapEdgePrintable(cells) {
-		out = appendVTCursorPosition(out, row, last)
+		out = position(out, last)
 		return append(out, '\t')
 	}
 	if cells[last].width == 0 && last > 0 {
 		last--
 	}
-	out = appendVTCursorPosition(out, row, last)
+	out = position(out, last)
 	// A second half a code point writes takes its content as the glyph
 	// does.
 	content := vtContentSwitch(marks.content)
@@ -284,7 +326,7 @@ func (s *terminalScreen) appendVTCursor(out []byte, cells []vtCell, row, col int
 	if !plan.whole(cells[last]) {
 		// The row holds the glyph already; a tab with no stop left reaches
 		// the deferred wrap after it.
-		out = appendVTCursorPosition(out, row, len(cells)-1)
+		out = position(out, len(cells)-1)
 		return append(out, '\t')
 	}
 	return renderVTGlyph(out, cells, last, plan, s.graphemeCluster, content)

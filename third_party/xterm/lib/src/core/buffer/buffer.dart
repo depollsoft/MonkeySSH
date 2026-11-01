@@ -171,8 +171,7 @@ class Buffer {
       // autowrap, take the last two columns) instead of splitting it across
       // rows.
       if (terminal.autoWrapMode) {
-        graphics.removePlaceholderAt(currentLine, _cursorX);
-        currentLine.eraseCell(_cursorX, terminal.cursor);
+        _eraseRange(currentLine, _cursorX, _cursorX + 1);
         _wrapToNextLine();
       } else {
         _cursorX = viewWidth - 2;
@@ -688,6 +687,8 @@ class Buffer {
       graphics.removeGraphicsAnchoredToLine(lines[row]);
     }
     lines.trimStart(scrollBack);
+    // The top line continues nothing now, as in the MonkeyMux screen model.
+    lines[0].isWrapped = false;
   }
 
   /// Clears the viewport and scrollback buffer. Then fill with empty lines.
@@ -861,6 +862,7 @@ class Buffer {
             graphics.removePlacementsInRows(0, 0);
             graphics.removeGraphicsAnchoredToLine(lines[0]);
             lines.trimStart(1);
+            lines[0].isWrapped = false;
             _cursorY--;
           } else {
             graphics.removePlacementsInRows(lastIndex, lastIndex);

@@ -737,6 +737,8 @@ func (s *terminalScreen) resizeAlt(width, height int) {
 			g.cursorRow -= fromTop
 			s.savedAlt.row -= fromTop
 			drop -= fromTop
+			// The new top row continues nothing, as in the client.
+			g.wrapped[0] = false
 		}
 		if drop > 0 {
 			g.rows = g.rows[:len(g.rows)-drop]
@@ -1009,6 +1011,8 @@ func (s *terminalScreen) trimScrollback() {
 	}
 	if trimmed && b.len() > 0 {
 		b.at(0).wrapped = false
+	} else if trimmed {
+		s.main.wrapped[0] = false
 	}
 }
 
@@ -2016,7 +2020,7 @@ func (s *terminalScreen) print(r rune) {
 		// room for it anywhere, and prints it there without its second half,
 		// as the client does.
 		if s.autowrap {
-			g.rows[g.cursorRow][g.cursorCol] = s.blankCell()
+			s.eraseCells(g.rows[g.cursorRow], g.cursorCol, g.cursorCol+1)
 			s.wrapToNextLine()
 		} else {
 			g.cursorCol = s.width - 2
@@ -2495,6 +2499,8 @@ func (s *terminalScreen) eraseDisplay(mode int) {
 		// this erases nothing, as in the client's Buffer.clearScrollback.
 		if !s.altActive {
 			s.scrollback = vtScrollback{}
+			// The top row continues nothing now, as in the client.
+			g.wrapped[0] = false
 			// The client empties its own, however long.
 			s.kittyEvictedPlaceholders = [4]uint64{}
 			s.dropKittyScrollbackPlacements()

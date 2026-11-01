@@ -2236,5 +2236,48 @@
     "write": "\u001b8x"
    }
   ]
+ },
+ {
+  "expect": [
+   "C |cdef|iiii",
+   "C+|ghij|iiii",
+   "cursor 3,1 o click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "a scrollback erase ends the top row's continuation of a deleted line",
+  "size": [
+   4,
+   2
+  ],
+  "steps": [
+   {
+    "write": "\u001b]133;A\u0007$ \u001b]133;B\u0007abcdefghij"
+   },
+   {
+    "write": "\u001b[3J"
+   }
+  ]
+ },
+ {
+  "expect": [
+   "C |cdef|iiii",
+   "C+|ghij|iiii",
+   "cursor 3,1 i click=0 cl=- special=false redraw=true aid=-"
+  ],
+  "name": "an alternate screen shrinking from the top ends the new top row's continuation",
+  "size": [
+   4,
+   3
+  ],
+  "steps": [
+   {
+    "write": "\u001b[?1049h\u001b]133;A\u0007$ \u001b]133;B\u0007abcdefghij"
+   },
+   {
+    "resize": [
+     4,
+     2
+    ]
+   }
+  ]
  }
 ]
