@@ -5,6 +5,7 @@ class CellData {
     required this.flags,
     required this.content,
     this.underlineColor = 0,
+    this.graphemeExtras = const [],
   });
 
   factory CellData.empty() {
@@ -29,14 +30,37 @@ class CellData {
   /// type plus value). `0` means "use the text color".
   int underlineColor;
 
+  /// The code points the cell's grapheme cluster holds after the one in
+  /// [content], such as combining marks, a ZWJ sequence's later emoji or a
+  /// variation selector. Empty unless [content] has
+  /// [CellContent.graphemeFlag]. The list is shared with the line and must
+  /// not be changed.
+  List<int> graphemeExtras;
+
+  /// Everything about the cell its painted glyph depends on, compared by
+  /// value, for keying a cache of laid-out glyphs. Unlike [getHash], two
+  /// different cells never share a key.
+  Object get paintKey => (
+        foreground,
+        background,
+        flags,
+        content,
+        underlineColor,
+        graphemeExtras.isEmpty ? null : String.fromCharCodes(graphemeExtras),
+      );
+
   int getHash() {
-    return Object.hash(foreground, background, flags, content, underlineColor);
+    final hash =
+        Object.hash(foreground, background, flags, content, underlineColor);
+    if (graphemeExtras.isEmpty) return hash;
+    return Object.hash(hash, Object.hashAll(graphemeExtras));
   }
 
   @override
   String toString() {
     return 'CellData{foreground: $foreground, background: $background, '
-        'flags: $flags, content: $content, underlineColor: $underlineColor}';
+        'flags: $flags, content: $content, underlineColor: $underlineColor, '
+        'graphemeExtras: $graphemeExtras}';
   }
 }
 
@@ -92,6 +116,13 @@ abstract class SemanticContent {
 
 abstract class CellContent {
   static const codepointMask = 0x1fffff;
+
+  /// Set when the cell holds code points after its base, which
+  /// [BufferLine.getGraphemeExtras] returns: the rest of a grapheme cluster
+  /// (DEC mode 2027), or the marks legacy mode joins to a glyph. It sits
+  /// between the code point and the width, so `content & codepointMask` and
+  /// `content >> widthShift` read the same with it set.
+  static const graphemeFlag = 1 << 21;
 
   static const widthShift = 22;
   // static const widthMask = 3 << widthShift;

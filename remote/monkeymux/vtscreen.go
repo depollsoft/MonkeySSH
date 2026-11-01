@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 	"unicode/utf8"
 )
@@ -45,6 +46,14 @@ type terminalScreen struct {
 	g0Graphics bool
 	g1Graphics bool
 	shiftOut   bool
+	// graphemeCluster is DEC private mode 2027: printed code points join
+	// into grapheme clusters (vtscreen_grapheme.go). graphemeChanges are the
+	// offsets of the output (Written) where it changed since, in order, and
+	// graphemeBefore what it was before the first of them
+	// (GraphemeClusterAt).
+	graphemeCluster bool
+	graphemeChanges []int64
+	graphemeBefore  bool
 
 	// cursorKnown records that the cursor is where the app's terminal has it
 	// too: the last thing that moved it was an absolute position (CUP or HVP
@@ -168,7 +177,9 @@ const (
 	vtMaxCells   = 400_000
 	// Per-sequence parser bounds; longer input is ignored, never retained.
 	vtIntermediateLimit = 8
-	vtCombiningLimit    = 8
+	// vtCombiningLimit bounds the code points a cell keeps after its base,
+	// as the client's cells do; any more are dropped.
+	vtCombiningLimit = 15
 	// kittyPlaceholderRune is the Kitty graphics unicode placeholder code
 	// point; a cell holding it displays part of an image instead of a glyph.
 	kittyPlaceholderRune = rune(0x10EEEE)
@@ -374,7 +385,7 @@ type vtAttrs struct {
 
 func newTerminalScreen(width, height int) *terminalScreen {
 	width, height = clampVTSize(width, height)
-	s := &terminalScreen{width: width, height: height}
+	s := &terminalScreen{width: width, height: height, graphemeCluster: true, graphemeBefore: true}
 	s.main = newVTGrid(width, height)
 	s.alt = newVTGrid(width, height)
 	s.resetState()
@@ -405,6 +416,7 @@ func (s *terminalScreen) resetState() {
 	s.autowrap = true
 	s.insertMode = false
 	s.cursorOn = true
+	s.setGraphemeCluster(true)
 	s.tabs = make([]bool, s.width)
 	for i := 8; i < s.width; i += 8 {
 		s.tabs[i] = true
@@ -568,7 +580,7 @@ func (s *terminalScreen) noteUnsyncedCursorState(final byte) {
 func cursorNeutralPrivateMode(mode int) bool {
 	switch mode {
 	case 1, 12, 25, 67, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016,
-		2004, 2026, 2031, 2033, 5522:
+		2004, 2026, 2027, 2031, 2033, 5522:
 		return true
 	}
 	return false
@@ -589,6 +601,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
 	c.kittyCommands = append([]vtKittyCommand(nil), s.kittyCommands...)
+	c.graphemeChanges = slices.Clone(s.graphemeChanges)
 	for i, store := range s.kittyStores {
 		c.kittyStores[i] = store.clone()
 	}
@@ -1975,10 +1988,20 @@ func (s *terminalScreen) print(r rune) {
 		// ignore them in UTF-8 mode.
 		return
 	}
+	if s.graphemeCluster && graphemeMayContinue(r) && s.joinCluster(r) {
+		return
+	}
 	width := runeWidth(r)
+	if width == 0 && s.graphemeCluster {
+		// Only a code point of width 0 starts a cluster wider:
+		// TestGraphemeStartWidthDiffersOnlyFromNoWidth.
+		width = graphemeStartWidth(r)
+	}
 	g := s.grid()
 	if width == 0 {
-		s.attachCombining(r)
+		if !s.graphemeCluster {
+			s.attachCombining(r)
+		}
 		return
 	}
 	if g.pendingWrap {
@@ -1987,17 +2010,16 @@ func (s *terminalScreen) print(r rune) {
 		}
 		g.pendingWrap = false
 	}
-	if width == 2 && g.cursorCol == s.width-1 {
+	if width == 2 && g.cursorCol == s.width-1 && s.width >= 2 {
 		// A wide glyph does not fit in the last column, which is erased like
-		// any other, keeping only the background.
+		// any other, keeping only the background. A one-column screen has no
+		// room for it anywhere, and prints it there without its second half,
+		// as the client does.
 		if s.autowrap {
 			g.rows[g.cursorRow][g.cursorCol] = s.blankCell()
 			s.wrapToNextLine()
 		} else {
 			g.cursorCol = s.width - 2
-			if g.cursorCol < 0 {
-				return
-			}
 		}
 	}
 	row := g.rows[g.cursorRow]
@@ -2054,24 +2076,29 @@ func (s *terminalScreen) wrapToNextLine() {
 	g.wrapped[g.cursorRow] = true
 }
 
+// attachCombining adds r, a code point of width 0, to the glyph before the
+// cursor with clustering off: the one an autowrap is pending after, or else
+// the one left of the cursor. An emoji variation selector attaches only to an
+// emoji, and nothing attaches to an empty cell or past vtCombiningLimit.
 func (s *terminalScreen) attachCombining(r rune) {
 	g := s.grid()
 	row := g.rows[g.cursorRow]
 	col := g.cursorCol
-	if g.pendingWrap {
-		col = s.width - 1
-	} else if col > 0 {
+	if !g.pendingWrap {
+		if col == 0 {
+			return
+		}
 		col--
-	} else {
-		return
 	}
 	if row[col].width == 0 && col > 0 {
 		col--
 	}
-	if row[col].r == 0 || len(row[col].comb) >= vtCombiningLimit {
+	cell := &row[col]
+	if cell.r == 0 || len(cell.comb) >= vtCombiningLimit ||
+		isEmojiVariationSelector(r) && !isExtendedPictographic(cell.r) {
 		return
 	}
-	row[col].comb = append(row[col].comb, r)
+	cell.comb = append(cell.comb, r)
 }
 
 // trackKittyPlaceholder records which Kitty image a placeholder cell refers to.
@@ -2339,6 +2366,8 @@ func (s *terminalScreen) setPrivateMode(mode int, on bool) {
 		s.moveCursor(0, 0)
 	case 7:
 		s.autowrap = on
+	case 2027:
+		s.setGraphemeCluster(on)
 	case 12, 25:
 		if mode == 25 {
 			s.cursorOn = on

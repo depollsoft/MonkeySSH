@@ -178,13 +178,24 @@ void main() {
       expect(row(terminal, 0), ' \u754c');
     });
 
-    test('zero-width code points do not take a column', () {
+    test('zero-width code points join the glyph before them', () {
       final terminal = Terminal()..resize(10, 1);
       terminal.write('e\u0301f\u2764\uFE0Fx\u200D');
-      expect(terminal.buffer.cursorX, 4);
-      expect(row(terminal, 0), 'ef\u2764x');
+      // VS16 makes the heart an emoji, two columns wide.
+      expect(terminal.buffer.cursorX, 5);
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200D');
+      // REP repeats the last glyph printed, not what joined it.
       terminal.write('\x1b[b');
-      expect(row(terminal, 0), 'ef\u2764xx');
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200Dx');
+    });
+
+    test('zero-width code points take no column without clustering', () {
+      final terminal = Terminal()..resize(10, 1);
+      terminal.write('\x1b[?2027le\u0301f\u2764\uFE0Fx\u200D');
+      expect(terminal.buffer.cursorX, 4);
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200D');
+      terminal.write('\x1b[b');
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200Dx');
     });
 
     test('vertical moves and VPA stay inside the scroll region', () {
@@ -412,7 +423,7 @@ void main() {
     test('a wide glyph pushes two cells and a zero-width one none', () {
       final terminal = Terminal()..resize(8, 2);
       terminal.write('abcdef\r\x1b[4h\u231Ae\u0301');
-      expect(terminal.lines[0].getText(), '\u231Aeabcde');
+      expect(terminal.lines[0].getText(), '\u231Ae\u0301abcde');
       expect(terminal.buffer.cursorX, 3);
     });
 

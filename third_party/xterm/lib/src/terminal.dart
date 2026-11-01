@@ -61,6 +61,12 @@ const _saveCursorDecMode = 1048;
 // Visibility reports: https://rockorager.dev/misc/visibility-reports/
 const _visibilityReportsDecMode = 2033;
 
+// Grapheme clustering (DECSET 2027), set by default as in Ghostty. Reset, a
+// zero-width code point joins the glyph before it without changing its width
+// and every other code point takes cells of its own, as in xterm.
+// https://github.com/contour-terminal/terminal-unicode-core
+const _graphemeClusterDecMode = 2027;
+
 // Kitty clipboard paste events (DECSET 5522): a program that sets it asks for
 // a list of the clipboard's MIME types on paste instead of the pasted text.
 // The core only tracks the mode; the app sends the event and serves the reads.
@@ -371,6 +377,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   bool _reportVisibilityMode = false;
 
+  bool _graphemeClusterMode = true;
+
   bool _visible = true;
 
   final _mainKittyKeyboardState = KittyKeyboardState();
@@ -450,6 +458,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   /// Whether the program enabled visibility reports (DEC private mode 2033).
   bool get reportVisibilityMode => _reportVisibilityMode;
+
+  @override
+  bool get graphemeClusterMode => _graphemeClusterMode;
 
   /// Whether the view showing this terminal may be visible to the user.
   ///
@@ -1053,8 +1064,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     softReset();
   }
 
-  /// Switches off the modes DECSTR leaves alone, for [fullReset] and
-  /// [resetForNextProgram].
+  /// Returns the modes DECSTR leaves alone to their defaults, for [fullReset]
+  /// and [resetForNextProgram].
   void _resetModesSoftResetKeeps() {
     _mouseMode = MouseMode.none;
     _mouseReportMode = MouseReportMode.normal;
@@ -1068,6 +1079,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     // The view's visibility belongs to the host and survives the reset.
     _reportVisibilityMode = false;
     _kittyPasteEvents = false; // DEC mode 5522
+    _graphemeClusterMode = true; // DEC mode 2027
     _mainKittyKeyboardState.reset();
     _altKittyKeyboardState.reset();
   }
@@ -1602,6 +1614,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
         }
       case _kittyPasteEventsMode:
         _kittyPasteEvents = enabled;
+      case _graphemeClusterDecMode:
+        _graphemeClusterMode = enabled;
     }
   }
 

@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// Probes against real ps, lsof and sqlite3 must not fail a test because
+	// the machine was busy (see processMetadataTimeout).
+	processMetadataTimeout = 30 * time.Second
 	os.Exit(m.Run())
 }
 

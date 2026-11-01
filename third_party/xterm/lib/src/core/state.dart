@@ -44,4 +44,9 @@ abstract class TerminalState {
   bool get altBufferMouseScrollMode;
 
   bool get bracketedPasteMode;
+
+  /// Whether DEC private mode 2027 is set: a code point that continues the
+  /// grapheme cluster in the cell before the cursor joins that cell, which
+  /// may widen or narrow, as in Ghostty.
+  bool get graphemeClusterMode;
 }

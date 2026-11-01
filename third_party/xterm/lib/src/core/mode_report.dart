@@ -100,6 +100,7 @@ int? decModeReportState(Terminal terminal, int mode) => switch (mode) {
       1048 => ModeReportState.of(terminal.saveCursorMode),
       2004 => ModeReportState.of(terminal.bracketedPasteMode),
       2026 => ModeReportState.of(terminal.synchronizedOutputMode),
+      2027 => ModeReportState.of(terminal.graphemeClusterMode),
       2033 => ModeReportState.of(terminal.reportVisibilityMode),
       5522 => ModeReportState.of(terminal.kittyPasteEventsMode),
       _ => null,
