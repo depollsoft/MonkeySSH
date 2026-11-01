@@ -53,5 +53,7 @@
 {"name": "a code point widening a glyph on a one-column screen leaves it as it is", "size": [1, 2], "write": "\u2665\ufe0fx", "rows": [["\u2665"], ["x"]], "cursor": [1, 0, true], "wrapped": [1]},
 {"name": "a cluster widened over a wide glyph blanks that glyph's right half", "size": [10, 2], "write": "\u2665\u001b[7;31;44m\u754c\u001b[2G\u001b[0m\ufe0f", "rows": [["\u2665\ufe0f", "<"]], "cursor": [0, 2, false], "wrapped": []},
 {"name": "a wide glyph on a one-column screen stays in its row", "size": [1, 2], "write": "\ud83c\udffd", "rows": [["\ud83c\udffd"]], "cursor": [0, 0, true], "wrapped": []},
-{"name": "a wide glyph on a one-column screen without autowrap is replaced in place", "size": [1, 2], "write": "\u001b[?7l\ud83c\udffdx", "rows": [["x"]], "cursor": [0, 0, true], "wrapped": []}
+{"name": "a wide glyph on a one-column screen without autowrap is replaced in place", "size": [1, 2], "write": "\u001b[?7l\ud83c\udffdx", "rows": [["x"]], "cursor": [0, 0, true], "wrapped": []},
+{"name": "a glyph narrowed while waiting to wrap takes the next one beside it", "size": [4, 2], "write": "ab\u231a\ufe0ex", "rows": [["a", "b", "\u231a\ufe0e", "x"]], "cursor": [0, 3, true], "wrapped": []},
+{"name": "a glyph narrowed while waiting to wrap takes the next one beside it without autowrap", "size": [4, 2], "write": "\u001b[?7lab\u231a\ufe0exy", "rows": [["a", "b", "\u231a\ufe0e", "y"]], "cursor": [0, 3, true], "wrapped": []}
 ]
