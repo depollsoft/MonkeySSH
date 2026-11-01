@@ -38,7 +38,14 @@ func (s *terminalScreen) RenderFrameReplacing(replace func(imageID string) bool)
 		return nil
 	}
 	g := s.grid()
-	out, marks := s.appendGridFrame(make([]byte, 0, 4096), g, !s.altActive)
+	out := make([]byte, 0, 4096)
+	if s.altActive {
+		// RenderMainScreen leaves the charsets the main screen saved, for
+		// the replayed 1049 entry to save again, and cells are painted in
+		// the default ones.
+		out = appendVTCharsets(out, false, false, false)
+	}
+	out, marks := s.appendGridFrame(out, g, !s.altActive)
 	out = s.appendKittyPlacements(out, s.altActive, replace)
 	out = s.appendSavedCursor(out, g, *s.saved(), marks)
 	out = marks.resume(out)
@@ -270,7 +277,10 @@ func (s *terminalScreen) appendVTCursorOutsideRegion(out []byte, g *vtGrid, mark
 		out = appendVTRegion(out, s.top, s.bottom)
 		return append(out, "\x1b8"...)
 	}
-	out = append(out, "\x1b8"...)
+	// DECRC also restored the saved rendition and charsets, which a glyph
+	// reprinted for a deferred wrap must not take.
+	out = append(out, "\x1b8\x1b[0m"...)
+	out = appendVTCharsets(out, false, false, false)
 	if rows := g.cursorRow - restored; rows != 0 {
 		out = append(out, "\x1b["...)
 		final := byte('B')

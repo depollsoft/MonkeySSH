@@ -1225,7 +1225,7 @@ func (s *terminalScreen) printASCIIRun(data []byte) int {
 			count = s.width - col
 		}
 		if row[col].width == 0 && col > 0 {
-			row[col-1] = blankedHalf(row[col-1])
+			row[col-1] = s.blankCell()
 		}
 		for j := 0; j < count; j++ {
 			row[col+j] = vtCell{r: rune(data[i+j]), width: 1, sem: sem, attrs: s.attrs}
@@ -2046,9 +2046,10 @@ func (s *terminalScreen) print(r rune) {
 		s.shiftKittyPlacementCells(g.cursorCol, width)
 	}
 	col := g.cursorCol
-	// Overwriting half of a wide glyph blanks the other half.
+	// Overwriting half of a wide glyph blanks the other half: the first one
+	// in the current background, as the client erases it.
 	if row[col].width == 0 && col > 0 {
-		row[col-1] = blankedHalf(row[col-1])
+		row[col-1] = s.blankCell()
 	}
 	if width == 1 && row[col].width == 2 && col+1 < len(row) {
 		row[col+1] = blankedHalf(row[col+1])
@@ -2559,11 +2560,13 @@ func (s *terminalScreen) eraseLine(mode int) {
 func (s *terminalScreen) eraseCells(row []vtCell, from, to int) {
 	from = clampInt(from, 0, len(row))
 	to = clampInt(to, 0, len(row))
+	// The other half of a wide glyph the range cuts is erased with it, in
+	// the current background, as the client's BufferLine.eraseRange does.
 	if from > 0 && from < len(row) && row[from].width == 0 {
-		row[from-1] = blankedHalf(row[from-1])
+		row[from-1] = s.blankCell()
 	}
 	if to < len(row) && row[to].width == 0 {
-		row[to] = blankedHalf(row[to])
+		row[to] = s.blankCell()
 	}
 	for i := from; i < to; i++ {
 		row[i] = s.blankCell()

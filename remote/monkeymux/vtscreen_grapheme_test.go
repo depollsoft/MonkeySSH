@@ -945,7 +945,8 @@ func TestFramesRepaintPromptMarksAroundRandomEdits(t *testing.T) {
 		"\x1b[@", "\x1b[P", "\x1b[X", "\x1b[L", "\x1b[M", "\x1b[J", "\x1b[1J", "\x1b[2J", "\x1b[K", "\x1b[1K",
 		"\x1b[S", "\x1b[T", "\x1b[2;3r", "\x1b[r", "\x1bD", "\x1bM", "\x1b[3J", "\x1b[?6h", "\x1b[?6l", "\x1b7", "\x1b8",
 		"\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1047h", "\x1b[?1047l", "\x1bc", "\x1b[!p",
-		"\x1b[?7l", "\x1b[?7h", "\x1b[4h", "\x1b[4l", "\x1b[?2027l", "\x1b[?2027h", "\x1b[41m", "\x1b[0m",
+		"\x1b[?7l", "\x1b[?7h", "\x1b[4h", "\x1b[4l", "\x1b[?2027l", "\x1b[?2027h", "\x1b[41m", "\x1b[44m", "\x1b[0m",
+		"\x1b(0", "\x1b(B", "\x1b)0", "\x0e", "\x0f",
 	}
 	rng := rand.New(rand.NewSource(1336))
 	skipped := 0
@@ -989,8 +990,9 @@ func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
 		"\x1b[?6h\x1b7\x1b[2;3r\x1b8",
 		"\x1b[?6h\x1b7\x1b[2;3r\x1b[?1049l",
 		// Waiting to wrap there, after a glyph whose reprint must not land
-		// on the region's top row.
+		// on the region's top row, nor take the saved charsets and rendition.
 		"\x1b[?6h\u754c\u0915\x1b[?1049h\x1b[2;3r\x1b[?1049l",
+		"\x1b[?6h\x1b)0\x0e\x1b[41m\x1b7\x1b[2;4r\x1b8\x0f\x1b[0mabcde",
 		// Moved along and up from where it was restored, which a later
 		// DECRC still goes back to.
 		"\x1b[?6h\x1b[2;1H\x1b7\x1b[4;5r\x1b8\x1b[Aab",
@@ -1015,6 +1017,33 @@ func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
 	}
 	if saved := replica.savedAlt; saved.row != 1 || saved.col != 1 || !saved.originMode {
 		t.Fatalf("saved cursor %+v, want the cursor", saved)
+	}
+}
+
+// TestBlankingHalfAWideGlyphUsesTheCurrentBackground covers the other half of
+// a wide glyph that an erase, a glyph printed over one half, or a wide glyph
+// that does not fit in the last column blanks: it takes the current
+// background, as in the client (grapheme_cluster_test.dart) and xterm.
+func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
+	blue := vtColor{kind: vtColorIndexed, index: 4}
+	for _, c := range []struct {
+		stream string
+		width  int
+		blanks []int
+	}{
+		{"\x1b[41m\x1b[1;3H\u754c\x1b[44m\x1b[1;4H\u754c", 4, []int{2, 3}},
+		{"\x1b[41m\u754c\x1b[44m\x1b[2G\x1b[X", 4, []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[44m\x1b[1;1H\x1b[X", 4, []int{0, 1}},
+		{"\x1b[41m\u754c\x1b[44m\x1b[2Gx", 4, []int{0}},
+	} {
+		s := newTerminalScreen(c.width, 3)
+		s.Write([]byte(c.stream))
+		for _, col := range c.blanks {
+			if cell := s.grid().rows[0][col]; cell.r != 0 || cell.width != 1 || cell.attrs.bg != blue {
+				t.Fatalf("%+q left column %d as %+v, want a blank in the current background", c.stream, col, cell)
+			}
+		}
+		requirePromptFrameRoundTrip(t, s, c.stream)
 	}
 }
 
@@ -1071,9 +1100,10 @@ func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string)
 		t.Fatalf("replay of %+q moved the cursor to %d,%d,%v, want %d,%d,%v", stream,
 			r.cursorRow, r.cursorCol, r.pendingWrap, g.cursorRow, g.cursorCol, g.pendingWrap)
 	}
-	if replica.originMode != s.originMode || replica.top != s.top || replica.bottom != s.bottom || replica.insertMode != s.insertMode {
-		t.Fatalf("replay of %+q left origin mode %v, region %d-%d, insert mode %v", stream,
-			replica.originMode, replica.top, replica.bottom, replica.insertMode)
+	if replica.originMode != s.originMode || replica.top != s.top || replica.bottom != s.bottom || replica.insertMode != s.insertMode ||
+		replica.attrs != s.attrs || replica.g0Graphics != s.g0Graphics || replica.g1Graphics != s.g1Graphics || replica.shiftOut != s.shiftOut {
+		t.Fatalf("replay of %+q left origin mode %v, region %d-%d, insert mode %v, rendition %+v, charsets %v %v %v", stream,
+			replica.originMode, replica.top, replica.bottom, replica.insertMode, replica.attrs, replica.g0Graphics, replica.g1Graphics, replica.shiftOut)
 	}
 	outside := func(row int) bool { return row < s.top || row > s.bottom }
 	want, got := *s.saved(), *replica.saved()
