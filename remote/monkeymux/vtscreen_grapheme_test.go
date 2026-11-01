@@ -269,6 +269,11 @@ func TestShellReplayStartsInTheModeItsHistoryDid(t *testing.T) {
 			row:    append(append(append([]string{}, clustered...), "x"), legacy...),
 		},
 		{
+			name:   "before more switches than a short record keeps",
+			output: family + "x" + strings.Repeat("\x1b[?2027l\x1b[?2027h", 65) + "\x1b[?2027l" + family,
+			row:    append(append(append([]string{}, clustered...), "x"), legacy...),
+		},
+		{
 			name:      "past a switch the history lost",
 			output:    "\x1b[?2027l" + filler + family + "\x1b[?2027hx" + family,
 			y:         2,
@@ -328,8 +333,9 @@ func TestShellReplayStartsInTheModeItsHistoryDid(t *testing.T) {
 
 // TestGraphemeClusterAtKeepsTheChangesAReplayReaches covers the record of
 // mode 2027 changes a replay looks its starting mode up in: each change holds
-// from just past its sequence, and one no replay can start before only sets
-// the mode before the next.
+// from just past its sequence, every change a replay can reach back to is
+// kept, however many, and one no replay can start before only sets the mode
+// before the next.
 func TestGraphemeClusterAtKeepsTheChangesAReplayReaches(t *testing.T) {
 	s := newTerminalScreen(10, 2)
 	s.Write([]byte("ab\x1b[?2027lcd\x1b[?2027hef"))
@@ -338,22 +344,75 @@ func TestGraphemeClusterAtKeepsTheChangesAReplayReaches(t *testing.T) {
 			t.Errorf("mode at %d = %v, want %v", at, got, want)
 		}
 	}
-	s.Write([]byte("\x1b[?2027l" + strings.Repeat("a", vtModeChangeReach) + "\x1b[?2027h"))
+
+	s = newTerminalScreen(10, 2)
+	s.Write([]byte("\U0001F468\u200d\U0001F469x"))
+	start := s.Written()
+	switches := strings.Repeat("\x1b[?2027l\x1b[?2027h", 65) + "\x1b[?2027l"
+	s.Write([]byte(switches))
+	if !s.GraphemeClusterAt(0) || !s.GraphemeClusterAt(start) || s.GraphemeClusterAt(s.Written()) {
+		t.Fatal("the record lost the mode before many switches")
+	}
+	for i, at := 0, start; i < 131; i++ {
+		at += int64(len("\x1b[?2027l"))
+		if got, want := s.GraphemeClusterAt(at), i%2 == 1; got != want {
+			t.Fatalf("mode after switch %d = %v, want %v", i, got, want)
+		}
+	}
+
+	s.Write([]byte(strings.Repeat("a", vtModeChangeReach) + "\x1b[?2027h"))
 	if len(s.graphemeChanges) != 2 {
 		t.Fatalf("kept %d changes, want the last 2", len(s.graphemeChanges))
 	}
 	if s.GraphemeClusterAt(s.Written()-vtModeChangeReach) || !s.GraphemeClusterAt(s.Written()) {
 		t.Fatal("pruning lost the mode a replay within reach starts in")
 	}
-	for range vtModeChangeLimit {
-		s.Write([]byte("\x1b[?2027l\x1b[?2027h"))
-	}
-	if len(s.graphemeChanges) > vtModeChangeLimit || !s.GraphemeClusterAt(s.Written()) ||
-		s.GraphemeClusterAt(s.Written()-int64(len("\x1b[?2027h"))) {
-		t.Fatalf("after many changes: kept %d", len(s.graphemeChanges))
-	}
-	if c := s.Clone(); len(c.graphemeChanges) != len(s.graphemeChanges) || &c.graphemeChanges[0] == &s.graphemeChanges[0] {
+	if c := s.Clone(); !slices.Equal(c.graphemeChanges, s.graphemeChanges) || &c.graphemeChanges[0] == &s.graphemeChanges[0] {
 		t.Fatal("a clone shares the record of changes")
+	}
+}
+
+// TestFramesPaintGlyphsThatWouldJoinTheGlyphBefore covers glyphs a frame
+// cannot print after the glyph to their left, which the client would join
+// them to, but that stand alone: a skin tone swatch written before the emoji
+// later put left of it (one after a letter stands alone anyway). The frame
+// prints them first, from the right, also at the start of a soft-wrapped row
+// and in a line kept in the scrollback.
+func TestFramesPaintGlyphsThatWouldJoinTheGlyphBefore(t *testing.T) {
+	swatch, thumb := "\U0001F3FD", "\U0001F44D"
+	for _, tc := range []struct {
+		name, write string
+		width       int
+		y           int
+		row         []string
+	}{
+		{"after an emoji", "\x1b[1;3H" + swatch + "\x1b[1;1H" + thumb, 8, 0, []string{thumb, "<", swatch, "<"}},
+		{"after a letter", "\x1b[1;2H" + swatch + "\x1b[1;1Ha", 8, 0, []string{"a", swatch, "<"}},
+		{
+			"in a run, with renditions",
+			"\x1b[1;5H\x1b[44m" + swatch + "\x1b[1;3H\x1b[0;7m" + swatch + "\x1b[1;1H\x1b[0;31m" + thumb + "\x1b[0;44m\x1b[1;7Hz",
+			8, 0, []string{thumb, "<", swatch, "<", swatch, "<", "z"},
+		},
+		{"at the start of a soft-wrapped row", "\x1b[2;3H" + swatch + "\x1b[1;1Habcd" + thumb, 4, 1, []string{thumb, "<", swatch, "<"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTerminalScreen(tc.width, 3)
+			s.Write([]byte(tc.write))
+			if got := graphemeRows(s)[tc.y]; !reflect.DeepEqual(got, tc.row) {
+				t.Fatalf("model row = %q, want %q", got, tc.row)
+			}
+			requireGraphemeFrameRoundTrip(t, s, tc.write)
+
+			// Scrolled into the scrollback, the row is kept as the frame
+			// paints it.
+			want := slices.Clone(s.grid().rows[tc.y])
+			s.Write([]byte("\x1b[3;1H\n\n\n"))
+			var decoder vtLineDecoder
+			line := s.scrollback.at(s.scrollback.len() - 3 + tc.y)
+			if got := line.decode(&decoder, s.width); !vtRowsEqual([][]vtCell{want}, [][]vtCell{got}) {
+				t.Fatalf("scrollback line %q decodes to another row", line.text)
+			}
+		})
 	}
 }
 
@@ -920,6 +979,10 @@ func graphemeFrameCannotPaint(s *terminalScreen) bool {
 		}
 	}
 	for _, row := range rows {
+		// Glyphs the frame prints before the one to their left
+		// (vtStandaloneRun) are painted alone.
+		alone := 0
+		edge := func(col int) bool { return col == len(row)-1 }
 		for col, cell := range row {
 			if cell.width == 2 && (col+1 == len(row) || row[col+1].width != 0) ||
 				cell.width == 0 && (col == 0 || row[col-1].width != 2) {
@@ -928,6 +991,10 @@ func graphemeFrameCannotPaint(s *terminalScreen) bool {
 			if cell.width == 0 || cell.r == 0 {
 				continue
 			}
+			if col < alone {
+				continue
+			}
+			alone = vtStandaloneRun(row, col, len(row), vtGlyphBefore(row, col), true, edge)
 			plan := planVTGlyph(cell, vtGlyphBefore(row, col), true, col == len(row)-1)
 			if plan.whole(cell) {
 				continue

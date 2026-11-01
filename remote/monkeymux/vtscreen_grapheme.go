@@ -1,5 +1,7 @@
 package main
 
+import "slices"
+
 // Grapheme clustering in the screen model is DEC private mode 2027, set by
 // default and by RIS, left alone by DECSTR, as in Ghostty. With it set, a code
 // point that continues the cluster in the glyph before the cursor joins that
@@ -10,35 +12,22 @@ package main
 // both pass testdata/grapheme_cluster_parity.json: a frame painted from the
 // model has to land on the cells the client laid out from the same output.
 
-// vtModeChange is a change of a mode at an offset of the output, just past
-// the sequence that made it, in the terms of Written.
-type vtModeChange struct {
-	at int64
-	on bool
-}
-
-const (
-	// vtModeChangeReach is how far back from the latest output a replay of
-	// retained output can start: the longest history a window keeps.
-	vtModeChangeReach = windowFullReplayHistoryLimitBytes
-	// vtModeChangeLimit bounds the changes kept within that reach; a replay
-	// from before the oldest of them starts in the mode it set.
-	vtModeChangeLimit = 64
-)
+// vtModeChangeReach is how far back from the latest output a replay of
+// retained output can start: the longest history a window keeps.
+const vtModeChangeReach = windowFullReplayHistoryLimitBytes
 
 // setGraphemeCluster sets mode 2027, recording where it changed for
-// GraphemeClusterAt.
+// GraphemeClusterAt. Each change takes a sequence of output (RIS, at
+// least), so the output within vtModeChangeReach bounds how many are kept.
 func (s *terminalScreen) setGraphemeCluster(on bool) {
 	if on == s.graphemeCluster {
 		return
 	}
 	s.graphemeCluster = on
-	s.graphemeChanges = append(s.graphemeChanges, vtModeChange{at: s.written, on: on})
+	s.graphemeChanges = append(s.graphemeChanges, s.written)
 	// A change no replay starts before only sets the mode before the next.
-	for len(s.graphemeChanges) > 1 &&
-		(len(s.graphemeChanges) > vtModeChangeLimit ||
-			s.graphemeChanges[1].at <= s.written-vtModeChangeReach) {
-		s.graphemeBefore = s.graphemeChanges[0].on
+	for len(s.graphemeChanges) > 1 && s.graphemeChanges[1] <= s.written-vtModeChangeReach {
+		s.graphemeBefore = !s.graphemeBefore
 		s.graphemeChanges = s.graphemeChanges[1:]
 	}
 }
@@ -55,14 +44,9 @@ func (s *terminalScreen) StartGraphemeCluster(on bool) {
 // has to start in that mode to lay the output out as the model did, when
 // the output changes the mode later on.
 func (s *terminalScreen) GraphemeClusterAt(at int64) bool {
-	on := s.graphemeBefore
-	for _, change := range s.graphemeChanges {
-		if change.at > at {
-			break
-		}
-		on = change.on
-	}
-	return on
+	// Each change flips the mode.
+	changes, _ := slices.BinarySearch(s.graphemeChanges, at+1)
+	return s.graphemeBefore != (changes%2 == 1)
 }
 
 // joinCluster prints r into the glyph before the cursor, with clustering on,
@@ -423,4 +407,50 @@ func vtGlyphBefore(row []vtCell, col int) vtCell {
 		col--
 	}
 	return row[col]
+}
+
+// vtStandaloneRun is the end of the run of glyphs after the one at col of
+// row, short of end, that printed after the glyph to their left would join
+// it, as a skin tone swatch an emoji was later painted before does, but
+// printed with nothing to their left stand alone. A frame prints them first,
+// from the right, onto blank cells, and then the glyph at col
+// (appendVTStandaloneRun). left is the glyph before col on the client, and
+// edge reports a column a code point widening the glyph there would move it
+// to the next row from. Without such a run it returns the column after the
+// glyph at col. The run stops before a glyph that would leave a second half
+// on the one to its right, as the glyph at col must not, and before one
+// written as other content than the glyph at col, whose mark is put before
+// the whole run.
+func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, edge func(int) bool) int {
+	cell := row[col]
+	next := col + int(cell.width)
+	if next >= end || !vtMayJoinLeft(row[next]) {
+		return next
+	}
+	plan := planVTGlyph(cell, left, clustered, edge(col))
+	if !plan.whole(cell) || plan.spills || vtGlyphHalf(row, col).sem != cell.sem {
+		return next
+	}
+	stop, prev := next, plan.printed(cell)
+	for next < end && vtMayJoinLeft(row[next]) {
+		glyph := row[next]
+		if planVTGlyph(glyph, prev, clustered, edge(next)).whole(glyph) {
+			break
+		}
+		alone := planVTGlyph(glyph, vtCell{width: 1}, clustered, edge(next))
+		if !alone.whole(glyph) || alone.spills ||
+			glyph.sem != cell.sem || vtGlyphHalf(row, next).sem != cell.sem {
+			break
+		}
+		prev = alone.printed(glyph)
+		next += int(glyph.width)
+		stop = next
+	}
+	return stop
+}
+
+// vtMayJoinLeft reports whether cell holds a glyph that may join the one to
+// its left when printed after it.
+func vtMayJoinLeft(cell vtCell) bool {
+	return cell.r >= 0x80 && cell.width != 0 && graphemeMayContinue(cell.r)
 }

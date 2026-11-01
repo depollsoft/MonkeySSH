@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strconv"
 	"unicode/utf8"
 )
@@ -46,11 +47,12 @@ type terminalScreen struct {
 	g1Graphics bool
 	shiftOut   bool
 	// graphemeCluster is DEC private mode 2027: printed code points join
-	// into grapheme clusters (vtscreen_grapheme.go). graphemeChanges are
-	// where it changed since, oldest first, and graphemeBefore what it was
-	// before the first of them (GraphemeClusterAt).
+	// into grapheme clusters (vtscreen_grapheme.go). graphemeChanges are the
+	// offsets of the output (Written) where it changed since, in order, and
+	// graphemeBefore what it was before the first of them
+	// (GraphemeClusterAt).
 	graphemeCluster bool
-	graphemeChanges []vtModeChange
+	graphemeChanges []int64
 	graphemeBefore  bool
 
 	// cursorKnown records that the cursor is where the app's terminal has it
@@ -599,7 +601,7 @@ func (s *terminalScreen) Clone() *terminalScreen {
 	c.kittyPlaceholderOrder = append([]string(nil), s.kittyPlaceholderOrder...)
 	c.kittyDirect = append([]vtKittyPlacement(nil), s.kittyDirect...)
 	c.kittyCommands = append([]vtKittyCommand(nil), s.kittyCommands...)
-	c.graphemeChanges = append([]vtModeChange(nil), s.graphemeChanges...)
+	c.graphemeChanges = slices.Clone(s.graphemeChanges)
 	for i, store := range s.kittyStores {
 		c.kittyStores[i] = store.clone()
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strconv"
 )
 
@@ -519,6 +520,10 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clust
 		out = append(out, "\x1b[@\r"...)
 		current, end = vtAttrs{}, moved
 	}
+	// The glyph before moved ones must not widen over them on its way.
+	edge := func(col int) bool {
+		return col == len(row)-1 || col == moved-1 && row[col].width == 1
+	}
 	for i := 0; i < end; {
 		cell := row[i]
 		if cell.width == 0 {
@@ -544,6 +549,11 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clust
 			i = run
 			continue
 		}
+		if run := vtStandaloneRun(row, i, end, left, clustered, edge); run > i+int(cell.width) {
+			out, current, left = appendVTStandaloneRun(out, row, i, run, left, marks, clustered, current, edge)
+			i = run
+			continue
+		}
 		if cell.r < 0x80 && len(cell.comb) == 0 {
 			// Most cells: ASCII prints alike in both modes and joins nothing.
 			out = marks.cell(out, i, cell.sem)
@@ -556,8 +566,7 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clust
 			i++
 			continue
 		}
-		// The glyph before moved ones must not widen over them on its way.
-		plan := planVTGlyph(cell, left, clustered, i == len(row)-1 || i == moved-1 && cell.width == 1)
+		plan := planVTGlyph(cell, left, clustered, edge(i))
 		if plan.n == 0 {
 			// A glyph the client cannot start here stays unwritten.
 			out = appendVTCSICount(out, int(cell.width), 'C')
@@ -595,6 +604,70 @@ func renderVTCellsMarked(out []byte, row []vtCell, marks *vtSemanticFrame, clust
 		out = marks.cell(out, len(row)-1, row[len(row)-1].sem)
 	}
 	return out
+}
+
+// appendVTStandaloneRun paints the glyph at col of row and the run after it
+// up to stop that would join it if printed after it (vtStandaloneRun): the
+// run first, from the right, each glyph onto blank cells, then the glyph at
+// col, where the client's cursor is and its mark is put first, for the whole
+// run. It returns, for renderVTCellsMarked, the rendition in force and the
+// glyph before the cursor, which it leaves at stop.
+func appendVTStandaloneRun(
+	out []byte,
+	row []vtCell,
+	col, stop int,
+	left vtCell,
+	marks *vtSemanticFrame,
+	clustered bool,
+	current vtAttrs,
+	edge func(int) bool,
+) ([]byte, vtAttrs, vtCell) {
+	cell := row[col]
+	out = marks.cell(out, col, cell.sem)
+	if col == 0 {
+		// The row is blank but for the glyph a soft wrap onto it printed.
+		out = appendVTCSICount(out, int(cell.width), 'X')
+	}
+	var run []int
+	for c := col + int(cell.width); c < stop; c += int(row[c].width) {
+		run = append(run, c)
+	}
+	var last vtCell
+	for k, c := range slices.Backward(run) {
+		glyph, half := row[c], vtGlyphHalf(row, c)
+		plan := planVTGlyph(glyph, vtCell{width: 1}, clustered, edge(c))
+		out = appendVTCSICount(out, c+1, 'G')
+		if glyph.attrs != current {
+			out = appendVTSGR(out, glyph.attrs)
+			current = glyph.attrs
+		}
+		out = appendVTGlyph(out, glyph, plan, clustered, half, nil)
+		if plan.widens > 0 {
+			current = half.attrs
+		}
+		if k == len(run)-1 {
+			last = plan.printed(glyph)
+		}
+	}
+	out = appendVTCSICount(out, col+1, 'G')
+	plan := planVTGlyph(cell, left, clustered, edge(col))
+	if cell.attrs != current {
+		out = appendVTSGR(out, cell.attrs)
+		current = cell.attrs
+	}
+	half := vtGlyphHalf(row, col)
+	var content vtContentSwitch
+	if plan.widens > 0 {
+		content = func(out []byte, sem uint8) []byte { return marks.cell(out, col+1, sem) }
+	}
+	out = appendVTGlyph(out, cell, plan, clustered, half, content)
+	if plan.widens > 0 {
+		current = half.attrs
+	}
+	if stop < len(row) {
+		out = appendVTCSICount(out, stop-col-int(cell.width), 'C')
+	}
+	return out, current, last
 }
 
 // vtMovedRun is the first column of the glyphs renderVTCellsMarked moves into
