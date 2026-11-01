@@ -659,6 +659,12 @@ func (f *vtSemanticFrame) cursorContent(out []byte, sem uint8, row int) []byte {
 	return f.content(out, sem)
 }
 
+// changes reports whether a cell written as sem would set the content in
+// force again.
+func (f *vtSemanticFrame) changes(sem uint8) bool {
+	return f != nil && sem != f.emitted
+}
+
 // cell is called before the cell at col of the line being painted is
 // written as sem. Output after the last prompt or input cell on its row is
 // where a running command, whose C arrived on that row, started.

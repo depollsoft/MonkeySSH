@@ -917,15 +917,6 @@ func TestFramesRepaintPromptMarksAroundRandomClusters(t *testing.T) {
 		"1\ufe0f\u20e3", "\U0001F44D\U0001F3FD", "\u754c", "\U0001F468\u200d\u00a9",
 		"\x1b[?2027l", "\x1b[?2027h", "\x1b[41m", "\x1b[0m",
 	}
-	marks := func(s *terminalScreen) []string {
-		var rows []string
-		for _, line := range dumpSemanticPrompt(s) {
-			if !strings.HasPrefix(line, "cursor") {
-				rows = append(rows, line[:2])
-			}
-		}
-		return rows
-	}
 	rng := rand.New(rand.NewSource(133))
 	for range 3000 {
 		width, height := 3+rng.Intn(5), 2+rng.Intn(3)
@@ -936,29 +927,67 @@ func TestFramesRepaintPromptMarksAroundRandomClusters(t *testing.T) {
 			stream.WriteString(token)
 			s.Write([]byte(token))
 		}
-		replica := replayFrame(s)
-		if !vtRowsEqual(s.grid().rows, replica.grid().rows) {
-			t.Fatalf("replay of %+q changed the cells\nwant %q\n got %q", stream.String(), graphemeRows(s), graphemeRows(replica))
-		}
-		if got, want := marks(replica), marks(s); !slices.Equal(got, want) {
-			t.Fatalf("replay of %+q changed the row marks to %q, want %q", stream.String(), got, want)
-		}
-		g := s.grid()
-		for r, row := range g.rows {
-			for col, cell := range row {
-				if g.pendingWrap && r == g.cursorRow && col >= len(row)-2 {
-					continue
-				}
-				if got := replica.grid().rows[r][col].sem; got != cell.sem {
-					t.Fatalf("replay of %+q changed the content of %d,%d to %d, want %d", stream.String(), r, col, got, cell.sem)
-				}
+		requirePromptFrameRoundTrip(t, s, stream.String())
+	}
+}
+
+// requirePromptFrameRoundTrip replays s, written by stream, onto a fresh
+// model: it must end with the same cells, row marks and cell contents, but
+// for the glyph the cursor waits to wrap after (cursorContent), and a clear
+// must then save as many rows.
+func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string) {
+	t.Helper()
+	marks := func(s *terminalScreen) []string {
+		var rows []string
+		for _, line := range dumpSemanticPrompt(s) {
+			if !strings.HasPrefix(line, "cursor") {
+				rows = append(rows, line[:2])
 			}
 		}
-		s.Write([]byte("\x1b[2J"))
-		replica.Write([]byte("\x1b[2J"))
-		if got, want := replica.scrollback.len(), s.scrollback.len(); got != want {
-			t.Fatalf("after the replay of %+q a clear saves %d rows, want %d", stream.String(), got, want)
+		return rows
+	}
+	replica := replayFrame(s)
+	if !vtRowsEqual(s.grid().rows, replica.grid().rows) {
+		t.Fatalf("replay of %+q changed the cells\nwant %q\n got %q", stream, graphemeRows(s), graphemeRows(replica))
+	}
+	if got, want := marks(replica), marks(s); !slices.Equal(got, want) {
+		t.Fatalf("replay of %+q changed the row marks to %q, want %q", stream, got, want)
+	}
+	g := s.grid()
+	for r, row := range g.rows {
+		for col, cell := range row {
+			if g.pendingWrap && r == g.cursorRow && col >= len(row)-2 {
+				continue
+			}
+			if got := replica.grid().rows[r][col].sem; got != cell.sem {
+				t.Fatalf("replay of %+q changed the content of %d,%d to %d, want %d", stream, r, col, got, cell.sem)
+			}
 		}
+	}
+	s.Write([]byte("\x1b[2J"))
+	replica.Write([]byte("\x1b[2J"))
+	if got, want := replica.scrollback.len(), s.scrollback.len(); got != want {
+		t.Fatalf("after the replay of %+q a clear saves %d rows, want %d", stream, got, want)
+	}
+}
+
+// TestFramesPaintJoiningGlyphsWithTheirOwnContent covers glyphs a frame
+// prints before the one to their left (vtStandaloneRun) written as other
+// content than it: each keeps its own, and the app sees the marks a painting
+// from the left puts there, a running command's C included.
+func TestFramesPaintJoiningGlyphsWithTheirOwnContent(t *testing.T) {
+	a, b, c := osc133("A"), osc133("B"), osc133("C")
+	swatch, thumb := "\U0001F3FD", "\U0001F44D"
+	for _, stream := range []string{
+		"\x1b[3G" + swatch + "\x1b[1G" + b + thumb,
+		a + "$ " + b + "\x1b[5G" + swatch + "\x1b[3G" + thumb + c,
+		a + "$ " + b + c + "\x1b[5G" + swatch + "\x1b[3G" + b + thumb,
+		a + "$ " + b + "\x1b[5G" + swatch + c + "\x1b[3G" + thumb,
+		a + "$ " + b + "\x1b[7G" + swatch + c + "\x1b[5G" + swatch + "\x1b[3G" + b + thumb,
+	} {
+		s := newTerminalScreen(10, 3)
+		s.Write([]byte(stream))
+		requirePromptFrameRoundTrip(t, s, stream)
 	}
 }
 

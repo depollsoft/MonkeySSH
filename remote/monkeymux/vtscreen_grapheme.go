@@ -395,6 +395,14 @@ func appendVTGlyph(out []byte, cell vtCell, plan vtGlyphPlan, clustered bool, ha
 	return out
 }
 
+// vtEdge reports whether col is the last column of a row width columns wide,
+// where planVTGlyph's edge applies: a glyph printed wide there, or widened,
+// moves to the next row. A one-column row prints a wide glyph in place, and
+// leaves one a code point would widen as it is.
+func vtEdge(width, col int) bool {
+	return col == width-1 && width > 1
+}
+
 // vtGlyphBefore is the glyph a code point printed at col of row may join: the
 // cell left of col, or the first half of the wide glyph that cell ends, or
 // none at the first column.
@@ -418,9 +426,7 @@ func vtGlyphBefore(row []vtCell, col int) vtCell {
 // edge reports a column a code point widening the glyph there would move it
 // to the next row from. Without such a run it returns the column after the
 // glyph at col. The run stops before a glyph that would leave a second half
-// on the one to its right, as the glyph at col must not, and before one
-// written as other content than the glyph at col, whose mark is put before
-// the whole run.
+// on the one to its right, as the glyph at col must not.
 func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, edge func(int) bool) int {
 	cell := row[col]
 	next := col + int(cell.width)
@@ -428,7 +434,7 @@ func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, ed
 		return next
 	}
 	plan := planVTGlyph(cell, left, clustered, edge(col))
-	if !plan.whole(cell) || plan.spills || vtGlyphHalf(row, col).sem != cell.sem {
+	if !plan.whole(cell) || plan.spills {
 		return next
 	}
 	stop, prev := next, plan.printed(cell)
@@ -438,8 +444,7 @@ func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, ed
 			break
 		}
 		alone := planVTGlyph(glyph, vtCell{width: 1}, clustered, edge(next))
-		if !alone.whole(glyph) || alone.spills ||
-			glyph.sem != cell.sem || vtGlyphHalf(row, next).sem != cell.sem {
+		if !alone.whole(glyph) || alone.spills {
 			break
 		}
 		prev = alone.printed(glyph)
