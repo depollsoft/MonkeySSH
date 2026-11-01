@@ -678,16 +678,15 @@ class Buffer {
 
   /// Remove all lines above the top of the viewport.
   void clearScrollback() {
-    if (height <= viewHeight) {
-      return;
+    if (height > viewHeight) {
+      graphics.removePlacementsInRows(0, scrollBack - 1);
+      for (var row = 0; row < scrollBack; row++) {
+        graphics.removeGraphicsAnchoredToLine(lines[row]);
+      }
+      lines.trimStart(scrollBack);
     }
-
-    graphics.removePlacementsInRows(0, scrollBack - 1);
-    for (var row = 0; row < scrollBack; row++) {
-      graphics.removeGraphicsAnchoredToLine(lines[row]);
-    }
-    lines.trimStart(scrollBack);
-    // The top line continues nothing now, as in the MonkeyMux screen model.
+    // The top line continues nothing now, as in the MonkeyMux screen model,
+    // also when a buffer one screen tall already dropped the line above it.
     lines[0].isWrapped = false;
   }
 
