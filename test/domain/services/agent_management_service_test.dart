@@ -1469,9 +1469,14 @@ void main() {
       (definition) => definition.id == 'cli:hermes',
     );
 
-    for (final source in ['pipx', null]) {
+    for (final (source, version) in [
+      ('pipx', '0.19.0'),
+      (null, '0.19.0'),
+      // pipx still lists an old copy, but the installer's newer one runs.
+      ('pipx', '0.21.6'),
+    ]) {
       test(
-        'a ${source ?? 'installer'} copy behind the latest release',
+        'a ${source ?? 'installer'} listing running $version behind the latest release',
         () async {
           final client = _MockSshClient();
           final session = _remoteSession(client);
@@ -1484,7 +1489,7 @@ void main() {
               return _execOutput(
                 '__monkeyssh_agent_runtime__=cli:hermes\n'
                 '__monkeyssh_agent_path__=/home/dev/.local/bin/hermes\n'
-                '__monkeyssh_agent_version__=Hermes Agent v0.19.0\n'
+                '__monkeyssh_agent_version__=Hermes Agent v$version\n'
                 '__monkeyssh_agent_runtime_end__\n',
               );
             }
@@ -1500,9 +1505,9 @@ void main() {
               .inspect(session, definition);
 
           expect(runtime.status, AgentRuntimeStatus.updateAvailable);
-          expect(runtime.installedVersion, '0.19.0');
+          expect(runtime.installedVersion, version);
           expect(runtime.latestVersion, '0.22.6');
-          if (source == 'pipx') {
+          if (source == 'pipx' && version == '0.19.0') {
             expect(runtime.managedByPackageManager, isFalse);
             expect(runtime.message, contains('pipx uninstall hermes-agent'));
           } else {
@@ -2361,8 +2366,21 @@ exit "$result"
             update: true,
             executablePath: '/home/dev/.local/bin/hermes',
             detectionSource: 'pipx',
+            installedVersion: '0.19.0',
           ),
           isNull,
+        );
+        // A newer copy did not come from PyPI, whatever pipx still lists.
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: true,
+            executablePath: '/home/dev/.local/bin/hermes',
+            detectionSource: 'pipx',
+            installedVersion: '0.21.6',
+          ),
+          isNotNull,
         );
       }
     });

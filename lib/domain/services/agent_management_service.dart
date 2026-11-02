@@ -327,7 +327,7 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     windowsInstallerUrl: 'https://hermes-agent.nousresearch.com/install.ps1',
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
-    retiredRegistryMessage: _hermesPipxMessage,
+    retiredRegistry: (lastVersion: '0.19.0', message: _hermesPipxMessage),
   ),
   AgentRuntimeDefinition(
     id: 'cli:openclaw',
@@ -619,8 +619,7 @@ String? buildAgentInstallCommand(
   // Neither the retired registry nor the agent's own updater can move an
   // installation the registry owns forward; the user replaces it instead.
   if (update &&
-      definition.retiredRegistryMessage != null &&
-      detectionSource == _registrySource(definition.registry)) {
+      _ownedByRetiredRegistry(definition, detectionSource, installedVersion)) {
     return null;
   }
   final repairScript = definition.repairScript;
@@ -1164,6 +1163,15 @@ class AgentManagementService {
         ? 'npx on demand'
         : _detectionSourceFromPath(path);
     installed ??= parseAgentVersion(metadata?.installedVersionOutput ?? '');
+    final retiredRegistry = definition.retiredRegistry;
+    // The registry still lists an old copy, but a newer one runs: it came
+    // from the official installer.
+    if (retiredRegistry != null &&
+        installed != null &&
+        source == _registrySource(definition.registry) &&
+        compareAgentVersions(installed, retiredRegistry.lastVersion) > 0) {
+      source = _detectionSourceFromPath(path);
+    }
     final latest = parseAgentVersion(metadata?.latestVersionOutput ?? '');
     final hasUpdate =
         installed != null &&
@@ -1174,9 +1182,7 @@ class AgentManagementService {
         legacy != null &&
         installed != null &&
         compareAgentVersions(installed, legacy.belowVersion) < 0;
-    final retired =
-        definition.retiredRegistryMessage != null &&
-        source == _registrySource(definition.registry);
+    final retired = _ownedByRetiredRegistry(definition, source, installed);
     final managed =
         !isLegacyInstallation &&
         !retired &&
@@ -1199,7 +1205,7 @@ class AgentManagementService {
           ? isLegacyInstallation
                 ? legacy.message
                 : retired
-                ? definition.retiredRegistryMessage
+                ? retiredRegistry!.message
                 : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
@@ -2325,6 +2331,20 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
 
 String _executableBasename(String path) =>
     path.replaceAll('\\', '/').split('/').last.toLowerCase();
+
+/// Whether [definition]'s retired registry owns the running copy: it lists
+/// the package and the copy is no newer than the registry's last release.
+bool _ownedByRetiredRegistry(
+  AgentRuntimeDefinition definition,
+  String? source,
+  String? installedVersion,
+) {
+  final retired = definition.retiredRegistry;
+  return retired != null &&
+      installedVersion != null &&
+      source == _registrySource(definition.registry) &&
+      compareAgentVersions(installedVersion, retired.lastVersion) <= 0;
+}
 
 /// Install source the metadata probe reports for [registry]'s installations.
 String? _registrySource(AgentPackageRegistry? registry) => switch (registry) {
