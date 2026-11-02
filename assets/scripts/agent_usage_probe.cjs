@@ -47,14 +47,23 @@ function claudeUsage(data) {
   const names = {five_hour: '5 hours', seven_day: 'Weekly', seven_day_opus: 'Weekly · Opus',
     seven_day_sonnet: 'Weekly · Sonnet', seven_day_oauth_apps: 'Weekly · OAuth apps',
     seven_day_cowork: 'Weekly · Cowork'};
+  const limits = Array.isArray(data.limits) ? data.limits : [];
+  // limits[] lists the meters the plan has; percent is already 0–100. Plans
+  // without a five-hour limit (verified Ultra since 2026-10-30) send
+  // five_hour: null and no session row, so no five-hour window is reported.
+  // Like Claude Code's /usage, prefer the five_hour/seven_day fields, and read
+  // the matching account-wide row only when the field has no reading.
+  const accountRows = {five_hour: 'session', seven_day: 'weekly_all'};
   const windows = Object.entries(names).flatMap(([key, label]) => {
     const w = data[key];
-    return number(w?.utilization) == null ? [] :
-      [{label, usedPercent: w.utilization, resetsAt: date(w.resets_at)}];
+    if (number(w?.utilization) != null) return [{label, usedPercent: w.utilization, resetsAt: date(w.resets_at)}];
+    const rows = !accountRows[key] ? [] : limits.filter(row => row?.kind === accountRows[key] && row.scope?.model == null &&
+      row.scope?.surface == null && number(row.percent) != null);
+    return rows.length === 1 ? [{label, usedPercent: rows[0].percent, resetsAt: date(rows[0].resets_at)}] : [];
   });
   // Claude Code's /usage projects model allowances from limits, separately
-  // from the legacy five_hour/seven_day fields. percent is already 0–100.
-  for (const limit of Array.isArray(data.limits) ? data.limits : []) {
+  // from the legacy five_hour/seven_day fields.
+  for (const limit of limits) {
     const model = limit?.scope?.model?.display_name;
     if (limit?.kind !== 'weekly_scoped' || typeof model !== 'string' ||
         !/^fable(?: [0-9]+(?:\.[0-9]+)*)?$/i.test(model) || number(limit.percent) == null) continue;
@@ -508,7 +517,8 @@ async function providerUsage(id, credential, fetch = requestJson, accounts = [])
     }));
     if (id === 'openai' || id === 'openai-codex') {
       const claims = jwtClaims(token);
-      if (String(claims.scope || '').split(/\s+/).includes('chatgpt.tokens.use.direct')) {
+      // scope is a space-separated string or, in OpenCode 2's tokens, an array.
+      if ([].concat(claims.scope ?? []).flatMap(x => String(x).split(/\s+/)).includes('chatgpt.tokens.use.direct')) {
         return chatGPTPlanUsage(token, accounts, fetch);
       }
       const account = c.accountId || c.account_id || claims['https://api.openai.com/auth']?.chatgpt_account_id;
@@ -560,6 +570,22 @@ function configuredAccounts(id) {
   }
   return Object.entries(data).filter(([, c]) => c && typeof c === 'object' && ['oauth', 'api', 'api_key', 'wellknown'].includes(c.type));
 }
+// OpenCode 2 moved saved accounts from auth.json into its database and prints
+// them with `auth export`. --standalone uses a private server instead of
+// starting the background service. OpenCode 1 has no export: use auth.json.
+async function openCodeAccounts(executable, run = runJson) {
+  if (!executable) return null;
+  let rows;
+  try { rows = await run(executable, ['auth', 'export', '--standalone']); } catch { return null; }
+  if (!Array.isArray(rows)) return null;
+  return rows.flatMap(row => {
+    const value = row?.value;
+    if (typeof row?.integrationID !== 'string' || !value || typeof value !== 'object' || Array.isArray(value)) return [];
+    // OpenCode 2 names an API key `key`; the readers know it as `api`.
+    return [[row.integrationID, {...value, type: value.type === 'key' ? 'api' : value.type,
+      ...(typeof value.metadata?.accountID === 'string' ? {accountId: value.metadata.accountID} : {})}]];
+  });
+}
 async function multiProvider(id, accounts = configuredAccounts(id), reader = providerUsage) {
   if (!accounts.length) return {windows: [], notices: [], status: 'noAccounts'};
   const totals = new Map(), seen = new Map();
@@ -592,7 +618,8 @@ async function probe(id, executable) {
     else if (id === 'cursor') result = await cursor();
     else if (id === 'antigravity') result = await antigravity();
     else if (id === 'openclaw') result = openclawUsage(await runJson(executable, ['status', '--usage', '--json']));
-    else if (['opencode', 'pi', 'hermes'].includes(id)) result = await multiProvider(id);
+    else if (id === 'opencode') result = await multiProvider(id, await openCodeAccounts(executable) ?? configuredAccounts(id));
+    else if (['pi', 'hermes'].includes(id)) result = await multiProvider(id);
     else return {status: 'unsupported'};
     return {...result, status: result.status || (result.windows.length ? 'available' : 'unavailable')};
   } catch (error) {
@@ -600,7 +627,7 @@ async function probe(id, executable) {
   }
 }
 module.exports = {requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
-  openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, multiProvider, antigravity, rpc, probe};
+  openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
   Promise.all(Object.entries(input).map(async ([id, executable]) => {

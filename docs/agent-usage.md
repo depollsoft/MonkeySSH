@@ -17,10 +17,10 @@ Every supported agent has a reader:
 
 | Agent | Source and reported information |
 | --- | --- |
-| Claude Code | Existing host OAuth credentials and the account usage endpoint. Reports five-hour, weekly, and model-specific windows, including Fable weekly allowances when returned. |
+| Claude Code | Existing host OAuth credentials and the account usage endpoint. Reports the plan's five-hour session limit when it has one, weekly, and model-specific windows, including Fable weekly allowances when returned. |
 | Codex | Installed CLI's `account/rateLimits/read` app-server method. Reports every returned bucket and earned resets available. Never redeems a reset. |
 | Copilot CLI | Installed CLI's `account.getQuota` stdio method. Reports allowances, unlimited categories, resets, and paid overage availability. |
-| OpenCode | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
+| OpenCode | Its saved provider accounts (OpenCode 2 through `opencode auth export`). Reads the applicable provider quota endpoint for each account. |
 | Antigravity | An already-running CLI's local `RetrieveUserQuotaSummary` endpoint. Reports all enabled quota groups and reset times. Shows a start-agent hint when no running CLI is found. |
 | Cursor Agent | Its existing access token and `DashboardService/GetUsageLimitPolicyStatus`. Reports access restrictions and the supplied reset time. Does not infer a percentage or remaining allowance from that status. |
 | Pi | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
@@ -37,12 +37,15 @@ reader. A failed provider does not hide successful providers. Multiple saved
 accounts for a provider receive anonymous account numbers; no emails or account
 identifiers return to the app.
 
-The credential stores are OpenCode's `$XDG_DATA_HOME/opencode/auth.json`
-(default `~/.local/share/opencode/auth.json`), Pi's
+The credential stores are OpenCode 2's database, read with
+`opencode auth export --standalone` (a private server, so no background service
+is left running), OpenCode 1's `$XDG_DATA_HOME/opencode/auth.json`
+(default `~/.local/share/opencode/auth.json`), used when the installed OpenCode has
+no `auth export`, Pi's
 `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`), and Hermes's
 `$HERMES_HOME/auth.json` (default `~/.hermes/auth.json`). These readers inspect
-saved accounts, including inactive accounts. OpenCode also honors its
-`OPENCODE_AUTH_CONTENT` override before reading the file. They do not resolve project-specific
+saved accounts, including inactive accounts. OpenCode 1 also honors its
+`OPENCODE_AUTH_CONTENT` override before reading the file; OpenCode 2 ignores it. They do not resolve project-specific
 configuration, run key-generating shell commands, or discover keys supplied only
 through other environment variables or an external credential plugin. An empty saved
 store is reported as such, not as zero usage. Unreadable or malformed stores
@@ -124,8 +127,9 @@ shrinks: 23% used leaves 77% filled, and 100% used leaves an empty track.
 
 Only actual reported quotas occupy the circle:
 
-- One quota uses the whole circle. This includes Codex accounts that report a
-  weekly limit but no account-wide five-hour limit, and Grok's included credits.
+- One quota uses the whole circle. This includes Claude plans without a five-hour
+  limit (verified Ultra accounts since October 30, 2026), Codex accounts that report
+  a weekly limit but no account-wide five-hour limit, and Grok's included credits.
 - Two quotas use the top and bottom halves. For Claude Code and Codex, the
   five-hour allowance stays above the account-wide weekly allowance.
 - Antigravity exposes its numerical quota groups as separate, equal segments.
@@ -199,6 +203,15 @@ against its CLI and the [CodexBar reader](https://github.com/steipete/CodexBar/b
 Contract fixtures cover every agent. Live account checks have succeeded locally
 for Claude, Codex, Copilot, OpenCode, and Pi. Authenticated live checks for the
 remaining providers and Windows hosts still need suitable accounts/hosts.
+
+Claude plans differ in which limits they have. Pro, Max, and Ultra accounts
+awaiting verification have a five-hour session limit and a weekly limit; verified
+Ultra accounts have only weekly limits. The usage response then carries
+`five_hour: null` and no `kind: session` row in `limits`, so no five-hour window is
+reported and the ring shows the weekly allowance alone. Like Claude Code's own
+`/usage` (2.1.316), the reader prefers the `five_hour` and `seven_day` fields and
+falls back to the matching account-wide `limits` row (`session`, `weekly_all`) only
+when a field has no reading.
 
 Fable weekly usage comes from the OAuth usage response's `limits` entries with
 `kind: weekly_scoped` and `scope.model.display_name: Fable` (also accepts versioned

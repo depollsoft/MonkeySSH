@@ -117,6 +117,42 @@ test('Hermes copilot pool entries use GitHub quota and its provider label', asyn
   }
 });
 
+test('OpenCode 2 accounts come from auth export, OpenCode 1 falls back to auth.json', async () => {
+  const {openCodeAccounts, multiProvider, providerUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const calls = [];
+  const exported = [
+    {id: 'c1', integrationID: 'openai', label: 'PRIVATE_LABEL', active: true, value: {type: 'oauth', methodID: 'chatgpt-headless',
+      refresh: 'REFRESH', access: 'ACCESS', expires: 1, metadata: {accountID: 'acct-1'}}},
+    {id: 'c2', integrationID: 'openrouter', label: 'k', active: false, value: {type: 'key', key: 'sk-or-FIXTURE'}},
+    {id: 'c3', integrationID: 'openai', value: null}, {value: {type: 'oauth'}}, null,
+  ];
+  const accounts = await openCodeAccounts('/opt/opencode', async (executable, args) => {
+    calls.push([executable, ...args]);
+    return exported;
+  });
+  assert.deepEqual(calls, [['/opt/opencode', 'auth', 'export', '--standalone']]);
+  assert.deepEqual(accounts, [
+    ['openai', {type: 'oauth', methodID: 'chatgpt-headless', refresh: 'REFRESH', access: 'ACCESS', expires: 1,
+      metadata: {accountID: 'acct-1'}, accountId: 'acct-1'}],
+    ['openrouter', {type: 'api', key: 'sk-or-FIXTURE'}],
+  ]);
+  const result = await multiProvider('opencode', accounts, (id, c) => providerUsage(id, c, async (url, options) => {
+    if (url.startsWith('https://openrouter.ai/')) return {data: {limit: 10, usage: 4}};
+    assert.equal(url, 'https://chatgpt.com/backend-api/wham/usage');
+    assert.equal(options.token, 'ACCESS');
+    assert.deepEqual(options.headers, {'ChatGPT-Account-Id': 'acct-1'});
+    return {rate_limit: {primary_window: {used_percent: 30, limit_window_seconds: 18000}}};
+  }));
+  assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]),
+    [['OpenAI · 5 hours', 30], ['OpenRouter · Key spending limit', 40]]);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_LABEL'));
+  // OpenCode 1 has no `auth export`; a failed or unexpected export reads auth.json instead.
+  assert.equal(await openCodeAccounts('/opt/opencode', async () => { throw new Error('unavailable'); }), null);
+  assert.equal(await openCodeAccounts('/opt/opencode', async () => ({accounts: []})), null);
+  assert.equal(await openCodeAccounts('', async () => exported), null);
+  assert.deepEqual(await openCodeAccounts('/opt/opencode', async () => []), []);
+});
+
 test('Codex weekly-only account stays separate from unused model buckets', () => {
   const result = codexUsage({rateLimitsByLimitId: {
     codex: {primary: {usedPercent: 23, windowDurationMins: 10080}},
@@ -192,6 +228,36 @@ test('Claude includes reported Fable weekly allowances without inferring a quota
     {kind: 'weekly_scoped', percent: 20, scope: {model: {display_name: 'PRIVATE_ACCOUNT'}}},
   ]]) {
     assert.deepEqual(claudeUsage({limits}).windows, []);
+  }
+});
+
+test('Claude plans with and without a five-hour limit report only the meters they have', () => {
+  const reset = '2026-11-06T17:00:00.000Z';
+  const weekly = {kind: 'weekly_all', group: 'weekly', percent: 12, severity: 'normal', resets_at: reset, scope: null, is_active: true};
+  const fable = {kind: 'weekly_scoped', group: 'weekly', percent: 3, severity: 'normal', resets_at: reset,
+    scope: {model: {id: null, display_name: 'Fable'}, surface: null}, is_active: false};
+  const session = {kind: 'session', group: 'session', percent: 40, severity: 'normal', resets_at: reset, scope: null, is_active: true};
+  // Shape of a verified Ultra account's response on 2026-11-02.
+  assert.deepEqual(claudeUsage({five_hour: null, seven_day: {utilization: 12, resets_at: reset},
+    seven_day_sonnet: null, extra_usage: {is_enabled: false}, limits: [weekly, fable]}).windows, [
+    {label: 'Weekly', usedPercent: 12, resetsAt: reset},
+    {label: 'Weekly · Fable', usedPercent: 3, resetsAt: reset},
+  ]);
+  // Pro, Max and unverified Ultra accounts keep the five-hour session limit.
+  assert.deepEqual(claudeUsage({five_hour: {utilization: 40, resets_at: reset},
+    seven_day: {utilization: 12, resets_at: reset}, limits: [session, weekly, fable]}).windows.map(w => w.label),
+  ['5 hours', 'Weekly', 'Weekly · Fable']);
+  // Without the legacy fields, the account-wide rows still give both meters.
+  assert.deepEqual(claudeUsage({limits: [weekly, session, fable]}).windows, [
+    {label: '5 hours', usedPercent: 40, resetsAt: reset},
+    {label: 'Weekly', usedPercent: 12, resetsAt: reset},
+    {label: 'Weekly · Fable', usedPercent: 3, resetsAt: reset},
+  ]);
+  assert.deepEqual(claudeUsage({five_hour: null, seven_day: null, limits: [weekly]}).windows.map(w => w.label), ['Weekly']);
+  // Scoped, duplicate or non-numerical rows never stand in for an account-wide meter.
+  for (const limits of [[session, session], [{...session, percent: '40'}],
+    [{...session, scope: {model: {display_name: 'Fable'}}}], [{...session, scope: {surface: {display_name: 'Cowork'}}}]]) {
+    assert.deepEqual(claudeUsage({five_hour: null, limits}).windows, []);
   }
 });
 
@@ -399,6 +465,11 @@ test('Pi Sign in with ChatGPT reads the plan through a Codex sign-in for the sam
     requests.length = 0;
     await providerUsage('openai', {type: 'oauth', access: codex('user-me', later)}, fetch, accounts);
     assert.deepEqual(requests, [['https://chatgpt.com/backend-api/wham/usage', codex('user-me', later), 'ACCOUNT_user-me']]);
+
+    // A scope claim sent as an array is read the same way.
+    requests.length = 0;
+    await providerUsage('openai', {type: 'oauth', access: jwt({exp: later, scope: ['openid', 'chatgpt.tokens.use.direct']})}, fetch, []);
+    assert.equal(requests[0][0], 'https://api.openai.com/v1/me');
   } finally {
     previous == null ? delete process.env.CODEX_HOME : process.env.CODEX_HOME = previous;
     fs.rmSync(dir, {recursive: true, force: true});

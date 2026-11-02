@@ -368,6 +368,24 @@ void main() {
       expect(rings.weekly, 82);
     }
   });
+
+  test(
+    'Claude plans without a five-hour limit get a full-circle weekly meter',
+    () {
+      // Verified Ultra accounts report no five-hour window; the scoped Fable
+      // allowance never takes the empty half.
+      final usage = parseAgentUsageOutput(
+        '__monkeyssh_usage__={"id":"claude","status":"available","windows":[ '
+        '{"label":"Weekly","usedPercent":12}, '
+        '{"label":"Weekly · Fable","usedPercent":3}]}',
+        checkedAt: now,
+      )['claude']!;
+      final rings = project(usage)!;
+      expect(rings.shortTerm, isNull);
+      expect(rings.weekly, 88);
+      expect(rings.segments, [(label: 'weekly', remaining: 88.0)]);
+    },
+  );
   test('duplicate or model/account-prefixed categories are not guessed', () {
     expect(
       project(
