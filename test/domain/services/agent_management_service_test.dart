@@ -1849,7 +1849,8 @@ esac
   test('POSIX metadata reports a Pi installer launcher ahead of a leftover npm package', () async {
     final root = await Directory.systemTemp.createTemp('monkeyssh-pi-layout-');
     addTearDown(() => root.delete(recursive: true));
-    final bin = Directory('${root.path}/bin')..createSync();
+    // ~/bin is left free for the symlinked-directory case below.
+    final bin = Directory('${root.path}/tools')..createSync();
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (d) => d.id == 'cli:pi',
     );
@@ -1899,6 +1900,20 @@ esac
       expect(managed?.detectionSource, 'Pi installer', reason: shell);
       expect(managed?.installedVersionOutput, isNull, reason: shell);
       expect(parseAgentVersion(managed?.latestVersionOutput ?? ''), '1.5.0');
+    }
+    // A symlinked bin directory: ~/bin -> .pi/agent/bin.
+    Link('${root.path}/.local/bin/pi').deleteSync();
+    Link('${root.path}/bin').createSync('.pi/agent/bin');
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+      if (File('/bin/dash').existsSync()) '/bin/dash',
+    ]) {
+      expect(
+        (await probe(shell))?.detectionSource,
+        'Pi installer',
+        reason: shell,
+      );
     }
     // Without the installer's marker, the same launcher is an npm package.
     marker.deleteSync();

@@ -2342,7 +2342,8 @@ String _detectionSourceFromPath(String path) {
 /// Sets `__fl_source` when the first of [definition]'s executables on PATH is
 /// an installer-managed launcher (see
 /// [AgentRuntimeDefinition.installerLayout]). Symlinks are followed by hand,
-/// as the launchers do, because `readlink -f` is not portable.
+/// as the launchers do, because `readlink -f` is not portable; each hop takes
+/// the physical directory, so a symlinked `bin` directory resolves too.
 String _posixInstallerLayoutSource(
   AgentRuntimeDefinition definition,
   ({String marker, String source}) layout,
@@ -2350,17 +2351,21 @@ String _posixInstallerLayoutSource(
     '__fl_launcher=; for __fl_name in '
     '${definition.executableNames.map(_shellQuote).join(' ')}; do '
     r'__fl_launcher=$(command -v "$__fl_name" 2>/dev/null) && break; done; '
-    r'__fl_hops=0; while [ -n "$__fl_launcher" ] && [ -L "$__fl_launcher" ] && [ "$__fl_hops" -lt 16 ]; do '
+    r'__fl_hops=0; while [ -n "$__fl_launcher" ] && [ "$__fl_hops" -lt 16 ]; do '
+    r'__fl_dir=$(CDPATH= cd -P "${__fl_launcher%/*}" 2>/dev/null && pwd -P) || break; '
+    r'__fl_launcher=$__fl_dir/${__fl_launcher##*/}; '
+    r'[ -L "$__fl_launcher" ] || break; '
     r'__fl_link=$(readlink "$__fl_launcher") || break; '
     r'case "$__fl_link" in /*) __fl_launcher=$__fl_link;; '
-    r'*) __fl_launcher=${__fl_launcher%/*}/$__fl_link;; esac; '
+    r'*) __fl_launcher=$__fl_dir/$__fl_link;; esac; '
     r'__fl_hops=$((__fl_hops + 1)); done; '
     r'case "$__fl_launcher" in */bin/*) '
     'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
     '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
 
 /// PowerShell form of [_posixInstallerLayoutSource]: sets `$__flManaged` when
-/// the first executable found is `<root>\bin\<name>` beside the marker.
+/// the first executable found, after following file symlinks, is
+/// `<root>\bin\<name>` beside the marker.
 String _windowsInstallerLayoutSource(
   AgentRuntimeDefinition definition,
   ({String marker, String source}) layout,
@@ -2369,7 +2374,14 @@ String _windowsInstallerLayoutSource(
     'foreach(\$__flName in @(${definition.executableNames.map(powerShellSingleQuote).join(',')})){'
     r'$__flCommand=Get-Command $__flName -ErrorAction SilentlyContinue | Select-Object -First 1;'
     r'if($null -eq $__flCommand){continue};'
-    r'try{$__flBin=Split-Path ([IO.Path]::GetFullPath($__flCommand.Source)) -Parent;'
+    r'try{$__flPath=[IO.Path]::GetFullPath($__flCommand.Source);'
+    // PowerShell 5.1 returns Target as an array, 7 as a string.
+    r'for($__flHop=0;$__flHop -lt 16;$__flHop++){'
+    r'$__flItem=Get-Item -LiteralPath $__flPath -Force;'
+    r"if($__flItem.LinkType -ne 'SymbolicLink'){break};"
+    r'$__flTarget=@($__flItem.Target)[0];if(-not $__flTarget){break};'
+    r'$__flPath=[IO.Path]::GetFullPath([IO.Path]::Combine((Split-Path $__flPath -Parent),$__flTarget))};'
+    r'$__flBin=Split-Path $__flPath -Parent;'
     r"if((Split-Path $__flBin -Leaf) -eq 'bin'){"
     '\$__flManaged=Test-Path -LiteralPath (Join-Path (Split-Path \$__flBin -Parent) '
     '${powerShellSingleQuote(layout.marker.replaceAll('/', r'\'))})}}catch{};break};'
