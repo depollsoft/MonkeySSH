@@ -3256,6 +3256,65 @@ exit "$result"
       }
     }, skip: !Platform.isWindows);
 
+    // Named so the Windows CI step's --plain-name filter runs it too.
+    test('full Windows probe executes through cmd and PowerShell for the Pi installer layout', () async {
+      final root = await Directory.systemTemp.createTemp('agent-pi-layout-');
+      addTearDown(() => root.delete(recursive: true));
+      final agent = '${root.path}\\.pi\\agent';
+      final bin = Directory('$agent\\bin')..createSync(recursive: true);
+      Directory('$agent\\install').createSync();
+      File('${bin.path}\\pi.cmd')
+          .writeAsStringSync('@echo off\r\necho 1.4.0\r\n');
+      final marker = File('$agent\\install\\managed-install.json')
+        ..writeAsStringSync('{"kind":"pi-managed-install","schemaVersion":1}');
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:pi',
+      );
+      final script =
+          decodeEncodedPowerShell(
+                buildAgentMetadataProbeCommand([definition], windows: true),
+              )
+              .replaceFirst(
+                powerShellProfilePathPreamble,
+                '\$env:Path=${powerShellSingleQuote(bin.path)} + \';\' + '
+                r"$env:SystemRoot + '\System32;' + $env:SystemRoot + '\System32\WindowsPowerShell\v1.0';",
+              )
+              // Offline: the latest-version lookup fails at once.
+              .replaceAll(
+                'https://pi.dev/api/latest-version',
+                'http://127.0.0.1:9/',
+              );
+      final command = buildCompactWindowsPowerShellCommand(script);
+      Future<String?> source(String shell) async {
+        final batch = File('${root.path}\\metadata.cmd');
+        await batch.writeAsString('@echo off\r\n$command\r\n');
+        final result = await Process.run(shell, [
+          if (shell == 'cmd.exe') ...[
+            '/d',
+            '/c',
+            batch.path,
+          ] else ...[
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            command,
+          ],
+        ]).timeout(const Duration(seconds: 60));
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        final snapshots = parseAgentMetadataProbeOutput(
+          result.stdout as String,
+        );
+        expect(snapshots.keys, ['cli:pi'], reason: '${result.stdout}');
+        return snapshots['cli:pi']!.detectionSource;
+      }
+
+      for (final shell in ['cmd.exe', 'powershell.exe']) {
+        expect(await source(shell), 'Pi installer', reason: shell);
+      }
+      marker.deleteSync();
+      expect(await source('powershell.exe'), isNull);
+    }, skip: !Platform.isWindows);
+
     test('parses installed and missing runtimes independently', () {
       final snapshots = parseAgentBatchProbeOutput(
         'profile chatter\n'
