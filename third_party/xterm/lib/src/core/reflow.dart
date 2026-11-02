@@ -1,4 +1,5 @@
 import 'package:xterm/src/core/buffer/line.dart';
+import 'package:xterm/src/core/cursor.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
 class _LineBuilder {
@@ -71,6 +72,7 @@ class _LineReflow {
   /// Adds a line to the reflow operation. This method will try to reuse the
   /// given line if possible.
   void add(BufferLine line) {
+    line.restoreOneColumnHalf();
     final trimmedLength = line.getTrimmedLength(oldWidth);
 
     // A fast path for empty lines. Cells still waiting in the builder come
@@ -125,6 +127,11 @@ class _LineReflow {
     var cellsLeft = to - from;
 
     while (cellsLeft > 0) {
+      if (_builder.length >= newWidth) {
+        // A line one column wide holding a wide glyph fills a line two
+        // columns wide by itself when [setBuffer] reuses it.
+        _lines.add(_builder.take(wrapped: _lines.isNotEmpty));
+      }
       final bufferRemainingCells = newWidth - _builder.length;
 
       // How many cells we should copy in this iteration.
@@ -260,6 +267,11 @@ List<BufferLine> reflow(
       line.truncate(newWidth);
     } else {
       line.resize(newWidth);
+    }
+    // The second half a narrowing to one column leaves at the start of a
+    // line keeps only its background, as the MonkeyMux model blanks it.
+    if (line.length > 0 && line.getCodePoint(0) == 0) {
+      line.eraseCell(0, CursorStyle(background: line.getBackground(0)));
     }
   }
 

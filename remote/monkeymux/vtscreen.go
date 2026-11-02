@@ -324,6 +324,12 @@ type vtSavedCursor struct {
 	kittyColumnLost bool
 }
 
+// untouched reports a cursor never saved that no resize moved, which DECRC
+// restores as the power-up state, home with the default rendition.
+func (c vtSavedCursor) untouched() bool {
+	return !c.valid && c.row == 0 && c.col == 0
+}
+
 // vtCell holds one grid cell. r == 0 means blank. width is 1 or 2 for a cell
 // that starts a glyph and 0 for the continuation cell of a wide glyph.
 type vtCell struct {
@@ -970,8 +976,9 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 	}
 	if len(row) > width {
 		row = row[:width]
-		// A wide glyph cut in half becomes a blank.
-		if width > 0 && row[width-1].width == 2 {
+		// A wide glyph cut in half becomes a blank, but for one a one-column
+		// row holds without its second half, as printing it there does.
+		if width > 1 && row[width-1].width == 2 {
 			row[width-1] = vtCell{width: 1}
 		}
 		return row
@@ -981,7 +988,17 @@ func resizeVTRow(row []vtCell, width int) []vtCell {
 	for i := len(row); i < width; i++ {
 		out[i].width = 1
 	}
+	if len(row) == 1 && row[0].width == 2 {
+		out[1] = vtOneColumnHalf(row[0])
+	}
 	return out
+}
+
+// vtOneColumnHalf is the second half of wide, a glyph a one-column row holds
+// without one, that a wider row has room for: the client writes it past the
+// row's end when it prints the glyph there, in the same rendition.
+func vtOneColumnHalf(wide vtCell) vtCell {
+	return vtCell{width: 0, sem: wide.sem, attrs: wide.attrs}
 }
 
 func (s *terminalScreen) pushScrollback(row []vtCell, wrapped bool, prompt uint8) {

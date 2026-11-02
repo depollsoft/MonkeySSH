@@ -191,7 +191,13 @@ class BufferLine with IndexedItem {
   /// Joins [codePoint] to the grapheme cluster of the cell at [index], after
   /// its other code points.
   void addGraphemeExtra(int index, int codePoint) {
-    setGraphemeExtras(index, [...getGraphemeExtras(index), codePoint]);
+    final extras = getGraphemeExtras(index);
+    assert(extras.length < maxGraphemeExtras);
+    // One copy per code point a cluster takes: no caller changes the list.
+    final joined = List<int>.filled(extras.length + 1, codePoint)
+      ..setRange(0, extras.length, extras);
+    (_graphemeExtras ??= {})[index] = joined;
+    _data[index * _cellSize + _cellContent] |= CellContent.graphemeFlag;
   }
 
   bool get _hasAnyGraphemeExtras => _graphemeExtras?.isNotEmpty ?? false;
@@ -311,6 +317,11 @@ class BufferLine with IndexedItem {
     if (start > 0 && getWidth(start - 1) == 2) {
       eraseCell(start - 1, style);
     }
+    // A second half moved to [start] without its first keeps only its
+    // background, as the MonkeyMux model blanks it.
+    if (start < _length && getContent(start) == 0) {
+      eraseCell(start, CursorStyle(background: getBackground(start)));
+    }
 
     // Update anchors, remove anchors that are inside the removed range.
     for (final anchor in _anchors.toList()) {
@@ -331,6 +342,9 @@ class BufferLine with IndexedItem {
 
     if (start > 0 && getWidth(start - 1) == 2) {
       eraseCell(start - 1, style);
+      // Its second half moves on keeping only its background, as the
+      // MonkeyMux model blanks it.
+      eraseCell(start, CursorStyle(background: getBackground(start)));
     }
 
     if (start + count < _length) {
@@ -375,6 +389,7 @@ class BufferLine with IndexedItem {
     if (length == _length) {
       return;
     }
+    if (length > _length) restoreOneColumnHalf();
 
     if (length > _length) {
       final newBufferSize = _calcCapacity(length) * _cellSize;
@@ -387,6 +402,10 @@ class BufferLine with IndexedItem {
     }
 
     _length = length;
+    // A wide glyph left in the only column has no second half until the line
+    // grows again, which gives it a new one; one kept past the end would come
+    // back after the glyph was gone.
+    if (length == 1 && getWidth(0) == 2) resetCell(1);
 
     for (var i = 0; i < _anchors.length; i++) {
       final anchor = _anchors[i];
@@ -416,6 +435,18 @@ class BufferLine with IndexedItem {
       if (to != null) moved[to] = codePoints;
     });
     _graphemeExtras = moved;
+  }
+
+  /// Gives the wide glyph a line one column long holds without its second
+  /// half that half, past the line's end, in the glyph's rendition, for the
+  /// line to show once it is longer, as the MonkeyMux model does
+  /// (vtOneColumnHalf). Whatever a narrowing hid there before was under the
+  /// glyph.
+  void restoreOneColumnHalf() {
+    if (_length != 1 || getWidth(0) != 2) return;
+    _clearGraphemeExtras(1);
+    _data.setRange(_cellSize, 2 * _cellSize, _data);
+    _data[_cellSize + _cellContent] = 0;
   }
 
   /// Returns the offset of the last cell that has content from the start of

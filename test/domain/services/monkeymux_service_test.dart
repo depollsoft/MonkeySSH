@@ -1592,13 +1592,17 @@ void main() {
         connectionId: 944,
         retryDelay: const Duration(milliseconds: 10),
       );
-      server.failVisibility = true;
+      // Only the first send fails, so the retry is answered whenever its
+      // timer fires; turning failures off after a pause raced that timer on a
+      // loaded machine and failed the retry too.
+      server.failNextVisibility = 1;
       service.setClientHidden(session, 'work', hidden: true);
-      await pumpEventQueue();
-      server.failVisibility = false;
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      await pumpEventQueue();
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (server.requests.length < 3 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
       expect(server.requests, [(0, false), (0, true), (0, true)]);
+      expect(server.hidden, isTrue);
 
       // Acknowledged, it is not sent again.
       await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -2637,7 +2641,8 @@ void _respondToControlError(
 
 /// A server whose control connections each say hello once, as the real
 /// one does, and answer every request. While [failVisibility] is set it fails
-/// client_visibility requests; while [holdVisibility] is set it applies them
+/// client_visibility requests, and so it does the next [failNextVisibility]
+/// of them; while [holdVisibility] is set it applies them
 /// but holds their answers until [releaseHeld]. [requests] records each
 /// client_visibility request's hidden flag with its connection's number, and
 /// [hidden] the state the server applied last.
@@ -2650,6 +2655,7 @@ class _FakeVisibilityServer {
   final outputs = <StreamController<Uint8List>>[];
   final _held = <void Function()>[];
   bool failVisibility = false;
+  int failNextVisibility = 0;
   bool holdVisibility = false;
   bool hidden = false;
 
@@ -2675,14 +2681,16 @@ class _FakeVisibilityServer {
       final data = invocation.positionalArguments.single as List<int>;
       final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
       final visibility = request['type'] == 'client_visibility';
+      final fails = visibility && (failVisibility || failNextVisibility > 0);
       if (visibility) {
         requests.add((connection, request['hidden'] == true));
-        if (!failVisibility) {
+        if (failNextVisibility > 0) failNextVisibility--;
+        if (!fails) {
           hidden = request['hidden'] == true;
         }
       }
       void answer() => send(
-        visibility && failVisibility
+        fails
             ? {'id': request['id'], 'type': 'error', 'error': 'boom'}
             : {
                 'id': request['id'],

@@ -1,5 +1,5 @@
 import 'package:test/test.dart';
-import 'package:xterm/src/terminal.dart';
+import 'package:xterm/core.dart';
 
 void main() {
   test('reflow() can reflow a single line', () {
@@ -98,6 +98,114 @@ void main() {
     for (final line in terminal.buffer.lines.toList()) {
       expect(line.length, 1);
     }
+  });
+
+  // A one-column screen holds a wide character without its second half,
+  // which goes past the line's end, and a wider screen gives it back: a line
+  // two columns wide is then full with it.
+  test('reflow() widens wide characters a one-column screen holds', () {
+    for (final (width, rows) in [
+      (2, ['\u{1F468}', '\u{1F469}']),
+      (3, ['\u{1F468}', '\u{1F469}']),
+      (4, ['\u{1F468}\u{1F469}']),
+    ]) {
+      final terminal = Terminal()..resize(1, 3);
+      terminal.write('\u{1F468}\u{1F469}');
+
+      expect(() => terminal.resize(width, 3), returnsNormally);
+
+      final lines = terminal.buffer.lines;
+      for (var i = 0; i < rows.length; i++) {
+        expect(lines[i].toString(), rows[i], reason: 'width $width row $i');
+        expect(lines[i].getWidth(0), 2);
+        expect(lines[i].isWrapped, i > 0);
+      }
+    }
+  });
+
+  // A wider screen gives a wide character a one-column screen holds its
+  // second half in the character's rendition: cells an earlier narrowing hid
+  // under it do not come back, and neither does a half of a character the
+  // one-column screen replaced.
+  test('a wide character on a one-column screen widens over hidden cells', () {
+    final terminal = Terminal(reflowEnabled: false)..resize(3, 2);
+    terminal.write('abc');
+    terminal.resize(1, 2);
+    terminal.write('\x1b[1;1H\u{1F468}');
+    terminal.resize(3, 2);
+
+    expect(terminal.buffer.lines[0].toString(), '\u{1F468}c');
+    expect(terminal.buffer.lines[0].getCodePoint(1), 0);
+
+    // Without a reflow too, as on the alternate screen, where a second half
+    // the glyph got in another rendition is not kept.
+    final alternate = Terminal()..resize(2, 3);
+    alternate.write('\x1b[?47h\u00A9\x1b[41m\uFE0F');
+    alternate.resize(1, 3);
+    alternate.resize(2, 3);
+    expect(alternate.buffer.lines[0].getWidth(0), 2);
+    expect(alternate.buffer.lines[0].getBackground(1), 0);
+
+    // Nor does a second half given back once: narrowed again, the glyph
+    // drops it, and a later widening finds nothing where the glyph went.
+    for (final replace in ['x', '\x1b[X', '\x1b[P']) {
+      final terminal = Terminal()..resize(1, 5);
+      terminal.write('\x1b[?47h\x1b[7;32;41m\u754C');
+      terminal
+        ..resize(2, 5)
+        ..resize(1, 5);
+      terminal.write('\r\x1b[0m$replace');
+      terminal.resize(2, 5);
+      final cell = CellData.empty();
+      terminal.buffer.lines[0].getCellData(1, cell);
+      expect([cell.foreground, cell.background, cell.flags], [0, 0, 0],
+          reason: replace);
+    }
+
+    for (final replace in ['x', '\x1b[X']) {
+      final terminal = Terminal()..resize(1, 3);
+      terminal.write('\x1b[41m\u754C\r\x1b[0m$replace');
+      terminal.resize(3, 3);
+      for (var column = 1; column < 3; column++) {
+        expect(terminal.buffer.lines[0].getBackground(column), 0,
+            reason: '$replace $column');
+      }
+    }
+  });
+
+  // The second half a narrowing to one column moves onto a line of its own
+  // keeps only its background, as the MonkeyMux model blanks it.
+  test('reflow() blanks a second half left alone at width 1', () {
+    final terminal = Terminal()..resize(1, 5);
+    terminal.write('\x1b[7;32;41m\u754C');
+    terminal
+      ..resize(2, 5)
+      ..resize(1, 5);
+
+    final lines = terminal.buffer.lines;
+    final glyph = [
+      for (var i = 0; i < lines.length; i++) lines[i].getCodePoint(0)
+    ].indexOf(0x754C);
+    final cell = CellData.empty();
+    lines[glyph + 1].getCellData(0, cell);
+    expect(cell.content, 0);
+    expect(cell.foreground, 0);
+    expect(cell.flags, 0);
+    expect(cell.background, CellColor.named | 1);
+  });
+
+  // A narrowing to one column keeps a wide character, as printing it there
+  // does, on a line of its own.
+  test('reflow() keeps a wide character at width 1', () {
+    final terminal = Terminal()..resize(2, 4);
+    terminal.write('a\u{1F468}b');
+
+    terminal.resize(1, 4);
+
+    final lines = terminal.buffer.lines;
+    expect([for (var i = 0; i < 4; i++) lines[i].getCodePoint(0)],
+        ['a'.codeUnitAt(0), 0x1F468, 0, 'b'.codeUnitAt(0)]);
+    expect(lines[1].getWidth(0), 2);
   });
 
   // With one cell left on a line, a wide character goes to the next line

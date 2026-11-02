@@ -126,8 +126,12 @@ func (s *terminalScreen) joinCluster(r rune) bool {
 		// The second half is left an empty cell with its background.
 		if prevCol+1 < len(row) {
 			row[prevCol+1] = blankedHalf(row[prevCol+1])
+			g.cursorCol, g.pendingWrap = prevCol+1, false
+		} else {
+			// A one-column screen: the cursor waits to wrap after the glyph,
+			// as after any other in the last column.
+			g.cursorCol, g.pendingWrap = prevCol, true
 		}
-		g.cursorCol, g.pendingWrap = min(prevCol+1, s.width-1), false
 	}
 	cell.comb = append(cell.comb, r)
 	return true
@@ -137,6 +141,13 @@ func (s *terminalScreen) joinCluster(r rune) bool {
 // grapheme break rules and reports whether a cluster ends between them and r,
 // along with the last of them.
 func vtClusterBreak(cell vtCell, r rune) (last rune, brk bool) {
+	last = vtLastCodePoint(cell)
+	// Most text (letters, CJK, symbols) is class other, which only joins a
+	// cluster that ends with a prepended mark (GB9b): skip the replay, as
+	// the client does.
+	if graphemeClassOf(r) == graphemeOther && graphemeClassOf(last) != graphemePrepend {
+		return last, true
+	}
 	var state graphemeBreakState
 	last = cell.r
 	for _, x := range cell.comb {
@@ -192,13 +203,12 @@ func (p vtGlyphPlan) printed(cell vtCell) vtCell {
 // to a glyph it was not printed after, may need the other mode for some of its
 // code points, and the plan switches as rarely as it can. left is the glyph
 // the client may join the first code point to: the one before the cursor, or
-// the one a pending wrap follows, or none (a zero cell). edge reports a cell
-// in the last column, which a code point widening it would move to the next
-// row. A cell the client cannot rebuild whole loses the code points at its
-// end it would not take.
-func planVTGlyph(cell vtCell, left vtCell, clustered, edge bool) vtGlyphPlan {
+// the one a pending wrap follows, or none (a zero cell). at is the column's
+// room for the glyph (vtColumn). A cell the client cannot rebuild whole loses
+// the code points at its end it would not take.
+func planVTGlyph(cell vtCell, left vtCell, clustered bool, at vtColumn) vtGlyphPlan {
 	if len(cell.comb) == 0 {
-		return planVTSingleGlyph(cell, left, clustered, edge)
+		return planVTSingleGlyph(cell, left, clustered, at)
 	}
 	const unreachable = 1 << 30
 	cell.comb = cell.comb[:min(len(cell.comb), vtCombiningLimit)]
@@ -237,7 +247,7 @@ func planVTGlyph(cell vtCell, left vtCell, clustered, edge bool) vtGlyphPlan {
 			}
 			width = graphemeStartWidth(cell.r)
 		}
-		if width < 1 || width > 2 || edge && width == 2 {
+		if width < 1 || width > 2 || at == vtLastColumn && width == 2 {
 			continue
 		}
 		cost[width-1][m] = switchCost(start, m)
@@ -280,7 +290,7 @@ func planVTGlyph(cell vtCell, left vtCell, clustered, edge bool) vtGlyphPlan {
 				parent := uint8(w<<1 | m)
 				if joins {
 					switch {
-					case effect == graphemeWide && w == 0 && edge:
+					case effect == graphemeWide && w == 0 && at != vtMidRow:
 					case effect == graphemeWide:
 						step(1, 1, c+switchCost(m, 1), parent)
 					case effect == graphemeNarrow:
@@ -324,9 +334,9 @@ func planVTGlyph(cell vtCell, left vtCell, clustered, edge bool) vtGlyphPlan {
 // planVTSingleGlyph is planVTGlyph for a glyph of one code point, most of
 // them: printed under the mode the client is in unless that mode starts it at
 // another width or joins it to the glyph before.
-func planVTSingleGlyph(cell vtCell, left vtCell, clustered, edge bool) vtGlyphPlan {
+func planVTSingleGlyph(cell vtCell, left vtCell, clustered bool, at vtColumn) vtGlyphPlan {
 	width := int(cell.width)
-	if edge && width == 2 {
+	if at == vtLastColumn && width == 2 {
 		return vtGlyphPlan{}
 	}
 	legacy := runeWidth(cell.r)
@@ -395,12 +405,31 @@ func appendVTGlyph(out []byte, cell vtCell, plan vtGlyphPlan, clustered bool, ha
 	return out
 }
 
-// vtEdge reports whether col is the last column of a row width columns wide,
-// where planVTGlyph's edge applies: a glyph printed wide there, or widened,
-// moves to the next row. A one-column row prints a wide glyph in place, and
-// leaves one a code point would widen as it is.
-func vtEdge(width, col int) bool {
-	return col == width-1 && width > 1
+// vtColumn is the room a column leaves the glyph a frame prints there
+// (planVTGlyph).
+type vtColumn uint8
+
+const (
+	// vtMidRow has a column after it for a second half.
+	vtMidRow vtColumn = iota
+	// vtLastColumn ends a row: a glyph printed wide there, or widened, moves
+	// to the next row.
+	vtLastColumn
+	// vtOnlyColumn is that of a one-column row, which has room for a second
+	// half on no row: a glyph printed wide stays there without one, and a
+	// code point that would widen one is dropped.
+	vtOnlyColumn
+)
+
+// vtColumnAt is the room col of a row width columns wide leaves (vtColumn).
+func vtColumnAt(width, col int) vtColumn {
+	switch {
+	case width == 1:
+		return vtOnlyColumn
+	case col == width-1:
+		return vtLastColumn
+	}
+	return vtMidRow
 }
 
 // vtGlyphBefore is the glyph a code point printed at col of row may join: the
@@ -423,27 +452,27 @@ func vtGlyphBefore(row []vtCell, col int) vtCell {
 // printed with nothing to their left stand alone. A frame prints them first,
 // from the right, onto blank cells, and then the glyph at col
 // (appendVTStandaloneRun). left is the glyph before col on the client, and
-// edge reports a column a code point widening the glyph there would move it
-// to the next row from. Without such a run it returns the column after the
+// column the room each column leaves (vtColumn). Without such a run it
+// returns the column after the
 // glyph at col. The run stops before a glyph that would leave a second half
 // on the one to its right, as the glyph at col must not.
-func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, edge func(int) bool) int {
+func vtStandaloneRun(row []vtCell, col, end int, left vtCell, clustered bool, column func(int) vtColumn) int {
 	cell := row[col]
 	next := col + int(cell.width)
 	if next >= end || !vtMayJoinLeft(row[next]) {
 		return next
 	}
-	plan := planVTGlyph(cell, left, clustered, edge(col))
+	plan := planVTGlyph(cell, left, clustered, column(col))
 	if !plan.whole(cell) || plan.spills {
 		return next
 	}
 	stop, prev := next, plan.printed(cell)
 	for next < end && vtMayJoinLeft(row[next]) {
 		glyph := row[next]
-		if planVTGlyph(glyph, prev, clustered, edge(next)).whole(glyph) {
+		if planVTGlyph(glyph, prev, clustered, column(next)).whole(glyph) {
 			break
 		}
-		alone := planVTGlyph(glyph, vtCell{width: 1}, clustered, edge(next))
+		alone := planVTGlyph(glyph, vtCell{width: 1}, clustered, column(next))
 		if !alone.whole(glyph) || alone.spills {
 			break
 		}

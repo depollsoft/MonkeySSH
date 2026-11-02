@@ -787,7 +787,8 @@ func requireGraphemeFrameRoundTrip(t *testing.T, s *terminalScreen, stream strin
 			preamble += "\x1b[?7l"
 		}
 		if s.AlternateScreenActive() {
-			preamble += "\x1b[?1049h"
+			// The main screen's saved cursor, which a frame may restore.
+			preamble += string(s.RenderMainScreen()) + enterAlternateScreen(s)
 		}
 		replica.Write([]byte(preamble))
 		replica.Write(frame)
@@ -847,6 +848,25 @@ func TestFramesRepaintClustersWrittenUnderEitherMode(t *testing.T) {
 	}
 }
 
+// TestFramesRepaintOneColumnScreens covers a one-column screen, where a wide
+// glyph has no second half: a glyph narrowed there is painted, though its
+// row has no room to widen it into, a wide glyph above a soft wrap keeps its
+// cell, as does one in the scrollback, and a narrowed glyph waits to wrap.
+func TestFramesRepaintOneColumnScreens(t *testing.T) {
+	for _, stream := range []string{
+		"⌚︎",
+		"\x1b[41m⌚︎\x1b[0m",
+		"\U0001F468e",
+		"\U0001F468⌚︎",
+		"⌚︎́x",
+		"⌚︎\U0001F468‍\U0001F469\r\nab",
+	} {
+		s := newTerminalScreen(1, 2)
+		s.Write([]byte(stream))
+		requireGraphemeFrameRoundTrip(t, s, stream)
+	}
+}
+
 // TestFramesRepaintRandomClusters paints random output, mixing clustering,
 // cursor moves, resizes and both modes, from frames: the client must end
 // with the model's cells. Cases with a picture no frame paints are skipped
@@ -872,14 +892,14 @@ func TestFramesRepaintRandomClusters(t *testing.T) {
 	skipped := 0
 	const runs = 3000
 	for range runs {
-		width, height := 2+rng.Intn(6), 2+rng.Intn(3)
+		width, height := 1+rng.Intn(7), 1+rng.Intn(4)
 		s := newTerminalScreen(width, height)
 		var stream strings.Builder
 		fmt.Fprintf(&stream, "<%dx%d>", width, height)
 		tainted := false
 		for range 10 + rng.Intn(60) {
 			if rng.Intn(20) == 0 {
-				width, height = 2+rng.Intn(6), 2+rng.Intn(3)
+				width, height = 1+rng.Intn(7), 1+rng.Intn(4)
 				s.Resize(width, height)
 				fmt.Fprintf(&stream, "<resize %dx%d>", width, height)
 			} else {
@@ -1000,23 +1020,22 @@ func TestFramesPutTheCursorOutsideTheRegionInOriginMode(t *testing.T) {
 		"\x1b[?6h\x1b[5;2H\x1b7\x1b[1;2r\x1b8xy",
 		// Saved above the region, with the cursor inside it.
 		"\x1b[?6h\x1b7\x1b[2;3rab",
+		// Carried onto the other screen, whose saved cursor stays where it
+		// was: the frame restores the one the cursor came from over there.
+		"\x1b[?6h\x1b[2;2H\x1b7\x1b[4;5r\x1b8\x1b[?1047h",
+		"\x1b[?6h\x1b[2;2H\x1b7\x1b[4;5r\x1b8\x1b[?1047h\x1b[3;3H\x1b7\x1b[?1047l\x1b[?1047h",
+		"\x1b[?6h\x1b[?1049h\x1b[5;2H\x1b7\x1b[1;3r\x1b8\x1b[?1047l\x1b[Ax",
+		"\x1b[?6h\x1b[?47h\x1b[2;2H\x1b7\x1b[4;5r\x1b8\x1b[?47l\x1b[?6h\x1b[2;2H\x1b7\x1b[4;5r\x1b[?47h\x1b8\x1b[?47l",
+		"\x1b[?6h\x1b[2;5H\x1b7\x1b[4;5r\x1b8\x1b[?1049h\x1b[?1049l\x1b[?1049h\x1b[3;3H\x1b7\x1b[?1049lz",
+		// The alternate screen's saved cursor, behind the main screen.
+		"\x1b[?1049h\x1b[31m\x1b[3;4H\x1b7\x1b[?1049l",
+		"\x1b[?1049h\x1b[?6h\x1b[2;3H\x1b(0\x1b7\x1b[?1049l\x1b(B\x1b[?6l",
+		"\x1b[?1049h\x1b[1;5Hab\x1b7\x1b[?1049l",
 	} {
 		s := newTerminalScreen(5, 5)
 		s.Write([]byte(stream))
 		requirePromptFrameRoundTrip(t, s, stream)
 		requireGraphemeFrameRoundTrip(t, s, stream)
-	}
-	// Carried onto the other screen, whose saved cursor never went there:
-	// the frame saves the cursor to restore it, so a DECRC now goes back to
-	// it rather than home.
-	s := newTerminalScreen(5, 5)
-	s.Write([]byte("\x1b[?6h\x1b[2;2H\x1b7\x1b[4;5r\x1b8\x1b[?1047h"))
-	replica := replayFrame(s)
-	if g, r := s.grid(), replica.grid(); r.cursorRow != g.cursorRow || r.cursorCol != g.cursorCol || !replica.originMode {
-		t.Fatalf("the cursor carried above the region replays at %d,%d origin %v, want %d,%d", r.cursorRow, r.cursorCol, replica.originMode, g.cursorRow, g.cursorCol)
-	}
-	if saved := replica.savedAlt; saved.row != 1 || saved.col != 1 || !saved.originMode {
-		t.Fatalf("saved cursor %+v, want the cursor", saved)
 	}
 }
 
@@ -1052,13 +1071,37 @@ func TestBlankingHalfAWideGlyphUsesTheCurrentBackground(t *testing.T) {
 	}
 }
 
+// TestBlankingTheOtherHalfKeepsItsBackground covers the second half of a
+// wide glyph left without its first: by a glyph printed over that, a wide one
+// too, DCH moving the second half to the cursor, or ICH and insert mode
+// moving it on from it. It keeps only its own background, as in the client
+// (grapheme_cluster_test.dart).
+func TestBlankingTheOtherHalfKeepsItsBackground(t *testing.T) {
+	blank := vtCell{width: 1, attrs: vtAttrs{bg: vtColor{kind: vtColorIndexed, index: 1}}}
+	for _, c := range []struct {
+		stream string
+		half   int
+	}{
+		{"\x1b[7;32;41m界\x1b[0;44m\x1b[1Gx", 1},
+		{"\x1b[7;32;41m\x1b[1;2H界\x1b[0;44m\x1b[1;1H界", 2},
+		{"\x1b[7;32;41m界\x1b[0;44m\x1b[1G\x1b[P", 0},
+		{"\x1b[7;32;41m界\x1b[0;44m\x1b[2G\x1b[@", 2},
+		{"\x1b[7;32;41m界\x1b[0;44m\x1b[2G\x1b[4hx", 2},
+	} {
+		s := newTerminalScreen(4, 3)
+		s.Write([]byte(c.stream))
+		if cell := s.grid().rows[0][c.half]; !vtRowsEqual([][]vtCell{{cell}}, [][]vtCell{{blank}}) {
+			t.Fatalf("%+q left column %d as %+v, want a blank in its own background alone", c.stream, c.half, cell)
+		}
+		requirePromptFrameRoundTrip(t, s, c.stream)
+	}
+}
+
 // requirePromptFrameRoundTrip replays s, written by stream, onto a fresh
 // model: it must end with the same cells, row marks and cell contents, but
 // for the glyph the cursor waits to wrap after (cursorContent), the same
-// scrollback, cursor and saved cursor, and a clear must then save as many
-// rows. A cursor outside the scroll region in origin mode that the saved
-// cursor cannot restore to is saved first (appendVTCursorOutsideRegion), so
-// the saved cursor is not compared then.
+// scrollback, cursor and both screens' saved cursors, and a clear must then
+// save as many rows.
 func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string) {
 	t.Helper()
 	marks := func(s *terminalScreen) []string {
@@ -1110,15 +1153,17 @@ func requirePromptFrameRoundTrip(t *testing.T, s *terminalScreen, stream string)
 		t.Fatalf("replay of %+q left origin mode %v, region %d-%d, insert mode %v, rendition %+v, charsets %v %v %v", stream,
 			replica.originMode, replica.top, replica.bottom, replica.insertMode, replica.attrs, replica.g0Graphics, replica.g1Graphics, replica.shiftOut)
 	}
-	outside := func(row int) bool { return row < s.top || row > s.bottom }
-	want, got := *s.saved(), *replica.saved()
-	if !s.originMode || !outside(g.cursorRow) || want.originMode && outside(clampInt(want.row, 0, s.height-1)) {
+	for _, saved := range []struct {
+		screen    string
+		want, got vtSavedCursor
+	}{{"main", s.savedMain, replica.savedMain}, {"alternate", s.savedAlt, replica.savedAlt}} {
 		// Whether DECSC ran, and the Kitty column the client cannot know,
-		// change nothing a DECRC restores here.
+		// change nothing a DECRC restores.
+		want, got := saved.want, saved.got
 		want.valid, got.valid = false, false
 		want.kittyColumnLost, got.kittyColumnLost = false, false
 		if got != want {
-			t.Fatalf("replay of %+q changed the saved cursor to %+v, want %+v", stream, got, want)
+			t.Fatalf("replay of %+q changed the %s screen's saved cursor to %+v, want %+v", stream, saved.screen, got, want)
 		}
 	}
 	s.Write([]byte("\x1b[2J"))
@@ -1148,14 +1193,14 @@ func TestFramesPaintJoiningGlyphsWithTheirOwnContent(t *testing.T) {
 	}
 }
 
-// graphemeFrameCannotPaint reports a picture no frame paints:
-//   - a glyph only clustering starts (an emoji modifier on its own) right of
-//     one it would join, which only printing the right one first makes;
-//   - a cluster narrowed from a wide base in the last column, which a frame
-//     moves there from the column before it, right of another glyph that
-//     was wide on its way to one column, whose second half would erase it;
-//   - half a wide glyph: a wide glyph printed in the last column erases the
-//     second half of one there, as the client does, and leaves the first.
+// graphemeFrameCannotPaint reports a row no output builds at its width,
+// which only a resize's reflow makes:
+//   - on a one-column row, a glyph a code point joined only while it was
+//     wide, which no code point widens it to there;
+//   - glyphs each wide on its way to one column, from the first column to
+//     the last: printed in place, each would write its second half over the
+//     next, and the last fits in the last column only when moved in from the
+//     column before it (vtMovedRun), which the first leaves none to do.
 func graphemeFrameCannotPaint(s *terminalScreen) bool {
 	rows := slices.Clone(s.grid().rows)
 	if !s.altActive {
@@ -1165,45 +1210,15 @@ func graphemeFrameCannotPaint(s *terminalScreen) bool {
 		}
 	}
 	for _, row := range rows {
-		// Glyphs the frame prints before the one to their left
-		// (vtStandaloneRun) are painted alone.
-		alone := 0
-		edge := func(col int) bool { return col == len(row)-1 }
-		for col, cell := range row {
-			if cell.width == 2 && (col+1 == len(row) || row[col+1].width != 0) ||
-				cell.width == 0 && (col == 0 || row[col-1].width != 2) {
-				return true
-			}
-			if cell.width == 0 || cell.r == 0 {
+		first, at := row[0], vtOnlyColumn
+		if len(row) > 1 {
+			if vtMovedRun(row, true) != 1 || first.width != 1 {
 				continue
 			}
-			if col < alone {
-				continue
-			}
-			alone = vtStandaloneRun(row, col, len(row), vtGlyphBefore(row, col), true, edge)
-			plan := planVTGlyph(cell, vtGlyphBefore(row, col), true, col == len(row)-1)
-			if plan.whole(cell) {
-				continue
-			}
-			if col != len(row)-1 {
-				return true
-			}
-			// The frame moves clusters it cannot print at the end of the row
-			// in from the column before them (vtMovedRun), and paints the
-			// glyph before them so it does not widen over them.
-			moved := vtMovedRun(row, true)
-			if moved == len(row) {
-				return true
-			}
-			for i := moved; i < len(row); i++ {
-				if !planVTGlyph(row[i], vtGlyphBefore(row, i-1), true, false).whole(row[i]) {
-					return true
-				}
-			}
-			if first := row[moved-1]; first.width == 1 && first.r != 0 &&
-				!planVTGlyph(first, vtGlyphBefore(row, moved-1), true, true).whole(first) {
-				return true
-			}
+			at = vtLastColumn
+		}
+		if first.r != 0 && !planVTGlyph(first, vtCell{width: 1}, true, at).whole(first) {
+			return true
 		}
 	}
 	return false

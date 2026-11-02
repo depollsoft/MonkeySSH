@@ -334,9 +334,55 @@ func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
 	}
 }
 
-// A one-column screen splits a wide glyph across rows; the halves are blanked
-// so a later widening does not read past a row's end.
+// A one-column screen holds a wide glyph without its second half, as
+// printing it there does, and a reflow lays it out as the client's does: a
+// narrowing to one column keeps it on a row of its own, blanking the second
+// half it leaves on the next, and a widening gives it its second half back,
+// which fills a row of two columns.
 func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
+	cells := func(s *terminalScreen) []string {
+		var rows []string
+		var decoder vtLineDecoder
+		lines := make([][]vtCell, 0, s.scrollback.len()+len(s.main.rows))
+		for i := range s.scrollback.len() {
+			lines = append(lines, s.scrollback.at(i).decode(&decoder, s.width))
+		}
+		for _, row := range append(lines, s.main.rows...) {
+			var b strings.Builder
+			for _, cell := range row {
+				switch {
+				case cell.width == 0:
+					b.WriteString("<")
+				case cell.r == 0:
+					b.WriteString("_")
+				default:
+					b.WriteRune(cell.r)
+				}
+			}
+			rows = append(rows, b.String())
+		}
+		return rows
+	}
+	for _, c := range []struct {
+		size   [2]int
+		write  string
+		resize [2]int
+		want   []string
+	}{
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{2, 3}, []string{"\U0001F468<", "\U0001F469<", "__"}},
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{3, 3}, []string{"\U0001F468<_", "\U0001F469<_", "___"}},
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{4, 3}, []string{"\U0001F468<\U0001F469<", "____", "____"}},
+		{[2]int{2, 4}, "a\U0001F468b", [2]int{1, 4}, []string{"a", "\U0001F468", "_", "b", "_"}},
+	} {
+		s := newTerminalScreen(c.size[0], c.size[1])
+		s.Write([]byte(c.write))
+		s.Resize(c.resize[0], c.resize[1])
+		if got := cells(s); !slices.Equal(got, c.want) {
+			t.Fatalf("%q from %v to %v: %q, want %q", c.write, c.size, c.resize, got, c.want)
+		}
+		vtRoundTrip(t, s)
+	}
+
 	// Printing a wide glyph on one column, plain or in insert mode, has no
 	// room for its second half; it must not write past the row.
 	for _, seq := range []string{"界a", "\x1b[4h界a"} {

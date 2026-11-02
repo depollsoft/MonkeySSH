@@ -160,9 +160,19 @@ func TestSemanticPromptReadsLongOptions(t *testing.T) {
 func replaySequence(s *terminalScreen) string {
 	replay := activeWindowReplayPrefix + string(s.RenderMainScreen())
 	if s.altActive {
-		replay += "\x1b[?1049h"
+		replay += enterAlternateScreen(s)
 	}
 	return replay + string(s.RenderFrame())
+}
+
+// enterAlternateScreen is the window mode a replay enters s's alternate
+// screen with after RenderMainScreen: 1049, which saves the cursor, when the
+// model's entry saved it.
+func enterAlternateScreen(s *terminalScreen) string {
+	if s.altSavedCursor {
+		return "\x1b[?1049h"
+	}
+	return "\x1b[?1047h"
 }
 
 // A program that answers the replay's resize by redrawing itself paints the

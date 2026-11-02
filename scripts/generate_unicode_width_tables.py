@@ -118,8 +118,8 @@ var runeWidthRanges = []runeWidthRange{{
 // East Asian wide and fullwidth characters (including emoji presentation),
 // 1 otherwise.
 func runeWidth(r rune) int {{
-	if r >= 0x20 && r < 0x7F {{
-		return 1
+	if uint32(r) < 0x20000 {{
+		return int(runeWidthDirect[r])
 	}}
 	lo, hi := 0, len(runeWidthRanges)-1
 	for lo <= hi {{
@@ -135,6 +135,21 @@ func runeWidth(r rune) int {{
 	}}
 	return 1
 }}
+
+// runeWidthDirect is runeWidth below U+20000, in the planes nearly all text
+// and emoji are in, looked up directly.
+var runeWidthDirect = func() *[0x20000]uint8 {{
+	var table [0x20000]uint8
+	for i := range table {{
+		table[i] = 1
+	}}
+	for _, entry := range runeWidthRanges {{
+		for r := entry.lo; r <= min(entry.hi, 0x1FFFF); r++ {{
+			table[r] = entry.width
+		}}
+	}}
+	return &table
+}}()
 '''
 
 
@@ -162,15 +177,16 @@ const _widthRanges = <int>[
 {rows}
 ];
 
-/// Widths of the Basic Multilingual Plane, indexed by code point.
-final Uint8List _bmpWidths = _buildBmpWidths();
+/// Widths below U+20000, in the planes nearly all text and emoji are in,
+/// indexed by code point.
+final Uint8List _directWidths = _buildDirectWidths();
 
-Uint8List _buildBmpWidths() {{
-  final table = Uint8List(0x10000)..fillRange(0, 0x10000, 1);
+Uint8List _buildDirectWidths() {{
+  final table = Uint8List(0x20000)..fillRange(0, 0x20000, 1);
   for (var i = 0; i < _widthRanges.length; i += 3) {{
     final first = _widthRanges[i];
-    if (first >= 0x10000) break;
-    final last = _widthRanges[i + 1] < 0x10000 ? _widthRanges[i + 1] : 0xFFFF;
+    if (first >= 0x20000) break;
+    final last = _widthRanges[i + 1] < 0x20000 ? _widthRanges[i + 1] : 0x1FFFF;
     table.fillRange(first, last + 1, _widthRanges[i + 2]);
   }}
   return table;
@@ -198,7 +214,7 @@ class UnicodeV11 {{
   /// Number of terminal columns [codePoint] occupies: 0, 1 or 2.
   int wcwidth(int codePoint) {{
     if (codePoint < 0x20) return 0;
-    if (codePoint < 0x10000) return _bmpWidths[codePoint];
+    if (codePoint < 0x20000) return _directWidths[codePoint];
     return _rangeWidth(codePoint);
   }}
 }}

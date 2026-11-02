@@ -137,24 +137,21 @@ class Buffer {
   bool writeChar(int codePoint) {
     codePoint = charset.translate(codePoint);
 
-    final clustering = terminal.graphemeClusterMode;
+    final mayJoin =
+        mayContinueGrapheme(codePoint) && terminal.graphemeClusterMode;
     // A pending wrap follows the glyph in the cursor's own cell, which on a
     // one-column screen is in column 0.
-    if (clustering &&
-        mayContinueGrapheme(codePoint) &&
-        (cursorX > 0 || isWrapPending) &&
-        _joinGraphemeCluster(codePoint)) {
+    if (mayJoin && _cursorX > 0 && _joinGraphemeCluster(codePoint)) {
       return false;
     }
 
-    final cellWidth = clustering && codePoint > 0xFF
-        ? graphemeStartWidth(codePoint)
-        : unicodeV11.wcwidth(codePoint);
+    final cellWidth =
+        mayJoin ? graphemeStartWidth(codePoint) : unicodeV11.wcwidth(codePoint);
     if (cellWidth == 0) {
       // Combining marks, variation selectors and ZWJ take no column on the
       // host. Clustering joined the ones that continue a cluster above; the
       // rest have nothing to attach to.
-      if (!clustering) _joinZeroWidth(codePoint);
+      if (!terminal.graphemeClusterMode) _joinZeroWidth(codePoint);
       return false;
     }
     if (_cursorX >= viewWidth) {
@@ -189,6 +186,13 @@ class Buffer {
     if (_cursorX > 0 && line.getWidth(_cursorX - 1) == 2) {
       line.eraseCell(_cursorX - 1, terminal.cursor);
     }
+    // A narrow glyph over the first half leaves the second keeping only its
+    // background, as the MonkeyMux model blanks it.
+    if (cellWidth == 1 &&
+        line.getWidth(_cursorX) == 2 &&
+        _cursorX + 1 < viewWidth) {
+      _blankHalf(line, _cursorX + 1);
+    }
     graphics.removePlaceholderAt(line, _cursorX);
     line.setCell(
       _cursorX,
@@ -201,6 +205,10 @@ class Buffer {
 
     // A one-column screen has no room for the second half.
     if (cellWidth == 2 && _cursorX < viewWidth) {
+      // So does a second half over the first half of another wide glyph.
+      if (_cursorX + 1 < viewWidth && line.getWidth(_cursorX) == 2) {
+        _blankHalf(line, _cursorX + 1);
+      }
       graphics.removePlaceholderAt(line, _cursorX);
       line.setCell(_cursorX, 0, 0, terminal.cursor, semanticPrompt.content);
       _cursorX++;
@@ -231,8 +239,9 @@ class Buffer {
     // cursor's own cell. Ghostty instead checks, without autowrap, whether
     // the last column holds anything, which picks an old glyph there after a
     // cursor move.
-    final left = isWrapPending ? 0 : 1;
-    var column = _glyphColumnBefore(line, left);
+    final width = viewWidth;
+    var column = _cursorX >= width ? width - 1 : _cursorX - 1;
+    if (column > 0 && line.getWidth(column - 1) == 2) column--;
     final base = line.getCodePoint(column);
     if (base == 0) return false;
 
@@ -266,12 +275,11 @@ class Buffer {
           // background, as the MonkeyMux model blanks half a wide glyph.
           line.setWidth(column, 1);
           if (column + 1 < viewWidth) {
-            line.eraseCell(
-              column + 1,
-              CursorStyle(background: line.getBackground(column + 1)),
-            );
+            _blankHalf(line, column + 1);
           }
-          _cursorX = min(column + 1, viewWidth - 1);
+          // Past the last column of a one-column screen, this is a pending
+          // wrap, as after any other glyph there.
+          _cursorX = column + 1;
         }
       case GraphemeWidthEffect.wide:
         if (line.getWidth(column) == 2) break;
@@ -297,10 +305,7 @@ class Buffer {
         // own right half an empty cell with only its background, as the
         // MonkeyMux model blanks it.
         if (column + 2 < viewWidth && line.getWidth(column + 1) == 2) {
-          line.eraseCell(
-            column + 2,
-            CursorStyle(background: line.getBackground(column + 2)),
-          );
+          _blankHalf(line, column + 2);
         }
         graphics.removePlaceholderAt(line, column + 1);
         line.setCell(column + 1, 0, 0, terminal.cursor, semanticPrompt.content);
@@ -309,6 +314,12 @@ class Buffer {
     }
     line.addGraphemeExtra(column, codePoint);
     return true;
+  }
+
+  /// Erases the second half at [column] of [line] of a wide glyph that lost
+  /// its first, keeping only its background.
+  void _blankHalf(BufferLine line, int column) {
+    line.eraseCell(column, CursorStyle(background: line.getBackground(column)));
   }
 
   /// Mode 2027 reset: joins the zero-width [codePoint] to the glyph before
