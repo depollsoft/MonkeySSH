@@ -676,6 +676,10 @@ String? buildAgentInstallCommand(
     final quotedPackage = powerShellSingleQuote(package);
     final quotedSpec = powerShellSingleQuote(spec);
     final quotedLatest = powerShellSingleQuote('$package@latest');
+    // npm 12 skips a global package's own install scripts unless
+    // --allow-scripts names it; --ignore-scripts=false no longer covers them.
+    // Older npm runs them anyway and at most warns about the unknown option.
+    final allowScripts = powerShellSingleQuote('--allow-scripts=$package');
     final script = switch (definition.registry) {
       AgentPackageRegistry.npm => [
         powerShellProfilePathPreamble,
@@ -683,7 +687,7 @@ String? buildAgentInstallCommand(
           '& npm uninstall -g $quotedPackage;',
           r'if($LASTEXITCODE -ne 0){exit $LASTEXITCODE};',
         ],
-        '& npm install -g --foreground-scripts --ignore-scripts=false $quotedLatest;',
+        '& npm install -g --foreground-scripts --ignore-scripts=false $allowScripts $quotedLatest;',
         r'exit $LASTEXITCODE',
       ].join(),
       AgentPackageRegistry.pipx => [
@@ -712,11 +716,14 @@ String? buildAgentInstallCommand(
         ? null
         : buildCompactWindowsPowerShellCommand(script, plainTextOutput: true);
   }
+  final npmInstall =
+      'npm install -g --foreground-scripts --ignore-scripts=false '
+      '${_shellQuote('--allow-scripts=$package')} ${_shellQuote(package)}@latest';
   return switch (definition.registry) {
     AgentPackageRegistry.npm =>
       repair
-          ? '$_profilePrefix npm uninstall -g ${_shellQuote(package)} && npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest'
-          : '$_profilePrefix npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest',
+          ? '$_profilePrefix npm uninstall -g ${_shellQuote(package)} && $npmInstall'
+          : '$_profilePrefix $npmInstall',
     AgentPackageRegistry.pipx =>
       repair
           ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${_shellQuote(spec)}' : 'pipx reinstall ${_shellQuote(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'

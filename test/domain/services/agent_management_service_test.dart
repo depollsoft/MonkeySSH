@@ -1955,7 +1955,7 @@ esac
       expect(
         posix,
         endsWith(
-          "npm install -g --foreground-scripts --ignore-scripts=false '@anthropic-ai/claude-code'@latest",
+          "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=@anthropic-ai/claude-code' '@anthropic-ai/claude-code'@latest",
         ),
       );
       final windows = buildAgentInstallCommand(
@@ -1994,6 +1994,12 @@ esac
           ),
           reason: definition.id,
         );
+        // npm 12 runs a global package's install scripts only when named.
+        expect(
+          posix,
+          contains("'--allow-scripts=${definition.packageName}'"),
+          reason: definition.id,
+        );
 
         final windows = buildAgentInstallCommand(
           definition,
@@ -2003,7 +2009,7 @@ esac
         expect(
           decodeEncodedPowerShell(windows!),
           contains(
-            'npm install -g --foreground-scripts --ignore-scripts=false',
+            "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=${definition.packageName}'",
           ),
           reason: definition.id,
         );
@@ -2024,7 +2030,7 @@ esac
       expect(
         posix,
         endsWith(
-          "npm install -g --foreground-scripts --ignore-scripts=false '@opencode/cli'@latest",
+          "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=@opencode/cli' '@opencode/cli'@latest",
         ),
       );
 
@@ -2260,7 +2266,7 @@ exit "$result"
       expect(
         buildAgentInstallCommand(definition, windows: false, update: false),
         endsWith(
-          r"npm install -g --foreground-scripts --ignore-scripts=false 'it'\''s-agent'@latest",
+          r"npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=it'\''s-agent' 'it'\''s-agent'@latest",
         ),
       );
     });
