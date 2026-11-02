@@ -357,6 +357,19 @@ func TestVTKittyDirectPlacementOfAChunkedTransmission(t *testing.T) {
 	assertVTKittyPlaced(t, s, "1/@2,3")
 }
 
+// A placement right after a wide glyph comes back to its cell after a
+// one-column screen, which keeps the glyph whole, as in the client.
+func TestVTKittyPlacementAfterAWideGlyphSurvivesOneColumn(t *testing.T) {
+	s := newTerminalScreen(5, 4)
+	s.Write([]byte(vtKittyUploads(1) + "a界\x1b_Ga=p,i=1,C=1\x1b\\"))
+	assertVTKittyPlaced(t, s, "1/@0,3")
+	for range 2 {
+		s.Resize(1, 4)
+		s.Resize(5, 4)
+		assertVTKittyPlaced(t, s, "1/@0,3")
+	}
+}
+
 func TestVTKittyDirectPlacementReflowsWithItsCell(t *testing.T) {
 	s := newTerminalScreen(10, 4)
 	// "0123456789ABCDE" wraps after 9; the placement is on C, the 13th cell.

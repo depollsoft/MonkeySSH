@@ -16,6 +16,7 @@ type graphemeParityCase struct {
 	Name    string     `json:"name"`
 	Size    [2]int     `json:"size"`
 	Write   string     `json:"write"`
+	Resize  [][2]int   `json:"resize"`
 	Rows    [][]string `json:"rows"`
 	Cursor  [3]any     `json:"cursor"`
 	Wrapped []int      `json:"wrapped"`
@@ -72,6 +73,17 @@ func (c graphemeParityCase) expected(height int) graphemeParityState {
 	return state
 }
 
+// screen is the case's screen: its text written at its size, then resized
+// to each size in turn.
+func (c graphemeParityCase) screen() *terminalScreen {
+	s := newTerminalScreen(c.Size[0], c.Size[1])
+	s.Write([]byte(c.Write))
+	for _, size := range c.Resize {
+		s.Resize(size[0], size[1])
+	}
+	return s
+}
+
 func loadGraphemeParityCases(t *testing.T) []graphemeParityCase {
 	t.Helper()
 	data, err := os.ReadFile("testdata/grapheme_cluster_parity.json")
@@ -94,9 +106,9 @@ func loadGraphemeParityCases(t *testing.T) []graphemeParityCase {
 func TestGraphemeClusterParityWithClient(t *testing.T) {
 	for _, c := range loadGraphemeParityCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
-			s := newTerminalScreen(c.Size[0], c.Size[1])
-			s.Write([]byte(c.Write))
-			if got, want := dumpGraphemeParity(s), c.expected(c.Size[1]); !reflect.DeepEqual(got, want) {
+			s := c.screen()
+			_, height := s.Size()
+			if got, want := dumpGraphemeParity(s), c.expected(height); !reflect.DeepEqual(got, want) {
 				t.Fatalf("model differs from the client\n got: %q %v %v\nwant: %q %v %v",
 					got.rows, got.cursor, got.wrapped, want.rows, want.cursor, want.wrapped)
 			}
@@ -111,12 +123,11 @@ func TestGraphemeClusterParityWithClient(t *testing.T) {
 func TestGraphemeClusterParityFramesRepaintTheCells(t *testing.T) {
 	for _, c := range loadGraphemeParityCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
-			s := newTerminalScreen(c.Size[0], c.Size[1])
-			s.Write([]byte(c.Write))
+			s := c.screen()
 			want := dumpGraphemeParity(s)
 			frame := s.RenderFrame()
 			for _, initial := range []string{"\x1b[?2027h", "\x1b[?2027l"} {
-				replica := newTerminalScreen(c.Size[0], c.Size[1])
+				replica := newTerminalScreen(s.Size())
 				replica.Write([]byte(initial))
 				replica.Write(frame)
 				if got := dumpGraphemeParity(replica); !reflect.DeepEqual(got, want) {
