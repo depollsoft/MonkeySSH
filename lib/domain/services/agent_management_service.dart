@@ -282,9 +282,26 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.pi,
     executableNames: ['pi'],
+    // npm installations are still detected and updated in place. New
+    // installations use the pi.dev installer, which pins every dependency
+    // and migrates an npm installation it finds.
     registry: AgentPackageRegistry.npm,
     packageName: '@earendil-works/pi-coding-agent',
+    posixInstallerUrl: 'https://pi.dev/install.sh',
+    windowsInstallerUrl: 'https://pi.dev/install.ps1',
+    // `pi update` updates both kinds of installation to the release pi.dev
+    // reports, which can trail npm's latest tag.
     selfUpdateArguments: ['update', '--self'],
+    officialVersionLookup: (
+      url: 'https://pi.dev/api/latest-version',
+      pattern: _jsonVersionPattern,
+    ),
+    // The installer's launcher, `~/.pi/agent/bin/pi`, runs a pinned release
+    // from `~/.pi/agent/install/releases/<version>`.
+    installerLayout: (
+      marker: 'install/managed-install.json',
+      source: 'Pi installer',
+    ),
   ),
   AgentRuntimeDefinition(
     id: 'cli:hermes',
@@ -2022,11 +2039,17 @@ String buildAgentMetadataProbeCommand(
           '${powerShellSingleQuote('$_runtimeMarker${definition.id}')});',
         )
         ..write(r'$__flLatest=$null;$__flInstalled=$null;');
+      final layout = definition.installerLayout;
+      if (layout != null) {
+        body.write(_windowsInstallerLayoutSource(definition, layout));
+      }
       if (package != null && definition.registry == AgentPackageRegistry.npm) {
         final needle = powerShellSingleQuote('$package@');
         body.write(
           '\$__flNeedle=$needle;'
           r'$__flLine=($__flNpmGlobal -split "`n" | Where-Object { $_.Contains($__flNeedle) } | Select-Object -First 1);'
+          // The installer's launcher, not a leftover npm package, runs.
+          '${layout == null ? '' : r'if($__flManaged){$__flLine=$null};'}'
           r'if($null -ne $__flLine){'
           '[void]\$__flOut.AppendLine(${powerShellSingleQuote('$_sourceMarker npm global')});'
           r'$__flInstalled=$__flLine.Substring($__flLine.IndexOf($__flNeedle)+$__flNeedle.Length).Split(" ")[0]};',
@@ -2114,14 +2137,18 @@ String buildAgentMetadataProbeCommand(
       ..write('printf ${_shellQuote('$_runtimeMarker%s\\n')} ')
       ..write('${_shellQuote(definition.id)}; ')
       ..write('__fl_source=; __fl_installed=; __fl_latest=; __fl_line=; ');
+    if (definition.installerLayout case final layout?) {
+      command.write(_posixInstallerLayoutSource(definition, layout));
+    }
     if (formula != null) {
       command.write(
+        'if [ -z "\$__fl_source" ]; then '
         '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_brew_global" | '
         'grep -E ${_shellQuote('^$formula([[:space:]]|\$)')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
         '__fl_source=${_shellQuote('Homebrew')}; '
         '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')}); '
-        'fi; ',
+        'fi; fi; ',
       );
     }
     if (package != null && definition.registry == AgentPackageRegistry.npm) {
@@ -2269,6 +2296,43 @@ String _detectionSourceFromPath(String path) {
   if (normalized.contains('/.cargo/')) return 'Cargo';
   return 'PATH';
 }
+
+/// Sets `__fl_source` when the first of [definition]'s executables on PATH is
+/// an installer-managed launcher (see
+/// [AgentRuntimeDefinition.installerLayout]). Symlinks are followed by hand,
+/// as the launchers do, because `readlink -f` is not portable.
+String _posixInstallerLayoutSource(
+  AgentRuntimeDefinition definition,
+  ({String marker, String source}) layout,
+) =>
+    '__fl_launcher=; for __fl_name in '
+    '${definition.executableNames.map(_shellQuote).join(' ')}; do '
+    r'__fl_launcher=$(command -v "$__fl_name" 2>/dev/null) && break; done; '
+    r'__fl_hops=0; while [ -n "$__fl_launcher" ] && [ -L "$__fl_launcher" ] && [ "$__fl_hops" -lt 16 ]; do '
+    r'__fl_link=$(readlink "$__fl_launcher") || break; '
+    r'case "$__fl_link" in /*) __fl_launcher=$__fl_link;; '
+    r'*) __fl_launcher=${__fl_launcher%/*}/$__fl_link;; esac; '
+    r'__fl_hops=$((__fl_hops + 1)); done; '
+    r'case "$__fl_launcher" in */bin/*) '
+    'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
+    '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
+
+/// PowerShell form of [_posixInstallerLayoutSource]: sets `$__flManaged` when
+/// the first executable found is `<root>\bin\<name>` beside the marker.
+String _windowsInstallerLayoutSource(
+  AgentRuntimeDefinition definition,
+  ({String marker, String source}) layout,
+) =>
+    '\$__flManaged=\$false;'
+    'foreach(\$__flName in @(${definition.executableNames.map(powerShellSingleQuote).join(',')})){'
+    r'$__flCommand=Get-Command $__flName -ErrorAction SilentlyContinue | Select-Object -First 1;'
+    r'if($null -eq $__flCommand){continue};'
+    r'try{$__flBin=Split-Path ([IO.Path]::GetFullPath($__flCommand.Source)) -Parent;'
+    r"if((Split-Path $__flBin -Leaf) -eq 'bin'){"
+    '\$__flManaged=Test-Path -LiteralPath (Join-Path (Split-Path \$__flBin -Parent) '
+    '${powerShellSingleQuote(layout.marker.replaceAll('/', r'\'))})}}catch{};break};'
+    'if(\$__flManaged){[void]\$__flOut.AppendLine('
+    '${powerShellSingleQuote('$_sourceMarker${layout.source}')})};';
 
 String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
 

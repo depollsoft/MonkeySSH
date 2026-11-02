@@ -68,6 +68,7 @@ class AgentRuntimeDefinition {
     this.officialVersionLookup,
     this.latestVersionUrlPlatformSuffix = false,
     this.legacyInstallation,
+    this.installerLayout,
   });
 
   /// Stable runtime identifier.
@@ -154,6 +155,12 @@ class AgentRuntimeDefinition {
   /// Installed versions below [belowVersion] cannot be updated in place; the
   /// user is shown [message] instead.
   final ({String belowVersion, String message})? legacyInstallation;
+
+  /// Layout of an installation the agent's own installer manages: the
+  /// executable resolves, through any symlinks, to `<root>/bin/<name>` and
+  /// `<root>/<marker>` exists. Such an installation is reported as [source]
+  /// rather than as a package-manager installation.
+  final ({String marker, String source})? installerLayout;
 
   /// Whether the launcher performs its own updates (see
   /// [syncUpdateEnvironment]).

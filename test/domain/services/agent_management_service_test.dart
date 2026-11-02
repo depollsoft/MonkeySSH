@@ -1471,36 +1471,50 @@ void main() {
     const package = '@earendil-works/pi-coding-agent';
 
     for (final windows in [false, true]) {
-      test('Pi installs use the current package, windows=$windows', () {
-        expect(definition.registry, AgentPackageRegistry.npm);
-        expect(definition.packageName, package);
-        for (final update in [false, true]) {
+      test(
+        'Pi installs with the pi.dev installer and updates itself, windows=$windows',
+        () {
+          // npm installations are still recognized under the current package.
+          expect(definition.registry, AgentPackageRegistry.npm);
+          expect(definition.packageName, package);
+          final install = buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: false,
+          )!;
+          final installScript = windows
+              ? decodeEncodedPowerShell(install)
+              : install;
+          expect(
+            installScript,
+            contains(
+              windows
+                  ? 'https://pi.dev/install.ps1'
+                  : 'https://pi.dev/install.sh',
+            ),
+          );
+          expect(installScript, isNot(contains('npm install')));
+          expect(
+            definition.officialVersionLookup?.url,
+            'https://pi.dev/api/latest-version',
+          );
           final command = buildAgentInstallCommand(
             definition,
             windows: windows,
-            update: update,
-            detectionSource: 'npm global',
+            update: true,
+            executablePath: windows ? r'C:\tools\pi.cmd' : '/usr/local/bin/pi',
           )!;
           final script = windows ? decodeEncodedPowerShell(command) : command;
-          expect(script, contains(package));
-          expect(script, isNot(contains('@mariozechner/')));
-        }
-        final command = buildAgentInstallCommand(
-          definition,
-          windows: windows,
-          update: true,
-          executablePath: windows ? r'C:\tools\pi.cmd' : '/usr/local/bin/pi',
-        )!;
-        final script = windows ? decodeEncodedPowerShell(command) : command;
-        expect(script, contains("'update' '--self'"));
-        expect(script, isNot(contains('npm install')));
-        expect(
-          agentAcpRuntimeDefinitions
-              .singleWhere((d) => d.id == 'acp:pi')
-              .packageName,
-          'pi-acp',
-        );
-      });
+          expect(script, contains("'update' '--self'"));
+          expect(script, isNot(contains('npm install')));
+          expect(
+            agentAcpRuntimeDefinitions
+                .singleWhere((d) => d.id == 'acp:pi')
+                .packageName,
+            'pi-acp',
+          );
+        },
+      );
 
       for (final batched in [false, true]) {
         test('Pi detects 0.85.1 from 0.85.0, windows=$windows, batched=$batched', () async {
@@ -1525,9 +1539,10 @@ void main() {
                 '__monkeyssh_agent_runtime_end__\n',
               );
             }
-            final currentPackage = script
-                .replaceAll(RegExp("'+"), "'")
-                .contains("npm view '$package'");
+            // `pi update` follows pi.dev, not npm's latest tag.
+            final currentPackage =
+                script.contains('https://pi.dev/api/latest-version') &&
+                !script.replaceAll(RegExp("'+"), "'").contains('npm view');
             return _execOutput(
               '__monkeyssh_agent_runtime__=cli:pi\n'
               '__monkeyssh_agent_source__=npm global\n'
@@ -1681,6 +1696,7 @@ case "$*" in
   *antigravity*/manifests/*) echo '{"version":"1.1.28","url":"https://example.test/1.1.28"}';;
   *hermes_cli/__init__.py*) printf '__version__ = "0.21.1"\n__release_date__ = "2026.9.7"\n';;
   *x.ai/cli/stable*) echo '1.0.24';;
+  *pi.dev/api/latest-version*) echo '{"ok":true,"version":"1.3.0","packageName":"@earendil-works/pi-coding-agent"}';;
   *registry.npmjs.org/*/latest*) echo '{"version":"1.2.0"}';;
   *) exit 1;;
 esac
@@ -1717,6 +1733,7 @@ esac
           '1.0.0',
           reason: definition.id,
         );
+        if (definition.officialVersionLookup != null) continue;
         expect(
           snapshots[definition.id]?.latestVersionOutput,
           '1.1.0',
@@ -1728,6 +1745,7 @@ esac
         'cli:antigravity': '1.1.28',
         'cli:hermes': '0.21.1',
         'cli:grok': '1.0.24',
+        'cli:pi': '1.3.0',
       }.entries) {
         expect(
           parseAgentVersion(snapshots[entry.key]?.latestVersionOutput ?? ''),
@@ -1748,7 +1766,9 @@ esac
       fallback.stdout as String,
     );
     for (final definition in agentRuntimeDefinitions.where(
-      (d) => d.registry == AgentPackageRegistry.npm,
+      (d) =>
+          d.registry == AgentPackageRegistry.npm &&
+          d.officialVersionLookup == null,
     )) {
       expect(
         parseAgentVersion(
@@ -1773,6 +1793,85 @@ esac
     for (final snapshot in offlineSnapshots.values) {
       expect(snapshot.latestVersionOutput, isNull);
     }
+  });
+
+  test('POSIX metadata reports a Pi installer launcher ahead of a leftover npm package', () async {
+    final root = await Directory.systemTemp.createTemp('monkeyssh-pi-layout-');
+    addTearDown(() => root.delete(recursive: true));
+    final bin = Directory('${root.path}/bin')..createSync();
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    File('${bin.path}/npm').writeAsStringSync(
+      '#!/bin/sh\n[ "\$1" = list ] && echo "├── ${definition.packageName}@1.0.0"\n',
+    );
+    File(
+      '${bin.path}/curl',
+    ).writeAsStringSync('#!/bin/sh\necho \'{"ok":true,"version":"1.5.0"}\'\n');
+    // The installer's layout: ~/.local/bin/pi -> ../../.pi/agent/bin/pi.
+    final agent = Directory('${root.path}/.pi/agent');
+    Directory('${agent.path}/bin').createSync(recursive: true);
+    Directory('${agent.path}/install').createSync();
+    File('${agent.path}/bin/pi').writeAsStringSync('#!/bin/sh\necho 1.4.0\n');
+    final marker = File('${agent.path}/install/managed-install.json')
+      ..writeAsStringSync('{"kind":"pi-managed-install","schemaVersion":1}');
+    Directory('${root.path}/.local/bin').createSync(recursive: true);
+    Link('${root.path}/.local/bin/pi').createSync('../../.pi/agent/bin/pi');
+    await Process.run('chmod', [
+      '+x',
+      '${bin.path}/npm',
+      '${bin.path}/curl',
+      '${agent.path}/bin/pi',
+    ]);
+    final script = File('${root.path}/metadata.sh')
+      ..writeAsStringSync(
+        buildAgentMetadataProbeCommand([definition], windows: false),
+      );
+    Future<AgentMetadataSnapshot?> probe(String shell) async {
+      final result = await Process.run(
+        shell,
+        [script.path],
+        environment: {'HOME': root.path, 'PATH': '${bin.path}:/usr/bin:/bin'},
+        includeParentEnvironment: false,
+      );
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      return parseAgentMetadataProbeOutput(
+        result.stdout as String,
+      )[definition.id];
+    }
+
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+    ]) {
+      final managed = await probe(shell);
+      expect(managed?.detectionSource, 'Pi installer', reason: shell);
+      expect(managed?.installedVersionOutput, isNull, reason: shell);
+      expect(parseAgentVersion(managed?.latestVersionOutput ?? ''), '1.5.0');
+    }
+    // Without the installer's marker, the same launcher is an npm package.
+    marker.deleteSync();
+    final npm = await probe('bash');
+    expect(npm?.detectionSource, 'npm global');
+    expect(npm?.installedVersionOutput, '1.0.0');
+  });
+
+  test('Windows metadata checks the Pi installer layout before npm', () {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    final script = decodeEncodedPowerShell(
+      buildAgentMetadataProbeCommand([definition], windows: true),
+    );
+    final layout = script.indexOf(r"'install\managed-install.json'");
+    expect(layout, greaterThan(0));
+    expect(script, contains("'__monkeyssh_agent_source__=Pi installer'"));
+    expect(
+      script.indexOf(r'if($__flManaged){$__flLine=$null}'),
+      greaterThan(layout),
+    );
+    expect(script, contains('https://pi.dev/api/latest-version'));
+    expect(script, isNot(contains('npm view')));
   });
 
   test('reads ACP package versions without starting servers and handles a locked Cursor keychain', () async {
@@ -1875,8 +1974,11 @@ esac
     });
 
     test('enables lifecycle scripts for every managed npm install', () {
+      // Pi's npm package is only detected; new installs use its installer.
       final npmDefinitions = agentRuntimeDefinitions.where(
-        (definition) => definition.registry == AgentPackageRegistry.npm,
+        (definition) =>
+            definition.registry == AgentPackageRegistry.npm &&
+            definition.posixInstallerUrl == null,
       );
 
       for (final definition in npmDefinitions) {
