@@ -2750,10 +2750,12 @@ branch refs/heads/main
       final discovery = AgentSessionDiscoveryService();
       final session = _buildDiscoverySession(client);
 
+      // About 15,000 seven-byte chunks: a loaded machine takes several
+      // seconds, so this only guards against a hang.
       final result = await discovery
           .discoverSessionsStream(session, toolName: 'Cursor Agent')
           .last
-          .timeout(const Duration(seconds: 2));
+          .timeout(const Duration(seconds: 20));
 
       expect(result.sessions.single.summary, 'Open stream Cursor session');
       expect(result.sessions.map((session) => session.sessionId), [
