@@ -146,11 +146,24 @@ test('OpenCode 2 accounts come from auth export, OpenCode 1 falls back to auth.j
   assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]),
     [['OpenAI · 5 hours', 30], ['OpenRouter · Key spending limit', 40]]);
   assert.ok(!JSON.stringify(result).includes('PRIVATE_LABEL'));
-  // OpenCode 1 has no `auth export`; a failed or unexpected export reads auth.json instead.
-  assert.equal(await openCodeAccounts('/opt/opencode', async () => { throw new Error('unavailable'); }), null);
-  assert.equal(await openCodeAccounts('/opt/opencode', async () => ({accounts: []})), null);
+  // OpenCode 1 has no `auth export` and reads auth.json instead. A failed or
+  // unexpected OpenCode 2 export, or an unknown version, is unavailable.
+  const fake = (version, exportResult) => async (executable, args, parse) => {
+    if (args[0] === '--version') {
+      if (version == null) throw new Error('unavailable');
+      return parse(version);
+    }
+    if (exportResult instanceof Error) throw exportResult;
+    return exportResult;
+  };
+  const failed = new Error('unavailable');
+  assert.equal(await openCodeAccounts('/opt/opencode', fake('1.19.5\n', failed)), null);
+  assert.equal(await openCodeAccounts('/opt/opencode', fake('1.19.5\n', {accounts: []})), null);
+  for (const [version, result] of [['opencode v2.2.5\n', failed], ['opencode v2.2.5\n', {accounts: []}], [null, failed]]) {
+    await assert.rejects(openCodeAccounts('/opt/opencode', fake(version, result)), /unavailable/);
+  }
   assert.equal(await openCodeAccounts('', async () => exported), null);
-  assert.deepEqual(await openCodeAccounts('/opt/opencode', async () => []), []);
+  assert.deepEqual(await openCodeAccounts('/opt/opencode', fake('opencode v2.2.5', [])), []);
 });
 
 test('Codex weekly-only account stays separate from unused model buckets', () => {

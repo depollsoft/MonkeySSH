@@ -222,7 +222,7 @@ function requestJson(url, {token, headers = {}, body, local = false} = {}) {
   requestCache.set(key, promise);
   return promise;
 }
-function runJson(executable, args) {
+function runJson(executable, args, parse = JSON.parse) {
   return new Promise((resolve, reject) => {
     const child = spawnAgent(executable, args);
     let output = '', done = false;
@@ -230,7 +230,7 @@ function runJson(executable, args) {
       if (done) return;
       done = true; clearTimeout(timer); stop(child);
       if (error) return reject(new Error('unavailable'));
-      try { resolve(JSON.parse(output)); } catch { reject(new Error('unavailable')); }
+      try { resolve(parse(output)); } catch { reject(new Error('unavailable')); }
     };
     const timer = setTimeout(() => finish(true), 12000);
     child.on('error', () => finish(true));
@@ -572,12 +572,18 @@ function configuredAccounts(id) {
 }
 // OpenCode 2 moved saved accounts from auth.json into its database and prints
 // them with `auth export`. --standalone uses a private server instead of
-// starting the background service. OpenCode 1 has no export: use auth.json.
+// starting the background service. Only OpenCode 1, which has no export,
+// reads auth.json: a failed OpenCode 2 export must not report the stale file.
 async function openCodeAccounts(executable, run = runJson) {
   if (!executable) return null;
   let rows;
-  try { rows = await run(executable, ['auth', 'export', '--standalone']); } catch { return null; }
-  if (!Array.isArray(rows)) return null;
+  try { rows = await run(executable, ['auth', 'export', '--standalone']); } catch {}
+  if (!Array.isArray(rows)) {
+    let version = '';
+    try { version = await run(executable, ['--version'], String); } catch {}
+    if (Number(/(\d+)\.\d+/.exec(version)?.[1]) < 2) return null;
+    throw new Error('unavailable');
+  }
   return rows.flatMap(row => {
     const value = row?.value;
     if (typeof row?.integrationID !== 'string' || !value || typeof value !== 'object' || Array.isArray(value)) return [];
