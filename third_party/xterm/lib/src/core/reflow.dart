@@ -1,5 +1,6 @@
+import 'dart:math';
+
 import 'package:xterm/src/core/buffer/line.dart';
-import 'package:xterm/src/core/cursor.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
 class _LineBuilder {
@@ -72,7 +73,13 @@ class _LineReflow {
   /// Adds a line to the reflow operation. This method will try to reuse the
   /// given line if possible.
   void add(BufferLine line) {
-    line.restoreOneColumnHalf();
+    if (line.restoreOneColumnHalf()) {
+      // Whatever followed the glyph, such as a cursor waiting to wrap, now
+      // follows its second half.
+      for (final anchor in line.anchors) {
+        if (anchor.x >= 1) anchor.reposition(anchor.x + 1);
+      }
+    }
     final trimmedLength = line.getTrimmedLength(oldWidth);
 
     // A fast path for empty lines. Cells still waiting in the builder come
@@ -100,10 +107,15 @@ class _LineReflow {
       _lines.add(line);
 
       if (trimmedLength > newWidth) {
+        var from = newWidth;
         if (line.getWidth(newWidth - 1) == 2) {
-          _addPart(line, from: newWidth - 1, to: trimmedLength);
-        } else {
-          _addPart(line, from: newWidth, to: trimmedLength);
+          // The glyph stays on a line one column wide, as [_addPart] keeps
+          // it there, with its second half; an anchor on that half stays
+          // past the line's end. A wider line passes it on.
+          from = newWidth == 1 ? 2 : newWidth - 1;
+        }
+        if (from < trimmedLength) {
+          _addPart(line, from: from, to: trimmedLength);
         }
       }
     }
@@ -115,7 +127,7 @@ class _LineReflow {
       line.truncate(newWidth);
     }
 
-    if (line.getWidth(newWidth - 1) == 2) {
+    if (newWidth > 1 && line.getWidth(newWidth - 1) == 2) {
       line.resetCell(newWidth - 1);
     }
   }
@@ -163,18 +175,32 @@ class _LineReflow {
         // terminal.
       }
 
+      // A line one column wide takes the wide glyph whole, as printing it
+      // there does: its second half goes with it rather than onto a line of
+      // its own, and an anchor on that half follows the glyph.
+      var copyEnd = from + cellsToCopy;
+      if (newWidth == 1 &&
+          cellsToCopy == 1 &&
+          line.getWidth(from) == 2 &&
+          copyEnd < to &&
+          line.getWidth(copyEnd) == 0) {
+        copyEnd++;
+      }
+
       for (var anchor in line.anchors.toList()) {
-        final copyEnd = from + cellsToCopy;
         final isExclusiveRangeEnd = anchor.x == to && anchor.x == copyEnd;
         if (anchor.x >= from && (anchor.x < copyEnd || isExclusiveRangeEnd)) {
-          _builder.addAnchor(anchor, anchor.x - from);
+          // One just past that second half lands just past the line's end
+          // too, as in the MonkeyMux model. Nothing clamps it later: resizing
+          // a line that is already one column long leaves its anchors alone.
+          _builder.addAnchor(anchor, min(anchor.x - from, cellsToCopy));
         }
       }
 
       _builder.add(line, from, cellsToCopy);
 
-      from += cellsToCopy;
-      cellsLeft -= cellsToCopy;
+      cellsLeft -= copyEnd - from;
+      from = copyEnd;
 
       // Create a new line if the buffer is filled up.
       if (lineFilled) {
@@ -267,11 +293,6 @@ List<BufferLine> reflow(
       line.truncate(newWidth);
     } else {
       line.resize(newWidth);
-    }
-    // The second half a narrowing to one column leaves at the start of a
-    // line keeps only its background, as the MonkeyMux model blanks it.
-    if (line.length > 0 && line.getCodePoint(0) == 0) {
-      line.eraseCell(0, CursorStyle(background: line.getBackground(0)));
     }
   }
 

@@ -86,7 +86,7 @@ func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 		out = append(out, reflowed...)
 	}
 	for i := range out {
-		out[i].cells = vtCloseSplitGlyphs(resizeVTRow(out[i].cells, newWidth))
+		out[i].cells = resizeVTRow(out[i].cells, newWidth)
 		vtClampAnchors(out[i].anchors, newWidth)
 	}
 	return out
@@ -106,20 +106,6 @@ func vtTakeMarkAnchors(anchors []vtReflowAnchor, mark *uint8) []vtReflowAnchor {
 		}
 	}
 	return kept
-}
-
-// vtCloseSplitGlyphs blanks a wide glyph's half left alone at either edge of
-// a row: a first half in the last column, or a second half in the first. Only
-// a one-column screen splits a wide glyph so, and its row keeps the glyph, as
-// printing it there does, but not the half the next row starts with.
-func vtCloseSplitGlyphs(row []vtCell) []vtCell {
-	if last := len(row) - 1; last >= 1 && row[last].width == 2 {
-		row[last] = blankedHalf(row[last])
-	}
-	if len(row) > 0 && row[0].width == 0 {
-		row[0] = blankedHalf(row[0])
-	}
-	return row
 }
 
 // vtClampAnchors keeps anchors within a line cut or grown to length, as
@@ -146,8 +132,20 @@ type vtLineReflow struct {
 
 func (r *vtLineReflow) add(line vtLine) {
 	if len(line.cells) == 1 && line.cells[0].width == 2 {
-		// The second half the client keeps past the row's end.
+		// The second half the client keeps past the row's end. Whatever
+		// followed the glyph, such as a cursor waiting to wrap, now follows
+		// that half.
 		line.cells = []vtCell{line.cells[0], vtOneColumnHalf(line.cells[0])}
+		if len(line.anchors) > 0 {
+			anchors := make([]vtReflowAnchor, len(line.anchors))
+			for i, anchor := range line.anchors {
+				if anchor.x >= 1 {
+					anchor.x++
+				}
+				anchors[i] = anchor
+			}
+			line.anchors = anchors
+		}
 	}
 	trimmed := vtTrimmedLength(line.cells, len(line.cells))
 	if trimmed == 0 {
@@ -174,12 +172,21 @@ func (r *vtLineReflow) add(line vtLine) {
 	if trimmed > r.newWidth {
 		from := r.newWidth
 		if line.cells[r.newWidth-1].width == 2 {
-			from--
+			if r.newWidth == 1 {
+				// The glyph stays, as addPart keeps it on a line one
+				// column wide, with its second half; an anchor on that
+				// half stays past the line's end.
+				from = 2
+			} else {
+				from--
+			}
 		}
-		r.addPart(&line, from, trimmed)
+		if from < trimmed {
+			r.addPart(&line, from, trimmed)
+		}
 	}
 	line.cells = resizeVTRow(line.cells, r.newWidth)
-	if line.cells[r.newWidth-1].width == 2 {
+	if r.newWidth > 1 && line.cells[r.newWidth-1].width == 2 {
 		// The glyph moved on to the next line.
 		line.cells[r.newWidth-1] = vtCell{width: 1}
 	}
@@ -216,14 +223,22 @@ func (r *vtLineReflow) addPart(line *vtLine, from, to int) {
 			}
 		}
 		end := from + count
+		// A line one column wide takes the wide glyph whole, as printing
+		// it there does: its second half goes with it rather than onto a
+		// line of its own, and an anchor on that half follows the glyph.
+		next := end
+		if r.newWidth == 1 && count == 1 && src[from].width == 2 &&
+			end < to && src[end].width == 0 {
+			next++
+		}
 		line.anchors = r.takeAnchors(line.anchors, r.filled-from, func(x int) bool {
-			return x >= from && (x < end || (x == to && end == to))
+			return x >= from && (x < next || (x == to && next == to))
 		})
 		r.cells = append(r.cells[:r.filled], src[from:end]...)
 		r.filled += count
 		vtClampAnchors(r.anchors, r.filled)
-		from += count
-		left -= count
+		left -= next - from
+		from = next
 		if lineFilled {
 			r.lines = append(r.lines, r.take())
 		}

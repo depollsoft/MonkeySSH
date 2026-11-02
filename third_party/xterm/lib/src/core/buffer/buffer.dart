@@ -445,7 +445,7 @@ class Buffer {
       graphics.removeGraphicsAnchoredToLine(this.lines[i]);
     }
     final reordered = <BufferLine>[
-      for (var i = 0; i < count; i++) _newEmptyLine(),
+      for (var i = 0; i < count; i++) _newErasedLine(),
       for (var i = top; i <= bottom - count; i++) this.lines[i],
     ];
     this.lines.reassignRange(top, reordered);
@@ -492,7 +492,7 @@ class Buffer {
           graphics.removeGraphicsAnchoredToLine(this.lines[0]);
           evicted = true;
         }
-        this.lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
+        this.lines.insert(absoluteMarginBottom + 1, _newErasedLine());
       }
       // The oldest line kept continues nothing once the one before it is
       // dropped, as when the MonkeyMux screen model trims its scrollback.
@@ -506,7 +506,7 @@ class Buffer {
     }
     final reordered = <BufferLine>[
       for (var i = top + count; i <= bottom; i++) this.lines[i],
-      for (var i = 0; i < count; i++) _newEmptyLine(),
+      for (var i = 0; i < count; i++) _newErasedLine(),
     ];
     this.lines.reassignRange(top, reordered);
     graphics.endRegionScroll(this.lines, images);
@@ -752,13 +752,13 @@ class Buffer {
     for (var i = 0; i < linesToMove; i++) {
       final index = absoluteMarginBottom - i;
       graphics.removeGraphicsAnchoredToLine(lines[index]);
-      lines[index] = lines.swap(index - linesToInsert, _newEmptyLine());
+      lines[index] = lines.swap(index - linesToInsert, _newErasedLine());
     }
 
     for (var i = linesToMove; i < linesToInsert; i++) {
       final index = absoluteCursorY + i;
       graphics.removeGraphicsAnchoredToLine(lines[index]);
-      lines[index] = _newEmptyLine();
+      lines[index] = _newErasedLine();
     }
     _endContinuation(absoluteCursorY + linesToInsert);
     _endContinuation(absoluteMarginBottom + 1);
@@ -782,7 +782,7 @@ class Buffer {
     final reordered = <BufferLine>[
       for (var i = absoluteCursorY + count; i <= absoluteMarginBottom; i++)
         lines[i],
-      for (var i = 0; i < count; i++) _newEmptyLine(),
+      for (var i = 0; i < count; i++) _newErasedLine(),
     ];
     lines.reassignRange(absoluteCursorY, reordered);
     _endContinuation(absoluteCursorY);
@@ -1015,6 +1015,20 @@ class Buffer {
   /// is not specified.
   BufferLine _newEmptyLine([int? width]) {
     final line = BufferLine(width ?? viewWidth);
+    return line;
+  }
+
+  /// A blank line for a scroll or a line insertion or deletion to bring in,
+  /// erased in the current background as xterm.js, Ghostty and the MonkeyMux
+  /// screen model fill it (BCE).
+  BufferLine _newErasedLine() {
+    final line = _newEmptyLine();
+    final style = terminal.cursor;
+    if (style.background != 0) {
+      for (var i = 0; i < viewWidth; i++) {
+        line.eraseCell(i, style);
+      }
+    }
     return line;
   }
 

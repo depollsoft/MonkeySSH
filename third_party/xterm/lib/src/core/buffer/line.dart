@@ -441,12 +441,13 @@ class BufferLine with IndexedItem {
   /// half that half, past the line's end, in the glyph's rendition, for the
   /// line to show once it is longer, as the MonkeyMux model does
   /// (vtOneColumnHalf). Whatever a narrowing hid there before was under the
-  /// glyph.
-  void restoreOneColumnHalf() {
-    if (_length != 1 || getWidth(0) != 2) return;
+  /// glyph. Returns whether the line holds such a glyph.
+  bool restoreOneColumnHalf() {
+    if (_length != 1 || getWidth(0) != 2) return false;
     _clearGraphemeExtras(1);
     _data.setRange(_cellSize, 2 * _cellSize, _data);
     _data[_cellSize + _cellContent] = 0;
+    return true;
   }
 
   /// Returns the offset of the last cell that has content from the start of

@@ -37,10 +37,15 @@ void main() {
   for (final raw in cases) {
     final testCase = raw as Map<String, dynamic>;
     test(testCase['name'], () {
-      final size = (testCase['size'] as List).cast<int>();
+      var size = (testCase['size'] as List).cast<int>();
       final terminal = Terminal(maxLines: 10000);
       terminal.resize(size[0], size[1]);
       terminal.write(testCase['write'] as String);
+      // Then each size in turn, which the model's reflow follows too.
+      for (final step in (testCase['resize'] as List?) ?? const []) {
+        size = (step as List).cast<int>();
+        terminal.resize(size[0], size[1]);
+      }
 
       final rows = testCase['rows'] as List;
       final buffer = terminal.buffer;

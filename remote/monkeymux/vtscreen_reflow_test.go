@@ -166,9 +166,8 @@ func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
 
 // On a one-row screen the row a frame wraps from has already scrolled into
 // the history, out of reach of anything that would erase a stand-in glyph
-// there. A wide glyph that did not fit is reproduced the way it arose; any
-// other wrap from a never-written cell is dropped rather than leave a space
-// the client would keep.
+// there. A wide glyph that did not fit is reproduced the way it arose; a
+// wrap from a never-written cell is reached by a tab, which writes nothing.
 func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 	s := newTerminalScreen(4, 1)
 	s.Write([]byte("abc界"))
@@ -191,8 +190,15 @@ func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 	if got := vtScrollbackLines(replica); len(got) != 1 || string(got[0]) != "abc" {
 		t.Fatalf("frame left a stand-in in the history: %q", got)
 	}
-	if replica.main.wrapped[0] {
-		t.Fatal("frame kept a wrap it could not reproduce faithfully")
+	if !replica.main.wrapped[0] {
+		t.Fatal("frame dropped the soft wrap")
+	}
+	s.Resize(8, 1)
+	replica.Resize(8, 1)
+	if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) ||
+		replica.scrollback.len() != 0 || s.scrollback.len() != 0 {
+		t.Fatalf("widened replica %q (history %d), model %q (history %d)",
+			got, replica.scrollback.len(), want, s.scrollback.len())
 	}
 }
 
@@ -372,7 +378,7 @@ func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
 		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{2, 3}, []string{"\U0001F468<", "\U0001F469<", "__"}},
 		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{3, 3}, []string{"\U0001F468<_", "\U0001F469<_", "___"}},
 		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{4, 3}, []string{"\U0001F468<\U0001F469<", "____", "____"}},
-		{[2]int{2, 4}, "a\U0001F468b", [2]int{1, 4}, []string{"a", "\U0001F468", "_", "b", "_"}},
+		{[2]int{2, 4}, "a\U0001F468b", [2]int{1, 4}, []string{"a", "\U0001F468", "b", "_"}},
 	} {
 		s := newTerminalScreen(c.size[0], c.size[1])
 		s.Write([]byte(c.write))
