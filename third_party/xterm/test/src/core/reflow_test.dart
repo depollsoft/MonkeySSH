@@ -195,8 +195,8 @@ void main() {
         reason: 'trip $trip',
       );
       expect(buffer.lines[1].getTrimmedLength(), 0, reason: 'trip $trip');
-      expect([buffer.cursorY, buffer.cursorX, buffer.isWrapPending],
-          [0, 0, true],
+      expect(
+          [buffer.cursorY, buffer.cursorX, buffer.isWrapPending], [0, 0, true],
           reason: 'trip $trip');
     }
   });
