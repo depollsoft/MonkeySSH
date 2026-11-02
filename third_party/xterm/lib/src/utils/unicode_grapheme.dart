@@ -641,16 +641,17 @@ const _graphemeRanges = <int>[
   0xE0100, 0xE01EF, 0x0E, //
 ];
 
-/// Values of the Basic Multilingual Plane, indexed by code point.
-final Uint8List _bmpValues = _buildBmpValues();
+/// Values below U+20000, in the planes nearly all text and emoji are in,
+/// indexed by code point.
+final Uint8List _directValues = _buildDirectValues();
 
-Uint8List _buildBmpValues() {
-  final table = Uint8List(0x10000);
+Uint8List _buildDirectValues() {
+  final table = Uint8List(0x20000);
   for (var i = 0; i < _graphemeRanges.length; i += 3) {
     final first = _graphemeRanges[i];
-    if (first >= 0x10000) break;
+    if (first >= 0x20000) break;
     final last =
-        _graphemeRanges[i + 1] < 0x10000 ? _graphemeRanges[i + 1] : 0xFFFF;
+        _graphemeRanges[i + 1] < 0x20000 ? _graphemeRanges[i + 1] : 0x1FFFF;
     table.fillRange(first, last + 1, _graphemeRanges[i + 2]);
   }
   return table;
@@ -658,7 +659,7 @@ Uint8List _buildBmpValues() {
 
 /// The [GraphemeClass] of [codePoint] in the low bits, plus [graphemeVSBase].
 int graphemeProperty(int codePoint) {
-  if (codePoint < 0x10000) return _bmpValues[codePoint];
+  if (codePoint < 0x20000) return _directValues[codePoint];
   var low = 0;
   var high = _graphemeRanges.length ~/ 3 - 1;
   while (low <= high) {

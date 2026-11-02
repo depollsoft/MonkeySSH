@@ -110,10 +110,10 @@ func vtTakeMarkAnchors(anchors []vtReflowAnchor, mark *uint8) []vtReflowAnchor {
 
 // vtCloseSplitGlyphs blanks a wide glyph's half left alone at either edge of
 // a row: a first half in the last column, or a second half in the first. Only
-// a one-column screen splits a wide glyph so, and a glyph wider than its row
-// would make the next reflow read past the row's end.
+// a one-column screen splits a wide glyph so, and its row keeps the glyph, as
+// printing it there does, but not the half the next row starts with.
 func vtCloseSplitGlyphs(row []vtCell) []vtCell {
-	if last := len(row) - 1; last >= 0 && row[last].width == 2 {
+	if last := len(row) - 1; last >= 1 && row[last].width == 2 {
 		row[last] = blankedHalf(row[last])
 	}
 	if len(row) > 0 && row[0].width == 0 {
@@ -145,7 +145,11 @@ type vtLineReflow struct {
 }
 
 func (r *vtLineReflow) add(line vtLine) {
-	trimmed := vtTrimmedLength(line.cells, r.oldWidth)
+	if len(line.cells) == 1 && line.cells[0].width == 2 {
+		// The second half the client keeps past the row's end.
+		line.cells = []vtCell{line.cells[0], vtOneColumnHalf(line.cells[0])}
+	}
+	trimmed := vtTrimmedLength(line.cells, len(line.cells))
 	if trimmed == 0 {
 		// Cells still waiting in the builder come before an empty line, or
 		// an erased continuation row would land ahead of the text it
@@ -175,6 +179,10 @@ func (r *vtLineReflow) add(line vtLine) {
 		r.addPart(&line, from, trimmed)
 	}
 	line.cells = resizeVTRow(line.cells, r.newWidth)
+	if line.cells[r.newWidth-1].width == 2 {
+		// The glyph moved on to the next line.
+		line.cells[r.newWidth-1] = vtCell{width: 1}
+	}
 	vtClampAnchors(line.anchors, r.newWidth)
 	r.lines[head] = line
 }
@@ -186,6 +194,11 @@ func (r *vtLineReflow) add(line vtLine) {
 func (r *vtLineReflow) addPart(line *vtLine, from, to int) {
 	src := line.cells
 	for left := to - from; left > 0; {
+		if r.filled == r.newWidth {
+			// A line one column wide holding a wide glyph fills a line two
+			// columns wide by itself when add reuses it.
+			r.lines = append(r.lines, r.take())
+		}
 		count := left
 		lineFilled := false
 		if remaining := r.newWidth - r.filled; count >= remaining {

@@ -121,6 +121,31 @@ void main() {
       }
     });
 
+    test(
+        'the second half of a wide glyph left without its first keeps its '
+        'background alone', () {
+      // As the MonkeyMux model blanks it
+      // (TestBlankingTheOtherHalfKeepsItsBackground): a glyph printed over
+      // the first half, a wide one too, DCH moving the second half to the
+      // cursor, and ICH and insert mode moving it on.
+      for (final (input, half) in [
+        ('\x1b[7;32;41m界\x1b[0;44m\x1b[1Gx', 1),
+        ('\x1b[7;32;41m\x1b[1;2H界\x1b[0;44m\x1b[1;1H界', 2),
+        ('\x1b[7;32;41m界\x1b[0;44m\x1b[1G\x1b[P', 0),
+        ('\x1b[7;32;41m界\x1b[0;44m\x1b[2G\x1b[@', 2),
+        ('\x1b[7;32;41m界\x1b[0;44m\x1b[2G\x1b[4hx', 2),
+      ]) {
+        final terminal = _terminal(4, 3);
+        terminal.write(input);
+        final cell = CellData.empty();
+        _row(terminal, 0).getCellData(half, cell);
+        expect(cell.content, 0, reason: input);
+        expect(cell.background, CellColor.named | 1, reason: input);
+        expect(cell.foreground, 0, reason: input);
+        expect(cell.flags, 0, reason: input);
+      }
+    });
+
     test('covers both screens', () {
       final terminal = _terminal(10, 2);
       terminal.write('\x1b[?2027l\x1b[?1049h$family');

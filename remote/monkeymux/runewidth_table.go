@@ -149,8 +149,8 @@ var runeWidthRanges = []runeWidthRange{
 // East Asian wide and fullwidth characters (including emoji presentation),
 // 1 otherwise.
 func runeWidth(r rune) int {
-	if r >= 0x20 && r < 0x7F {
-		return 1
+	if uint32(r) < 0x20000 {
+		return int(runeWidthDirect[r])
 	}
 	lo, hi := 0, len(runeWidthRanges)-1
 	for lo <= hi {
@@ -166,3 +166,18 @@ func runeWidth(r rune) int {
 	}
 	return 1
 }
+
+// runeWidthDirect is runeWidth below U+20000, in the planes nearly all text
+// and emoji are in, looked up directly.
+var runeWidthDirect = func() *[0x20000]uint8 {
+	var table [0x20000]uint8
+	for i := range table {
+		table[i] = 1
+	}
+	for _, entry := range runeWidthRanges {
+		for r := entry.lo; r <= min(entry.hi, 0x1FFFF); r++ {
+			table[r] = entry.width
+		}
+	}
+	return &table
+}()

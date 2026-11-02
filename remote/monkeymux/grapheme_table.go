@@ -499,6 +499,9 @@ var graphemeRanges = []graphemeRange{
 
 // graphemeProperty returns the class of r in the low bits, plus graphemeVSBase.
 func graphemeProperty(r rune) uint8 {
+	if uint32(r) < 0x20000 {
+		return graphemeDirect[r]
+	}
 	lo, hi := 0, len(graphemeRanges)-1
 	for lo <= hi {
 		mid := int(uint(lo+hi) >> 1)
@@ -513,3 +516,15 @@ func graphemeProperty(r rune) uint8 {
 	}
 	return 0
 }
+
+// graphemeDirect is graphemeProperty below U+20000, in the planes nearly all
+// text and emoji are in, looked up directly.
+var graphemeDirect = func() *[0x20000]uint8 {
+	var table [0x20000]uint8
+	for _, entry := range graphemeRanges {
+		for r := entry.lo; r <= min(entry.hi, 0x1FFFF); r++ {
+			table[r] = entry.value
+		}
+	}
+	return &table
+}()
