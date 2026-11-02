@@ -1854,8 +1854,11 @@ esac
   test('POSIX metadata reports a Pi installer launcher ahead of a leftover npm package', () async {
     final root = await Directory.systemTemp.createTemp('monkeyssh-pi-layout-');
     addTearDown(() => root.delete(recursive: true));
-    // ~/bin is left free for the symlinked-directory case below.
-    final bin = Directory('${root.path}/tools')..createSync();
+    // The probe's login PATH puts ~/.cargo/bin ahead of the system
+    // directories, so these fakes win over a host's real npm and curl; ~/bin
+    // stays free for the symlinked-directory case below.
+    final bin = Directory('${root.path}/.cargo/bin')
+      ..createSync(recursive: true);
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (d) => d.id == 'cli:pi',
     );
@@ -1864,7 +1867,7 @@ esac
     );
     File(
       '${bin.path}/curl',
-    ).writeAsStringSync('#!/bin/sh\necho \'{"ok":true,"version":"1.5.0"}\'\n');
+    ).writeAsStringSync('#!/bin/sh\necho \'{"ok":true,"version":"9.8.7"}\'\n');
     // The installer's layout: ~/.local/bin/pi -> ../../.pi/agent/bin/pi.
     final agent = Directory('${root.path}/.pi/agent');
     Directory('${agent.path}/bin').createSync(recursive: true);
@@ -1904,7 +1907,7 @@ esac
       final managed = await probe(shell);
       expect(managed?.detectionSource, 'Pi installer', reason: shell);
       expect(managed?.installedVersionOutput, isNull, reason: shell);
-      expect(parseAgentVersion(managed?.latestVersionOutput ?? ''), '1.5.0');
+      expect(parseAgentVersion(managed?.latestVersionOutput ?? ''), '9.8.7');
     }
     // A symlinked bin directory: ~/bin -> .pi/agent/bin.
     Link('${root.path}/.local/bin/pi').deleteSync();
