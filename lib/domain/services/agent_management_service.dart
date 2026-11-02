@@ -109,12 +109,6 @@ const _hermesVersionLookup = (
   url: 'https://api.github.com/repos/NousResearch/hermes-agent/releases/latest',
   pattern: '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"',
 );
-// `hermes update` refuses a pipx installation, and Hermes's installer leaves
-// a command it did not publish in place, so the pipx copy goes first.
-const _hermesPipxMessage =
-    'Hermes stopped publishing to PyPI at 0.19.0, so this pipx installation '
-    'cannot update. Run `pipx uninstall hermes-agent` on the host (settings '
-    'in ~/.hermes stay), then re-check and install Hermes again.';
 const _grokVersionLookup = (
   url: 'https://x.ai/cli/stable',
   pattern: r'^[0-9]+\.[0-9]+\.[0-9]+[-+0-9A-Za-z.]*',
@@ -327,7 +321,9 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     windowsInstallerUrl: 'https://hermes-agent.nousresearch.com/install.ps1',
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
-    retiredRegistry: (lastVersion: '0.19.0', message: _hermesPipxMessage),
+    // PyPI stopped at 0.19.0 and `hermes update` refuses a pip install. Its
+    // `--version` reports `Install method: pip` or `git`.
+    retiredRegistry: (lastVersion: '0.19.0', installMethod: 'pip'),
   ),
   AgentRuntimeDefinition(
     id: 'cli:openclaw',
@@ -619,7 +615,8 @@ String? buildAgentInstallCommand(
   // Neither the retired registry nor the agent's own updater can move an
   // installation the registry owns forward; the user replaces it instead.
   if (update &&
-      _ownedByRetiredRegistry(definition, detectionSource, installedVersion)) {
+      definition.retiredRegistry != null &&
+      _retiredRegistrySources(definition).contains(detectionSource)) {
     return null;
   }
   final repairScript = definition.repairScript;
@@ -1163,13 +1160,18 @@ class AgentManagementService {
         ? 'npx on demand'
         : _detectionSourceFromPath(path);
     installed ??= parseAgentVersion(metadata?.installedVersionOutput ?? '');
-    final retiredRegistry = definition.retiredRegistry;
-    // The registry still lists an old copy, but a newer one runs: it came
-    // from the official installer.
-    if (retiredRegistry != null &&
-        installed != null &&
-        source == _registrySource(definition.registry) &&
-        compareAgentVersions(installed, retiredRegistry.lastVersion) > 0) {
+    // The source names the running copy, not whatever a retired registry
+    // still lists.
+    final retiredSource = _retiredRegistrySource(
+      definition,
+      source: source,
+      installed: installed,
+      versionOutput: snapshot.versionOutput,
+    );
+    if (retiredSource != null) {
+      source = retiredSource;
+    } else if (definition.retiredRegistry != null &&
+        source == _registrySource(definition.registry)) {
       source = _detectionSourceFromPath(path);
     }
     final latest = parseAgentVersion(metadata?.latestVersionOutput ?? '');
@@ -1182,7 +1184,7 @@ class AgentManagementService {
         legacy != null &&
         installed != null &&
         compareAgentVersions(installed, legacy.belowVersion) < 0;
-    final retired = _ownedByRetiredRegistry(definition, source, installed);
+    final retired = retiredSource != null;
     final managed =
         !isLegacyInstallation &&
         !retired &&
@@ -1205,7 +1207,7 @@ class AgentManagementService {
           ? isLegacyInstallation
                 ? legacy.message
                 : retired
-                ? retiredRegistry!.message
+                ? _retiredRegistryMessage(definition, retiredSource, path)
                 : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
@@ -2332,18 +2334,60 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
 String _executableBasename(String path) =>
     path.replaceAll('\\', '/').split('/').last.toLowerCase();
 
-/// Whether [definition]'s retired registry owns the running copy: it lists
-/// the package and the copy is no newer than the registry's last release.
-bool _ownedByRetiredRegistry(
-  AgentRuntimeDefinition definition,
-  String? source,
-  String? installedVersion,
-) {
+// The line Hermes's `--version` prints for the running copy.
+final _installMethodPattern = RegExp(r'Install method: (\S+)');
+
+/// Sources of a copy installed from [definition]'s retired registry: its
+/// package manager, or plain pip, which pipx installs through.
+Set<String> _retiredRegistrySources(AgentRuntimeDefinition definition) => {
+  ?_registrySource(definition.registry),
+  if (definition.registry == AgentPackageRegistry.pipx) 'pip',
+};
+
+/// The install source of the running copy when [definition]'s retired
+/// registry installed it, or null (see
+/// [AgentRuntimeDefinition.retiredRegistry]).
+String? _retiredRegistrySource(
+  AgentRuntimeDefinition definition, {
+  required String source,
+  required String? installed,
+  required String? versionOutput,
+}) {
   final retired = definition.retiredRegistry;
-  return retired != null &&
-      installedVersion != null &&
-      source == _registrySource(definition.registry) &&
-      compareAgentVersions(installedVersion, retired.lastVersion) <= 0;
+  final registrySource = _registrySource(definition.registry);
+  if (retired == null || registrySource == null) return null;
+  final method = _installMethodPattern
+      .firstMatch(versionOutput ?? '')
+      ?.group(1);
+  if (method != null) {
+    if (method != retired.installMethod) return null;
+    // Without a pipx listing, a pip-installed copy came from pip itself.
+    return source == registrySource ||
+            definition.registry != AgentPackageRegistry.pipx
+        ? registrySource
+        : 'pip';
+  }
+  return source == registrySource &&
+          installed != null &&
+          compareAgentVersions(installed, retired.lastVersion) <= 0
+      ? registrySource
+      : null;
+}
+
+String _retiredRegistryMessage(
+  AgentRuntimeDefinition definition,
+  String source,
+  String path,
+) {
+  final package = definition.packageName;
+  final python = path.contains(r'\') ? 'py' : 'python3';
+  final uninstall = source == 'pip'
+      ? '$python -m pip uninstall $package'
+      : 'pipx uninstall $package';
+  return '${definition.label} stopped publishing to PyPI at '
+      '${definition.retiredRegistry!.lastVersion}, so this $source '
+      'installation cannot update. Run `$uninstall` on the host (settings '
+      'stay), then re-check and install ${definition.label} again.';
 }
 
 /// Install source the metadata probe reports for [registry]'s installations.

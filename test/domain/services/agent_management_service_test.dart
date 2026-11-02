@@ -1469,14 +1469,20 @@ void main() {
       (definition) => definition.id == 'cli:hermes',
     );
 
-    for (final (source, version) in [
-      ('pipx', '0.19.0'),
-      (null, '0.19.0'),
-      // pipx still lists an old copy, but the installer's newer one runs.
-      ('pipx', '0.21.6'),
+    // Hermes's --version reports how the running copy was installed.
+    for (final (listing, version, method, expectedSource, uninstall) in [
+      ('pipx', '0.19.0', 'pip', 'pipx', 'pipx uninstall hermes-agent'),
+      // Installed with plain pip: no pipx listing, but still PyPI's copy.
+      (null, '0.19.0', 'pip', 'pip', 'python3 -m pip uninstall hermes-agent'),
+      // Older copies print no install method; a pipx listing then decides.
+      ('pipx', '0.18.2', null, 'pipx', 'pipx uninstall hermes-agent'),
+      (null, '0.19.0', 'git', 'PATH', null),
+      // pipx still lists an old copy, but the installer's checkout runs.
+      ('pipx', '0.19.0', 'git', 'PATH', null),
+      ('pipx', '0.21.6', null, 'PATH', null),
     ]) {
       test(
-        'a ${source ?? 'installer'} listing running $version behind the latest release',
+        '${listing ?? 'no'} listing, $version via ${method ?? 'unreported'} is $expectedSource',
         () async {
           final client = _MockSshClient();
           final session = _remoteSession(client);
@@ -1489,14 +1495,17 @@ void main() {
               return _execOutput(
                 '__monkeyssh_agent_runtime__=cli:hermes\n'
                 '__monkeyssh_agent_path__=/home/dev/.local/bin/hermes\n'
-                '__monkeyssh_agent_version__=Hermes Agent v$version\n'
+                '__monkeyssh_agent_version__=Hermes Agent v$version '
+                'Install directory: /home/dev/.hermes/hermes-agent '
+                '${method == null ? '' : 'Install method: $method '}'
+                'Python: 3.12.4\n'
                 '__monkeyssh_agent_runtime_end__\n',
               );
             }
             expect(script, contains('api.github.com/repos/NousResearch'));
             return _execOutput(
               '__monkeyssh_agent_runtime__=cli:hermes\n'
-              '${source == null ? '' : '__monkeyssh_agent_source__=$source\n'}'
+              '${listing == null ? '' : '__monkeyssh_agent_source__=$listing\n'}'
               '__monkeyssh_agent_latest__="tag_name": "v0.22.6"\n'
               '__monkeyssh_agent_runtime_end__\n',
             );
@@ -1507,13 +1516,12 @@ void main() {
           expect(runtime.status, AgentRuntimeStatus.updateAvailable);
           expect(runtime.installedVersion, version);
           expect(runtime.latestVersion, '0.22.6');
-          if (source == 'pipx' && version == '0.19.0') {
-            expect(runtime.managedByPackageManager, isFalse);
-            expect(runtime.message, contains('pipx uninstall hermes-agent'));
-          } else {
-            expect(runtime.detectionSource, 'PATH');
-            expect(runtime.managedByPackageManager, isTrue);
+          expect(runtime.detectionSource, expectedSource);
+          expect(runtime.managedByPackageManager, uninstall == null);
+          if (uninstall == null) {
             expect(runtime.message, isNull);
+          } else {
+            expect(runtime.message, contains('`$uninstall`'));
           }
         },
       );
@@ -2373,17 +2381,16 @@ exit "$result"
           ),
           isNull,
         );
-        // A newer copy did not come from PyPI, whatever pipx still lists.
         expect(
           buildAgentInstallCommand(
             definition,
             windows: windows,
             update: true,
             executablePath: '/home/dev/.local/bin/hermes',
-            detectionSource: 'pipx',
-            installedVersion: '0.21.6',
+            detectionSource: 'pip',
+            installedVersion: '0.19.0',
           ),
-          isNotNull,
+          isNull,
         );
       }
     });

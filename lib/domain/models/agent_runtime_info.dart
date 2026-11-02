@@ -164,11 +164,14 @@ class AgentRuntimeDefinition {
   final ({String marker, String source})? installerLayout;
 
   /// Set when [registry] stopped receiving this agent's releases at
-  /// `lastVersion`. A copy it owns cannot update in place, and `message`
-  /// tells the user how to move to the official installer. A running copy
-  /// newer than `lastVersion` came from elsewhere, even while the registry
-  /// still lists an old one.
-  final ({String lastVersion, String message})? retiredRegistry;
+  /// `lastVersion`. A copy installed from it cannot update in place; the user
+  /// is told to uninstall it and install again with the official installer.
+  /// A copy whose version output has an `Install method: <installMethod>`
+  /// line came from the registry (through pipx or plain pip); another method
+  /// came from elsewhere, whatever the registry still lists. Without that
+  /// line, a registry listing counts only for a copy no newer than
+  /// `lastVersion`.
+  final ({String lastVersion, String installMethod})? retiredRegistry;
 
   /// Whether the launcher performs its own updates (see
   /// [syncUpdateEnvironment]).
