@@ -1464,6 +1464,57 @@ void main() {
     }
   });
 
+  group('Hermes releases', () {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (definition) => definition.id == 'cli:hermes',
+    );
+
+    for (final source in ['pipx', null]) {
+      test(
+        'a ${source ?? 'installer'} copy behind the latest release',
+        () async {
+          final client = _MockSshClient();
+          final session = _remoteSession(client);
+          when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+          when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+            invocation,
+          ) async {
+            final script = invocation.positionalArguments.first as String;
+            if (script.contains('__monkeyssh_agent_path__')) {
+              return _execOutput(
+                '__monkeyssh_agent_runtime__=cli:hermes\n'
+                '__monkeyssh_agent_path__=/home/dev/.local/bin/hermes\n'
+                '__monkeyssh_agent_version__=Hermes Agent v0.19.0\n'
+                '__monkeyssh_agent_runtime_end__\n',
+              );
+            }
+            expect(script, contains('api.github.com/repos/NousResearch'));
+            return _execOutput(
+              '__monkeyssh_agent_runtime__=cli:hermes\n'
+              '${source == null ? '' : '__monkeyssh_agent_source__=$source\n'}'
+              '__monkeyssh_agent_latest__="tag_name": "v0.22.6"\n'
+              '__monkeyssh_agent_runtime_end__\n',
+            );
+          });
+          final runtime = await _unlockedManagementService(_MockDiscovery())
+              .inspect(session, definition);
+
+          expect(runtime.status, AgentRuntimeStatus.updateAvailable);
+          expect(runtime.installedVersion, '0.19.0');
+          expect(runtime.latestVersion, '0.22.6');
+          if (source == 'pipx') {
+            expect(runtime.managedByPackageManager, isFalse);
+            expect(runtime.message, contains('pipx uninstall hermes-agent'));
+          } else {
+            expect(runtime.detectionSource, 'PATH');
+            expect(runtime.managedByPackageManager, isTrue);
+            expect(runtime.message, isNull);
+          }
+        },
+      );
+    }
+  });
+
   group('Pi package migration', () {
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (definition) => definition.id == 'cli:pi',
@@ -1694,7 +1745,7 @@ void main() {
 case "$*" in
   *cursor.com/install*) echo 'DOWNLOAD_URL="https://downloads.cursor.com/lab/2026.09.08-6caf4ff/linux/arm64/agent-cli-package.tar.gz"';;
   *antigravity*/manifests/*) echo '{"version":"1.1.28","url":"https://example.test/1.1.28"}';;
-  *hermes_cli/__init__.py*) printf '__version__ = "0.21.1"\n__release_date__ = "2026.9.7"\n';;
+  *api.github.com/repos/NousResearch/hermes-agent/releases/latest*) printf '{\n  "url": "https://api.github.com/x",\n  "tag_name": "v0.21.1",\n  "name": "Hermes Agent v0.21.1"\n}\n';;
   *x.ai/cli/stable*) echo '1.0.24';;
   *pi.dev/api/latest-version*) echo '{"ok":true,"version":"1.3.0","packageName":"@earendil-works/pi-coding-agent"}';;
   *registry.npmjs.org/*/latest*) echo '{"version":"1.2.0"}';;
@@ -2216,11 +2267,17 @@ exit "$result"
     });
 
     test('builds pipx commands with a Python fallback', () {
-      final definition = agentCliRuntimeDefinitions.firstWhere(
-        (runtime) => runtime.label == 'Hermes',
+      const definition = AgentRuntimeDefinition(
+        id: 'cli:test-pipx',
+        label: 'Pipx agent',
+        kind: AgentRuntimeKind.cli,
+        executableNames: ['hermes'],
+        registry: AgentPackageRegistry.pipx,
+        packageName: 'hermes-agent',
+        packageExtras: ['acp'],
       );
-      // Native chat runs `hermes acp`, so installs carry the `acp` extra;
-      // pipx upgrade and reinstall take the installed package name.
+      // Installs carry the package's extras; pipx upgrade and reinstall take
+      // the installed package name.
       final install = buildAgentInstallCommand(
         definition,
         windows: false,
@@ -2252,6 +2309,47 @@ exit "$result"
         ),
         contains("& pipx install 'hermes-agent[acp]';"),
       );
+    });
+
+    test('Hermes installs with its installer and asks pipx copies to move', () {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (runtime) => runtime.id == 'cli:hermes',
+      );
+      expect(
+        buildAgentInstallCommand(definition, windows: false, update: false),
+        contains("'https://hermes-agent.nousresearch.com/install.sh'"),
+      );
+      expect(
+        decodeEncodedPowerShell(
+          buildAgentInstallCommand(definition, windows: true, update: false)!,
+        ),
+        contains("'https://hermes-agent.nousresearch.com/install.ps1'"),
+      );
+      for (final windows in [false, true]) {
+        // `hermes update` keeps an installer checkout current...
+        final update = buildAgentInstallCommand(
+          definition,
+          windows: windows,
+          update: true,
+          executablePath: '/home/dev/.local/bin/hermes',
+          detectionSource: 'PATH',
+        )!;
+        expect(
+          windows ? decodeEncodedPowerShell(update) : update,
+          contains("'update' '--yes'"),
+        );
+        // ...but refuses a pipx installation, and PyPI stopped at 0.19.0.
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: true,
+            executablePath: '/home/dev/.local/bin/hermes',
+            detectionSource: 'pipx',
+          ),
+          isNull,
+        );
+      }
     });
 
     test('quotes apostrophes safely for POSIX shells', () {

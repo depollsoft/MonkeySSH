@@ -69,6 +69,7 @@ class AgentRuntimeDefinition {
     this.latestVersionUrlPlatformSuffix = false,
     this.legacyInstallation,
     this.installerLayout,
+    this.retiredRegistryMessage,
   });
 
   /// Stable runtime identifier.
@@ -161,6 +162,11 @@ class AgentRuntimeDefinition {
   /// `<root>/<marker>` exists. Such an installation is reported as [source]
   /// rather than as a package-manager installation.
   final ({String marker, String source})? installerLayout;
+
+  /// Set when [registry] no longer receives this agent's releases. An
+  /// installation the registry owns cannot update in place; this message
+  /// tells the user how to move to the official installer instead.
+  final String? retiredRegistryMessage;
 
   /// Whether the launcher performs its own updates (see
   /// [syncUpdateEnvironment]).

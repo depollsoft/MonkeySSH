@@ -103,10 +103,18 @@ const _cursorVersionLookup = (
   url: 'https://cursor.com/install',
   pattern: r'https://downloads\.cursor\.com/lab/[0-9][0-9A-Za-z.+-]*',
 );
+// Hermes's own installer and `hermes update` follow the latest release.
+// Since 0.21.6 its source no longer spells out the version.
 const _hermesVersionLookup = (
-  url: 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
-  pattern: '__version__[[:space:]]*=[[:space:]]*"[^"]+"',
+  url: 'https://api.github.com/repos/NousResearch/hermes-agent/releases/latest',
+  pattern: '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"',
 );
+// `hermes update` refuses a pipx installation, and Hermes's installer leaves
+// a command it did not publish in place, so the pipx copy goes first.
+const _hermesPipxMessage =
+    'Hermes stopped publishing to PyPI at 0.19.0, so this pipx installation '
+    'cannot update. Run `pipx uninstall hermes-agent` on the host (settings '
+    'in ~/.hermes stay), then re-check and install Hermes again.';
 const _grokVersionLookup = (
   url: 'https://x.ai/cli/stable',
   pattern: r'^[0-9]+\.[0-9]+\.[0-9]+[-+0-9A-Za-z.]*',
@@ -309,12 +317,17 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.hermes,
     executableNames: ['hermes', 'hermes-agent'],
+    // pipx installations are still detected. New installations use the
+    // official installer: a git checkout that `hermes update` keeps current,
+    // with every extra native chat needs (`hermes acp` needs `acp`).
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
-    // Native chat runs `hermes acp`, which needs the optional `acp` extra.
     packageExtras: ['acp'],
+    posixInstallerUrl: 'https://hermes-agent.nousresearch.com/install.sh',
+    windowsInstallerUrl: 'https://hermes-agent.nousresearch.com/install.ps1',
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
+    retiredRegistryMessage: _hermesPipxMessage,
   ),
   AgentRuntimeDefinition(
     id: 'cli:openclaw',
@@ -603,6 +616,13 @@ String? buildAgentInstallCommand(
       compareAgentVersions(installedVersion, legacy.belowVersion) < 0) {
     return null;
   }
+  // Neither the retired registry nor the agent's own updater can move an
+  // installation the registry owns forward; the user replaces it instead.
+  if (update &&
+      definition.retiredRegistryMessage != null &&
+      detectionSource == _registrySource(definition.registry)) {
+    return null;
+  }
   final repairScript = definition.repairScript;
   if (repair && repairScript != null && executablePath != null) {
     if (windows) {
@@ -660,7 +680,9 @@ String? buildAgentInstallCommand(
   final installerUrl = windows
       ? definition.windowsInstallerUrl
       : definition.posixInstallerUrl;
-  if (installerUrl != null) {
+  // A repair finishes the package that is there; it never switches an
+  // installation to the official installer.
+  if (installerUrl != null && !(repair && definition.registry != null)) {
     return _buildOfficialAgentInstallerCommand(installerUrl, windows: windows);
   }
   final package = definition.packageName;
@@ -1152,8 +1174,12 @@ class AgentManagementService {
         legacy != null &&
         installed != null &&
         compareAgentVersions(installed, legacy.belowVersion) < 0;
+    final retired =
+        definition.retiredRegistryMessage != null &&
+        source == _registrySource(definition.registry);
     final managed =
         !isLegacyInstallation &&
+        !retired &&
         (definition.supportsSelfUpdate ||
             definition.launcherOwnsUpdates ||
             source == 'Homebrew' ||
@@ -1172,6 +1198,8 @@ class AgentManagementService {
       message: hasUpdate && !managed
           ? isLegacyInstallation
                 ? legacy.message
+                : retired
+                ? definition.retiredRegistryMessage
                 : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
@@ -2297,6 +2325,13 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
 
 String _executableBasename(String path) =>
     path.replaceAll('\\', '/').split('/').last.toLowerCase();
+
+/// Install source the metadata probe reports for [registry]'s installations.
+String? _registrySource(AgentPackageRegistry? registry) => switch (registry) {
+  AgentPackageRegistry.npm => 'npm global',
+  AgentPackageRegistry.pipx => 'pipx',
+  null => null,
+};
 
 String _detectionSourceFromPath(String path) {
   final normalized = path.toLowerCase();
