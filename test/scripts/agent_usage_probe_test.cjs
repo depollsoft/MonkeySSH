@@ -134,7 +134,7 @@ test('OpenCode 2 accounts come from auth export, OpenCode 1 falls back to auth.j
   assert.deepEqual(accounts, [
     ['openai', {type: 'oauth', methodID: 'chatgpt-headless', refresh: 'REFRESH', access: 'ACCESS', expires: 1,
       metadata: {accountID: 'acct-1'}, accountId: 'acct-1'}],
-    ['openrouter', {type: 'api', key: 'sk-or-FIXTURE'}],
+    ['openrouter', {type: 'api', key: 'sk-or-FIXTURE', inactive: true}],
   ]);
   const result = await multiProvider('opencode', accounts, (id, c) => providerUsage(id, c, async (url, options) => {
     if (url.startsWith('https://openrouter.ai/')) return {data: {limit: 10, usage: 4}};
@@ -600,7 +600,100 @@ test('OpenCode matches inline auth precedence, BOM files, and credential read fa
   }
 });
 
-test('Muse does not invent account quotas or launch an interactive process', async () => {
+test('Muse usage reads the subscription window and weekly allowance', () => {
+  const {museUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const usage = {observedAtMs: 1793000000000, tier: 'pro',
+    window: {usedPercent: 112, resetsAtMs: 1793001800000, windowDurationMins: 300},
+    weekly: {usedPercent: 40, resetsAtMs: 1793500000000}};
+  const expected = {windows: [
+    {label: '5 hours', usedPercent: 112, resetsAt: new Date(1793001800000).toISOString()},
+    {label: 'Weekly', usedPercent: 40, resetsAt: new Date(1793500000000).toISOString()},
+  ]};
+  assert.deepEqual(museUsage(usage), expected);
+  assert.deepEqual(museUsage({usage}), expected);
+  assert.equal(museUsage({usage: {...usage, window: {...usage.window, windowDurationMins: 180}}}).windows[0].label, '180 minutes');
+  for (const empty of [{}, null, {usage: {}}, {window: {usedPercent: 'x'}}]) {
+    assert.deepEqual(museUsage(empty), {windows: [], status: 'notReported'});
+  }
+});
+
+test('Muse usage runs `muse usage --json` without updating Muse', {skip: process.platform === 'win32'}, async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
   const {probe} = require('../../assets/scripts/agent_usage_probe.cjs');
-  assert.deepEqual(await probe('muse', '/does/not/exist'), {status: 'notReported', windows: [], notices: []});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-usage-'));
+  try {
+    const muse = path.join(dir, 'muse');
+    fs.writeFileSync(muse, '#!/bin/sh\n' +
+      '[ "$1 $2 $#" = "usage --json 2" ] && [ "$MUSE_NO_AUTO_UPDATE" = 1 ] || exit 3\n' +
+      'echo \'{"observedAtMs":1,"tier":"pro","window":{"usedPercent":5,"resetsAtMs":1793001800000,"windowDurationMins":300},' +
+      '"weekly":{"usedPercent":9,"resetsAtMs":1793500000000}}\'\n', {mode: 0o755});
+    const result = await probe('muse', muse);
+    assert.equal(result.status, 'available');
+    assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]), [['5 hours', 5], ['Weekly', 9]]);
+    // Not signed in, or a locked keychain over SSH: Muse exits non-zero.
+    fs.writeFileSync(muse, '#!/bin/sh\necho "muse usage: not logged in" >&2\nexit 1\n', {mode: 0o755});
+    assert.deepEqual(await probe('muse', muse), {status: 'unavailable'});
+    assert.deepEqual(await probe('muse', path.join(dir, 'missing')), {status: 'unavailable'});
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('OpenCode 2 Console limits report Go meters and spending budgets', () => {
+  const {openCodeLimitsUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const reset = 1793001800000, iso = new Date(reset).toISOString();
+  const meter = percent => ({percent, limited: false, resetsAt: reset});
+  const budget = fields => ({id: 'b', limit: 50, spent: 10, scope: 'combined', per: 'set', coverage: 'all',
+    models: [], vendors: [], picked: true, shared: false, resetsAt: reset, ...fields});
+  const result = openCodeLimitsUsage({location: {directory: '/private'}, data: {
+    workspace: {id: 'wrk_PRIVATE', name: 'PRIVATE_ORG', usageURL: 'https://opencode.ai/console/wrk_PRIVATE/activity/overview'},
+    go: {rolling: meter(12.5), weekly: meter(40), monthly: meter(61)},
+    budgets: [
+      budget({}),
+      budget({coverage: 'models', models: [{providerID: 'opencode', modelID: 'a', name: 'Model A'}, {providerID: 'opencode', modelID: 'b', name: 'Model B'}]}),
+      budget({per: 'model', limit: 15, spent: 0, coverage: 'models', models: [
+        {providerID: 'opencode', modelID: 'a', name: 'Model A', spent: 3}, {providerID: 'opencode', modelID: 'b', name: 'Model B'}]}),
+      budget({limit: 0}),
+    ],
+  }});
+  assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent, w.used ?? null, w.limit ?? null, w.unit ?? null, w.resetsAt]), [
+    ['Go · 5 hours', 12.5, null, null, null, iso],
+    ['Go · Weekly', 40, null, null, null, iso],
+    ['Go · Monthly', 61, null, null, null, iso],
+    ['Budget', 20, 10, 50, 'USD', iso],
+    ['Budget · Model A, Model B', 20, 10, 50, 'USD', iso],
+    ['Budget · Model A', 20, 3, 15, 'USD', iso],
+  ]);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  // A Console sign-in without Go or budgets, and no Console sign-in at all.
+  assert.deepEqual(openCodeLimitsUsage({data: {workspace: {id: 'w', usageURL: 'u'}, budgets: []}}), {windows: [], status: 'notReported'});
+  assert.deepEqual(openCodeLimitsUsage({location: {directory: '/'}, data: null}), {windows: [], status: 'notReported'});
+});
+
+test('OpenCode 2 asks its own server for the active Console sign-in once', async () => {
+  const {openCodeReader, multiProvider} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const calls = [];
+  const run = async (executable, args) => {
+    calls.push([executable, ...args]);
+    return {data: {workspace: {id: 'w', usageURL: 'u'}, go: {rolling: {percent: 30, limited: false, resetsAt: 1}}, budgets: []}};
+  };
+  const accounts = [
+    ['opencode', {type: 'oauth', access: 'CONSOLE', metadata: {orgID: 'org'}}],
+    ['opencode', {type: 'oauth', access: 'OLD', inactive: true}],
+    ['openrouter', {type: 'api', key: 'not-openrouter'}],
+  ];
+  const result = await multiProvider('opencode', accounts, openCodeReader('/opt/opencode', true, run));
+  assert.deepEqual(calls, [['/opt/opencode', 'api', '--standalone', 'experimental.usage.limits']]);
+  assert.deepEqual(result.windows.map(w => [w.label, w.usedPercent]), [['OpenCode · Account 1 · Go · 5 hours', 30]]);
+  assert.deepEqual(result.notices.map(n => [n.provider, n.status]),
+    [['OpenCode · Account 2', 'notReported'], ['OpenRouter', 'notReported']]);
+  // OpenCode 1 has no usage limits operation; its Zen key reports nothing.
+  calls.length = 0;
+  const v1 = await multiProvider('opencode', accounts.slice(0, 1), openCodeReader('/opt/opencode', false, run));
+  assert.deepEqual(calls, []);
+  assert.deepEqual(v1.notices, [{provider: 'OpenCode', status: 'notReported'}]);
+  // A failed call is unavailable, not a stale or invented reading.
+  const failed = await multiProvider('opencode', accounts.slice(0, 1),
+    openCodeReader('/opt/opencode', true, async () => { throw new Error('unavailable'); }));
+  assert.deepEqual(failed.notices, [{provider: 'OpenCode', status: 'unavailable'}]);
 });

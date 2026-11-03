@@ -96,7 +96,7 @@ function spawnAgent(executable, args) {
   return cp.spawn(executable, args, {cwd: os.tmpdir(),
     detached: process.platform !== 'win32', windowsHide: true,
     stdio: ['pipe', 'pipe', 'ignore'], env: {...process.env, NO_COLOR: '1',
-      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false'}});
+      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false', MUSE_NO_AUTO_UPDATE: '1'}});
 }
 function rpc(executable, args, method, framed, initialize) {
   return new Promise((resolve, reject) => {
@@ -276,7 +276,7 @@ const providerNames = {
   'github-copilot': 'GitHub Copilot', copilot: 'GitHub Copilot', 'google-antigravity': 'Google Antigravity',
   'google-gemini-cli': 'Google Gemini', google: 'Google', openrouter: 'OpenRouter',
   nous: 'Nous', xai: 'xAI', groq: 'Groq', mistral: 'Mistral', deepseek: 'DeepSeek',
-  opencode: 'OpenCode Zen', 'opencode-go': 'OpenCode Go', ollama: 'Ollama',
+  opencode: 'OpenCode', 'opencode-go': 'OpenCode Go', ollama: 'Ollama',
 };
 const label = (value, fallback) => typeof value === 'string' && value.trim()
   ? value.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 65) : fallback;
@@ -445,6 +445,45 @@ function openclawUsage(data) {
   }
   return {windows, notices, status: windows.length ? 'available' : notices.length ? 'notReported' : usage.refreshing ? 'unavailable' : 'noAccounts'};
 }
+// Muse 1.4.13+ prints its subscription allowance as one JSON object: the
+// SubscriptionUsage of its protocol, or a usage/read result that wraps it.
+function museUsage(data) {
+  const usage = data?.usage && typeof data.usage === 'object' ? data.usage : data;
+  const windows = [];
+  const current = usage?.window;
+  if (number(current?.usedPercent) != null) {
+    const minutes = number(current.windowDurationMins);
+    windows.push({label: minutes === 300 ? '5 hours' : minutes > 0 ? `${minutes} minutes` : 'Current window',
+      usedPercent: current.usedPercent, resetsAt: milliseconds(current.resetsAtMs)});
+  }
+  if (number(usage?.weekly?.usedPercent) != null) {
+    windows.push({label: 'Weekly', usedPercent: usage.weekly.usedPercent, resetsAt: milliseconds(usage.weekly.resetsAtMs)});
+  }
+  return windows.length ? {windows} : {windows: [], status: 'notReported'};
+}
+// OpenCode 2.2's experimental.usage.limits reports the active OpenCode Console
+// sign-in: the Go plan's meters (rolling is its five-hour limit) and the
+// workspace's spending budgets. data is null without a Console sign-in.
+function openCodeLimitsUsage(response) {
+  const data = response?.data;
+  const windows = [];
+  for (const [key, name] of [['rolling', '5 hours'], ['weekly', 'Weekly'], ['monthly', 'Monthly']]) {
+    const meter = data?.go?.[key];
+    if (number(meter?.percent) != null) windows.push({label: `Go · ${name}`, usedPercent: meter.percent, resetsAt: milliseconds(meter.resetsAt)});
+  }
+  for (const b of Array.isArray(data?.budgets) ? data.budgets : []) {
+    if (!(number(b?.limit) > 0)) continue;
+    const reset = milliseconds(b.resetsAt), models = Array.isArray(b.models) ? b.models : [];
+    if (b.per === 'model') {
+      // The limit applies to each model on its own.
+      for (const m of models) if (number(m?.spent) != null) windows.push(budget(`Budget · ${label(m.name, 'Model')}`, m.spent, b.limit, reset, 'USD'));
+    } else if (number(b.spent) != null) {
+      const names = b.coverage === 'models' ? models.map(m => label(m?.name, '')).filter(Boolean).join(', ') : '';
+      windows.push(budget(names ? `Budget · ${names}` : 'Budget', b.spent, b.limit, reset, 'USD'));
+    }
+  }
+  return windows.length ? {windows} : {windows: [], status: 'notReported'};
+}
 function codexOAuthUsage(data) {
   const convert = bucket => ({primary: convertWindow(bucket?.primary_window), secondary: convertWindow(bucket?.secondary_window)});
   const convertWindow = w => w && ({usedPercent: w.used_percent,
@@ -589,8 +628,17 @@ async function openCodeAccounts(executable, run = runJson) {
     if (typeof row?.integrationID !== 'string' || !value || typeof value !== 'object' || Array.isArray(value)) return [];
     // OpenCode 2 names an API key `key`; the readers know it as `api`.
     return [[row.integrationID, {...value, type: value.type === 'key' ? 'api' : value.type,
-      ...(typeof value.metadata?.accountID === 'string' ? {accountId: value.metadata.accountID} : {})}]];
+      ...(typeof value.metadata?.accountID === 'string' ? {accountId: value.metadata.accountID} : {}),
+      ...(row.active === false ? {inactive: true} : {})}]];
   });
+}
+// OpenCode 2 reads its Console sign-in's limits itself. One standalone call
+// covers the active sign-in; other providers use the shared readers.
+function openCodeReader(executable, version2, run = runJson) {
+  let limits;
+  return (provider, credential, fetch, accounts) => version2 && provider === 'opencode' && !credential.inactive
+    ? (limits ??= run(executable, ['api', '--standalone', 'experimental.usage.limits']).then(openCodeLimitsUsage))
+    : providerUsage(provider, credential, fetch, accounts);
 }
 async function multiProvider(id, accounts = configuredAccounts(id), reader = providerUsage) {
   if (!accounts.length) return {windows: [], notices: [], status: 'noAccounts'};
@@ -619,12 +667,15 @@ async function probe(id, executable) {
       ['app-server'], 'account/rateLimits/read', false, true));
     else if (id === 'copilot') result = copilotUsage(await rpc(executable,
       ['--headless', '--stdio', '--no-auto-update', '--log-level', 'none'], 'account.getQuota', true, false));
-    else if (id === 'muse') result = {status: 'notReported', windows: [], notices: []};
+    else if (id === 'muse') result = museUsage(await runJson(executable, ['usage', '--json']));
     else if (id === 'grok') result = await grok();
     else if (id === 'cursor') result = await cursor();
     else if (id === 'antigravity') result = await antigravity();
     else if (id === 'openclaw') result = openclawUsage(await runJson(executable, ['status', '--usage', '--json']));
-    else if (id === 'opencode') result = await multiProvider(id, await openCodeAccounts(executable) ?? configuredAccounts(id));
+    else if (id === 'opencode') {
+      const exported = await openCodeAccounts(executable);
+      result = await multiProvider(id, exported ?? configuredAccounts(id), openCodeReader(executable, exported != null));
+    }
     else if (['pi', 'hermes'].includes(id)) result = await multiProvider(id);
     else return {status: 'unsupported'};
     return {...result, status: result.status || (result.windows.length ? 'available' : 'unavailable')};
@@ -633,7 +684,7 @@ async function probe(id, executable) {
   }
 }
 module.exports = {requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
-  openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
+  openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
   Promise.all(Object.entries(input).map(async ([id, executable]) => {

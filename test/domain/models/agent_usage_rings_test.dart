@@ -362,7 +362,11 @@ void main() {
       AgentUsageWindow(label: 'Weekly', usedPercent: 18),
       AgentUsageWindow(label: 'Weekly · Fable', usedPercent: 99),
     ]);
-    for (final tool in [AgentLaunchTool.claudeCode, AgentLaunchTool.codex]) {
+    for (final tool in [
+      AgentLaunchTool.claudeCode,
+      AgentLaunchTool.codex,
+      AgentLaunchTool.museCode,
+    ]) {
       final rings = project(usage, tool: tool)!;
       expect(rings.shortTerm, 58);
       expect(rings.weekly, 82);

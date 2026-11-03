@@ -20,13 +20,13 @@ Every supported agent has a reader:
 | Claude Code | Existing host OAuth credentials and the account usage endpoint. Reports the plan's five-hour session limit when it has one, weekly, and model-specific windows, including Fable weekly allowances when returned. |
 | Codex | Installed CLI's `account/rateLimits/read` app-server method. Reports every returned bucket and earned resets available. Never redeems a reset. |
 | Copilot CLI | Installed CLI's `account.getQuota` stdio method. Reports allowances, unlimited categories, resets, and paid overage availability. |
-| OpenCode | Its saved provider accounts (OpenCode 2 through `opencode auth export`). Reads the applicable provider quota endpoint for each account. |
+| OpenCode | Its saved provider accounts (OpenCode 2 through `opencode auth export`). Reads the applicable provider quota endpoint for each account. For an OpenCode 2 Console sign-in, OpenCode's own `experimental.usage.limits` operation (OpenCode 2.2+) reports the Go plan's five-hour, weekly, and monthly meters and the workspace's spending budgets. |
 | Antigravity | An already-running CLI's local `RetrieveUserQuotaSummary` endpoint. Reports all enabled quota groups and reset times. Shows a start-agent hint when no running CLI is found. |
 | Cursor Agent | Its existing access token and `DashboardService/GetUsageLimitPolicyStatus`. Reports access restrictions and the supplied reset time. Does not infer a percentage or remaining allowance from that status. |
 | Pi | Its saved provider accounts. Reads the applicable provider quota endpoint for each account. |
 | Hermes | Its saved provider accounts and credential pool, deduplicated by credential. Includes Nous subscription, purchased-credit balances, and member spending caps when reported. |
 | OpenClaw | Installed CLI's `status --usage --json`. Preserves provider quotas, supported USD billing figures, resets, and individual provider failures. |
-| Muse Code | No verified account-quota API. Reports `notReported`; no estimated usage rings. |
+| Muse Code | Installed CLI's `muse usage --json` (Muse 1.4.13+), run with `MUSE_NO_AUTO_UPDATE=1`. Reports the current subscription window and the weekly allowance. Muse needs its keychain entry, so a locked macOS keychain over SSH reports an unavailable check. |
 | Grok Build | Its signed-in account and the credits billing endpoint. Prefers current credit percentage and reset period; keeps on-demand spending and prepaid balances separate. |
 
 The OpenCode, Pi, and Hermes readers support Anthropic OAuth, OpenAI/Codex OAuth,
@@ -120,7 +120,7 @@ visible and can be retried.
 
 ## MonkeyMux usage rings · Pro
 
-Claude Code, Codex, Antigravity, Grok Build, and Pi can show remaining account
+Claude Code, Codex, Muse Code, Antigravity, Grok Build, and Pi can show remaining account
 allowances around the current agent icon in MonkeyMux's existing bottom bar or
 tablet sidebar. **Zero used means a full meter.** As usage grows, the colored arc
 shrinks: 23% used leaves 77% filled, and 100% used leaves an empty track.
@@ -130,8 +130,8 @@ Only actual reported quotas occupy the circle:
 - One quota uses the whole circle. This includes Claude plans without a five-hour
   limit (verified Ultra accounts since October 30, 2026), Codex accounts that report
   a weekly limit but no account-wide five-hour limit, and Grok's included credits.
-- Two quotas use the top and bottom halves. For Claude Code and Codex, the
-  five-hour allowance stays above the account-wide weekly allowance.
+- Two quotas use the top and bottom halves. For Claude Code, Codex, and Muse
+  Code, the five-hour allowance stays above the account-wide weekly allowance.
 - Antigravity exposes its numerical quota groups as separate, equal segments.
   Group positions use stable label order rather than guessing an active model.
   More than two reported groups divide the circle into additional segments.
@@ -193,6 +193,8 @@ existing allowlisted paywall feature token is registered.
 - [Hermes account usage readers](https://github.com/NousResearch/hermes-agent/blob/main/agent/account_usage.py)
 - [Hermes Nous account schema](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/nous_account.py)
 - [OpenClaw status command](https://docs.openclaw.ai/cli/status)
+- [OpenCode Go limits](https://opencode.ai/docs/go/)
+- [Muse Code changelog](https://dev.meta.ai/docs/muse-code/changelog)
 - [OpenClaw usage tracking](https://docs.openclaw.ai/concepts/usage-tracking)
 - [Antigravity usage command](https://www.antigravity.google/docs/cli/commands/usage)
 - [Grok Build billing schema](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/extensions/billing.rs)
