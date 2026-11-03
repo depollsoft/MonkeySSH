@@ -319,6 +319,8 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     packageExtras: ['acp'],
     posixInstallerUrl: 'https://hermes-agent.nousresearch.com/install.sh',
     windowsInstallerUrl: 'https://hermes-agent.nousresearch.com/install.ps1',
+    // Homebrew core packages Hermes too; `hermes update` refuses that copy.
+    homebrewFormula: 'hermes-agent',
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
     // PyPI stopped at 0.19.0 and `hermes update` refuses a pip install. Its
@@ -331,9 +333,22 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.openclaw,
     executableNames: ['openclaw'],
+    // npm installations are still detected and repaired. New installations
+    // use the official installer, which also brings in a Node.js new enough
+    // for OpenClaw (24.22.1+ or 26.12.1+ since 2026.10.9) where npm would
+    // install a CLI the host's Node cannot start.
     registry: AgentPackageRegistry.npm,
     packageName: 'openclaw',
+    posixInstallerUrl: 'https://openclaw.ai/install.sh',
+    windowsInstallerUrl: 'https://openclaw.ai/install.ps1',
+    installerEnvironment: {
+      'OPENCLAW_NO_ONBOARD': '1',
+      'OPENCLAW_NO_PROMPT': '1',
+    },
     selfUpdateArguments: ['update', '--yes'],
+    // Since 2026.9.5, an update handed to a managed Gateway's background
+    // helper exits 75: accepted and still running.
+    backgroundUpdateExitCode: 75,
   ),
   AgentRuntimeDefinition(
     id: 'cli:grok',
@@ -649,7 +664,14 @@ String? buildAgentInstallCommand(
     return '$_profilePrefix${_posixEnvironment(definition.syncUpdateEnvironment)}'
         '${_shellQuote(executablePath)} ${arguments.join(' ')}';
   }
-  if (update && executablePath != null && definition.supportsSelfUpdate) {
+  // Homebrew owns the files of a copy it installed, and some updaters refuse
+  // one (`hermes update`).
+  final formula = definition.homebrewFormula;
+  final homebrewCopy = detectionSource == 'Homebrew' && formula != null;
+  if (update &&
+      executablePath != null &&
+      definition.supportsSelfUpdate &&
+      !homebrewCopy) {
     if (windows) {
       final executable = powerShellSingleQuote(executablePath);
       final arguments = definition.selfUpdateArguments
@@ -667,8 +689,7 @@ String? buildAgentInstallCommand(
         '${definition.selfUpdateArguments.map(_shellQuote).join(' ')}';
   }
   if (update && detectionSource == 'PATH') return null;
-  final formula = definition.homebrewFormula;
-  if (update && detectionSource == 'Homebrew' && formula != null) {
+  if (update && homebrewCopy) {
     return windows
         ? null
         : '$_profilePrefix brew upgrade ${_shellQuote(formula)}';
@@ -679,7 +700,11 @@ String? buildAgentInstallCommand(
   // A repair finishes the package that is there; it never switches an
   // installation to the official installer.
   if (installerUrl != null && !(repair && definition.registry != null)) {
-    return _buildOfficialAgentInstallerCommand(installerUrl, windows: windows);
+    return _buildOfficialAgentInstallerCommand(
+      installerUrl,
+      windows: windows,
+      environment: definition.installerEnvironment,
+    );
   }
   final package = definition.packageName;
   if (package == null) return null;
@@ -1173,6 +1198,14 @@ class AgentManagementService {
     } else if (definition.retiredRegistry != null &&
         source == _registrySource(definition.registry)) {
       source = _detectionSourceFromPath(path);
+    } else if (source == 'Homebrew' &&
+        _installMethodPattern
+                .firstMatch(snapshot.versionOutput ?? '')
+                ?.group(1) ==
+            'git') {
+      // Hermes names the running copy's install method. A git checkout
+      // updates itself, whatever formula Homebrew also lists.
+      source = _detectionSourceFromPath(path);
     }
     final latest = parseAgentVersion(metadata?.latestVersionOutput ?? '');
     final hasUpdate =
@@ -1652,6 +1685,20 @@ class AgentManagementService {
         onOutput: onOutput,
         unlimitedTimeout: true,
       );
+      if (update &&
+          result.exitCode != null &&
+          result.exitCode == definition.backgroundUpdateExitCode) {
+        final message =
+            '\n${definition.label} accepted the update and is finishing it '
+            'in the background. Tap Re-check in a minute to see the new '
+            'version. Running the update again will not speed it up.\n';
+        onOutput?.call(message);
+        result = AgentRuntimeActionResult(
+          succeeded: true,
+          exitCode: result.exitCode,
+          output: '${result.output}$message',
+        );
+      }
       if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
         var verified = await inspect(session, definition);
         // An updater can leave its package's postinstall scripts pending.
@@ -2469,10 +2516,12 @@ String _powerShellEnvironment(Map<String, String> environment) => environment
 String _buildOfficialAgentInstallerCommand(
   String url, {
   required bool windows,
+  Map<String, String> environment = const {},
 }) {
   if (windows) {
     return buildCompactWindowsPowerShellCommand(
       '$powerShellProfilePathPreamble'
+      '${_powerShellEnvironment(environment)}'
       r"$ErrorActionPreference='Stop';"
       r"$__flFile=Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString()+'.ps1');"
       r'$__flCode=1;try {'
@@ -2491,7 +2540,7 @@ String _buildOfficialAgentInstallerCommand(
       'if curl -fLsS --connect-timeout 15 --max-time 60 ${_shellQuote(url)} -o "\$__fl_file"; then '
       r'bash "$__fl_file"; __fl_code=$?; else __fl_code=$?; fi; '
       r'rm -f "$__fl_file"; exit "$__fl_code"';
-  return '${_profilePrefix}sh -c ${_shellQuote(script)}';
+  return '$_profilePrefix${_posixEnvironment(environment)}sh -c ${_shellQuote(script)}';
 }
 
 /// Provider for [AgentManagementService].

@@ -1480,6 +1480,10 @@ void main() {
       // pipx still lists an old copy, but the installer's checkout runs.
       ('pipx', '0.19.0', 'git', 'PATH', null),
       ('pipx', '0.21.6', null, 'PATH', null),
+      // Homebrew's copy reports no method Hermes knows; the listing decides.
+      ('Homebrew', '0.22.4', 'unknown', 'Homebrew', null),
+      // Homebrew still lists a formula, but the installer's checkout runs.
+      ('Homebrew', '0.22.4', 'git', 'PATH', null),
     ]) {
       test(
         '${listing ?? 'no'} listing, $version via ${method ?? 'unreported'} is $expectedSource',
@@ -2283,17 +2287,87 @@ exit "$result"
     );
 
     test('keeps Homebrew updates with the detected package manager', () {
-      final definition = agentCliRuntimeDefinitions.firstWhere(
-        (runtime) => runtime.label == 'OpenCode',
+      // Homebrew owns its copy's files, and `hermes update` refuses one, so
+      // brew upgrades it even where the agent has its own updater.
+      for (final (id, formula) in [
+        ('cli:opencode', 'opencode-v2'),
+        ('cli:hermes', 'hermes-agent'),
+      ]) {
+        final definition = agentCliRuntimeDefinitions.singleWhere(
+          (runtime) => runtime.id == id,
+        );
+        for (final executablePath in [null, '/opt/homebrew/bin/agent']) {
+          expect(
+            buildAgentInstallCommand(
+              definition,
+              windows: false,
+              update: true,
+              detectionSource: 'Homebrew',
+              executablePath: executablePath,
+            ),
+            endsWith("brew upgrade '$formula'"),
+          );
+        }
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: false,
+            update: true,
+            detectionSource: 'PATH',
+            executablePath: '/home/dev/.local/bin/agent',
+          ),
+          isNot(contains('brew upgrade')),
+        );
+      }
+    });
+
+    test('OpenClaw installs with its installer and no onboarding', () {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (runtime) => runtime.id == 'cli:openclaw',
+      );
+      final posix = buildAgentInstallCommand(
+        definition,
+        windows: false,
+        update: false,
+      )!;
+      expect(
+        posix,
+        contains(
+          "OPENCLAW_NO_ONBOARD=1 OPENCLAW_NO_PROMPT=1 sh -c '__fl_file=",
+        ),
+      );
+      expect(posix, contains('https://openclaw.ai/install.sh'));
+      expect(posix, isNot(contains('npm install')));
+      final windows = decodeEncodedPowerShell(
+        buildAgentInstallCommand(definition, windows: true, update: false)!,
+      );
+      expect(
+        windows,
+        contains(
+          r"$env:OPENCLAW_NO_ONBOARD='1';$env:OPENCLAW_NO_PROMPT='1';"
+          r"$ErrorActionPreference='Stop';",
+        ),
+      );
+      expect(windows, contains('https://openclaw.ai/install.ps1'));
+      // npm installations keep their own repair and updater.
+      expect(
+        buildAgentInstallCommand(
+          definition,
+          windows: false,
+          update: false,
+          repair: true,
+        ),
+        allOf(contains('npm uninstall -g'), isNot(contains('openclaw.ai'))),
       );
       expect(
         buildAgentInstallCommand(
           definition,
           windows: false,
           update: true,
-          detectionSource: 'Homebrew',
+          detectionSource: 'npm global',
+          executablePath: '/usr/local/bin/openclaw',
         ),
-        endsWith("brew upgrade 'opencode-v2'"),
+        endsWith("'/usr/local/bin/openclaw' 'update' '--yes'"),
       );
     });
 
@@ -3213,6 +3287,65 @@ exit "$result"
       expect(result.succeeded, isFalse);
       expect(result.output, contains('could not be verified'));
     });
+
+    test(
+      'OpenClaw exit 75 means the update is finishing in the background',
+      () async {
+        final definition = agentCliRuntimeDefinitions.singleWhere(
+          (d) => d.id == 'cli:openclaw',
+        );
+        for (final (exitCode, succeeds) in [(75, true), (1, false)]) {
+          final client = _MockSshClient();
+          final discovery = _MockDiscovery();
+          final session = _remoteSession(client);
+          when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+          final scripts = <String>[];
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                final script = invocation.positionalArguments.first as String;
+                scripts.add(script);
+                if (scripts.length == 1) {
+                  return _execOutput('Update accepted.\n', exitCode: exitCode);
+                }
+                return _execOutput(
+                  script.contains('__monkeyssh_agent_path__')
+                      ? '__monkeyssh_agent_runtime__=cli:openclaw\n'
+                            '__monkeyssh_agent_path__=/usr/local/bin/openclaw\n'
+                            '__monkeyssh_agent_version__=OpenClaw 2026.10.8\n'
+                            '__monkeyssh_agent_runtime_end__\n'
+                      : '',
+                );
+              });
+          when(() => discovery.invalidateSession(session)).thenReturn(null);
+          final result = await _unlockedManagementService(discovery)
+              .installOrUpdate(
+                session,
+                definition,
+                update: true,
+                current: AgentRuntimeInfo(
+                  definition: definition,
+                  status: AgentRuntimeStatus.updateAvailable,
+                  installedVersion: '2026.10.8',
+                  executablePath: '/usr/local/bin/openclaw',
+                  detectionSource: 'npm global',
+                ),
+              );
+          expect(scripts.first, endsWith("'update' '--yes'"));
+          expect(result.succeeded, succeeds, reason: 'exit $exitCode');
+          expect(result.exitCode, exitCode);
+          if (succeeds) {
+            expect(result.output, contains('finishing it in the background'));
+            // Nothing retries the accepted update.
+            expect(
+              scripts.where((script) => script.endsWith("'update' '--yes'")),
+              hasLength(1),
+            );
+          } else {
+            expect(result.output, isNot(contains('in the background')));
+          }
+        }
+      },
+    );
 
     test(
       'keeps completed metadata when a later registry lookup times out',

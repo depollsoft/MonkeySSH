@@ -58,7 +58,9 @@ class AgentRuntimeDefinition {
     this.homebrewFormula,
     this.posixInstallerUrl,
     this.windowsInstallerUrl,
+    this.installerEnvironment = const {},
     this.selfUpdateArguments = const [],
+    this.backgroundUpdateExitCode,
     this.sharesCliInstallation = false,
     this.versionEnvironment = const {},
     this.updateEnvironment = const {},
@@ -115,8 +117,17 @@ class AgentRuntimeDefinition {
   /// Official PowerShell bootstrap script for native Windows hosts.
   final String? windowsInstallerUrl;
 
+  /// Environment applied to the official installer (for example to skip
+  /// interactive onboarding, which an SSH exec channel cannot answer).
+  final Map<String, String> installerEnvironment;
+
   /// Arguments for the CLI's own non-interactive updater.
   final List<String> selfUpdateArguments;
+
+  /// Exit status with which the updater reports that it accepted the update
+  /// and is finishing it in the background. That is not a failure, and the
+  /// update must not be retried.
+  final int? backgroundUpdateExitCode;
 
   /// Whether this runtime has a built-in updater.
   bool get supportsSelfUpdate => selfUpdateArguments.isNotEmpty;
