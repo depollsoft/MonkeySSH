@@ -218,7 +218,11 @@ void registerAcpConnectionSupportTests() {
                   result!.override!.argv,
                   installedAdapter
                       ? ['$prefix/muse-code-acp']
-                      : ['$prefix/npx', '--yes', '@bex-co/muse-code-acp@0.6.0'],
+                      : [
+                          '$prefix/npx',
+                          '--yes',
+                          '@bex-co/muse-code-acp@0.11.0',
+                        ],
                 );
               }
             },

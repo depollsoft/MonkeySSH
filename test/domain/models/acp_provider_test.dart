@@ -200,7 +200,7 @@ void main() {
             executable: '/opt/homebrew/bin/npx',
             arguments: const [
               '--yes',
-              '@agentclientprotocol/claude-agent-acp@0.70.0',
+              '@agentclientprotocol/claude-agent-acp@0.100.0',
             ],
           ),
         ),
@@ -288,6 +288,15 @@ void main() {
       final terminalAuthCommand = acpCopilotCliProvider.terminalAuthCommand!;
       expect(terminalAuthCommand.executable, 'copilot');
       expect(terminalAuthCommand.arguments, ['login']);
+    });
+
+    test('only Codex hides the browser sign-in, which cannot finish '
+        'over SSH', () {
+      expect(acpCodexProvider.defaultLaunchEnvironment, {'NO_BROWSER': '1'});
+      for (final provider in acpBuiltinProviders) {
+        if (provider == acpCodexProvider) continue;
+        expect(provider.defaultLaunchEnvironment, isEmpty, reason: provider.id);
+      }
     });
   });
 

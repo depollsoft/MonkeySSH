@@ -1,6 +1,7 @@
 import 'dart:collection';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/domain/models/acp_authentication.dart';
 import 'package:monkeyssh/domain/models/acp_content.dart';
 import 'package:monkeyssh/domain/models/acp_protocol.dart';
 import 'package:monkeyssh/domain/models/acp_updates.dart';
@@ -64,6 +65,97 @@ void registerAcpProtocolTests() {
       expect(result.agentCapabilities.prompt.extensions['futurePrompt'], 1);
       expect(result.authMethods.single.extensions['futureAuth'], isTrue);
       expect(result.extensions, contains('futureInitialize'));
+    });
+
+    test('keeps every sign-in method the pinned adapters advertise', () {
+      // Trimmed from each pinned adapter's live initialize response.
+      final advertised = <String, List<Map<String, Object?>>>{
+        'claude-agent-acp 0.100.0': [
+          {
+            'id': 'claude-ai-login',
+            'name': 'Claude Subscription',
+            'type': 'terminal',
+            'args': ['--cli', 'auth', 'login', '--claudeai'],
+            '_meta': {
+              'terminal-auth': {'label': 'Claude Login'},
+            },
+          },
+          {
+            'id': 'console-login',
+            'name': 'Anthropic Console',
+            'type': 'terminal',
+            'args': ['--cli', 'auth', 'login', '--console'],
+          },
+        ],
+        // With NO_BROWSER set, as native chat launches it.
+        'codex-acp 2.5.0': [
+          {
+            'id': 'api-key',
+            'name': 'API Key',
+            '_meta': {
+              'api-key': {'provider': 'openai'},
+            },
+          },
+          {'id': 'chat-gpt-device-code', 'name': 'ChatGPT (device code)'},
+        ],
+        'pi-acp 0.0.34': [
+          {
+            'id': 'pi_terminal_login',
+            'name': 'Launch pi in the terminal',
+            'type': 'terminal',
+            'args': ['--terminal-login'],
+            'env': <String, Object?>{},
+          },
+        ],
+        'muse-code-acp 0.11.0': [
+          {
+            'id': 'muse-login',
+            'name': 'Meta account (browser)',
+            'type': 'terminal',
+            'args': ['--cli', 'login'],
+          },
+          {'id': 'meta-api-key', 'name': 'Meta API key'},
+        ],
+      };
+      // Each usable method as its id, type, then arguments.
+      final expected = <String, List<List<String>>>{
+        'claude-agent-acp 0.100.0': [
+          [
+            'claude-ai-login',
+            'terminal',
+            '--cli',
+            'auth',
+            'login',
+            '--claudeai',
+          ],
+          ['console-login', 'terminal', '--cli', 'auth', 'login', '--console'],
+        ],
+        'codex-acp 2.5.0': [
+          ['api-key', 'agent'],
+          ['chat-gpt-device-code', 'agent'],
+        ],
+        'pi-acp 0.0.34': [
+          ['pi_terminal_login', 'terminal', '--terminal-login'],
+        ],
+        'muse-code-acp 0.11.0': [
+          ['muse-login', 'terminal', '--cli', 'login'],
+          ['meta-api-key', 'agent'],
+        ],
+      };
+      for (final MapEntry(key: adapter, value: methods) in advertised.entries) {
+        final result = AcpInitializeResult.fromJson({
+          'protocolVersion': 1,
+          'authMethods': methods,
+        });
+        expect(
+          [
+            for (final method in usableAcpAuthMethods(result.authMethods))
+              [method.id, method.type, ...method.args],
+          ],
+          expected[adapter],
+          reason: adapter,
+        );
+      }
     });
 
     test('parses every ACP content shape and unknown content', () {

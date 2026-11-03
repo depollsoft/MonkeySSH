@@ -25,7 +25,7 @@ stay in session UI, never diagnostics or telemetry.
 
 Native chat uses the separate community
 [`@bex-co/muse-code-acp` adapter](https://github.com/bex-co/muse-code-acp), with an
-on-demand fallback pinned to 0.6.0. Install the adapter from Agent Management to
+on-demand fallback pinned to 0.11.0. Install the adapter from Agent Management to
 avoid the on-demand download. It requires Node.js 22 or newer and Muse installed
 separately. MonkeySSH checks for Muse before offering the installed adapter or
 the npx fallback, honoring a configured absolute `MUSE_CODE_EXECUTABLE` file path. On Windows, MonkeySSH resolves the native executable selected by
@@ -51,7 +51,11 @@ approval review may need to resume in the terminal instead of native chat.
 Command and log contracts were checked against Muse 1.3.0-R3233.1. Local checks
 covered an isolated echo session and real SDK prompts against a local test
 server with adapter 0.6.0, including streamed replies, session listing, and
-history loading. These checks do not exercise paid Meta model requests.
+history loading. These checks do not exercise paid Meta model requests. A check
+of adapter 0.11.0 against a stub Muse CLI covered initialization, sign-in
+methods, and session setup. It offers browser sign-in as a terminal method and
+`META_API_KEY` as an agent method, which succeeds only when that variable is
+already set in the adapter's environment.
 
 Windows integration is covered by command-generation, discovery, and PowerShell
 execution tests. The PowerShell fixtures ran on macOS; a live native Windows

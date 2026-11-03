@@ -516,7 +516,7 @@ void main() {
     'Muse Windows chat resolves the native binary without changing argv',
     () {
       final command = buildMonkeyMuxAcpProviderCommand(
-        const ['npx', '--yes', '@bex-co/muse-code-acp@0.6.0'],
+        const ['npx', '--yes', '@bex-co/muse-code-acp@0.11.0'],
         isWindows: true,
         providerId: AcpBuiltinProviderIds.museCode,
       );
@@ -534,7 +534,7 @@ void main() {
       expect(script, contains(r"$__flAcpExe='npx'"));
       expect(
         script,
-        contains(r"$__flAcpArgs=@('--yes','@bex-co/muse-code-acp@0.6.0')"),
+        contains(r"$__flAcpArgs=@('--yes','@bex-co/muse-code-acp@0.11.0')"),
       );
       expect(script, isNot(contains('MUSE_SYNC_UPDATE')));
       final other = decodeEncodedPowerShell(
@@ -583,6 +583,137 @@ void main() {
         r"$env:TERM_PROGRAM='MonkeySSH' };",
       ),
     );
+  });
+
+  group('Codex launches set NO_BROWSER', () {
+    const posixDefault =
+        r'''[ -n "${NO_BROWSER+x}" ] || export NO_BROWSER='1'; ''';
+    const windowsDefault =
+        r"if($null -eq $env:NO_BROWSER){ $env:NO_BROWSER='1' };";
+    final launches = [
+      acpCodexProvider.launchCommand.argv,
+      const ['/Users/demo/.npm-global/bin/codex-acp'],
+      acpCodexProvider.adapterFallbackCommand!.argv,
+    ];
+
+    test('for the installed adapter and the npx fallback on POSIX', () {
+      for (final argv in launches) {
+        final posix = buildMonkeyMuxAcpProviderCommand(
+          argv,
+          isWindows: false,
+          providerId: AcpBuiltinProviderIds.codex,
+        );
+        expect(posix, contains(posixDefault), reason: '$argv');
+        // After the profile, so a value the user exported there wins, and
+        // before the exec.
+        expect(
+          posix.indexOf(posixDefault),
+          greaterThan(posix.indexOf('. ~/.zprofile')),
+        );
+        expect(
+          posix.indexOf(posixDefault),
+          lessThan(posix.indexOf('exec ${shellEscapePosix(argv.first)}')),
+        );
+      }
+    });
+
+    test('for the installed adapter and the npx fallback on Windows', () {
+      for (final argv in launches) {
+        final windows = decodeEncodedPowerShell(
+          buildMonkeyMuxAcpProviderCommand(
+            argv,
+            isWindows: true,
+            providerId: AcpBuiltinProviderIds.codex,
+          ),
+        );
+        expect(windows, contains(windowsDefault), reason: '$argv');
+        expect(
+          windows.indexOf(windowsDefault),
+          lessThan(windows.indexOf(r'& $__flAcpExe @__flAcpArgs')),
+        );
+      }
+    });
+
+    test('and no other provider does', () {
+      for (final providerId in [
+        ...acpBuiltinProviders
+            .map((provider) => provider.id)
+            .where((id) => id != AcpBuiltinProviderIds.codex),
+        'custom:codex-acp',
+        null,
+      ]) {
+        for (final isWindows in const [false, true]) {
+          final command = decodeEncodedPowerShell(
+            buildMonkeyMuxAcpProviderCommand(
+              const ['codex-acp'],
+              isWindows: isWindows,
+              providerId: providerId,
+            ),
+          );
+          expect(command, isNot(contains('NO_BROWSER')), reason: providerId);
+        }
+      }
+    });
+
+    test('a sign-in method environment overrides the default', () {
+      final posix = buildMonkeyMuxAcpProviderCommand(
+        const ['codex-acp'],
+        isWindows: false,
+        providerId: AcpBuiltinProviderIds.codex,
+        environment: const {'NO_BROWSER': ''},
+      );
+      expect(
+        posix.indexOf("export NO_BROWSER=''; "),
+        lessThan(posix.indexOf(posixDefault)),
+      );
+      final windows = decodeEncodedPowerShell(
+        buildMonkeyMuxAcpProviderCommand(
+          const ['codex-acp'],
+          isWindows: true,
+          providerId: AcpBuiltinProviderIds.codex,
+          environment: const {'NO_BROWSER': '0'},
+        ),
+      );
+      expect(
+        windows.indexOf(r"$env:NO_BROWSER='0';"),
+        lessThan(windows.indexOf(windowsDefault)),
+      );
+    });
+
+    test('keeps a value the user exported, even an empty one', () async {
+      final home = await Directory.systemTemp.createTemp('acp-no-browser');
+      addTearDown(() => home.delete(recursive: true));
+      final command = buildMonkeyMuxAcpProviderCommand(
+        const [
+          '/bin/sh',
+          '-c',
+          r'printf "%s|%s" "${NO_BROWSER-unset}" "${NO_BROWSER+set}"',
+        ],
+        isWindows: false,
+        providerId: AcpBuiltinProviderIds.codex,
+      );
+      Future<String> run({String? inherited, String profile = ''}) async {
+        await File('${home.path}/.profile').writeAsString(profile);
+        final result = await Process.run(
+          '/bin/bash',
+          ['-c', command],
+          environment: {
+            'HOME': home.path,
+            'SHELL': '/bin/bash',
+            'PATH': '/usr/bin:/bin',
+            'NO_BROWSER': ?inherited,
+          },
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        return result.stdout as String;
+      }
+
+      expect(await run(), '1|set');
+      expect(await run(inherited: '0'), '0|set');
+      expect(await run(inherited: ''), '|set');
+      expect(await run(profile: 'export NO_BROWSER=no\n'), 'no|set');
+    }, testOn: 'mac-os || linux');
   });
 
   test('Cursor ACP leaves credential handling to Cursor', () {
@@ -651,7 +782,7 @@ void main() {
           argv: [
             'npx',
             '--yes',
-            '@agentclientprotocol/claude-agent-acp@0.70.0',
+            '@agentclientprotocol/claude-agent-acp@0.100.0',
           ],
           executable: 'npx',
         ),
