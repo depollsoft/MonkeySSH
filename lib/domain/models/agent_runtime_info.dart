@@ -250,6 +250,7 @@ class AgentRuntimeActionResult {
     required this.succeeded,
     required this.output,
     this.exitCode,
+    this.finishingInBackground = false,
   });
 
   /// Whether the remote command exited successfully.
@@ -260,4 +261,9 @@ class AgentRuntimeActionResult {
 
   /// Remote process exit code, when reported.
   final int? exitCode;
+
+  /// Whether the updater accepted the update and is still finishing it in
+  /// the background (see [AgentRuntimeDefinition.backgroundUpdateExitCode]).
+  /// A probe meanwhile can catch the installation half replaced.
+  final bool finishingInBackground;
 }

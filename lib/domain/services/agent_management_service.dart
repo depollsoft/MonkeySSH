@@ -1701,6 +1701,7 @@ class AgentManagementService {
           succeeded: true,
           exitCode: result.exitCode,
           output: '${result.output}$message',
+          finishingInBackground: true,
         );
       }
       if (result.succeeded &&
@@ -1794,6 +1795,7 @@ class AgentManagementService {
         output: result.output
             .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
             .trim(),
+        finishingInBackground: result.finishingInBackground,
       );
       DiagnosticsLogService.instance.info(
         'agent.management',
@@ -2237,15 +2239,16 @@ String buildAgentMetadataProbeCommand(
       command.write(_posixInstallerLayoutSource(definition, layout));
     }
     if (formula != null) {
-      // A listed formula counts only when the executable that runs resolves
-      // into its keg. Another copy ahead on PATH updates its own way.
+      // A listed formula or cask counts only when the executable that runs
+      // resolves into its keg or Caskroom (Muse ships as a cask). Another
+      // copy ahead on PATH updates its own way.
       command.write(
         'if [ -z "\$__fl_source" ]; then '
         '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_brew_global" | '
         'grep -E ${_shellQuote('^$formula([[:space:]]|\$)')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
         '${_posixResolvedLauncher(definition)}'
-        'case "\$__fl_launcher" in */Cellar/${_shellQuote(formula)}/*) '
+        'case "\$__fl_launcher" in */Cellar/${_shellQuote(formula)}/*|*/Caskroom/${_shellQuote(formula)}/*) '
         '__fl_source=${_shellQuote('Homebrew')}; '
         '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')});; '
         'esac; fi; fi; ',

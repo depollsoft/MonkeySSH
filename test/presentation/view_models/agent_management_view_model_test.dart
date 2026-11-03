@@ -233,6 +233,70 @@ void main() {
     },
   );
 
+  test(
+    'an update finishing in the background keeps its row until it lands',
+    () async {
+      await model.refresh();
+      final runtime = runtimes.first;
+      when(
+        () => service.installOrUpdate(
+          session,
+          runtime.definition,
+          update: true,
+          current: runtime,
+          onOutput: any(named: 'onOutput'),
+        ),
+      ).thenAnswer(
+        (_) async => const AgentRuntimeActionResult(
+          succeeded: true,
+          exitCode: 75,
+          output: 'accepted',
+          finishingInBackground: true,
+        ),
+      );
+      // The background helper is replacing the launcher right now.
+      final midSwap = AgentRuntimeInfo(
+        definition: runtime.definition,
+        status: AgentRuntimeStatus.notInstalled,
+      );
+      runtimes = [midSwap, ...runtimes.skip(1)];
+
+      await model.runAction(runtime);
+
+      final held = model.runtimes.first;
+      expect(failures, isEmpty);
+      expect(held.status, AgentRuntimeStatus.installed);
+      expect(held.installedVersion, '1.0');
+      expect(held.message, contains('finishing its update in the background'));
+      // A later probe that still sees the old version keeps the note.
+      runtimes = [
+        AgentRuntimeInfo(
+          definition: runtime.definition,
+          status: AgentRuntimeStatus.updateAvailable,
+          installedVersion: '1.0',
+          latestVersion: '2.0',
+        ),
+        ...runtimes.skip(1),
+      ];
+      await model.refresh();
+      expect(model.runtimes.first, same(held));
+      // The new version shows once a probe sees it.
+      final landed = AgentRuntimeInfo(
+        definition: runtime.definition,
+        status: AgentRuntimeStatus.installed,
+        installedVersion: '2.0',
+      );
+      runtimes = [landed, ...runtimes.skip(1)];
+      await model.refresh();
+      expect(model.runtimes.first, same(landed));
+      // Re-check always shows the installation as it is.
+      when(() => service.inspect(session, runtime.definition))
+          .thenAnswer((_) async => midSwap);
+      await model.recheck(held);
+      expect(model.runtimes.first, same(midSwap));
+    },
+  );
+
   test('revoked access prevents probing and stale actions', () async {
     await model.refresh();
     permitted = false;

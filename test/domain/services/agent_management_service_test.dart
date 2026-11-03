@@ -1999,6 +1999,15 @@ esac
         expect(brewed?.detectionSource, 'Homebrew', reason: shell);
         expect(brewed?.installedVersionOutput, '0.22.4', reason: shell);
       }
+      // A cask links its binary from the Caskroom instead (Muse ships as one).
+      final cask = Directory('${root.path}/brew/Caskroom/hermes-agent/0.22.4')
+        ..createSync(recursive: true);
+      File('${cask.path}/hermes').writeAsStringSync('#!/bin/sh\nexit 0\n');
+      await Process.run('chmod', ['+x', '${cask.path}/hermes']);
+      launcher
+        ..deleteSync()
+        ..createSync('../../brew/Caskroom/hermes-agent/0.22.4/hermes');
+      expect((await probe('bash'))?.detectionSource, 'Homebrew');
       // Homebrew still lists the formula, but another copy runs: it must not
       // be upgraded through brew.
       launcher.deleteSync();
