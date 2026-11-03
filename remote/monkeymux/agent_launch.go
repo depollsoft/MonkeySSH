@@ -146,7 +146,11 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 	hookCommand := shellQuote(executable) + " agent-identity-hook --tool " + tool
 	var prefix []string
 	if tool == "codex" {
-		prefix = []string{"-c", codexIdentityHookConfig(hookCommand), "-c", codexIdentityHookTrustConfig(hookCommand)}
+		prefix = []string{
+			"-c", codexIdentityHookConfig(hookCommand),
+			"-c", codexIdentityHookTrustConfig(hookCommand),
+			"-c", codexNoDaemonAutoStartConfig,
+		}
 	} else {
 		directory, err := runtimeDirectory()
 		if err != nil {
@@ -330,6 +334,15 @@ func prepareAgentLaunch(tool string, args, env []string, executable string) (pre
 	launch.args = append(prefix, args...)
 	return launch, nil
 }
+
+// codexNoDaemonAutoStartConfig keeps Codex 0.157+ from warning "Running
+// without the shared background server" in every wrapped window. The hook
+// overrides above are -c flags, and any -c flag makes Codex run embedded,
+// which the identity hook needs anyway: it reads the pane's environment.
+// Codex warns about that only while daemon auto-start is on. `--no-daemon`
+// would also silence it, but Codex before 0.156 rejects the flag, while
+// older releases ignore an unknown feature key.
+const codexNoDaemonAutoStartConfig = "features.daemon_auto_start=false"
 
 // codexIdentityHookTimeoutSec is the hook timeout written into the -c hooks
 // override. The trust hash covers it, so both come from this one constant.

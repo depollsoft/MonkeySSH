@@ -8,6 +8,9 @@ import (
 type wheelAccelerationProfile struct {
 	window time.Duration
 	speed  func(count int) int
+	// rowCap, when set, bounds the rows one report moves in a pane of the
+	// given height, applied after speed.
+	rowCap func(paneRows int) int
 }
 
 var wheelGovernorNow = time.Now
@@ -26,7 +29,10 @@ var scheduleWheelFlush = func(delay time.Duration, action func()) {
 }
 
 type wheelGovernor struct {
-	profile  *wheelAccelerationProfile
+	profile *wheelAccelerationProfile
+	// paneRows is the pane height the TUI lays out for, refreshed before each
+	// use; 0 leaves rowCap unapplied.
+	paneRows int
 	last     time.Time
 	count    int
 	owed     int
@@ -47,7 +53,11 @@ func (g *wheelGovernor) nextCount(now time.Time) int {
 }
 
 func (g *wheelGovernor) predictedSpeed(now time.Time) int {
-	return g.profile.speed(g.nextCount(now))
+	speed := g.profile.speed(g.nextCount(now))
+	if g.profile.rowCap != nil && g.paneRows > 0 {
+		speed = min(speed, g.profile.rowCap(g.paneRows))
+	}
+	return speed
 }
 
 func (g *wheelGovernor) drain(now time.Time) []byte {
@@ -315,6 +325,7 @@ func (s *muxServer) flushWheelGovernor(window *muxWindow, generation int) {
 	window.resetWheelGovernorIfInactiveLocked()
 	var data []byte
 	if g.profile != nil {
+		g.paneRows = window.screenHeight
 		data = g.drain(wheelGovernorNow())
 	}
 	if len(held) > 0 {
