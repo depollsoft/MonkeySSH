@@ -1685,9 +1685,13 @@ class AgentManagementService {
         onOutput: onOutput,
         unlimitedTimeout: true,
       );
-      if (update &&
+      // An accepted background update may be replacing the installation
+      // right now, so a check at this point proves nothing either way.
+      final acceptedInBackground =
+          update &&
           result.exitCode != null &&
-          result.exitCode == definition.backgroundUpdateExitCode) {
+          result.exitCode == definition.backgroundUpdateExitCode;
+      if (acceptedInBackground) {
         final message =
             '\n${definition.label} accepted the update and is finishing it '
             'in the background. Tap Re-check in a minute to see the new '
@@ -1699,7 +1703,9 @@ class AgentManagementService {
           output: '${result.output}$message',
         );
       }
-      if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
+      if (result.succeeded &&
+          !acceptedInBackground &&
+          definition.kind == AgentRuntimeKind.cli) {
         var verified = await inspect(session, definition);
         // An updater can leave its package's postinstall scripts pending.
         // Finish setup on the newly detected launcher, not the old path or a
@@ -2231,14 +2237,18 @@ String buildAgentMetadataProbeCommand(
       command.write(_posixInstallerLayoutSource(definition, layout));
     }
     if (formula != null) {
+      // A listed formula counts only when the executable that runs resolves
+      // into its keg. Another copy ahead on PATH updates its own way.
       command.write(
         'if [ -z "\$__fl_source" ]; then '
         '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_brew_global" | '
         'grep -E ${_shellQuote('^$formula([[:space:]]|\$)')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
+        '${_posixResolvedLauncher(definition)}'
+        'case "\$__fl_launcher" in */Cellar/${_shellQuote(formula)}/*) '
         '__fl_source=${_shellQuote('Homebrew')}; '
-        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')}); '
-        'fi; fi; ',
+        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')});; '
+        'esac; fi; fi; ',
       );
     }
     if (package != null && definition.registry == AgentPackageRegistry.npm) {
@@ -2452,13 +2462,21 @@ String _detectionSourceFromPath(String path) {
 
 /// Sets `__fl_source` when the first of [definition]'s executables on PATH is
 /// an installer-managed launcher (see
-/// [AgentRuntimeDefinition.installerLayout]). Symlinks are followed by hand,
-/// as the launchers do, because `readlink -f` is not portable; each hop takes
-/// the physical directory, so a symlinked `bin` directory resolves too.
+/// [AgentRuntimeDefinition.installerLayout]).
 String _posixInstallerLayoutSource(
   AgentRuntimeDefinition definition,
   ({String marker, String source}) layout,
 ) =>
+    '${_posixResolvedLauncher(definition)}'
+    r'case "$__fl_launcher" in */bin/*) '
+    'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
+    '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
+
+/// Sets `__fl_launcher` to the physical path of the first of [definition]'s
+/// executables on PATH. Symlinks are followed by hand, as the launchers do,
+/// because `readlink -f` is not portable; each hop takes the physical
+/// directory, so a symlinked `bin` directory resolves too.
+String _posixResolvedLauncher(AgentRuntimeDefinition definition) =>
     '__fl_launcher=; for __fl_name in '
     '${definition.executableNames.map(_shellQuote).join(' ')}; do '
     r'__fl_launcher=$(command -v "$__fl_name" 2>/dev/null) && break; done; '
@@ -2469,10 +2487,7 @@ String _posixInstallerLayoutSource(
     r'__fl_link=$(readlink "$__fl_launcher") || break; '
     r'case "$__fl_link" in /*) __fl_launcher=$__fl_link;; '
     r'*) __fl_launcher=$__fl_dir/$__fl_link;; esac; '
-    r'__fl_hops=$((__fl_hops + 1)); done; '
-    r'case "$__fl_launcher" in */bin/*) '
-    'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
-    '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
+    r'__fl_hops=$((__fl_hops + 1)); done; ';
 
 /// PowerShell form of [_posixInstallerLayoutSource]: sets `$__flManaged` when
 /// the first executable found, after following file symlinks, is

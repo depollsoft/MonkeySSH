@@ -1942,6 +1942,76 @@ esac
     expect(npm?.installedVersionOutput, '1.0.0');
   });
 
+  test(
+    'POSIX metadata reports Homebrew only for a copy in the formula keg',
+    () async {
+      final root = await Directory.systemTemp.createTemp('monkeyssh-brew-keg-');
+      addTearDown(() => root.delete(recursive: true));
+      // ~/.cargo/bin comes ahead of the host's real Homebrew in the login PATH.
+      final bin = Directory('${root.path}/.cargo/bin')
+        ..createSync(recursive: true);
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:hermes',
+      );
+      File('${bin.path}/brew').writeAsStringSync(
+        '#!/bin/sh\n[ "\$1 \$2" = "list --versions" ] && echo "hermes-agent 0.22.4"\n',
+      );
+      File('${bin.path}/pipx').writeAsStringSync('#!/bin/sh\nexit 1\n');
+      File('${bin.path}/curl')
+          .writeAsStringSync('#!/bin/sh\necho \'{"tag_name": "v0.22.6"}\'\n');
+      final keg = Directory('${root.path}/brew/Cellar/hermes-agent/0.22.4/bin')
+        ..createSync(recursive: true);
+      File('${keg.path}/hermes').writeAsStringSync('#!/bin/sh\nexit 0\n');
+      final local = Directory('${root.path}/.local/bin')
+        ..createSync(recursive: true);
+      final launcher = Link('${local.path}/hermes')
+        ..createSync('../../brew/Cellar/hermes-agent/0.22.4/bin/hermes');
+      await Process.run('chmod', [
+        '+x',
+        '${bin.path}/brew',
+        '${bin.path}/pipx',
+        '${bin.path}/curl',
+        '${keg.path}/hermes',
+      ]);
+      final script = File('${root.path}/metadata.sh')
+        ..writeAsStringSync(
+          buildAgentMetadataProbeCommand([definition], windows: false),
+        );
+      Future<AgentMetadataSnapshot?> probe(String shell) async {
+        final result = await Process.run(
+          shell,
+          [script.path],
+          environment: {'HOME': root.path, 'PATH': '${bin.path}:/usr/bin:/bin'},
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        return parseAgentMetadataProbeOutput(
+          result.stdout as String,
+        )[definition.id];
+      }
+
+      for (final shell in [
+        'bash',
+        if (File('/bin/zsh').existsSync()) '/bin/zsh',
+        if (File('/bin/dash').existsSync()) '/bin/dash',
+      ]) {
+        final brewed = await probe(shell);
+        expect(brewed?.detectionSource, 'Homebrew', reason: shell);
+        expect(brewed?.installedVersionOutput, '0.22.4', reason: shell);
+      }
+      // Homebrew still lists the formula, but another copy runs: it must not
+      // be upgraded through brew.
+      launcher.deleteSync();
+      File('${local.path}/hermes')
+        ..writeAsStringSync('#!/bin/sh\nexit 0\n')
+        ..createSync();
+      await Process.run('chmod', ['+x', '${local.path}/hermes']);
+      final other = await probe('bash');
+      expect(other?.detectionSource, isNull);
+      expect(other?.installedVersionOutput, isNull);
+    },
+  );
+
   test('Windows metadata checks the Pi installer layout before npm', () {
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (d) => d.id == 'cli:pi',
@@ -3335,11 +3405,9 @@ exit "$result"
           expect(result.exitCode, exitCode);
           if (succeeds) {
             expect(result.output, contains('finishing it in the background'));
-            // Nothing retries the accepted update.
-            expect(
-              scripts.where((script) => script.endsWith("'update' '--yes'")),
-              hasLength(1),
-            );
+            // Nothing retries the accepted update, and nothing checks the
+            // installation while the background helper may be replacing it.
+            expect(scripts, hasLength(1));
           } else {
             expect(result.output, isNot(contains('in the background')));
           }
