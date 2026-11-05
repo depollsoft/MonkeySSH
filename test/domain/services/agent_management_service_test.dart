@@ -3424,6 +3424,115 @@ exit "$result"
       },
     );
 
+    test('holds a background update across probes until it lands', () async {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:openclaw',
+      );
+      final client = _MockSshClient();
+      final discovery = _MockDiscovery();
+      final session = _remoteSession(client);
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+      var now = DateTime(2026, 11, 4, 12);
+      String probeFinding(String version) =>
+          '__monkeyssh_agent_runtime__=cli:openclaw\n'
+          '__monkeyssh_agent_path__=/usr/local/bin/openclaw\n'
+          '__monkeyssh_agent_version__=OpenClaw $version\n'
+          '__monkeyssh_agent_runtime_end__\n';
+      // The background helper is replacing the launcher: nothing is found.
+      var probe = '';
+      var updates = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final script = invocation.positionalArguments.first as String;
+            if (script.endsWith("'update' '--yes'")) {
+              updates++;
+              return _execOutput('Update accepted.\n', exitCode: 75);
+            }
+            return _execOutput(probe);
+          });
+      when(() => discovery.invalidateSession(session)).thenReturn(null);
+      final service = AgentManagementService(
+        discovery,
+        canManageAgents: () async => true,
+        now: () => now,
+      );
+      final current = AgentRuntimeInfo(
+        definition: definition,
+        status: AgentRuntimeStatus.updateAvailable,
+        installedVersion: '2026.10.8',
+        latestVersion: '2026.10.9',
+        executablePath: '/usr/local/bin/openclaw',
+        detectionSource: 'npm global',
+      );
+      AgentRuntimeInfo openClaw(List<AgentRuntimeInfo> runtimes) =>
+          runtimes.singleWhere((r) => r.definition.id == definition.id);
+      Future<void> acceptUpdate() async {
+        final result = await service.installOrUpdate(
+          session,
+          definition,
+          update: true,
+          current: current,
+        );
+        expect(result.finishingInBackground, isTrue);
+      }
+
+      await acceptUpdate();
+      // Every probe of the session holds the row, including a reopened
+      // screen's discovery, its cached opening state and the periodic check.
+      final discovered = <AgentRuntimeInfo>[];
+      final held = openClaw(
+        await service.refreshAll(session, onDiscovered: discovered.addAll),
+      );
+      expect(held.status, AgentRuntimeStatus.installed);
+      expect(held.installedVersion, '2026.10.8');
+      expect(held.executablePath, '/usr/local/bin/openclaw');
+      expect(held.message, contains('finishing its update in the background'));
+      expect(openClaw(discovered), same(held));
+      expect(openClaw(service.cachedState(session)!.runtimes), same(held));
+      expect(openClaw(await service.checkForUpdates(session)), same(held));
+      // The old version is still the old version.
+      probe = probeFinding('2026.10.8');
+      expect(openClaw(await service.refreshAll(session)), same(held));
+      // A second update waits for the first one.
+      final again = await service.installOrUpdate(
+        session,
+        definition,
+        update: true,
+        current: current,
+      );
+      expect(again.succeeded, isFalse);
+      expect(again.output, contains('still finishing its last update'));
+      expect(updates, 1);
+      // The new version ends the hold.
+      probe = probeFinding('2026.10.9');
+      expect(
+        openClaw(await service.refreshAll(session)).installedVersion,
+        '2026.10.9',
+      );
+      probe = '';
+      expect(
+        openClaw(await service.refreshAll(session)).status,
+        AgentRuntimeStatus.notInstalled,
+      );
+      // So do Re-check and ten minutes without the new version.
+      for (final end in <void Function()>[
+        () => service.releaseBackgroundUpdate(session, definition),
+        () => now = now.add(const Duration(minutes: 10)),
+      ]) {
+        await acceptUpdate();
+        expect(
+          openClaw(await service.refreshAll(session)).status,
+          AgentRuntimeStatus.installed,
+        );
+        end();
+        expect(
+          openClaw(await service.refreshAll(session)).status,
+          AgentRuntimeStatus.notInstalled,
+        );
+      }
+      expect(updates, 3);
+    });
+
     test(
       'keeps completed metadata when a later registry lookup times out',
       () async {

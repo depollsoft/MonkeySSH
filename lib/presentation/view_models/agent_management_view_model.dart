@@ -128,19 +128,14 @@ class AgentManagementViewModel extends ChangeNotifier {
         session(),
         onDiscovered: (discovered) {
           if (!mounted) return;
-          _change(
-            () => this.runtimes = _holdBackgroundUpdates(
-              _keepKnownVersions(discovered),
-            ),
-          );
+          _change(() => this.runtimes = _keepKnownVersions(discovered));
           usageStarted = true;
           unawaited(_refreshUsage());
         },
       );
       if (!mounted) return;
-      final held = _holdBackgroundUpdates(runtimes);
-      _change(() => this.runtimes = held);
-      onRuntimesRefreshed(held);
+      _change(() => this.runtimes = runtimes);
+      onRuntimesRefreshed(runtimes);
       onProvidersRefreshed();
       if (!usageStarted) unawaited(_refreshUsage());
     } on Object catch (error) {
@@ -149,33 +144,6 @@ class AgentManagementViewModel extends ChangeNotifier {
     } finally {
       if (mounted) _change(() => refreshing = false);
     }
-  }
-
-  // Updates the agent accepted and is finishing in the background (OpenClaw
-  // exit 75). A probe meanwhile can find the installation half replaced and
-  // offer Install, so each row keeps its last state with a note until
-  // Re-check, or until a probe shows a different installed version.
-  final Map<String, AgentRuntimeInfo> _finishingInBackground = {};
-
-  List<AgentRuntimeInfo> _holdBackgroundUpdates(List<AgentRuntimeInfo> fresh) {
-    if (_finishingInBackground.isEmpty) return fresh;
-    return [
-      for (final runtime in fresh)
-        switch (_finishingInBackground[runtime.definition.id]) {
-          final held? when !_backgroundUpdateLanded(held, runtime) => held,
-          _ => runtime,
-        },
-    ];
-  }
-
-  bool _backgroundUpdateLanded(AgentRuntimeInfo held, AgentRuntimeInfo fresh) {
-    final landed =
-        (fresh.status == AgentRuntimeStatus.installed ||
-            fresh.status == AgentRuntimeStatus.updateAvailable) &&
-        fresh.installedVersion != null &&
-        fresh.installedVersion != held.installedVersion;
-    if (landed) _finishingInBackground.remove(fresh.definition.id);
-    return landed;
   }
 
   // Discovery lands before registry metadata, so on its own it would turn
@@ -299,19 +267,6 @@ class AgentManagementViewModel extends ChangeNotifier {
           });
         },
       );
-      if (result.finishingInBackground) {
-        _finishingInBackground[id] = AgentRuntimeInfo(
-          definition: runtime.definition,
-          status: AgentRuntimeStatus.installed,
-          installedVersion: runtime.installedVersion,
-          executablePath: runtime.executablePath,
-          detectionSource: runtime.detectionSource,
-          managedByPackageManager: runtime.managedByPackageManager,
-          message:
-              '${runtime.definition.label} is finishing its update in the '
-              'background. Re-check in a minute to see the new version.',
-        );
-      }
     } on Object catch (error) {
       result = AgentRuntimeActionResult(
         succeeded: false,
@@ -329,8 +284,9 @@ class AgentManagementViewModel extends ChangeNotifier {
   Future<void> recheck(AgentRuntimeInfo runtime) async {
     if (!await canManageAgents() || !mounted || busy || refreshing) return;
     final id = runtime.definition.id;
-    // An explicit re-check shows the installation as it is now.
-    _finishingInBackground.remove(id);
+    // An explicit re-check shows the installation as it is now, even while
+    // an update may still be finishing in the background.
+    service().releaseBackgroundUpdate(session(), runtime.definition);
     _change(() {
       runningActions.add(id);
       recheckingActions.add(id);

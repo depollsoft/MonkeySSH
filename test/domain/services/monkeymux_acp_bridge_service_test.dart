@@ -587,7 +587,7 @@ void main() {
 
   group('Codex launches set NO_BROWSER', () {
     const posixDefault =
-        r'''[ -n "${NO_BROWSER+x}" ] || export NO_BROWSER='1'; ''';
+        r'''[ -n "${NO_BROWSER+x}" ] || NO_BROWSER='1'; export NO_BROWSER; ''';
     const windowsDefault =
         r"if($null -eq $env:NO_BROWSER){ $env:NO_BROWSER='1' };";
     final launches = [
@@ -680,7 +680,7 @@ void main() {
       );
     });
 
-    test('keeps a value the user exported, even an empty one', () async {
+    test('keeps a value the user set, even an empty one', () async {
       final home = await Directory.systemTemp.createTemp('acp-no-browser');
       addTearDown(() => home.delete(recursive: true));
       final command = buildMonkeyMuxAcpProviderCommand(
@@ -713,6 +713,9 @@ void main() {
       expect(await run(inherited: '0'), '0|set');
       expect(await run(inherited: ''), '|set');
       expect(await run(profile: 'export NO_BROWSER=no\n'), 'no|set');
+      // A profile assignment without export still reaches the adapter.
+      expect(await run(profile: 'NO_BROWSER=no\n'), 'no|set');
+      expect(await run(profile: 'NO_BROWSER=\n'), '|set');
     }, testOn: 'mac-os || linux');
   });
 

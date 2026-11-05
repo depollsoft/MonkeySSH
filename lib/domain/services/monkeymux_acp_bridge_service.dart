@@ -127,8 +127,9 @@ String buildMonkeyMuxAcpProviderCommand(
             '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
             '$_terminalProgramPreamble'
             '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
-            // A value the user exported, even an empty one, is kept.
-            '${defaultEnvironment.entries.map((entry) => '[ -n "\${${entry.key}+x}" ] || export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
+            // A value the user set, even an empty one, is kept. A profile
+            // can set it without `export`, so export it either way.
+            '${defaultEnvironment.entries.map((entry) => '[ -n "\${${entry.key}+x}" ] || ${entry.key}=${shellEscapePosix(entry.value)}; export ${entry.key}; ').join()}'
             'exec ${launchArgv.map(shellEscapePosix).join(' ')}';
   if (utf8.encode(command).length > 8192) {
     throw const MonkeyMuxAcpBridgeException(

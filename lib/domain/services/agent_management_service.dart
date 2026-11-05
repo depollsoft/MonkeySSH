@@ -939,7 +939,9 @@ class AgentManagementService {
     }
 
     return (
-      runtimes: List.unmodifiable(cached.runtimes),
+      runtimes: List.unmodifiable(
+        _holdBackgroundUpdates(session, cached.runtimes),
+      ),
       usage: {
         if (sameSession)
           for (final runtime in cached.runtimes)
@@ -962,7 +964,7 @@ class AgentManagementService {
     _pruneRuntimeCache();
     final cached = _runtimeCache[session.connectionId];
     if (!forceRefresh && cached != null) {
-      return Future.value(cached.runtimes);
+      return _holdBackgroundUpdates(session, cached.runtimes);
     }
     final existing = _inFlightUpdateChecks[session.connectionId];
     if (existing != null) return existing;
@@ -1036,13 +1038,15 @@ class AgentManagementService {
     final installedDefinitions = definitions
         .where((definition) => snapshots[definition.id]?.executablePath != null)
         .toList(growable: false);
-    onDiscovered?.call([
-      for (final definition in definitions)
-        _resolveRuntimeInfo(
-          definition,
-          snapshots[definition.id] ?? const AgentProbeSnapshot(),
-        ),
-    ]);
+    onDiscovered?.call(
+      _holdBackgroundUpdates(session, [
+        for (final definition in definitions)
+          _resolveRuntimeInfo(
+            definition,
+            snapshots[definition.id] ?? const AgentProbeSnapshot(),
+          ),
+      ]),
+    );
     var metadata = <String, AgentMetadataSnapshot>{};
     if (installedDefinitions.isNotEmpty) {
       try {
@@ -1071,7 +1075,7 @@ class AgentManagementService {
           metadata: metadata[definition.id],
         ),
     ];
-    return _cacheRuntimes(session, runtimes);
+    return _holdBackgroundUpdates(session, _cacheRuntimes(session, runtimes));
   }
 
   void _pruneRuntimeCache() {
@@ -1623,6 +1627,13 @@ class AgentManagementService {
     // including verification and automatic repair, from a second mutation of
     // the same installation through that new screen.
     final running = _runningInstallations[session] ??= <String>{};
+    if (_pendingBackgroundUpdates(session).containsKey(definition.id)) {
+      return AgentRuntimeActionResult(
+        succeeded: false,
+        output:
+            '${definition.label} is still finishing its last update in the background. Tap Re-check to see it.',
+      );
+    }
     if (!running.add(definition.id)) {
       return AgentRuntimeActionResult(
         succeeded: false,
@@ -1631,16 +1642,84 @@ class AgentManagementService {
       );
     }
     try {
-      return await _installOrUpdate(
+      final result = await _installOrUpdate(
         session,
         definition,
         update: update,
         current: current,
         onOutput: onOutput,
       );
+      if (result.finishingInBackground && current != null) {
+        (_backgroundUpdates[session] ??= {})[definition.id] = (
+          at: _now(),
+          runtime: AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            installedVersion: current.installedVersion,
+            executablePath: current.executablePath,
+            detectionSource: current.detectionSource,
+            managedByPackageManager: current.managedByPackageManager,
+            message:
+                '${definition.label} is finishing its update in the '
+                'background. Re-check in a minute to see the new version.',
+          ),
+        );
+      }
+      return result;
     } finally {
       running.remove(definition.id);
     }
+  }
+
+  // Updates an agent accepted and is finishing in the background (OpenClaw
+  // exit 75). A probe meanwhile can find the installation half replaced and
+  // offer Install, so probes keep the row as it was, with a note, until
+  // Re-check, until a probe shows a different installed version, or for
+  // [_backgroundUpdateHold] at most. The service keeps them per session, not
+  // the screen, so a reopened Agent Management screen holds them too.
+  final _backgroundUpdates =
+      Expando<Map<String, ({DateTime at, AgentRuntimeInfo runtime})>>();
+  static const _backgroundUpdateHold = Duration(minutes: 10);
+
+  Map<String, ({DateTime at, AgentRuntimeInfo runtime})>
+  _pendingBackgroundUpdates(SshSession session) {
+    final pending = _backgroundUpdates[session];
+    if (pending == null) return const {};
+    pending.removeWhere(
+      (_, entry) => _now().difference(entry.at) >= _backgroundUpdateHold,
+    );
+    return pending;
+  }
+
+  /// Stops holding [definition]'s row for an update finishing in the
+  /// background, so the next probe shows the installation as it is.
+  void releaseBackgroundUpdate(
+    SshSession session,
+    AgentRuntimeDefinition definition,
+  ) {
+    _backgroundUpdates[session]?.remove(definition.id);
+  }
+
+  List<AgentRuntimeInfo> _holdBackgroundUpdates(
+    SshSession session,
+    List<AgentRuntimeInfo> fresh,
+  ) {
+    final pending = _pendingBackgroundUpdates(session);
+    if (pending.isEmpty) return fresh;
+    for (final runtime in fresh) {
+      final held = pending[runtime.definition.id]?.runtime;
+      if (held != null &&
+          (runtime.status == AgentRuntimeStatus.installed ||
+              runtime.status == AgentRuntimeStatus.updateAvailable) &&
+          runtime.installedVersion != null &&
+          runtime.installedVersion != held.installedVersion) {
+        pending.remove(runtime.definition.id);
+      }
+    }
+    return [
+      for (final runtime in fresh)
+        pending[runtime.definition.id]?.runtime ?? runtime,
+    ];
   }
 
   Future<AgentRuntimeActionResult> _installOrUpdate(
