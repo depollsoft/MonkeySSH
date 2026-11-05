@@ -2050,7 +2050,20 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) : > "$HOME/.local/bin/pi" ;; esac
 exit 3
 EOF
 ''');
-    await Process.run('chmod', ['+x', '${fakes.path}/curl']);
+    // Homebrew's bin is writable; a system-wide one is not.
+    final brew = Directory('${root.path}/brew')..createSync();
+    final systemBrew = Directory('${root.path}/system-brew')..createSync();
+    for (final dir in [brew, systemBrew]) {
+      File('${dir.path}/brew').writeAsStringSync('#!/bin/sh\nexit 0\n');
+    }
+    await Process.run('chmod', [
+      '+x',
+      '${fakes.path}/curl',
+      '${brew.path}/brew',
+      '${systemBrew.path}/brew',
+    ]);
+    await Process.run('chmod', ['555', systemBrew.path]);
+    addTearDown(() => Process.run('chmod', ['755', systemBrew.path]));
     final command = buildAgentInstallCommand(
       definition,
       windows: false,
@@ -2060,7 +2073,11 @@ EOF
     // run the real installer, so stop before running anything.
     expect(command, isNot(contains(r'$HOME/.grok/bin')));
     final script = File('${root.path}/install.sh')..writeAsStringSync(command);
-    Future<String> install(String shell, {String profile = ''}) async {
+    Future<List<String>> install(
+      String shell, {
+      required Directory brewDir,
+      String profile = '',
+    }) async {
       if (Directory(home).existsSync()) {
         Directory(home).deleteSync(recursive: true);
       }
@@ -2072,12 +2089,12 @@ EOF
         environment: {
           'HOME': home,
           'SHELL': shell,
-          'PATH': '${fakes.path}:/usr/bin:/bin',
+          'PATH': '${brewDir.path}:${fakes.path}:/usr/bin:/bin',
         },
         includeParentEnvironment: false,
       );
       expect(result.exitCode, 3, reason: '$shell ${result.stderr}');
-      return File('$home/installer-path').readAsStringSync();
+      return File('$home/installer-path').readAsStringSync().split(':');
     }
 
     for (final shell in [
@@ -2085,24 +2102,30 @@ EOF
       if (File('/bin/zsh').existsSync()) '/bin/zsh',
       if (File('/bin/dash').existsSync()) '/bin/dash',
     ]) {
-      // A profile that never adds ~/.local/bin: the installer must not see
-      // the directories the app adds for its own probes, and the empty
-      // ~/.local/bin made for the profiles is gone again.
-      final path = await install(shell).then((path) => path.split(':'));
-      expect(path, isNot(contains('$home/.local/bin')), reason: shell);
-      expect(path, isNot(contains('$home/bin')), reason: shell);
-      expect(path.first, fakes.path, reason: shell);
-      expect(path, contains('/opt/homebrew/bin'), reason: shell);
+      // With Homebrew and a profile that never adds ~/.local/bin, the
+      // installer must not see the directories the app adds for its own
+      // probes, and the empty ~/.local/bin made for the profiles is gone.
+      final brewed = await install(shell, brewDir: brew);
+      expect(brewed, isNot(contains('$home/.local/bin')), reason: shell);
+      expect(brewed, isNot(contains('$home/bin')), reason: shell);
+      expect(brewed.first, brew.path, reason: shell);
+      expect(brewed, contains('/opt/homebrew/bin'), reason: shell);
       expect(Directory('$home/.local/bin').existsSync(), isFalse);
       // Debian and Ubuntu add ~/.local/bin once it exists, so `pi` goes there.
       final debian = await install(
         shell,
+        brewDir: brew,
         profile:
             r'if [ -d "$HOME/.local/bin" ]; then '
             r'PATH="$HOME/.local/bin:$PATH"; fi'
             '\n',
       );
-      expect(debian.split(':').first, '$home/.local/bin', reason: shell);
+      expect(debian.first, '$home/.local/bin', reason: shell);
+      expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
+      // Without a writable Homebrew bin, ~/.local/bin comes last, so `pi`
+      // goes where the app finds it, not into ~/.pi/agent/bin.
+      final unbrewed = await install(shell, brewDir: systemBrew);
+      expect(unbrewed.last, '$home/.local/bin', reason: shell);
       expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
     }
   });
