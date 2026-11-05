@@ -1527,6 +1527,13 @@ void main() {
           } else {
             expect(runtime.message, contains('`$uninstall`'));
           }
+          if (expectedSource == 'pip') {
+            // Hermes says pip for a uv tool or venv copy too.
+            expect(
+              runtime.message,
+              contains('`uv tool uninstall hermes-agent`'),
+            );
+          }
         },
       );
     }
@@ -2020,6 +2027,85 @@ esac
       expect(other?.installedVersionOutput, isNull);
     },
   );
+
+  test('the Pi installer sees the user own PATH', () async {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    final root = await Directory.systemTemp.createTemp('monkeyssh-pi-path-');
+    addTearDown(() => root.delete(recursive: true));
+    final home = '${root.path}/home';
+    final fakes = Directory('${root.path}/fakes')..createSync();
+    // The installer links `pi` into ~/.local/bin when that is on PATH, as
+    // pi.dev's does, records the PATH it saw and exits 3.
+    File('${fakes.path}/curl').writeAsStringSync(r'''
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -o ] && out=$2
+  shift
+done
+cat > "$out" <<'EOF'
+printf '%s' "$PATH" > "$HOME/installer-path"
+case ":$PATH:" in *":$HOME/.local/bin:"*) : > "$HOME/.local/bin/pi" ;; esac
+exit 3
+EOF
+''');
+    await Process.run('chmod', ['+x', '${fakes.path}/curl']);
+    final command = buildAgentInstallCommand(
+      definition,
+      windows: false,
+      update: false,
+    )!;
+    // With the app's own PATH, a real curl ahead of the fake would fetch and
+    // run the real installer, so stop before running anything.
+    expect(command, isNot(contains(r'$HOME/.grok/bin')));
+    final script = File('${root.path}/install.sh')..writeAsStringSync(command);
+    Future<String> install(String shell, {String profile = ''}) async {
+      if (Directory(home).existsSync()) {
+        Directory(home).deleteSync(recursive: true);
+      }
+      Directory(home).createSync();
+      File('$home/.profile').writeAsStringSync(profile);
+      final result = await Process.run(
+        shell,
+        [script.path],
+        environment: {
+          'HOME': home,
+          'SHELL': shell,
+          'PATH': '${fakes.path}:/usr/bin:/bin',
+        },
+        includeParentEnvironment: false,
+      );
+      expect(result.exitCode, 3, reason: '$shell ${result.stderr}');
+      return File('$home/installer-path').readAsStringSync();
+    }
+
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+      if (File('/bin/dash').existsSync()) '/bin/dash',
+    ]) {
+      // A profile that never adds ~/.local/bin: the installer must not see
+      // the directories the app adds for its own probes, and the empty
+      // ~/.local/bin made for the profiles is gone again.
+      final path = await install(shell).then((path) => path.split(':'));
+      expect(path, isNot(contains('$home/.local/bin')), reason: shell);
+      expect(path, isNot(contains('$home/bin')), reason: shell);
+      expect(path.first, fakes.path, reason: shell);
+      expect(path, contains('/opt/homebrew/bin'), reason: shell);
+      expect(Directory('$home/.local/bin').existsSync(), isFalse);
+      // Debian and Ubuntu add ~/.local/bin once it exists, so `pi` goes there.
+      final debian = await install(
+        shell,
+        profile:
+            r'if [ -d "$HOME/.local/bin" ]; then '
+            r'PATH="$HOME/.local/bin:$PATH"; fi'
+            '\n',
+      );
+      expect(debian.split(':').first, '$home/.local/bin', reason: shell);
+      expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
+    }
+  });
 
   test('Windows metadata checks the Pi installer layout before npm', () {
     final definition = agentCliRuntimeDefinitions.singleWhere(

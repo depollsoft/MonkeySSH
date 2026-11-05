@@ -187,6 +187,20 @@ final String _profilePrefix = [
 /// The login PATH setup above, for other host scripts that must find tools
 /// installed through profile files (Homebrew, `~/.local/bin`, nix).
 final String remoteProfilePathPrefix = _profilePrefix;
+
+/// The user's own login PATH: the profile files read from the exec channel's
+/// PATH, without the tool directories [_defaultPathExport] adds, then
+/// Homebrew and the system directories at the end. An installer that picks
+/// the first suitable bin directory on PATH then picks one the user's shell
+/// searches.
+final String _userPathPrefix = [
+  r'__fl_rc=; case "${SHELL##*/}" in zsh) __fl_rc="$HOME/.zshrc";; ',
+  r'bash) __fl_rc="$HOME/.bashrc";; esac; ',
+  '__fl_profile_path=\$( set +e; ${_profileSourcing()} ); ',
+  r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; ',
+  'unset __fl_rc __fl_p __fl_profile_path; ',
+  r'export PATH="${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; ',
+].join();
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
@@ -291,6 +305,10 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     packageName: '@earendil-works/pi-coding-agent',
     posixInstallerUrl: 'https://pi.dev/install.sh',
     windowsInstallerUrl: 'https://pi.dev/install.ps1',
+    // It links `pi` into the first of ~/.local/bin, ~/bin and a few others on
+    // PATH, else into Homebrew's bin, else into ~/.pi/agent/bin, and edits no
+    // profile without a terminal.
+    installerPicksBinFromPath: true,
     // `pi update` updates both kinds of installation to the release pi.dev
     // reports, which can trail npm's latest tag.
     selfUpdateArguments: ['update', '--self'],
@@ -704,6 +722,7 @@ String? buildAgentInstallCommand(
       installerUrl,
       windows: windows,
       environment: definition.installerEnvironment,
+      userPath: definition.installerPicksBinFromPath,
     );
   }
   final package = definition.packageName;
@@ -2519,14 +2538,21 @@ String _retiredRegistryMessage(
   String path,
 ) {
   final package = definition.packageName;
-  final python = path.contains(r'\') ? 'py' : 'python3';
-  final uninstall = source == 'pip'
-      ? '$python -m pip uninstall $package'
-      : 'pipx uninstall $package';
-  return '${definition.label} stopped publishing to PyPI at '
+  final retired =
+      '${definition.label} stopped publishing to PyPI at '
       '${definition.retiredRegistry!.lastVersion}, so this $source '
-      'installation cannot update. Run `$uninstall` on the host (settings '
-      'stay), then re-check and install ${definition.label} again.';
+      'installation cannot update.';
+  final reinstall = 're-check and install ${definition.label} again.';
+  if (source != 'pip') {
+    return '$retired Run `pipx uninstall $package` on the host (settings '
+        'stay), then $reinstall';
+  }
+  // Hermes reports pip for any PyPI copy it does not otherwise recognize:
+  // pip, uv tool or a virtual environment.
+  final python = path.contains(r'\') ? 'py' : 'python3';
+  return '$retired Remove it with the tool that installed it, such as '
+      '`$python -m pip uninstall $package` or `uv tool uninstall $package` '
+      '(settings stay), then $reinstall';
 }
 
 /// Install source the metadata probe reports for [registry]'s installations.
@@ -2614,6 +2640,7 @@ String _buildOfficialAgentInstallerCommand(
   String url, {
   required bool windows,
   Map<String, String> environment = const {},
+  bool userPath = false,
 }) {
   if (windows) {
     return buildCompactWindowsPowerShellCommand(
@@ -2637,7 +2664,15 @@ String _buildOfficialAgentInstallerCommand(
       'if curl -fLsS --connect-timeout 15 --max-time 60 ${_shellQuote(url)} -o "\$__fl_file"; then '
       r'bash "$__fl_file"; __fl_code=$?; else __fl_code=$?; fi; '
       r'rm -f "$__fl_file"; exit "$__fl_code"';
-  return '$_profilePrefix${_posixEnvironment(environment)}sh -c ${_shellQuote(script)}';
+  final run = '${_posixEnvironment(environment)}sh -c ${_shellQuote(script)}';
+  if (!userPath) return '$_profilePrefix$run';
+  // Debian and Ubuntu profiles add ~/.local/bin only once it exists, so it
+  // exists while they are read and is removed again if nothing went in.
+  return r'__fl_new_bin=; [ -d "$HOME/.local/bin" ] || '
+      r'{ mkdir -p "$HOME/.local/bin" 2>/dev/null && __fl_new_bin=1; }; '
+      '( $_userPathPrefix$run ); __fl_code=\$?; '
+      r'[ -z "$__fl_new_bin" ] || rmdir "$HOME/.local/bin" 2>/dev/null; '
+      r'(exit "$__fl_code")';
 }
 
 /// Provider for [AgentManagementService].

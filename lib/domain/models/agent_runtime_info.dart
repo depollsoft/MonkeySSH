@@ -59,6 +59,7 @@ class AgentRuntimeDefinition {
     this.posixInstallerUrl,
     this.windowsInstallerUrl,
     this.installerEnvironment = const {},
+    this.installerPicksBinFromPath = false,
     this.selfUpdateArguments = const [],
     this.backgroundUpdateExitCode,
     this.sharesCliInstallation = false,
@@ -120,6 +121,12 @@ class AgentRuntimeDefinition {
   /// Environment applied to the official installer (for example to skip
   /// interactive onboarding, which an SSH exec channel cannot answer).
   final Map<String, String> installerEnvironment;
+
+  /// Whether the POSIX installer links its command into the first suitable
+  /// directory on PATH. It then runs with the user's own login PATH, without
+  /// the directories the app adds for its probes, so it picks one the user's
+  /// shell searches too.
+  final bool installerPicksBinFromPath;
 
   /// Arguments for the CLI's own non-interactive updater.
   final List<String> selfUpdateArguments;
