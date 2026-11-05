@@ -2671,12 +2671,15 @@ String _buildOfficialAgentInstallerCommand(
   return r'__fl_new_bin=; [ -d "$HOME/.local/bin" ] || '
       r'{ mkdir -p "$HOME/.local/bin" 2>/dev/null && __fl_new_bin=1; }; '
       '( $_userPathPrefix'
-      // With neither a home bin directory on the user's PATH nor a writable
-      // Homebrew bin, the installer would use a directory no PATH lists,
-      // where the app cannot find it either. ~/.local/bin is better then.
-      r'__fl_brew=$(command -v brew 2>/dev/null); '
-      r'case "$__fl_brew" in /*) [ -w "${__fl_brew%/*}" ] || __fl_brew=;; '
-      '*) __fl_brew=;; esac; '
+      // With neither a home bin directory on the user's PATH nor a Homebrew
+      // bin the installer would take (writable, holding `brew` and no `pi`
+      // yet), it would use a directory no PATH lists, where the app cannot
+      // find it either. ~/.local/bin is better then. `sh` splits PATH the
+      // same way under every login shell.
+      r"__fl_brew=$(sh -c 'IFS=:; for d in $PATH; do "
+      r'[ -n "$d" ] && [ -x "$d/brew" ] && [ -w "$d" ] && '
+      r'[ ! -e "$d/pi" ] && [ ! -L "$d/pi" ] && { echo 1; break; }; '
+      "done'); "
       r'[ -n "$__fl_brew" ] || export PATH="$PATH:$HOME/.local/bin"; '
       '$run ); __fl_code=\$?; '
       r'[ -z "$__fl_new_bin" ] || rmdir "$HOME/.local/bin" 2>/dev/null; '

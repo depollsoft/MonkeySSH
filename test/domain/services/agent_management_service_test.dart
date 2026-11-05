@@ -2050,17 +2050,21 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) : > "$HOME/.local/bin/pi" ;; esac
 exit 3
 EOF
 ''');
-    // Homebrew's bin is writable; a system-wide one is not.
+    // Homebrew's bin is writable; a system-wide one is not, and one that
+    // already holds a `pi` (here a dangling link) is taken.
     final brew = Directory('${root.path}/brew')..createSync();
     final systemBrew = Directory('${root.path}/system-brew')..createSync();
-    for (final dir in [brew, systemBrew]) {
+    final takenBrew = Directory('${root.path}/taken-brew')..createSync();
+    for (final dir in [brew, systemBrew, takenBrew]) {
       File('${dir.path}/brew').writeAsStringSync('#!/bin/sh\nexit 0\n');
     }
+    Link('${takenBrew.path}/pi').createSync('${root.path}/gone/pi');
     await Process.run('chmod', [
       '+x',
       '${fakes.path}/curl',
       '${brew.path}/brew',
       '${systemBrew.path}/brew',
+      '${takenBrew.path}/brew',
     ]);
     await Process.run('chmod', ['555', systemBrew.path]);
     addTearDown(() => Process.run('chmod', ['755', systemBrew.path]));
@@ -2073,9 +2077,17 @@ EOF
     // run the real installer, so stop before running anything.
     expect(command, isNot(contains(r'$HOME/.grok/bin')));
     final script = File('${root.path}/install.sh')..writeAsStringSync(command);
+    const hostBrewScan =
+        'for d in /opt/homebrew/bin /usr/local/bin; do '
+        r'[ -x "$d/brew" ] && [ -w "$d" ] && [ ! -e "$d/pi" ] && '
+        r'[ ! -L "$d/pi" ] && echo 1; done';
+    final hostHomebrew = (await Process.run('sh', [
+      '-c',
+      hostBrewScan,
+    ])).stdout.toString().isNotEmpty;
     Future<List<String>> install(
       String shell, {
-      required Directory brewDir,
+      required List<Directory> brewDirs,
       String profile = '',
     }) async {
       if (Directory(home).existsSync()) {
@@ -2089,7 +2101,12 @@ EOF
         environment: {
           'HOME': home,
           'SHELL': shell,
-          'PATH': '${brewDir.path}:${fakes.path}:/usr/bin:/bin',
+          'PATH': [
+            ...brewDirs.map((dir) => dir.path),
+            fakes.path,
+            '/usr/bin',
+            '/bin',
+          ].join(':'),
         },
         includeParentEnvironment: false,
       );
@@ -2105,16 +2122,16 @@ EOF
       // With Homebrew and a profile that never adds ~/.local/bin, the
       // installer must not see the directories the app adds for its own
       // probes, and the empty ~/.local/bin made for the profiles is gone.
-      final brewed = await install(shell, brewDir: brew);
+      final brewed = await install(shell, brewDirs: [systemBrew, brew]);
       expect(brewed, isNot(contains('$home/.local/bin')), reason: shell);
       expect(brewed, isNot(contains('$home/bin')), reason: shell);
-      expect(brewed.first, brew.path, reason: shell);
+      expect(brewed.first, systemBrew.path, reason: shell);
       expect(brewed, contains('/opt/homebrew/bin'), reason: shell);
       expect(Directory('$home/.local/bin').existsSync(), isFalse);
       // Debian and Ubuntu add ~/.local/bin once it exists, so `pi` goes there.
       final debian = await install(
         shell,
-        brewDir: brew,
+        brewDirs: [brew],
         profile:
             r'if [ -d "$HOME/.local/bin" ]; then '
             r'PATH="$HOME/.local/bin:$PATH"; fi'
@@ -2122,11 +2139,23 @@ EOF
       );
       expect(debian.first, '$home/.local/bin', reason: shell);
       expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
-      // Without a writable Homebrew bin, ~/.local/bin comes last, so `pi`
-      // goes where the app finds it, not into ~/.pi/agent/bin.
-      final unbrewed = await install(shell, brewDir: systemBrew);
-      expect(unbrewed.last, '$home/.local/bin', reason: shell);
-      expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
+      // Without a Homebrew bin the installer would take, ~/.local/bin comes
+      // last, so `pi` goes where the app finds it, not into ~/.pi/agent/bin.
+      // A real Homebrew in the system directories at the end of PATH is one
+      // the installer would take, so the host decides which result is right.
+      for (final unusable in [systemBrew, takenBrew]) {
+        final unbrewed = await install(shell, brewDirs: [unusable]);
+        expect(
+          unbrewed.last == '$home/.local/bin',
+          !hostHomebrew,
+          reason: '$shell ${unusable.path}',
+        );
+        expect(
+          File('$home/.local/bin/pi').existsSync(),
+          !hostHomebrew,
+          reason: shell,
+        );
+      }
     }
   });
 
