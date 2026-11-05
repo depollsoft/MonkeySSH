@@ -43,7 +43,8 @@ is left running), OpenCode 1's `$XDG_DATA_HOME/opencode/auth.json`
 (default `~/.local/share/opencode/auth.json`), used when the installed OpenCode has
 no `auth export`, Pi's
 `$PI_CODING_AGENT_DIR/auth.json` (default `~/.pi/agent/auth.json`), and Hermes's
-`$HERMES_HOME/auth.json` (default `~/.hermes/auth.json`). These readers inspect
+`$HERMES_HOME/auth.json` (default `~/.hermes/auth.json`, or
+`%LOCALAPPDATA%\hermes\auth.json` on Windows, as Hermes itself does). These readers inspect
 saved accounts, including inactive accounts. OpenCode 1 also honors its
 `OPENCODE_AUTH_CONTENT` override before reading the file; OpenCode 2 ignores it. They do not resolve project-specific
 configuration, run key-generating shell commands, or discover keys supplied only

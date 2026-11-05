@@ -532,6 +532,19 @@ test('saved accounts stay scoped to each tool and Hermes deduplicates its pool',
   }
 });
 
+test('Hermes accounts come from the home Hermes uses on each platform', () => {
+  const {hermesHome} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const user = 'C:\\Users\\demo';
+  assert.equal(hermesHome({}, 'linux', '/home/demo'), '/home/demo/.hermes');
+  assert.equal(hermesHome({}, 'darwin', '/Users/demo'), '/Users/demo/.hermes');
+  // Hermes and its Windows installer default to %LOCALAPPDATA%\hermes.
+  assert.equal(hermesHome({LOCALAPPDATA: `${user}\\AppData\\Local`}, 'win32', user), `${user}\\AppData\\Local\\hermes`);
+  assert.equal(hermesHome({LOCALAPPDATA: ' '}, 'win32', user), `${user}\\AppData\\Local\\hermes`);
+  for (const platform of ['linux', 'win32']) {
+    assert.equal(hermesHome({HERMES_HOME: ' D:\\hermes ', LOCALAPPDATA: 'C:\\x'}, platform, user), 'D:\\hermes');
+  }
+});
+
 test('Windows stdin bootstrap accepts a fragmented payload without command expansion', async () => {
   const fs = require('fs'), path = require('path'), cp = require('child_process');
   const script = fs.readFileSync(path.join(__dirname, '../../assets/scripts/agent_usage_probe.cjs')).toString('base64');

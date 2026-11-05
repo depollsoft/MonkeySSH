@@ -582,6 +582,16 @@ async function providerUsage(id, credential, fetch = requestJson, accounts = [])
   }
   return {windows: [], status: oauth && !token ? 'signInRequired' : 'notReported'};
 }
+// Hermes's own rule (hermes_constants.get_hermes_home): HERMES_HOME, else
+// %LOCALAPPDATA%\hermes on Windows and ~/.hermes elsewhere.
+function hermesHome(env = process.env, platform = process.platform, home = os.homedir()) {
+  const configured = (env.HERMES_HOME || '').trim();
+  if (configured) return configured;
+  if (platform !== 'win32') return path.join(home, '.hermes');
+  const local = (env.LOCALAPPDATA || '').trim();
+  return path.win32.join(local || path.win32.join(home, 'AppData', 'Local'), 'hermes');
+}
+
 function configuredAccounts(id) {
   let data;
   if (id === 'opencode') {
@@ -593,7 +603,7 @@ function configuredAccounts(id) {
   }
   else if (id === 'pi') data = readJson(path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), 'auth.json'));
   else {
-    data = readJson(path.join(process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'), 'auth.json'));
+    data = readJson(path.join(hermesHome(), 'auth.json'));
     const entries = [];
     for (const [provider, state] of Object.entries(data.providers || {})) if (state && typeof state === 'object') entries.push([provider, state]);
     for (const [provider, pool] of Object.entries(data.credential_pool || {})) {
@@ -683,7 +693,7 @@ async function probe(id, executable) {
     return {status: statusOf(error), ...retryFields(error)};
   }
 }
-module.exports = {requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
+module.exports = {hermesHome, requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
   openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
