@@ -103,9 +103,11 @@ const _cursorVersionLookup = (
   url: 'https://cursor.com/install',
   pattern: r'https://downloads\.cursor\.com/lab/[0-9][0-9A-Za-z.+-]*',
 );
+// Hermes's own installer and `hermes update` follow the latest release.
+// Since 0.21.6 its source no longer spells out the version.
 const _hermesVersionLookup = (
-  url: 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/hermes_cli/__init__.py',
-  pattern: '__version__[[:space:]]*=[[:space:]]*"[^"]+"',
+  url: 'https://api.github.com/repos/NousResearch/hermes-agent/releases/latest',
+  pattern: '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"',
 );
 const _grokVersionLookup = (
   url: 'https://x.ai/cli/stable',
@@ -185,6 +187,20 @@ final String _profilePrefix = [
 /// The login PATH setup above, for other host scripts that must find tools
 /// installed through profile files (Homebrew, `~/.local/bin`, nix).
 final String remoteProfilePathPrefix = _profilePrefix;
+
+/// The user's own login PATH: the profile files read from the exec channel's
+/// PATH, without the tool directories [_defaultPathExport] adds, then
+/// Homebrew and the system directories at the end. An installer that picks
+/// the first suitable bin directory on PATH then picks one the user's shell
+/// searches.
+final String _userPathPrefix = [
+  r'__fl_rc=; case "${SHELL##*/}" in zsh) __fl_rc="$HOME/.zshrc";; ',
+  r'bash) __fl_rc="$HOME/.bashrc";; esac; ',
+  '__fl_profile_path=\$( set +e; ${_profileSourcing()} ); ',
+  r'[ -n "$__fl_profile_path" ] && export PATH="$__fl_profile_path"; ',
+  'unset __fl_rc __fl_p __fl_profile_path; ',
+  r'export PATH="${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; ',
+].join();
 const _pathMarker = '__monkeyssh_agent_path__=';
 const _versionMarker = '__monkeyssh_agent_version__=';
 const _repairMarker = '__monkeyssh_agent_repair__';
@@ -282,9 +298,30 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.pi,
     executableNames: ['pi'],
+    // npm installations are still detected and updated in place. New
+    // installations use the pi.dev installer, which pins every dependency
+    // and migrates an npm installation it finds.
     registry: AgentPackageRegistry.npm,
     packageName: '@earendil-works/pi-coding-agent',
+    posixInstallerUrl: 'https://pi.dev/install.sh',
+    windowsInstallerUrl: 'https://pi.dev/install.ps1',
+    // It links `pi` into the first of ~/.local/bin, ~/bin and a few others on
+    // PATH, else into Homebrew's bin, else into ~/.pi/agent/bin, and edits no
+    // profile without a terminal.
+    installerPicksBinFromPath: true,
+    // `pi update` updates both kinds of installation to the release pi.dev
+    // reports, which can trail npm's latest tag.
     selfUpdateArguments: ['update', '--self'],
+    officialVersionLookup: (
+      url: 'https://pi.dev/api/latest-version',
+      pattern: _jsonVersionPattern,
+    ),
+    // The installer's launcher, `~/.pi/agent/bin/pi`, runs a pinned release
+    // from `~/.pi/agent/install/releases/<version>`.
+    installerLayout: (
+      marker: 'install/managed-install.json',
+      source: 'Pi installer',
+    ),
   ),
   AgentRuntimeDefinition(
     id: 'cli:hermes',
@@ -292,12 +329,21 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.hermes,
     executableNames: ['hermes', 'hermes-agent'],
+    // pipx installations are still detected. New installations use the
+    // official installer: a git checkout that `hermes update` keeps current,
+    // with every extra native chat needs (`hermes acp` needs `acp`).
     registry: AgentPackageRegistry.pipx,
     packageName: 'hermes-agent',
-    // Native chat runs `hermes acp`, which needs the optional `acp` extra.
     packageExtras: ['acp'],
+    posixInstallerUrl: 'https://hermes-agent.nousresearch.com/install.sh',
+    windowsInstallerUrl: 'https://hermes-agent.nousresearch.com/install.ps1',
+    // Homebrew core packages Hermes too; `hermes update` refuses that copy.
+    homebrewFormula: 'hermes-agent',
     selfUpdateArguments: ['update', '--yes'],
     officialVersionLookup: _hermesVersionLookup,
+    // PyPI stopped at 0.19.0 and `hermes update` refuses a pip install. Its
+    // `--version` reports `Install method: pip` or `git`.
+    retiredRegistry: (lastVersion: '0.19.0', installMethod: 'pip'),
   ),
   AgentRuntimeDefinition(
     id: 'cli:openclaw',
@@ -305,9 +351,22 @@ const agentCliRuntimeDefinitions = <AgentRuntimeDefinition>[
     kind: AgentRuntimeKind.cli,
     tool: AgentLaunchTool.openclaw,
     executableNames: ['openclaw'],
+    // npm installations are still detected and repaired. New installations
+    // use the official installer, which also brings in a Node.js new enough
+    // for OpenClaw (24.22.1+ or 26.12.1+ since 2026.10.9) where npm would
+    // install a CLI the host's Node cannot start.
     registry: AgentPackageRegistry.npm,
     packageName: 'openclaw',
+    posixInstallerUrl: 'https://openclaw.ai/install.sh',
+    windowsInstallerUrl: 'https://openclaw.ai/install.ps1',
+    installerEnvironment: {
+      'OPENCLAW_NO_ONBOARD': '1',
+      'OPENCLAW_NO_PROMPT': '1',
+    },
     selfUpdateArguments: ['update', '--yes'],
+    // Since 2026.9.5, an update handed to a managed Gateway's background
+    // helper exits 75: accepted and still running.
+    backgroundUpdateExitCode: 75,
   ),
   AgentRuntimeDefinition(
     id: 'cli:grok',
@@ -586,6 +645,13 @@ String? buildAgentInstallCommand(
       compareAgentVersions(installedVersion, legacy.belowVersion) < 0) {
     return null;
   }
+  // Neither the retired registry nor the agent's own updater can move an
+  // installation the registry owns forward; the user replaces it instead.
+  if (update &&
+      definition.retiredRegistry != null &&
+      _retiredRegistrySources(definition).contains(detectionSource)) {
+    return null;
+  }
   final repairScript = definition.repairScript;
   if (repair && repairScript != null && executablePath != null) {
     if (windows) {
@@ -616,7 +682,14 @@ String? buildAgentInstallCommand(
     return '$_profilePrefix${_posixEnvironment(definition.syncUpdateEnvironment)}'
         '${_shellQuote(executablePath)} ${arguments.join(' ')}';
   }
-  if (update && executablePath != null && definition.supportsSelfUpdate) {
+  // Homebrew owns the files of a copy it installed, and some updaters refuse
+  // one (`hermes update`).
+  final formula = definition.homebrewFormula;
+  final homebrewCopy = detectionSource == 'Homebrew' && formula != null;
+  if (update &&
+      executablePath != null &&
+      definition.supportsSelfUpdate &&
+      !homebrewCopy) {
     if (windows) {
       final executable = powerShellSingleQuote(executablePath);
       final arguments = definition.selfUpdateArguments
@@ -634,8 +707,7 @@ String? buildAgentInstallCommand(
         '${definition.selfUpdateArguments.map(_shellQuote).join(' ')}';
   }
   if (update && detectionSource == 'PATH') return null;
-  final formula = definition.homebrewFormula;
-  if (update && detectionSource == 'Homebrew' && formula != null) {
+  if (update && homebrewCopy) {
     return windows
         ? null
         : '$_profilePrefix brew upgrade ${_shellQuote(formula)}';
@@ -643,8 +715,15 @@ String? buildAgentInstallCommand(
   final installerUrl = windows
       ? definition.windowsInstallerUrl
       : definition.posixInstallerUrl;
-  if (installerUrl != null) {
-    return _buildOfficialAgentInstallerCommand(installerUrl, windows: windows);
+  // A repair finishes the package that is there; it never switches an
+  // installation to the official installer.
+  if (installerUrl != null && !(repair && definition.registry != null)) {
+    return _buildOfficialAgentInstallerCommand(
+      installerUrl,
+      windows: windows,
+      environment: definition.installerEnvironment,
+      userPath: definition.installerPicksBinFromPath,
+    );
   }
   final package = definition.packageName;
   if (package == null) return null;
@@ -659,6 +738,10 @@ String? buildAgentInstallCommand(
     final quotedPackage = powerShellSingleQuote(package);
     final quotedSpec = powerShellSingleQuote(spec);
     final quotedLatest = powerShellSingleQuote('$package@latest');
+    // npm 12 skips a global package's own install scripts unless
+    // --allow-scripts names it; --ignore-scripts=false no longer covers them.
+    // Older npm runs them anyway and at most warns about the unknown option.
+    final allowScripts = powerShellSingleQuote('--allow-scripts=$package');
     final script = switch (definition.registry) {
       AgentPackageRegistry.npm => [
         powerShellProfilePathPreamble,
@@ -666,7 +749,7 @@ String? buildAgentInstallCommand(
           '& npm uninstall -g $quotedPackage;',
           r'if($LASTEXITCODE -ne 0){exit $LASTEXITCODE};',
         ],
-        '& npm install -g --foreground-scripts --ignore-scripts=false $quotedLatest;',
+        '& npm install -g --foreground-scripts --ignore-scripts=false $allowScripts $quotedLatest;',
         r'exit $LASTEXITCODE',
       ].join(),
       AgentPackageRegistry.pipx => [
@@ -695,11 +778,14 @@ String? buildAgentInstallCommand(
         ? null
         : buildCompactWindowsPowerShellCommand(script, plainTextOutput: true);
   }
+  final npmInstall =
+      'npm install -g --foreground-scripts --ignore-scripts=false '
+      '${_shellQuote('--allow-scripts=$package')} ${_shellQuote(package)}@latest';
   return switch (definition.registry) {
     AgentPackageRegistry.npm =>
       repair
-          ? '$_profilePrefix npm uninstall -g ${_shellQuote(package)} && npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest'
-          : '$_profilePrefix npm install -g --foreground-scripts --ignore-scripts=false ${_shellQuote(package)}@latest',
+          ? '$_profilePrefix npm uninstall -g ${_shellQuote(package)} && $npmInstall'
+          : '$_profilePrefix $npmInstall',
     AgentPackageRegistry.pipx =>
       repair
           ? '$_profilePrefix ${pipxRepairsFromSpec ? 'pipx install --force ${_shellQuote(spec)}' : 'pipx reinstall ${_shellQuote(package)}'} || python3 -m pip install --user --upgrade --force-reinstall ${_shellQuote(spec)}'
@@ -872,7 +958,9 @@ class AgentManagementService {
     }
 
     return (
-      runtimes: List.unmodifiable(cached.runtimes),
+      runtimes: List.unmodifiable(
+        _holdBackgroundUpdates(session, cached.runtimes),
+      ),
       usage: {
         if (sameSession)
           for (final runtime in cached.runtimes)
@@ -895,7 +983,7 @@ class AgentManagementService {
     _pruneRuntimeCache();
     final cached = _runtimeCache[session.connectionId];
     if (!forceRefresh && cached != null) {
-      return Future.value(cached.runtimes);
+      return _holdBackgroundUpdates(session, cached.runtimes);
     }
     final existing = _inFlightUpdateChecks[session.connectionId];
     if (existing != null) return existing;
@@ -969,13 +1057,15 @@ class AgentManagementService {
     final installedDefinitions = definitions
         .where((definition) => snapshots[definition.id]?.executablePath != null)
         .toList(growable: false);
-    onDiscovered?.call([
-      for (final definition in definitions)
-        _resolveRuntimeInfo(
-          definition,
-          snapshots[definition.id] ?? const AgentProbeSnapshot(),
-        ),
-    ]);
+    onDiscovered?.call(
+      _holdBackgroundUpdates(session, [
+        for (final definition in definitions)
+          _resolveRuntimeInfo(
+            definition,
+            snapshots[definition.id] ?? const AgentProbeSnapshot(),
+          ),
+      ]),
+    );
     var metadata = <String, AgentMetadataSnapshot>{};
     if (installedDefinitions.isNotEmpty) {
       try {
@@ -1004,7 +1094,7 @@ class AgentManagementService {
           metadata: metadata[definition.id],
         ),
     ];
-    return _cacheRuntimes(session, runtimes);
+    return _holdBackgroundUpdates(session, _cacheRuntimes(session, runtimes));
   }
 
   void _pruneRuntimeCache() {
@@ -1118,6 +1208,28 @@ class AgentManagementService {
         ? 'npx on demand'
         : _detectionSourceFromPath(path);
     installed ??= parseAgentVersion(metadata?.installedVersionOutput ?? '');
+    // The source names the running copy, not whatever a retired registry
+    // still lists.
+    final retiredSource = _retiredRegistrySource(
+      definition,
+      source: source,
+      installed: installed,
+      versionOutput: snapshot.versionOutput,
+    );
+    if (retiredSource != null) {
+      source = retiredSource;
+    } else if (definition.retiredRegistry != null &&
+        source == _registrySource(definition.registry)) {
+      source = _detectionSourceFromPath(path);
+    } else if (source == 'Homebrew' &&
+        _installMethodPattern
+                .firstMatch(snapshot.versionOutput ?? '')
+                ?.group(1) ==
+            'git') {
+      // Hermes names the running copy's install method. A git checkout
+      // updates itself, whatever formula Homebrew also lists.
+      source = _detectionSourceFromPath(path);
+    }
     final latest = parseAgentVersion(metadata?.latestVersionOutput ?? '');
     final hasUpdate =
         installed != null &&
@@ -1128,8 +1240,10 @@ class AgentManagementService {
         legacy != null &&
         installed != null &&
         compareAgentVersions(installed, legacy.belowVersion) < 0;
+    final retired = retiredSource != null;
     final managed =
         !isLegacyInstallation &&
+        !retired &&
         (definition.supportsSelfUpdate ||
             definition.launcherOwnsUpdates ||
             source == 'Homebrew' ||
@@ -1148,6 +1262,8 @@ class AgentManagementService {
       message: hasUpdate && !managed
           ? isLegacyInstallation
                 ? legacy.message
+                : retired
+                ? _retiredRegistryMessage(definition, retiredSource, path)
                 : 'Update this PATH installation with its original installer, then re-check.'
           : null,
     );
@@ -1530,6 +1646,13 @@ class AgentManagementService {
     // including verification and automatic repair, from a second mutation of
     // the same installation through that new screen.
     final running = _runningInstallations[session] ??= <String>{};
+    if (_pendingBackgroundUpdates(session).containsKey(definition.id)) {
+      return AgentRuntimeActionResult(
+        succeeded: false,
+        output:
+            '${definition.label} is still finishing its last update in the background. Tap Re-check to see it.',
+      );
+    }
     if (!running.add(definition.id)) {
       return AgentRuntimeActionResult(
         succeeded: false,
@@ -1538,16 +1661,84 @@ class AgentManagementService {
       );
     }
     try {
-      return await _installOrUpdate(
+      final result = await _installOrUpdate(
         session,
         definition,
         update: update,
         current: current,
         onOutput: onOutput,
       );
+      if (result.finishingInBackground && current != null) {
+        (_backgroundUpdates[session] ??= {})[definition.id] = (
+          at: _now(),
+          runtime: AgentRuntimeInfo(
+            definition: definition,
+            status: AgentRuntimeStatus.installed,
+            installedVersion: current.installedVersion,
+            executablePath: current.executablePath,
+            detectionSource: current.detectionSource,
+            managedByPackageManager: current.managedByPackageManager,
+            message:
+                '${definition.label} is finishing its update in the '
+                'background. Re-check in a minute to see the new version.',
+          ),
+        );
+      }
+      return result;
     } finally {
       running.remove(definition.id);
     }
+  }
+
+  // Updates an agent accepted and is finishing in the background (OpenClaw
+  // exit 75). A probe meanwhile can find the installation half replaced and
+  // offer Install, so probes keep the row as it was, with a note, until
+  // Re-check, until a probe shows a different installed version, or for
+  // [_backgroundUpdateHold] at most. The service keeps them per session, not
+  // the screen, so a reopened Agent Management screen holds them too.
+  final _backgroundUpdates =
+      Expando<Map<String, ({DateTime at, AgentRuntimeInfo runtime})>>();
+  static const _backgroundUpdateHold = Duration(minutes: 10);
+
+  Map<String, ({DateTime at, AgentRuntimeInfo runtime})>
+  _pendingBackgroundUpdates(SshSession session) {
+    final pending = _backgroundUpdates[session];
+    if (pending == null) return const {};
+    pending.removeWhere(
+      (_, entry) => _now().difference(entry.at) >= _backgroundUpdateHold,
+    );
+    return pending;
+  }
+
+  /// Stops holding [definition]'s row for an update finishing in the
+  /// background, so the next probe shows the installation as it is.
+  void releaseBackgroundUpdate(
+    SshSession session,
+    AgentRuntimeDefinition definition,
+  ) {
+    _backgroundUpdates[session]?.remove(definition.id);
+  }
+
+  List<AgentRuntimeInfo> _holdBackgroundUpdates(
+    SshSession session,
+    List<AgentRuntimeInfo> fresh,
+  ) {
+    final pending = _pendingBackgroundUpdates(session);
+    if (pending.isEmpty) return fresh;
+    for (final runtime in fresh) {
+      final held = pending[runtime.definition.id]?.runtime;
+      if (held != null &&
+          (runtime.status == AgentRuntimeStatus.installed ||
+              runtime.status == AgentRuntimeStatus.updateAvailable) &&
+          runtime.installedVersion != null &&
+          runtime.installedVersion != held.installedVersion) {
+        pending.remove(runtime.definition.id);
+      }
+    }
+    return [
+      for (final runtime in fresh)
+        pending[runtime.definition.id]?.runtime ?? runtime,
+    ];
   }
 
   Future<AgentRuntimeActionResult> _installOrUpdate(
@@ -1592,7 +1783,28 @@ class AgentManagementService {
         onOutput: onOutput,
         unlimitedTimeout: true,
       );
-      if (result.succeeded && definition.kind == AgentRuntimeKind.cli) {
+      // An accepted background update may be replacing the installation
+      // right now, so a check at this point proves nothing either way.
+      final acceptedInBackground =
+          update &&
+          result.exitCode != null &&
+          result.exitCode == definition.backgroundUpdateExitCode;
+      if (acceptedInBackground) {
+        final message =
+            '\n${definition.label} accepted the update and is finishing it '
+            'in the background. Tap Re-check in a minute to see the new '
+            'version. Running the update again will not speed it up.\n';
+        onOutput?.call(message);
+        result = AgentRuntimeActionResult(
+          succeeded: true,
+          exitCode: result.exitCode,
+          output: '${result.output}$message',
+          finishingInBackground: true,
+        );
+      }
+      if (result.succeeded &&
+          !acceptedInBackground &&
+          definition.kind == AgentRuntimeKind.cli) {
         var verified = await inspect(session, definition);
         // An updater can leave its package's postinstall scripts pending.
         // Finish setup on the newly detected launcher, not the old path or a
@@ -1681,6 +1893,7 @@ class AgentManagementService {
         output: result.output
             .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
             .trim(),
+        finishingInBackground: result.finishingInBackground,
       );
       DiagnosticsLogService.instance.info(
         'agent.management',
@@ -2022,11 +2235,17 @@ String buildAgentMetadataProbeCommand(
           '${powerShellSingleQuote('$_runtimeMarker${definition.id}')});',
         )
         ..write(r'$__flLatest=$null;$__flInstalled=$null;');
+      final layout = definition.installerLayout;
+      if (layout != null) {
+        body.write(_windowsInstallerLayoutSource(definition, layout));
+      }
       if (package != null && definition.registry == AgentPackageRegistry.npm) {
         final needle = powerShellSingleQuote('$package@');
         body.write(
           '\$__flNeedle=$needle;'
           r'$__flLine=($__flNpmGlobal -split "`n" | Where-Object { $_.Contains($__flNeedle) } | Select-Object -First 1);'
+          // The installer's launcher, not a leftover npm package, runs.
+          '${layout == null ? '' : r'if($__flManaged){$__flLine=$null};'}'
           r'if($null -ne $__flLine){'
           '[void]\$__flOut.AppendLine(${powerShellSingleQuote('$_sourceMarker npm global')});'
           r'$__flInstalled=$__flLine.Substring($__flLine.IndexOf($__flNeedle)+$__flNeedle.Length).Split(" ")[0]};',
@@ -2114,14 +2333,23 @@ String buildAgentMetadataProbeCommand(
       ..write('printf ${_shellQuote('$_runtimeMarker%s\\n')} ')
       ..write('${_shellQuote(definition.id)}; ')
       ..write('__fl_source=; __fl_installed=; __fl_latest=; __fl_line=; ');
+    if (definition.installerLayout case final layout?) {
+      command.write(_posixInstallerLayoutSource(definition, layout));
+    }
     if (formula != null) {
+      // A listed formula or cask counts only when the executable that runs
+      // resolves into its keg or Caskroom (Muse ships as a cask). Another
+      // copy ahead on PATH updates its own way.
       command.write(
+        'if [ -z "\$__fl_source" ]; then '
         '__fl_line=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_brew_global" | '
         'grep -E ${_shellQuote('^$formula([[:space:]]|\$)')} | head -n 1); '
         'if [ -n "\$__fl_line" ]; then '
+        '${_posixResolvedLauncher(definition)}'
+        'case "\$__fl_launcher" in */Cellar/${_shellQuote(formula)}/*|*/Caskroom/${_shellQuote(formula)}/*) '
         '__fl_source=${_shellQuote('Homebrew')}; '
-        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')}); '
-        'fi; ',
+        '__fl_installed=\$(printf ${_shellQuote(r'%s\n')} "\$__fl_line" | awk ${_shellQuote('{print \u00242}')});; '
+        'esac; fi; fi; ',
       );
     }
     if (package != null && definition.registry == AgentPackageRegistry.npm) {
@@ -2264,11 +2492,135 @@ String _buildPosixProbeBody(AgentRuntimeDefinition definition) {
 String _executableBasename(String path) =>
     path.replaceAll('\\', '/').split('/').last.toLowerCase();
 
+// The line Hermes's `--version` prints for the running copy.
+final _installMethodPattern = RegExp(r'Install method: (\S+)');
+
+/// Sources of a copy installed from [definition]'s retired registry: its
+/// package manager, or plain pip, which pipx installs through.
+Set<String> _retiredRegistrySources(AgentRuntimeDefinition definition) => {
+  ?_registrySource(definition.registry),
+  if (definition.registry == AgentPackageRegistry.pipx) 'pip',
+};
+
+/// The install source of the running copy when [definition]'s retired
+/// registry installed it, or null (see
+/// [AgentRuntimeDefinition.retiredRegistry]).
+String? _retiredRegistrySource(
+  AgentRuntimeDefinition definition, {
+  required String source,
+  required String? installed,
+  required String? versionOutput,
+}) {
+  final retired = definition.retiredRegistry;
+  final registrySource = _registrySource(definition.registry);
+  if (retired == null || registrySource == null) return null;
+  final method = _installMethodPattern
+      .firstMatch(versionOutput ?? '')
+      ?.group(1);
+  if (method != null) {
+    if (method != retired.installMethod) return null;
+    // Without a pipx listing, a pip-installed copy came from pip itself.
+    return source == registrySource ||
+            definition.registry != AgentPackageRegistry.pipx
+        ? registrySource
+        : 'pip';
+  }
+  return source == registrySource &&
+          installed != null &&
+          compareAgentVersions(installed, retired.lastVersion) <= 0
+      ? registrySource
+      : null;
+}
+
+String _retiredRegistryMessage(
+  AgentRuntimeDefinition definition,
+  String source,
+  String path,
+) {
+  final package = definition.packageName;
+  final retired =
+      '${definition.label} stopped publishing to PyPI at '
+      '${definition.retiredRegistry!.lastVersion}, so this $source '
+      'installation cannot update.';
+  final reinstall = 're-check and install ${definition.label} again.';
+  if (source != 'pip') {
+    return '$retired Run `pipx uninstall $package` on the host (settings '
+        'stay), then $reinstall';
+  }
+  // Hermes reports pip for any PyPI copy it does not otherwise recognize:
+  // pip, uv tool or a virtual environment.
+  final python = path.contains(r'\') ? 'py' : 'python3';
+  return '$retired Remove it with the tool that installed it, such as '
+      '`$python -m pip uninstall $package` or `uv tool uninstall $package` '
+      '(settings stay), then $reinstall';
+}
+
+/// Install source the metadata probe reports for [registry]'s installations.
+String? _registrySource(AgentPackageRegistry? registry) => switch (registry) {
+  AgentPackageRegistry.npm => 'npm global',
+  AgentPackageRegistry.pipx => 'pipx',
+  null => null,
+};
+
 String _detectionSourceFromPath(String path) {
   final normalized = path.toLowerCase();
   if (normalized.contains('/.cargo/')) return 'Cargo';
   return 'PATH';
 }
+
+/// Sets `__fl_source` when the first of [definition]'s executables on PATH is
+/// an installer-managed launcher (see
+/// [AgentRuntimeDefinition.installerLayout]).
+String _posixInstallerLayoutSource(
+  AgentRuntimeDefinition definition,
+  ({String marker, String source}) layout,
+) =>
+    '${_posixResolvedLauncher(definition)}'
+    r'case "$__fl_launcher" in */bin/*) '
+    'if [ -f "\${__fl_launcher%/bin/*}"${_shellQuote('/${layout.marker}')} ]; then '
+    '__fl_source=${_shellQuote(layout.source)}; fi;; esac; ';
+
+/// Sets `__fl_launcher` to the physical path of the first of [definition]'s
+/// executables on PATH. Symlinks are followed by hand, as the launchers do,
+/// because `readlink -f` is not portable; each hop takes the physical
+/// directory, so a symlinked `bin` directory resolves too.
+String _posixResolvedLauncher(AgentRuntimeDefinition definition) =>
+    '__fl_launcher=; for __fl_name in '
+    '${definition.executableNames.map(_shellQuote).join(' ')}; do '
+    r'__fl_launcher=$(command -v "$__fl_name" 2>/dev/null) && break; done; '
+    r'__fl_hops=0; while [ -n "$__fl_launcher" ] && [ "$__fl_hops" -lt 16 ]; do '
+    r'__fl_dir=$(CDPATH= cd -P "${__fl_launcher%/*}" 2>/dev/null && pwd -P) || break; '
+    r'__fl_launcher=$__fl_dir/${__fl_launcher##*/}; '
+    r'[ -L "$__fl_launcher" ] || break; '
+    r'__fl_link=$(readlink "$__fl_launcher") || break; '
+    r'case "$__fl_link" in /*) __fl_launcher=$__fl_link;; '
+    r'*) __fl_launcher=$__fl_dir/$__fl_link;; esac; '
+    r'__fl_hops=$((__fl_hops + 1)); done; ';
+
+/// PowerShell form of [_posixInstallerLayoutSource]: sets `$__flManaged` when
+/// the first executable found, after following file symlinks, is
+/// `<root>\bin\<name>` beside the marker.
+String _windowsInstallerLayoutSource(
+  AgentRuntimeDefinition definition,
+  ({String marker, String source}) layout,
+) =>
+    '\$__flManaged=\$false;'
+    'foreach(\$__flName in @(${definition.executableNames.map(powerShellSingleQuote).join(',')})){'
+    r'$__flCommand=Get-Command $__flName -ErrorAction SilentlyContinue | Select-Object -First 1;'
+    r'if($null -eq $__flCommand){continue};'
+    r'try{$__flPath=[IO.Path]::GetFullPath($__flCommand.Source);'
+    // PowerShell 5.1 returns Target as an array, 7 as a string.
+    r'for($__flHop=0;$__flHop -lt 16;$__flHop++){'
+    r'$__flItem=Get-Item -LiteralPath $__flPath -Force;'
+    r"if($__flItem.LinkType -ne 'SymbolicLink'){break};"
+    r'$__flTarget=@($__flItem.Target)[0];if(-not $__flTarget){break};'
+    r'$__flPath=[IO.Path]::GetFullPath([IO.Path]::Combine((Split-Path $__flPath -Parent),$__flTarget))};'
+    r'$__flBin=Split-Path $__flPath -Parent;'
+    r"if((Split-Path $__flBin -Leaf) -eq 'bin'){"
+    '\$__flManaged=Test-Path -LiteralPath (Join-Path (Split-Path \$__flBin -Parent) '
+    '${powerShellSingleQuote(layout.marker.replaceAll('/', r'\'))})}}catch{};break};'
+    'if(\$__flManaged){[void]\$__flOut.AppendLine('
+    '${powerShellSingleQuote('$_sourceMarker${layout.source}')})};';
 
 String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
 
@@ -2287,10 +2639,13 @@ String _powerShellEnvironment(Map<String, String> environment) => environment
 String _buildOfficialAgentInstallerCommand(
   String url, {
   required bool windows,
+  Map<String, String> environment = const {},
+  bool userPath = false,
 }) {
   if (windows) {
     return buildCompactWindowsPowerShellCommand(
       '$powerShellProfilePathPreamble'
+      '${_powerShellEnvironment(environment)}'
       r"$ErrorActionPreference='Stop';"
       r"$__flFile=Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString()+'.ps1');"
       r'$__flCode=1;try {'
@@ -2309,7 +2664,26 @@ String _buildOfficialAgentInstallerCommand(
       'if curl -fLsS --connect-timeout 15 --max-time 60 ${_shellQuote(url)} -o "\$__fl_file"; then '
       r'bash "$__fl_file"; __fl_code=$?; else __fl_code=$?; fi; '
       r'rm -f "$__fl_file"; exit "$__fl_code"';
-  return '${_profilePrefix}sh -c ${_shellQuote(script)}';
+  final run = '${_posixEnvironment(environment)}sh -c ${_shellQuote(script)}';
+  if (!userPath) return '$_profilePrefix$run';
+  // Debian and Ubuntu profiles add ~/.local/bin only once it exists, so it
+  // exists while they are read and is removed again if nothing went in.
+  return r'__fl_new_bin=; [ -d "$HOME/.local/bin" ] || '
+      r'{ mkdir -p "$HOME/.local/bin" 2>/dev/null && __fl_new_bin=1; }; '
+      '( $_userPathPrefix'
+      // With neither a home bin directory on the user's PATH nor a Homebrew
+      // bin the installer would take (writable, holding `brew` and no `pi`
+      // yet), it would use a directory no PATH lists, where the app cannot
+      // find it either. ~/.local/bin is better then. `sh` splits PATH the
+      // same way under every login shell.
+      r"__fl_brew=$(sh -c 'IFS=:; for d in $PATH; do "
+      r'[ -n "$d" ] && [ -x "$d/brew" ] && [ -w "$d" ] && '
+      r'[ ! -e "$d/pi" ] && [ ! -L "$d/pi" ] && { echo 1; break; }; '
+      "done'); "
+      r'[ -n "$__fl_brew" ] || export PATH="$PATH:$HOME/.local/bin"; '
+      '$run ); __fl_code=\$?; '
+      r'[ -z "$__fl_new_bin" ] || rmdir "$HOME/.local/bin" 2>/dev/null; '
+      r'(exit "$__fl_code")';
 }
 
 /// Provider for [AgentManagementService].

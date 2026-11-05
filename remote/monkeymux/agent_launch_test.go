@@ -174,7 +174,11 @@ func TestPrepareAgentLaunch(t *testing.T) {
 				prefix = []string{"--plugin-dir", filepath.Join(directory, "monkeymux-cursor-plugin")}
 			case "codex":
 				hook := shellQuote(executable) + " agent-identity-hook --tool codex"
-				prefix = []string{"-c", codexIdentityHookConfig(hook), "-c", codexIdentityHookTrustConfig(hook)}
+				prefix = []string{
+					"-c", codexIdentityHookConfig(hook),
+					"-c", codexIdentityHookTrustConfig(hook),
+					"-c", "features.daemon_auto_start=false",
+				}
 			}
 			assignFlag := agentLaunchSessionIDFlag(tool, args)
 			if assignFlag != "" {

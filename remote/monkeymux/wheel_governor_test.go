@@ -57,6 +57,9 @@ type wheelTestTUI struct {
 	last  time.Time
 	count int
 	rows  int
+	// paneRows, when set, applies agy 1.3+'s scrollWheel limit: a third of
+	// the viewport left after its four rows of input box and status line.
+	paneRows int
 }
 
 func (tui *wheelTestTUI) receive(t *testing.T, data []byte, now time.Time) {
@@ -79,36 +82,52 @@ func (tui *wheelTestTUI) receive(t *testing.T, data []byte, now time.Time) {
 			tui.count = 0
 		}
 		tui.last = now
-		tui.rows += direction * min(int(math.Sqrt(float64(tui.count)))+1, 12)
+		speed := min(int(math.Sqrt(float64(tui.count)))+1, 12)
+		if tui.paneRows > 0 {
+			viewport := tui.paneRows - 4
+			if viewport <= 0 {
+				viewport = 1
+			}
+			speed = min(speed, max(viewport/3, 1))
+		}
+		tui.rows += direction * speed
 	}
 }
 
 func TestWheelGovernorRowConservation(t *testing.T) {
-	for _, reports := range []int{20, 2000} {
-		for _, interval := range []time.Duration{0, 16 * time.Millisecond} {
-			t.Run(fmt.Sprintf("%d/%v", reports, interval), func(t *testing.T) {
-				g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile}
-				tui := wheelTestTUI{}
-				now := time.Unix(100, 0)
-				for i := 0; i < reports; i++ {
-					tui.receive(t, g.process([]byte(wheelDown), now), now)
-					if tui.rows > i+1 || tui.rows+g.owed != i+1 {
-						t.Fatalf("report %d: moved=%d owed=%d", i+1, tui.rows, g.owed)
-					}
-					now = now.Add(interval)
-				}
-				for flushes := 0; g.owed != 0; flushes++ {
-					if flushes > 12 {
-						t.Fatal("flush failed to settle debt")
-					}
-					now = now.Add(200 * time.Millisecond)
-					tui.receive(t, g.drain(now), now)
-				}
-				if tui.rows != reports {
-					t.Fatalf("moved %d rows, want %d", tui.rows, reports)
-				}
-			})
+	// 0 is a pane height the governor has not learned; 60 leaves agy's cap
+	// above its top speed; the short panes cap a fast fling below it.
+	for _, paneRows := range []int{0, 60, 24, 13, 5, 1} {
+		for _, reports := range []int{20, 2000} {
+			for _, interval := range []time.Duration{0, 16 * time.Millisecond} {
+				t.Run(fmt.Sprintf("%d rows/%d/%v", paneRows, reports, interval), func(t *testing.T) {
+					testWheelGovernorRowConservation(t, paneRows, reports, interval)
+				})
+			}
 		}
+	}
+}
+
+func testWheelGovernorRowConservation(t *testing.T, paneRows, reports int, interval time.Duration) {
+	g := wheelGovernor{profile: agentRegistry["antigravity"].wheelProfile, paneRows: paneRows}
+	tui := wheelTestTUI{paneRows: paneRows}
+	now := time.Unix(100, 0)
+	for i := 0; i < reports; i++ {
+		tui.receive(t, g.process([]byte(wheelDown), now), now)
+		if tui.rows > i+1 || tui.rows+g.owed != i+1 {
+			t.Fatalf("report %d: moved=%d owed=%d", i+1, tui.rows, g.owed)
+		}
+		now = now.Add(interval)
+	}
+	for flushes := 0; g.owed != 0; flushes++ {
+		if flushes > 12 {
+			t.Fatal("flush failed to settle debt")
+		}
+		now = now.Add(200 * time.Millisecond)
+		tui.receive(t, g.drain(now), now)
+	}
+	if tui.rows != reports {
+		t.Fatalf("moved %d rows, want %d", tui.rows, reports)
 	}
 }
 
@@ -480,36 +499,44 @@ func TestWheelGovernorFlushInvalidation(t *testing.T) {
 }
 
 func TestWriteWindowWheelGovernorRowConservation(t *testing.T) {
-	clock := installWheelTestClock(t)
-	server, window, pty := newWheelTestWindow("agy", true)
-	tui := wheelTestTUI{}
-	read := 0
-	receive := func() {
-		output := pty.String()
-		tui.receive(t, []byte(output[read:]), clock.now)
-		read = len(output)
-	}
-	for i := 0; i < 20; i++ {
-		if err := server.writeWindowInput(window.id, []byte(wheelDown), false); err != nil {
-			t.Fatal(err)
-		}
-		receive()
-		clock.now = clock.now.Add(16 * time.Millisecond)
-	}
-	initialTimers := len(clock.timers)
-	for i := 0; i < len(clock.timers); i++ {
-		if i > initialTimers+12 {
-			t.Fatal("flush failed to settle debt")
-		}
-		timer := clock.timers[i]
-		if timer.due.After(clock.now) {
-			clock.now = timer.due
-		}
-		timer.action()
-		receive()
-	}
-	if tui.rows != 20 || window.wheelGovernor.owed != 0 {
-		t.Fatalf("after flushes: moved=%d owed=%d, want 20 and 0", tui.rows, window.wheelGovernor.owed)
+	// A 13-row pane caps agy at 3 rows per report, below the speed 60 quick
+	// reports reach, so both the write path and the flush path must use the
+	// pane height.
+	for _, test := range []struct{ paneRows, reports int }{{0, 20}, {13, 60}} {
+		t.Run(fmt.Sprintf("%d rows", test.paneRows), func(t *testing.T) {
+			clock := installWheelTestClock(t)
+			server, window, pty := newWheelTestWindow("agy", true)
+			window.screenHeight = test.paneRows
+			tui := wheelTestTUI{paneRows: test.paneRows}
+			read := 0
+			receive := func() {
+				output := pty.String()
+				tui.receive(t, []byte(output[read:]), clock.now)
+				read = len(output)
+			}
+			for i := 0; i < test.reports; i++ {
+				if err := server.writeWindowInput(window.id, []byte(wheelDown), false); err != nil {
+					t.Fatal(err)
+				}
+				receive()
+				clock.now = clock.now.Add(16 * time.Millisecond)
+			}
+			initialTimers := len(clock.timers)
+			for i := 0; i < len(clock.timers); i++ {
+				if i > initialTimers+12 {
+					t.Fatal("flush failed to settle debt")
+				}
+				timer := clock.timers[i]
+				if timer.due.After(clock.now) {
+					clock.now = timer.due
+				}
+				timer.action()
+				receive()
+			}
+			if tui.rows != test.reports || window.wheelGovernor.owed != 0 {
+				t.Fatalf("after flushes: moved=%d owed=%d, want %d and 0", tui.rows, window.wheelGovernor.owed, test.reports)
+			}
+		})
 	}
 }
 

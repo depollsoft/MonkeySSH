@@ -129,7 +129,17 @@ var agentRegistry = map[string]agentDescriptor{
 		fileBacked:        true,
 		wrappedLaunch:     true,
 		hookIdentity: func(hook agentHookPayload, _ *agentIdentity) bool {
-			return hook.Event == "SessionStart" && (hook.Source == "startup" || hook.Source == "resume")
+			// /clear and /fork (Codex 0.155+) start a new thread in the same
+			// pane. compact keeps the thread, so it carries nothing new.
+			// Subagents report SubagentStart, not SessionStart.
+			if hook.Event != "SessionStart" {
+				return false
+			}
+			switch hook.Source {
+			case "startup", "resume", "clear", "fork":
+				return true
+			}
+			return false
 		},
 		hookNotifyArgument: true,
 		acpProviderIDs:     []string{"codex-acp"},
@@ -166,6 +176,13 @@ var agentRegistry = map[string]agentDescriptor{
 					speed++
 				}
 				return speed
+			},
+			// agy 1.3+ moves at most a third of its conversation viewport per
+			// report (ConversationModel.scrollWheel, still in 1.4.12). The
+			// viewport is the pane minus agy's input box and status line, four
+			// rows when idle.
+			rowCap: func(paneRows int) int {
+				return max((paneRows-4)/3, 1)
 			},
 		},
 	},

@@ -233,6 +233,26 @@ void main() {
     },
   );
 
+  test('re-check releases a background update before probing', () async {
+    await model.refresh();
+    final runtime = runtimes.first;
+    // The background helper may still be replacing the launcher.
+    final midSwap = AgentRuntimeInfo(
+      definition: runtime.definition,
+      status: AgentRuntimeStatus.notInstalled,
+    );
+    when(() => service.inspect(session, runtime.definition))
+        .thenAnswer((_) async => midSwap);
+
+    await model.recheck(runtime);
+
+    verifyInOrder([
+      () => service.releaseBackgroundUpdate(session, runtime.definition),
+      () => service.inspect(session, runtime.definition),
+    ]);
+    expect(model.runtimes.first, same(midSwap));
+  });
+
   test('revoked access prevents probing and stale actions', () async {
     await model.refresh();
     permitted = false;

@@ -64,7 +64,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.255"
+	monkeyMuxVersion                  = "0.1.256"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -13536,6 +13536,7 @@ func (s *muxServer) writeWindowDataLocked(
 	if window.wheelGovernor.profile != profile {
 		window.wheelGovernor.reset(profile)
 	}
+	window.wheelGovernor.paneRows = window.screenHeight
 	if !response {
 		if bracketedPaste {
 			// A paste must reach the pty untouched; treat it as opaque so the

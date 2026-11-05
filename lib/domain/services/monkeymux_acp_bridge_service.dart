@@ -64,8 +64,10 @@ bool isValidMonkeyMuxAcpBridgeId(String bridgeId) =>
 ///
 /// [environment] overrides are applied after profile sourcing, so they win
 /// over same-named variables from the base launch environment. Names must be
-/// portable identifiers; values are quoted literally. [workingDirectory] is
-/// entered best-effort before the provider starts.
+/// portable identifiers; values are quoted literally. The built-in provider's
+/// [AcpBuiltinProvider.defaultLaunchEnvironment] follows and fills only the
+/// variables still unset. [workingDirectory] is entered best-effort before the
+/// provider starts.
 String buildMonkeyMuxAcpProviderCommand(
   List<String> launchArgv, {
   required bool isWindows,
@@ -73,11 +75,16 @@ String buildMonkeyMuxAcpProviderCommand(
   Map<String, String> environment = const <String, String>{},
   String? workingDirectory,
 }) {
+  final builtinProvider = acpBuiltinProviders.firstWhereOrNull(
+    (provider) => provider.id == providerId,
+  );
+  final defaultEnvironment =
+      builtinProvider?.defaultLaunchEnvironment ?? const <String, String>{};
   if (launchArgv.isEmpty ||
       launchArgv.first.trim().isEmpty ||
       launchArgv.any((value) => value.contains('\u0000')) ||
       (workingDirectory?.contains('\u0000') ?? false) ||
-      environment.entries.any(
+      [...environment.entries, ...defaultEnvironment.entries].any(
         (entry) =>
             !_environmentNamePattern.hasMatch(entry.key) ||
             entry.value.contains('\u0000'),
@@ -101,10 +108,11 @@ String buildMonkeyMuxAcpProviderCommand(
       'Set-Location -LiteralPath ${powerShellSingleQuote(cwd)} -ErrorAction SilentlyContinue;',
     for (final entry in environment.entries)
       '\$env:${entry.key}=${powerShellSingleQuote(entry.value)};',
+    // Windows cannot hold an empty variable, so null means unset.
+    for (final MapEntry(:key, :value) in defaultEnvironment.entries)
+      'if(\$null -eq \$env:$key){ \$env:$key=${powerShellSingleQuote(value)} };',
     r"$ErrorActionPreference='Stop';",
-    ?acpBuiltinProviders
-        .firstWhereOrNull((provider) => provider.id == providerId)
-        ?.windowsLaunchPreamble,
+    ?builtinProvider?.windowsLaunchPreamble,
     _windowsTerminalProgramPreamble,
     '$executableVariable=${powerShellSingleQuote(launchArgv.first)};',
     '$argumentsVariable=@(',
@@ -119,6 +127,9 @@ String buildMonkeyMuxAcpProviderCommand(
             '${hasCwd ? 'cd -- ${shellEscapePosix(cwd)} 2>/dev/null; ' : ''}'
             '$_terminalProgramPreamble'
             '${environment.entries.map((entry) => 'export ${entry.key}=${shellEscapePosix(entry.value)}; ').join()}'
+            // A value the user set, even an empty one, is kept. A profile
+            // can set it without `export`, so export it either way.
+            '${defaultEnvironment.entries.map((entry) => '[ -n "\${${entry.key}+x}" ] || ${entry.key}=${shellEscapePosix(entry.value)}; export ${entry.key}; ').join()}'
             'exec ${launchArgv.map(shellEscapePosix).join(' ')}';
   if (utf8.encode(command).length > 8192) {
     throw const MonkeyMuxAcpBridgeException(

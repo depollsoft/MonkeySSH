@@ -284,6 +284,9 @@ class AgentManagementViewModel extends ChangeNotifier {
   Future<void> recheck(AgentRuntimeInfo runtime) async {
     if (!await canManageAgents() || !mounted || busy || refreshing) return;
     final id = runtime.definition.id;
+    // An explicit re-check shows the installation as it is now, even while
+    // an update may still be finishing in the background.
+    service().releaseBackgroundUpdate(session(), runtime.definition);
     _change(() {
       runningActions.add(id);
       recheckingActions.add(id);

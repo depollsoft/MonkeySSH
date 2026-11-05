@@ -47,14 +47,23 @@ function claudeUsage(data) {
   const names = {five_hour: '5 hours', seven_day: 'Weekly', seven_day_opus: 'Weekly · Opus',
     seven_day_sonnet: 'Weekly · Sonnet', seven_day_oauth_apps: 'Weekly · OAuth apps',
     seven_day_cowork: 'Weekly · Cowork'};
+  const limits = Array.isArray(data.limits) ? data.limits : [];
+  // limits[] lists the meters the plan has; percent is already 0–100. Plans
+  // without a five-hour limit (verified Ultra since 2026-10-30) send
+  // five_hour: null and no session row, so no five-hour window is reported.
+  // Like Claude Code's /usage, prefer the five_hour/seven_day fields, and read
+  // the matching account-wide row only when the field has no reading.
+  const accountRows = {five_hour: 'session', seven_day: 'weekly_all'};
   const windows = Object.entries(names).flatMap(([key, label]) => {
     const w = data[key];
-    return number(w?.utilization) == null ? [] :
-      [{label, usedPercent: w.utilization, resetsAt: date(w.resets_at)}];
+    if (number(w?.utilization) != null) return [{label, usedPercent: w.utilization, resetsAt: date(w.resets_at)}];
+    const rows = !accountRows[key] ? [] : limits.filter(row => row?.kind === accountRows[key] && row.scope?.model == null &&
+      row.scope?.surface == null && number(row.percent) != null);
+    return rows.length === 1 ? [{label, usedPercent: rows[0].percent, resetsAt: date(rows[0].resets_at)}] : [];
   });
   // Claude Code's /usage projects model allowances from limits, separately
-  // from the legacy five_hour/seven_day fields. percent is already 0–100.
-  for (const limit of Array.isArray(data.limits) ? data.limits : []) {
+  // from the legacy five_hour/seven_day fields.
+  for (const limit of limits) {
     const model = limit?.scope?.model?.display_name;
     if (limit?.kind !== 'weekly_scoped' || typeof model !== 'string' ||
         !/^fable(?: [0-9]+(?:\.[0-9]+)*)?$/i.test(model) || number(limit.percent) == null) continue;
@@ -87,7 +96,7 @@ function spawnAgent(executable, args) {
   return cp.spawn(executable, args, {cwd: os.tmpdir(),
     detached: process.platform !== 'win32', windowsHide: true,
     stdio: ['pipe', 'pipe', 'ignore'], env: {...process.env, NO_COLOR: '1',
-      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false'}});
+      OTEL_SDK_DISABLED: 'true', COPILOT_TELEMETRY_ENABLED: 'false', MUSE_NO_AUTO_UPDATE: '1'}});
 }
 function rpc(executable, args, method, framed, initialize) {
   return new Promise((resolve, reject) => {
@@ -213,7 +222,7 @@ function requestJson(url, {token, headers = {}, body, local = false} = {}) {
   requestCache.set(key, promise);
   return promise;
 }
-function runJson(executable, args) {
+function runJson(executable, args, parse = JSON.parse) {
   return new Promise((resolve, reject) => {
     const child = spawnAgent(executable, args);
     let output = '', done = false;
@@ -221,7 +230,7 @@ function runJson(executable, args) {
       if (done) return;
       done = true; clearTimeout(timer); stop(child);
       if (error) return reject(new Error('unavailable'));
-      try { resolve(JSON.parse(output)); } catch { reject(new Error('unavailable')); }
+      try { resolve(parse(output)); } catch { reject(new Error('unavailable')); }
     };
     const timer = setTimeout(() => finish(true), 12000);
     child.on('error', () => finish(true));
@@ -267,7 +276,7 @@ const providerNames = {
   'github-copilot': 'GitHub Copilot', copilot: 'GitHub Copilot', 'google-antigravity': 'Google Antigravity',
   'google-gemini-cli': 'Google Gemini', google: 'Google', openrouter: 'OpenRouter',
   nous: 'Nous', xai: 'xAI', groq: 'Groq', mistral: 'Mistral', deepseek: 'DeepSeek',
-  opencode: 'OpenCode Zen', 'opencode-go': 'OpenCode Go', ollama: 'Ollama',
+  opencode: 'OpenCode', 'opencode-go': 'OpenCode Go', ollama: 'Ollama',
 };
 const label = (value, fallback) => typeof value === 'string' && value.trim()
   ? value.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 65) : fallback;
@@ -436,6 +445,45 @@ function openclawUsage(data) {
   }
   return {windows, notices, status: windows.length ? 'available' : notices.length ? 'notReported' : usage.refreshing ? 'unavailable' : 'noAccounts'};
 }
+// Muse 1.4.13+ prints its subscription allowance as one JSON object: the
+// SubscriptionUsage of its protocol, or a usage/read result that wraps it.
+function museUsage(data) {
+  const usage = data?.usage && typeof data.usage === 'object' ? data.usage : data;
+  const windows = [];
+  const current = usage?.window;
+  if (number(current?.usedPercent) != null) {
+    const minutes = number(current.windowDurationMins);
+    windows.push({label: minutes === 300 ? '5 hours' : minutes > 0 ? `${minutes} minutes` : 'Current window',
+      usedPercent: current.usedPercent, resetsAt: milliseconds(current.resetsAtMs)});
+  }
+  if (number(usage?.weekly?.usedPercent) != null) {
+    windows.push({label: 'Weekly', usedPercent: usage.weekly.usedPercent, resetsAt: milliseconds(usage.weekly.resetsAtMs)});
+  }
+  return windows.length ? {windows} : {windows: [], status: 'notReported'};
+}
+// OpenCode 2.2's experimental.usage.limits reports the active OpenCode Console
+// sign-in: the Go plan's meters (rolling is its five-hour limit) and the
+// workspace's spending budgets. data is null without a Console sign-in.
+function openCodeLimitsUsage(response) {
+  const data = response?.data;
+  const windows = [];
+  for (const [key, name] of [['rolling', '5 hours'], ['weekly', 'Weekly'], ['monthly', 'Monthly']]) {
+    const meter = data?.go?.[key];
+    if (number(meter?.percent) != null) windows.push({label: `Go · ${name}`, usedPercent: meter.percent, resetsAt: milliseconds(meter.resetsAt)});
+  }
+  for (const b of Array.isArray(data?.budgets) ? data.budgets : []) {
+    if (!(number(b?.limit) > 0)) continue;
+    const reset = milliseconds(b.resetsAt), models = Array.isArray(b.models) ? b.models : [];
+    if (b.per === 'model') {
+      // The limit applies to each model on its own.
+      for (const m of models) if (number(m?.spent) != null) windows.push(budget(`Budget · ${label(m.name, 'Model')}`, m.spent, b.limit, reset, 'USD'));
+    } else if (number(b.spent) != null) {
+      const names = b.coverage === 'models' ? models.map(m => label(m?.name, '')).filter(Boolean).join(', ') : '';
+      windows.push(budget(names ? `Budget · ${names}` : 'Budget', b.spent, b.limit, reset, 'USD'));
+    }
+  }
+  return windows.length ? {windows} : {windows: [], status: 'notReported'};
+}
 function codexOAuthUsage(data) {
   const convert = bucket => ({primary: convertWindow(bucket?.primary_window), secondary: convertWindow(bucket?.secondary_window)});
   const convertWindow = w => w && ({usedPercent: w.used_percent,
@@ -508,7 +556,8 @@ async function providerUsage(id, credential, fetch = requestJson, accounts = [])
     }));
     if (id === 'openai' || id === 'openai-codex') {
       const claims = jwtClaims(token);
-      if (String(claims.scope || '').split(/\s+/).includes('chatgpt.tokens.use.direct')) {
+      // scope is a space-separated string or, in OpenCode 2's tokens, an array.
+      if ([].concat(claims.scope ?? []).flatMap(x => String(x).split(/\s+/)).includes('chatgpt.tokens.use.direct')) {
         return chatGPTPlanUsage(token, accounts, fetch);
       }
       const account = c.accountId || c.account_id || claims['https://api.openai.com/auth']?.chatgpt_account_id;
@@ -533,6 +582,16 @@ async function providerUsage(id, credential, fetch = requestJson, accounts = [])
   }
   return {windows: [], status: oauth && !token ? 'signInRequired' : 'notReported'};
 }
+// Hermes's own rule (hermes_constants.get_hermes_home): HERMES_HOME, else
+// %LOCALAPPDATA%\hermes on Windows and ~/.hermes elsewhere.
+function hermesHome(env = process.env, platform = process.platform, home = os.homedir()) {
+  const configured = (env.HERMES_HOME || '').trim();
+  if (configured) return configured;
+  if (platform !== 'win32') return path.join(home, '.hermes');
+  const local = (env.LOCALAPPDATA || '').trim();
+  return path.win32.join(local || path.win32.join(home, 'AppData', 'Local'), 'hermes');
+}
+
 function configuredAccounts(id) {
   let data;
   if (id === 'opencode') {
@@ -544,7 +603,7 @@ function configuredAccounts(id) {
   }
   else if (id === 'pi') data = readJson(path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), 'auth.json'));
   else {
-    data = readJson(path.join(process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'), 'auth.json'));
+    data = readJson(path.join(hermesHome(), 'auth.json'));
     const entries = [];
     for (const [provider, state] of Object.entries(data.providers || {})) if (state && typeof state === 'object') entries.push([provider, state]);
     for (const [provider, pool] of Object.entries(data.credential_pool || {})) {
@@ -559,6 +618,37 @@ function configuredAccounts(id) {
     });
   }
   return Object.entries(data).filter(([, c]) => c && typeof c === 'object' && ['oauth', 'api', 'api_key', 'wellknown'].includes(c.type));
+}
+// OpenCode 2 moved saved accounts from auth.json into its database and prints
+// them with `auth export`. --standalone uses a private server instead of
+// starting the background service. Only OpenCode 1, which has no export,
+// reads auth.json: a failed OpenCode 2 export must not report the stale file.
+async function openCodeAccounts(executable, run = runJson) {
+  if (!executable) return null;
+  let rows;
+  try { rows = await run(executable, ['auth', 'export', '--standalone']); } catch {}
+  if (!Array.isArray(rows)) {
+    let version = '';
+    try { version = await run(executable, ['--version'], String); } catch {}
+    if (Number(/(\d+)\.\d+/.exec(version)?.[1]) < 2) return null;
+    throw new Error('unavailable');
+  }
+  return rows.flatMap(row => {
+    const value = row?.value;
+    if (typeof row?.integrationID !== 'string' || !value || typeof value !== 'object' || Array.isArray(value)) return [];
+    // OpenCode 2 names an API key `key`; the readers know it as `api`.
+    return [[row.integrationID, {...value, type: value.type === 'key' ? 'api' : value.type,
+      ...(typeof value.metadata?.accountID === 'string' ? {accountId: value.metadata.accountID} : {}),
+      ...(row.active === false ? {inactive: true} : {})}]];
+  });
+}
+// OpenCode 2 reads its Console sign-in's limits itself. One standalone call
+// covers the active sign-in; other providers use the shared readers.
+function openCodeReader(executable, version2, run = runJson) {
+  let limits;
+  return (provider, credential, fetch, accounts) => version2 && provider === 'opencode' && !credential.inactive
+    ? (limits ??= run(executable, ['api', '--standalone', 'experimental.usage.limits']).then(openCodeLimitsUsage))
+    : providerUsage(provider, credential, fetch, accounts);
 }
 async function multiProvider(id, accounts = configuredAccounts(id), reader = providerUsage) {
   if (!accounts.length) return {windows: [], notices: [], status: 'noAccounts'};
@@ -587,20 +677,24 @@ async function probe(id, executable) {
       ['app-server'], 'account/rateLimits/read', false, true));
     else if (id === 'copilot') result = copilotUsage(await rpc(executable,
       ['--headless', '--stdio', '--no-auto-update', '--log-level', 'none'], 'account.getQuota', true, false));
-    else if (id === 'muse') result = {status: 'notReported', windows: [], notices: []};
+    else if (id === 'muse') result = museUsage(await runJson(executable, ['usage', '--json']));
     else if (id === 'grok') result = await grok();
     else if (id === 'cursor') result = await cursor();
     else if (id === 'antigravity') result = await antigravity();
     else if (id === 'openclaw') result = openclawUsage(await runJson(executable, ['status', '--usage', '--json']));
-    else if (['opencode', 'pi', 'hermes'].includes(id)) result = await multiProvider(id);
+    else if (id === 'opencode') {
+      const exported = await openCodeAccounts(executable);
+      result = await multiProvider(id, exported ?? configuredAccounts(id), openCodeReader(executable, exported != null));
+    }
+    else if (['pi', 'hermes'].includes(id)) result = await multiProvider(id);
     else return {status: 'unsupported'};
     return {...result, status: result.status || (result.windows.length ? 'available' : 'unavailable')};
   } catch (error) {
     return {status: statusOf(error), ...retryFields(error)};
   }
 }
-module.exports = {requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
-  openclawUsage, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, multiProvider, antigravity, rpc, probe};
+module.exports = {hermesHome, requestJson, retryAfterSeconds, claude, cursor, providerUsage, codexUsage, copilotUsage, claudeUsage, grokUsage, cursorUsage, antigravityUsage,
+  openclawUsage, museUsage, openCodeLimitsUsage, openCodeReader, codexOAuthUsage, copilotOAuthUsage, openrouterUsage, nousUsage, configuredAccounts, openCodeAccounts, multiProvider, antigravity, rpc, probe};
 if (require.main === module || process.env.MONKEYSSH_USAGE_PROBE === '1') {
   const input = JSON.parse(Buffer.from(process.argv[process.env.MONKEYSSH_USAGE_PROBE === '1' ? 1 : 2], 'base64').toString());
   Promise.all(Object.entries(input).map(async ([id, executable]) => {
