@@ -9,6 +9,12 @@ require_relative '../../scripts/preview_release_notes'
 require_relative '../../scripts/store_metadata'
 require_relative '../../scripts/testflight_delivery'
 require_relative '../../scripts/match_git_persistence'
+require_relative '../../scripts/app_preview_frame_update'
+
+# Fastlane loads Spaceship before the Fastfile; the Fastfile tests stub it.
+if defined?(Spaceship::ConnectAPI::AppPreview) && defined?(Spaceship::UnexpectedResponse)
+  AppPreviewFrameUpdate.install!(Spaceship::ConnectAPI::AppPreview, Spaceship::UnexpectedResponse)
+end
 
 platform :ios do
   before_all do
