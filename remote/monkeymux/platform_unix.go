@@ -909,6 +909,7 @@ func forwardResizeSignals(
 func forwardCellSizeSignals(
 	session string,
 	clientID string,
+	token string,
 	sentWidth int,
 	sentHeight int,
 	registered <-chan struct{},
@@ -925,7 +926,7 @@ func forwardCellSizeSignals(
 				return
 			}
 			lastWidth, lastHeight = width, height
-			sendCellSize(session, clientID, width, height)
+			sendCellSize(session, clientID, token, width, height)
 		}
 		select {
 		case <-registered:

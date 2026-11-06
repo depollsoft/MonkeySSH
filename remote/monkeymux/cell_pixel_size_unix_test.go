@@ -179,7 +179,7 @@ func TestBackgroundClientCellPixelSizeAppliesWhenFocused(t *testing.T) {
 	server.resizeForClient("phone", 80, 24, false)
 	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
 
-	server.updateAttachClientCellSize("tablet", 11, 22)
+	server.updateAttachClientCellSize("tablet", "", 11, 22)
 	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
 
 	server.handleControlRequest(newControlClient(nil), controlMessage{
@@ -235,7 +235,7 @@ func TestForegroundRedrawKeepsCellPixelSize(t *testing.T) {
 
 	simulateForegroundResize(window, 80, 24)
 	// A cell size arriving mid-dance must not cancel the restore.
-	server.updateAttachClientCellSize("app", 9, 18)
+	server.updateAttachClientCellSize("app", "", 9, 18)
 
 	assertPtyPixelSizeEventually(t, windowPty, 80, 24, 720, 432)
 }
@@ -319,4 +319,35 @@ func TestNotifyFirstWriteClosesOnFirstOutputAndKeepsFlush(t *testing.T) {
 	if inner.writes != 3 || inner.flushes != 1 {
 		t.Fatalf("inner writes = %d, flushes = %d; want 3 and 1", inner.writes, inner.flushes)
 	}
+}
+
+func TestCellSizeRequestTargetsTheAttachItsTokenNames(t *testing.T) {
+	server, _, windowPty := newCellSizeTestServer(t)
+	// A reconnect reuses the client id while the old attach is still registered.
+	old := registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
+	current := registerTestAttachClientWithCellSize(t, server, "app", 80, 24, 10, 20)
+	server.mu.Lock()
+	old.cellToken, current.cellToken = "old-attach", "current-attach"
+	server.mu.Unlock()
+	server.resizeForClient("app", 80, 24, false)
+	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
+
+	for _, token := range []string{"old-attach", "unknown-attach"} {
+		server.handleControlRequest(newControlClient(nil), controlMessage{
+			Type:       "cell_size",
+			ClientID:   "app",
+			CellToken:  token,
+			CellWidth:  9,
+			CellHeight: 18,
+		})
+	}
+
+	server.mu.Lock()
+	oldCell := [2]int{old.cellWidth, old.cellHeight}
+	currentCell := [2]int{current.cellWidth, current.cellHeight}
+	server.mu.Unlock()
+	if oldCell != [2]int{9, 18} || currentCell != [2]int{10, 20} {
+		t.Fatalf("old attach cell = %v, current = %v; want [9 18] and [10 20]", oldCell, currentCell)
+	}
+	assertPtyPixelSize(t, windowPty, 80, 24, 800, 480)
 }

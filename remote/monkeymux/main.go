@@ -659,11 +659,15 @@ type controlMessage struct {
 	// CellWidth and CellHeight are the client terminal's cell size in pixels,
 	// read from its tty, in an attach hello, a resize or a cell_size request.
 	// Zero means unknown.
-	CellWidth    int  `json:"cellWidth,omitempty"`
-	CellHeight   int  `json:"cellHeight,omitempty"`
-	Redraw       bool `json:"redraw,omitempty"`
-	NoPrefix     bool `json:"noPrefix,omitempty"`
-	ClipViewport bool `json:"clipViewport,omitempty"`
+	CellWidth  int `json:"cellWidth,omitempty"`
+	CellHeight int `json:"cellHeight,omitempty"`
+	// CellToken names one attach connection, in its hello and in its
+	// cell_size requests, because a reconnect can reuse a client id while the
+	// old attach is still registered.
+	CellToken    string `json:"cellToken,omitempty"`
+	Redraw       bool   `json:"redraw,omitempty"`
+	NoPrefix     bool   `json:"noPrefix,omitempty"`
+	ClipViewport bool   `json:"clipViewport,omitempty"`
 	// SuppressReplay selects a native ACP placeholder without redrawing it into
 	// the attached terminal because the app replaces that viewport natively.
 	SuppressReplay bool `json:"suppressReplay,omitempty"`
@@ -1302,6 +1306,7 @@ type attachClient struct {
 	height       int
 	cellWidth    int
 	cellHeight   int
+	cellToken    string
 	clipViewport bool
 	// capabilityHint holds this client's replies to static terminal capability
 	// queries. It is per client because the answer describes *this* terminal:
@@ -1673,6 +1678,7 @@ func attachCommand(args []string) {
 	}
 
 	cellWidth, cellHeight := terminalCellPixelSize()
+	cellToken := newCellSizeToken()
 	hello := controlMessage{
 		Role:           "attach",
 		Session:        session,
@@ -1681,6 +1687,7 @@ func attachCommand(args []string) {
 		Height:         height,
 		CellWidth:      cellWidth,
 		CellHeight:     cellHeight,
+		CellToken:      cellToken,
 		Data:           string(themeHint),
 		CapabilityHint: string(capabilityHint),
 		NoPrefix:       *noPrefix,
@@ -1740,6 +1747,7 @@ func attachCommand(args []string) {
 		stopCellSize := forwardCellSizeSignals(
 			session,
 			resolvedClientID,
+			cellToken,
 			cellWidth,
 			cellHeight,
 			registered,
@@ -1782,6 +1790,16 @@ func attachCommand(args []string) {
 			fmt.Fprintf(os.Stderr, "\r\nmonkeymux: session %s ended\r\n", session)
 		}
 	}
+}
+
+// newCellSizeToken returns a random name for one attach connection, or ""
+// if the system has no randomness, which falls back to the client id.
+func newCellSizeToken() string {
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(token)
 }
 
 // firstWriteNotifier closes a channel at its first write and keeps the
@@ -7798,6 +7816,7 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 	if validCellPixelSize(hello.CellWidth, hello.CellHeight) {
 		client.cellWidth, client.cellHeight = hello.CellWidth, hello.CellHeight
 	}
+	client.cellToken = strings.TrimSpace(hello.CellToken)
 	go client.writeLoop()
 	return client
 }
@@ -9236,6 +9255,21 @@ func (s *muxServer) applyCellPixelSizeLocked() {
 	window.reportCellPixelSize()
 }
 
+// attachClientByCellTokenLocked finds the attach connection whose hello
+// carried token. s.mu must be held.
+func (s *muxServer) attachClientByCellTokenLocked(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	for _, client := range s.attachClients {
+		if client.cellToken == token {
+			return client
+		}
+	}
+	return nil
+}
+
 // recordAttachClientCellSize records a client's cell size for the resize that
 // follows it.
 func (s *muxServer) recordAttachClientCellSize(
@@ -9251,9 +9285,11 @@ func (s *muxServer) recordAttachClientCellSize(
 }
 
 // updateAttachClientCellSize records a client's cell size and, for the
-// primary client, reports it to the active window.
+// primary client, reports it to the active window. A token names the exact
+// attach connection; without one the newest attach with clientID is used.
 func (s *muxServer) updateAttachClientCellSize(
 	clientID string,
+	token string,
 	width int,
 	height int,
 ) {
@@ -9261,7 +9297,10 @@ func (s *muxServer) updateAttachClientCellSize(
 	defer s.resizeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	client := s.attachClientByIDLocked(clientID)
+	client := s.attachClientByCellTokenLocked(token)
+	if client == nil && strings.TrimSpace(token) == "" {
+		client = s.attachClientByIDLocked(clientID)
+	}
 	if client == nil {
 		return
 	}
@@ -9999,7 +10038,12 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			client.sendError(request, errors.New("invalid cell size"))
 			return
 		}
-		s.updateAttachClientCellSize(request.ClientID, request.CellWidth, request.CellHeight)
+		s.updateAttachClientCellSize(
+			request.ClientID,
+			request.CellToken,
+			request.CellWidth,
+			request.CellHeight,
+		)
 		client.send(controlResponse{ID: request.ID, Type: "cell_size", Status: "ok"})
 	case "focus_client":
 		if strings.TrimSpace(request.ClientID) == "" {
@@ -19823,7 +19867,13 @@ func sendResize(session string, clientID string, width int, height int) {
 
 // sendCellSize reports this client terminal's cell size in pixels. A server
 // older than cell_size answers with an error, which is not read.
-func sendCellSize(session string, clientID string, width int, height int) {
+func sendCellSize(
+	session string,
+	clientID string,
+	token string,
+	width int,
+	height int,
+) {
 	conn, err := dialSession(session)
 	if err != nil {
 		return
@@ -19839,6 +19889,7 @@ func sendCellSize(session string, clientID string, width int, height int) {
 		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
 		Type:       "cell_size",
 		ClientID:   clientID,
+		CellToken:  token,
 		CellWidth:  width,
 		CellHeight: height,
 		Session:    session,

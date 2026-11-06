@@ -1078,7 +1078,7 @@ func detectSystemMemoryBytes() uint64 {
 
 // forwardCellSizeSignals has nothing to report on Windows; see
 // terminalCellPixelSize.
-func forwardCellSizeSignals(string, string, int, int, <-chan struct{}) func() {
+func forwardCellSizeSignals(string, string, string, int, int, <-chan struct{}) func() {
 	return func() {}
 }
 
