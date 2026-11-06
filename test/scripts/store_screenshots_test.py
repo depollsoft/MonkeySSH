@@ -780,11 +780,16 @@ class CopilotFrameTest(unittest.TestCase):
         self.check_frame(height=9, valid=False)
 
     def test_color_tolerance_boundaries(self):
-        for color in ((46, 178, 243), (82, 214, 255)):
+        # The exact border, and the blends the app's scaling leaves on the
+        # iPhone Duo outer display and the 7-inch tablet.
+        for color in ((64, 196, 255), (96, 192, 232), (64, 168, 216),
+                      (88, 184, 224), (46, 178, 243)):
             with self.subTest(color=color):
                 self.check_frame(color=color)
-        for color in ((45, 196, 255), (83, 196, 255), (64, 177, 255),
-                      (64, 215, 255), (64, 196, 242)):
+        # iOS link blue, ANSI cyan, the app's teal, the pale screenshot
+        # background and a dim blend stay out.
+        for color in ((0, 122, 255), (0, 205, 205), (127, 224, 200),
+                      (200, 220, 235), (40, 100, 130)):
             with self.subTest(color=color):
                 self.check_frame(color=color, valid=False)
 
