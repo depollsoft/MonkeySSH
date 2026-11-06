@@ -1732,17 +1732,19 @@ func attachCommand(args []string) {
 	defer restoreTerminal()
 
 	explicitSize := *widthFlag > 0 && *heightFlag > 0
+	// The server writes the replay only after registering this attach, so the
+	// first output means a resize or cell_size for this client will not be
+	// dropped.
+	registered := make(chan struct{})
 	stopResize := forwardResizeSignals(
 		session,
 		resolvedClientID,
 		width,
 		height,
 		explicitSize,
+		registered,
 	)
 	defer stopResize()
-	// The server writes the replay only after registering this attach, so the
-	// first output means a cell_size for this client will not be dropped.
-	registered := make(chan struct{})
 	if explicitSize {
 		stopCellSize := forwardCellSizeSignals(
 			session,

@@ -1114,6 +1114,7 @@ func forwardResizeSignals(
 	initialWidth int,
 	initialHeight int,
 	explicitSize bool,
+	_ <-chan struct{},
 ) func() {
 	if explicitSize {
 		return func() {}

@@ -869,12 +869,18 @@ func terminalSize() (int, int) {
 	return defaultColumns, defaultRows
 }
 
+// forwardResizeSignals reports the terminal's size, and with it the cell
+// size, after the server registers this attach (registered closes) and at
+// each SIGWINCH from then on. A resize sent before registration names a client
+// the server does not know yet and is dropped, so the first report waits and
+// carries whatever changed since the hello.
 func forwardResizeSignals(
 	session string,
 	clientID string,
 	initialWidth int,
 	initialHeight int,
 	explicitSize bool,
+	registered <-chan struct{},
 ) func() {
 	if explicitSize && initialWidth > 0 && initialHeight > 0 {
 		return func() {}
@@ -883,6 +889,13 @@ func forwardResizeSignals(
 	signal.Notify(signals, syscall.SIGWINCH)
 	done := make(chan struct{})
 	go func() {
+		select {
+		case <-registered:
+		case <-done:
+			return
+		}
+		width, height := terminalSize()
+		sendResize(session, clientID, width, height)
 		for {
 			select {
 			case <-signals:
@@ -893,8 +906,6 @@ func forwardResizeSignals(
 			}
 		}
 	}()
-	width, height := terminalSize()
-	sendResize(session, clientID, width, height)
 	return func() {
 		close(done)
 		signal.Stop(signals)
