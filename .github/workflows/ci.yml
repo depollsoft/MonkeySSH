@@ -496,7 +496,7 @@ jobs:
     needs: [changes, monkeymux-assets]
     if: needs.changes.outputs.android == 'true' && github.event_name != 'push'
     runs-on: ubicloud-standard-4
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -565,6 +565,29 @@ jobs:
           keyAlias=ci-release
           storeFile=ci-release.keystore
           EOF
+
+      # Gradle installs the NDK and CMake on first use with no download
+      # timeout, so a stalled transfer from Google hangs the build until the
+      # job limit. Install them first, bounded and retried. The NDK is the
+      # version Flutter's Gradle plugin asks for; CMake 3.22.1 is the Android
+      # Gradle Plugin's default for native builds.
+      - name: Install Android NDK and CMake
+        run: |
+          flutter_root="${FLUTTER_ROOT:-$(cd "$(dirname "$(command -v flutter)")/.." && pwd)}"
+          ndk="$(sed -n 's/.*val ndkVersion: String = "\([0-9.]*\)".*/\1/p' \
+            "$flutter_root/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt")"
+          if [ -z "$ndk" ]; then
+            echo "::warning::Could not read Flutter's NDK version; Gradle will install the NDK itself."
+            exit 0
+          fi
+          sdkmanager="${ANDROID_HOME:?}/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3; do
+            if timeout 150 "$sdkmanager" --install "ndk;$ndk" "cmake;3.22.1" > /dev/null; then
+              exit 0
+            fi
+            echo "::warning::Android SDK install attempt $attempt failed or stalled."
+          done
+          exit 1
 
       - name: Build release APK
         run: |
