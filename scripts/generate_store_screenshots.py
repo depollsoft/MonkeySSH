@@ -1637,8 +1637,19 @@ def _monkeymux_platform_key() -> str:
     return f'{os_name}-{arch}'
 
 
+# Cell size the capture's attach terminal reports, like a real terminal's pty.
+# MonkeyMux passes it on to window ptys, and Copilot CLI 1.0.106+ draws inline
+# images with Kitty direct placements only when it can read a cell size.
+ATTACH_CELL_PIXEL_SIZE = (10, 20)
+
+
 def _set_pty_size(fd: int, *, rows: int, columns: int) -> None:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
+    cell_width, cell_height = ATTACH_CELL_PIXEL_SIZE
+    fcntl.ioctl(
+        fd,
+        termios.TIOCSWINSZ,
+        struct.pack('HHHH', rows, columns, columns * cell_width, rows * cell_height),
+    )
 
 
 def _strip_terminal_output(text: str) -> str:

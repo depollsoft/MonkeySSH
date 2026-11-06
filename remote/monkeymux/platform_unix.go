@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,15 +43,28 @@ func (p *unixPty) Close() error {
 }
 
 func (p *unixPty) Resize(cols int, rows int) error {
+	return p.ResizePixels(cols, rows, 0, 0)
+}
+
+// ResizePixels sets the grid and the pixel size it covers. A pixel size that
+// does not fit the winsize fields is reported as unknown.
+func (p *unixPty) ResizePixels(cols int, rows int, widthPx int, heightPx int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return os.ErrClosed
 	}
-	return pty.Setsize(p.file, &pty.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-	})
+	return pty.Setsize(p.file, ptyWinsize(cols, rows, widthPx, heightPx))
+}
+
+// ptyWinsize builds a winsize with a pixel size, or none when either pixel
+// dimension is out of range.
+func ptyWinsize(cols int, rows int, widthPx int, heightPx int) *pty.Winsize {
+	size := &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}
+	if widthPx > 0 && heightPx > 0 && widthPx <= math.MaxUint16 && heightPx <= math.MaxUint16 {
+		size.X, size.Y = uint16(widthPx), uint16(heightPx)
+	}
+	return size
 }
 
 func (p *unixPty) Fd() uintptr {
@@ -124,12 +138,24 @@ func (p *unixProcess) Kill() {
 
 // startWindow launches cmd attached to a new pty sized to cols x rows.
 func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) {
+	return startWindowSized(cmd, cols, rows, 0, 0)
+}
+
+// startWindowSized launches cmd attached to a new pty sized to cols x rows
+// that covers widthPx x heightPx pixels (zero for unknown).
+func startWindowSized(
+	cmd *exec.Cmd,
+	cols int,
+	rows int,
+	widthPx int,
+	heightPx int,
+) (muxPty, muxProcess, error) {
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tty.Close()
-	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+	if err := pty.Setsize(ptmx, ptyWinsize(cols, rows, widthPx, heightPx)); err != nil {
 		_ = ptmx.Close()
 		return nil, nil, err
 	}
@@ -810,6 +836,28 @@ func readDarwinMemTotalBytes() uint64 {
 	return bytes
 }
 
+// terminalCellPixelSize is the cell size in pixels of the terminal on stdin,
+// or zero when it reports no pixel size.
+func terminalCellPixelSize() (int, int) {
+	size, err := pty.GetsizeFull(os.Stdin)
+	if err != nil {
+		return 0, 0
+	}
+	return cellPixelSizeOf(size)
+}
+
+// cellPixelSizeOf divides a winsize's pixel size by its grid.
+func cellPixelSizeOf(size *pty.Winsize) (int, int) {
+	if size == nil || size.Cols == 0 || size.Rows == 0 || size.X == 0 || size.Y == 0 {
+		return 0, 0
+	}
+	width, height := int(size.X)/int(size.Cols), int(size.Y)/int(size.Rows)
+	if !validCellPixelSize(width, height) {
+		return 0, 0
+	}
+	return width, height
+}
+
 func terminalSize() (int, int) {
 	if size, err := pty.GetsizeFull(os.Stdin); err == nil && size.Cols > 0 && size.Rows > 0 {
 		return int(size.Cols), int(size.Rows)
@@ -829,7 +877,9 @@ func forwardResizeSignals(
 	explicitSize bool,
 ) func() {
 	if explicitSize && initialWidth > 0 && initialHeight > 0 {
-		return func() {}
+		// The client sizes the grid itself (the app sends resize requests),
+		// but its cell size still comes from this tty.
+		return forwardCellSizeSignals(session, clientID)
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGWINCH)
@@ -847,6 +897,35 @@ func forwardResizeSignals(
 	}()
 	width, height := terminalSize()
 	sendResize(session, clientID, width, height)
+	return func() {
+		close(done)
+		signal.Stop(signals)
+	}
+}
+
+// forwardCellSizeSignals reports the tty's cell size each time it changes,
+// for a client that sizes the grid itself. The hello carried the first one.
+func forwardCellSizeSignals(session string, clientID string) func() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGWINCH)
+	done := make(chan struct{})
+	lastWidth, lastHeight := terminalCellPixelSize()
+	go func() {
+		for {
+			select {
+			case <-signals:
+				width, height := terminalCellPixelSize()
+				if !validCellPixelSize(width, height) ||
+					(width == lastWidth && height == lastHeight) {
+					continue
+				}
+				lastWidth, lastHeight = width, height
+				sendCellSize(session, clientID, width, height)
+			case <-done:
+				return
+			}
+		}
+	}()
 	return func() {
 		close(done)
 		signal.Stop(signals)
