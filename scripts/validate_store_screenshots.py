@@ -136,23 +136,33 @@ def _validate_file(path: Path, expected_size: tuple[int, int]) -> None:
     )
 
 
+# The demo image border, (64, 196, 255), is hue 198 degrees. Accept 188-208
+# degrees (iOS link blue is 211, ANSI cyan 180), saturation from 0.45 and
+# brightness from 0.75, in PIL's 0-255 HSV units.
+FRAME_HUE_RANGE = (round(188 / 360 * 255), round(208 / 360 * 255))
+FRAME_MIN_SATURATION = round(0.45 * 255)
+FRAME_MIN_VALUE = round(0.75 * 255)
+
+
 def _validate_copilot_image_frame(path: Path) -> None:
     """Reject accidental slivers while allowing one intentionally cropped edge."""
     with Image.open(path) as image:
         rgb = image.convert('RGB')
         width, height = rgb.size
-        channels = [
-            channel.point([
-                255 if abs(value - target) <= tolerance else 0
-                for value in range(256)
-            ])
-            for channel, target, tolerance in zip(
-                rgb.split(), (64, 196, 255), (18, 18, 12),
+        # The harness frames the demo image with a (64, 196, 255) border. The
+        # app scales the image to its cell box, which blends that thin border
+        # with the dark frame and light screenshot beside it: the hue stays,
+        # saturation and brightness drop. So match the border's hue band with
+        # floors on both, not one exact colour. PIL's HSV bands run 0-255.
+        hue, saturation, value = rgb.convert('HSV').split()
+        bands = [
+            band.point([255 if low <= level <= high else 0 for level in range(256)])
+            for band, (low, high) in zip(
+                (hue, saturation, value),
+                (FRAME_HUE_RANGE, (FRAME_MIN_SATURATION, 255), (FRAME_MIN_VALUE, 255)),
             )
         ]
-        mask = ImageChops.multiply(
-            ImageChops.multiply(channels[0], channels[1]), channels[2],
-        )
+        mask = ImageChops.multiply(ImageChops.multiply(bands[0], bands[1]), bands[2])
 
         horizontal_rows = [
             y
