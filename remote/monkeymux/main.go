@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.257"
+	monkeyMuxVersion                  = "0.1.258"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -17612,13 +17612,38 @@ func (w *muxWindow) broadcastIdentityLocked() windowBroadcastIdentity {
 	return identity
 }
 
+// refreshWindowProcessMetadata refreshes one window's process metadata. Tests
+// replace it.
+var refreshWindowProcessMetadata = (*muxServer).refreshProcessMetadata
+
+// maxConcurrentMetadataRefreshes bounds how many windows refresh at once, so a
+// session with many windows does not start dozens of ps and lsof processes.
+const maxConcurrentMetadataRefreshes = 8
+
+// refreshAllProcessMetadata refreshes every window's process metadata, several
+// windows at a time. A refresh spends its time waiting on ps and lsof, so one
+// after another, list_windows cost the sum over all windows: seconds with a
+// handful of agent windows on a busy host, past the app's request timeouts.
+// Each refresh claims its window under s.mu, so overlapping calls never
+// refresh the same window twice.
 func (s *muxServer) refreshAllProcessMetadata() {
 	s.mu.Lock()
 	windows := append([]*muxWindow(nil), s.windows...)
 	s.mu.Unlock()
+	slots := make(chan struct{}, maxConcurrentMetadataRefreshes)
+	var refreshes sync.WaitGroup
 	for _, window := range windows {
-		s.refreshProcessMetadata(window.id)
+		refreshes.Add(1)
+		slots <- struct{}{}
+		go func(windowID string) {
+			defer func() {
+				<-slots
+				refreshes.Done()
+			}()
+			refreshWindowProcessMetadata(s, windowID)
+		}(window.id)
 	}
+	refreshes.Wait()
 }
 
 func (s *muxServer) refreshProcessMetadata(windowID string) {
