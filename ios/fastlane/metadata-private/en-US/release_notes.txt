@@ -14,6 +14,7 @@ What's fixed
 - MonkeyMux stays attached when a slow network stalls the connection, instead of showing "MonkeyMux disconnected".
 - When a program in a MonkeyMux window exits, the shell that replaces it no longer starts with stray characters.
 - Images from terminal programs come back when you return to a MonkeyMux window, and no longer carry over into the next one.
+- MonkeyMux windows report your screen's pixel size, so Copilot CLI and other programs show inline images in every window.
 - Lines that a full-screen program scrolls in take its background color.
 - In long sessions, the terminal no longer draws a character with another cell's glyph or color.
 - Installing Claude Code, OpenCode, and OpenClaw works on hosts with npm 12.

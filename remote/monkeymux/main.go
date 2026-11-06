@@ -49,6 +49,23 @@ type muxPty interface {
 	Fd() uintptr
 }
 
+// pixelSizedPty is a pty that can report a pixel size along with its grid
+// (the ws_xpixel and ws_ypixel of TIOCSWINSZ). Programs such as Copilot CLI
+// read it to size inline images. ConPTY has no pixel size.
+type pixelSizedPty interface {
+	ResizePixels(cols int, rows int, widthPx int, heightPx int) error
+}
+
+// maxCellPixelSize bounds the cell size a client may report. Real terminals
+// draw cells tens of pixels wide; anything larger is a bad reading.
+const maxCellPixelSize = 1024
+
+// validCellPixelSize reports whether width x height is a usable cell size.
+func validCellPixelSize(width int, height int) bool {
+	return width > 0 && height > 0 &&
+		width <= maxCellPixelSize && height <= maxCellPixelSize
+}
+
 // muxProcess is the child process attached to a window's pty.
 type muxProcess interface {
 	// Pid returns the process identifier, or 0 when it is unavailable.
@@ -64,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.256"
+	monkeyMuxVersion                  = "0.1.257"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -476,11 +493,58 @@ func (w *muxWindow) resizePty(width int, height int) {
 	}
 	w.resizeGeneration.Add(1)
 	w.ptyResizeMu.Lock()
-	if err := w.pty.Resize(width, height); err == nil {
+	if err := w.resizePtyGridLocked(width, height); err == nil {
 		w.ptyWidth = width
 		w.ptyHeight = height
 	}
 	w.ptyResizeMu.Unlock()
+}
+
+// resizePtyGridLocked sizes the pty to width x height cells and, when the
+// window knows its cell size, the pixels those cells cover. ptyResizeMu must
+// be held.
+func (w *muxWindow) resizePtyGridLocked(width int, height int) error {
+	if validCellPixelSize(w.cellWidthPx, w.cellHeightPx) {
+		if sized, ok := w.pty.(pixelSizedPty); ok {
+			return sized.ResizePixels(
+				width,
+				height,
+				width*w.cellWidthPx,
+				height*w.cellHeightPx,
+			)
+		}
+	}
+	return w.pty.Resize(width, height)
+}
+
+// setCellPixelSize records the cell size the pty reports from its next
+// resize on. It reports whether the size changed.
+func (w *muxWindow) setCellPixelSize(width int, height int) bool {
+	if w == nil {
+		return false
+	}
+	w.ptyResizeMu.Lock()
+	defer w.ptyResizeMu.Unlock()
+	if w.cellWidthPx == width && w.cellHeightPx == height {
+		return false
+	}
+	w.cellWidthPx, w.cellHeightPx = width, height
+	return true
+}
+
+// reportCellPixelSize gives the pty's current grid again with the window's
+// cell size, so the foreground program sees the new pixel size. It leaves the
+// resize generation alone: a redraw dance in flight still restores its size.
+func (w *muxWindow) reportCellPixelSize() {
+	if w == nil || w.pty == nil {
+		return
+	}
+	w.ptyResizeMu.Lock()
+	defer w.ptyResizeMu.Unlock()
+	if w.closedPty == w.pty || w.ptyWidth <= 0 || w.ptyHeight <= 0 {
+		return
+	}
+	_ = w.resizePtyGridLocked(w.ptyWidth, w.ptyHeight)
 }
 
 // ptySizeIs reports whether the PTY already holds this geometry, so callers can
@@ -508,7 +572,7 @@ func (w *muxWindow) resizePtyIfCurrent(
 	if w.resizeGeneration.Load() != generation {
 		return
 	}
-	if err := w.pty.Resize(width, height); err == nil {
+	if err := w.resizePtyGridLocked(width, height); err == nil {
 		w.ptyWidth = width
 		w.ptyHeight = height
 	}
@@ -592,9 +656,18 @@ type controlMessage struct {
 	Height         int    `json:"height,omitempty"`
 	PixelWidth     int    `json:"pixelWidth,omitempty"`
 	PixelHeight    int    `json:"pixelHeight,omitempty"`
-	Redraw         bool   `json:"redraw,omitempty"`
-	NoPrefix       bool   `json:"noPrefix,omitempty"`
-	ClipViewport   bool   `json:"clipViewport,omitempty"`
+	// CellWidth and CellHeight are the client terminal's cell size in pixels,
+	// read from its tty, in an attach hello, a resize or a cell_size request.
+	// Zero means unknown.
+	CellWidth  int `json:"cellWidth,omitempty"`
+	CellHeight int `json:"cellHeight,omitempty"`
+	// CellToken names one attach connection, in its hello and in its
+	// cell_size requests, because a reconnect can reuse a client id while the
+	// old attach is still registered.
+	CellToken    string `json:"cellToken,omitempty"`
+	Redraw       bool   `json:"redraw,omitempty"`
+	NoPrefix     bool   `json:"noPrefix,omitempty"`
+	ClipViewport bool   `json:"clipViewport,omitempty"`
 	// SuppressReplay selects a native ACP placeholder without redrawing it into
 	// the attached terminal because the app replaces that viewport natively.
 	SuppressReplay bool `json:"suppressReplay,omitempty"`
@@ -773,6 +846,10 @@ type muxServer struct {
 	height          int
 	publishedWidth  int
 	publishedHeight int
+	// cellWidthPx and cellHeightPx are the primary attach client's cell size in
+	// pixels. Like the grid, they stay after that client detaches. Guarded by mu.
+	cellWidthPx  int
+	cellHeightPx int
 
 	// detachedReplyClients holds removed attach clients whose input worker
 	// may still be writing received replies to windows; see
@@ -918,9 +995,13 @@ type muxWindow struct {
 	pty                  muxPty
 	ptyResizeMu          sync.Mutex
 	// closedPty is the handle closePty already closed; guarded by ptyResizeMu.
-	closedPty                   muxPty
-	ptyWidth                    int
-	ptyHeight                   int
+	closedPty muxPty
+	ptyWidth  int
+	ptyHeight int
+	// cellWidthPx and cellHeightPx are the cell size in pixels the pty reports
+	// with its grid, or zero to report no pixel size. Guarded by ptyResizeMu.
+	cellWidthPx                 int
+	cellHeightPx                int
 	resizeGeneration            atomic.Uint64
 	proc                        muxProcess
 	history                     []byte
@@ -1223,6 +1304,9 @@ type attachClient struct {
 	id           string
 	width        int
 	height       int
+	cellWidth    int
+	cellHeight   int
+	cellToken    string
 	clipViewport bool
 	// capabilityHint holds this client's replies to static terminal capability
 	// queries. It is per client because the answer describes *this* terminal:
@@ -1593,12 +1677,17 @@ func attachCommand(args []string) {
 		attachToken = reporter.token
 	}
 
+	cellWidth, cellHeight := terminalCellPixelSize()
+	cellToken := newCellSizeToken()
 	hello := controlMessage{
 		Role:           "attach",
 		Session:        session,
 		ClientID:       resolvedClientID,
 		Width:          width,
 		Height:         height,
+		CellWidth:      cellWidth,
+		CellHeight:     cellHeight,
+		CellToken:      cellToken,
 		Data:           string(themeHint),
 		CapabilityHint: string(capabilityHint),
 		NoPrefix:       *noPrefix,
@@ -1642,14 +1731,31 @@ func attachCommand(args []string) {
 	}
 	defer restoreTerminal()
 
+	explicitSize := *widthFlag > 0 && *heightFlag > 0
+	// The server writes the replay only after registering this attach, so the
+	// first output means a resize or cell_size for this client will not be
+	// dropped.
+	registered := make(chan struct{})
 	stopResize := forwardResizeSignals(
 		session,
 		resolvedClientID,
 		width,
 		height,
-		*widthFlag > 0 && *heightFlag > 0,
+		explicitSize,
+		registered,
 	)
 	defer stopResize()
+	if explicitSize {
+		stopCellSize := forwardCellSizeSignals(
+			session,
+			resolvedClientID,
+			cellToken,
+			cellWidth,
+			cellHeight,
+			registered,
+		)
+		defer stopCellSize()
+	}
 
 	// The attach lives for as long as the server keeps the connection open. The
 	// input relay (client stdin -> server) is best-effort: a stdin EOF must not
@@ -1664,7 +1770,7 @@ func attachCommand(args []string) {
 	}()
 
 	modes := newAttachModeTracker(os.Stdout)
-	attachOut := attachOutputWriter(modes)
+	attachOut := notifyFirstWrite(attachOutputWriter(modes), registered)
 	copyErr := relayAttachOutput(attachOut, conn, outputLimit, outputDelivered)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
@@ -1686,6 +1792,42 @@ func attachCommand(args []string) {
 			fmt.Fprintf(os.Stderr, "\r\nmonkeymux: session %s ended\r\n", session)
 		}
 	}
+}
+
+// newCellSizeToken returns a random name for one attach connection, or ""
+// if the system has no randomness, which falls back to the client id.
+func newCellSizeToken() string {
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(token)
+}
+
+// firstWriteNotifier closes a channel at its first write and keeps the
+// wrapped writer's Flush.
+type firstWriteNotifier struct {
+	io.Writer
+	once  sync.Once
+	first chan struct{}
+}
+
+func notifyFirstWrite(writer io.Writer, first chan struct{}) io.Writer {
+	return &firstWriteNotifier{Writer: writer, first: first}
+}
+
+func (w *firstWriteNotifier) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.once.Do(func() { close(w.first) })
+	}
+	return w.Writer.Write(data)
+}
+
+func (w *firstWriteNotifier) Flush() error {
+	if flusher, ok := w.Writer.(interface{ Flush() error }); ok {
+		return flusher.Flush()
+	}
+	return nil
 }
 
 type runningSessionInfo struct {
@@ -6767,7 +6909,23 @@ func newWindowAgentTool(
 }
 
 func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error) {
-	return s.createWindowWithStarter(options, startWindow)
+	return s.createWindowWithStarter(options, s.startWindowWithCellSize)
+}
+
+// startWindowWithCellSize starts a window whose pty already reports the pixel
+// size of its grid, so a program that reads it once at launch sees it.
+func (s *muxServer) startWindowWithCellSize(
+	cmd *exec.Cmd,
+	cols int,
+	rows int,
+) (muxPty, muxProcess, error) {
+	s.mu.Lock()
+	cellWidth, cellHeight := s.cellWidthPx, s.cellHeightPx
+	s.mu.Unlock()
+	if !validCellPixelSize(cellWidth, cellHeight) {
+		return startWindow(cmd, cols, rows)
+	}
+	return startWindowSized(cmd, cols, rows, cols*cellWidth, rows*cellHeight)
 }
 
 // createWindowWithStarter lets lifecycle tests gate startup without global hooks.
@@ -6911,6 +7069,11 @@ func (s *muxServer) createWindowWithStarter(
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
 	}
 	s.windows = append(s.windows, window)
+	// The pty started with the cell size known then; a client may have
+	// reported another one while the program was starting.
+	if window.setCellPixelSize(s.cellWidthPx, s.cellHeightPx) {
+		window.reportCellPixelSize()
+	}
 	if s.activeID != "" && s.activeID != window.id {
 		s.lastActiveID = s.activeID
 	}
@@ -7652,6 +7815,10 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
 	}
+	if validCellPixelSize(hello.CellWidth, hello.CellHeight) {
+		client.cellWidth, client.cellHeight = hello.CellWidth, hello.CellHeight
+	}
+	client.cellToken = strings.TrimSpace(hello.CellToken)
 	go client.writeLoop()
 	return client
 }
@@ -9055,6 +9222,96 @@ func (s *muxServer) primaryAttachSizeLocked() (int, int) {
 	return width, height
 }
 
+// refreshCellPixelSizeLocked adopts the primary attach client's cell size
+// and gives it to every window, so each pty reports it from its next resize.
+// A client that reports none leaves the last known size. It reports whether
+// the size changed. s.mu must be held.
+func (s *muxServer) refreshCellPixelSizeLocked() bool {
+	width, height := s.cellWidthPx, s.cellHeightPx
+	if client := s.primaryAttachClientLocked(); client != nil &&
+		validCellPixelSize(client.cellWidth, client.cellHeight) {
+		width, height = client.cellWidth, client.cellHeight
+	}
+	if width == s.cellWidthPx && height == s.cellHeightPx {
+		return false
+	}
+	s.cellWidthPx, s.cellHeightPx = width, height
+	for _, window := range s.windows {
+		window.setCellPixelSize(width, height)
+	}
+	return true
+}
+
+// applyCellPixelSizeLocked adopts the primary client's cell size and, when it
+// changed, reports it to the active window's program at the grid its pty
+// already has. Background windows report it at their next resize. s.mu must
+// be held.
+func (s *muxServer) applyCellPixelSizeLocked() {
+	if !s.refreshCellPixelSizeLocked() {
+		return
+	}
+	window := s.windowByIDLocked(s.activeID)
+	if window == nil || window.closed {
+		return
+	}
+	window.reportCellPixelSize()
+}
+
+// attachClientByCellTokenLocked finds the attach connection whose hello
+// carried token. s.mu must be held.
+func (s *muxServer) attachClientByCellTokenLocked(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	for _, client := range s.attachClients {
+		if client.cellToken == token {
+			return client
+		}
+	}
+	return nil
+}
+
+// recordAttachClientCellSize records a client's cell size for the resize that
+// follows it.
+func (s *muxServer) recordAttachClientCellSize(
+	clientID string,
+	width int,
+	height int,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if client := s.attachClientByIDLocked(clientID); client != nil {
+		client.cellWidth, client.cellHeight = width, height
+	}
+}
+
+// updateAttachClientCellSize records a client's cell size and, for the
+// primary client, reports it to the active window. A token names the exact
+// attach connection; without one the newest attach with clientID is used.
+func (s *muxServer) updateAttachClientCellSize(
+	clientID string,
+	token string,
+	width int,
+	height int,
+) {
+	s.resizeMu.Lock()
+	defer s.resizeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	client := s.attachClientByCellTokenLocked(token)
+	if client == nil && strings.TrimSpace(token) == "" {
+		client = s.attachClientByIDLocked(clientID)
+	}
+	if client == nil {
+		return
+	}
+	client.cellWidth, client.cellHeight = width, height
+	if s.attachConn == client.conn {
+		s.applyCellPixelSizeLocked()
+	}
+}
+
 func (s *muxServer) hasViewportClippingClientLocked() bool {
 	for _, client := range s.attachClients {
 		if client.clipViewport {
@@ -9259,6 +9516,7 @@ func (s *muxServer) focusAttachClientLocked(
 	s.nextFocusSequence++
 	registered.focusSequence.Store(s.nextFocusSequence)
 	s.attachConn = registered.conn
+	s.applyCellPixelSizeLocked()
 	targetWidth, targetHeight := s.primaryAttachSizeLocked()
 	sizeChanged :=
 		targetWidth != s.publishedWidth ||
@@ -9367,6 +9625,7 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		}
 		if replacement != nil {
 			s.attachConn = replacement.conn
+			s.applyCellPixelSizeLocked()
 		}
 	}
 	width, height = s.primaryAttachSizeLocked()
@@ -9462,6 +9721,7 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	client.focusSequence.Store(s.nextFocusSequence)
 	s.attachClients[conn] = client
 	s.attachConn = conn
+	s.applyCellPixelSizeLocked()
 	s.refreshWindowVisibilityLocked()
 	if themeHint := hintDataFromString(hello.Data, themeHintLimitBytes); len(themeHint) > 0 {
 		s.themeHint = append(s.themeHint[:0], themeHint...)
@@ -9764,6 +10024,10 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			client.sendError(request, errors.New("invalid terminal size"))
 			return
 		}
+		if validCellPixelSize(request.CellWidth, request.CellHeight) {
+			// Recorded before the resize, which applies it with the grid.
+			s.recordAttachClientCellSize(request.ClientID, request.CellWidth, request.CellHeight)
+		}
 		s.resizeForClient(
 			request.ClientID,
 			request.Width,
@@ -9771,6 +10035,18 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			request.Redraw,
 		)
 		client.send(controlResponse{ID: request.ID, Type: "resized", Status: "ok"})
+	case "cell_size":
+		if !validCellPixelSize(request.CellWidth, request.CellHeight) {
+			client.sendError(request, errors.New("invalid cell size"))
+			return
+		}
+		s.updateAttachClientCellSize(
+			request.ClientID,
+			request.CellToken,
+			request.CellWidth,
+			request.CellHeight,
+		)
+		client.send(controlResponse{ID: request.ID, Type: "cell_size", Status: "ok"})
 	case "focus_client":
 		if strings.TrimSpace(request.ClientID) == "" {
 			client.sendError(request, errors.New("missing client id"))
@@ -11000,6 +11276,7 @@ func (s *muxServer) resizeActiveLocked(width int, height int) {
 }
 
 func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int) {
+	s.refreshCellPixelSizeLocked()
 	if window == nil || window.closed || window.pty == nil {
 		return
 	}
@@ -19577,13 +19854,47 @@ func sendResize(session string, clientID string, width int, height int) {
 	_ = enc.Encode(controlMessage{Role: "control", Session: session})
 	_ = dec.Decode(&controlResponse{})
 	_ = dec.Decode(&controlResponse{})
+	cellWidth, cellHeight := terminalCellPixelSize()
 	_ = enc.Encode(controlMessage{
-		ID:       strconv.FormatInt(time.Now().UnixNano(), 10),
-		Type:     "resize",
-		ClientID: clientID,
-		Width:    width,
-		Height:   height,
-		Session:  session,
+		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+		Type:       "resize",
+		ClientID:   clientID,
+		Width:      width,
+		Height:     height,
+		CellWidth:  cellWidth,
+		CellHeight: cellHeight,
+		Session:    session,
+	})
+}
+
+// sendCellSize reports this client terminal's cell size in pixels. A server
+// older than cell_size answers with an error, which is not read.
+func sendCellSize(
+	session string,
+	clientID string,
+	token string,
+	width int,
+	height int,
+) {
+	conn, err := dialSession(session)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+	_ = enc.Encode(controlMessage{Role: "control", Session: session})
+	_ = dec.Decode(&controlResponse{})
+	_ = dec.Decode(&controlResponse{})
+	_ = enc.Encode(controlMessage{
+		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+		Type:       "cell_size",
+		ClientID:   clientID,
+		CellToken:  token,
+		CellWidth:  width,
+		CellHeight: height,
+		Session:    session,
 	})
 }
 

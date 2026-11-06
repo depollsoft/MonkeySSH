@@ -343,6 +343,18 @@ func (p *winProcess) Kill() {
 	}
 }
 
+// startWindowSized starts a ConPTY window. ConPTY has no pixel size, so the
+// pixel dimensions are dropped.
+func startWindowSized(
+	cmd *exec.Cmd,
+	cols int,
+	rows int,
+	_ int,
+	_ int,
+) (muxPty, muxProcess, error) {
+	return startWindow(cmd, cols, rows)
+}
+
 // startWindow launches cmd attached to a new ConPTY sized to cols x rows.
 func startWindow(cmd *exec.Cmd, cols int, rows int) (muxPty, muxProcess, error) {
 	if cmd.Err != nil {
@@ -1064,6 +1076,18 @@ func detectSystemMemoryBytes() uint64 {
 	return status.totalPhys
 }
 
+// forwardCellSizeSignals has nothing to report on Windows; see
+// terminalCellPixelSize.
+func forwardCellSizeSignals(string, string, string, int, int, <-chan struct{}) func() {
+	return func() {}
+}
+
+// terminalCellPixelSize reports no cell size: a Windows console has no
+// pixel size to read, and ConPTY windows could not pass one on.
+func terminalCellPixelSize() (int, int) {
+	return 0, 0
+}
+
 func terminalSize() (int, int) {
 	if columns, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil &&
 		columns > 0 && rows > 0 {
@@ -1090,6 +1114,7 @@ func forwardResizeSignals(
 	initialWidth int,
 	initialHeight int,
 	explicitSize bool,
+	_ <-chan struct{},
 ) func() {
 	if explicitSize {
 		return func() {}
