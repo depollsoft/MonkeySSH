@@ -18,7 +18,7 @@ What's fixed
 - Lines that a full-screen program scrolls in take its background color.
 - In long sessions, the terminal no longer draws a character with another cell's glyph or color.
 - Installing Claude Code, OpenCode, and OpenClaw works on hosts with npm 12.
-- Agent Management shows Hermes updates again, and usage reads current OpenCode 2 accounts.
+- Agent Management shows Hermes updates again, and usage reads the current OpenCode 2 accounts and Claude Code sign-in.
 - Codex windows no longer show a background server warning, and follow the new thread after /fork or /clear.
 - Fast scrolling in Antigravity keeps up with your finger in short panes.
 - Tab labels are easier to read in every theme, and blank shapes no longer appear beside the chat composer.
