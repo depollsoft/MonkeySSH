@@ -881,9 +881,12 @@ jobs:
       - name: Install Linux build dependencies
         id: apt-packages
         background: true
+        # A mirror connection can stall mid-download, and apt then waits until
+        # the job times out. Give up on a stalled transfer after 30 s and retry.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3)
+          sudo apt-get "${apt_options[@]}" update -qq
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev
 
       - uses: $/.github/actions/flutter-setup
