@@ -95,6 +95,54 @@ test('Claude and Cursor environment tokens bypass malformed and unreadable store
   }
 });
 
+test('Claude usage takes the sign-in that expires last from the file or the keychain', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {claude} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-claude-stores-'));
+  const keys = ['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'];
+  const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+  const homedir = os.homedir;
+  const signIn = (accessToken, expiresAt) => JSON.stringify({claudeAiOauth: {accessToken, expiresAt}});
+  const darwin = value => ({platform: 'darwin', readKeychain: service => {
+    assert.equal(service, 'Claude Code-credentials');
+    if (value instanceof Error) throw value;
+    return value;
+  }});
+  const tokenUsed = async options => {
+    let used;
+    await claude(async (_, request) => { used = request.token; return {five_hour: {utilization: 1}}; }, options);
+    return used;
+  };
+  try {
+    os.homedir = () => dir;
+    for (const k of keys) delete process.env[k];
+    fs.mkdirSync(path.join(dir, '.claude'));
+    const file = path.join(dir, '.claude', '.credentials.json');
+    // An SSH session with the keychain locked wrote the file; Claude Code
+    // later refreshed the keychain, and the file's token expired.
+    fs.writeFileSync(file, signIn('EXPIRED_FILE', 1000));
+    assert.equal(await tokenUsed(darwin(signIn('FRESH_KEYCHAIN', 2000))), 'FRESH_KEYCHAIN');
+    fs.writeFileSync(file, signIn('FRESH_FILE', 3000));
+    assert.equal(await tokenUsed(darwin(signIn('OLD_KEYCHAIN', 2000))), 'FRESH_FILE');
+    // A locked keychain or an unreadable item does not hide the file's token.
+    assert.equal(await tokenUsed(darwin(new Error('unavailable'))), 'FRESH_FILE');
+    assert.equal(await tokenUsed(darwin('{')), 'FRESH_FILE');
+    assert.equal(await tokenUsed({platform: 'linux', readKeychain: () => assert.fail('keychain read off macOS')}), 'FRESH_FILE');
+    // A malformed file does not hide the keychain's token.
+    fs.writeFileSync(file, '{');
+    assert.equal(await tokenUsed(darwin(signIn('FRESH_KEYCHAIN', 2000))), 'FRESH_KEYCHAIN');
+    // With no token anywhere, a store that failed is unavailable; otherwise sign in.
+    await assert.rejects(claude(async () => ({}), darwin(null)), /unavailable/);
+    fs.rmSync(file);
+    await assert.rejects(claude(async () => ({}), darwin(null)), /signInRequired/);
+    await assert.rejects(claude(async () => ({}), darwin(new Error('unavailable'))), /unavailable/);
+  } finally {
+    os.homedir = homedir;
+    for (const k of keys) saved[k] == null ? delete process.env[k] : process.env[k] = saved[k];
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('Hermes copilot pool entries use GitHub quota and its provider label', async () => {
   const fs = require('fs'), os = require('os'), path = require('path');
   const {configuredAccounts, multiProvider, providerUsage} = require('../../assets/scripts/agent_usage_probe.cjs');

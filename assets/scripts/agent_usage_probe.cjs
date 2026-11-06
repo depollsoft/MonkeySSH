@@ -253,17 +253,39 @@ function keychain(service, account) {
     throw new Error('unavailable'); // Locked or inaccessible keychain.
   }
 }
-async function claude(fetch = requestJson) {
-  let token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (!token) {
-    const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-    let credentials = readJson(path.join(dir, '.credentials.json'));
-    if (!credentials.claudeAiOauth && process.platform === 'darwin' && !process.env.CLAUDE_CONFIG_DIR) {
-      const value = keychain('Claude Code-credentials');
-      if (value) { try { credentials = JSON.parse(value); } catch { throw new Error('unavailable'); } }
-    }
-    token = credentials.claudeAiOauth?.accessToken;
+// Claude Code keeps its sign-in in the macOS keychain, and in .credentials.json
+// when it cannot use the keychain (an SSH session with the keychain locked).
+// Whichever it refreshed last holds the live token; the other can hold an
+// expired one. So read both and use the token that expires last. A store that
+// cannot be read matters only when the other has no token.
+function claudeOAuth({readKeychain = keychain, platform = process.platform} = {}) {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const stores = [() => readJson(path.join(dir, '.credentials.json'))];
+  if (platform === 'darwin' && !process.env.CLAUDE_CONFIG_DIR) {
+    stores.push(() => {
+      const value = readKeychain('Claude Code-credentials');
+      if (!value) return {};
+      try { return parseCredentials(value); } catch { throw new Error('unavailable'); }
+    });
   }
+  const signIns = [];
+  let failure;
+  for (const read of stores) {
+    try {
+      const oauth = read().claudeAiOauth;
+      if (typeof oauth?.accessToken === 'string' && oauth.accessToken) signIns.push(oauth);
+    } catch (error) { failure ??= error; }
+  }
+  if (!signIns.length) {
+    if (failure) throw failure;
+    return undefined;
+  }
+  const expiry = oauth => Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : -Infinity;
+  return signIns.reduce((best, oauth) => expiry(oauth) > expiry(best) ? oauth : best);
+}
+
+async function claude(fetch = requestJson, options = {}) {
+  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || claudeOAuth(options)?.accessToken;
   if (!token) throw new Error('signInRequired');
   return claudeUsage(await fetch('https://api.anthropic.com/api/oauth/usage', {
     token, headers: {'anthropic-beta': 'oauth-2025-04-20'},
