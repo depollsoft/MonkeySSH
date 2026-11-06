@@ -1,12 +1,24 @@
 What's new
 
-- Use MonkeySSH on iPhone Duo. Back, actions, terminal keys, and the home tabs move into the vertical bar, so each screen gets its full height. Turned sideways or opened wide, the keys follow the bar.
-- Hold iPhone Duo like a book to see hosts beside live connections, or the window navigator beside the terminal.
-- Prop it up like a laptop to keep the terminal above the fold, with the window navigator below.
-- The lock screen spreads across the fold, with the PIN on its own page.
+- Emoji sequences, flags, skin tones, accented letters, Hangul, and Indic scripts show as whole characters in the terminal.
+- In shells that mark their prompts, such as fish 4.1 and Nushell, tap the command you are typing to move the cursor there. Ctrl+L at the prompt keeps the old screen in scrollback.
+- Terminal programs can copy and paste text and images with the kitty clipboard protocol, following your clipboard settings.
+- If a Mac drops the connection after you type its password to unlock FileVault, MonkeySSH waits for it to restart and signs in again.
+- Agent Management installs Pi with its official installer.
+- Usage rings now cover Muse Code, OpenCode Go plan limits, and OpenCode Console budgets.
+- On iPad and other wide screens, chat reads in a centered column with the composer lined up beneath it.
+- On iPhone Duo, tab labels follow Dynamic Type, a + key above the tabs adds hosts, keys, and snippets, and the terminal shows which host you are typing into.
 
 What's fixed
 
-- Add Host, Edit Host, MonkeySSH Pro, and the SFTP toolbar stay clear of the notch in landscape.
-- Unlock stays in view above the keyboard when the phone is turned sideways.
-- The Snippets header fits on narrow screens.
+- MonkeyMux stays attached when a slow network stalls the connection, instead of showing "MonkeyMux disconnected".
+- When a program in a MonkeyMux window exits, the shell that replaces it no longer starts with stray characters.
+- Images from terminal programs come back when you return to a MonkeyMux window, and no longer carry over into the next one.
+- Lines that a full-screen program scrolls in take its background color.
+- In long sessions, the terminal no longer draws a character with another cell's glyph or color.
+- Installing Claude Code, OpenCode, and OpenClaw works on hosts with npm 12.
+- Agent Management shows Hermes updates again, and usage reads current OpenCode 2 accounts.
+- Codex windows no longer show a background server warning, and follow the new thread after /fork or /clear.
+- Fast scrolling in Antigravity keeps up with your finger in short panes.
+- Tab labels are easier to read in every theme, and blank shapes no longer appear beside the chat composer.
+- Many terminal emulation fixes, checked against the esctest conformance suite.

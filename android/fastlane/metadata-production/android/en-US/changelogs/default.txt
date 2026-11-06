@@ -1,4 +1,12 @@
+What's new
+
+- Emoji, flags, accents, Hangul, and Indic scripts show as whole characters.
+- Tap a fish or Nushell prompt to move the cursor.
+- Programs can copy and paste images through the kitty clipboard protocol.
+- Reconnects after a Mac's FileVault unlock over SSH.
+- Muse Code and OpenCode Go usage rings.
+
 What's fixed
 
-- Unlock stays in view above the keyboard when the phone is turned sideways.
-- The Snippets header fits on narrow screens.
+- MonkeyMux stays attached on stalled networks.
+- Fixes for terminal images and background colors, npm 12 agent installs, and a Codex warning.
