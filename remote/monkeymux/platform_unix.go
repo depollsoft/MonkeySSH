@@ -877,9 +877,7 @@ func forwardResizeSignals(
 	explicitSize bool,
 ) func() {
 	if explicitSize && initialWidth > 0 && initialHeight > 0 {
-		// The client sizes the grid itself (the app sends resize requests),
-		// but its cell size still comes from this tty.
-		return forwardCellSizeSignals(session, clientID)
+		return func() {}
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGWINCH)
@@ -904,23 +902,41 @@ func forwardResizeSignals(
 }
 
 // forwardCellSizeSignals reports the tty's cell size each time it changes,
-// for a client that sizes the grid itself. The hello carried the first one.
-func forwardCellSizeSignals(session string, clientID string) func() {
+// for a client that sizes the grid itself (the app sends its own resize
+// requests). sentWidth x sentHeight is what the hello carried. Nothing is sent
+// until registered closes: before the server registers this attach it drops a
+// cell_size for the client, so a change in that window is reported then.
+func forwardCellSizeSignals(
+	session string,
+	clientID string,
+	sentWidth int,
+	sentHeight int,
+	registered <-chan struct{},
+) func() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGWINCH)
 	done := make(chan struct{})
-	lastWidth, lastHeight := terminalCellPixelSize()
 	go func() {
+		lastWidth, lastHeight := sentWidth, sentHeight
+		report := func() {
+			width, height := terminalCellPixelSize()
+			if !validCellPixelSize(width, height) ||
+				(width == lastWidth && height == lastHeight) {
+				return
+			}
+			lastWidth, lastHeight = width, height
+			sendCellSize(session, clientID, width, height)
+		}
+		select {
+		case <-registered:
+			report()
+		case <-done:
+			return
+		}
 		for {
 			select {
 			case <-signals:
-				width, height := terminalCellPixelSize()
-				if !validCellPixelSize(width, height) ||
-					(width == lastWidth && height == lastHeight) {
-					continue
-				}
-				lastWidth, lastHeight = width, height
-				sendCellSize(session, clientID, width, height)
+				report()
 			case <-done:
 				return
 			}

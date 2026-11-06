@@ -1724,14 +1724,28 @@ func attachCommand(args []string) {
 	}
 	defer restoreTerminal()
 
+	explicitSize := *widthFlag > 0 && *heightFlag > 0
 	stopResize := forwardResizeSignals(
 		session,
 		resolvedClientID,
 		width,
 		height,
-		*widthFlag > 0 && *heightFlag > 0,
+		explicitSize,
 	)
 	defer stopResize()
+	// The server writes the replay only after registering this attach, so the
+	// first output means a cell_size for this client will not be dropped.
+	registered := make(chan struct{})
+	if explicitSize {
+		stopCellSize := forwardCellSizeSignals(
+			session,
+			resolvedClientID,
+			cellWidth,
+			cellHeight,
+			registered,
+		)
+		defer stopCellSize()
+	}
 
 	// The attach lives for as long as the server keeps the connection open. The
 	// input relay (client stdin -> server) is best-effort: a stdin EOF must not
@@ -1746,7 +1760,7 @@ func attachCommand(args []string) {
 	}()
 
 	modes := newAttachModeTracker(os.Stdout)
-	attachOut := attachOutputWriter(modes)
+	attachOut := notifyFirstWrite(attachOutputWriter(modes), registered)
 	copyErr := relayAttachOutput(attachOut, conn, outputLimit, outputDelivered)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
@@ -1768,6 +1782,32 @@ func attachCommand(args []string) {
 			fmt.Fprintf(os.Stderr, "\r\nmonkeymux: session %s ended\r\n", session)
 		}
 	}
+}
+
+// firstWriteNotifier closes a channel at its first write and keeps the
+// wrapped writer's Flush.
+type firstWriteNotifier struct {
+	io.Writer
+	once  sync.Once
+	first chan struct{}
+}
+
+func notifyFirstWrite(writer io.Writer, first chan struct{}) io.Writer {
+	return &firstWriteNotifier{Writer: writer, first: first}
+}
+
+func (w *firstWriteNotifier) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.once.Do(func() { close(w.first) })
+	}
+	return w.Writer.Write(data)
+}
+
+func (w *firstWriteNotifier) Flush() error {
+	if flusher, ok := w.Writer.(interface{ Flush() error }); ok {
+		return flusher.Flush()
+	}
+	return nil
 }
 
 type runningSessionInfo struct {

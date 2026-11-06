@@ -277,3 +277,46 @@ func TestServerStartsWindowWithCellPixelSize(t *testing.T) {
 
 	assertPtyPixelSize(t, windowPty, 90, 30, 900, 600)
 }
+
+type flushCountingWriter struct {
+	writes  int
+	flushes int
+}
+
+func (w *flushCountingWriter) Write(data []byte) (int, error) {
+	w.writes++
+	return len(data), nil
+}
+
+func (w *flushCountingWriter) Flush() error {
+	w.flushes++
+	return nil
+}
+
+func TestNotifyFirstWriteClosesOnFirstOutputAndKeepsFlush(t *testing.T) {
+	inner := &flushCountingWriter{}
+	first := make(chan struct{})
+	writer := notifyFirstWrite(inner, first)
+
+	_, _ = writer.Write(nil)
+	select {
+	case <-first:
+		t.Fatal("empty write reported output")
+	default:
+	}
+	_, _ = writer.Write([]byte("\x1b]7502;window=1:@1\x07"))
+	_, _ = writer.Write([]byte("more"))
+	select {
+	case <-first:
+	default:
+		t.Fatal("first output was not reported")
+	}
+	flusher, ok := writer.(interface{ Flush() error })
+	if !ok {
+		t.Fatal("wrapped writer lost Flush")
+	}
+	_ = flusher.Flush()
+	if inner.writes != 3 || inner.flushes != 1 {
+		t.Fatalf("inner writes = %d, flushes = %d; want 3 and 1", inner.writes, inner.flushes)
+	}
+}

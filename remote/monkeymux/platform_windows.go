@@ -1076,6 +1076,12 @@ func detectSystemMemoryBytes() uint64 {
 	return status.totalPhys
 }
 
+// forwardCellSizeSignals has nothing to report on Windows; see
+// terminalCellPixelSize.
+func forwardCellSizeSignals(string, string, int, int, <-chan struct{}) func() {
+	return func() {}
+}
+
 // terminalCellPixelSize reports no cell size: a Windows console has no
 // pixel size to read, and ConPTY windows could not pass one on.
 func terminalCellPixelSize() (int, int) {
