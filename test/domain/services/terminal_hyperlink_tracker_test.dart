@@ -32,6 +32,8 @@ void main() {
     for (final destination in [
       'README.md:12',
       'MyWidget.dart:3:1',
+      '.env:12',
+      '123.dart:12',
       r'C:\project\main.dart#L12',
       'C:%5Cproject%5Cmain.dart#L12',
       'HTTPS://EXAMPLE.COM/Docs',

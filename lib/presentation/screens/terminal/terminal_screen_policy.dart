@@ -2723,6 +2723,8 @@ final _terminalBareFileLocationPattern = RegExp(
   r'^(?:\./)?([^/\\:?#]*\.[^/\\:?#]+):\d+(?::\d+)?([?#].*)?$',
 );
 
+final _terminalHyperlinkLocationSuffixPattern = RegExp(r':\d+(?::\d+)?$');
+
 final _terminalHyperlinkWindowsDrivePattern = RegExp(
   r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])',
 );
@@ -2772,7 +2774,7 @@ String? resolveTerminalFileLinkPath(String link) {
     // Strip source locations before decoding so an encoded colon remains part
     // of the filename. Explicit destinations also keep trailing punctuation.
     path = Uri.decodeComponent(
-      encodedPath.replaceFirst(_terminalFilePathStackTraceSuffixPattern, ''),
+      encodedPath.replaceFirst(_terminalHyperlinkLocationSuffixPattern, ''),
     );
   } on FormatException {
     return null;

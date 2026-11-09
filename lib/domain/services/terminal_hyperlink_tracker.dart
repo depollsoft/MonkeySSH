@@ -212,9 +212,9 @@ class TerminalHyperlinkTracker {
       return null;
     }
 
-    // Parsing can lowercase a bare filename mistaken for a scheme, such as
-    // README.md:12. Validate here but preserve the destination for tap routing.
-    return Uri.tryParse(uriText) == null ? null : uriText;
+    // URI parsing can lowercase README.md:12 or reject .env:12 entirely.
+    // Track the destination verbatim; tap routing validates it before opening.
+    return uriText;
   }
 
   void _closePendingHyperlink() {
