@@ -2719,24 +2719,13 @@ bool isTerminalFileUri(Uri uri) =>
 bool isResolvableTerminalLinkUri(Uri uri) =>
     isLaunchableTerminalUri(uri) || isTerminalFileUri(uri);
 
-/// Resolves the remote path a terminal `file:` link should open in the SFTP
-/// browser, or `null` when [link] is not a usable `file:` URI.
-///
-/// The URI host (if any) is ignored: the path is opened on the host the
-/// terminal session is connected to. Percent-encoding is decoded so the SFTP
-/// browser receives the literal path (e.g. `%20` becomes a space); escapes that
-/// are not valid UTF-8 make the link unusable rather than throwing.
-String? resolveTerminalFileUriPath(String link) {
-  final uri = Uri.tryParse(normalizeTerminalLinkCandidate(link));
-  if (uri == null || !isTerminalFileUri(uri)) {
-    return null;
-  }
-  try {
-    return Uri.decodeComponent(uri.path);
-  } on FormatException {
-    return null;
-  }
-}
+final _terminalBareFileLocationPattern = RegExp(
+  r'^(?:\./)?([^/\\:?#]*\.[^/\\:?#]+):\d+(?::\d+)?([?#].*)?$',
+);
+
+final _terminalHyperlinkWindowsDrivePattern = RegExp(
+  r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])',
+);
 
 /// Resolves an explicit terminal hyperlink to a path on the connected host.
 ///
@@ -2746,36 +2735,57 @@ String? resolveTerminalFileUriPath(String link) {
 /// with `./` so they can use the same verification as other relative paths.
 /// External schemes and network-path references are not remote file links.
 String? resolveTerminalFileLinkPath(String link) {
-  final candidate = normalizeTerminalLinkCandidate(link);
+  var candidate = link.trim();
+  if (candidate.toLowerCase().startsWith('www.') ||
+      candidate == '.' ||
+      candidate == '..') {
+    return null;
+  }
+  // A bare filename with a location otherwise looks like a URI scheme. Limit
+  // this exception to filenames with extensions so tel:1234 and custom:12
+  // still take the external/unsupported-scheme path.
+  final bareLocation = _terminalBareFileLocationPattern.firstMatch(candidate);
+  if (bareLocation != null) {
+    candidate = './${bareLocation[1]}${bareLocation[2] ?? ''}';
+  }
   final uri = Uri.tryParse(candidate);
   if (uri == null || uri.hasAuthority && !isTerminalFileUri(uri)) {
     return null;
   }
 
-  final String decodedPath;
-  try {
-    if (isTerminalFileUri(uri)) {
-      decodedPath = Uri.decodeComponent(uri.path);
-    } else if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(candidate) &&
-        uri.hasScheme) {
-      // Dart parses the drive letter as a URI scheme.
-      decodedPath = Uri.decodeComponent(
-        '${candidate.substring(0, 2)}${uri.path}',
-      ).replaceAll(r'\', '/');
-    } else if (!uri.hasScheme) {
-      decodedPath = Uri.decodeComponent(uri.path);
-    } else {
-      return null;
-    }
-  } on FormatException {
+  final String encodedPath;
+  if (isTerminalFileUri(uri)) {
+    // The URI authority is ignored: files open on the connected host.
+    encodedPath = uri.path;
+  } else if (_terminalHyperlinkWindowsDrivePattern.hasMatch(candidate) &&
+      uri.hasScheme) {
+    // Dart parses the drive letter as a URI scheme.
+    encodedPath = '${candidate.substring(0, 2)}${uri.path}';
+  } else if (!uri.hasScheme) {
+    encodedPath = uri.path;
+  } else {
     return null;
   }
 
-  final path = decodedPath.replaceFirst(
-    _terminalFilePathStackTraceSuffixPattern,
-    '',
-  );
-  if (path.isEmpty || path == '.' || path == '..' || path.startsWith('//')) {
+  var path = '';
+  try {
+    // Strip source locations before decoding so an encoded colon remains part
+    // of the filename. Explicit destinations also keep trailing punctuation.
+    path = Uri.decodeComponent(
+      encodedPath.replaceFirst(_terminalFilePathStackTraceSuffixPattern, ''),
+    );
+  } on FormatException {
+    return null;
+  }
+  if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(path)) {
+    path = path.replaceAll(r'\', '/');
+  }
+  if (path.isEmpty ||
+      path == '.' ||
+      path == '..' ||
+      path == './' ||
+      path == '../' ||
+      path.startsWith('//')) {
     return null;
   }
   return isSupportedTerminalFilePath(path) ? path : './$path';

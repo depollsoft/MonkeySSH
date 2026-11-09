@@ -93,13 +93,13 @@ class TerminalHyperlinkTracker {
           end: _currentCursorOffset(terminal),
           target: offset,
         )) {
-      return activeHyperlink.uri.toString();
+      return activeHyperlink.uri;
     }
 
     for (final hyperlink in _trackedHyperlinks.reversed) {
       if (identical(hyperlink.buffer, terminal.buffer) &&
           hyperlink.contains(offset)) {
-        return hyperlink.uri.toString();
+        return hyperlink.uri;
       }
     }
 
@@ -179,7 +179,7 @@ class TerminalHyperlinkTracker {
           lastCell != null &&
           row >= start.y &&
           row <= lastCell.y) {
-        destination = activeHyperlink.uri.toString();
+        destination = activeHyperlink.uri;
       }
     }
     for (final hyperlink in _trackedHyperlinks) {
@@ -188,7 +188,7 @@ class TerminalHyperlinkTracker {
           row > hyperlink.lastCellAnchor.y) {
         continue;
       }
-      final nextDestination = hyperlink.uri.toString();
+      final nextDestination = hyperlink.uri;
       if (destination != null && destination != nextDestination) {
         return null;
       }
@@ -202,7 +202,7 @@ class TerminalHyperlinkTracker {
   @visibleForTesting
   int get trackedHyperlinkCount => _trackedHyperlinks.length;
 
-  Uri? _parseHyperlinkUri(List<String> args) {
+  String? _parseHyperlinkUri(List<String> args) {
     if (args.length < 2) {
       return null;
     }
@@ -212,7 +212,9 @@ class TerminalHyperlinkTracker {
       return null;
     }
 
-    return Uri.tryParse(uriText);
+    // Parsing can lowercase a bare filename mistaken for a scheme, such as
+    // README.md:12. Validate here but preserve the destination for tap routing.
+    return Uri.tryParse(uriText) == null ? null : uriText;
   }
 
   void _closePendingHyperlink() {
@@ -297,7 +299,7 @@ class _PendingTerminalHyperlink {
     required this.startAnchor,
   });
 
-  final Uri uri;
+  final String uri;
   final Buffer buffer;
   final CellAnchor startAnchor;
 
@@ -316,7 +318,7 @@ class _TrackedTerminalHyperlink {
     required this.lastCellAnchor,
   });
 
-  final Uri uri;
+  final String uri;
   final Buffer buffer;
   final CellAnchor startAnchor;
   final CellAnchor lastCellAnchor;

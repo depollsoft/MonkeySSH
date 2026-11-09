@@ -19468,24 +19468,39 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
-    for (final (link, remotePath) in [
+    for (final (link, remotePath) in <(String, String?)>[
       (
         '.github/workflows/deploy-pr-preview.yml#L223',
         '/srv/project/.github/workflows/deploy-pr-preview.yml',
       ),
       ('README.md#overview', '/srv/project/README.md'),
+      ('README.md:12', '/srv/project/README.md'),
+      ('main.dart:12:3', '/srv/project/main.dart'),
       ('lib/my%20file.dart:12:3', '/srv/project/lib/my file.dart'),
       ('file://build-host/var/log/app.log#L12', '/var/log/app.log'),
+      (r'C:\project\main.dart#L12', 'C:/project/main.dart'),
+      ('C:%5Cproject%5Cmain.dart#L12', 'C:/project/main.dart'),
+      ('lib/report.txt!', '/srv/project/lib/report.txt!'),
+      ('lib/a%3B', '/srv/project/lib/a;'),
+      ('lib/main.dart%3A12', '/srv/project/lib/main.dart:12'),
+      ('missing.dart', null),
+      ('README.md#unknown-cwd', null),
     ]) {
       testWidgets(
-        'OSC 8 file hyperlink $link opens on the connected host',
+        'OSC 8 file hyperlink $link ${remotePath == null ? 'reports failure' : 'opens on the connected host'}',
         (tester) async {
           const workingDirectory = '/srv/project';
+          final hasWorkingDirectory = link != 'README.md#unknown-cwd';
           final sftp = _MockSftpClient();
           final openedPaths = <String>[];
           when(() => sshClient.sftp()).thenAnswer((_) async => sftp);
-          when(() => sftp.stat(remotePath))
-              .thenAnswer((_) async => SftpFileAttrs());
+          when(() => sftp.stat(any())).thenAnswer((invocation) async {
+            if (invocation.positionalArguments.single == remotePath) {
+              return SftpFileAttrs();
+            }
+            // ignore: only_throw_errors
+            throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+          });
 
           final router = GoRouter(
             initialLocation:
@@ -19518,12 +19533,14 @@ void main() {
             buildScreen(child: MaterialApp.router(routerConfig: router)),
           );
           await tester.pumpAndSettle();
-          shellStdoutController.add(
-            Uint8List.fromList(
-              utf8.encode('\x1b]7;file://build-host$workingDirectory\x07'),
-            ),
-          );
-          await tester.pumpAndSettle();
+          if (hasWorkingDirectory) {
+            shellStdoutController.add(
+              Uint8List.fromList(
+                utf8.encode('\x1b]7;file://build-host$workingDirectory\x07'),
+              ),
+            );
+            await tester.pumpAndSettle();
+          }
 
           session.terminal!
             ..write('\x1b[?1003h\x1b[?1006h')
@@ -19545,14 +19562,20 @@ void main() {
           );
           await tester.pumpAndSettle();
 
-          expect(openedPaths, [remotePath]);
-          expect(find.text('SFTP opened'), findsOneWidget);
+          if (remotePath == null) {
+            expect(openedPaths, isEmpty);
+            expect(find.text('SFTP opened'), findsNothing);
+            expect(find.textContaining('Could not open'), findsOneWidget);
+          } else {
+            expect(openedPaths, [remotePath]);
+            expect(find.text('SFTP opened'), findsOneWidget);
+            verify(() => sftp.stat(remotePath)).called(1);
+          }
           expect(find.textContaining('unsupported link scheme'), findsNothing);
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             isNot(contains('\x1b[<')),
           );
-          verify(() => sftp.stat(remotePath)).called(1);
         },
         variant: const TargetPlatformVariant({
           TargetPlatform.android,
