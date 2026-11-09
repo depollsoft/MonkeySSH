@@ -2738,6 +2738,49 @@ String? resolveTerminalFileUriPath(String link) {
   }
 }
 
+/// Resolves an explicit terminal hyperlink to a path on the connected host.
+///
+/// OSC 8 destinations may be relative paths with source-line anchors rather
+/// than URLs. Decode the path once and omit URI queries, fragments and trailing
+/// `:line[:column]` locations before SFTP verification. Bare names are prefixed
+/// with `./` so they can use the same verification as other relative paths.
+/// External schemes and network-path references are not remote file links.
+String? resolveTerminalFileLinkPath(String link) {
+  final candidate = normalizeTerminalLinkCandidate(link);
+  final uri = Uri.tryParse(candidate);
+  if (uri == null || uri.hasAuthority && !isTerminalFileUri(uri)) {
+    return null;
+  }
+
+  final String decodedPath;
+  try {
+    if (isTerminalFileUri(uri)) {
+      decodedPath = Uri.decodeComponent(uri.path);
+    } else if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(candidate) &&
+        uri.hasScheme) {
+      // Dart parses the drive letter as a URI scheme.
+      decodedPath = Uri.decodeComponent(
+        '${candidate.substring(0, 2)}${uri.path}',
+      ).replaceAll(r'\', '/');
+    } else if (!uri.hasScheme) {
+      decodedPath = Uri.decodeComponent(uri.path);
+    } else {
+      return null;
+    }
+  } on FormatException {
+    return null;
+  }
+
+  final path = decodedPath.replaceFirst(
+    _terminalFilePathStackTraceSuffixPattern,
+    '',
+  );
+  if (path.isEmpty || path == '.' || path == '..' || path.startsWith('//')) {
+    return null;
+  }
+  return isSupportedTerminalFilePath(path) ? path : './$path';
+}
+
 /// Applies pasted or rendered text at the terminal cursor within a wrapped line.
 String applyTerminalCursorInsertion({
   required String currentText,

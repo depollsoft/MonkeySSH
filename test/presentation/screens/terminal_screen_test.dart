@@ -19468,6 +19468,99 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    for (final (link, remotePath) in [
+      (
+        '.github/workflows/deploy-pr-preview.yml#L223',
+        '/srv/project/.github/workflows/deploy-pr-preview.yml',
+      ),
+      ('README.md#overview', '/srv/project/README.md'),
+      ('lib/my%20file.dart:12:3', '/srv/project/lib/my file.dart'),
+      ('file://build-host/var/log/app.log#L12', '/var/log/app.log'),
+    ]) {
+      testWidgets(
+        'OSC 8 file hyperlink $link opens on the connected host',
+        (tester) async {
+          const workingDirectory = '/srv/project';
+          final sftp = _MockSftpClient();
+          final openedPaths = <String>[];
+          when(() => sshClient.sftp()).thenAnswer((_) async => sftp);
+          when(() => sftp.stat(remotePath))
+              .thenAnswer((_) async => SftpFileAttrs());
+
+          final router = GoRouter(
+            initialLocation:
+                '/terminal/${host.id}?connectionId=${session.connectionId}',
+            routes: [
+              GoRoute(
+                path: '/terminal/:hostId',
+                name: Routes.terminal,
+                builder: (context, state) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              ),
+              GoRoute(
+                path: '/sftp/:hostId',
+                name: Routes.sftp,
+                builder: (context, state) {
+                  openedPaths.add(state.uri.queryParameters['path'] ?? '');
+                  expect(
+                    state.uri.queryParameters['connectionId'],
+                    session.connectionId.toString(),
+                  );
+                  return const Scaffold(body: Text('SFTP opened'));
+                },
+              ),
+            ],
+          );
+          addTearDown(router.dispose);
+          await tester.pumpWidget(
+            buildScreen(child: MaterialApp.router(routerConfig: router)),
+          );
+          await tester.pumpAndSettle();
+          shellStdoutController.add(
+            Uint8List.fromList(
+              utf8.encode('\x1b]7;file://build-host$workingDirectory\x07'),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          session.terminal!
+            ..write('\x1b[?1003h\x1b[?1006h')
+            ..write('\x1b[4;2H\x1b]8;;$link\x07source\x1b]8;;\x07\x1b[K');
+          await tester.pumpAndSettle();
+          final view = tester.widget<MonkeyTerminalView>(
+            find.byType(MonkeyTerminalView),
+          );
+          expect(view.resolveLinkTap!(const CellOffset(3, 3)), link);
+          final render = tester
+              .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+              .renderTerminal;
+          shellWrites.clear();
+          await tester.tapAt(
+            render.localToGlobal(
+              render.getOffset(const CellOffset(3, 3)) +
+                  render.cellSize.center(Offset.zero),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(openedPaths, [remotePath]);
+          expect(find.text('SFTP opened'), findsOneWidget);
+          expect(find.textContaining('unsupported link scheme'), findsNothing);
+          expect(
+            shellWrites.map(String.fromCharCodes).join(),
+            isNot(contains('\x1b[<')),
+          );
+          verify(() => sftp.stat(remotePath)).called(1);
+        },
+        variant: const TargetPlatformVariant({
+          TargetPlatform.android,
+          TargetPlatform.iOS,
+        }),
+      );
+    }
+
     testWidgets(
       'mobile path underline taps open SFTP while system selection is enabled',
       (tester) async {

@@ -16136,11 +16136,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    // `file:` links name a file on the connected host, so open them in the
-    // SFTP browser rather than launching them externally.
-    final fileUriPath = resolveTerminalFileUriPath(link);
-    if (fileUriPath != null) {
-      unawaited(_openTerminalFilePath(fileUriPath));
+    // OSC 8 file destinations can be relative paths with source-line anchors,
+    // not just `file:` URIs. Open them on the connected host through SFTP.
+    final filePath = resolveTerminalFileLinkPath(link);
+    if (filePath != null) {
+      unawaited(_openTerminalFilePath(filePath));
       return;
     }
 

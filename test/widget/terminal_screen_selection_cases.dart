@@ -1464,6 +1464,59 @@ void registerTerminalScreenSelectionTests() {
       });
     });
 
+    group('resolveTerminalFileLinkPath', () {
+      for (final (link, path) in <(String, String)>[
+        (
+          '.github/workflows/deploy-pr-preview.yml#L223',
+          '.github/workflows/deploy-pr-preview.yml',
+        ),
+        ('lib/main.dart#L12-L24', 'lib/main.dart'),
+        ('./lib/main.dart:12:3', 'lib/main.dart'),
+        ('../src/main.dart?view=source#L12', '../src/main.dart'),
+        ('README.md#overview', './README.md'),
+        ('src#overview', './src'),
+        ('/srv/app/main.dart#L12', '/srv/app/main.dart'),
+        (
+          '/home/test/.cache/monkeyssh/uploads/clipboard-123.png',
+          '/home/test/.cache/monkeyssh/uploads/clipboard-123.png',
+        ),
+        ('~/project/main.dart#L12', '~/project/main.dart'),
+        ('lib/my%20file.dart#L12', 'lib/my file.dart'),
+        ('lib/my%2520file.dart', 'lib/my%20file.dart'),
+        ('lib/hash%23name.dart#L12', 'lib/hash#name.dart'),
+        ('file://build-host/srv/app/main.dart#L12', '/srv/app/main.dart'),
+        ('file:///srv/app/main.dart:12:3', '/srv/app/main.dart'),
+        (r'C:\project\main.dart#L12', 'C:/project/main.dart'),
+      ]) {
+        test('resolves $link to a remote path', () {
+          expect(resolveTerminalFileLinkPath(link), path);
+        });
+      }
+
+      for (final link in [
+        'https://example.com/main.dart#L12',
+        'www.example.com/main.dart',
+        'mailto:test@example.com',
+        'tel:1234',
+        'javascript:alert(1)',
+        'data:text/plain,hello',
+        'vscode://file/srv/app/main.dart',
+        '//other-host/srv/app/main.dart',
+        '%2F%2Fother-host/srv/app/main.dart',
+        'file://build-host',
+        'lib/%FF.dart',
+        '',
+        '#L12',
+        '?view=source',
+        '.',
+        '..',
+      ]) {
+        test('does not treat $link as a remote file link', () {
+          expect(resolveTerminalFileLinkPath(link), isNull);
+        });
+      }
+    });
+
     group('resolveTerminalFileUriPath', () {
       test('extracts the path from a host-qualified file URI', () {
         expect(
