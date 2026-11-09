@@ -2787,7 +2787,7 @@ String? resolveTerminalFileLinkPath(String link) {
       path == '..' ||
       path == './' ||
       path == '../' ||
-      path.startsWith('//')) {
+      path.replaceAll(r'\', '/').startsWith('//')) {
     return null;
   }
   return isSupportedTerminalFilePath(path) ? path : './$path';

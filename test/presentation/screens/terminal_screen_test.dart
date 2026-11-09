@@ -19488,6 +19488,7 @@ void main() {
       ('lib/main.dart%3A12', '/srv/project/lib/main.dart:12'),
       ('missing.dart', null),
       ('README.md#unknown-cwd', null),
+      ('%5C%5Cother-host%5Cshare%5Cmain.dart', null),
     ]) {
       testWidgets(
         'OSC 8 file hyperlink $link ${remotePath == null ? 'reports failure' : 'opens on the connected host'}',
@@ -19568,13 +19569,29 @@ void main() {
           if (remotePath == null) {
             expect(openedPaths, isEmpty);
             expect(find.text('SFTP opened'), findsNothing);
-            expect(find.textContaining('Could not open'), findsOneWidget);
+            final rejectedNetworkPath = link.startsWith('%5C%5C');
+            expect(
+              find.textContaining(
+                rejectedNetworkPath
+                    ? 'unsupported link scheme'
+                    : 'Could not open',
+              ),
+              findsOneWidget,
+            );
+            if (rejectedNetworkPath) {
+              verifyNever(() => sftp.stat(any()));
+            }
           } else {
             expect(openedPaths, [remotePath]);
             expect(find.text('SFTP opened'), findsOneWidget);
             verify(() => sftp.stat(remotePath)).called(1);
           }
-          expect(find.textContaining('unsupported link scheme'), findsNothing);
+          if (!link.startsWith('%5C%5C')) {
+            expect(
+              find.textContaining('unsupported link scheme'),
+              findsNothing,
+            );
+          }
           expect(
             shellWrites.map(String.fromCharCodes).join(),
             isNot(contains('\x1b[<')),
