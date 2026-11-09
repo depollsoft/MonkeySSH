@@ -42,6 +42,8 @@ class _FakeAcpServer implements AcpTransport {
     this.rejectLoadAlreadyLoaded = false,
     this.alreadyLoadedSessionId,
     this.newSessionErrorCode = -32000,
+    this.newSessionErrorMessage = 'Session creation failed',
+    this.newSessionErrorData,
     this.promptErrorMessage,
     this.replayTextOnLoad,
     this.replayTextOnResume,
@@ -104,6 +106,12 @@ class _FakeAcpServer implements AcpTransport {
 
   /// JSON-RPC error code returned when session creation is rejected.
   final int newSessionErrorCode;
+
+  /// JSON-RPC error message returned when session creation is rejected.
+  final String newSessionErrorMessage;
+
+  /// JSON-RPC error `data` returned when session creation is rejected.
+  final Object? newSessionErrorData;
 
   /// When set, session/prompt returns this remote error message.
   String? promptErrorMessage;
@@ -202,7 +210,12 @@ class _FakeAcpServer implements AcpTransport {
         final params = (message['params']! as Map).cast<String, Object?>();
         newSessionCwds.add(params['cwd']! as String);
         if ((authMethods.isNotEmpty && !authenticated) || failNewSession) {
-          _replyError(id, newSessionErrorCode, 'Session creation failed');
+          _replyError(
+            id,
+            newSessionErrorCode,
+            newSessionErrorMessage,
+            data: newSessionErrorData,
+          );
         } else {
           _reply(id, {'sessionId': 'session-${++_sessionCounter}'});
         }
@@ -377,11 +390,12 @@ class _FakeAcpServer implements AcpTransport {
   void _reply(Object? id, Object? result) =>
       _push({'jsonrpc': '2.0', 'id': id, 'result': result});
 
-  void _replyError(Object? id, int code, String message) => _push({
-    'jsonrpc': '2.0',
-    'id': id,
-    'error': {'code': code, 'message': message},
-  });
+  void _replyError(Object? id, int code, String message, {Object? data}) =>
+      _push({
+        'jsonrpc': '2.0',
+        'id': id,
+        'error': {'code': code, 'message': message, 'data': ?data},
+      });
 
   void _push(Map<String, Object?> message) {
     if (closed) return;
@@ -916,6 +930,71 @@ void main() {
       final failure = result as AcpSessionLaunchFailed;
       expect(failure.error.kind, AcpSessionErrorKind.protocol);
       expect(failure.error.message, contains('-32603'));
+    },
+  );
+
+  test(
+    'shows the reason an agent put in error data behind a generic message',
+    () async {
+      Future<String> failureMessage({
+        required String message,
+        Object? data,
+      }) async {
+        final connector = _FakeConnector(
+          serverFactory: (_, _) => _FakeAcpServer(
+            failNewSession: true,
+            newSessionErrorCode: -32603,
+            newSessionErrorMessage: message,
+            newSessionErrorData: data,
+          ),
+        );
+        final result = await buildManagerWith(connector).startNewSession(
+          hostId: 1,
+          providerId: AcpBuiltinProviderIds.hermes,
+          cwd: '/repo',
+        );
+        expect(result, isA<AcpSessionLaunchFailed>());
+        final error = (result as AcpSessionLaunchFailed).error;
+        expect(error.kind, AcpSessionErrorKind.protocol);
+        return error.message;
+      }
+
+      // Hermes (Python ACP SDK) answers a gateway failure this way.
+      expect(
+        await failureMessage(
+          message: 'Internal error',
+          data: {
+            'details': 'Gateway inaccessible:\n  service_manager_unavailable',
+          },
+        ),
+        'The agent rejected the request (-32603): '
+        'Gateway inaccessible: service_manager_unavailable',
+      );
+      // The Rust SDK carries the reason as a string.
+      expect(
+        await failureMessage(
+          message: 'Internal error',
+          data: 'auth file is unreadable',
+        ),
+        'The agent rejected the request (-32603): auth file is unreadable',
+      );
+      // A specific message is the agent's own wording; keep it.
+      expect(
+        await failureMessage(
+          message: 'Session is busy',
+          data: {'details': 'internal trace'},
+        ),
+        'The agent rejected the request (-32603): Session is busy',
+      );
+      // Without a usable reason the generic message is all there is.
+      expect(
+        await failureMessage(message: 'Internal error', data: {'details': ' '}),
+        'The agent rejected the request (-32603): Internal error',
+      );
+      expect(
+        await failureMessage(message: '', data: {'unknown': 'shape'}),
+        'The agent rejected the request (-32603).',
+      );
     },
   );
 
