@@ -1464,39 +1464,80 @@ void registerTerminalScreenSelectionTests() {
       });
     });
 
-    group('resolveTerminalFileUriPath', () {
-      test('extracts the path from a host-qualified file URI', () {
-        expect(
-          resolveTerminalFileUriPath('file://build-host/srv/app/main.dart'),
-          '/srv/app/main.dart',
-        );
-      });
+    group('resolveTerminalFileLinkPath', () {
+      for (final (link, path) in <(String, String)>[
+        (
+          '.github/workflows/deploy-pr-preview.yml#L223',
+          '.github/workflows/deploy-pr-preview.yml',
+        ),
+        ('lib/main.dart#L12-L24', 'lib/main.dart'),
+        ('./lib/main.dart:12:3', 'lib/main.dart'),
+        ('../src/main.dart?view=source#L12', '../src/main.dart'),
+        ('README.md#overview', './README.md'),
+        ('README.md:12', './README.md'),
+        ('./README.md:12', './README.md'),
+        ('main.dart:12:3', './main.dart'),
+        ('README.md:12#L12', './README.md'),
+        ('.env:12', './.env'),
+        ('123.dart:12', './123.dart'),
+        ('MSG.HL7', './MSG.HL7'),
+        ('file:///data/MSG.HL7', '/data/MSG.HL7'),
+        ('lib/report.txt!', 'lib/report.txt!'),
+        ('lib/a%3B', './lib/a;'),
+        ('lib/main.dart%3A12', 'lib/main.dart:12'),
+        ('src#overview', './src'),
+        ('/srv/app/main.dart#L12', '/srv/app/main.dart'),
+        (
+          '/home/test/.cache/monkeyssh/uploads/clipboard-123.png',
+          '/home/test/.cache/monkeyssh/uploads/clipboard-123.png',
+        ),
+        ('~/project/main.dart#L12', '~/project/main.dart'),
+        ('lib/my%20file.dart#L12', 'lib/my file.dart'),
+        ('lib/my%2520file.dart', 'lib/my%20file.dart'),
+        ('lib/hash%23name.dart#L12', 'lib/hash#name.dart'),
+        ('file://build-host/srv/app/main.dart#L12', '/srv/app/main.dart'),
+        ('file:///srv/app/main.dart:12:3', '/srv/app/main.dart'),
+        ('file:///var/log/app.log', '/var/log/app.log'),
+        ('file:///srv/my%20app/main.dart', '/srv/my app/main.dart'),
+        (r'C:\project\main.dart#L12', 'C:/project/main.dart'),
+        ('C:%5Cproject%5Cmain.dart#L12', 'C:/project/main.dart'),
+        ('C:%2fproject%2fmain.dart#L12', 'C:/project/main.dart'),
+        ('file:///C:%5Cproject%5Cmain.dart', '/C:/project/main.dart'),
+      ]) {
+        test('resolves $link to a remote path', () {
+          expect(resolveTerminalFileLinkPath(link), path);
+        });
+      }
 
-      test('extracts the path from an authority-less file URI', () {
-        expect(
-          resolveTerminalFileUriPath('file:///var/log/app.log'),
-          '/var/log/app.log',
-        );
-      });
-
-      test('decodes percent-encoded path segments', () {
-        expect(
-          resolveTerminalFileUriPath('file:///srv/my%20app/main.dart'),
-          '/srv/my app/main.dart',
-        );
-      });
-
-      test('returns null for non-file links', () {
-        expect(resolveTerminalFileUriPath('https://example.com'), isNull);
-      });
-
-      test('returns null for a file URI without a path', () {
-        expect(resolveTerminalFileUriPath('file://build-host'), isNull);
-      });
-
-      test('returns null instead of throwing for invalid UTF-8 escapes', () {
-        expect(resolveTerminalFileUriPath('file:///tmp/%FF.log'), isNull);
-      });
+      for (final link in [
+        'https://example.com/main.dart#L12',
+        'www.example.com/main.dart',
+        'mailto:test@example.com',
+        'tel:1234',
+        'custom:12',
+        'localhost:8080',
+        'javascript:alert(1)',
+        'data:text/plain,hello',
+        'vscode://file/srv/app/main.dart',
+        '//other-host/srv/app/main.dart',
+        '%2F%2Fother-host/srv/app/main.dart',
+        '%5C%5Cother-host%5Cshare%5Cmain.dart',
+        '%2F%5Cother-host/share/main.dart',
+        '%5C%2Fother-host/share/main.dart',
+        'file:%5C%5Cother-host%5Cshare%5Cmain.dart',
+        'file://build-host',
+        'lib/%FF.dart',
+        'file:///tmp/%FF.log',
+        '',
+        '#L12',
+        '?view=source',
+        '.',
+        '..',
+      ]) {
+        test('does not treat $link as a remote file link', () {
+          expect(resolveTerminalFileLinkPath(link), isNull);
+        });
+      }
     });
 
     group('isTerminalFileUri', () {

@@ -2719,23 +2719,78 @@ bool isTerminalFileUri(Uri uri) =>
 bool isResolvableTerminalLinkUri(Uri uri) =>
     isLaunchableTerminalUri(uri) || isTerminalFileUri(uri);
 
-/// Resolves the remote path a terminal `file:` link should open in the SFTP
-/// browser, or `null` when [link] is not a usable `file:` URI.
+final _terminalBareFileLocationPattern = RegExp(
+  r'^(?:\./)?([^/\\:?#]*\.[^/\\:?#]+):\d+(?::\d+)?([?#].*)?$',
+);
+
+final _terminalHyperlinkLocationSuffixPattern = RegExp(r':\d+(?::\d+)?$');
+
+final _terminalHyperlinkWindowsDrivePattern = RegExp(
+  r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])',
+);
+
+/// Resolves an explicit terminal hyperlink to a path on the connected host.
 ///
-/// The URI host (if any) is ignored: the path is opened on the host the
-/// terminal session is connected to. Percent-encoding is decoded so the SFTP
-/// browser receives the literal path (e.g. `%20` becomes a space); escapes that
-/// are not valid UTF-8 make the link unusable rather than throwing.
-String? resolveTerminalFileUriPath(String link) {
-  final uri = Uri.tryParse(normalizeTerminalLinkCandidate(link));
-  if (uri == null || !isTerminalFileUri(uri)) {
+/// OSC 8 destinations may be relative paths with source-line anchors rather
+/// than URLs. Decode the path once and omit URI queries, fragments and trailing
+/// `:line[:column]` locations before SFTP verification. Bare names are prefixed
+/// with `./` so they can use the same verification as other relative paths.
+/// External schemes and network-path references are not remote file links.
+String? resolveTerminalFileLinkPath(String link) {
+  var candidate = link.trim();
+  if (candidate.toLowerCase().startsWith('www.') ||
+      candidate == '.' ||
+      candidate == '..') {
     return null;
   }
+  // A bare filename with a location otherwise looks like a URI scheme. Limit
+  // this exception to filenames with extensions so tel:1234 and custom:12
+  // still take the external/unsupported-scheme path.
+  final bareLocation = _terminalBareFileLocationPattern.firstMatch(candidate);
+  if (bareLocation != null) {
+    candidate = './${bareLocation[1]}${bareLocation[2] ?? ''}';
+  }
+  final uri = Uri.tryParse(candidate);
+  if (uri == null || uri.hasAuthority && !isTerminalFileUri(uri)) {
+    return null;
+  }
+
+  final String encodedPath;
+  if (isTerminalFileUri(uri)) {
+    // The URI authority is ignored: files open on the connected host.
+    encodedPath = uri.path;
+  } else if (_terminalHyperlinkWindowsDrivePattern.hasMatch(candidate) &&
+      uri.hasScheme) {
+    // Dart parses the drive letter as a URI scheme.
+    encodedPath = '${candidate.substring(0, 2)}${uri.path}';
+  } else if (!uri.hasScheme) {
+    encodedPath = uri.path;
+  } else {
+    return null;
+  }
+
+  var path = '';
   try {
-    return Uri.decodeComponent(uri.path);
+    // Strip source locations before decoding so an encoded colon remains part
+    // of the filename. Explicit destinations also keep trailing punctuation.
+    path = Uri.decodeComponent(
+      encodedPath.replaceFirst(_terminalHyperlinkLocationSuffixPattern, ''),
+    );
   } on FormatException {
     return null;
   }
+  if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(path)) {
+    path = path.replaceAll(r'\', '/');
+  }
+  if (path.isEmpty ||
+      path == '.' ||
+      path == '..' ||
+      path == './' ||
+      path == '../' ||
+      path.replaceAll(r'\', '/').startsWith('//')) {
+    return null;
+  }
+  return isSupportedTerminalFilePath(path) ? path : './$path';
 }
 
 /// Applies pasted or rendered text at the terminal cursor within a wrapped line.

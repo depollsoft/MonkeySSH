@@ -16136,11 +16136,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    // `file:` links name a file on the connected host, so open them in the
-    // SFTP browser rather than launching them externally.
-    final fileUriPath = resolveTerminalFileUriPath(link);
-    if (fileUriPath != null) {
-      unawaited(_openTerminalFilePath(fileUriPath));
+    // OSC 8 file destinations can be relative paths with source-line anchors,
+    // not just `file:` URIs. Open them on the connected host through SFTP.
+    final filePath = resolveTerminalFileLinkPath(link);
+    if (filePath != null) {
+      unawaited(_openTerminalFilePath(filePath, exact: true));
       return;
     }
 
@@ -16440,58 +16440,66 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  Future<void> _openTerminalFilePath(String path) =>
-      _runExclusiveTerminalAction(
-        _TerminalExclusiveAction.sftpBrowser,
-        () async {
-          final normalizedPath = trimTerminalFilePathCandidate(path);
-          if (!isSupportedTerminalFilePath(normalizedPath)) {
-            _showTerminalLinkMessage('Could not open $path');
-            return;
-          }
+  Future<void> _openTerminalFilePath(
+    String path, {
+    bool exact = false,
+  }) => _runExclusiveTerminalAction(
+    _TerminalExclusiveAction.sftpBrowser,
+    () async {
+      final normalizedPath = exact ? path : trimTerminalFilePathCandidate(path);
+      if (!isSupportedTerminalFilePath(normalizedPath)) {
+        _showTerminalLinkMessage('Could not open $path');
+        return;
+      }
 
-          final verifiedPath = await _pathVerifier
-              .resolveVerifiedTerminalFilePath(normalizedPath);
-          if (!mounted || verifiedPath == null) {
-            return;
-          }
-          unawaited(
-            ref.read(telemetryServiceProvider).logTerminalPathLinkOpened(),
-          );
-
-          final connectionId = _connectionId;
-          final cwd = _workingDirectoryPath;
-          final tmuxPaneDirectory = await _resolveCurrentTmuxPaneDirectory();
-          if (!mounted) {
-            return;
-          }
-
-          final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
-          String? result;
-          try {
-            result = await context.pushNamed<String>(
-              Routes.sftp,
-              pathParameters: {'hostId': widget.hostId.toString()},
-              queryParameters: _buildSftpBrowserQueryParameters(
-                connectionId: connectionId,
-                initialPath: verifiedPath,
-                workingDirectory: cwd,
-                tmuxPaneDirectory: tmuxPaneDirectory,
-              ),
-            );
-          } finally {
-            _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
-            _resetTerminalScrollAfterSftpBrowserClosed(
-              forceFullRepaint: true,
-              focusAlreadyRestored: shouldRestoreKeyboard,
-            );
-          }
-
-          if (mounted && result != null) {
-            _showTerminalLinkMessage(result);
-          }
-        },
+      final verifiedPath = await _pathVerifier.resolveVerifiedTerminalFilePath(
+        normalizedPath,
+        exact: exact,
       );
+      if (!mounted) {
+        return;
+      }
+      if (verifiedPath == null) {
+        if (exact) {
+          _showTerminalLinkMessage('Could not open "$path" in SFTP');
+        }
+        return;
+      }
+      unawaited(ref.read(telemetryServiceProvider).logTerminalPathLinkOpened());
+
+      final connectionId = _connectionId;
+      final cwd = _workingDirectoryPath;
+      final tmuxPaneDirectory = await _resolveCurrentTmuxPaneDirectory();
+      if (!mounted) {
+        return;
+      }
+
+      final shouldRestoreKeyboard = _temporarilyDismissTerminalKeyboard();
+      String? result;
+      try {
+        result = await context.pushNamed<String>(
+          Routes.sftp,
+          pathParameters: {'hostId': widget.hostId.toString()},
+          queryParameters: _buildSftpBrowserQueryParameters(
+            connectionId: connectionId,
+            initialPath: verifiedPath,
+            workingDirectory: cwd,
+            tmuxPaneDirectory: tmuxPaneDirectory,
+          ),
+        );
+      } finally {
+        _restoreTemporarilyDismissedTerminalKeyboard(shouldRestoreKeyboard);
+        _resetTerminalScrollAfterSftpBrowserClosed(
+          forceFullRepaint: true,
+          focusAlreadyRestored: shouldRestoreKeyboard,
+        );
+      }
+
+      if (mounted && result != null) {
+        _showTerminalLinkMessage(result);
+      }
+    },
+  );
 
   void _resetTerminalScrollAfterSftpBrowserClosed({
     bool forceFullRepaint = false,

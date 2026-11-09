@@ -545,6 +545,7 @@ class TerminalPathVerifier {
     required bool showErrors,
     required String scope,
     required String? workingDirectory,
+    bool exact = false,
   }) async {
     bool ownsScope() =>
         mounted &&
@@ -552,7 +553,11 @@ class TerminalPathVerifier {
         identical(sftp, _terminalPathVerificationSftp) &&
         identical(_activeSession(), _terminalPathVerificationSession);
     if (!ownsScope()) return null;
-    final cacheKey = '$scope:$terminalPath';
+    // Explicit hyperlinks must not reuse a heuristic match to another file or
+    // a parent directory. Keep their results separate from detected text.
+    final cacheKey = exact
+        ? '$scope:exact:$terminalPath'
+        : '$scope:$terminalPath';
     final cachedPath = _verifiedTerminalPathCache[cacheKey];
     if (cachedPath != null) {
       return cachedPath.exists ? cachedPath.resolvedPath : null;
@@ -562,9 +567,9 @@ class TerminalPathVerifier {
     // Probe from the full path down through its directory prefixes so the
     // longest substring that actually exists wins (candidates are ordered
     // longest first).
-    final verificationCandidates = resolveTerminalFilePathExistenceCandidates(
-      terminalPath,
-    );
+    final verificationCandidates = exact
+        ? [terminalPath]
+        : resolveTerminalFilePathExistenceCandidates(terminalPath);
     for (final candidate in verificationCandidates) {
       final homeDirectory = await _resolveTerminalPathVerificationHomeDirectory(
         sftp,
@@ -630,9 +635,17 @@ class TerminalPathVerifier {
   }
 
   /// Resolves a tapped path immediately, bypassing background channel backoff.
-  Future<String?> resolveVerifiedTerminalFilePath(String terminalPath) async {
+  ///
+  /// [exact] preserves explicit hyperlink destinations without trying alternate
+  /// parses or parent directories. The caller reports failures in that mode.
+  Future<String?> resolveVerifiedTerminalFilePath(
+    String terminalPath, {
+    bool exact = false,
+  }) async {
     syncVerifiedTerminalPathCacheScope();
-    final cacheKey = _terminalPathCacheKey(terminalPath);
+    final cacheKey = exact
+        ? '${_currentTerminalPathCacheScope()}:exact:$terminalPath'
+        : _terminalPathCacheKey(terminalPath);
     final cachedPath = _verifiedTerminalPathCache[cacheKey];
     if (cachedPath != null) {
       return cachedPath.exists ? cachedPath.resolvedPath : null;
@@ -641,7 +654,7 @@ class TerminalPathVerifier {
     final scope = _currentTerminalPathCacheScope();
     final workingDirectory = this.workingDirectory();
     final session = _activeSession();
-    final isExplicitPath = isExplicitTerminalFilePath(terminalPath);
+    final isExplicitPath = !exact && isExplicitTerminalFilePath(terminalPath);
     if (session == null) {
       if (isExplicitPath) {
         _showTerminalLinkMessage('Could not open "$terminalPath" in SFTP');
@@ -660,9 +673,10 @@ class TerminalPathVerifier {
       return await _resolveVerifiedTerminalFilePathWithSftp(
         sftp,
         terminalPath,
-        showErrors: true,
+        showErrors: !exact,
         scope: scope,
         workingDirectory: workingDirectory,
+        exact: exact,
       );
     } on TimeoutException {
       if (!mounted ||

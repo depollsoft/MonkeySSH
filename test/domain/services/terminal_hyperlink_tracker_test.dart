@@ -29,6 +29,26 @@ void main() {
       expect(tracker.resolveLinkAt(const CellOffset(40, 0)), isNull);
     });
 
+    for (final destination in [
+      'README.md:12',
+      'MyWidget.dart:3:1',
+      '.env:12',
+      '123.dart:12',
+      r'C:\project\main.dart#L12',
+      'C:%5Cproject%5Cmain.dart#L12',
+      'HTTPS://EXAMPLE.COM/Docs',
+    ]) {
+      test('preserves the exact OSC 8 destination $destination', () {
+        terminal.write('\x1b]8;;$destination\x07source');
+        expect(tracker.resolveLinkAt(const CellOffset(2, 0)), destination);
+        expect(tracker.resolveLinkOnRow(0), destination);
+
+        terminal.write('\x1b]8;;\x07');
+        expect(tracker.resolveLinkAt(const CellOffset(2, 0)), destination);
+        expect(tracker.resolveLinkOnRow(0), destination);
+      });
+    }
+
     test('reassembles OSC 8 destinations containing semicolons', () {
       terminal.write(
         [
