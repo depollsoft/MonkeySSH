@@ -2341,10 +2341,14 @@ func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (sock
 			continue
 		}
 		if strings.HasSuffix(name, acpBridgeLifetimeSuffix) {
-			// A lifetime file nobody holds is what a bridge that crashed left.
+			// A lifetime file nobody holds, without its socket, is what a
+			// bridge that crashed left once its socket went. One beside a
+			// socket is judged with that socket below.
 			id := strings.TrimSuffix(strings.TrimPrefix(name, "monkeymux-acp-"), acpBridgeLifetimeSuffix)
 			socket := filepath.Join(runDir, "monkeymux-acp-"+id+".sock")
-			if validAcpBridgeID(id) && probeAcpBridgeLifetime(socket) == acpBridgeLifetimeFree {
+			if _, err := os.Lstat(socket); validAcpBridgeID(id) &&
+				errors.Is(err, os.ErrNotExist) &&
+				probeAcpBridgeLifetime(socket) == acpBridgeLifetimeFree {
 				_ = os.Remove(filepath.Join(runDir, name))
 			}
 			continue
