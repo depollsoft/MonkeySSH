@@ -43,6 +43,7 @@ const (
 	acpIdleTimeout            = 24 * time.Hour
 	acpProviderDrainTimeout   = 2 * time.Second
 	acpRequestTimeout         = 500 * time.Millisecond
+	acpStopRetryInterval      = 50 * time.Millisecond
 	acpWaitMaxFailures        = 5
 	// The live queue only has to absorb output published while the writer
 	// drains the retained replay, which it reads from the bridge's own event
@@ -62,6 +63,14 @@ const (
 )
 
 var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// acpStopRetryWindow is how long stopping a bridge keeps retrying, counted
+// from the first attempt, while its socket refuses connections or fails
+// transiently and nothing yet proves the bridge exited. On macOS a live
+// listener whose accept queue is full refuses connections exactly like a
+// socket whose bridge died, until the bridge runs again and drains the queue.
+// Tests change it.
+var acpStopRetryWindow = time.Second
 
 var (
 	errAcpProviderInputClosed = errors.New("closed")
@@ -534,37 +543,100 @@ func requestAcpBridgeStop(id string) error {
 	})
 }
 
-func requestAcpBridgeStopAndWait(id string) error {
+// acpBridgeSocketGone reports whether err, from reaching the bridge listening
+// at socket, shows that no bridge runs there: the socket refuses connections
+// (a bridge exited without unlinking it) or does not exist. Callers resolve
+// socket first, because a path-resolution failure can also wrap
+// os.ErrNotExist while the provider is still running.
+func acpBridgeSocketGone(socket string, err error) bool {
+	if isStaleUnixSocketError(err) {
+		return true
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, statErr := os.Stat(socket)
+	return errors.Is(statErr, os.ErrNotExist)
+}
+
+var (
+	errAcpBridgeUnreachable     = errors.New("ACP bridge is running but unreachable")
+	errAcpBridgeLivenessUnknown = errors.New("ACP bridge liveness could not be checked")
+)
+
+// requestAcpBridgeStopIfRunning asks bridge id to stop and reports whether a
+// running bridge took the request, with the bridge's resolved socket path.
+//
+// A bridge that already exited, for example with an earlier server or a host
+// restart, counts as stopped so its native window or app session can still
+// close. When its socket refuses connections or is missing, the bridge's
+// lifetime lock decides (see acpBridgeLifetime): a free lock means it exited
+// and its files are removed; a held one means it is running, so stop keeps
+// retrying for acpStopRetryWindow (it may be draining a full accept queue or
+// finishing its own shutdown) and then fails. A bridge without a lifetime
+// file, which predates them, counts as exited when its socket is missing or
+// kept refusing for the whole window. Transient failures, and a lifetime
+// file that cannot be checked, are retried in the same window; every other
+// failure is returned.
+//
+// The socket is looked up in this process's runtime directory. A bridge
+// listening in another one (XDG_RUNTIME_DIR changed after it started) looks
+// missing here, but then no attach, list or status call can reach it either.
+func requestAcpBridgeStopIfRunning(id string) (string, bool, error) {
 	socket, err := acpSocketPath(id)
 	if err != nil {
-		return err
+		return "", false, err
 	}
-	if err := requestAcpBridgeStop(id); err != nil {
-		// Closing a restored native window is idempotent only when its resolved
-		// socket is conclusively gone or abandoned. A path-resolution failure can
-		// also wrap os.ErrNotExist while the provider is still running, so resolve
-		// first and verify the socket itself before discarding the placeholder.
-		if isStaleUnixSocketError(err) {
-			_ = os.Remove(socket)
-			return nil
+	deadline := time.Now().Add(acpStopRetryWindow)
+	for {
+		err = requestAcpBridgeStop(id)
+		if err == nil {
+			return socket, true, nil
 		}
-		if errors.Is(err, os.ErrNotExist) {
-			if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
-				return nil
+		refused := isStaleUnixSocketError(err)
+		if refused || acpBridgeSocketGone(socket, err) {
+			switch probeAcpBridgeLifetime(socket) {
+			case acpBridgeLifetimeFree:
+				removeAcpBridgeResidue(socket)
+				return socket, false, nil
+			case acpBridgeLifetimeAbsent:
+				if !refused {
+					return socket, false, nil
+				}
+			case acpBridgeLifetimeHeld:
+				err = errAcpBridgeUnreachable
+			default:
+				// Possibly passing, as when a removed name stays busy on
+				// Windows until a probe closes it, so retry like a held lock.
+				err = errAcpBridgeLivenessUnknown
 			}
+		} else if !isTransientAcpStatusError(err) {
+			return socket, false, err
 		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(acpStopRetryInterval)
+	}
+	if isStaleUnixSocketError(err) {
+		// Only a bridge without a lifetime file gets here: its socket refused
+		// for the whole window and nothing shows that it still runs.
+		_ = os.Remove(socket)
+		return socket, false, nil
+	}
+	return socket, false, err
+}
+
+func requestAcpBridgeStopAndWait(id string) error {
+	socket, running, err := requestAcpBridgeStopIfRunning(id)
+	if err != nil || !running {
 		return err
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := acpBridgeStatus(id); err != nil {
-			if isStaleUnixSocketError(err) {
+			if acpBridgeSocketGone(socket, err) {
 				return nil
-			}
-			if errors.Is(err, os.ErrNotExist) {
-				if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
-					return nil
-				}
 			}
 			return err
 		}
@@ -573,11 +645,14 @@ func requestAcpBridgeStopAndWait(id string) error {
 	return errors.New("ACP bridge did not stop")
 }
 
+// acpStopCommand is how the app closes the native sessions it owns. A bridge
+// that already exited reports stopping like a running one, or the app could
+// never drop a session whose provider is gone.
 func acpStopCommand(args []string) {
 	if len(args) != 1 || !validAcpBridgeID(args[0]) {
 		acpUsageAndExit()
 	}
-	if err := requestAcpBridgeStop(args[0]); err != nil {
+	if _, _, err := requestAcpBridgeStopIfRunning(args[0]); err != nil {
 		fatal(errors.New("unable to stop ACP bridge"))
 	}
 	printAcpJSON(acpWireMessage{
@@ -793,8 +868,14 @@ func newAcpBridge(
 }
 
 func serveAcpBridge(bridge *acpBridge) error {
-	// The provider is already running, so even socket setup failures must stop it.
-	defer bridge.stop()
+	// The provider is already running, so even socket setup failures must stop
+	// it. The lifetime lock goes only after the provider has stopped and the
+	// socket is gone, so a free lock never belongs to a running provider.
+	releaseLifetime := func() {}
+	defer func() {
+		bridge.stop()
+		releaseLifetime()
+	}()
 	socket, err := acpSocketPath(bridge.id)
 	if err != nil {
 		return err
@@ -802,6 +883,7 @@ func serveAcpBridge(bridge *acpBridge) error {
 	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
 		return err
 	}
+	releaseLifetime = holdAcpBridgeLifetime(socket)
 	_ = os.Remove(socket)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -2261,8 +2343,23 @@ func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (sock
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "monkeymux-acp-") ||
-			!strings.HasSuffix(name, ".sock") {
+		if !strings.HasPrefix(name, "monkeymux-acp-") {
+			continue
+		}
+		if strings.HasSuffix(name, acpBridgeLifetimeSuffix) {
+			// A lifetime file nobody holds, without its socket, is what a
+			// bridge that crashed left once its socket went. One beside a
+			// socket is judged with that socket below.
+			id := strings.TrimSuffix(strings.TrimPrefix(name, "monkeymux-acp-"), acpBridgeLifetimeSuffix)
+			socket := filepath.Join(runDir, "monkeymux-acp-"+id+".sock")
+			if _, err := os.Lstat(socket); validAcpBridgeID(id) &&
+				errors.Is(err, os.ErrNotExist) &&
+				probeAcpBridgeLifetime(socket) == acpBridgeLifetimeFree {
+				_ = os.Remove(filepath.Join(runDir, name))
+			}
+			continue
+		}
+		if !strings.HasSuffix(name, ".sock") {
 			continue
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(name, "monkeymux-acp-"), ".sock")
@@ -2274,9 +2371,18 @@ func gcAcpArtifactsWithSocketIdentity(runDir string, identify func(string) (sock
 		identity, _ := identify(path)
 		conn, err := dialAcpBridge(id)
 		if err != nil {
-			if isStaleUnixSocketError(err) {
+			if !isStaleUnixSocketError(err) {
+				continue
+			}
+			switch probeAcpBridgeLifetime(path) {
+			case acpBridgeLifetimeFree:
+				removeSocketPathIfUnchanged(path, identity)
+				_ = os.Remove(acpBridgeLifetimePath(path))
+			case acpBridgeLifetimeAbsent:
 				removeSocketPathIfUnchanged(path, identity)
 			}
+			// A held lifetime lock is a live bridge whose accept queue is
+			// full; an unknown one proves nothing. Keep the socket either way.
 			continue
 		}
 		_ = conn.SetDeadline(time.Now().Add(acpRequestTimeout))

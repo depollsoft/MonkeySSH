@@ -11122,6 +11122,52 @@ func TestMarkWindowClosedStopsBridgeThroughSeam(t *testing.T) {
 	}
 }
 
+// Confirming that a native window's bridge already exited takes up to a stop
+// retry window, so shutdown must stop the bridges together rather than add
+// those windows up one after another.
+func TestShutdownStopsNativeBridgesInParallel(t *testing.T) {
+	originalStop := stopNativeAcpBridgeForWindow
+	t.Cleanup(func() { stopNativeAcpBridgeForWindow = originalStop })
+	const bridges = 4
+	started := make(chan string, bridges)
+	release := make(chan struct{})
+	stopNativeAcpBridgeForWindow = func(id string) error {
+		started <- id
+		<-release
+		return nil
+	}
+
+	server := &muxServer{}
+	for i := range bridges {
+		server.windows = append(server.windows, &muxWindow{
+			id:                fmt.Sprintf("@%d", i+1),
+			nativeAcpBridgeID: fmt.Sprintf("bridge-%d", i+1),
+		})
+	}
+	done := make(chan struct{})
+	go func() { server.close(); close(done) }()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+		<-done
+	})
+
+	seen := map[string]bool{}
+	for range bridges {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("bridge stops started together = %v, want all %d", seen, bridges)
+		}
+	}
+	close(release)
+	released = true
+	<-done
+}
+
 func TestQuerySessionAtSocketReturnsZeroWindowServer(t *testing.T) {
 	socketPath := filepath.Join(shortUnixSocketDir(t), "s.sock")
 	listener, err := net.Listen("unix", socketPath)

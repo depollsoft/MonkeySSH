@@ -74,6 +74,330 @@ func TestRequestAcpBridgeStopAndWaitRemovesAbandonedSocket(t *testing.T) {
 	}
 }
 
+// A live bridge with a full accept queue refuses connections on macOS just as
+// an abandoned socket does. A refusal that clears while stop retries must
+// reach the bridge instead of unlinking its socket.
+func TestRequestAcpBridgeStopRetriesRefusalUntilTheBridgeAccepts(t *testing.T) {
+	runtimeRoot := shortUnixSocketDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	previousWindow := acpStopRetryWindow
+	acpStopRetryWindow = 30 * time.Second
+	t.Cleanup(func() { acpStopRetryWindow = previousWindow })
+
+	const bridgeID = "00112233445566778899aabbccddeeff"
+	socket, err := acpSocketPath(bridgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusing, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusing.SetUnlinkOnClose(false)
+	if err := refusing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil || !isStaleUnixSocketError(err) {
+		if conn != nil {
+			conn.Close()
+		}
+		t.Fatalf("socket dial = %v, want refused", err)
+	}
+
+	// The bridge comes back by renaming a listening socket over the refusing
+	// one, so the path never goes missing in between.
+	staged := filepath.Join(runtimeRoot, "live.sock")
+	live, err := net.ListenUnix("unix", &net.UnixAddr{Name: staged, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	commands := make(chan acpWireMessage, 1)
+	go func() {
+		conn, err := live.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if message, err := readAcpWireFrame(bufio.NewReader(conn)); err == nil {
+			commands <- message
+		}
+	}()
+	renamed := make(chan error, 1)
+	go func() {
+		time.Sleep(4 * acpStopRetryInterval)
+		renamed <- os.Rename(staged, socket)
+	}()
+
+	_, running, err := requestAcpBridgeStopIfRunning(bridgeID)
+	if renameErr := <-renamed; renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	if err != nil || !running {
+		t.Fatalf("stop = running %v, %v; want the bridge to take the request", running, err)
+	}
+	select {
+	case message := <-commands:
+		if message.Type != "command" || message.Command != "stop" {
+			t.Fatalf("bridge received %+v, want stop", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge never received the stop request")
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Fatalf("live socket stat = %v, want it kept", err)
+	}
+}
+
+// abandonAcpTestSocket leaves a socket file at the bridge's path that refuses
+// connections, as a bridge that crashed (or a live one with a full accept
+// queue on macOS) does.
+func abandonAcpTestSocket(t *testing.T, bridgeID string) string {
+	t.Helper()
+	socket, err := acpSocketPath(bridgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return socket
+}
+
+// The lifetime lock, not the socket, decides whether a bridge that cannot be
+// reached still runs: a held lock keeps a suspended bridge's session and
+// socket, and a free one ends a crashed bridge's session without waiting out
+// the retry window.
+func TestRequestAcpBridgeStopJudgesUnreachableBridgesByLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		refusing     bool
+		lifetime     acpBridgeLifetime
+		wantStopped  bool
+		wantResidual bool
+	}{
+		{name: "refusing and held", refusing: true, lifetime: acpBridgeLifetimeHeld, wantResidual: true},
+		{name: "missing and held", lifetime: acpBridgeLifetimeHeld, wantResidual: true},
+		{name: "refusing and free", refusing: true, lifetime: acpBridgeLifetimeFree, wantStopped: true},
+		{name: "missing and free", lifetime: acpBridgeLifetimeFree, wantStopped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtimeRoot := shortUnixSocketDir(t)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+			previousWindow := acpStopRetryWindow
+			t.Cleanup(func() { acpStopRetryWindow = previousWindow })
+			if tc.wantStopped {
+				// A free lock is proof; stop must not wait for the window.
+				acpStopRetryWindow = 30 * time.Second
+			} else {
+				acpStopRetryWindow = 200 * time.Millisecond
+			}
+
+			const bridgeID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+			socket, err := acpSocketPath(bridgeID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refusing {
+				abandonAcpTestSocket(t, bridgeID)
+			}
+			lifetime := acpBridgeLifetimePath(socket)
+			if tc.lifetime == acpBridgeLifetimeHeld {
+				release := holdAcpBridgeLifetime(socket)
+				t.Cleanup(release)
+			} else if err := os.WriteFile(lifetime, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := probeAcpBridgeLifetime(socket); got != tc.lifetime {
+				t.Fatalf("lifetime probe = %v, want %v", got, tc.lifetime)
+			}
+
+			started := time.Now()
+			_, running, err := requestAcpBridgeStopIfRunning(bridgeID)
+			if running {
+				t.Fatal("stop reached a bridge that cannot accept connections")
+			}
+			if tc.wantStopped {
+				if err != nil {
+					t.Fatalf("stop = %v, want the exited bridge treated as stopped", err)
+				}
+				if elapsed := time.Since(started); elapsed > 5*time.Second {
+					t.Fatalf("stop took %v despite a free lifetime lock", elapsed)
+				}
+			} else if !errors.Is(err, errAcpBridgeUnreachable) {
+				t.Fatalf("stop = %v, want %v", err, errAcpBridgeUnreachable)
+			}
+
+			_, socketErr := os.Lstat(socket)
+			_, lifetimeErr := os.Stat(lifetime)
+			if tc.wantResidual {
+				if lifetimeErr != nil || (tc.refusing && socketErr != nil) {
+					t.Fatalf("running bridge lost its files: socket %v, lifetime %v", socketErr, lifetimeErr)
+				}
+			} else if !errors.Is(socketErr, os.ErrNotExist) || !errors.Is(lifetimeErr, os.ErrNotExist) {
+				t.Fatalf("exited bridge left residue: socket %v, lifetime %v", socketErr, lifetimeErr)
+			}
+		})
+	}
+}
+
+// A lifetime file that cannot be checked proves nothing either way, so stop
+// retries for the window, then fails and leaves the socket and the file.
+func TestRequestAcpBridgeStopFailsWhenLifetimeCannotBeChecked(t *testing.T) {
+	runtimeRoot := shortUnixSocketDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	previousWindow := acpStopRetryWindow
+	acpStopRetryWindow = 200 * time.Millisecond
+	t.Cleanup(func() { acpStopRetryWindow = previousWindow })
+	const bridgeID = "4b5a69788796a5b4c3d2e1f00f1e2d3c"
+	socket := abandonAcpTestSocket(t, bridgeID)
+	lifetime := acpBridgeLifetimePath(socket)
+	if err := os.WriteFile(lifetime, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := os.OpenFile(lifetime, os.O_RDWR, 0); err == nil {
+		_ = file.Close()
+		t.Skip("current user bypasses file permissions")
+	}
+	if got := probeAcpBridgeLifetime(socket); got != acpBridgeLifetimeUnknown {
+		t.Fatalf("lifetime probe = %v, want unknown", got)
+	}
+	_, running, err := requestAcpBridgeStopIfRunning(bridgeID)
+	if running || !errors.Is(err, errAcpBridgeLivenessUnknown) {
+		t.Fatalf("stop = running %v, %v; want %v", running, err, errAcpBridgeLivenessUnknown)
+	}
+	if _, err := os.Lstat(socket); err != nil {
+		t.Fatalf("socket stat = %v, want it kept", err)
+	}
+	if _, err := os.Lstat(lifetime); err != nil {
+		t.Fatalf("lifetime stat = %v, want it kept", err)
+	}
+}
+
+func TestServeAcpBridgeHoldsItsLifetimeUntilStopped(t *testing.T) {
+	bridge, cleanup := startTestAcpBridge(t, "cat")
+	socket, err := acpSocketPath(bridge.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := probeAcpBridgeLifetime(socket); got != acpBridgeLifetimeHeld {
+		t.Fatalf("serving bridge lifetime = %v, want held", got)
+	}
+	cleanup()
+	if got := probeAcpBridgeLifetime(socket); got != acpBridgeLifetimeAbsent {
+		t.Fatalf("stopped bridge lifetime = %v, want removed", got)
+	}
+}
+
+// Neither gc may unlink a refusing bridge socket whose lifetime lock is held,
+// and both clear what a crashed bridge left.
+func TestGCJudgesRefusingBridgeSocketsByLifetime(t *testing.T) {
+	runtimeRoot := shortUnixSocketDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	const heldID = "11111111111111111111111111111111"
+	const freeID = "22222222222222222222222222222222"
+	const loneID = "33333333333333333333333333333333"
+	heldSocket := abandonAcpTestSocket(t, heldID)
+	release := holdAcpBridgeLifetime(heldSocket)
+	t.Cleanup(release)
+	freeSocket := abandonAcpTestSocket(t, freeID)
+	if err := os.WriteFile(acpBridgeLifetimePath(freeSocket), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loneSocket, err := acpSocketPath(loneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(acpBridgeLifetimePath(loneSocket), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gcCommand()
+
+	if _, err := os.Lstat(heldSocket); err != nil {
+		t.Fatalf("gc unlinked a running bridge's socket: %v", err)
+	}
+	if got := probeAcpBridgeLifetime(heldSocket); got != acpBridgeLifetimeHeld {
+		t.Fatalf("running bridge lifetime after gc = %v, want held", got)
+	}
+	for _, path := range []string{freeSocket, acpBridgeLifetimePath(freeSocket), acpBridgeLifetimePath(loneSocket)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("gc kept crash residue %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// The app closes a native session it owns with `monkeymux acp stop`. When the
+// session's bridge already exited (a host restart, a server update), the
+// command must report it stopping rather than exit without output, or the
+// session can never be closed.
+func TestAcpStopCommandReportsExitedBridgesStopping(t *testing.T) {
+	if id, ok := os.LookupEnv("MONKEYMUX_ACP_STOP_CLI_BRIDGE"); ok {
+		acpCommand([]string{"stop", id})
+		os.Exit(0)
+	}
+	runtimeRoot := shortUnixSocketDir(t)
+	const missingID = "0123456789abcdef0123456789abcdef"
+	const abandonedID = "abcdef0123456789abcdef0123456789"
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	abandonedSocket, err := acpSocketPath(abandonedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: abandonedSocket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenRuntime := filepath.Join(runtimeRoot, "broken-runtime")
+	if err := os.Symlink(filepath.Join(runtimeRoot, "missing", "runtime"), brokenRuntime); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(runtimeDir, id string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAcpStopCommandReportsExitedBridgesStopping$")
+		cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir, "MONKEYMUX_ACP_STOP_CLI_BRIDGE="+id)
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		err := cmd.Run()
+		return stdout.String(), err
+	}
+
+	for _, id := range []string{missingID, abandonedID} {
+		stdout, err := run(runtimeRoot, id)
+		if err != nil {
+			t.Fatalf("acp stop %s = %v, stdout %q; want success", id, err, stdout)
+		}
+		var message acpWireMessage
+		if err := json.Unmarshal([]byte(stdout), &message); err != nil {
+			t.Fatalf("acp stop %s stdout %q: %v", id, stdout, err)
+		}
+		if message.Version != acpBridgeProtocolVersion || message.Type != "stopping" || message.BridgeID != id {
+			t.Fatalf("acp stop %s = %+v, want stopping", id, message)
+		}
+	}
+	if _, err := os.Stat(abandonedSocket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned socket stat = %v, want not exist", err)
+	}
+
+	// A socket that cannot be resolved may belong to a running provider, so
+	// the session must stay open.
+	if stdout, err := run(brokenRuntime, missingID); err == nil || stdout != "" {
+		t.Fatalf("runtime path failure: acp stop = %v, stdout %q; want failure without output", err, stdout)
+	}
+}
+
 func TestRequestAcpBridgeStopAndWaitPreservesStatusFailures(t *testing.T) {
 	for _, response := range []string{"", "invalid\n", `{"version":1,"type":"status"}` + "\n",
 		`{"version":1,"type":"error","bridge":{}}` + "\n",
