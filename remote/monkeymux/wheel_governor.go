@@ -11,6 +11,12 @@ type wheelAccelerationProfile struct {
 	// rowCap, when set, bounds the rows one report moves in a pane of the
 	// given height, applied after speed.
 	rowCap func(paneRows int) int
+	// deferredReversal TUIs move nothing for the first report against the
+	// previous direction, and move speed(0) rows for the next report in the
+	// new direction. A single reversed report followed by one in the old
+	// direction would instead read as a mechanical wheel's bounce, so the
+	// governor sends every reversal as that pair.
+	deferredReversal bool
 }
 
 var wheelGovernorNow = time.Now
@@ -35,10 +41,12 @@ type wheelGovernor struct {
 	paneRows int
 	last     time.Time
 	count    int
-	owed     int
-	template []byte
-	carry    []byte
-	flushGen int
+	// direction is the sign of the last forwarded report, 0 before the first.
+	direction int
+	owed      int
+	template  []byte
+	carry     []byte
+	flushGen  int
 }
 
 func (g *wheelGovernor) reset(profile *wheelAccelerationProfile) {
@@ -52,8 +60,8 @@ func (g *wheelGovernor) nextCount(now time.Time) int {
 	return 0
 }
 
-func (g *wheelGovernor) predictedSpeed(now time.Time) int {
-	speed := g.profile.speed(g.nextCount(now))
+func (g *wheelGovernor) cappedSpeed(count int) int {
+	speed := g.profile.speed(count)
 	if g.profile.rowCap != nil && g.paneRows > 0 {
 		speed = min(speed, g.profile.rowCap(g.paneRows))
 	}
@@ -70,24 +78,38 @@ func (g *wheelGovernor) drain(now time.Time) []byte {
 		if rows < 0 {
 			direction, rows = -1, -rows
 		}
-		speed := g.predictedSpeed(now)
+		reversal := g.profile.deferredReversal && g.direction != 0 && direction != g.direction
+		count := g.nextCount(now)
+		if reversal {
+			count = 0
+		}
+		speed := g.cappedSpeed(count)
 		if rows < speed {
 			break
 		}
-		report := append([]byte(nil), g.template...)
-		_, buttonOffset, button := wheelReport(report)
-		wantDown := direction > 0
-		if (button&1 != 0) != wantDown {
-			// SGR's last decimal digit and X10's button byte both encode
-			// up/down in their low bit. Preserve every other byte.
-			report[buttonOffset] ^= 1
-		}
+		report := g.reportInDirection(direction)
 		output = append(output, report...)
-		g.count = g.nextCount(now)
+		if reversal {
+			output = append(output, report...)
+		}
+		g.count = count
 		g.last = now
+		g.direction = direction
 		g.owed -= direction * speed
 	}
 	return output
+}
+
+func (g *wheelGovernor) reportInDirection(direction int) []byte {
+	report := append([]byte(nil), g.template...)
+	_, buttonOffset, button := wheelReport(report)
+	wantDown := direction > 0
+	if (button&1 != 0) != wantDown {
+		// SGR's last decimal digit and X10's button byte both encode
+		// up/down in their low bit. Preserve every other byte.
+		report[buttonOffset] ^= 1
+	}
+	return report
 }
 
 func (g *wheelGovernor) process(data []byte, now time.Time) []byte {

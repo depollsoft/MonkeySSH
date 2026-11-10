@@ -371,12 +371,24 @@ func installWheelTestClock(t *testing.T) *wheelTestClock {
 	foregroundProcessGroupForWindow = func(window *muxWindow) int { return window.foregroundPid }
 	wheelGovernorNow = func() time.Time { return clock.now }
 	scheduleWheelFlush = func(delay time.Duration, action func()) {
-		if delay != 200*time.Millisecond && delay != wheelCarryExpiry {
-			t.Errorf("flush delay=%v, want 200ms or %v", delay, wheelCarryExpiry)
+		if !wheelTestFlushDelay(delay) {
+			t.Errorf("flush delay=%v, want a profile window plus 50ms or %v", delay, wheelCarryExpiry)
 		}
 		clock.timers = append(clock.timers, wheelTestTimer{clock.now.Add(delay), action})
 	}
 	return clock
+}
+
+func wheelTestFlushDelay(delay time.Duration) bool {
+	if delay == wheelCarryExpiry {
+		return true
+	}
+	for _, descriptor := range agentRegistry {
+		if profile := descriptor.wheelProfile; profile != nil && delay == profile.window+50*time.Millisecond {
+			return true
+		}
+	}
+	return false
 }
 
 func newWheelTestWindow(tool string, mouse bool) (*muxServer, *muxWindow, *recordingPty) {
