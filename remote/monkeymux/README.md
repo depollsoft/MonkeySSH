@@ -96,9 +96,13 @@ monkeymux acp stop BRIDGE_ID
 monkeymux acp gc
 ```
 
-`stop` also succeeds for a bridge that already exited, when its socket is gone
-or refuses connections, and removes such an abandoned socket. Any other failure
-to reach the bridge still fails, because its provider may be running.
+`stop` also succeeds for a bridge that already exited: its socket is missing,
+or it keeps refusing connections for a second (a live bridge with a full accept
+queue refuses them too, until it drains the queue), in which case the abandoned
+socket is removed. Other failures to reach the bridge still fail. Sockets are
+looked up in the current runtime directory, so a bridge started under a
+different `XDG_RUNTIME_DIR` counts as gone, as it does for `attach`, `list` and
+`status`.
 
 `attach` speaks newline-delimited JSON over its stdin/stdout. Its first frame is
 `{"version":1,"type":"hello","bridgeId":"...","lastAck":N}`. Provider output is

@@ -43,6 +43,7 @@ const (
 	acpIdleTimeout            = 24 * time.Hour
 	acpProviderDrainTimeout   = 2 * time.Second
 	acpRequestTimeout         = 500 * time.Millisecond
+	acpStopRetryInterval      = 50 * time.Millisecond
 	acpWaitMaxFailures        = 5
 	// The live queue only has to absorb output published while the writer
 	// drains the retained replay, which it reads from the bridge's own event
@@ -62,6 +63,13 @@ const (
 )
 
 var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// acpStopRetryWindow is how long stopping a bridge retries a refused or
+// transiently failing connection before judging the socket abandoned. On
+// macOS a live listener whose accept queue is full refuses connections
+// exactly like a socket whose bridge died, and a running bridge drains that
+// queue at once. Tests lengthen it.
+var acpStopRetryWindow = time.Second
 
 var (
 	errAcpProviderInputClosed = errors.New("closed")
@@ -553,26 +561,39 @@ func acpBridgeSocketGone(socket string, err error) bool {
 // requestAcpBridgeStopIfRunning asks bridge id to stop and reports whether a
 // running bridge took the request, with the bridge's resolved socket path.
 //
-// Stopping is idempotent only when the socket is conclusively gone or
-// abandoned: the bridge already exited, for example with an earlier server or
-// a host restart, and its native window or app session must still close. An
-// abandoned socket file is removed. Any other failure is returned, so a
-// provider that may still be running is never dropped.
+// A bridge that already exited, for example with an earlier server or a host
+// restart, counts as stopped so its native window or app session can still
+// close: its socket is missing, or it kept refusing connections for
+// acpStopRetryWindow, and such an abandoned socket file is removed. A refused
+// or transient failure is retried within that window, since a live bridge
+// with a full accept queue fails the same way until it drains it. Every other
+// failure is returned.
+//
+// The socket is looked up in this process's runtime directory. A bridge
+// listening in another one (XDG_RUNTIME_DIR changed after it started) looks
+// missing here, but then no attach, list or status call can reach it either.
 func requestAcpBridgeStopIfRunning(id string) (string, bool, error) {
 	socket, err := acpSocketPath(id)
 	if err != nil {
 		return "", false, err
 	}
-	if err := requestAcpBridgeStop(id); err != nil {
-		if !acpBridgeSocketGone(socket, err) {
-			return socket, false, err
-		}
-		if isStaleUnixSocketError(err) {
-			_ = os.Remove(socket)
-		}
-		return socket, false, nil
+	err = requestAcpBridgeStop(id)
+	for deadline := time.Now().Add(acpStopRetryWindow); err != nil &&
+		(isStaleUnixSocketError(err) || isTransientAcpStatusError(err)) &&
+		time.Now().Before(deadline); {
+		time.Sleep(acpStopRetryInterval)
+		err = requestAcpBridgeStop(id)
 	}
-	return socket, true, nil
+	if err == nil {
+		return socket, true, nil
+	}
+	if !acpBridgeSocketGone(socket, err) {
+		return socket, false, err
+	}
+	if isStaleUnixSocketError(err) {
+		_ = os.Remove(socket)
+	}
+	return socket, false, nil
 }
 
 func requestAcpBridgeStopAndWait(id string) error {

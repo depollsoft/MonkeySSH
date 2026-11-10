@@ -74,6 +74,81 @@ func TestRequestAcpBridgeStopAndWaitRemovesAbandonedSocket(t *testing.T) {
 	}
 }
 
+// A live bridge with a full accept queue refuses connections on macOS just as
+// an abandoned socket does. A refusal that clears while stop retries must
+// reach the bridge instead of unlinking its socket.
+func TestRequestAcpBridgeStopRetriesRefusalUntilTheBridgeAccepts(t *testing.T) {
+	runtimeRoot := shortUnixSocketDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	previousWindow := acpStopRetryWindow
+	acpStopRetryWindow = 30 * time.Second
+	t.Cleanup(func() { acpStopRetryWindow = previousWindow })
+
+	const bridgeID = "00112233445566778899aabbccddeeff"
+	socket, err := acpSocketPath(bridgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusing, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusing.SetUnlinkOnClose(false)
+	if err := refusing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil || !isStaleUnixSocketError(err) {
+		if conn != nil {
+			conn.Close()
+		}
+		t.Fatalf("socket dial = %v, want refused", err)
+	}
+
+	// The bridge comes back by renaming a listening socket over the refusing
+	// one, so the path never goes missing in between.
+	staged := filepath.Join(runtimeRoot, "live.sock")
+	live, err := net.ListenUnix("unix", &net.UnixAddr{Name: staged, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	commands := make(chan acpWireMessage, 1)
+	go func() {
+		conn, err := live.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if message, err := readAcpWireFrame(bufio.NewReader(conn)); err == nil {
+			commands <- message
+		}
+	}()
+	renamed := make(chan error, 1)
+	go func() {
+		time.Sleep(4 * acpStopRetryInterval)
+		renamed <- os.Rename(staged, socket)
+	}()
+
+	_, running, err := requestAcpBridgeStopIfRunning(bridgeID)
+	if renameErr := <-renamed; renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	if err != nil || !running {
+		t.Fatalf("stop = running %v, %v; want the bridge to take the request", running, err)
+	}
+	select {
+	case message := <-commands:
+		if message.Type != "command" || message.Command != "stop" {
+			t.Fatalf("bridge received %+v, want stop", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge never received the stop request")
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Fatalf("live socket stat = %v, want it kept", err)
+	}
+}
+
 // The app closes a native session it owns with `monkeymux acp stop`. When the
 // session's bridge already exited (a host restart, a server update), the
 // command must report it stopping rather than exit without output, or the
