@@ -559,7 +559,10 @@ func acpBridgeSocketGone(socket string, err error) bool {
 	return errors.Is(statErr, os.ErrNotExist)
 }
 
-var errAcpBridgeUnreachable = errors.New("ACP bridge is running but unreachable")
+var (
+	errAcpBridgeUnreachable     = errors.New("ACP bridge is running but unreachable")
+	errAcpBridgeLivenessUnknown = errors.New("ACP bridge liveness could not be checked")
+)
 
 // requestAcpBridgeStopIfRunning asks bridge id to stop and reports whether a
 // running bridge took the request, with the bridge's resolved socket path.
@@ -572,8 +575,9 @@ var errAcpBridgeUnreachable = errors.New("ACP bridge is running but unreachable"
 // retrying for acpStopRetryWindow (it may be draining a full accept queue or
 // finishing its own shutdown) and then fails. A bridge without a lifetime
 // file, which predates them, counts as exited when its socket is missing or
-// kept refusing for the whole window. Transient failures are retried in the
-// same window; every other failure is returned.
+// kept refusing for the whole window. Transient failures, and a lifetime
+// file that cannot be checked, are retried in the same window; every other
+// failure is returned.
 //
 // The socket is looked up in this process's runtime directory. A bridge
 // listening in another one (XDG_RUNTIME_DIR changed after it started) looks
@@ -602,7 +606,9 @@ func requestAcpBridgeStopIfRunning(id string) (string, bool, error) {
 			case acpBridgeLifetimeHeld:
 				err = errAcpBridgeUnreachable
 			default:
-				return socket, false, errors.New("ACP bridge liveness could not be checked")
+				// Possibly passing, as when a removed name stays busy on
+				// Windows until a probe closes it, so retry like a held lock.
+				err = errAcpBridgeLivenessUnknown
 			}
 		} else if !isTransientAcpStatusError(err) {
 			return socket, false, err

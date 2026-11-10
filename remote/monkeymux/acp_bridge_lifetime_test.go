@@ -44,6 +44,33 @@ func TestAcpBridgeLifetimeLockLifecycle(t *testing.T) {
 	}
 }
 
+// `monkeymux gc` deletes staging files past a fixed age without asking who
+// holds them. A bridge that stalls before renaming its staging file into place
+// must publish a fresh one rather than run without a lifetime.
+func TestAcpBridgeLifetimeSurvivesGCDeletingItsStagingFile(t *testing.T) {
+	previousHook := beforeAcpBridgeLifetimeRename
+	t.Cleanup(func() { beforeAcpBridgeLifetimeRename = previousHook })
+	deletions := 0
+	beforeAcpBridgeLifetimeRename = func(staging string) {
+		if deletions == 0 {
+			if err := os.Remove(staging); err != nil {
+				t.Errorf("remove staging: %v", err)
+			}
+		}
+		deletions++
+	}
+
+	socket := filepath.Join(t.TempDir(), "monkeymux-acp-fedcba9876543210fedcba9876543210.sock")
+	release := holdAcpBridgeLifetime(socket)
+	defer release()
+	if deletions != 2 {
+		t.Fatalf("publish attempts = %d, want a second after the staging file vanished", deletions)
+	}
+	if got := probeAcpBridgeLifetime(socket); got != acpBridgeLifetimeHeld {
+		t.Fatalf("lifetime after a lost staging file = %v, want held", got)
+	}
+}
+
 // A lifetime file that existed unlocked while its bridge started could be
 // judged free and deleted by a concurrent gc, leaving the bridge locking a
 // file nobody can see. A probe racing the hold must only ever find the file

@@ -247,10 +247,13 @@ func TestRequestAcpBridgeStopJudgesUnreachableBridgesByLifetime(t *testing.T) {
 }
 
 // A lifetime file that cannot be checked proves nothing either way, so stop
-// fails at once and leaves the socket and the file.
+// retries for the window, then fails and leaves the socket and the file.
 func TestRequestAcpBridgeStopFailsWhenLifetimeCannotBeChecked(t *testing.T) {
 	runtimeRoot := shortUnixSocketDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	previousWindow := acpStopRetryWindow
+	acpStopRetryWindow = 200 * time.Millisecond
+	t.Cleanup(func() { acpStopRetryWindow = previousWindow })
 	const bridgeID = "4b5a69788796a5b4c3d2e1f00f1e2d3c"
 	socket := abandonAcpTestSocket(t, bridgeID)
 	lifetime := acpBridgeLifetimePath(socket)
@@ -265,8 +268,8 @@ func TestRequestAcpBridgeStopFailsWhenLifetimeCannotBeChecked(t *testing.T) {
 		t.Fatalf("lifetime probe = %v, want unknown", got)
 	}
 	_, running, err := requestAcpBridgeStopIfRunning(bridgeID)
-	if running || err == nil {
-		t.Fatalf("stop = running %v, %v; want failure", running, err)
+	if running || !errors.Is(err, errAcpBridgeLivenessUnknown) {
+		t.Fatalf("stop = running %v, %v; want %v", running, err, errAcpBridgeLivenessUnknown)
 	}
 	if _, err := os.Lstat(socket); err != nil {
 		t.Fatalf("socket stat = %v, want it kept", err)

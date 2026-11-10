@@ -42,7 +42,13 @@ func acpBridgeLifetimePath(socket string) string {
 	return strings.TrimSuffix(socket, ".sock") + acpBridgeLifetimeSuffix
 }
 
+const acpBridgeLifetimePublishAttempts = 3
+
 var acpBridgeLifetimeStagingSequence atomic.Uint64
+
+// beforeAcpBridgeLifetimeRename lets tests act between locking the staging
+// file and publishing it.
+var beforeAcpBridgeLifetimeRename = func(staging string) {}
 
 // holdAcpBridgeLifetime publishes the locked lifetime file for the bridge
 // listening at socket, returning the function that releases and removes it.
@@ -50,7 +56,18 @@ var acpBridgeLifetimeStagingSequence atomic.Uint64
 // left behind and the bridge runs without one.
 func holdAcpBridgeLifetime(socket string) func() {
 	path := acpBridgeLifetimePath(socket)
-	file, err := publishLockedAcpBridgeLifetime(path)
+	var file *os.File
+	var err error
+	// `monkeymux gc` deletes staging files older than abandonedPIDFileAge
+	// without asking who holds them, so a bridge stalled between creating its
+	// staging file and renaming it can find the file gone. Publish a fresh one
+	// rather than run without a lifetime.
+	for range acpBridgeLifetimePublishAttempts {
+		file, err = publishLockedAcpBridgeLifetime(path)
+		if !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
 	if err != nil {
 		return func() {}
 	}
@@ -82,6 +99,7 @@ func publishLockedAcpBridgeLifetime(path string) (*os.File, error) {
 		err = errors.New("ACP bridge lifetime staging file is locked")
 	}
 	if err == nil {
+		beforeAcpBridgeLifetimeRename(staging)
 		err = os.Rename(staging, path)
 	}
 	if err != nil {
