@@ -74,6 +74,72 @@ func TestRequestAcpBridgeStopAndWaitRemovesAbandonedSocket(t *testing.T) {
 	}
 }
 
+// The app closes a native session it owns with `monkeymux acp stop`. When the
+// session's bridge already exited (a host restart, a server update), the
+// command must report it stopping rather than exit without output, or the
+// session can never be closed.
+func TestAcpStopCommandReportsExitedBridgesStopping(t *testing.T) {
+	if id, ok := os.LookupEnv("MONKEYMUX_ACP_STOP_CLI_BRIDGE"); ok {
+		acpCommand([]string{"stop", id})
+		os.Exit(0)
+	}
+	runtimeRoot := shortUnixSocketDir(t)
+	const missingID = "0123456789abcdef0123456789abcdef"
+	const abandonedID = "abcdef0123456789abcdef0123456789"
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	abandonedSocket, err := acpSocketPath(abandonedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: abandonedSocket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenRuntime := filepath.Join(runtimeRoot, "broken-runtime")
+	if err := os.Symlink(filepath.Join(runtimeRoot, "missing", "runtime"), brokenRuntime); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(runtimeDir, id string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAcpStopCommandReportsExitedBridgesStopping$")
+		cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir, "MONKEYMUX_ACP_STOP_CLI_BRIDGE="+id)
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		err := cmd.Run()
+		return stdout.String(), err
+	}
+
+	for _, id := range []string{missingID, abandonedID} {
+		stdout, err := run(runtimeRoot, id)
+		if err != nil {
+			t.Fatalf("acp stop %s = %v, stdout %q; want success", id, err, stdout)
+		}
+		var message acpWireMessage
+		if err := json.Unmarshal([]byte(stdout), &message); err != nil {
+			t.Fatalf("acp stop %s stdout %q: %v", id, stdout, err)
+		}
+		if message.Version != acpBridgeProtocolVersion || message.Type != "stopping" || message.BridgeID != id {
+			t.Fatalf("acp stop %s = %+v, want stopping", id, message)
+		}
+	}
+	if _, err := os.Stat(abandonedSocket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned socket stat = %v, want not exist", err)
+	}
+
+	// A socket that cannot be resolved may belong to a running provider, so
+	// the session must stay open.
+	if stdout, err := run(brokenRuntime, missingID); err == nil || stdout != "" {
+		t.Fatalf("runtime path failure: acp stop = %v, stdout %q; want failure without output", err, stdout)
+	}
+}
+
 func TestRequestAcpBridgeStopAndWaitPreservesStatusFailures(t *testing.T) {
 	for _, response := range []string{"", "invalid\n", `{"version":1,"type":"status"}` + "\n",
 		`{"version":1,"type":"error","bridge":{}}` + "\n",

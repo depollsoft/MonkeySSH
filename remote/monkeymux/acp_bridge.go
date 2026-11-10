@@ -534,37 +534,57 @@ func requestAcpBridgeStop(id string) error {
 	})
 }
 
-func requestAcpBridgeStopAndWait(id string) error {
+// acpBridgeSocketGone reports whether err, from reaching the bridge listening
+// at socket, shows that no bridge runs there: the socket refuses connections
+// (a bridge exited without unlinking it) or does not exist. Callers resolve
+// socket first, because a path-resolution failure can also wrap
+// os.ErrNotExist while the provider is still running.
+func acpBridgeSocketGone(socket string, err error) bool {
+	if isStaleUnixSocketError(err) {
+		return true
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, statErr := os.Stat(socket)
+	return errors.Is(statErr, os.ErrNotExist)
+}
+
+// requestAcpBridgeStopIfRunning asks bridge id to stop and reports whether a
+// running bridge took the request, with the bridge's resolved socket path.
+//
+// Stopping is idempotent only when the socket is conclusively gone or
+// abandoned: the bridge already exited, for example with an earlier server or
+// a host restart, and its native window or app session must still close. An
+// abandoned socket file is removed. Any other failure is returned, so a
+// provider that may still be running is never dropped.
+func requestAcpBridgeStopIfRunning(id string) (string, bool, error) {
 	socket, err := acpSocketPath(id)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	if err := requestAcpBridgeStop(id); err != nil {
-		// Closing a restored native window is idempotent only when its resolved
-		// socket is conclusively gone or abandoned. A path-resolution failure can
-		// also wrap os.ErrNotExist while the provider is still running, so resolve
-		// first and verify the socket itself before discarding the placeholder.
+		if !acpBridgeSocketGone(socket, err) {
+			return socket, false, err
+		}
 		if isStaleUnixSocketError(err) {
 			_ = os.Remove(socket)
-			return nil
 		}
-		if errors.Is(err, os.ErrNotExist) {
-			if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
-				return nil
-			}
-		}
+		return socket, false, nil
+	}
+	return socket, true, nil
+}
+
+func requestAcpBridgeStopAndWait(id string) error {
+	socket, running, err := requestAcpBridgeStopIfRunning(id)
+	if err != nil || !running {
 		return err
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := acpBridgeStatus(id); err != nil {
-			if isStaleUnixSocketError(err) {
+			if acpBridgeSocketGone(socket, err) {
 				return nil
-			}
-			if errors.Is(err, os.ErrNotExist) {
-				if _, statErr := os.Stat(socket); errors.Is(statErr, os.ErrNotExist) {
-					return nil
-				}
 			}
 			return err
 		}
@@ -573,11 +593,14 @@ func requestAcpBridgeStopAndWait(id string) error {
 	return errors.New("ACP bridge did not stop")
 }
 
+// acpStopCommand is how the app closes the native sessions it owns. A bridge
+// that already exited reports stopping like a running one, or the app could
+// never drop a session whose provider is gone.
 func acpStopCommand(args []string) {
 	if len(args) != 1 || !validAcpBridgeID(args[0]) {
 		acpUsageAndExit()
 	}
-	if err := requestAcpBridgeStop(args[0]); err != nil {
+	if _, _, err := requestAcpBridgeStopIfRunning(args[0]); err != nil {
 		fatal(errors.New("unable to stop ACP bridge"))
 	}
 	printAcpJSON(acpWireMessage{

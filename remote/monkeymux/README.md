@@ -96,6 +96,10 @@ monkeymux acp stop BRIDGE_ID
 monkeymux acp gc
 ```
 
+`stop` also succeeds for a bridge that already exited, when its socket is gone
+or refuses connections, and removes such an abandoned socket. Any other failure
+to reach the bridge still fails, because its provider may be running.
+
 `attach` speaks newline-delimited JSON over its stdin/stdout. Its first frame is
 `{"version":1,"type":"hello","bridgeId":"...","lastAck":N}`. Provider output is
 relayed as `output` frames with a monotonically increasing `sequence`; clients
