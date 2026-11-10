@@ -218,6 +218,16 @@ var agentRegistry = map[string]agentDescriptor{
 	},
 	"hermes": {
 		commandNames: []string{"hermes", "hermes-agent"},
+		// The Ink TUI ramps its wheel speed; see hermes_wheel.go. Its
+		// classic CLI does not track the mouse, so it is never governed.
+		wheelProfile: &wheelAccelerationProfile{
+			// Hermes keeps ramping while reports are at most 40 whole
+			// milliseconds apart. A gap on that edge then reads as
+			// continuing the ramp, which can only under-scroll.
+			window:           41 * time.Millisecond,
+			processSpeed:     hermesWheelSpeedForProcessGroup,
+			deferredReversal: true,
+		},
 	},
 	"openclaw": {
 		commandNames: []string{"openclaw"},

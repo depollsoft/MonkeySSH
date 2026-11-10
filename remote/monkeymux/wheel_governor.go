@@ -7,10 +7,22 @@ import (
 
 type wheelAccelerationProfile struct {
 	window time.Duration
-	speed  func(count int) int
+	// speed is the rows the TUI moves for a report that continues a run of
+	// count quick reports; the client calibrates each report to speed(0).
+	speed func(count int) int
+	// processSpeed, set instead of speed for a TUI whose ramp its environment
+	// configures, reads speed from the window's foreground process group.
+	// Returning nil leaves the window ungoverned.
+	processSpeed func(processGroup int) func(count int) int
 	// rowCap, when set, bounds the rows one report moves in a pane of the
 	// given height, applied after speed.
 	rowCap func(paneRows int) int
+	// deferredReversal TUIs move nothing for the first report against the
+	// previous direction, and move speed(0) rows for the next report in the
+	// new direction. A single reversed report followed by one in the old
+	// direction would instead read as a mechanical wheel's bounce, so the
+	// governor sends every reversal as that pair.
+	deferredReversal bool
 }
 
 var wheelGovernorNow = time.Now
@@ -35,10 +47,12 @@ type wheelGovernor struct {
 	paneRows int
 	last     time.Time
 	count    int
-	owed     int
-	template []byte
-	carry    []byte
-	flushGen int
+	// direction is the sign of the last forwarded report, 0 before the first.
+	direction int
+	owed      int
+	template  []byte
+	carry     []byte
+	flushGen  int
 }
 
 func (g *wheelGovernor) reset(profile *wheelAccelerationProfile) {
@@ -52,8 +66,8 @@ func (g *wheelGovernor) nextCount(now time.Time) int {
 	return 0
 }
 
-func (g *wheelGovernor) predictedSpeed(now time.Time) int {
-	speed := g.profile.speed(g.nextCount(now))
+func (g *wheelGovernor) cappedSpeed(count int) int {
+	speed := g.profile.speed(count)
 	if g.profile.rowCap != nil && g.paneRows > 0 {
 		speed = min(speed, g.profile.rowCap(g.paneRows))
 	}
@@ -70,24 +84,50 @@ func (g *wheelGovernor) drain(now time.Time) []byte {
 		if rows < 0 {
 			direction, rows = -1, -rows
 		}
-		speed := g.predictedSpeed(now)
+		reversal := g.profile.deferredReversal && g.direction != 0 && direction != g.direction
+		count := g.nextCount(now)
+		if reversal {
+			count = 0
+		}
+		speed := g.cappedSpeed(count)
 		if rows < speed {
-			break
+			if count != 0 {
+				break
+			}
+			// A TUI with a base speed above 1 moves no fewer rows than
+			// speed(0), and the ramp can leave less than that owed. No
+			// report can pay it exactly, so round it to the nearest report.
+			if 2*rows < speed {
+				g.owed = 0
+				break
+			}
 		}
-		report := append([]byte(nil), g.template...)
-		_, buttonOffset, button := wheelReport(report)
-		wantDown := direction > 0
-		if (button&1 != 0) != wantDown {
-			// SGR's last decimal digit and X10's button byte both encode
-			// up/down in their low bit. Preserve every other byte.
-			report[buttonOffset] ^= 1
-		}
+		report := g.reportInDirection(direction)
 		output = append(output, report...)
-		g.count = g.nextCount(now)
+		if reversal {
+			output = append(output, report...)
+		}
+		g.count = count
 		g.last = now
+		g.direction = direction
 		g.owed -= direction * speed
+		if g.owed*direction < 0 {
+			g.owed = 0
+		}
 	}
 	return output
+}
+
+func (g *wheelGovernor) reportInDirection(direction int) []byte {
+	report := append([]byte(nil), g.template...)
+	_, buttonOffset, button := wheelReport(report)
+	wantDown := direction > 0
+	if (button&1 != 0) != wantDown {
+		// SGR's last decimal digit and X10's button byte both encode
+		// up/down in their low bit. Preserve every other byte.
+		report[buttonOffset] ^= 1
+	}
+	return report
 }
 
 func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
@@ -136,10 +176,12 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 			continue
 		}
 		reorder = false
+		// The client calibrated this report against one sent after a pause.
+		rows := g.cappedSpeed(0)
 		if button&1 == 0 {
-			g.owed--
+			g.owed -= rows
 		} else {
-			g.owed++
+			g.owed += rows
 		}
 		g.template = append(g.template[:0], report...)
 		output = append(output, g.drain(now)...)
@@ -270,7 +312,31 @@ func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
 		return nil
 	}
-	return agentRegistry[w.agentToolLocked()].wheelProfile
+	profile := agentRegistry[w.agentToolLocked()].wheelProfile
+	if profile == nil || profile.processSpeed == nil {
+		return profile
+	}
+	// Resolve once per foreground process group: the TUI's environment is
+	// fixed when it starts, and the stable pointer keeps the governor's state.
+	group := w.activeForegroundPidLocked()
+	cached := &w.processWheelProfile
+	if cached.registered != profile || cached.group != group {
+		*cached = processWheelProfile{registered: profile, group: group}
+		if speed := profile.processSpeed(group); speed != nil {
+			resolved := *profile
+			resolved.speed, resolved.processSpeed = speed, nil
+			cached.resolved = &resolved
+		}
+	}
+	return cached.resolved
+}
+
+// processWheelProfile caches a registered profile resolved for one
+// foreground process group.
+type processWheelProfile struct {
+	registered *wheelAccelerationProfile
+	group      int
+	resolved   *wheelAccelerationProfile
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

@@ -915,6 +915,17 @@ func processCommandLine(pid int) []string {
 	return nil
 }
 
+// processEnvironment and processGroupMembers are not implemented on Windows
+// either, so a TUI whose wheel speed its environment sets is governed at its
+// default speed there.
+func processEnvironment(pid int) []string {
+	return nil
+}
+
+func processGroupMembers(group int) []int {
+	return nil
+}
+
 func shellArgument(value string) (string, bool) {
 	if !isCmdShell(defaultShellPath()) {
 		return "'" + strings.ReplaceAll(value, "'", "''") + "'", true
