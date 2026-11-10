@@ -2296,6 +2296,11 @@ func gcCommand() {
 			clearAbandonedTakeoverGuard(path)
 			continue
 		case ".sock":
+			// gcAcpArtifacts below judges ACP bridge sockets, which a refused
+			// dial alone does not prove abandoned.
+			if strings.HasPrefix(entry.Name(), "monkeymux-acp-") {
+				continue
+			}
 		default:
 			continue
 		}

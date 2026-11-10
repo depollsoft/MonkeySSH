@@ -96,10 +96,14 @@ monkeymux acp stop BRIDGE_ID
 monkeymux acp gc
 ```
 
-`stop` also succeeds for a bridge that already exited: its socket is missing,
-or it keeps refusing connections for about a second (a live bridge with a full
-accept queue refuses them too, until it drains the queue), in which case the
-abandoned socket is removed. Other failures to reach the bridge still fail.
+Each bridge holds an exclusive lock on `monkeymux-acp-ID.alive` beside its
+socket while it runs, and the OS drops that lock when the process ends. `stop`
+also succeeds for a bridge that already exited, and `gc` clears what it left,
+when its socket refuses connections or is missing and that lock is free. A held
+lock means the bridge still runs (a live bridge with a full accept queue
+refuses connections too), so `stop` retries for about a second and then fails,
+and `gc` keeps the socket. A bridge started before lifetime files existed
+counts as exited when its socket is missing or keeps refusing for that second.
 Sockets are looked up in the current runtime directory, so a bridge started
 under a different `XDG_RUNTIME_DIR` counts as gone, as it does for `attach`,
 `list` and `status`.
