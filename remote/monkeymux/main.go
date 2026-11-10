@@ -19079,10 +19079,19 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		// Codex gets its separate graceful lock-release deadline. Other agents
 		// still need forced cleanup when they ignore the initial terminal hangup.
 		killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
+		// Bridges stop independently, and confirming that one already exited
+		// takes up to a retry window, so stop them in parallel: shutdown then
+		// costs the slowest bridge, not the sum of all of them.
 		for _, window := range windows {
-			if window.nativeAcpBridgeID != "" {
-				_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
+			bridgeID := window.nativeAcpBridgeID
+			if bridgeID == "" {
+				continue
 			}
+			teardowns.Add(1)
+			go func() {
+				defer teardowns.Done()
+				_ = stopNativeAcpBridgeForWindow(bridgeID)
+			}()
 		}
 		teardowns.Wait()
 		// Closing the ptys ends the reader goroutines and the hangup above ends the

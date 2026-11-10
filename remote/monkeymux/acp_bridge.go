@@ -64,11 +64,13 @@ const (
 
 var acpBridgeIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
-// acpStopRetryWindow is how long stopping a bridge retries a refused or
-// transiently failing connection before judging the socket abandoned. On
-// macOS a live listener whose accept queue is full refuses connections
-// exactly like a socket whose bridge died, and a running bridge drains that
-// queue at once. Tests lengthen it.
+// acpStopRetryWindow is how long stopping a bridge keeps retrying a refused or
+// transiently failing connection, counted from the first attempt, before the
+// last attempt's error decides. On macOS a live listener whose accept queue is
+// full refuses connections exactly like a socket whose bridge died, until the
+// bridge runs again and drains the queue; refusal for the whole window is
+// still only strong evidence that the bridge exited, not proof. Tests
+// lengthen it.
 var acpStopRetryWindow = time.Second
 
 var (
@@ -577,10 +579,11 @@ func requestAcpBridgeStopIfRunning(id string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	deadline := time.Now().Add(acpStopRetryWindow)
 	err = requestAcpBridgeStop(id)
-	for deadline := time.Now().Add(acpStopRetryWindow); err != nil &&
+	for err != nil &&
 		(isStaleUnixSocketError(err) || isTransientAcpStatusError(err)) &&
-		time.Now().Before(deadline); {
+		time.Now().Before(deadline) {
 		time.Sleep(acpStopRetryInterval)
 		err = requestAcpBridgeStop(id)
 	}
