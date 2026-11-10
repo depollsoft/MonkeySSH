@@ -949,7 +949,8 @@ type muxWindow struct {
 	agentSessionWatch         *agentSessionWatch
 	inputMu                   sync.Mutex
 	replies                   windowReplyQueue
-	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
+	wheelGovernor             wheelGovernor       // guarded by s.mu; draining also requires inputMu
+	processWheelProfile       processWheelProfile // guarded by s.mu
 	nativePaste               nativeConsolePasteFilter
 	nativeResponse            nativeConsoleResponseFilter
 	id                        string

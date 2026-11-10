@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -219,41 +218,20 @@ var agentRegistry = map[string]agentDescriptor{
 	},
 	"hermes": {
 		commandNames: []string{"hermes", "hermes-agent"},
-		// The Ink TUI (ui-tui/src/lib/wheelAccel.ts, nativeStep) adds 0.3 to
-		// a multiplier for each report at most 40 whole milliseconds after
-		// the last, up to 6, and moves its floor. It has no setting to turn
-		// this off; HERMES_TUI_SCROLL_SPEED only raises the base, which this
-		// assumes is the default 1. The classic CLI does not track the mouse,
-		// so it is never governed.
+		// The Ink TUI ramps its wheel speed; see hermes_wheel.go. Its
+		// classic CLI does not track the mouse, so it is never governed.
 		wheelProfile: &wheelAccelerationProfile{
-			// A gap on the 40 ms edge then reads as continuing the ramp,
-			// which can only under-scroll.
+			// Hermes keeps ramping while reports are at most 40 whole
+			// milliseconds apart. A gap on that edge then reads as
+			// continuing the ramp, which can only under-scroll.
 			window:           41 * time.Millisecond,
-			speed:            hermesWheelSpeed,
+			processSpeed:     hermesWheelSpeedForProcessGroup,
 			deferredReversal: true,
 		},
 	},
 	"openclaw": {
 		commandNames: []string{"openclaw"},
 	},
-}
-
-// hermesWheelSteps holds the rows the Hermes TUI moves for each report of a
-// fast run, until it reaches its maximum of 6. The multiplier is summed the
-// way Hermes sums it, in float64, so rounding matches: the eleventh report
-// moves 3 rows, because ten additions of 0.3 to 1 fall just short of 4.
-var hermesWheelSteps = func() []int {
-	var steps []int
-	for multiplier := 1.0; ; multiplier = math.Min(6, multiplier+0.3) {
-		steps = append(steps, int(math.Floor(multiplier)))
-		if multiplier == 6 {
-			return steps
-		}
-	}
-}()
-
-func hermesWheelSpeed(count int) int {
-	return hermesWheelSteps[min(count, len(hermesWheelSteps)-1)]
 }
 
 var (
