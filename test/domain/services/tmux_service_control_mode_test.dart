@@ -70,6 +70,20 @@ void main() {
       expect(resolveTmuxClientFlagsFromExtraFlags('-x 200 -n editor'), isNull);
     });
 
+    test('ignores client flags when any part of the input is malformed', () {
+      for (final flags in [
+        '-S socket ; "unfinished',
+        r'-L socket\',
+        '-S a\n-L b',
+      ]) {
+        expect(
+          resolveTmuxClientFlagsFromExtraFlags(flags),
+          isNull,
+          reason: flags,
+        );
+      }
+    });
+
     test('shell-quotes reusable client flag values', () {
       expect(
         resolveTmuxClientFlagsFromExtraFlags(r'-S "$(touch /tmp/pwn)"'),
