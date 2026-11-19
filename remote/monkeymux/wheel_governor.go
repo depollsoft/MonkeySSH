@@ -1,17 +1,43 @@
 package main
 
 import (
+	"bytes"
 	"strconv"
+	"sync"
 	"time"
 )
 
 type wheelAccelerationProfile struct {
 	window time.Duration
-	speed  func(count int) int
+	// speed is the rows the TUI moves for a report that continues a run of
+	// count quick reports; the client calibrates each report to speed(0).
+	speed func(count int) int
+	// processSpeed, set instead of speed for a TUI whose ramp its environment
+	// configures, reads speed from the window's foreground process group.
+	// Returning nil leaves the window ungoverned.
+	processSpeed func(processGroup int) func(count int) int
 	// rowCap, when set, bounds the rows one report moves in a pane of the
 	// given height, applied after speed.
 	rowCap func(paneRows int) int
+	// deferredReversal TUIs move nothing for the first report against the
+	// previous direction, and move speed(0) rows for the next report in the
+	// new direction. A single reversed report followed by one in the old
+	// direction would instead read as a mechanical wheel's bounce, so the
+	// governor sends every reversal as that pair.
+	deferredReversal bool
+	// precisionSticky, when set, is how long after a Ctrl- or Meta-wheel
+	// report the TUI keeps scrolling in a precision mode: one row per frame,
+	// not ramped, with the ramp reset when the mode starts. Such reports,
+	// and any report less than that after the last one in the mode, pass
+	// through ungoverned. The gap is counted in whole milliseconds, as the
+	// TUI counts it: a report it reads as outside the mode while the governor
+	// still bypasses would keep the governor bypassed for the whole drag.
+	precisionSticky time.Duration
 }
+
+// wheelPrecisionModifiers are the Meta and Ctrl bits of a wheel report's
+// button, in SGR and X10 alike.
+const wheelPrecisionModifiers = 8 | 16
 
 var wheelGovernorNow = time.Now
 
@@ -35,10 +61,14 @@ type wheelGovernor struct {
 	paneRows int
 	last     time.Time
 	count    int
-	owed     int
-	template []byte
-	carry    []byte
-	flushGen int
+	// direction is the sign of the last forwarded report, 0 before the first.
+	direction int
+	// precisionAt is when the last report in precision mode was forwarded.
+	precisionAt time.Time
+	owed        int
+	template    []byte
+	carry       []byte
+	flushGen    int
 }
 
 func (g *wheelGovernor) reset(profile *wheelAccelerationProfile) {
@@ -52,8 +82,8 @@ func (g *wheelGovernor) nextCount(now time.Time) int {
 	return 0
 }
 
-func (g *wheelGovernor) predictedSpeed(now time.Time) int {
-	speed := g.profile.speed(g.nextCount(now))
+func (g *wheelGovernor) cappedSpeed(count int) int {
+	speed := g.profile.speed(count)
 	if g.profile.rowCap != nil && g.paneRows > 0 {
 		speed = min(speed, g.profile.rowCap(g.paneRows))
 	}
@@ -70,24 +100,59 @@ func (g *wheelGovernor) drain(now time.Time) []byte {
 		if rows < 0 {
 			direction, rows = -1, -rows
 		}
-		speed := g.predictedSpeed(now)
+		reversal := g.profile.deferredReversal && g.direction != 0 && direction != g.direction
+		count := g.nextCount(now)
+		if reversal {
+			count = 0
+		}
+		speed := g.cappedSpeed(count)
 		if rows < speed {
-			break
+			if count != 0 {
+				break
+			}
+			// A TUI with a base speed above 1 moves no fewer rows than
+			// speed(0), and the ramp can leave less than that owed. No
+			// report can pay it exactly, so round it to the nearest report.
+			if 2*rows < speed {
+				g.owed = 0
+				break
+			}
 		}
-		report := append([]byte(nil), g.template...)
-		_, buttonOffset, button := wheelReport(report)
-		wantDown := direction > 0
-		if (button&1 != 0) != wantDown {
-			// SGR's last decimal digit and X10's button byte both encode
-			// up/down in their low bit. Preserve every other byte.
-			report[buttonOffset] ^= 1
-		}
+		report := g.reportInDirection(direction)
 		output = append(output, report...)
-		g.count = g.nextCount(now)
+		if reversal {
+			output = append(output, report...)
+		}
+		g.count = count
 		g.last = now
+		g.direction = direction
 		g.owed -= direction * speed
+		if g.owed*direction < 0 {
+			g.owed = 0
+		}
 	}
 	return output
+}
+
+func (g *wheelGovernor) inPrecisionMode(button int, now time.Time) bool {
+	if g.profile.precisionSticky <= 0 {
+		return false
+	}
+	return button&wheelPrecisionModifiers != 0 ||
+		(!g.precisionAt.IsZero() &&
+			now.UnixMilli()-g.precisionAt.UnixMilli() < g.profile.precisionSticky.Milliseconds())
+}
+
+func (g *wheelGovernor) reportInDirection(direction int) []byte {
+	report := append([]byte(nil), g.template...)
+	_, buttonOffset, button := wheelReport(report)
+	wantDown := direction > 0
+	if (button&1 != 0) != wantDown {
+		// SGR's last decimal digit and X10's button byte both encode
+		// up/down in their low bit. Preserve every other byte.
+		report[buttonOffset] ^= 1
+	}
+	return report
 }
 
 func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
@@ -136,10 +201,20 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 			continue
 		}
 		reorder = false
+		if g.inPrecisionMode(button, now) {
+			// The TUI starts its ramp afresh on entering precision mode, and
+			// rows owed from before could only be paid in it at a row each.
+			g.precisionAt = now
+			g.owed, g.count, g.last, g.direction = 0, 0, time.Time{}, 0
+			output = append(output, report...)
+			continue
+		}
+		// The client calibrated this report against one sent after a pause.
+		rows := g.cappedSpeed(0)
 		if button&1 == 0 {
-			g.owed--
+			g.owed -= rows
 		} else {
-			g.owed++
+			g.owed += rows
 		}
 		g.template = append(g.template[:0], report...)
 		output = append(output, g.drain(now)...)
@@ -268,9 +343,192 @@ func wheelReport(data []byte) (length, buttonOffset, button int) {
 
 func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
+		w.processWheelProfile.forget()
 		return nil
 	}
-	return agentRegistry[w.agentToolLocked()].wheelProfile
+	profile := agentRegistry[w.agentToolLocked()].wheelProfile
+	if profile == nil || profile.processSpeed == nil {
+		w.processWheelProfile.forget()
+		return profile
+	}
+	return w.processWheelProfile.lookup(profile, w.activeForegroundPidLocked())
+}
+
+// processWheelProfile caches a registered profile resolved for one
+// foreground process group. Resolving reads other processes and files, so
+// it runs off the server lock: the window stays ungoverned until the result
+// lands, which is normally long before a drag, as the lookup starts when the
+// TUI turns mouse tracking on.
+//
+// The TUI's environment is fixed when it starts, so one resolution serves
+// the group, and the stable pointer keeps the governor's state. On Windows
+// the group is the window's shell, which outlives the TUI, so the result is
+// also forgotten whenever the window stops being governed by the profile,
+// as it is once the TUI turns mouse tracking off.
+type processWheelProfile struct {
+	mu         sync.Mutex
+	generation int
+	registered *wheelAccelerationProfile
+	group      int
+	resolved   *wheelAccelerationProfile
+	// done is closed when the resolution started for the current key
+	// finishes; resolving is true until then.
+	done      chan struct{}
+	resolving bool
+	// bypassed is set once wheel input stopped waiting for the resolution
+	// and reached the TUI ungoverned. The TUI's ramp and direction then
+	// hold state no governor saw, so the key stays ungoverned.
+	bypassed bool
+}
+
+// resolveProcessWheelProfile runs a resolution. Tests replace it to run it
+// synchronously or to hold it.
+var resolveProcessWheelProfile = func(resolve func()) {
+	go resolve()
+}
+
+// processWheelProfileWait bounds how long wheel input waits for a pending
+// resolution before it goes to the TUI ungoverned.
+var processWheelProfileWait = 250 * time.Millisecond
+
+// onWheelProfileWait and onWheelProfileWaitExpired, when set by a test, run
+// as wheel input starts waiting for a resolution and once it has given up,
+// with s.mu held.
+var onWheelProfileWait, onWheelProfileWaitExpired func()
+
+func (c *processWheelProfile) forget() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registered != nil {
+		c.generation++
+		c.registered, c.group, c.resolved, c.resolving, c.bypassed = nil, 0, nil, false, false
+	}
+}
+
+// pending returns a channel closed when the resolution in flight finishes,
+// or nil when none is or input no longer waits for it.
+func (c *processWheelProfile) pending() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.resolving || c.bypassed {
+		return nil
+	}
+	return c.done
+}
+
+// expire settles wheel input that stopped waiting, for whichever key is now
+// registered. A result that has landed is used; otherwise the input goes to
+// the TUI ungoverned, and the key is marked bypassed so no later result
+// takes effect out of step with what the TUI saw. Deciding both under one
+// lock leaves no gap for a result to land in between.
+func (c *processWheelProfile) expire() *wheelAccelerationProfile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registered == nil {
+		return nil
+	}
+	if c.resolved != nil && !c.bypassed {
+		return c.resolved
+	}
+	c.bypassed = true
+	return nil
+}
+
+func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group int) *wheelAccelerationProfile {
+	c.mu.Lock()
+	if c.registered == profile && c.group == group {
+		defer c.mu.Unlock()
+		if c.bypassed {
+			return nil
+		}
+		return c.resolved
+	}
+	c.generation++
+	generation := c.generation
+	done := make(chan struct{})
+	c.registered, c.group, c.resolved = profile, group, nil
+	c.done, c.resolving, c.bypassed = done, true, false
+	c.mu.Unlock()
+	resolveProcessWheelProfile(func() {
+		var resolved *wheelAccelerationProfile
+		if speed := profile.processSpeed(group); speed != nil {
+			copied := *profile
+			copied.speed, copied.processSpeed = speed, nil
+			resolved = &copied
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.generation == generation {
+			c.resolved, c.resolving = resolved, false
+		}
+		close(done)
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != generation || c.bypassed {
+		return nil
+	}
+	return c.resolved
+}
+
+// awaitWheelProfileLocked returns the window's wheel profile for data. Wheel
+// reports the TUI received ungoverned would advance its ramp and direction
+// where a governor started afterwards cannot see them, so while a profile is
+// still being resolved, wheel input waits for it, off s.mu (still holding
+// the window's inputMu, which queues the window's later input behind it).
+// Called with s.mu held; it returns with s.mu held, and false when the
+// window went away while it waited.
+func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wheelAccelerationProfile, bool) {
+	profile := window.wheelAccelerationProfileLocked()
+	if profile != nil || !mayHoldWheelReport(data) {
+		return profile, true
+	}
+	deadline := time.NewTimer(processWheelProfileWait)
+	defer deadline.Stop()
+	for {
+		pending := window.processWheelProfile.pending()
+		if pending == nil {
+			return profile, true
+		}
+		if onWheelProfileWait != nil {
+			onWheelProfileWait()
+		}
+		s.mu.Unlock()
+		expired := false
+		select {
+		case <-pending:
+		case <-deadline.C:
+			expired = true
+		}
+		s.mu.Lock()
+		if s.windowByIDLocked(window.id) != window || window.closed {
+			return nil, false
+		}
+		// The key may have changed while waiting, starting another
+		// resolution; input that gives up settles whichever is now current.
+		profile = window.wheelAccelerationProfileLocked()
+		if profile == nil && expired {
+			if onWheelProfileWaitExpired != nil {
+				onWheelProfileWaitExpired()
+			}
+			profile = window.processWheelProfile.expire()
+		}
+		if profile != nil || expired {
+			return profile, true
+		}
+	}
+}
+
+// mayHoldWheelReport reports whether data may hold an SGR or X10 mouse
+// report, or ends with what may be the start of one split across writes, as
+// a lone ESC or ESC [ may be. Waiting for the profile lets the governor carry
+// that start, so the rest of the report is governed with it.
+func mayHoldWheelReport(data []byte) bool {
+	if bytes.Contains(data, []byte("\x1b[<")) || bytes.Contains(data, []byte("\x1b[M")) {
+		return true
+	}
+	last := bytes.LastIndexByte(data, 0x1b)
+	return last >= 0 && wheelReportPrefixLen(data[last:]) == len(data)-last
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

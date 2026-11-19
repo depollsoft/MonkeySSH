@@ -7,7 +7,11 @@ import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/terminal.dart';
 
 /// Maximum screen displacement attributed to one terminal wheel report.
-const _maximumMeasuredWheelRows = 6;
+///
+/// Most applications move one or three rows. The Hermes TUI moves its
+/// configured base speed, `HERMES_TUI_SCROLL_SPEED`, which it caps at 20, and
+/// the MonkeyMux wheel governor counts each report as that many rows.
+const _maximumMeasuredWheelRows = 20;
 
 /// Captures the visible terminal text used to measure an application's
 /// response to one wheel report. Text, rather than styling, is compared so a

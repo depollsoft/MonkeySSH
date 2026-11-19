@@ -218,6 +218,23 @@ var agentRegistry = map[string]agentDescriptor{
 	},
 	"hermes": {
 		commandNames: []string{"hermes", "hermes-agent"},
+		// The Ink TUI ramps its wheel speed; see hermes_wheel.go. Its
+		// classic CLI does not track the mouse, so it is never governed.
+		// A few overlays, such as /agents, step once per report without
+		// the ramp. Hermes gives no sign of which view has the wheel, so
+		// there a fast drag moves fewer items than it asked for and a
+		// reversal moves two; the transcript is what a drag scrolls.
+		wheelProfile: &wheelAccelerationProfile{
+			// Hermes keeps ramping while reports are at most 40 whole
+			// milliseconds apart. A gap on that edge then reads as
+			// continuing the ramp, which can only under-scroll.
+			window:           41 * time.Millisecond,
+			processSpeed:     hermesWheelSpeedForProcessGroup,
+			deferredReversal: true,
+			// Hermes stays in precision mode while reports are under 80
+			// whole milliseconds apart (ui-tui/src/lib/precisionWheel.ts).
+			precisionSticky: 80 * time.Millisecond,
+		},
 	},
 	"openclaw": {
 		commandNames: []string{"openclaw"},

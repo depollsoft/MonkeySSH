@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.258"
+	monkeyMuxVersion                  = "0.1.259"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -949,7 +949,8 @@ type muxWindow struct {
 	agentSessionWatch         *agentSessionWatch
 	inputMu                   sync.Mutex
 	replies                   windowReplyQueue
-	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
+	wheelGovernor             wheelGovernor       // guarded by s.mu; draining also requires inputMu
+	processWheelProfile       processWheelProfile // guards itself, so resolution can finish off s.mu
 	nativePaste               nativeConsolePasteFilter
 	nativeResponse            nativeConsoleResponseFilter
 	id                        string
@@ -13813,8 +13814,17 @@ func (s *muxServer) writeWindowDataLocked(
 		s.mu.Unlock()
 		return nil, fmt.Errorf("window %q not found", window.id)
 	}
+	var profile *wheelAccelerationProfile
+	if response || bracketedPaste {
+		profile = window.wheelAccelerationProfileLocked()
+	} else {
+		var present bool
+		if profile, present = s.awaitWheelProfileLocked(window, data); !present {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("window %q not found", window.id)
+		}
+	}
 	win32InputMode := window.win32InputMode
-	profile := window.wheelAccelerationProfileLocked()
 	if window.wheelGovernor.profile != profile {
 		window.wheelGovernor.reset(profile)
 	}

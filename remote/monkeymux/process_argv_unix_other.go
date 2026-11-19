@@ -8,3 +8,12 @@ package main
 func processCommandLine(pid int) []string {
 	return nil
 }
+
+// processEnvironment and processGroupMembers are not implemented here either.
+func processEnvironment(pid int) []string {
+	return nil
+}
+
+func processGroupMembers(group int) []int {
+	return nil
+}

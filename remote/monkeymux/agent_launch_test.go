@@ -33,6 +33,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// A stand-in for an agent process that tests inspect while it runs,
+	// under whatever name they started this executable with.
+	if os.Getenv("MONKEYMUX_TEST_STAND_IN") != "" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	// Probes against real ps, lsof and sqlite3 must not fail a test because
 	// the machine was busy (see processMetadataTimeout).
 	processMetadataTimeout = 30 * time.Second
