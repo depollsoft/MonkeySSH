@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/agent_launch_preset.dart';
 import '../models/terminal_backend.dart';
 import '../models/terminal_theme.dart';
+import '../models/tmux_flags.dart';
 import '../models/tmux_state.dart';
 import 'command_output_marker_reader.dart';
 import 'diagnostics_log_service.dart';
@@ -18,8 +19,6 @@ import 'remote_multiplexer_service.dart';
 import 'ssh_exec_queue.dart';
 import 'ssh_service.dart';
 import 'windows_remote_powershell.dart';
-
-const _backslashCodeUnit = 0x5C;
 
 /// Whether the app is in the foreground, so periodic remote polling may run.
 ///
@@ -33,8 +32,6 @@ bool isAppInForeground() {
     return true;
   }
 }
-
-enum _ShellQuoteMode { none, single, double }
 
 /// Error thrown when a tmux command channel ends before confirming completion.
 class TmuxCommandException implements Exception {
@@ -3193,8 +3190,10 @@ String _formatTmuxSendKeysHexArgument(int codeUnit) {
 /// other than `new-session`.
 @visibleForTesting
 String? resolveTmuxClientFlagsFromExtraFlags(String? extraFlags) {
-  final tokens = _tokenizeShellFragment(extraFlags);
-  if (tokens == null || tokens.isEmpty) {
+  final List<String> tokens;
+  try {
+    tokens = tokenizeTmuxFlags(extraFlags, allowCommandSeparators: true);
+  } on FormatException {
     return null;
   }
 
@@ -3238,97 +3237,6 @@ String _shellQuoteReusableTmuxClientFlagValue(String value) {
     return r'"$HOME"' + shellEscapePosix(value.substring(1));
   }
   return shellEscapePosix(value);
-}
-
-List<String>? _tokenizeShellFragment(String? value) {
-  final normalized = value?.trim();
-  if (normalized == null || normalized.isEmpty) {
-    return const [];
-  }
-  if (normalized.contains('\n') || normalized.contains('\r')) {
-    return null;
-  }
-
-  final tokens = <String>[];
-  var currentToken = StringBuffer();
-  var tokenStarted = false;
-  var quoteMode = _ShellQuoteMode.none;
-
-  void commitToken() {
-    if (!tokenStarted) return;
-    tokens.add(currentToken.toString());
-    currentToken = StringBuffer();
-    tokenStarted = false;
-  }
-
-  for (var index = 0; index < normalized.length; index++) {
-    final character = normalized[index];
-
-    if (quoteMode == _ShellQuoteMode.single) {
-      if (character == "'") {
-        quoteMode = _ShellQuoteMode.none;
-      } else {
-        currentToken.write(character);
-      }
-      continue;
-    }
-
-    if (quoteMode == _ShellQuoteMode.double) {
-      if (character == '"') {
-        quoteMode = _ShellQuoteMode.none;
-        continue;
-      }
-      if (character.codeUnitAt(0) == _backslashCodeUnit) {
-        if (index + 1 >= normalized.length) {
-          return null;
-        }
-        final nextCharacter = normalized[index + 1];
-        if (nextCharacter == '"' ||
-            nextCharacter.codeUnitAt(0) == _backslashCodeUnit ||
-            nextCharacter == r'$' ||
-            nextCharacter == '`') {
-          currentToken.write(nextCharacter);
-          index++;
-          continue;
-        }
-      }
-      currentToken.write(character);
-      continue;
-    }
-
-    if (character == ' ' || character == '\t') {
-      commitToken();
-      continue;
-    }
-    if (character == "'") {
-      tokenStarted = true;
-      quoteMode = _ShellQuoteMode.single;
-      continue;
-    }
-    if (character == '"') {
-      tokenStarted = true;
-      quoteMode = _ShellQuoteMode.double;
-      continue;
-    }
-    if (character.codeUnitAt(0) == _backslashCodeUnit) {
-      if (index + 1 >= normalized.length) {
-        return null;
-      }
-      tokenStarted = true;
-      currentToken.write(normalized[index + 1]);
-      index++;
-      continue;
-    }
-    tokenStarted = true;
-    currentToken.write(character);
-  }
-
-  if (quoteMode != _ShellQuoteMode.none) {
-    return null;
-  }
-
-  commitToken();
-  return tokens;
 }
 
 bool _isReusableTmuxClientFlag(String value) {

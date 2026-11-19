@@ -2,6 +2,7 @@ import '../services/windows_remote_powershell.dart';
 import 'agent_worktree.dart';
 import 'command_names.dart';
 import 'remote_multiplexer.dart';
+import 'tmux_flags.dart';
 import 'tmux_state.dart';
 
 /// Supported coding-agent CLIs for host-scoped launch presets.
@@ -708,7 +709,10 @@ String buildAgentLaunchCommand(
   if (preset.usesTmuxSession &&
       tmuxSessionName != null &&
       tmuxSessionName.isNotEmpty) {
-    final tmuxExtraFlags = _tokenizeTmuxNewSessionFlags(preset.tmuxExtraFlags);
+    final tmuxExtraFlags = tokenizeTmuxFlags(
+      preset.tmuxExtraFlags,
+      allowCommandSeparators: false,
+    );
     final commandParts = <String>[
       'tmux new-session -A -s ${_quoteShellArgument(tmuxSessionName)}',
       if (workingDirectory != null && workingDirectory.isNotEmpty)
@@ -1022,118 +1026,6 @@ String? _stripArgumentPatterns(
       .trim();
   return normalizedArguments.isEmpty ? null : normalizedArguments;
 }
-
-List<String> _tokenizeTmuxNewSessionFlags(String? value) {
-  final normalized = value?.trim();
-  if (normalized == null || normalized.isEmpty) {
-    return const [];
-  }
-  if (normalized.contains('\n') || normalized.contains('\r')) {
-    throw const FormatException(
-      'tmux new-session flags must stay on one line.',
-    );
-  }
-
-  final tokens = <String>[];
-  var currentToken = StringBuffer();
-  var tokenStarted = false;
-  var quoteMode = _ShellQuoteMode.none;
-
-  void commitToken() {
-    if (!tokenStarted) {
-      return;
-    }
-    final token = currentToken.toString();
-    if (_isTmuxCommandSeparatorToken(token)) {
-      throw const FormatException(
-        r'tmux new-session flags cannot include tmux command separators like \;.',
-      );
-    }
-    tokens.add(token);
-    currentToken = StringBuffer();
-    tokenStarted = false;
-  }
-
-  for (var index = 0; index < normalized.length; index++) {
-    final character = normalized[index];
-
-    if (quoteMode == _ShellQuoteMode.single) {
-      if (character == "'") {
-        quoteMode = _ShellQuoteMode.none;
-      } else {
-        tokenStarted = true;
-        currentToken.write(character);
-      }
-      continue;
-    }
-
-    if (quoteMode == _ShellQuoteMode.double) {
-      if (character == '"') {
-        quoteMode = _ShellQuoteMode.none;
-        continue;
-      }
-      if (character.codeUnitAt(0) == _backslashCodeUnit) {
-        if (index + 1 >= normalized.length) {
-          throw const FormatException(
-            'tmux new-session flags cannot end with an escape character.',
-          );
-        }
-        final nextCharacter = normalized[index + 1];
-        if (nextCharacter == '"' ||
-            nextCharacter.codeUnitAt(0) == _backslashCodeUnit ||
-            nextCharacter == r'$' ||
-            nextCharacter == '`') {
-          tokenStarted = true;
-          currentToken.write(nextCharacter);
-          index++;
-          continue;
-        }
-      }
-      tokenStarted = true;
-      currentToken.write(character);
-      continue;
-    }
-
-    if (character == ' ' || character == '\t') {
-      commitToken();
-      continue;
-    }
-    if (character == "'") {
-      tokenStarted = true;
-      quoteMode = _ShellQuoteMode.single;
-      continue;
-    }
-    if (character == '"') {
-      tokenStarted = true;
-      quoteMode = _ShellQuoteMode.double;
-      continue;
-    }
-    if (character.codeUnitAt(0) == _backslashCodeUnit) {
-      if (index + 1 >= normalized.length) {
-        throw const FormatException(
-          'tmux new-session flags cannot end with an escape character.',
-        );
-      }
-      tokenStarted = true;
-      currentToken.write(normalized[index + 1]);
-      index++;
-      continue;
-    }
-    tokenStarted = true;
-    currentToken.write(character);
-  }
-
-  if (quoteMode != _ShellQuoteMode.none) {
-    throw const FormatException(
-      'tmux new-session flags contain an unterminated quote.',
-    );
-  }
-
-  commitToken();
-  return tokens;
-}
-
-bool _isTmuxCommandSeparatorToken(String value) => value == ';';
 
 String _quoteTmuxFlagToken(String value) =>
     _unquotedTmuxFlagTokenPattern.hasMatch(value)
