@@ -84,6 +84,15 @@ func TestResolveHermesDotenv(t *testing.T) {
 	}
 }
 
+func TestResolveHermesDotenvKeepsLastBinding(t *testing.T) {
+	got := resolveHermesDotenv(parseDotenv("A=1\nB=2\nA=3\nB\nC=${A}${B}\n"), map[string]string{"B": "9"})
+	// B's bare last line drops it and shadows it as empty for later lines.
+	want := []dotenvAssignment{{"A", "3", true}, {"C", "3", true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
 func writeHermesTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -128,6 +137,12 @@ func TestHermesLaunchEnvironmentLayers(t *testing.T) {
 
 	if got := speed(); got != 2 {
 		t.Fatalf("without a .env: base %v, want the shell's 2", got)
+	}
+	// A last line that assigns nothing drops the name's earlier lines, and
+	// the inherited value stands.
+	writeHermesTestFile(t, filepath.Join(defaultHome, ".env"), "HERMES_TUI_SCROLL_SPEED=3\nHERMES_TUI_SCROLL_SPEED\n")
+	if got := speed(); got != 2 {
+		t.Fatalf("with a bare last line: base %v, want the shell's 2", got)
 	}
 	// The profile's .env overrides a shell export, and its last line wins.
 	writeHermesTestFile(t, filepath.Join(defaultHome, ".env"),

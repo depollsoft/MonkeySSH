@@ -632,20 +632,45 @@ func TestWheelGovernorHermesQueuesWheelInputWhileResolving(t *testing.T) {
 }
 
 // A resolution that cannot finish in time lets the input through rather than
-// holding the window's input any longer.
+// holding the window's input any longer. Hermes then holds ramp and
+// direction state no governor saw, so that run stays ungoverned even once
+// the result lands, and the next run resolves afresh.
 func TestWheelGovernorHermesStopsWaitingForResolution(t *testing.T) {
 	installWheelTestClock(t)
 	installHermesTestEnvironment(t)
-	holdWheelProfileResolutions(t)
+	started := holdWheelProfileResolutions(t)
 	processWheelProfileWait = 20 * time.Millisecond
 	t.Cleanup(func() { processWheelProfileWait = 250 * time.Millisecond })
 	server, window, pty := newWheelTestWindow("hermes", true)
-	data := strings.Repeat(wheelUp, 7)
-	if err := server.writeWindowData(window.id, []byte(data), false, false); err != nil {
-		t.Fatal(err)
+	write := func(data string) string {
+		t.Helper()
+		before := len(pty.String())
+		if err := server.writeWindowData(window.id, []byte(data), false, false); err != nil {
+			t.Fatal(err)
+		}
+		return pty.String()[before:]
 	}
-	if got := pty.String(); got != data {
+	down, up := strings.Repeat(wheelDown, 7), strings.Repeat(wheelUp, 7)
+	if got := write(down); got != down {
 		t.Fatalf("PTY input=%q, want the reports ungoverned", got)
+	}
+	resolve := <-started
+	resolve()
+	start := time.Now()
+	if got := write(up); got != up {
+		t.Fatalf("after a late result: PTY input=%q, want the reversal ungoverned", got)
+	}
+	if waited := time.Since(start); waited >= processWheelProfileWait {
+		t.Fatalf("input waited %v again for a resolution it had given up on", waited)
+	}
+	// Hermes exits and runs again in the same shell.
+	window.observeTerminalModesLocked([]byte("\x1b[?1002l\x1b[?1006l"))
+	window.resetWheelGovernorIfInactiveLocked()
+	// Turning mouse tracking on starts the next run's resolution.
+	resolveProcessWheelProfile = func(resolve func()) { resolve() }
+	window.observeTerminalModesLocked([]byte("\x1b[?1002h\x1b[?1006h"))
+	if got := write(up); got != strings.Repeat(wheelUp, 5) {
+		t.Fatalf("next run: PTY input=%q, want five governed reports", got)
 	}
 }
 
@@ -661,11 +686,11 @@ func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 	cache.lookup(registered, 200)
 	current := <-started
 	stale()
-	if cache.lookup(registered, 200) != nil || cache.pending() == nil {
+	if pending, _ := cache.pending(); cache.lookup(registered, 200) != nil || pending == nil {
 		t.Fatal("a stale result was applied")
 	}
 	current()
-	if cache.lookup(registered, 200) == nil || cache.pending() != nil {
+	if pending, _ := cache.pending(); cache.lookup(registered, 200) == nil || pending != nil {
 		t.Fatal("the current result was not applied")
 	}
 }

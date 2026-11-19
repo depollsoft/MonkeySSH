@@ -85,8 +85,8 @@ func hermesLaunchEnvironment(base []string, argv []string) []string {
 			loaded = append(loaded, assignment.name+"="+assignment.value)
 		}
 	}
-	// A later layer and a later line override an earlier one, so the last
-	// assignment of a name goes first.
+	// A later layer overrides an earlier one, so the last assignment of a
+	// name goes first.
 	environment := make([]string, 0, len(loaded)+len(base))
 	for i := len(loaded) - 1; i >= 0; i-- {
 		environment = append(environment, loaded[i])
@@ -330,12 +330,17 @@ var dotenvVariable = regexp.MustCompile(`\$\{([^}:]*)(?::-([^}]*))?\}`)
 // resolveHermesDotenv expands ${NAME} and ${NAME:-default} the way Hermes's
 // _resolve_dotenv_assignments does when a file overrides the environment:
 // against lookup, with the file's earlier lines in front of it. A name
-// defined but empty expands to empty, not to the default. It returns the
-// assignments in file order, without the lines that assign nothing.
+// defined but empty expands to empty, not to the default. Like the dict
+// Hermes collects them in, it keeps one binding per name, the last, in the
+// order names first appear, and drops a name whose last line assigns
+// nothing, which leaves the inherited value alone.
 func resolveHermesDotenv(assignments []dotenvAssignment, lookup map[string]string) []dotenvAssignment {
 	resolved := map[string]*string{}
-	var output []dotenvAssignment
+	var order []string
 	for _, assignment := range assignments {
+		if _, seen := resolved[assignment.name]; !seen {
+			order = append(order, assignment.name)
+		}
 		if !assignment.set {
 			resolved[assignment.name] = nil
 			continue
@@ -354,7 +359,12 @@ func resolveHermesDotenv(assignments []dotenvAssignment, lookup map[string]strin
 			return match[2]
 		})
 		resolved[assignment.name] = &value
-		output = append(output, dotenvAssignment{name: assignment.name, value: value, set: true})
+	}
+	var output []dotenvAssignment
+	for _, name := range order {
+		if value := resolved[name]; value != nil {
+			output = append(output, dotenvAssignment{name: name, value: *value, set: true})
+		}
 	}
 	return output
 }

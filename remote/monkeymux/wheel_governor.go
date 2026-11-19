@@ -375,6 +375,10 @@ type processWheelProfile struct {
 	// finishes; resolving is true until then.
 	done      chan struct{}
 	resolving bool
+	// bypassed is set once wheel input stopped waiting for the resolution
+	// and reached the TUI ungoverned. The TUI's ramp and direction then
+	// hold state no governor saw, so the key stays ungoverned.
+	bypassed bool
 }
 
 // resolveProcessWheelProfile runs a resolution. Tests replace it to run it
@@ -392,32 +396,45 @@ func (c *processWheelProfile) forget() {
 	defer c.mu.Unlock()
 	if c.registered != nil {
 		c.generation++
-		c.registered, c.group, c.resolved, c.resolving = nil, 0, nil, false
+		c.registered, c.group, c.resolved, c.resolving, c.bypassed = nil, 0, nil, false, false
 	}
 }
 
 // pending returns a channel closed when the resolution in flight finishes,
-// or nil when none is.
-func (c *processWheelProfile) pending() <-chan struct{} {
+// with its generation, or nil when none is or input no longer waits for it.
+func (c *processWheelProfile) pending() (<-chan struct{}, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.resolving {
-		return nil
+	if !c.resolving || c.bypassed {
+		return nil, 0
 	}
-	return c.done
+	return c.done, c.generation
+}
+
+// bypass records that wheel input stopped waiting for generation's
+// resolution and went to the TUI ungoverned.
+func (c *processWheelProfile) bypass(generation int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation == generation {
+		c.bypassed = true
+	}
 }
 
 func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group int) *wheelAccelerationProfile {
 	c.mu.Lock()
 	if c.registered == profile && c.group == group {
 		defer c.mu.Unlock()
+		if c.bypassed {
+			return nil
+		}
 		return c.resolved
 	}
 	c.generation++
 	generation := c.generation
 	done := make(chan struct{})
 	c.registered, c.group, c.resolved = profile, group, nil
-	c.done, c.resolving = done, true
+	c.done, c.resolving, c.bypassed = done, true, false
 	c.mu.Unlock()
 	resolveProcessWheelProfile(func() {
 		var resolved *wheelAccelerationProfile
@@ -435,7 +452,7 @@ func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group in
 	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.generation != generation {
+	if c.generation != generation || c.bypassed {
 		return nil
 	}
 	return c.resolved
@@ -456,7 +473,7 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 	deadline := time.NewTimer(processWheelProfileWait)
 	defer deadline.Stop()
 	for {
-		pending := window.processWheelProfile.pending()
+		pending, generation := window.processWheelProfile.pending()
 		if pending == nil {
 			return profile, true
 		}
@@ -470,6 +487,9 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 		s.mu.Lock()
 		if s.windowByIDLocked(window.id) != window || window.closed {
 			return nil, false
+		}
+		if expired {
+			window.processWheelProfile.bypass(generation)
 		}
 		profile = window.wheelAccelerationProfileLocked()
 		if profile != nil || expired {
