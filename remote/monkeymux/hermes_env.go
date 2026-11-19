@@ -43,12 +43,20 @@ var hermesTUIEnvironmentForGroup = func(group int) []string {
 // not run Hermes.
 func hermesCommandStart(argv []string) int {
 	for i, arg := range argv {
-		name := strings.ToLower(cleanProcessCommandName(arg))
-		if name == "hermes" || name == "hermes-agent" || strings.HasPrefix(arg, "hermes_cli") {
+		if name := hermesExecutableName(arg); name == "hermes" || name == "hermes-agent" ||
+			strings.HasPrefix(arg, "hermes_cli") {
 			return i + 1
 		}
 	}
 	return -1
+}
+
+// hermesExecutableName is the lowercase base name of one argv entry, which
+// may hold spaces, as in C:\Users\Jane Doe\Scripts\hermes.exe, without an
+// .exe or .js suffix.
+func hermesExecutableName(path string) string {
+	name := strings.ToLower(filepath.Base(path))
+	return strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".js")
 }
 
 func isNodeExecutable(path string) bool {

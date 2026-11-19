@@ -497,3 +497,53 @@ func TestWheelGovernorHermesRereadsSpeedForNextRun(t *testing.T) {
 		t.Fatalf("next run: PTY input=%q after %d lookups, want four reports from base 3 after 2", got, lookups)
 	}
 }
+
+// Hermes leaves precision mode once a report comes 80 whole milliseconds or
+// more after the last one in it. A governor still bypassing there would stay
+// bypassed for a whole drag Hermes then ramps, and a reversal could switch
+// Hermes into wheel mode.
+func TestWheelGovernorHermesPrecisionBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		gap      time.Duration
+		reversal bool
+		governed bool
+	}{
+		{name: "79ms", gap: 79 * time.Millisecond},
+		{name: "79.9ms", gap: 79*time.Millisecond + 900*time.Microsecond},
+		{name: "80ms", gap: 80 * time.Millisecond, governed: true},
+		{name: "80ms reversal", gap: 80 * time.Millisecond, reversal: true, governed: true},
+		{name: "81ms", gap: 81 * time.Millisecond, governed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := wheelGovernor{profile: hermesWheelProfile(1)}
+			tui := newHermesTestTUI(1)
+			now := time.UnixMilli(100_000)
+			tui.receive(t, g.process([]byte(ctrlWheelDown), now), now)
+			now = now.Add(test.gap)
+			before := tui.rows
+			report := wheelDown
+			if test.reversal {
+				report = wheelUp
+			}
+			for i := 0; i < 40; i++ {
+				tui.receive(t, g.process([]byte(report), now), now)
+				now = now.Add(16 * time.Millisecond)
+			}
+			settleHermesWheelGovernor(t, &g, tui, now)
+			moved := tui.rows - before
+			if test.reversal {
+				moved = -moved
+			}
+			if test.governed && moved != 40 {
+				t.Fatalf("drag after leaving precision mode moved %d rows, want 40", moved)
+			}
+			if !test.governed && moved > 40 {
+				t.Fatalf("drag in precision mode moved %d rows, more than the 40 asked for", moved)
+			}
+			if tui.enteredWheelMode {
+				t.Fatal("reports switched Hermes into wheel mode")
+			}
+		})
+	}
+}

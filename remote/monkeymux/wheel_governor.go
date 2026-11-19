@@ -26,7 +26,10 @@ type wheelAccelerationProfile struct {
 	// precisionSticky, when set, is how long after a Ctrl- or Meta-wheel
 	// report the TUI keeps scrolling in a precision mode: one row per frame,
 	// not ramped, with the ramp reset when the mode starts. Such reports,
-	// and any report within that time of one, pass through ungoverned.
+	// and any report less than that after the last one in the mode, pass
+	// through ungoverned. The gap is counted in whole milliseconds, as the
+	// TUI counts it: a report it reads as outside the mode while the governor
+	// still bypasses would keep the governor bypassed for the whole drag.
 	precisionSticky time.Duration
 }
 
@@ -134,7 +137,8 @@ func (g *wheelGovernor) inPrecisionMode(button int, now time.Time) bool {
 		return false
 	}
 	return button&wheelPrecisionModifiers != 0 ||
-		(!g.precisionAt.IsZero() && now.Sub(g.precisionAt) < g.profile.precisionSticky)
+		(!g.precisionAt.IsZero() &&
+			now.UnixMilli()-g.precisionAt.UnixMilli() < g.profile.precisionSticky.Milliseconds())
 }
 
 func (g *wheelGovernor) reportInDirection(direction int) []byte {

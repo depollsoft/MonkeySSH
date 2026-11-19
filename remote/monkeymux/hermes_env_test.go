@@ -191,6 +191,7 @@ func TestHermesHomeForLaunch(t *testing.T) {
 		{name: "sticky default", active: "default", argv: with(), want: defaultHome},
 		{name: "sticky without argv", active: "work", want: work},
 		{name: "module", argv: []string{"python3", "-m", "hermes_cli.main", "-p", "work"}, want: work},
+		{name: "spaces in path", argv: []string{filepath.Join(account, "Jane Doe", "Scripts", "hermes.exe"), "-p", "work"}, want: work},
 		{name: "profile HERMES_HOME", hermesHome: work, active: "ghost", argv: with(), want: work},
 		{name: "custom root", hermesHome: custom, argv: with("-p", "work"), want: filepath.Join(custom, "profiles", "work")},
 		{name: "custom root HERMES_HOME", hermesHome: custom, argv: with(), want: custom},

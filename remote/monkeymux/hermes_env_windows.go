@@ -29,7 +29,7 @@ func hermesLaunchArguments(root int) []string {
 			descendants := children[pid]
 			slices.Sort(descendants)
 			for _, child := range descendants {
-				name := strings.ToLower(cleanProcessCommandName(processes[child].comm))
+				name := hermesExecutableName(processes[child].comm)
 				if name == "hermes" || name == "hermes-agent" || strings.HasPrefix(name, "python") {
 					if argv := windowsProcessCommandLine(child); hermesCommandStart(argv) >= 0 {
 						return argv
