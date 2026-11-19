@@ -479,9 +479,15 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 }
 
 // mayHoldWheelReport reports whether data may hold an SGR or X10 mouse
-// report. An ungoverned window carries no partial report between writes.
+// report, or ends with what may be the start of one split across writes, as
+// a lone ESC or ESC [ may be. Waiting for the profile lets the governor carry
+// that start, so the rest of the report is governed with it.
 func mayHoldWheelReport(data []byte) bool {
-	return bytes.Contains(data, []byte("\x1b[<")) || bytes.Contains(data, []byte("\x1b[M"))
+	if bytes.Contains(data, []byte("\x1b[<")) || bytes.Contains(data, []byte("\x1b[M")) {
+		return true
+	}
+	last := bytes.LastIndexByte(data, 0x1b)
+	return last >= 0 && wheelReportPrefixLen(data[last:]) == len(data)-last
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

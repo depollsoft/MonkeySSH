@@ -585,10 +585,15 @@ func TestWheelGovernorHermesQueuesWheelInputWhileResolving(t *testing.T) {
 	}
 	read = len(pty.String())
 
-	// A drag that starts before the resolution lands waits for it.
+	// A drag that starts before the resolution lands waits for it, even
+	// when its first report is split after ESC [.
 	written := make(chan error, 1)
 	go func() {
-		written <- server.writeWindowData(window.id, []byte(strings.Repeat(wheelDown, 7)), false, false)
+		if err := server.writeWindowData(window.id, []byte(wheelDown[:2]), false, false); err != nil {
+			written <- err
+			return
+		}
+		written <- server.writeWindowData(window.id, []byte(wheelDown[2:]+strings.Repeat(wheelDown, 6)), false, false)
 	}()
 	select {
 	case err := <-written:
@@ -662,5 +667,27 @@ func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 	current()
 	if cache.lookup(registered, 200) == nil || cache.pending() != nil {
 		t.Fatal("the current result was not applied")
+	}
+}
+
+func TestMayHoldWheelReport(t *testing.T) {
+	for _, test := range []struct {
+		data string
+		want bool
+	}{
+		{wheelDown, true},
+		{"ls" + wheelUp + "\r", true},
+		{"\x1b[M`!!", true},
+		{"\x1b", true},
+		{"ls\x1b[", true},
+		{"\x1b[<65;12", true},
+		{"ls", false},
+		{"\x1b[A", false},
+		{"\x1bOA", false},
+		{"<65;12;34M", false},
+	} {
+		if got := mayHoldWheelReport([]byte(test.data)); got != test.want {
+			t.Errorf("%q: %v, want %v", test.data, got, test.want)
+		}
 	}
 }
