@@ -391,6 +391,10 @@ var resolveProcessWheelProfile = func(resolve func()) {
 // resolution before it goes to the TUI ungoverned.
 var processWheelProfileWait = 250 * time.Millisecond
 
+// onWheelProfileWait, when set by a test, runs as wheel input starts waiting
+// for a resolution, with s.mu still held.
+var onWheelProfileWait func()
+
 func (c *processWheelProfile) forget() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -401,22 +405,22 @@ func (c *processWheelProfile) forget() {
 }
 
 // pending returns a channel closed when the resolution in flight finishes,
-// with its generation, or nil when none is or input no longer waits for it.
-func (c *processWheelProfile) pending() (<-chan struct{}, int) {
+// or nil when none is or input no longer waits for it.
+func (c *processWheelProfile) pending() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.resolving || c.bypassed {
-		return nil, 0
+		return nil
 	}
-	return c.done, c.generation
+	return c.done
 }
 
-// bypass records that wheel input stopped waiting for generation's
-// resolution and went to the TUI ungoverned.
-func (c *processWheelProfile) bypass(generation int) {
+// bypassPending records that wheel input stopped waiting for the resolution
+// in flight, whichever key it is for, and went to the TUI ungoverned.
+func (c *processWheelProfile) bypassPending() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.generation == generation {
+	if c.resolving {
 		c.bypassed = true
 	}
 }
@@ -473,9 +477,12 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 	deadline := time.NewTimer(processWheelProfileWait)
 	defer deadline.Stop()
 	for {
-		pending, generation := window.processWheelProfile.pending()
+		pending := window.processWheelProfile.pending()
 		if pending == nil {
 			return profile, true
+		}
+		if onWheelProfileWait != nil {
+			onWheelProfileWait()
 		}
 		s.mu.Unlock()
 		expired := false
@@ -488,10 +495,13 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 		if s.windowByIDLocked(window.id) != window || window.closed {
 			return nil, false
 		}
-		if expired {
-			window.processWheelProfile.bypass(generation)
-		}
+		// The key may have changed while waiting, starting another
+		// resolution; input that gives up goes through ungoverned, so
+		// whichever one is now in flight is bypassed.
 		profile = window.wheelAccelerationProfileLocked()
+		if profile == nil && expired {
+			window.processWheelProfile.bypassPending()
+		}
 		if profile != nil || expired {
 			return profile, true
 		}

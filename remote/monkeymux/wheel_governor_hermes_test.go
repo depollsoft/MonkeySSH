@@ -674,6 +674,52 @@ func TestWheelGovernorHermesStopsWaitingForResolution(t *testing.T) {
 	}
 }
 
+// When the foreground group changes during the wait, the resolution started
+// for the new group is the one the ungoverned input bypassed.
+func TestWheelGovernorHermesBypassesResolutionStartedDuringWait(t *testing.T) {
+	installWheelTestClock(t)
+	installHermesTestEnvironment(t)
+	started := holdWheelProfileResolutions(t)
+	processWheelProfileWait = 100 * time.Millisecond
+	waiting := make(chan struct{}, 1)
+	onWheelProfileWait = func() { waiting <- struct{}{} }
+	t.Cleanup(func() {
+		processWheelProfileWait = 250 * time.Millisecond
+		onWheelProfileWait = nil
+	})
+	// Turning mouse tracking on started the first group's resolution.
+	server, window, pty := newWheelTestWindow("hermes", true)
+	first := <-started
+	down := strings.Repeat(wheelDown, 7)
+	written := make(chan error, 1)
+	go func() { written <- server.writeWindowData(window.id, []byte(down), false, false) }()
+	<-waiting
+	server.mu.Lock()
+	window.foregroundPid, window.mouseTrackingProcessID = 200, 200
+	server.mu.Unlock()
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if got := pty.String(); got != down {
+		t.Fatalf("PTY input=%q, want the reports ungoverned", got)
+	}
+	first()
+	select {
+	case second := <-started:
+		second()
+	default:
+		t.Fatal("no resolution started for the new group")
+	}
+	before := len(pty.String())
+	up := strings.Repeat(wheelUp, 7)
+	if err := server.writeWindowData(window.id, []byte(up), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := pty.String()[before:]; got != up {
+		t.Fatalf("after the new group's result: PTY input=%q, want it ungoverned", got)
+	}
+}
+
 // A result for a process group the window has left is dropped.
 func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 	installWheelTestClock(t)
@@ -686,11 +732,11 @@ func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 	cache.lookup(registered, 200)
 	current := <-started
 	stale()
-	if pending, _ := cache.pending(); cache.lookup(registered, 200) != nil || pending == nil {
+	if cache.lookup(registered, 200) != nil || cache.pending() == nil {
 		t.Fatal("a stale result was applied")
 	}
 	current()
-	if pending, _ := cache.pending(); cache.lookup(registered, 200) == nil || pending != nil {
+	if cache.lookup(registered, 200) == nil || cache.pending() != nil {
 		t.Fatal("the current result was not applied")
 	}
 }
