@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strconv"
 	"sync"
 	"time"
@@ -370,6 +371,10 @@ type processWheelProfile struct {
 	registered *wheelAccelerationProfile
 	group      int
 	resolved   *wheelAccelerationProfile
+	// done is closed when the resolution started for the current key
+	// finishes; resolving is true until then.
+	done      chan struct{}
+	resolving bool
 }
 
 // resolveProcessWheelProfile runs a resolution. Tests replace it to run it
@@ -378,13 +383,28 @@ var resolveProcessWheelProfile = func(resolve func()) {
 	go resolve()
 }
 
+// processWheelProfileWait bounds how long wheel input waits for a pending
+// resolution before it goes to the TUI ungoverned.
+var processWheelProfileWait = 250 * time.Millisecond
+
 func (c *processWheelProfile) forget() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.registered != nil {
 		c.generation++
-		c.registered, c.group, c.resolved = nil, 0, nil
+		c.registered, c.group, c.resolved, c.resolving = nil, 0, nil, false
 	}
+}
+
+// pending returns a channel closed when the resolution in flight finishes,
+// or nil when none is.
+func (c *processWheelProfile) pending() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.resolving {
+		return nil
+	}
+	return c.done
 }
 
 func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group int) *wheelAccelerationProfile {
@@ -395,7 +415,9 @@ func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group in
 	}
 	c.generation++
 	generation := c.generation
+	done := make(chan struct{})
 	c.registered, c.group, c.resolved = profile, group, nil
+	c.done, c.resolving = done, true
 	c.mu.Unlock()
 	resolveProcessWheelProfile(func() {
 		var resolved *wheelAccelerationProfile
@@ -407,8 +429,9 @@ func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group in
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.generation == generation {
-			c.resolved = resolved
+			c.resolved, c.resolving = resolved, false
 		}
+		close(done)
 	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -416,6 +439,49 @@ func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group in
 		return nil
 	}
 	return c.resolved
+}
+
+// awaitWheelProfileLocked returns the window's wheel profile for data. Wheel
+// reports the TUI received ungoverned would advance its ramp and direction
+// where a governor started afterwards cannot see them, so while a profile is
+// still being resolved, wheel input waits for it, off s.mu (still holding
+// the window's inputMu, which queues the window's later input behind it).
+// Called with s.mu held; it returns with s.mu held, and false when the
+// window went away while it waited.
+func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wheelAccelerationProfile, bool) {
+	profile := window.wheelAccelerationProfileLocked()
+	if profile != nil || !mayHoldWheelReport(data) {
+		return profile, true
+	}
+	deadline := time.NewTimer(processWheelProfileWait)
+	defer deadline.Stop()
+	for {
+		pending := window.processWheelProfile.pending()
+		if pending == nil {
+			return profile, true
+		}
+		s.mu.Unlock()
+		expired := false
+		select {
+		case <-pending:
+		case <-deadline.C:
+			expired = true
+		}
+		s.mu.Lock()
+		if s.windowByIDLocked(window.id) != window || window.closed {
+			return nil, false
+		}
+		profile = window.wheelAccelerationProfileLocked()
+		if profile != nil || expired {
+			return profile, true
+		}
+	}
+}
+
+// mayHoldWheelReport reports whether data may hold an SGR or X10 mouse
+// report. An ungoverned window carries no partial report between writes.
+func mayHoldWheelReport(data []byte) bool {
+	return bytes.Contains(data, []byte("\x1b[<")) || bytes.Contains(data, []byte("\x1b[M"))
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

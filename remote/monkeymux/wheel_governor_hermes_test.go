@@ -548,35 +548,119 @@ func TestWheelGovernorHermesPrecisionBoundary(t *testing.T) {
 	}
 }
 
-// Resolving reads other processes and files, so it runs off the server lock,
-// and the window stays ungoverned until it lands. A result for a group the
-// window has left is dropped.
-func TestWheelGovernorHermesResolvesOffLock(t *testing.T) {
-	installWheelTestClock(t)
+// holdWheelProfileResolutions makes resolutions wait until the test runs
+// them, returning them as they start.
+func holdWheelProfileResolutions(t *testing.T) <-chan func() {
+	t.Helper()
+	started := make(chan func(), 8)
+	resolveProcessWheelProfile = func(resolve func()) { started <- resolve }
+	return started
+}
+
+// Resolving reads other processes and files, so it runs off the server lock.
+// Wheel input that arrives meanwhile waits for it rather than reaching
+// Hermes ungoverned, which would advance a ramp the governor cannot see.
+func TestWheelGovernorHermesQueuesWheelInputWhileResolving(t *testing.T) {
+	clock := installWheelTestClock(t)
 	installHermesTestEnvironment(t)
-	var pending []func()
-	resolveProcessWheelProfile = func(resolve func()) { pending = append(pending, resolve) }
+	started := holdWheelProfileResolutions(t)
+	processWheelProfileWait = 5 * time.Second
+	t.Cleanup(func() { processWheelProfileWait = 250 * time.Millisecond })
 	server, window, pty := newWheelTestWindow("hermes", true)
-	write := func() string {
-		t.Helper()
-		before := len(pty.String())
-		if err := server.writeWindowData(window.id, []byte(strings.Repeat(wheelUp, 7)), false, false); err != nil {
+	tui := newHermesTestTUI(1)
+	read := 0
+	receive := func() {
+		output := pty.String()
+		tui.receive(t, []byte(output[read:]), clock.now)
+		read = len(output)
+	}
+
+	// Keystrokes never wait.
+	if err := server.writeWindowData(window.id, []byte("ls"), false, false); err != nil {
+		t.Fatal(err)
+	}
+	resolve := <-started
+	if pty.String() != "ls" {
+		t.Fatalf("PTY input=%q, want the keystrokes at once", pty.String())
+	}
+	read = len(pty.String())
+
+	// A drag that starts before the resolution lands waits for it.
+	written := make(chan error, 1)
+	go func() {
+		written <- server.writeWindowData(window.id, []byte(strings.Repeat(wheelDown, 7)), false, false)
+	}()
+	select {
+	case err := <-written:
+		t.Fatalf("wheel input did not wait for the resolution: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if pty.String() != "ls" {
+		t.Fatalf("PTY input=%q while resolving, want nothing more", pty.String())
+	}
+	resolve()
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	receive()
+	// Then it reverses. Every report Hermes saw was governed, so the rows
+	// add up and the reversal is not read as a wheel bounce.
+	requested := 7
+	for i := 0; i < 12; i++ {
+		clock.now = clock.now.Add(16 * time.Millisecond)
+		if err := server.writeWindowData(window.id, []byte(wheelUp), false, false); err != nil {
 			t.Fatal(err)
 		}
-		return pty.String()[before:]
+		receive()
+		requested--
 	}
-	if got := write(); got != strings.Repeat(wheelUp, 7) || len(pending) != 1 {
-		t.Fatalf("while resolving: PTY input=%q with %d resolutions, want ungoverned and 1", got, len(pending))
+	for i := 0; i < len(clock.timers); i++ {
+		if timer := clock.timers[i]; timer.due.After(clock.now) {
+			clock.now = timer.due
+		}
+		clock.timers[i].action()
+		receive()
 	}
-	// The foreground group changes before the first resolution lands.
-	window.foregroundPid, window.mouseTrackingProcessID = 200, 200
-	write()
-	pending[0]()
-	if got := write(); got != strings.Repeat(wheelUp, 7) || len(pending) != 2 {
-		t.Fatalf("after a stale result: PTY input=%q with %d resolutions, want ungoverned and 2", got, len(pending))
+	if tui.rows != requested || tui.enteredWheelMode {
+		t.Fatalf("moved %d rows, wheel mode %v; want %d and no wheel mode", tui.rows, tui.enteredWheelMode, requested)
 	}
-	pending[1]()
-	if got := write(); got != strings.Repeat(wheelUp, 5) {
-		t.Fatalf("once resolved: PTY input=%q, want five governed reports", got)
+}
+
+// A resolution that cannot finish in time lets the input through rather than
+// holding the window's input any longer.
+func TestWheelGovernorHermesStopsWaitingForResolution(t *testing.T) {
+	installWheelTestClock(t)
+	installHermesTestEnvironment(t)
+	holdWheelProfileResolutions(t)
+	processWheelProfileWait = 20 * time.Millisecond
+	t.Cleanup(func() { processWheelProfileWait = 250 * time.Millisecond })
+	server, window, pty := newWheelTestWindow("hermes", true)
+	data := strings.Repeat(wheelUp, 7)
+	if err := server.writeWindowData(window.id, []byte(data), false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := pty.String(); got != data {
+		t.Fatalf("PTY input=%q, want the reports ungoverned", got)
+	}
+}
+
+// A result for a process group the window has left is dropped.
+func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
+	installWheelTestClock(t)
+	installHermesTestEnvironment(t)
+	started := holdWheelProfileResolutions(t)
+	registered := agentRegistry["hermes"].wheelProfile
+	var cache processWheelProfile
+	cache.lookup(registered, 100)
+	stale := <-started
+	cache.lookup(registered, 200)
+	current := <-started
+	stale()
+	if cache.lookup(registered, 200) != nil || cache.pending() == nil {
+		t.Fatal("a stale result was applied")
+	}
+	current()
+	if cache.lookup(registered, 200) == nil || cache.pending() != nil {
+		t.Fatal("the current result was not applied")
 	}
 }

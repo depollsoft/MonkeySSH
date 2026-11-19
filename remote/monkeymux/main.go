@@ -13809,8 +13809,17 @@ func (s *muxServer) writeWindowDataLocked(
 		s.mu.Unlock()
 		return nil, fmt.Errorf("window %q not found", window.id)
 	}
+	var profile *wheelAccelerationProfile
+	if response || bracketedPaste {
+		profile = window.wheelAccelerationProfileLocked()
+	} else {
+		var present bool
+		if profile, present = s.awaitWheelProfileLocked(window, data); !present {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("window %q not found", window.id)
+		}
+	}
 	win32InputMode := window.win32InputMode
-	profile := window.wheelAccelerationProfileLocked()
 	if window.wheelGovernor.profile != profile {
 		window.wheelGovernor.reset(profile)
 	}
