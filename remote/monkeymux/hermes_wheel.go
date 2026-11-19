@@ -2,7 +2,6 @@ package main
 
 import (
 	"math"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,32 +52,6 @@ func hermesWheelSteps(base float64) []int {
 			return steps
 		}
 	}
-}
-
-// hermesTUIEnvironmentForGroup returns the environment of the TUI process in a
-// process group. Hermes runs the TUI as a Node child of its Python CLI, which
-// first loads ~/.hermes/.env into its own environment, so the child, not the
-// group leader, holds the value the TUI reads. The oldest Node process is the
-// TUI; anything Node it starts comes later. Without one the leader's
-// environment is the best guess. Only Linux exposes another process's
-// environment, so elsewhere this is nil and the base is Hermes's default.
-// Tests replace it.
-var hermesTUIEnvironmentForGroup = func(group int) []string {
-	for _, pid := range processGroupMembers(group) {
-		argv := processCommandLine(pid)
-		if len(argv) == 0 || !isNodeExecutable(argv[0]) {
-			continue
-		}
-		if environment := processEnvironment(pid); environment != nil {
-			return environment
-		}
-	}
-	return processEnvironment(group)
-}
-
-func isNodeExecutable(path string) bool {
-	name := strings.ToLower(filepath.Base(path))
-	return strings.TrimSuffix(name, ".exe") == "node"
 }
 
 // hermesScrollSpeedBase mirrors Hermes's readScrollSpeedBase, which applies

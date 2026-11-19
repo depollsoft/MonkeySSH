@@ -4,8 +4,7 @@ package main
 
 // processEnvironment is not implemented on macOS: kern.procargs2 and ps
 // return a process's environment only to root, even for the user's own
-// processes, so a TUI whose wheel speed its environment sets is governed at
-// its default speed here.
+// processes, so the Hermes wheel speed comes from its .env files here.
 func processEnvironment(pid int) []string {
 	return nil
 }

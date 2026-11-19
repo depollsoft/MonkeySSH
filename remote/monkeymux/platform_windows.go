@@ -916,8 +916,7 @@ func processCommandLine(pid int) []string {
 }
 
 // processEnvironment and processGroupMembers are not implemented on Windows
-// either, so a TUI whose wheel speed its environment sets is governed at its
-// default speed there.
+// either, so the Hermes wheel speed comes from its .env files there.
 func processEnvironment(pid int) []string {
 	return nil
 }
