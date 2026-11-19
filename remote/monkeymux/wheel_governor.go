@@ -23,7 +23,16 @@ type wheelAccelerationProfile struct {
 	// direction would instead read as a mechanical wheel's bounce, so the
 	// governor sends every reversal as that pair.
 	deferredReversal bool
+	// precisionSticky, when set, is how long after a Ctrl- or Meta-wheel
+	// report the TUI keeps scrolling in a precision mode: one row per frame,
+	// not ramped, with the ramp reset when the mode starts. Such reports,
+	// and any report within that time of one, pass through ungoverned.
+	precisionSticky time.Duration
 }
+
+// wheelPrecisionModifiers are the Meta and Ctrl bits of a wheel report's
+// button, in SGR and X10 alike.
+const wheelPrecisionModifiers = 8 | 16
 
 var wheelGovernorNow = time.Now
 
@@ -49,10 +58,12 @@ type wheelGovernor struct {
 	count    int
 	// direction is the sign of the last forwarded report, 0 before the first.
 	direction int
-	owed      int
-	template  []byte
-	carry     []byte
-	flushGen  int
+	// precisionAt is when the last report in precision mode was forwarded.
+	precisionAt time.Time
+	owed        int
+	template    []byte
+	carry       []byte
+	flushGen    int
 }
 
 func (g *wheelGovernor) reset(profile *wheelAccelerationProfile) {
@@ -118,6 +129,14 @@ func (g *wheelGovernor) drain(now time.Time) []byte {
 	return output
 }
 
+func (g *wheelGovernor) inPrecisionMode(button int, now time.Time) bool {
+	if g.profile.precisionSticky <= 0 {
+		return false
+	}
+	return button&wheelPrecisionModifiers != 0 ||
+		(!g.precisionAt.IsZero() && now.Sub(g.precisionAt) < g.profile.precisionSticky)
+}
+
 func (g *wheelGovernor) reportInDirection(direction int) []byte {
 	report := append([]byte(nil), g.template...)
 	_, buttonOffset, button := wheelReport(report)
@@ -176,6 +195,14 @@ func (g *wheelGovernor) process(data []byte, now time.Time) []byte {
 			continue
 		}
 		reorder = false
+		if g.inPrecisionMode(button, now) {
+			// The TUI starts its ramp afresh on entering precision mode, and
+			// rows owed from before could only be paid in it at a row each.
+			g.precisionAt = now
+			g.owed, g.count, g.last, g.direction = 0, 0, time.Time{}, 0
+			output = append(output, report...)
+			continue
+		}
 		// The client calibrated this report against one sent after a pause.
 		rows := g.cappedSpeed(0)
 		if button&1 == 0 {

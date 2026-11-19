@@ -227,6 +227,11 @@ var agentRegistry = map[string]agentDescriptor{
 			window:           41 * time.Millisecond,
 			processSpeed:     hermesWheelSpeedForProcessGroup,
 			deferredReversal: true,
+			// Hermes stays in precision mode while reports are under 80
+			// whole milliseconds apart (ui-tui/src/lib/precisionWheel.ts).
+			// One more millisecond passes the first report after it through
+			// ungoverned, which moves the base speed it was calibrated to.
+			precisionSticky: 81 * time.Millisecond,
 		},
 	},
 	"openclaw": {

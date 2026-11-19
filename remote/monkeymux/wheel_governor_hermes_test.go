@@ -26,6 +26,41 @@ type hermesTestTUI struct {
 	// enteredWheelMode records that a report ever switched the TUI into
 	// the mechanical-wheel mode, which moves up to 15 rows per report.
 	enteredWheelMode bool
+	// Precision mode (ui-tui/src/lib/precisionWheel.ts).
+	precisionActive     bool
+	precisionDir        int
+	precisionLastEvent  int64
+	precisionLastScroll int64
+}
+
+const (
+	// Ctrl-wheel reports, which put Hermes in precision mode.
+	ctrlWheelUp   = "\x1b[<80;12;34M"
+	ctrlWheelDown = "\x1b[<81;12;34M"
+)
+
+// precisionStep mirrors computePrecisionWheelStep and its caller: it returns
+// the rows a report moves in precision mode, or false outside it.
+func (tui *hermesTestTUI) precisionStep(dir int, modifier bool, now int64) (int, bool) {
+	if !modifier && now-tui.precisionLastEvent >= 80 {
+		tui.precisionActive = false
+		return 0, false
+	}
+	if !tui.precisionActive {
+		// Entering precision mode discards the accelerated wheel state.
+		*tui = hermesTestTUI{
+			base: tui.base, mult: tui.base, rows: tui.rows, enteredWheelMode: tui.enteredWheelMode,
+			precisionDir: tui.precisionDir, precisionLastScroll: tui.precisionLastScroll,
+		}
+	}
+	tui.precisionActive = true
+	tui.precisionLastEvent = now
+	if dir == tui.precisionDir && now-tui.precisionLastScroll < 16 {
+		return 0, true
+	}
+	tui.precisionDir = dir
+	tui.precisionLastScroll = now
+	return 1, true
 }
 
 func newHermesTestTUI(base float64) *hermesTestTUI {
@@ -88,16 +123,24 @@ func (tui *hermesTestTUI) step(dir int, now int64) int {
 func (tui *hermesTestTUI) receive(t *testing.T, data []byte, now time.Time) {
 	t.Helper()
 	for len(data) != 0 {
-		direction := 0
-		switch {
-		case bytes.HasPrefix(data, []byte(wheelUp)):
-			direction = -1
-			data = data[len(wheelUp):]
-		case bytes.HasPrefix(data, []byte(wheelDown)):
-			direction = 1
-			data = data[len(wheelDown):]
-		default:
+		direction, modifier := 0, false
+		for _, report := range []struct {
+			bytes     string
+			direction int
+			modifier  bool
+		}{{wheelUp, -1, false}, {wheelDown, 1, false}, {ctrlWheelUp, -1, true}, {ctrlWheelDown, 1, true}} {
+			if bytes.HasPrefix(data, []byte(report.bytes)) {
+				direction, modifier = report.direction, report.modifier
+				data = data[len(report.bytes):]
+				break
+			}
+		}
+		if direction == 0 {
 			t.Fatalf("unexpected forwarded bytes: %q", data)
+		}
+		if rows, precision := tui.precisionStep(direction, modifier, now.UnixMilli()); precision {
+			tui.rows += direction * rows
+			continue
 		}
 		tui.rows += direction * tui.step(direction, now.UnixMilli())
 	}
@@ -373,5 +416,48 @@ func TestHermesScrollSpeedBase(t *testing.T) {
 		if got := hermesScrollSpeedBase(test.environment); got != test.want {
 			t.Errorf("%q: base %v, want %v", test.environment, got, test.want)
 		}
+	}
+}
+
+func TestWheelGovernorHermesPrecisionMode(t *testing.T) {
+	for _, base := range hermesTestBases {
+		t.Run(fmt.Sprint(base), func(t *testing.T) {
+			g := wheelGovernor{profile: hermesWheelProfile(base)}
+			tui := newHermesTestTUI(base)
+			now := time.Unix(100, 0)
+			send := func(report string, count int, passThrough bool) {
+				t.Helper()
+				for i := 0; i < count; i++ {
+					got := g.process([]byte(report), now)
+					if passThrough && string(got) != report {
+						t.Fatalf("report %q forwarded as %q, want it unchanged", report, got)
+					}
+					tui.receive(t, got, now)
+					now = now.Add(16 * time.Millisecond)
+				}
+			}
+			// A governed drag, then Ctrl-wheel reports, then plain reports
+			// that arrive while Hermes is still in precision mode.
+			send(wheelDown, 6, false)
+			send(ctrlWheelDown, 3, true)
+			send(wheelDown, 4, true)
+			if g.owed != 0 || g.count != 0 || !g.last.IsZero() {
+				t.Fatalf("precision mode left owed=%d count=%d last=%v", g.owed, g.count, g.last)
+			}
+			// Once precision mode ends, a drag is governed from a fresh ramp.
+			now = now.Add(100 * time.Millisecond)
+			before := tui.rows
+			send(wheelDown, 30, false)
+			settleHermesWheelGovernor(t, &g, tui, now)
+			// As in the row conservation test, the flush rounds what the
+			// ramp leaves to the nearest report.
+			want, bound := 30*int(base), int(base)/2
+			if miss := tui.rows - before - want; miss < -bound || miss > bound {
+				t.Fatalf("drag after precision mode moved %d rows, want %d±%d", tui.rows-before, want, bound)
+			}
+			if tui.enteredWheelMode {
+				t.Fatal("governed reports switched Hermes into wheel mode")
+			}
+		})
 	}
 }
