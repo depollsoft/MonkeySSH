@@ -2,6 +2,7 @@ package main
 
 import (
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -341,38 +342,80 @@ func wheelReport(data []byte) (length, buttonOffset, button int) {
 
 func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
-		w.processWheelProfile = processWheelProfile{}
+		w.processWheelProfile.forget()
 		return nil
 	}
 	profile := agentRegistry[w.agentToolLocked()].wheelProfile
 	if profile == nil || profile.processSpeed == nil {
-		w.processWheelProfile = processWheelProfile{}
+		w.processWheelProfile.forget()
 		return profile
 	}
-	// Resolve once per foreground process group: the TUI's environment is
-	// fixed when it starts, and the stable pointer keeps the governor's state.
-	// On Windows the group is the window's shell, which outlives the TUI, so
-	// the resolution is also forgotten whenever the window stops being
-	// governed by it, as it is once the TUI turns mouse tracking off.
-	group := w.activeForegroundPidLocked()
-	cached := &w.processWheelProfile
-	if cached.registered != profile || cached.group != group {
-		*cached = processWheelProfile{registered: profile, group: group}
-		if speed := profile.processSpeed(group); speed != nil {
-			resolved := *profile
-			resolved.speed, resolved.processSpeed = speed, nil
-			cached.resolved = &resolved
-		}
-	}
-	return cached.resolved
+	return w.processWheelProfile.lookup(profile, w.activeForegroundPidLocked())
 }
 
 // processWheelProfile caches a registered profile resolved for one
-// foreground process group.
+// foreground process group. Resolving reads other processes and files, so
+// it runs off the server lock: the window stays ungoverned until the result
+// lands, which is normally long before a drag, as the lookup starts when the
+// TUI turns mouse tracking on.
+//
+// The TUI's environment is fixed when it starts, so one resolution serves
+// the group, and the stable pointer keeps the governor's state. On Windows
+// the group is the window's shell, which outlives the TUI, so the result is
+// also forgotten whenever the window stops being governed by the profile,
+// as it is once the TUI turns mouse tracking off.
 type processWheelProfile struct {
+	mu         sync.Mutex
+	generation int
 	registered *wheelAccelerationProfile
 	group      int
 	resolved   *wheelAccelerationProfile
+}
+
+// resolveProcessWheelProfile runs a resolution. Tests replace it to run it
+// synchronously or to hold it.
+var resolveProcessWheelProfile = func(resolve func()) {
+	go resolve()
+}
+
+func (c *processWheelProfile) forget() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registered != nil {
+		c.generation++
+		c.registered, c.group, c.resolved = nil, 0, nil
+	}
+}
+
+func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group int) *wheelAccelerationProfile {
+	c.mu.Lock()
+	if c.registered == profile && c.group == group {
+		defer c.mu.Unlock()
+		return c.resolved
+	}
+	c.generation++
+	generation := c.generation
+	c.registered, c.group, c.resolved = profile, group, nil
+	c.mu.Unlock()
+	resolveProcessWheelProfile(func() {
+		var resolved *wheelAccelerationProfile
+		if speed := profile.processSpeed(group); speed != nil {
+			copied := *profile
+			copied.speed, copied.processSpeed = speed, nil
+			resolved = &copied
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.generation == generation {
+			c.resolved = resolved
+		}
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != generation {
+		return nil
+	}
+	return c.resolved
 }
 
 func (w *muxWindow) resetWheelGovernorIfInactiveLocked() {

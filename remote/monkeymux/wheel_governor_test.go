@@ -364,10 +364,13 @@ func installWheelTestClock(t *testing.T) *wheelTestClock {
 	clock := &wheelTestClock{now: time.Unix(100, 0)}
 	originalNow, originalSchedule := wheelGovernorNow, scheduleWheelFlush
 	originalForeground := foregroundProcessGroupForWindow
+	originalResolve := resolveProcessWheelProfile
 	t.Cleanup(func() {
 		wheelGovernorNow, scheduleWheelFlush = originalNow, originalSchedule
 		foregroundProcessGroupForWindow = originalForeground
+		resolveProcessWheelProfile = originalResolve
 	})
+	resolveProcessWheelProfile = func(resolve func()) { resolve() }
 	foregroundProcessGroupForWindow = func(window *muxWindow) int { return window.foregroundPid }
 	wheelGovernorNow = func() time.Time { return clock.now }
 	scheduleWheelFlush = func(delay time.Duration, action func()) {

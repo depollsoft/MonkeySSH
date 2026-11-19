@@ -547,3 +547,36 @@ func TestWheelGovernorHermesPrecisionBoundary(t *testing.T) {
 		})
 	}
 }
+
+// Resolving reads other processes and files, so it runs off the server lock,
+// and the window stays ungoverned until it lands. A result for a group the
+// window has left is dropped.
+func TestWheelGovernorHermesResolvesOffLock(t *testing.T) {
+	installWheelTestClock(t)
+	installHermesTestEnvironment(t)
+	var pending []func()
+	resolveProcessWheelProfile = func(resolve func()) { pending = append(pending, resolve) }
+	server, window, pty := newWheelTestWindow("hermes", true)
+	write := func() string {
+		t.Helper()
+		before := len(pty.String())
+		if err := server.writeWindowData(window.id, []byte(strings.Repeat(wheelUp, 7)), false, false); err != nil {
+			t.Fatal(err)
+		}
+		return pty.String()[before:]
+	}
+	if got := write(); got != strings.Repeat(wheelUp, 7) || len(pending) != 1 {
+		t.Fatalf("while resolving: PTY input=%q with %d resolutions, want ungoverned and 1", got, len(pending))
+	}
+	// The foreground group changes before the first resolution lands.
+	window.foregroundPid, window.mouseTrackingProcessID = 200, 200
+	write()
+	pending[0]()
+	if got := write(); got != strings.Repeat(wheelUp, 7) || len(pending) != 2 {
+		t.Fatalf("after a stale result: PTY input=%q with %d resolutions, want ungoverned and 2", got, len(pending))
+	}
+	pending[1]()
+	if got := write(); got != strings.Repeat(wheelUp, 5) {
+		t.Fatalf("once resolved: PTY input=%q, want five governed reports", got)
+	}
+}

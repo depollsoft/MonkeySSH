@@ -950,7 +950,7 @@ type muxWindow struct {
 	inputMu                   sync.Mutex
 	replies                   windowReplyQueue
 	wheelGovernor             wheelGovernor       // guarded by s.mu; draining also requires inputMu
-	processWheelProfile       processWheelProfile // guarded by s.mu
+	processWheelProfile       processWheelProfile // guards itself, so resolution can finish off s.mu
 	nativePaste               nativeConsolePasteFilter
 	nativeResponse            nativeConsoleResponseFilter
 	id                        string
