@@ -391,9 +391,10 @@ var resolveProcessWheelProfile = func(resolve func()) {
 // resolution before it goes to the TUI ungoverned.
 var processWheelProfileWait = 250 * time.Millisecond
 
-// onWheelProfileWait, when set by a test, runs as wheel input starts waiting
-// for a resolution, with s.mu still held.
-var onWheelProfileWait func()
+// onWheelProfileWait and onWheelProfileWaitExpired, when set by a test, run
+// as wheel input starts waiting for a resolution and once it has given up,
+// with s.mu held.
+var onWheelProfileWait, onWheelProfileWaitExpired func()
 
 func (c *processWheelProfile) forget() {
 	c.mu.Lock()
@@ -415,14 +416,22 @@ func (c *processWheelProfile) pending() <-chan struct{} {
 	return c.done
 }
 
-// bypassPending records that wheel input stopped waiting for the resolution
-// in flight, whichever key it is for, and went to the TUI ungoverned.
-func (c *processWheelProfile) bypassPending() {
+// expire settles wheel input that stopped waiting, for whichever key is now
+// registered. A result that has landed is used; otherwise the input goes to
+// the TUI ungoverned, and the key is marked bypassed so no later result
+// takes effect out of step with what the TUI saw. Deciding both under one
+// lock leaves no gap for a result to land in between.
+func (c *processWheelProfile) expire() *wheelAccelerationProfile {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.resolving {
-		c.bypassed = true
+	if c.registered == nil {
+		return nil
 	}
+	if c.resolved != nil && !c.bypassed {
+		return c.resolved
+	}
+	c.bypassed = true
+	return nil
 }
 
 func (c *processWheelProfile) lookup(profile *wheelAccelerationProfile, group int) *wheelAccelerationProfile {
@@ -496,11 +505,13 @@ func (s *muxServer) awaitWheelProfileLocked(window *muxWindow, data []byte) (*wh
 			return nil, false
 		}
 		// The key may have changed while waiting, starting another
-		// resolution; input that gives up goes through ungoverned, so
-		// whichever one is now in flight is bypassed.
+		// resolution; input that gives up settles whichever is now current.
 		profile = window.wheelAccelerationProfileLocked()
 		if profile == nil && expired {
-			window.processWheelProfile.bypassPending()
+			if onWheelProfileWaitExpired != nil {
+				onWheelProfileWaitExpired()
+			}
+			profile = window.processWheelProfile.expire()
 		}
 		if profile != nil || expired {
 			return profile, true

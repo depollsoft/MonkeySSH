@@ -720,6 +720,56 @@ func TestWheelGovernorHermesBypassesResolutionStartedDuringWait(t *testing.T) {
 	}
 }
 
+// A result can land between the lookup that finds none and the input giving
+// up. The input then uses it, so every report Hermes sees is governed and
+// the rows add up.
+func TestWheelGovernorHermesUsesResultLandingAsWaitExpires(t *testing.T) {
+	clock := installWheelTestClock(t)
+	installHermesTestEnvironment(t)
+	started := holdWheelProfileResolutions(t)
+	processWheelProfileWait = 20 * time.Millisecond
+	t.Cleanup(func() {
+		processWheelProfileWait = 250 * time.Millisecond
+		onWheelProfileWaitExpired = nil
+	})
+	server, window, pty := newWheelTestWindow("hermes", true)
+	onWheelProfileWaitExpired = <-started
+	tui := newHermesTestTUI(1)
+	read := 0
+	receive := func() {
+		output := pty.String()
+		tui.receive(t, []byte(output[read:]), clock.now)
+		read = len(output)
+	}
+	write := func(data string) {
+		t.Helper()
+		if err := server.writeWindowData(window.id, []byte(data), false, false); err != nil {
+			t.Fatal(err)
+		}
+		onWheelProfileWaitExpired = nil
+		receive()
+	}
+	write(strings.Repeat(wheelDown, 7))
+	for i := 0; i < 6; i++ {
+		clock.now = clock.now.Add(16 * time.Millisecond)
+		write(wheelUp)
+	}
+	initialTimers := len(clock.timers)
+	for i := 0; i < len(clock.timers); i++ {
+		if i > initialTimers+12 {
+			t.Fatal("flush failed to settle debt")
+		}
+		if timer := clock.timers[i]; timer.due.After(clock.now) {
+			clock.now = timer.due
+		}
+		clock.timers[i].action()
+		receive()
+	}
+	if tui.rows != 1 || tui.enteredWheelMode {
+		t.Fatalf("moved %d rows, wheel mode %v; want 1 and no wheel mode", tui.rows, tui.enteredWheelMode)
+	}
+}
+
 // A result for a process group the window has left is dropped.
 func TestProcessWheelProfileDropsStaleResult(t *testing.T) {
 	installWheelTestClock(t)
