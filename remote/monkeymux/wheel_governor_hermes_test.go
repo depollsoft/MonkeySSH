@@ -461,3 +461,39 @@ func TestWheelGovernorHermesPrecisionMode(t *testing.T) {
 		})
 	}
 }
+
+// On Windows a window's process group is its shell, which outlives the TUI,
+// so a later Hermes run there must read its own settings.
+func TestWheelGovernorHermesRereadsSpeedForNextRun(t *testing.T) {
+	installWheelTestClock(t)
+	speed := "HERMES_TUI_SCROLL_SPEED=0.5"
+	original := hermesTUIEnvironmentForGroup
+	t.Cleanup(func() { hermesTUIEnvironmentForGroup = original })
+	lookups := 0
+	hermesTUIEnvironmentForGroup = func(int) []string {
+		lookups++
+		return []string{speed}
+	}
+	server, window, pty := newWheelTestWindow("hermes", true)
+	write := func(data string) {
+		t.Helper()
+		if err := server.writeWindowData(window.id, []byte(data), false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(strings.Repeat(wheelDown, 6))
+	if got := pty.String(); got != strings.Repeat(wheelDown, 6) {
+		t.Fatalf("PTY input=%q, want a base below 1 ungoverned", got)
+	}
+	// Hermes exits, turning mouse tracking off, and the next run in the same
+	// shell has a base of 3.
+	window.observeTerminalModesLocked([]byte("\x1b[?1002l\x1b[?1006l"))
+	window.resetWheelGovernorIfInactiveLocked()
+	speed = "HERMES_TUI_SCROLL_SPEED=3"
+	window.observeTerminalModesLocked([]byte("\x1b[?1002h\x1b[?1006h"))
+	before := len(pty.String())
+	write(strings.Repeat(wheelDown, 5))
+	if got := pty.String()[before:]; got != strings.Repeat(wheelDown, 4) || lookups != 2 {
+		t.Fatalf("next run: PTY input=%q after %d lookups, want four reports from base 3 after 2", got, lookups)
+	}
+}

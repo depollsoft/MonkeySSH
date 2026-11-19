@@ -337,14 +337,19 @@ func wheelReport(data []byte) (length, buttonOffset, button int) {
 
 func (w *muxWindow) wheelAccelerationProfileLocked() *wheelAccelerationProfile {
 	if w.closed || !w.mouseTrackingActiveLocked() {
+		w.processWheelProfile = processWheelProfile{}
 		return nil
 	}
 	profile := agentRegistry[w.agentToolLocked()].wheelProfile
 	if profile == nil || profile.processSpeed == nil {
+		w.processWheelProfile = processWheelProfile{}
 		return profile
 	}
 	// Resolve once per foreground process group: the TUI's environment is
 	// fixed when it starts, and the stable pointer keeps the governor's state.
+	// On Windows the group is the window's shell, which outlives the TUI, so
+	// the resolution is also forgotten whenever the window stops being
+	// governed by it, as it is once the TUI turns mouse tracking off.
 	group := w.activeForegroundPidLocked()
 	cached := &w.processWheelProfile
 	if cached.registered != profile || cached.group != group {

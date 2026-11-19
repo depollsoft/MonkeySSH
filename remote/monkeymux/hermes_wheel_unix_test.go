@@ -16,23 +16,20 @@ import (
 // child, so the child's environment can hold a speed the group leader's
 // never did.
 func TestHermesTUIEnvironmentReadsNodeChild(t *testing.T) {
-	if os.Getenv("MONKEYMUX_TEST_NODE_STAND_IN") != "" {
-		t.Skip("running as the stand-in node")
-	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Skipf("cannot find the test binary: %v", err)
 	}
-	// The test binary itself plays node: a system tool would not do,
-	// because a multi-call build such as Rust coreutils picks the tool from
-	// its name and exits under any other.
+	// The test binary itself plays node (see TestMain): a system tool would
+	// not do, because a multi-call build such as Rust coreutils picks the
+	// tool from its name and exits under any other.
 	node := filepath.Join(t.TempDir(), "node")
 	if err := os.Symlink(self, node); err != nil {
 		t.Skipf("cannot link a stand-in node: %v", err)
 	}
 	// The trailing command keeps sh from replacing itself with the child.
 	leader := exec.Command("/bin/sh", "-c",
-		`HERMES_TUI_SCROLL_SPEED=3 MONKEYMUX_TEST_NODE_STAND_IN=1 "$0" -test.run='^TestHermesNodeStandIn$'; :`, node)
+		`HERMES_TUI_SCROLL_SPEED=3 MONKEYMUX_TEST_STAND_IN=1 "$0"; :`, node)
 	leader.Env = []string{"PATH=/usr/bin:/bin", "HERMES_TUI_SCROLL_SPEED=2"}
 	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := leader.Start(); err != nil {
@@ -70,13 +67,4 @@ func TestHermesTUIEnvironmentReadsNodeChild(t *testing.T) {
 	if got := hermesScrollSpeedBase(hermesTUIEnvironmentForGroup(group)); got != 3 {
 		t.Fatalf("base speed = %v, want the Node child's 3", got)
 	}
-}
-
-// TestHermesNodeStandIn is the stand-in node process of
-// TestHermesTUIEnvironmentReadsNodeChild; run alone it does nothing.
-func TestHermesNodeStandIn(t *testing.T) {
-	if os.Getenv("MONKEYMUX_TEST_NODE_STAND_IN") == "" {
-		t.Skip("only runs as the stand-in node")
-	}
-	time.Sleep(30 * time.Second)
 }

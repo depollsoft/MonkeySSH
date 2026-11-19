@@ -34,7 +34,21 @@ var hermesTUIEnvironmentForGroup = func(group int) []string {
 	if base == nil {
 		base = os.Environ()
 	}
-	return hermesLaunchEnvironment(base, processCommandLine(group))
+	return hermesLaunchEnvironment(base, hermesLaunchArguments(group))
+}
+
+// hermesCommandStart returns the index of the first argument after the
+// hermes command in argv, which may run it through an interpreter, as in
+// `python3 .../hermes` or `python3 -m hermes_cli.main`, or -1 when argv does
+// not run Hermes.
+func hermesCommandStart(argv []string) int {
+	for i, arg := range argv {
+		name := strings.ToLower(cleanProcessCommandName(arg))
+		if name == "hermes" || name == "hermes-agent" || strings.HasPrefix(arg, "hermes_cli") {
+			return i + 1
+		}
+	}
+	return -1
 }
 
 func isNodeExecutable(path string) bool {
@@ -132,14 +146,7 @@ func hermesHomeForLaunch(environment map[string]string, argv []string) string {
 // take from the arguments after the hermes command. Hermes also steps over
 // the values of its own options, which this does not.
 func hermesProfileArgument(argv []string) (string, bool) {
-	start := -1
-	for i, arg := range argv {
-		name := strings.ToLower(cleanProcessCommandName(arg))
-		if name == "hermes" || name == "hermes-agent" || strings.HasPrefix(arg, "hermes_cli") {
-			start = i + 1
-			break
-		}
-	}
+	start := hermesCommandStart(argv)
 	if start < 0 {
 		return "", false
 	}
