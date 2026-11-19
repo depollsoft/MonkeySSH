@@ -96,6 +96,18 @@ monkeymux acp stop BRIDGE_ID
 monkeymux acp gc
 ```
 
+Each bridge holds an exclusive lock on `monkeymux-acp-ID.alive` beside its
+socket while it runs, and the OS drops that lock when the process ends. `stop`
+also succeeds for a bridge that already exited, and `gc` clears what it left,
+when its socket refuses connections or is missing and that lock is free. A held
+lock means the bridge still runs (a live bridge with a full accept queue
+refuses connections too), so `stop` retries for about a second and then fails,
+and `gc` keeps the socket. A bridge started before lifetime files existed
+counts as exited when its socket is missing or keeps refusing for that second.
+Sockets are looked up in the current runtime directory, so a bridge started
+under a different `XDG_RUNTIME_DIR` counts as gone, as it does for `attach`,
+`list` and `status`.
+
 `attach` speaks newline-delimited JSON over its stdin/stdout. Its first frame is
 `{"version":1,"type":"hello","bridgeId":"...","lastAck":N}`. Provider output is
 relayed as `output` frames with a monotonically increasing `sequence`; clients
