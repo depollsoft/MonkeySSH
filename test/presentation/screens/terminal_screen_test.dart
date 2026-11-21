@@ -546,6 +546,8 @@ class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
     bool redraw = false,
     SshExecPriority priority = SshExecPriority.normal,
   }) async {
@@ -564,6 +566,8 @@ class _MockMonkeyMuxService extends Mock implements MonkeyMuxService {
     String sessionName, {
     required int columns,
     required int rows,
+    int? cellWidth,
+    int? cellHeight,
   }) async {
     controlOperations.add('focus');
     focusClientCalls.add((
@@ -3287,6 +3291,67 @@ void main() {
       expect(launchedUrls, [url]);
       final linkForward = shellWrites.map(String.fromCharCodes).join();
       expect(linkForward, isNot(contains('\x1b[<')));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('a finger resting on a link past the tap-down delay opens it '
+        'once', (tester) async {
+      const url = 'https://github.com/depollsoft/MonkeySSH/issues/1';
+      const urlLauncherChannel = MethodChannel(
+        'plugins.flutter.io/url_launcher',
+      );
+      final launchedUrls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        urlLauncherChannel,
+        (call) async {
+          if (call.method == 'launch') {
+            launchedUrls.add((call.arguments! as Map)['url']! as String);
+            return true;
+          }
+          return false;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          urlLauncherChannel,
+          null,
+        ),
+      );
+
+      await pumpScreen(tester);
+      session.terminal!.write(
+        '\x1b[?1049h\x1b[?1003h\x1b[?1006h'
+        '\x1b[4;2H\x1b]8;id=md-link;$url\x07Issue #1\x1b]8;;\x07\x1b[K',
+      );
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      final link = render.localToGlobal(
+        render.getOffset(const CellOffset(3, 3)) +
+            render.cellSize.center(Offset.zero),
+      );
+
+      // The selection recognizer wins the arena on touch platforms, but the
+      // terminal's tap recognizer still reports its tap down after
+      // kPressTimeout. That must not drop the pending link tap.
+      shellWrites.clear();
+      for (final hold in const [
+        Duration(milliseconds: 150),
+        Duration(milliseconds: 300),
+      ]) {
+        launchedUrls.clear();
+        final gesture = await tester.startGesture(link);
+        await tester.pump(hold);
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(launchedUrls, [url], reason: 'held for $hold');
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+      expect(
+        shellWrites.map(String.fromCharCodes).join(),
+        isNot(contains('\x1b[<')),
+      );
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets(
@@ -19677,6 +19742,103 @@ void main() {
         verify(() => sftp.stat(remotePath)).called(1);
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'a desktop touch opens one target when a link sits above a path',
+      (tester) async {
+        const remotePath = '/var/log/app.log';
+        const url = 'https://github.com/depollsoft/MonkeySSH/issues/1';
+        final sftp = _MockSftpClient();
+        final openedPaths = <String>[];
+        final launchedUrls = <String>[];
+        const urlLauncherChannel = MethodChannel(
+          'plugins.flutter.io/url_launcher',
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          urlLauncherChannel,
+          (call) async {
+            if (call.method == 'launch') {
+              launchedUrls.add((call.arguments! as Map)['url']! as String);
+              return true;
+            }
+            return false;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            urlLauncherChannel,
+            null,
+          ),
+        );
+
+        when(() => sshClient.sftp()).thenAnswer((_) async => sftp);
+        when(() => sftp.stat(remotePath))
+            .thenAnswer((_) async => SftpFileAttrs());
+
+        final router = GoRouter(
+          initialLocation:
+              '/terminal/${host.id}?connectionId=${session.connectionId}',
+          routes: [
+            GoRoute(
+              path: '/terminal/:hostId',
+              name: Routes.terminal,
+              builder: (context, state) => TerminalScreen(
+                hostId: host.id,
+                connectionId: session.connectionId,
+              ),
+            ),
+            GoRoute(
+              path: '/sftp/:hostId',
+              name: Routes.sftp,
+              builder: (context, state) {
+                openedPaths.add(state.uri.queryParameters['path'] ?? '');
+                return const Scaffold(body: Text('SFTP opened'));
+              },
+            ),
+          ],
+        );
+        addTearDown(router.dispose);
+
+        await tester.pumpWidget(
+          buildScreen(child: MaterialApp.router(routerConfig: router)),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        // The pointer listener looks for links on the adjacent row; the tap
+        // recognizer resolves only the touched cell, so the two disagree.
+        session.terminal!
+          ..write('\x1b[2J\x1b[4;1H\x1b]8;;$url\x07Issue #1\x1b]8;;\x07')
+          ..write('\x1b[5;1H$remotePath');
+        await tester.pumpAndSettle();
+        final view = tester.widget<MonkeyTerminalView>(
+          find.byType(MonkeyTerminalView),
+        );
+        view.resolveLinkTap!(const CellOffset(2, 4));
+        await tester.pumpAndSettle();
+        expect(
+          view.resolveLinkTap!(const CellOffset(2, 4)),
+          endsWith(remotePath),
+        );
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        final gesture = await tester.startGesture(
+          render.localToGlobal(
+            render.getOffset(const CellOffset(2, 4)) +
+                render.cellSize.center(Offset.zero),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 150));
+        await gesture.up();
+        await tester.pumpAndSettle();
+
+        expect(launchedUrls, [url]);
+        expect(openedPaths, isEmpty);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
     );
 
     testWidgets(

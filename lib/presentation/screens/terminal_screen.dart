@@ -854,6 +854,8 @@ typedef _MonkeyMuxResizeSyncKey = ({
   String sessionName,
   int columns,
   int rows,
+  int cellWidth,
+  int cellHeight,
 });
 
 class _TerminalScreenState extends ConsumerState<TerminalScreen>
@@ -1038,7 +1040,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int? _pendingTerminalTargetTapPointer;
   Offset? _pendingTerminalTargetTapDownPosition;
   Duration? _pendingTerminalTargetTapDownTimestamp;
-  String? _recentlyOpenedTerminalTargetTap;
+  bool _terminalTargetTapOpenedByPointer = false;
   final Set<_TerminalExclusiveAction> _exclusiveTerminalActions =
       <_TerminalExclusiveAction>{};
   int? _pendingTerminalDoubleTapPointer;
@@ -5055,11 +5057,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           initialAutoConnect.handled ||
           _suppressRemoteMuxDetectionConnectionId == session.connectionId;
       final viewportCellSize = _localTerminalViewportCellSize();
+      final viewportPixelSize = _localTerminalViewportPixelSize();
 
       final shell = await session.getShell(
         pty: SSHPtyConfig(
           width: viewportCellSize.columns,
           height: viewportCellSize.rows,
+          pixelWidth: viewportPixelSize?.width ?? 0,
+          pixelHeight: viewportPixelSize?.height ?? 0,
         ),
         requestPty:
             !(session.remoteIsWindows &&
@@ -6224,6 +6229,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     final sessionName = _activeMonkeyMuxSessionName(session);
     final viewportCellSize = _localTerminalViewportCellSize();
+    final cellPixelSize = _localTerminalCellPixelSize();
     final columns = viewportCellSize.columns;
     final rows = viewportCellSize.rows;
     if (sessionName == null || columns <= 0 || rows <= 0) {
@@ -6232,7 +6238,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final connectionId = session.connectionId;
     unawaited(
       _monkeyMuxService
-          .focusClient(session, sessionName, columns: columns, rows: rows)
+          .focusClient(
+            session,
+            sessionName,
+            columns: columns,
+            rows: rows,
+            cellWidth: cellPixelSize?.width,
+            cellHeight: cellPixelSize?.height,
+          )
           .then((focusChanged) {
             if (!mounted ||
                 !focusChanged ||
@@ -6288,6 +6301,64 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }
     return (columns: _terminal.viewWidth, rows: _terminal.viewHeight);
+  }
+
+  ({int width, int height})? _localTerminalViewportPixelSize() {
+    final viewportPixelSize = _terminalViewKey.currentState?.viewportPixelSize;
+    if (viewportPixelSize != null &&
+        viewportPixelSize.width > 0 &&
+        viewportPixelSize.height > 0) {
+      return viewportPixelSize;
+    }
+    final layoutSize = _terminalViewportLayoutSize;
+    if (layoutSize != null && mounted) {
+      final mediaQuery = MediaQuery.of(context);
+      final viewportPadding = resolveTerminalViewportPadding(mediaQuery);
+      final availableWidth =
+          (layoutSize.width -
+                  viewportPadding.horizontal -
+                  _terminalViewportReservedWidth)
+              .round();
+      final availableHeight =
+          (layoutSize.height -
+                  viewportPadding.vertical -
+                  _terminalViewportReservedBottomPadding)
+              .round();
+      if (availableWidth > 0 && availableHeight > 0) {
+        return (width: availableWidth, height: availableHeight);
+      }
+    }
+    final metrics = _activeSession()?.terminalWindowMetrics;
+    if (metrics != null && metrics.pixelWidth > 0 && metrics.pixelHeight > 0) {
+      return (width: metrics.pixelWidth, height: metrics.pixelHeight);
+    }
+    return null;
+  }
+
+  ({int width, int height})? _localTerminalCellPixelSize() {
+    // Match MonkeyMux's Unix cellPixelSizeOf (integer division of viewport
+    // pixels by cell grid) so control-channel resize/focus cell sizes agree
+    // with the helper's SIGWINCH tty readings.
+    final cellSize = _localTerminalViewportCellSize();
+    final pixelSize = _localTerminalViewportPixelSize();
+    if (pixelSize != null &&
+        cellSize.columns > 0 &&
+        cellSize.rows > 0 &&
+        pixelSize.width > 0 &&
+        pixelSize.height > 0) {
+      final width = pixelSize.width ~/ cellSize.columns;
+      final height = pixelSize.height ~/ cellSize.rows;
+      if (width > 0 && height > 0) {
+        return (width: width, height: height);
+      }
+    }
+    final cellPixelSize = _terminalViewKey.currentState?.viewportCellPixelSize;
+    if (cellPixelSize != null &&
+        cellPixelSize.width > 0 &&
+        cellPixelSize.height > 0) {
+      return cellPixelSize;
+    }
+    return null;
   }
 
   Future<void> _waitForInitialTerminalViewportLayout({
@@ -6348,8 +6419,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final viewportCellSize = _localTerminalViewportCellSize();
+    final cellPixelSize = _localTerminalCellPixelSize();
     final terminalColumns = columns ?? viewportCellSize.columns;
     final terminalRows = rows ?? viewportCellSize.rows;
+    final terminalCellWidth = cellPixelSize?.width ?? 0;
+    final terminalCellHeight = cellPixelSize?.height ?? 0;
     if (terminalColumns <= 0 || terminalRows <= 0) {
       return;
     }
@@ -6359,6 +6433,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       sessionName: sessionName,
       columns: terminalColumns,
       rows: terminalRows,
+      cellWidth: terminalCellWidth,
+      cellHeight: terminalCellHeight,
     );
     final isDuplicateSize =
         _lastMonkeyMuxResizeSync == resizeKey ||
@@ -6376,6 +6452,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         sessionName,
         columns: terminalColumns,
         rows: terminalRows,
+        cellWidth: terminalCellWidth > 0 ? terminalCellWidth : null,
+        cellHeight: terminalCellHeight > 0 ? terminalCellHeight : null,
         redraw: refreshVisibleTerminal,
       );
       DiagnosticsLogService.instance.debug(
@@ -11698,9 +11776,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     unawaited(_releaseShellStreams());
 
     final viewportCellSize = _localTerminalViewportCellSize();
+    final viewportPixelSize = _localTerminalViewportPixelSize();
     final pty = SSHPtyConfig(
       width: viewportCellSize.columns,
       height: viewportCellSize.rows,
+      pixelWidth: viewportPixelSize?.width ?? 0,
+      pixelHeight: viewportPixelSize?.height ?? 0,
     );
 
     final SSHSession shell;
@@ -14223,7 +14304,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       scrollResetGeneration: _terminalScrollResetGeneration,
       resolveLinkTap: _resolveTerminalLinkTap,
       onLinkTapDown: _handleTerminalLinkTapDown,
-      onLinkTap: _handleTerminalLinkTap,
+      onLinkTap: _handleTerminalGestureLinkTap,
       suppressLongPressDragSelection: isMobile,
       liveOutputAutoScroll: _terminalLiveOutputAutoScrollEnabled,
       useSystemSelection: isMobile || _isNativeSelectionMode,
@@ -15058,12 +15139,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
     }
-    _clearPendingTerminalTargetTap();
-    if (_recentlyOpenedTerminalTargetTap == target) {
-      _recentlyOpenedTerminalTargetTap = null;
-      return null;
-    }
+    // Leave the pointer-level pending tap alone. With system selection the
+    // selection recognizer wins the arena, so that tap is the only one that
+    // opens the link; this resolver still runs when the losing tap recognizer
+    // reports its tap down 100 ms into the press.
     return target;
+  }
+
+  /// Opens a link for the terminal's own tap recognizer, unless the pointer
+  /// listener already opened a target for the same touch. The two can resolve
+  /// different targets (the listener also looks at neighbouring cells), so the
+  /// check does not compare them.
+  void _handleTerminalGestureLinkTap(String link) {
+    if (_terminalTargetTapOpenedByPointer) {
+      _terminalTargetTapOpenedByPointer = false;
+      return;
+    }
+    _clearPendingTerminalTargetTap();
+    _handleTerminalLinkTap(link);
   }
 
   String? _resolveTerminalExternalLinkAtOffset(
@@ -15492,6 +15585,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   void _handleTerminalTargetPointerDown(PointerDownEvent event) {
     _clearPendingTerminalTargetTap();
+    _terminalTargetTapOpenedByPointer = false;
     final terminalViewState = _terminalViewKey.currentState;
     if (terminalViewState == null) {
       _clearHoveredTerminalPathUnderline();
@@ -15553,12 +15647,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     _clearPendingTerminalTargetTap();
-    _recentlyOpenedTerminalTargetTap = pendingTarget;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_recentlyOpenedTerminalTargetTap == pendingTarget) {
-        _recentlyOpenedTerminalTargetTap = null;
-      }
-    });
+    // The recognizer's tap up, if it comes, arrives in this same pointer-up
+    // dispatch; the next pointer down clears the flag in case no frame does.
+    _terminalTargetTapOpenedByPointer = true;
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _terminalTargetTapOpenedByPointer = false,
+    );
     _handleTerminalLinkTap(pendingTarget);
     return true;
   }

@@ -1647,6 +1647,75 @@ void main() {
       await pumpEventQueue();
       expect(server.requests, isEmpty);
     });
+    test(
+      'includes cellWidth and cellHeight in resize and focusClient requests',
+      () async {
+        final client = _MockSshClient();
+        final installer = _MockMonkeyMuxInstaller();
+        final session = _buildSession(client, connectionId: 901);
+        final stdoutController = StreamController<Uint8List>();
+        final controlSession = _buildSilentControlSession(stdoutController);
+        final requests = <Map<String, Object?>>[];
+
+        when(() => installer.ensureInstalled(session))
+            .thenAnswer((_) async => _fakeInstallation);
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => controlSession);
+        when(() => controlSession.write(any())).thenAnswer((invocation) {
+          final data = invocation.positionalArguments.single as List<int>;
+          final request = jsonDecode(utf8.decode(data)) as Map<String, Object?>;
+          requests.add(request);
+          final responseType = request['type'] == 'focus_client'
+              ? 'client_focused'
+              : 'resized';
+          final response = jsonEncode({
+            'id': request['id'],
+            'type': responseType,
+            'status': 'ok',
+            if (responseType == 'client_focused') 'focusChanged': true,
+          });
+          scheduleMicrotask(
+            () => stdoutController.add(
+              Uint8List.fromList(utf8.encode('$response\n')),
+            ),
+          );
+        });
+
+        final service = MonkeyMuxService(
+          installer: installer,
+          agentSessionMetadataPeriodicRefreshInterval: Duration.zero,
+        )..watchWindowChanges(session, 'work');
+
+        await service.resizeTerminal(
+          session,
+          'work',
+          columns: 48,
+          rows: 36,
+          cellWidth: 8,
+          cellHeight: 19,
+        );
+        final focused = await service.focusClient(
+          session,
+          'work',
+          columns: 48,
+          rows: 36,
+          cellWidth: 10,
+          cellHeight: 20,
+        );
+
+        expect(focused, isTrue);
+        expect(requests, hasLength(2));
+        expect(requests[0]['type'], 'resize');
+        expect(requests[0]['cellWidth'], 8);
+        expect(requests[0]['cellHeight'], 19);
+        expect(requests[1]['type'], 'focus_client');
+        expect(requests[1]['cellWidth'], 10);
+        expect(requests[1]['cellHeight'], 20);
+
+        await stdoutController.close();
+        await service.clearCache(901);
+      },
+    );
   });
 
   group('MonkeyMux control channel timeout', () {

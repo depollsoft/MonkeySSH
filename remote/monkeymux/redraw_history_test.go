@@ -703,6 +703,258 @@ func TestWindowSelectDeliversPlaceholderImageFollowUp(t *testing.T) {
 	}
 }
 
+func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send > 512 KiB of complete m=1 Kitty chunks while the redraw pause is
+	// active, leaving the transmission in flight across the pause deadline.
+	const firstChunkHeader = "\x1b_Ga=t,f=100,i=3875144,q=2,m=1;"
+	chunkPayload := strings.Repeat("A", 4096)
+	var firstHalf bytes.Buffer
+	firstHalf.WriteString("\x1b[2J\x1b[H")
+	firstHalf.WriteString(firstChunkHeader + chunkPayload + "\x1b\\")
+	for i := 0; i < 135; i++ {
+		firstHalf.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+	}
+	server.handleWindowOutput(window.id, firstHalf.Bytes())
+
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	pendingLen := len(window.kittyGraphicsPending)
+	server.mu.Unlock()
+	if pendingLen == 0 {
+		t.Fatal("setup error: expected in-progress Kitty transmission in kittyGraphicsPending")
+	}
+
+	// Resume forwarding between chunks before m=0 and a=p arrive.
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	// Now deliver the final chunk and placement after the pause.
+	const finalChunk = "\x1b_Gq=2,m=0;AAAA\x1b\\"
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=3875144,p=2,c=27,r=24,C=1,q=2\x1b\\"
+	server.handleWindowOutput(window.id, []byte(finalChunk+placement))
+	waitForTestAttachWrites(t, server)
+
+	got := primary.String()
+	if !strings.Contains(got, firstChunkHeader) {
+		t.Fatalf("opening chunk of in-progress Kitty upload was dropped across redraw pause (delivered %d bytes)", len(got))
+	}
+	if !strings.Contains(got, finalChunk) || !strings.Contains(got, placement) {
+		t.Fatalf("trailing chunk or placement missing after redraw pause resume")
+	}
+}
+
+func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T) {
+	const fullApc = "\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAABBBB\x1b\\"
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=4242,p=1,c=10,r=5,C=1,q=2\x1b\\"
+	for _, tc := range []struct {
+		name  string
+		split int
+	}{
+		{"after ESC", 1},
+		{"after ESC _", 2},
+		{"after ESC _ G", 3},
+		{"mid payload", len("\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAA")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 120, 40)
+			window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+			window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+			server.windows = []*muxWindow{{id: "@1"}, window}
+			server.activeID = "@1"
+			primary := &recordingConn{}
+			registerTestAttachClient(t, server, primary, "phone", 120, 40)
+			if err := server.selectWindow("@2"); err != nil {
+				t.Fatal(err)
+			}
+
+			head := "\x1b[2J\x1b[H" + fullApc[:tc.split]
+			tail := fullApc[tc.split:] + placement
+			server.handleWindowOutput(window.id, []byte(head))
+
+			server.mu.Lock()
+			generation := window.redrawForwardingGeneration
+			server.mu.Unlock()
+			server.resumePausedAttachForwarding(window.id, generation)
+			waitForTestAttachWrites(t, server)
+
+			server.handleWindowOutput(window.id, []byte(tail))
+			waitForTestAttachWrites(t, server)
+
+			got := primary.String()
+			if !strings.Contains(got, fullApc) {
+				t.Fatalf("split Kitty APC (%s) was corrupted by resume marker; got tail %q", tc.name, got[max(0, len(got)-160):])
+			}
+		})
+	}
+
+	t.Run("multibyte UTF-8 containing 0x9f G and split trailing rune stays intact", func(t *testing.T) {
+		// "ßGit…" encodes ß as 0xc3 0x9f followed by 'G' (0x47). Ending mid-ellipsis
+		// leaves the parser off ground: neither ß nor the trailing ellipsis may be
+		// split by ESC[?9002l.
+		ellipsis := "\u2026"
+		head := []byte("\x1b[2J\x1b[HßGit" + ellipsis[:2])
+		wrapped := wrapSynchronizedTerminalOutputBeforeIncompleteApc(nil, head, 0)
+		combined := append(wrapped, ellipsis[2:]...)
+		want := string(terminalSynchronizedOutputBegin) +
+			"\x1b[2J\x1b[HßGit" +
+			string(terminalSynchronizedOutputEnd) +
+			ellipsis
+		if string(combined) != want {
+			t.Fatalf("UTF-8 stream corrupted by sync end marker: got %q, want %q", combined, want)
+		}
+	})
+}
+
+func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t *testing.T) {
+	server := newMuxServerWithSize("test", 120, 40)
+	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+	server.windows = []*muxWindow{{id: "@1"}, window}
+	server.activeID = "@1"
+	primary := &recordingConn{}
+	registerTestAttachClient(t, server, primary, "phone", 120, 40)
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clear the screen (no visible text painted yet) and upload a > 2 MiB
+	// store-only image that completes (m=0) during the pause before its a=p
+	// placement arrives after resume.
+	chunkPayload := strings.Repeat("A", 4096)
+	var upload bytes.Buffer
+	upload.WriteString("\x1b[2J\x1b[H")
+	upload.WriteString("\x1b_Ga=t,f=100,i=5555,q=2,m=1;" + chunkPayload + "\x1b\\")
+	for i := 0; i < 600; i++ { // ~2.45 MiB (> maxReplayedKittyImageBytes)
+		upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+	}
+	upload.WriteString("\x1b_Gq=2,m=0;AAAA\x1b\\")
+	server.handleWindowOutput(window.id, upload.Bytes())
+
+	server.mu.Lock()
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+	server.resumePausedAttachForwarding(window.id, generation)
+	waitForTestAttachWrites(t, server)
+
+	// Assert the complete >2 MiB transmission reached the client BEFORE a=p.
+	beforePlacement := primary.String()
+	if !strings.Contains(beforePlacement, "\x1b_Ga=t,f=100,i=5555,") ||
+		!strings.Contains(beforePlacement, "\x1b_Gq=2,m=0;AAAA\x1b\\") {
+		t.Fatalf(
+			"completed >2 MiB store-only upload on blank redraw was dropped before placement arrived (delivered %d bytes)",
+			len(beforePlacement),
+		)
+	}
+
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=5555,p=2,c=27,r=24,C=1,q=2\x1b\\"
+	server.handleWindowOutput(window.id, []byte(placement))
+	waitForTestAttachWrites(t, server)
+
+	if !strings.Contains(primary.String(), placement) {
+		t.Fatal("placement missing after redraw pause resume")
+	}
+}
+
+func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		midChunk bool
+	}{
+		{"mid chunk", true},
+		{"between m=1 chunks", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := stubForegroundResize(t)
+			defer restore()
+
+			server := newMuxServerWithSize("test", 120, 40)
+			window := &muxWindow{
+				id:        "@2",
+				index:     1,
+				agentTool: "copilot",
+			}
+			window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+			server.windows = []*muxWindow{{id: "@1"}, window}
+			server.activeID = "@1"
+			secondaryConn := &recordingConn{}
+			primaryConn := &recordingConn{}
+			// registerTestAttachClient makes the most recently registered client
+			// primary, so register secondary first and primary second.
+			secondaryClient := registerTestAttachClient(t, server, secondaryConn, "desktop", 120, 40)
+			primaryClient := registerTestAttachClient(t, server, primaryConn, "phone", 120, 40)
+			if server.attachConn != primaryClient.conn {
+				t.Fatal("setup error: expected phone to be primary attach client")
+			}
+			chunkPayload := strings.Repeat("A", 4096)
+			const openingChunk = "\x1b_Ga=t,f=100,i=6666,q=2,m=1;"
+			var upload bytes.Buffer
+			upload.WriteString("\x1b[2J\x1b[H\x1b[14t")
+			upload.WriteString(openingChunk + chunkPayload + "\x1b\\")
+			for i := 0; i < 750; i++ { // ~3 MiB
+				upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
+			}
+			if tc.midChunk {
+				upload.WriteString("\x1b_Gq=2,m=0;PARTIAL") // open APC payload across resume
+			}
+			uploadBytes := upload.Bytes()
+			largeReplay := bytes.Repeat([]byte("R"), 6*1024*1024)
+
+			if err := server.selectWindow("@2"); err != nil {
+				t.Fatal(err)
+			}
+
+			// Simulate a 6 MiB deferred replay, a forwarded terminal query
+			// (CSI 14 t), and a 3 MiB in-progress Kitty upload.
+			server.mu.Lock()
+			if !window.redrawForwardingPaused {
+				server.mu.Unlock()
+				t.Fatal("setup error: expected redraw forwarding pause to be active")
+			}
+			window.redrawForwardingReplay = largeReplay
+			window.redrawForwardingGeneration++
+			generation := window.redrawForwardingGeneration
+			server.mu.Unlock()
+
+			server.handleWindowOutput(window.id, uploadBytes)
+
+			server.resumePausedAttachForwarding(window.id, generation)
+			waitForTestAttachWrites(t, server)
+
+			if secondaryClient.isClosed() {
+				t.Fatal("secondary viewer was disconnected by mutually exclusive redraw reservation")
+			}
+			if !strings.Contains(secondaryConn.String(), openingChunk) {
+				t.Fatalf("secondary viewer lost opening Kitty chunk (received %d bytes)", len(secondaryConn.String()))
+			}
+			if len(secondaryConn.String()) < 8*1024*1024 {
+				t.Fatalf("secondary viewer received only %d bytes, expected full replay+upload", len(secondaryConn.String()))
+			}
+			if strings.Contains(secondaryConn.String(), "\x1b[14t") {
+				t.Fatal("secondary viewer should not receive the primary-only CSI 14 t query")
+			}
+			if !tc.midChunk {
+				const finish = "\x1b_Gq=2,m=0;AAAA\x1b\\\x1b[16;4H\x1b_Ga=p,i=6666,p=1,c=27,r=24,C=1,q=2\x1b\\"
+				server.handleWindowOutput(window.id, []byte(finish))
+				waitForTestAttachWrites(t, server)
+				if !strings.Contains(secondaryConn.String(), finish) {
+					t.Fatal("secondary viewer did not receive final chunk and placement")
+				}
+			}
+		})
+	}
+}
+
 func TestActiveReplayRestoresMainScreenBehindAlternateScreen(t *testing.T) {
 	for _, test := range []struct{ mode, app string }{
 		{"1047", "alternate app"},
