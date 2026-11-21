@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
+const {antigravity, rpc} = require('../../assets/scripts/agent_usage_probe.cjs');
 
 for (const extension of ['cmd', 'ps1']) for (const framed of [false, true]) {
   test(`Windows npm .${extension} launcher forwards ${framed ? 'Content-Length' : 'JSONL'} RPC`, {skip: process.platform !== 'win32'}, async () => {
@@ -37,6 +37,31 @@ for (const extension of ['cmd', 'ps1']) for (const framed of [false, true]) {
       assert.deepEqual(await rpc(launcher, [], 'account/get', framed, !framed), {ok:true});
     } finally {
       // Windows keeps executables locked until asynchronous process-tree cleanup finishes.
+      await fs.promises.rm(dir, {recursive:true,force:true,maxRetries:10,retryDelay:100});
+    }
+  });
+}
+
+for (const extension of ['cmd', 'ps1']) {
+  test(`Windows .${extension} launcher preserves exit code 2 for Antigravity API-key mode`, {skip: process.platform !== 'win32'}, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-agy-win-'));
+    try {
+      const source = path.join(dir, 'fake-agy.cjs');
+      fs.writeFileSync(source, `
+        if (process.env.AGY_CLI_DISABLE_AUTO_UPDATE !== '1') process.exit(8);
+        if (process.argv.includes('--version')) { console.log('1.5.14'); process.exit(0); }
+        process.stderr.write('/usage is unavailable with GEMINI_API_KEY; see https://aistudio.google.com/usage\\n');
+        process.exit(2);
+      `);
+      const launcher = path.join(dir, 'agy.' + extension);
+      fs.copyFileSync(process.execPath, path.join(dir, 'node.exe'));
+      fs.writeFileSync(launcher, extension === 'cmd'
+        ? '@echo off\r\n"%~dp0node.exe" "%~dp0fake-agy.cjs" %*\r\n'
+        : '& "$PSScriptRoot/node.exe" "$PSScriptRoot/fake-agy.cjs" @args; exit $LASTEXITCODE');
+      assert.deepEqual(await antigravity(launcher, {
+        ports: () => { throw new Error('should not scan local ports on notReported'); },
+      }), {windows: [], status: 'notReported'});
+    } finally {
       await fs.promises.rm(dir, {recursive:true,force:true,maxRetries:10,retryDelay:100});
     }
   });
