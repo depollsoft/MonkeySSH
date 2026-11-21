@@ -3090,6 +3090,67 @@ void main() {
       expect(linkForward, isNot(contains('\x1b[<')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets('a finger resting on a link past the tap-down delay opens it '
+        'once', (tester) async {
+      const url = 'https://github.com/depollsoft/MonkeySSH/issues/1';
+      const urlLauncherChannel = MethodChannel(
+        'plugins.flutter.io/url_launcher',
+      );
+      final launchedUrls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        urlLauncherChannel,
+        (call) async {
+          if (call.method == 'launch') {
+            launchedUrls.add((call.arguments! as Map)['url']! as String);
+            return true;
+          }
+          return false;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          urlLauncherChannel,
+          null,
+        ),
+      );
+
+      await pumpScreen(tester);
+      session.terminal!.write(
+        '\x1b[?1049h\x1b[?1003h\x1b[?1006h'
+        '\x1b[4;2H\x1b]8;id=md-link;$url\x07Issue #1\x1b]8;;\x07\x1b[K',
+      );
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      final link = render.localToGlobal(
+        render.getOffset(const CellOffset(3, 3)) +
+            render.cellSize.center(Offset.zero),
+      );
+
+      // The selection recognizer wins the arena on touch platforms, but the
+      // terminal's tap recognizer still reports its tap down after
+      // kPressTimeout. That must not drop the pending link tap.
+      shellWrites.clear();
+      for (final hold in const [
+        Duration(milliseconds: 150),
+        Duration(milliseconds: 300),
+      ]) {
+        launchedUrls.clear();
+        final gesture = await tester.startGesture(link);
+        await tester.pump(hold);
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(launchedUrls, [url], reason: 'held for $hold');
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+      expect(
+        shellWrites.map(String.fromCharCodes).join(),
+        isNot(contains('\x1b[<')),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets(
       'offers reconnect when the active session disappears unexpectedly',
       (tester) async {
