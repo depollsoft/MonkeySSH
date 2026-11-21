@@ -443,9 +443,15 @@ test('Antigravity includes every group and excludes unknown or disabled amounts'
   const r = antigravityUsage({summary: {groups: [{displayName: 'Fast', buckets: [
     {displayName: 'Weekly', remainingFraction: 0, resetTime: '2026-10-01T00:00:00Z'},
     {displayName: 'Daily', remainingFraction: 1}, {remainingFraction: .5, disabled: true}, {},
-  ]}, {displayName: 'Pro', buckets: [{remainingFraction: .25}]}]}});
+  ]}, {displayName: 'Pro', buckets: [{remainingFraction: .25}]}]}, buckets: [
+    {displayName: 'Duplicate', remainingFraction: .5},
+  ]});
   assert.deepEqual(r.windows.map(w => w.usedPercent), [100, 0, 75]);
   assert.equal(r.windows[0].resetsAt, '2026-10-01T00:00:00.000Z');
+  assert.equal(antigravityUsage({buckets: [
+    {displayName: 'Weekly Limit', remainingFraction: .5},
+    {displayName: 'Disabled', remainingFraction: .5, disabled: true},
+  ]}).windows.map(w => `${w.label}:${w.usedPercent}`).join(','), 'Weekly Limit:50');
   assert.equal(antigravityUsage({buckets: [{modelId: 'gemini', remainingFraction: .5}]}).windows[0].usedPercent, 50);
 });
 
@@ -610,9 +616,10 @@ test('Windows stdin bootstrap accepts a fragmented payload without command expan
 test('Antigravity uses the quota-summary request schema and falls back on older CLIs', async () => {
   const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
   const methods = [];
-  const result = await antigravity([12345], async (url, options) => {
+  const result = await antigravity([{port: 12345, csrf: 'CSRF_TOKEN'}], async (url, options) => {
     methods.push(url.split('/').pop());
     assert.equal(options.local, true);
+    assert.equal(options.headers['x-codeium-csrf-token'], 'CSRF_TOKEN');
     if (methods.length === 1) {
       assert.deepEqual(options.body, {forceRefresh: true});
       throw new Error('unavailable');
@@ -624,6 +631,138 @@ test('Antigravity uses the quota-summary request schema and falls back on older 
   assert.deepEqual(methods, ['RetrieveUserQuotaSummary', 'GetUserStatus']);
   assert.equal(result.windows[0].usedPercent, 25);
   assert.ok(!JSON.stringify(result).includes('SECRET'));
+});
+
+test('Antigravity reads saved OAuth credentials, sends Antigravity UA, and falls back to prod endpoint', async () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const {antigravity, antigravityCredentials} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'monkeyssh-agy-auth-'));
+  const keys = ['ANTIGRAVITY_GEMINI_DIR', 'ANTIGRAVITY_CONFIG_REL_DIR', 'GEMINI_API_KEY'];
+  const previous = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+  try {
+    process.env.ANTIGRAVITY_GEMINI_DIR = dir;
+    delete process.env.ANTIGRAVITY_CONFIG_REL_DIR;
+    delete process.env.GEMINI_API_KEY;
+    assert.equal(antigravityCredentials(), null);
+    await assert.rejects(antigravity('', {ports: [], request: async () => ({})}), /signInRequired/);
+
+    process.env.GEMINI_API_KEY = 'API_KEY_ONLY';
+    assert.deepEqual(await antigravity('', {ports: [], request: async () => ({})}), {windows: [], status: 'notReported'});
+    delete process.env.GEMINI_API_KEY;
+
+    const cliDir = path.join(dir, 'antigravity-cli');
+    fs.mkdirSync(cliDir, {recursive: true});
+    const tokenFile = path.join(cliDir, 'antigravity-oauth-token');
+    fs.writeFileSync(tokenFile, JSON.stringify({
+      token: {
+        access_token: 'AGY_ACCESS',
+        refresh_token: 'AGY_REFRESH',
+        expiry: new Date(Date.now() + 3600_000).toISOString(),
+      },
+      project_id: 'proj-123',
+      auth_method: 'consumer',
+      id_token_email: 'SECRET@example.com',
+    }));
+
+    const calls = [];
+    const result = await antigravity('/usr/local/bin/agy', {
+      ports: () => { throw new Error('local scan should not run when cloud succeeds'); },
+      request: async (url, options) => {
+        calls.push({url, token: options.token, ua: options.headers?.['User-Agent'], body: options.body});
+        if (url.includes('daily-cloudcode-pa')) throw new Error('unavailable');
+        return {groups: [{displayName: 'Claude and GPT models', buckets: [
+          {displayName: 'Weekly Limit Remaining', remainingFraction: 0.6, resetTime: '2026-11-28T12:00:00Z'},
+        ]}]};
+      },
+    });
+    assert.deepEqual(calls.map(c => c.url), [
+      'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+      'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+    ]);
+    assert.equal(calls[0].token, 'AGY_ACCESS');
+    assert.match(calls[0].ua, /^antigravity\//);
+    assert.deepEqual(calls[0].body, {project: 'proj-123'});
+    assert.equal(result.windows.length, 1);
+    assert.equal(result.windows[0].label, 'Claude and GPT models · Weekly Limit Remaining');
+    assert.equal(result.windows[0].usedPercent, 40);
+    assert.ok(!JSON.stringify(result).includes('SECRET'));
+
+    // Malformed credential file fails as unavailable rather than signInRequired.
+    fs.writeFileSync(tokenFile, '{');
+    assert.throws(() => antigravityCredentials(), /unavailable/);
+  } finally {
+    for (const k of keys) previous[k] == null ? delete process.env[k] : process.env[k] = previous[k];
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('Antigravity refreshes an expired or 401 token once through the CLI and preserves rate limits', async () => {
+  const {antigravity} = require('../../assets/scripts/agent_usage_probe.cjs');
+  let stored = {accessToken: 'EXPIRED', hasRefresh: true, expired: true, project: null, authMethod: 'consumer'};
+  let refreshes = 0;
+  const tokensSeen = [];
+  const refreshed = await antigravity('/usr/local/bin/agy', {
+    ports: [],
+    credentials: () => stored,
+    refresh: async exe => {
+      assert.equal(exe, '/usr/local/bin/agy');
+      refreshes++;
+      stored = {...stored, accessToken: 'FRESH', expired: false};
+      return true;
+    },
+    request: async (url, options) => {
+      tokensSeen.push(options.token);
+      return {groups: [{displayName: 'Models', buckets: [{displayName: '5h', remainingFraction: 0.75}]}]};
+    },
+  });
+  assert.equal(refreshes, 1);
+  assert.deepEqual(tokensSeen, ['FRESH']);
+  assert.equal(refreshed.windows[0].usedPercent, 25);
+
+  // Non-expired token that returns 401 triggers one refresh and retries.
+  stored = {accessToken: 'STALE', hasRefresh: true, expired: false, project: null, authMethod: 'consumer'};
+  refreshes = 0;
+  tokensSeen.length = 0;
+  const retried = await antigravity('/usr/local/bin/agy', {
+    ports: [],
+    credentials: () => stored,
+    refresh: async () => {
+      refreshes++;
+      stored = {...stored, accessToken: 'ROTATED', expired: false};
+      return true;
+    },
+    request: async (url, options) => {
+      tokensSeen.push(options.token);
+      if (options.token === 'STALE') throw new Error('signInRequired');
+      return {groups: [{displayName: 'Models', buckets: [{displayName: 'Weekly', remainingFraction: 0.5}]}]};
+    },
+  });
+  assert.equal(refreshes, 1);
+  assert.deepEqual(tokensSeen, ['STALE', 'ROTATED']);
+  assert.equal(retried.windows[0].usedPercent, 50);
+
+  // HTTP 429 preserves retryAfterSeconds without falling back to local servers.
+  await assert.rejects(
+    antigravity('/usr/local/bin/agy', {
+      ports: () => { throw new Error('should not fall back on 429'); },
+      credentials: () => ({accessToken: 'VALID', hasRefresh: true, expired: false, project: null, authMethod: 'consumer'}),
+      request: async () => { throw Object.assign(new Error('rateLimited'), {retryAfterSeconds: 600}); },
+    }),
+    {message: 'rateLimited', retryAfterSeconds: 600},
+  );
+});
+
+test('google-antigravity providerUsage includes Antigravity User-Agent header', async () => {
+  const {providerUsage} = require('../../assets/scripts/agent_usage_probe.cjs');
+  const seen = {};
+  for (const id of ['google-antigravity', 'google-gemini-cli']) {
+    await providerUsage(id, {type: 'oauth', access: 'TOKEN'}, async (url, options) => {
+      seen[id] = {url, headers: options.headers};
+      return {buckets: [{modelId: 'gemini', remainingFraction: 0.75}]};
+    });
+  }
+  assert.match(seen['google-antigravity'].headers?.['User-Agent'], /^antigravity\//);
+  assert.equal(seen['google-gemini-cli'].headers, undefined);
 });
 
 
