@@ -81,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.259"
+	monkeyMuxVersion                  = "0.1.260"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -1098,6 +1098,10 @@ type muxWindow struct {
 	// redrawForwardingAnsweredCursor records that MonkeyMux answered a cursor
 	// position query from the screen model during the current pause.
 	redrawForwardingAnsweredCursor bool
+	// redrawForwardingStartKittySeq snapshots kittyImageStoreSeq when the
+	// current redraw pause began so a screen-model fallback can still include
+	// store-only images uploaded during the pause whose a=p arrives after it.
+	redrawForwardingStartKittySeq uint64
 	// redrawForwardingClipboard holds the OSC 5522 packets forwarded during
 	// the pause apart from the redraw; see forwardKittyClipboardLocked.
 	redrawForwardingClipboard kittyClipboardDelivery
@@ -1248,6 +1252,7 @@ type attachFocusResult struct {
 
 type attachWrite struct {
 	data             []byte
+	reservedBytes    int
 	complete         chan error
 	responseWindowID string
 	responseCount    int
@@ -1642,6 +1647,7 @@ func attachCommand(args []string) {
 	if *heightFlag > 0 {
 		height = *heightFlag
 	}
+	cellWidth, cellHeight := terminalCellPixelSize()
 	if err := ensureServer(
 		session,
 		createWindowOptions{
@@ -1650,6 +1656,8 @@ func attachCommand(args []string) {
 			command:        *command,
 			themeHint:      themeHint,
 			capabilityHint: capabilityHint,
+			cellWidth:      cellWidth,
+			cellHeight:     cellHeight,
 		},
 		policy,
 		*restoreYolo,
@@ -1678,7 +1686,7 @@ func attachCommand(args []string) {
 		attachToken = reporter.token
 	}
 
-	cellWidth, cellHeight := terminalCellPixelSize()
+	cellWidth, cellHeight = terminalCellPixelSize()
 	cellToken := newCellSizeToken()
 	hello := controlMessage{
 		Role:           "attach",
@@ -1863,12 +1871,15 @@ func newSessionCommand(args []string) {
 	}
 
 	width, height := terminalSize()
+	cellWidth, cellHeight := terminalCellPixelSize()
 	if err := ensureServer(
 		target,
 		createWindowOptions{
-			cwd:  *cwd,
-			name: *name,
-			args: append([]string(nil), fs.Args()...),
+			cwd:        *cwd,
+			name:       *name,
+			args:       append([]string(nil), fs.Args()...),
+			cellWidth:  cellWidth,
+			cellHeight: cellHeight,
 		},
 		serverUpdatePolicyPrompt,
 		false,
@@ -2172,6 +2183,8 @@ func serveCommand(args []string) {
 	argsBase64 := fs.String("args-base64", "", "base64-encoded initial argv")
 	width := fs.Int("width", defaultColumns, "initial terminal columns")
 	height := fs.Int("height", defaultRows, "initial terminal rows")
+	cellWidth := fs.Int("cell-width", 0, "initial terminal cell pixel width")
+	cellHeight := fs.Int("cell-height", 0, "initial terminal cell pixel height")
 	themeHintBase64 := fs.String("theme-hint-base64", "", "base64-encoded terminal theme reports")
 	capabilityHintBase64 := fs.String("capability-hint-base64", "", "base64-encoded terminal capability reports")
 	_ = fs.Parse(args)
@@ -2201,6 +2214,8 @@ func serveCommand(args []string) {
 		args:           initialArgs,
 		themeHint:      themeHint,
 		capabilityHint: capabilityHint,
+		cellWidth:      *cellWidth,
+		cellHeight:     *cellHeight,
 	}, restore, *width, *height); err != nil {
 		fatal(err)
 	}
@@ -2437,6 +2452,13 @@ func ensureServer(
 	}
 	if width > 0 && height > 0 {
 		serveArgs = append(serveArgs, "--width", strconv.Itoa(width), "--height", strconv.Itoa(height))
+	}
+	if validCellPixelSize(initialWindow.cellWidth, initialWindow.cellHeight) {
+		serveArgs = append(
+			serveArgs,
+			"--cell-width", strconv.Itoa(initialWindow.cellWidth),
+			"--cell-height", strconv.Itoa(initialWindow.cellHeight),
+		)
 	}
 	var restore *serverRestore
 	var previousPID pidRecord
@@ -6457,6 +6479,10 @@ func serveSession(
 	_ = os.Chmod(socket, 0o600)
 
 	server := newMuxServerWithSize(session, width, height)
+	if validCellPixelSize(initialWindow.cellWidth, initialWindow.cellHeight) {
+		server.cellWidthPx = initialWindow.cellWidth
+		server.cellHeightPx = initialWindow.cellHeight
+	}
 	server.themeHint = append([]byte(nil), initialWindow.themeHint...)
 	server.capabilityHint = append([]byte(nil), initialWindow.capabilityHint...)
 	server.listener = listener
@@ -6887,6 +6913,8 @@ type createWindowOptions struct {
 	agentSessionDir           string
 	agentSessionPath          string
 	agentSessionIdentityExact bool
+	cellWidth                 int
+	cellHeight                int
 	nativeAcpBridgeID         string
 	nativeAcpProviderID       string
 	cursorVisible             bool
@@ -7631,6 +7659,108 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 	return output
 }
 
+// incompleteTrailingKittyApcStart returns the index in data where an
+// unterminated Kitty APC (`ESC _ G` or C1 `0x9f G`) or a trailing partial APC
+// introducer (`ESC`, `ESC _`, or `0x9f`) begins at the tail, or -1 if data
+// does not end inside one. UTF-8 continuation bytes (such as `0x9f` in `ß`)
+// are never treated as C1 introducers. Scans forward once in O(n).
+func incompleteTrailingKittyApcStart(data []byte, startUtf8Remaining int) int {
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(data, startUtf8Remaining)
+	inApc := false
+	apcStart := -1
+	for i := 0; i < len(data); i++ {
+		if !inApc {
+			if i < leadingUtf8Prefix && data[i]&0xc0 == 0x80 {
+				continue
+			}
+			if data[i] == '\x1b' {
+				if i+2 < len(data) && data[i+1] == '_' && data[i+2] == 'G' {
+					inApc = true
+					apcStart = i
+					i += 2
+				} else if i == len(data)-1 {
+					return i
+				} else if i == len(data)-2 && data[i+1] == '_' {
+					return i
+				}
+			} else if data[i] == 0x9f && !isUtf8ContinuationAt(data, i) {
+				if i+1 < len(data) && data[i+1] == 'G' {
+					inApc = true
+					apcStart = i
+					i++
+				} else if i == len(data)-1 {
+					return i
+				}
+			}
+			continue
+		}
+		switch data[i] {
+		case 0x18, 0x1a, 0x9c: // CAN, SUB, C1 ST
+			inApc = false
+			apcStart = -1
+		case '\x1b':
+			if i+1 < len(data) {
+				if data[i+1] == '\\' {
+					inApc = false
+					apcStart = -1
+					i++
+				} else {
+					// ESC followed by another byte aborts the APC and starts a
+					// new sequence; reprocess this ESC in ground state.
+					inApc = false
+					apcStart = -1
+					i--
+				}
+			}
+		}
+	}
+	if inApc {
+		return apcStart
+	}
+	return -1
+}
+
+// incompleteTrailingUtf8Start returns the index where an incomplete multibyte
+// UTF-8 sequence begins at the tail of data, or -1 if data ends on a complete
+// UTF-8 boundary (or with invalid bytes that cannot be completed).
+func incompleteTrailingUtf8Start(data []byte) int {
+	for back := 1; back <= 3 && back <= len(data); back++ {
+		start := len(data) - back
+		b := data[start]
+		if b&0xc0 == 0x80 {
+			continue
+		}
+		if expected := utf8ContinuationCount(b); expected > 0 && back <= expected {
+			return start
+		}
+		return -1
+	}
+	return -1
+}
+
+// wrapSynchronizedTerminalOutputBeforeIncompleteApc wraps prefix and the
+// complete head of data in a synchronized transaction and appends any
+// unterminated trailing Kitty APC or incomplete UTF-8 rune after ESC[?9002l so
+// the end marker is never injected inside an open graphics chunk or rune.
+func wrapSynchronizedTerminalOutputBeforeIncompleteApc(
+	prefix []byte,
+	data []byte,
+	startUtf8Remaining int,
+) []byte {
+	splitAt := incompleteTrailingKittyApcStart(data, startUtf8Remaining)
+	if splitAt < 0 {
+		splitAt = incompleteTrailingUtf8Start(data)
+	}
+	if splitAt < 0 {
+		return wrapSynchronizedTerminalOutput(prefix, data)
+	}
+	wrapped := wrapSynchronizedTerminalOutput(prefix, data[:splitAt])
+	out := make([]byte, 0, len(wrapped)+len(data)-splitAt)
+	out = append(out, wrapped...)
+	out = append(out, data[splitAt:]...)
+	return out
+}
+
 func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.closed = true
 	window.replies.take()
@@ -7901,7 +8031,7 @@ func (c *attachClient) nextQueuedWrite() (attachWrite, bool) {
 
 func (c *attachClient) finishQueuedWrite(write attachWrite, err error) {
 	c.queueMu.Lock()
-	c.queuedBytes -= len(write.data)
+	c.queuedBytes -= write.reservedBytes
 	c.queueMu.Unlock()
 	// writeLoop registered a sent write's replies as awaited before sending
 	// it, so they stay counted.
@@ -7924,7 +8054,7 @@ func (c *attachClient) failQueuedWrites(err error) {
 		write := c.queue[0]
 		c.queue[0] = attachWrite{}
 		c.queue = c.queue[1:]
-		c.queuedBytes -= len(write.data)
+		c.queuedBytes -= write.reservedBytes
 		c.queueMu.Unlock()
 		c.trackQueryWrite(write, -1)
 		if write.complete != nil {
@@ -8064,6 +8194,7 @@ func (c *attachClient) enqueueWrite(
 	}
 	write := attachWrite{
 		data:             append([]byte(nil), data...),
+		reservedBytes:    len(data),
 		responseWindowID: responseWindowID,
 		responseCount:    responseCount,
 		gate:             gate,
@@ -8074,20 +8205,21 @@ func (c *attachClient) enqueueWrite(
 	c.queueMu.Lock()
 	queueClosed := c.queueClosed
 	if queueClosed ||
-		c.queuedBytes+len(write.data) > attachWriteQueueLimitBytes {
+		c.queuedBytes+write.reservedBytes > attachWriteQueueLimitBytes {
 		c.queueMu.Unlock()
 		if !queueClosed {
 			c.close()
 		}
 		return nil, false
 	}
-	c.queuedBytes += len(write.data)
+	c.queuedBytes += write.reservedBytes
 	queueWasEmpty := len(c.queue) == 0
 	if attachWritesCanCoalesce(write) && len(c.queue) > 0 {
 		last := &c.queue[len(c.queue)-1]
 		if attachWritesCanCoalesce(*last) &&
 			len(last.data)+len(write.data) <= attachWriteChunkBytes {
 			last.data = append(last.data, write.data...)
+			last.reservedBytes += write.reservedBytes
 			c.queueMu.Unlock()
 			return nil, true
 		}
@@ -8103,6 +8235,78 @@ func (c *attachClient) enqueueWrite(
 		}
 	}
 	return write.complete, true
+}
+
+// enqueueMutuallyExclusiveWrites atomically queues a gated failover write and
+// its mutually exclusive gated secondary write while reserving only
+// max(len(failover), len(secondary)) bytes in c.queuedBytes, because at most
+// one of the two gates will ever deliver its payload.
+func (c *attachClient) enqueueMutuallyExclusiveWrites(
+	failover []byte,
+	responseWindowID string,
+	responseCount int,
+	failoverGate *attachWriteGate,
+	secondary []byte,
+	secondaryGate *attachWriteGate,
+) (<-chan error, bool, bool) {
+	if len(secondary) == 0 {
+		completion, queued := c.enqueueWrite(
+			failover,
+			true,
+			responseWindowID,
+			responseCount,
+			failoverGate,
+		)
+		return completion, queued, false
+	}
+	if len(failover) == 0 {
+		_, queued := c.enqueueWrite(secondary, false, "", 0, secondaryGate)
+		return nil, true, queued
+	}
+	reservedTotal := max(len(failover), len(secondary))
+	if reservedTotal > attachWriteQueueLimitBytes {
+		c.close()
+		return nil, false, false
+	}
+	// Callers (deliverWithQueryFallback) pass immutable slices that are never
+	// mutated afterwards, and gated writes never coalesce, so share the slice
+	// headers across viewers rather than duplicating multi-MiB payloads per
+	// secondary connection.
+	failoverWrite := attachWrite{
+		data:             failover,
+		reservedBytes:    reservedTotal - len(secondary),
+		complete:         make(chan error, 1),
+		responseWindowID: responseWindowID,
+		responseCount:    responseCount,
+		gate:             failoverGate,
+	}
+	secondaryWrite := attachWrite{
+		data:          secondary,
+		reservedBytes: len(secondary),
+		gate:          secondaryGate,
+	}
+	c.queueMu.Lock()
+	queueClosed := c.queueClosed
+	if queueClosed ||
+		c.queuedBytes+reservedTotal > attachWriteQueueLimitBytes {
+		c.queueMu.Unlock()
+		if !queueClosed {
+			c.close()
+		}
+		return nil, false, false
+	}
+	c.queuedBytes += reservedTotal
+	queueWasEmpty := len(c.queue) == 0
+	c.trackQueryWrite(failoverWrite, 1)
+	c.queue = append(c.queue, failoverWrite, secondaryWrite)
+	c.queueMu.Unlock()
+	if queueWasEmpty {
+		select {
+		case c.queueReady <- struct{}{}:
+		default:
+		}
+	}
+	return failoverWrite.complete, true, true
 }
 
 func attachWritesCanCoalesce(write attachWrite) bool {
@@ -10062,6 +10266,13 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			client.sendError(request, errors.New("invalid terminal size"))
 			return
 		}
+		if validCellPixelSize(request.CellWidth, request.CellHeight) {
+			s.recordAttachClientCellSize(
+				request.ClientID,
+				request.CellWidth,
+				request.CellHeight,
+			)
+		}
 		result := s.focusAttachClientByIDWithResult(
 			request.ClientID,
 			request.Width,
@@ -11488,6 +11699,9 @@ func (s *muxServer) pauseAttachForwardingForRedrawLocked(
 	} else if !window.redrawForwardingPaused {
 		window.redrawForwardingFallbackScreen = nil
 	}
+	if !window.redrawForwardingPaused {
+		window.redrawForwardingStartKittySeq = kittyImageStoreSeq
+	}
 	window.redrawForwardingPaused = true
 	window.redrawForwardingGeneration += 1
 	windowID := window.id
@@ -11584,15 +11798,43 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// so retain only a parser-safe tail of that redraw instead of sending many
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
+	endedAtGround := window.terminalOutputIsGroundLocked()
+	startUtf8Remaining := window.redrawForwardingStartParser.utf8Remaining
+	uploadedKittyDuringPause := false
+	for _, id := range window.kittyImageOrder {
+		if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq {
+			uploadedKittyDuringPause = true
+			break
+		}
+	}
+	// Account for the prepended replay when deciding whether an in-progress
+	// Kitty upload fits safely inside the client write queue (keeping
+	// foregroundRedrawBufferLimitBytes of headroom below attachWriteQueueLimitBytes).
+	kittyRedrawFitsQueue := func() bool {
+		const maxAllowed = attachWriteQueueLimitBytes - foregroundRedrawBufferLimitBytes
+		return len(replay)+len(buffered) <= maxAllowed &&
+			len(replay)+len(failoverBuffered) <= maxAllowed &&
+			len(replay)+len(secondaryBuffered) <= maxAllowed
+	}
+	pendingKitty := len(window.kittyGraphicsPending) > 0 && kittyRedrawFitsQueue()
+	hasRedrawContent := visibleRedraw || pendingKitty || uploadedKittyDuringPause
 	paintedFromScreen := false
-	if len(replay) > 0 && window.terminalOutputIsGroundLocked() {
-		oversized := len(buffered) > foregroundRedrawBufferLimitBytes ||
-			len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
-			len(secondaryBuffered) > foregroundRedrawBufferLimitBytes
-		if oversized && window.screenLocked().HasVisibleContent() {
+	if len(replay) > 0 && endedAtGround {
+		// If a chunked Kitty transmission is still in flight when the redraw
+		// pause ends, replacing buffered with a screen-model frame or trimming
+		// its head discards the opening m=1 chunks so later chunks arrive
+		// orphaned and the image never displays. Keep the upload intact while
+		// the combined replay and redraw stay safely within the client queue.
+		oversized := !pendingKitty &&
+			(len(buffered) > foregroundRedrawBufferLimitBytes ||
+				len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
+				len(secondaryBuffered) > foregroundRedrawBufferLimitBytes)
+		if oversized &&
+			(window.screenLocked().HasVisibleContent() || uploadedKittyDuringPause) {
 			// Cutting the head off a long repaint loses the top of the frame.
 			// The screen model has already absorbed the whole redraw, so paint
-			// its picture instead of a bounded tail of the bytes.
+			// its picture (along with any store-only Kitty uploads completed
+			// during this pause) instead of a bounded tail of the bytes.
 			frame := s.foregroundHistoryFallbackReplayLocked(
 				window,
 				window.screenLocked(),
@@ -11602,7 +11844,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 			secondaryBuffered = append([]byte(nil), frame...)
 			paintedFromScreen = true
-		} else {
+		} else if !pendingKitty {
 			buffered = trimForegroundRedrawBuffer(buffered, queryData)
 			failoverBuffered = trimForegroundRedrawBuffer(failoverBuffered, queryData)
 			secondaryBuffered = trimForegroundRedrawBuffer(secondaryBuffered, nil)
@@ -11615,7 +11857,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// now, whose cursor is the one reported. A visible redraw is applied over
 	// the snapshot and reaches the same cursor.
 	if !paintedFromScreen && window.redrawForwardingAnsweredCursor &&
-		window.terminalOutputIsGroundLocked() && !visibleRedraw {
+		window.terminalOutputIsGroundLocked() && !hasRedrawContent {
 		frame := s.foregroundHistoryFallbackReplayLocked(
 			window,
 			window.screenLocked(),
@@ -11631,7 +11873,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// escape sequence would drop the head of a sequence whose tail is still to
 	// come and corrupt the client, so leave those redraws to forward normally.
 	if !paintedFromScreen && window.terminalOutputIsGroundLocked() &&
-		(!visibleRedraw || !replacesScreen) {
+		(!hasRedrawContent || !replacesScreen) {
 		// Some TUIs coalesce the temporary and restored SIGWINCH notifications
 		// and emit either nothing or an incremental update. The normal
 		// foreground replay clears the client, so the update needs its base
@@ -11648,7 +11890,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			)
 		}
 		if len(fallbackReplay) > 0 {
-			if visibleRedraw {
+			if hasRedrawContent {
 				// A normal TUI update (for example a spinner tick) can arrive
 				// while the child coalesces both resize notifications. It relies
 				// on the pre-resize frame. Restore that frame before applying the
@@ -11712,18 +11954,19 @@ func (s *muxServer) resumePausedAttachForwarding(
 		}
 	}
 	s.mu.Unlock()
-	primaryOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		buffered,
-	)
-	failoverOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		failoverBuffered,
-	)
-	secondaryOutput := wrapSynchronizedTerminalOutput(
-		replay,
-		secondaryBuffered,
-	)
+	formatOutput := func(prefix []byte, data []byte) []byte {
+		if !endedAtGround {
+			return wrapSynchronizedTerminalOutputBeforeIncompleteApc(
+				prefix,
+				data,
+				startUtf8Remaining,
+			)
+		}
+		return wrapSynchronizedTerminalOutput(prefix, data)
+	}
+	primaryOutput := formatOutput(replay, buffered)
+	failoverOutput := formatOutput(replay, failoverBuffered)
+	secondaryOutput := formatOutput(replay, secondaryBuffered)
 	var primaryClient *attachClient
 	for _, client := range clients {
 		if client.conn == primary {
@@ -12171,6 +12414,7 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingAnsweredCursor = false
+	w.redrawForwardingStartKittySeq = 0
 	w.redrawForwardingClipboard = kittyClipboardDelivery{}
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
@@ -12193,7 +12437,9 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	// The frame is rendered from the screen model, which drops the APC image
 	// transmissions, so every image its placeholder cells reference must travel
 	// with it — not just the few most recently mutated ones — and so must the
-	// images its direct placements show.
+	// images its direct placements show. Reserve the repair budget for visible
+	// frame images first before spending any leftover headroom on unplaced
+	// store-only uploads completed during an active redraw pause.
 	frameImages, served := window.kittyFrameImageReplayLocked(
 		replayed,
 		nil,
@@ -12205,6 +12451,24 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	// placed where the client may hold another window's image of that id.
 	// The client's own copies of the rest go first, before the images.
 	carried := kittyCarriedImages(replayed, served)
+	if window.redrawForwardingPaused && screen == window.screenLocked() {
+		var unplacedPauseIDs []string
+		for _, id := range window.kittyImageOrder {
+			if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq &&
+				!carried(id) {
+				unplacedPauseIDs = append(unplacedPauseIDs, id)
+			}
+		}
+		if len(unplacedPauseIDs) > 0 && len(images) < maxKittyImageRepairBytes {
+			pauseImages, _ := window.kittyFrameImageReplayLocked(
+				replayed,
+				nil,
+				maxKittyImageRepairBytes-len(images),
+				unplacedPauseIDs,
+			)
+			images = append(images, pauseImages...)
+		}
+	}
 	var deletes []byte
 	if !screen.AlternateScreenActive() {
 		deletes = screen.KittyMainPlacementDeletes(carried)
@@ -12868,13 +13132,18 @@ func (s *muxServer) deliverWithQueryFallback(
 			}
 			failover, secondary := fallbackData(client)
 			queryGate := &attachWriteGate{done: make(chan struct{})}
-			queryCompletion, queued :=
-				client.enqueueWrite(
+			var secondaryGate *attachWriteGate
+			if len(secondary) > 0 {
+				secondaryGate = &attachWriteGate{done: make(chan struct{})}
+			}
+			queryCompletion, queued, secondaryQueued :=
+				client.enqueueMutuallyExclusiveWrites(
 					failover,
-					true,
 					windowID,
 					responseCount,
 					queryGate,
+					secondary,
+					secondaryGate,
 				)
 			if !queued {
 				continue
@@ -12884,17 +13153,8 @@ func (s *muxServer) deliverWithQueryFallback(
 				queryCompletion: queryCompletion,
 				queryGate:       queryGate,
 			}
-			if len(secondary) > 0 {
-				secondaryGate := &attachWriteGate{done: make(chan struct{})}
-				if _, queued := client.enqueueWrite(
-					secondary,
-					false,
-					"",
-					0,
-					secondaryGate,
-				); queued {
-					fallback.secondaryOutputGate = secondaryGate
-				}
+			if secondaryQueued {
+				fallback.secondaryOutputGate = secondaryGate
 			}
 			gated = append(gated, fallback)
 		}

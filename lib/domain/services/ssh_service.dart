@@ -4096,6 +4096,10 @@ class SshSession {
     return true;
   }
 
+  /// Latest known visible terminal dimensions in cells and pixels.
+  TerminalWindowMetrics? get terminalWindowMetrics =>
+      _runtime.terminalWindowMetrics;
+
   /// Records visible terminal dimensions used to answer size report queries.
   void updateTerminalWindowMetrics({
     required int columns,

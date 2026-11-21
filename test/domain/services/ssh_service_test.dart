@@ -3310,6 +3310,60 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       await session.closeShell(waitForStreams: false);
     });
 
+    test('seeds terminalWindowMetrics from initial SSHPtyConfig pixel size for early CSI 14 t', () async {
+      for (final requestPty in [true, false]) {
+        final client = _MockSshClient();
+        final shell = _MockExecSession();
+        final stdoutController = StreamController<Uint8List>();
+        final writes = <String>[];
+        final session = _testSession(
+          client,
+          hostId: 2,
+          hostname: 'example.com',
+        );
+        const pty = SSHPtyConfig(
+          width: 48,
+          height: 36,
+          pixelWidth: 390,
+          pixelHeight: 700,
+        );
+
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) async => shell);
+        when(() => shell.stdout).thenAnswer((_) => stdoutController.stream);
+        when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => shell.done).thenAnswer((_) => Completer<void>().future);
+        when(() => shell.resizeTerminal(any(), any(), any(), any()))
+            .thenAnswer((_) {});
+        when(() => shell.write(any())).thenAnswer((invocation) {
+          final data = invocation.positionalArguments.single as Uint8List;
+          writes.add(utf8.decode(data));
+        });
+
+        await session.getShell(
+          pty: pty,
+          requestPty: requestPty,
+          command: requestPty ? null : 'monkeymux attach work',
+        );
+        expect(session.terminalWindowMetrics, (
+          columns: 48,
+          rows: 36,
+          pixelWidth: 390,
+          pixelHeight: 700,
+        ));
+
+        stdoutController.add(Uint8List.fromList(utf8.encode('\x1b[14t')));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        expect(writes, contains('\x1b[4;700;390t'));
+        if (!requestPty) {
+          verifyNever(() => shell.resizeTerminal(any(), any(), any(), any()));
+        }
+        await stdoutController.close();
+        await session.closeShell(waitForStreams: false);
+      }
+    });
+
     test(
       'emits shell done when a completed startup command has no login fallback',
       () async {
