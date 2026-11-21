@@ -755,35 +755,47 @@ func TestRedrawPausePreservesInProgressChunkedKittyUpload(t *testing.T) {
 }
 
 func TestRedrawPauseResumingMidKittyChunkDoesNotInjectSyncEndMarker(t *testing.T) {
-	server := newMuxServerWithSize("test", 120, 40)
-	window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
-	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
-	server.windows = []*muxWindow{{id: "@1"}, window}
-	server.activeID = "@1"
-	primary := &recordingConn{}
-	registerTestAttachClient(t, server, primary, "phone", 120, 40)
-	if err := server.selectWindow("@2"); err != nil {
-		t.Fatal(err)
-	}
+	const fullApc = "\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAABBBB\x1b\\"
+	const placement = "\x1b[16;4H\x1b_Ga=p,i=4242,p=1,c=10,r=5,C=1,q=2\x1b\\"
+	for _, tc := range []struct {
+		name  string
+		split int
+	}{
+		{"after ESC", 1},
+		{"after ESC _", 2},
+		{"after ESC _ G", 3},
+		{"mid payload", len("\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAA")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newMuxServerWithSize("test", 120, 40)
+			window := &muxWindow{id: "@2", index: 1, agentTool: "copilot"}
+			window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
+			server.windows = []*muxWindow{{id: "@1"}, window}
+			server.activeID = "@1"
+			primary := &recordingConn{}
+			registerTestAttachClient(t, server, primary, "phone", 120, 40)
+			if err := server.selectWindow("@2"); err != nil {
+				t.Fatal(err)
+			}
 
-	// Split a single Kitty APC chunk's base64 payload across the pause resume.
-	const head = "\x1b[2J\x1b[H\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAA"
-	const tail = "BBBB\x1b\\\x1b[16;4H\x1b_Ga=p,i=4242,p=1,c=10,r=5,C=1,q=2\x1b\\"
-	server.handleWindowOutput(window.id, []byte(head))
+			head := "\x1b[2J\x1b[H" + fullApc[:tc.split]
+			tail := fullApc[tc.split:] + placement
+			server.handleWindowOutput(window.id, []byte(head))
 
-	server.mu.Lock()
-	generation := window.redrawForwardingGeneration
-	server.mu.Unlock()
-	server.resumePausedAttachForwarding(window.id, generation)
-	waitForTestAttachWrites(t, server)
+			server.mu.Lock()
+			generation := window.redrawForwardingGeneration
+			server.mu.Unlock()
+			server.resumePausedAttachForwarding(window.id, generation)
+			waitForTestAttachWrites(t, server)
 
-	server.handleWindowOutput(window.id, []byte(tail))
-	waitForTestAttachWrites(t, server)
+			server.handleWindowOutput(window.id, []byte(tail))
+			waitForTestAttachWrites(t, server)
 
-	got := primary.String()
-	const wantFullApc = "\x1b_Ga=t,f=100,i=4242,q=2,m=0;AAAABBBB\x1b\\"
-	if !strings.Contains(got, wantFullApc) {
-		t.Fatalf("split Kitty APC was corrupted by resume marker; got tail %q", got[max(0, len(got)-160):])
+			got := primary.String()
+			if !strings.Contains(got, fullApc) {
+				t.Fatalf("split Kitty APC (%s) was corrupted by resume marker; got tail %q", tc.name, got[max(0, len(got)-160):])
+			}
+		})
 	}
 }
 
@@ -799,11 +811,12 @@ func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t 
 		t.Fatal(err)
 	}
 
-	// Upload a > 2 MiB store-only image that completes (m=0) during the pause
-	// before its a=p placement arrives after resume.
+	// Clear the screen (no visible text painted yet) and upload a > 2 MiB
+	// store-only image that completes (m=0) during the pause before its a=p
+	// placement arrives after resume.
 	chunkPayload := strings.Repeat("A", 4096)
 	var upload bytes.Buffer
-	upload.WriteString("\x1b[2J\x1b[Hready")
+	upload.WriteString("\x1b[2J\x1b[H")
 	upload.WriteString("\x1b_Ga=t,f=100,i=5555,q=2,m=1;" + chunkPayload + "\x1b\\")
 	for i := 0; i < 600; i++ { // ~2.45 MiB (> maxReplayedKittyImageBytes)
 		upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
@@ -817,62 +830,89 @@ func TestRedrawPausePreservesCompletedOverTwoMiBStoreOnlyImageBeforePlacement(t 
 	server.resumePausedAttachForwarding(window.id, generation)
 	waitForTestAttachWrites(t, server)
 
+	// Assert the complete >2 MiB transmission reached the client BEFORE a=p.
+	beforePlacement := primary.String()
+	if !strings.Contains(beforePlacement, "\x1b_Ga=t,f=100,i=5555,") ||
+		!strings.Contains(beforePlacement, "\x1b_Gq=2,m=0;AAAA\x1b\\") {
+		t.Fatalf(
+			"completed >2 MiB store-only upload on blank redraw was dropped before placement arrived (delivered %d bytes)",
+			len(beforePlacement),
+		)
+	}
+
 	const placement = "\x1b[16;4H\x1b_Ga=p,i=5555,p=2,c=27,r=24,C=1,q=2\x1b\\"
 	server.handleWindowOutput(window.id, []byte(placement))
 	waitForTestAttachWrites(t, server)
 
-	got := primary.String()
-	if !strings.Contains(got, "i=5555,") && !strings.Contains(got, "i=5555;") {
-		t.Fatalf("completed >2 MiB store-only upload was dropped before placement arrived (delivered %d bytes)", len(got))
-	}
-	if !strings.Contains(got, placement) {
+	if !strings.Contains(primary.String(), placement) {
 		t.Fatal("placement missing after redraw pause resume")
 	}
 }
 
 func TestRedrawPauseLargeReplayAndPendingKittyKeepsSecondaryViewerConnected(t *testing.T) {
+	restore := stubForegroundResize(t)
+	defer restore()
+
 	server := newMuxServerWithSize("test", 120, 40)
 	window := &muxWindow{
 		id:        "@2",
 		index:     1,
 		agentTool: "copilot",
-		pty:       &recordingPty{},
-		ptyWidth:  120,
-		ptyHeight: 40,
 	}
 	window.appendHistoryLocked([]byte("\x1b[?1049h\x1b[2J\x1b[Hcopilot"))
 	server.windows = []*muxWindow{{id: "@1"}, window}
 	server.activeID = "@1"
-	primary := &recordingConn{}
-	secondary := &recordingConn{}
-	registerTestAttachClient(t, server, primary, "phone", 120, 40)
-	secondaryClient := registerTestAttachClient(t, server, secondary, "desktop", 120, 40)
-	if err := server.selectWindow("@2"); err != nil {
-		t.Fatal(err)
+	secondaryConn := &recordingConn{}
+	primaryConn := &recordingConn{}
+	// registerTestAttachClient makes the most recently registered client
+	// primary, so register secondary first and primary second.
+	secondaryClient := registerTestAttachClient(t, server, secondaryConn, "desktop", 120, 40)
+	primaryClient := registerTestAttachClient(t, server, primaryConn, "phone", 120, 40)
+	if server.attachConn != primaryClient.conn {
+		t.Fatal("setup error: expected phone to be primary attach client")
 	}
-
-	// Simulate a large 6 MiB deferred replay plus a 3 MiB in-progress Kitty
-	// upload and a pending terminal query so failover + secondary reservations
-	// would exceed attachWriteQueueLimitBytes if the upload were kept verbatim.
-	server.mu.Lock()
-	window.redrawForwardingReplay = bytes.Repeat([]byte("R"), 6*1024*1024)
-	generation := window.redrawForwardingGeneration
-	server.mu.Unlock()
-
 	chunkPayload := strings.Repeat("A", 4096)
 	var upload bytes.Buffer
-	upload.WriteString("\x1b[2J\x1b[H\x1b[6n")
+	upload.WriteString("\x1b[2J\x1b[H\x1b[14t")
 	upload.WriteString("\x1b_Ga=t,f=100,i=6666,q=2,m=1;" + chunkPayload + "\x1b\\")
 	for i := 0; i < 750; i++ { // ~3 MiB
 		upload.WriteString("\x1b_Gq=2,m=1;" + chunkPayload + "\x1b\\")
 	}
-	server.handleWindowOutput(window.id, upload.Bytes())
+	upload.WriteString("\x1b_Gq=2,m=0;PARTIAL") // open APC payload across resume
+	uploadBytes := upload.Bytes()
+	largeReplay := bytes.Repeat([]byte("R"), 6*1024*1024)
+
+	if err := server.selectWindow("@2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a 6 MiB deferred replay, a forwarded terminal query (CSI 14 t),
+	// and a 3 MiB in-progress Kitty upload ending mid-chunk (endedAtGround ==
+	// false). Reserving failover + secondary separately would exceed 16 MiB and
+	// disconnect the secondary viewer.
+	server.mu.Lock()
+	if !window.redrawForwardingPaused {
+		server.mu.Unlock()
+		t.Fatal("setup error: expected redraw forwarding pause to be active")
+	}
+	window.redrawForwardingReplay = largeReplay
+	window.redrawForwardingGeneration++
+	generation := window.redrawForwardingGeneration
+	server.mu.Unlock()
+
+	server.handleWindowOutput(window.id, uploadBytes)
 
 	server.resumePausedAttachForwarding(window.id, generation)
 	waitForTestAttachWrites(t, server)
 
 	if secondaryClient.isClosed() {
-		t.Fatal("secondary viewer was disconnected by oversized redraw reservation")
+		t.Fatal("secondary viewer was disconnected by mutually exclusive redraw reservation")
+	}
+	if len(secondaryConn.String()) < 8*1024*1024 {
+		t.Fatalf("secondary viewer received only %d bytes, expected full replay+upload", len(secondaryConn.String()))
+	}
+	if strings.Contains(secondaryConn.String(), "\x1b[14t") {
+		t.Fatal("secondary viewer should not receive the primary-only CSI 14 t query")
 	}
 }
 

@@ -1252,6 +1252,7 @@ type attachFocusResult struct {
 
 type attachWrite struct {
 	data             []byte
+	reservedBytes    int
 	complete         chan error
 	responseWindowID string
 	responseCount    int
@@ -7636,22 +7637,32 @@ func wrapSynchronizedTerminalOutput(prefix []byte, data []byte) []byte {
 }
 
 // incompleteTrailingKittyApcStart returns the index in data where an
-// unterminated Kitty APC (`ESC _ G` or C1 `0x9f G`) begins at the tail, or -1
-// if data does not end inside an open Kitty APC. Scans forward once in O(n).
+// unterminated Kitty APC (`ESC _ G` or C1 `0x9f G`) or a trailing partial APC
+// introducer (`ESC`, `ESC _`, or `0x9f`) begins at the tail, or -1 if data
+// does not end inside one. Scans forward once in O(n).
 func incompleteTrailingKittyApcStart(data []byte) int {
 	inApc := false
 	apcStart := -1
 	for i := 0; i < len(data); i++ {
 		if !inApc {
-			if data[i] == '\x1b' && i+2 < len(data) &&
-				data[i+1] == '_' && data[i+2] == 'G' {
-				inApc = true
-				apcStart = i
-				i += 2
-			} else if data[i] == 0x9f && i+1 < len(data) && data[i+1] == 'G' {
-				inApc = true
-				apcStart = i
-				i++
+			if data[i] == '\x1b' {
+				if i+2 < len(data) && data[i+1] == '_' && data[i+2] == 'G' {
+					inApc = true
+					apcStart = i
+					i += 2
+				} else if i == len(data)-1 {
+					return i
+				} else if i == len(data)-2 && data[i+1] == '_' {
+					return i
+				}
+			} else if data[i] == 0x9f {
+				if i+1 < len(data) && data[i+1] == 'G' {
+					inApc = true
+					apcStart = i
+					i++
+				} else if i == len(data)-1 {
+					return i
+				}
 			}
 			continue
 		}
@@ -7970,7 +7981,7 @@ func (c *attachClient) nextQueuedWrite() (attachWrite, bool) {
 
 func (c *attachClient) finishQueuedWrite(write attachWrite, err error) {
 	c.queueMu.Lock()
-	c.queuedBytes -= len(write.data)
+	c.queuedBytes -= write.reservedBytes
 	c.queueMu.Unlock()
 	// writeLoop registered a sent write's replies as awaited before sending
 	// it, so they stay counted.
@@ -7993,7 +8004,7 @@ func (c *attachClient) failQueuedWrites(err error) {
 		write := c.queue[0]
 		c.queue[0] = attachWrite{}
 		c.queue = c.queue[1:]
-		c.queuedBytes -= len(write.data)
+		c.queuedBytes -= write.reservedBytes
 		c.queueMu.Unlock()
 		c.trackQueryWrite(write, -1)
 		if write.complete != nil {
@@ -8133,6 +8144,7 @@ func (c *attachClient) enqueueWrite(
 	}
 	write := attachWrite{
 		data:             append([]byte(nil), data...),
+		reservedBytes:    len(data),
 		responseWindowID: responseWindowID,
 		responseCount:    responseCount,
 		gate:             gate,
@@ -8143,20 +8155,21 @@ func (c *attachClient) enqueueWrite(
 	c.queueMu.Lock()
 	queueClosed := c.queueClosed
 	if queueClosed ||
-		c.queuedBytes+len(write.data) > attachWriteQueueLimitBytes {
+		c.queuedBytes+write.reservedBytes > attachWriteQueueLimitBytes {
 		c.queueMu.Unlock()
 		if !queueClosed {
 			c.close()
 		}
 		return nil, false
 	}
-	c.queuedBytes += len(write.data)
+	c.queuedBytes += write.reservedBytes
 	queueWasEmpty := len(c.queue) == 0
 	if attachWritesCanCoalesce(write) && len(c.queue) > 0 {
 		last := &c.queue[len(c.queue)-1]
 		if attachWritesCanCoalesce(*last) &&
 			len(last.data)+len(write.data) <= attachWriteChunkBytes {
 			last.data = append(last.data, write.data...)
+			last.reservedBytes += write.reservedBytes
 			c.queueMu.Unlock()
 			return nil, true
 		}
@@ -8172,6 +8185,74 @@ func (c *attachClient) enqueueWrite(
 		}
 	}
 	return write.complete, true
+}
+
+// enqueueMutuallyExclusiveWrites atomically queues a gated failover write and
+// its mutually exclusive gated secondary write while reserving only
+// max(len(failover), len(secondary)) bytes in c.queuedBytes, because at most
+// one of the two gates will ever deliver its payload.
+func (c *attachClient) enqueueMutuallyExclusiveWrites(
+	failover []byte,
+	responseWindowID string,
+	responseCount int,
+	failoverGate *attachWriteGate,
+	secondary []byte,
+	secondaryGate *attachWriteGate,
+) (<-chan error, bool, bool) {
+	if len(secondary) == 0 {
+		completion, queued := c.enqueueWrite(
+			failover,
+			true,
+			responseWindowID,
+			responseCount,
+			failoverGate,
+		)
+		return completion, queued, false
+	}
+	if len(failover) == 0 {
+		_, queued := c.enqueueWrite(secondary, false, "", 0, secondaryGate)
+		return nil, true, queued
+	}
+	reservedTotal := max(len(failover), len(secondary))
+	if reservedTotal > attachWriteQueueLimitBytes {
+		c.close()
+		return nil, false, false
+	}
+	failoverWrite := attachWrite{
+		data:             append([]byte(nil), failover...),
+		reservedBytes:    reservedTotal - len(secondary),
+		complete:         make(chan error, 1),
+		responseWindowID: responseWindowID,
+		responseCount:    responseCount,
+		gate:             failoverGate,
+	}
+	secondaryWrite := attachWrite{
+		data:          append([]byte(nil), secondary...),
+		reservedBytes: len(secondary),
+		gate:          secondaryGate,
+	}
+	c.queueMu.Lock()
+	queueClosed := c.queueClosed
+	if queueClosed ||
+		c.queuedBytes+reservedTotal > attachWriteQueueLimitBytes {
+		c.queueMu.Unlock()
+		if !queueClosed {
+			c.close()
+		}
+		return nil, false, false
+	}
+	c.queuedBytes += reservedTotal
+	queueWasEmpty := len(c.queue) == 0
+	c.trackQueryWrite(failoverWrite, 1)
+	c.queue = append(c.queue, failoverWrite, secondaryWrite)
+	c.queueMu.Unlock()
+	if queueWasEmpty {
+		select {
+		case c.queueReady <- struct{}{}:
+		default:
+		}
+	}
+	return failoverWrite.complete, true, true
 }
 
 func attachWritesCanCoalesce(write attachWrite) bool {
@@ -11664,25 +11745,23 @@ func (s *muxServer) resumePausedAttachForwarding(
 	// megabytes to a mobile client. Preserve terminal-query prefixes verbatim.
 	visibleRedraw := terminalOutputHasVisibleContent(secondaryBuffered)
 	endedAtGround := window.terminalOutputIsGroundLocked()
-	hasQueryFailover := len(queryData) > 0 || len(clipboard.tags) > 0
-	// Account for the prepended replay and both mutually exclusive writes
-	// queued per secondary viewer in deliverWithQueryFallback so a preserved
-	// upload can never overflow attachWriteQueueLimitBytes and drop a viewer.
+	uploadedKittyDuringPause := false
+	for _, id := range window.kittyImageOrder {
+		if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq {
+			uploadedKittyDuringPause = true
+			break
+		}
+	}
+	// Account for the prepended replay when deciding whether an in-progress
+	// Kitty upload fits safely inside the client write queue.
 	kittyRedrawFitsQueue := func() bool {
 		const maxAllowed = attachWriteQueueLimitBytes / 2
-		primaryBytes := len(replay) + len(buffered)
-		failoverBytes := len(replay) + len(failoverBuffered)
-		secondaryBytes := len(replay) + len(secondaryBuffered)
-		if primaryBytes > maxAllowed {
-			return false
-		}
-		if hasQueryFailover {
-			return failoverBytes+secondaryBytes <= maxAllowed
-		}
-		return failoverBytes <= maxAllowed && secondaryBytes <= maxAllowed
+		return len(replay)+len(buffered) <= maxAllowed &&
+			len(replay)+len(failoverBuffered) <= maxAllowed &&
+			len(replay)+len(secondaryBuffered) <= maxAllowed
 	}
 	pendingKitty := len(window.kittyGraphicsPending) > 0 && kittyRedrawFitsQueue()
-	hasRedrawContent := visibleRedraw || pendingKitty
+	hasRedrawContent := visibleRedraw || pendingKitty || uploadedKittyDuringPause
 	paintedFromScreen := false
 	if len(replay) > 0 && endedAtGround {
 		// If a chunked Kitty transmission is still in flight when the redraw
@@ -11694,10 +11773,12 @@ func (s *muxServer) resumePausedAttachForwarding(
 			(len(buffered) > foregroundRedrawBufferLimitBytes ||
 				len(failoverBuffered) > foregroundRedrawBufferLimitBytes ||
 				len(secondaryBuffered) > foregroundRedrawBufferLimitBytes)
-		if oversized && window.screenLocked().HasVisibleContent() {
+		if oversized &&
+			(window.screenLocked().HasVisibleContent() || uploadedKittyDuringPause) {
 			// Cutting the head off a long repaint loses the top of the frame.
 			// The screen model has already absorbed the whole redraw, so paint
-			// its picture instead of a bounded tail of the bytes.
+			// its picture (along with any store-only Kitty uploads completed
+			// during this pause) instead of a bounded tail of the bytes.
 			frame := s.foregroundHistoryFallbackReplayLocked(
 				window,
 				window.screenLocked(),
@@ -12980,13 +13061,18 @@ func (s *muxServer) deliverWithQueryFallback(
 			}
 			failover, secondary := fallbackData(client)
 			queryGate := &attachWriteGate{done: make(chan struct{})}
-			queryCompletion, queued :=
-				client.enqueueWrite(
+			var secondaryGate *attachWriteGate
+			if len(secondary) > 0 {
+				secondaryGate = &attachWriteGate{done: make(chan struct{})}
+			}
+			queryCompletion, queued, secondaryQueued :=
+				client.enqueueMutuallyExclusiveWrites(
 					failover,
-					true,
 					windowID,
 					responseCount,
 					queryGate,
+					secondary,
+					secondaryGate,
 				)
 			if !queued {
 				continue
@@ -12996,17 +13082,8 @@ func (s *muxServer) deliverWithQueryFallback(
 				queryCompletion: queryCompletion,
 				queryGate:       queryGate,
 			}
-			if len(secondary) > 0 {
-				secondaryGate := &attachWriteGate{done: make(chan struct{})}
-				if _, queued := client.enqueueWrite(
-					secondary,
-					false,
-					"",
-					0,
-					secondaryGate,
-				); queued {
-					fallback.secondaryOutputGate = secondaryGate
-				}
+			if secondaryQueued {
+				fallback.secondaryOutputGate = secondaryGate
 			}
 			gated = append(gated, fallback)
 		}
