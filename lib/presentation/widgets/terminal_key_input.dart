@@ -103,6 +103,23 @@ void writeTerminalEnterKey(void Function() write) {
   }
 }
 
+/// Whether [writePromptClick] is writing right now, so an output sink passes
+/// its mouse report on even with mouse tracking off.
+bool get isWritingPromptClick => _writingPromptClick;
+var _writingPromptClick = false;
+
+/// Runs [write], marking its output as the input a click on a shell prompt
+/// sends: the SGR click the prompt asked for with OSC 133 `click_events`, which
+/// the shell reads with mouse tracking off, or the cursor keys for `cl`.
+T writePromptClick<T>(T Function() write) {
+  _writingPromptClick = true;
+  try {
+    return write();
+  } finally {
+    _writingPromptClick = false;
+  }
+}
+
 /// Whether [writeKeyboardSpace] is writing right now, so an output sink can
 /// tell a space the keyboard added on its own from typed text; see
 /// [TerminalEnterPacer].

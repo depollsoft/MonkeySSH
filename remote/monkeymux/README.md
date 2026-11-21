@@ -96,6 +96,18 @@ monkeymux acp stop BRIDGE_ID
 monkeymux acp gc
 ```
 
+Each bridge holds an exclusive lock on `monkeymux-acp-ID.alive` beside its
+socket while it runs, and the OS drops that lock when the process ends. `stop`
+also succeeds for a bridge that already exited, and `gc` clears what it left,
+when its socket refuses connections or is missing and that lock is free. A held
+lock means the bridge still runs (a live bridge with a full accept queue
+refuses connections too), so `stop` retries for about a second and then fails,
+and `gc` keeps the socket. A bridge started before lifetime files existed
+counts as exited when its socket is missing or keeps refusing for that second.
+Sockets are looked up in the current runtime directory, so a bridge started
+under a different `XDG_RUNTIME_DIR` counts as gone, as it does for `attach`,
+`list` and `status`.
+
 `attach` speaks newline-delimited JSON over its stdin/stdout. Its first frame is
 `{"version":1,"type":"hello","bridgeId":"...","lastAck":N}`. Provider output is
 relayed as `output` frames with a monotonically increasing `sequence`; clients
@@ -270,6 +282,18 @@ reattaches, or in a background window — never gets a reply in time and falls
 back to a less capable rendering mode. Queries with no cached reply, and every
 query whose answer depends on live terminal state, are still buffered and
 re-delivered to the terminal on the next attach or window switch.
+
+The server drops an attach client whose socket refuses output for a second,
+and a client behind a stalled SSH channel stops reading. When the server
+advertises `attach-output-delivery`, `monkeymux attach` keeps reading into a
+buffer of up to 16 MiB instead. It sends an `attachToken` in its hello and,
+over a control connection of its own, `attach_delivered` requests that carry
+how many output bytes its terminal has been written. Because the client reads
+ahead, the socket taking a query no longer means the terminal has it, so the
+server keeps that query's replies expected until a report covers it, and only
+then starts their usual grace. Past the grace a reply is routed to the window
+as typed input. Against a server without the capability the client copies
+without reading ahead.
 
 MonkeyMux observes 7-bit and C1 OSC title and working-directory reports for
 metadata only, without stripping or rewriting those bytes from the foreground

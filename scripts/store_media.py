@@ -3,6 +3,7 @@
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -48,6 +49,22 @@ def require_agent_executables() -> dict[str, str]:
             'no placeholder panes will be created.'
         )
     return resolved
+
+
+def require_unlocked_keychain() -> None:
+    # Cursor Agent exits at once on a locked login keychain. A shell started
+    # from an SSH login keeps it locked even after the screen is unlocked.
+    if sys.platform != 'darwin':
+        return
+    result = subprocess.run(
+        ['security', 'show-keychain-info'], capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            'The macOS login keychain is locked, so Cursor Agent cannot start. '
+            'Run `security unlock-keychain ~/Library/Keychains/login.keychain-db` '
+            'in this login session before retrying.'
+        )
 
 
 def require_agent_family(text: str, source: str) -> None:

@@ -150,7 +150,7 @@ void main() {
       ..kittyGraphicsEnabled = true;
     final pngBytes = base64Decode(_pngBase64);
     terminal
-      ..graphicsCommandStart(const {'a': 'T', 'f': '98', 'q': '2'})
+      ..graphicsCommandStart(const {'a': 'T', 'f': '100', 'q': '2'})
       ..graphicsDataChunk(pngBytes);
 
     expect(

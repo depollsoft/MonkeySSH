@@ -27,6 +27,7 @@ void main() {
             .tertiaryDeviceAttributes(),
         terminalCapabilityHintTerminalVersionKey: emitter.terminalVersion(),
         terminalCapabilityHintDeviceStatusKey: emitter.operatingStatus(),
+        terminalCapabilityHintKittyClipboardKey: '\x1b[?5522;2\$y',
       });
     });
 

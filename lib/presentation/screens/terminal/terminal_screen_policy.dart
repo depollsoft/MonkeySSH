@@ -87,6 +87,25 @@ String? formatTerminalConnectionIdentity({
   return '$hostWithPort · $sessionLabel';
 }
 
+/// Formats the terminal title's subtitle: the [connectionIdentity], then the
+/// remote program's [iconName] and [windowTitle].
+///
+/// OSC 0 sets the icon name and the window title to the same text, which
+/// appears once.
+String formatTerminalTitleSubtitle({
+  required String? connectionIdentity,
+  String? iconName,
+  String? windowTitle,
+}) {
+  final segments = <String>[];
+  for (final segment in [connectionIdentity, iconName, windowTitle]) {
+    final text = segment?.trim();
+    if (text == null || text.isEmpty || segments.contains(text)) continue;
+    segments.add(text);
+  }
+  return segments.join(' · ');
+}
+
 /// Resolves the user-visible text for a mux window notification.
 ///
 /// The title is the window the tap lands on (its navigator title, or the
@@ -435,6 +454,27 @@ bool shouldReviewTerminalCommandInsertion({
   return shellStatus != TerminalShellStatus.runningCommand;
 }
 
+/// The text of a bracketed paste of printable text, or null for any other
+/// input. The keyboard can commit the end of a word, such as an autocorrected
+/// or quickly typed one, as a paste, which completion follows like typing.
+String? unwrapBracketedPasteCompletionInput(String output) {
+  const start = '\x1B[200~';
+  const end = '\x1B[201~';
+  if (!output.startsWith(start) ||
+      !output.endsWith(end) ||
+      output.length <= start.length + end.length) {
+    return null;
+  }
+  final text = output.substring(start.length, output.length - end.length);
+  for (var index = 0; index < text.length; index++) {
+    final codeUnit = text.codeUnitAt(index);
+    if (codeUnit < 0x20 || codeUnit == 0x7F) {
+      return null;
+    }
+  }
+  return text;
+}
+
 /// Returns whether terminal input should start a shell completion refresh.
 bool canTerminalOutputTriggerShellCompletion({
   required String output,
@@ -704,8 +744,10 @@ TmuxBarPlacement resolveTmuxBarPlacement(double availableWidth) {
       : TmuxBarPlacement.bottomOverlay;
 }
 
-/// A control the connection screen puts in the system vertical bar, listed
-/// in the order the bar keeps them when it runs short of room.
+/// A control the connection screen stands as a key outside its title bar,
+/// in the system vertical bar or, propped up, in the row below the fold.
+/// Listed in the order the keys are kept when they run short of room. The
+/// menu takes the controls left out, so it stays while any key fits.
 enum TerminalVerticalBarControl {
   /// Shows or hides the system keyboard. It sits just above the keyboard.
   keyboard,
@@ -717,9 +759,6 @@ enum TerminalVerticalBarControl {
   /// Leaves the screen; the edge swipe does too.
   back,
 
-  /// Shows the connection's state, and its host on tap.
-  status,
-
   /// Shows or hides the extra keys toolbar.
   extraKeys,
 
@@ -730,17 +769,30 @@ enum TerminalVerticalBarControl {
   muxWindows,
 }
 
-/// Chooses the [available] controls the vertical bar has room for.
+/// Chooses the [available] controls the vertical bar, or the propped row,
+/// has room for.
 ///
 /// The bar holds [capacity] controls, fewer while the keyboard covers its
 /// lower part or a Live Activity lengthens the status cluster above them.
+/// When some are left out the menu stays, even with room for one key, since
+/// it takes the rest.
 Set<TerminalVerticalBarControl> resolveTerminalVerticalBarControls({
   required Set<TerminalVerticalBarControl> available,
   required int capacity,
-}) => TerminalVerticalBarControl.values
-    .where(available.contains)
-    .take(capacity)
-    .toSet();
+}) {
+  final ordered = TerminalVerticalBarControl.values.where(available.contains);
+  if (capacity < 1) return const {};
+  if (ordered.length <= capacity ||
+      !available.contains(TerminalVerticalBarControl.menu)) {
+    return ordered.take(capacity).toSet();
+  }
+  return {
+    TerminalVerticalBarControl.menu,
+    ...ordered
+        .where((control) => control != TerminalVerticalBarControl.menu)
+        .take(capacity - 1),
+  };
+}
 
 /// How the connection screen splits across a fold, such as iPhone Duo's.
 enum TerminalFoldLayout {
@@ -752,8 +804,9 @@ enum TerminalFoldLayout {
   book,
 
   /// Propped up like a laptop: the terminal fills the top page to read at a
-  /// distance; the bottom page, where the hands rest, holds the keyboard
-  /// toolbar above the window navigator or, without one, a keyboard deck.
+  /// distance; the bottom page, where the hands rest, holds the screen's
+  /// controls, then the window navigator or, without one, a keyboard deck,
+  /// and the keyboard toolbar.
   propped,
 }
 
@@ -863,6 +916,32 @@ bool? resolveTmuxBarActiveWindowBracketedPasteMode(
   Iterable<TmuxWindow>? windows,
 ) => _activeTmuxWindowOrNull(windows)?.terminalBracketedPasteMode;
 
+/// Resolves whether the active mux window's program set kitty paste events
+/// (DEC private mode 5522). Null when the server does not report it.
+bool? resolveTmuxBarActiveWindowKittyPasteEventsMode(
+  Iterable<TmuxWindow>? windows,
+) => _activeTmuxWindowOrNull(windows)?.terminalKittyPasteEventsMode;
+
+/// Whether a clipboard paste should become a kitty paste event (mode 5522)
+/// rather than typed text.
+///
+/// A plain shell reads the mode from the terminal, which sees the program's
+/// own `CSI ? 5522 h`. A MonkeyMux window trusts only the server's snapshot of
+/// that window, so a paste right after a window switch never sends an event
+/// to a program that did not ask for one. tmux does not carry the protocol.
+bool shouldSendTerminalKittyPasteEvent({
+  required bool isMuxActive,
+  required RemoteMuxBackend muxBackend,
+  required bool terminalKittyPasteEventsMode,
+  required bool? activeWindowKittyPasteEventsMode,
+}) {
+  if (!isMuxActive) {
+    return terminalKittyPasteEventsMode;
+  }
+  return muxBackend == RemoteMuxBackend.monkeyMux &&
+      activeWindowKittyPasteEventsMode == true;
+}
+
 /// Resolves a stable identity for the active mux window.
 String? resolveTmuxBarActiveWindowKey(Iterable<TmuxWindow>? windows) =>
     _activeTmuxWindowOrNull(windows)?.stableKey;
@@ -897,6 +976,7 @@ Future<
     bool bracketedPasteMode,
     bool bracketedPasteModeKnown,
     String? activeWindowKey,
+    bool? kittyPasteEventsMode,
   })
 >
 refreshTerminalBracketedPasteModeFromMuxWindows({
@@ -914,6 +994,9 @@ refreshTerminalBracketedPasteModeFromMuxWindows({
     bracketedPasteMode: terminal.bracketedPasteMode,
     bracketedPasteModeKnown: activeWindowBracketedPasteMode != null,
     activeWindowKey: resolveTmuxBarActiveWindowKey(windows),
+    kittyPasteEventsMode: resolveTmuxBarActiveWindowKittyPasteEventsMode(
+      windows,
+    ),
   );
 }
 
@@ -1130,6 +1213,10 @@ int? resolveTmuxBarPendingSelectedWindowIndex(
 }
 
 /// Resolves the compact label shown in the tmux bar handle.
+///
+/// The active window's title leads, since it tells windows apart; the
+/// session name is the same for every window, so it trails and is what an
+/// ellipsis cuts first.
 String resolveTmuxBarHandleLabel(
   String tmuxSessionName, {
   String? activeWindowTitle,
@@ -1142,7 +1229,7 @@ String resolveTmuxBarHandleLabel(
   if (sessionName.isEmpty) {
     return title;
   }
-  return '$sessionName · $title';
+  return '$title · $sessionName';
 }
 
 final _oscEscapeSequencePattern = RegExp(
@@ -2632,23 +2719,78 @@ bool isTerminalFileUri(Uri uri) =>
 bool isResolvableTerminalLinkUri(Uri uri) =>
     isLaunchableTerminalUri(uri) || isTerminalFileUri(uri);
 
-/// Resolves the remote path a terminal `file:` link should open in the SFTP
-/// browser, or `null` when [link] is not a usable `file:` URI.
+final _terminalBareFileLocationPattern = RegExp(
+  r'^(?:\./)?([^/\\:?#]*\.[^/\\:?#]+):\d+(?::\d+)?([?#].*)?$',
+);
+
+final _terminalHyperlinkLocationSuffixPattern = RegExp(r':\d+(?::\d+)?$');
+
+final _terminalHyperlinkWindowsDrivePattern = RegExp(
+  r'^[A-Za-z]:(?:[\\/]|%5[cC]|%2[fF])',
+);
+
+/// Resolves an explicit terminal hyperlink to a path on the connected host.
 ///
-/// The URI host (if any) is ignored: the path is opened on the host the
-/// terminal session is connected to. Percent-encoding is decoded so the SFTP
-/// browser receives the literal path (e.g. `%20` becomes a space); escapes that
-/// are not valid UTF-8 make the link unusable rather than throwing.
-String? resolveTerminalFileUriPath(String link) {
-  final uri = Uri.tryParse(normalizeTerminalLinkCandidate(link));
-  if (uri == null || !isTerminalFileUri(uri)) {
+/// OSC 8 destinations may be relative paths with source-line anchors rather
+/// than URLs. Decode the path once and omit URI queries, fragments and trailing
+/// `:line[:column]` locations before SFTP verification. Bare names are prefixed
+/// with `./` so they can use the same verification as other relative paths.
+/// External schemes and network-path references are not remote file links.
+String? resolveTerminalFileLinkPath(String link) {
+  var candidate = link.trim();
+  if (candidate.toLowerCase().startsWith('www.') ||
+      candidate == '.' ||
+      candidate == '..') {
     return null;
   }
+  // A bare filename with a location otherwise looks like a URI scheme. Limit
+  // this exception to filenames with extensions so tel:1234 and custom:12
+  // still take the external/unsupported-scheme path.
+  final bareLocation = _terminalBareFileLocationPattern.firstMatch(candidate);
+  if (bareLocation != null) {
+    candidate = './${bareLocation[1]}${bareLocation[2] ?? ''}';
+  }
+  final uri = Uri.tryParse(candidate);
+  if (uri == null || uri.hasAuthority && !isTerminalFileUri(uri)) {
+    return null;
+  }
+
+  final String encodedPath;
+  if (isTerminalFileUri(uri)) {
+    // The URI authority is ignored: files open on the connected host.
+    encodedPath = uri.path;
+  } else if (_terminalHyperlinkWindowsDrivePattern.hasMatch(candidate) &&
+      uri.hasScheme) {
+    // Dart parses the drive letter as a URI scheme.
+    encodedPath = '${candidate.substring(0, 2)}${uri.path}';
+  } else if (!uri.hasScheme) {
+    encodedPath = uri.path;
+  } else {
+    return null;
+  }
+
+  var path = '';
   try {
-    return Uri.decodeComponent(uri.path);
+    // Strip source locations before decoding so an encoded colon remains part
+    // of the filename. Explicit destinations also keep trailing punctuation.
+    path = Uri.decodeComponent(
+      encodedPath.replaceFirst(_terminalHyperlinkLocationSuffixPattern, ''),
+    );
   } on FormatException {
     return null;
   }
+  if (_optionalSlashWindowsDrivePrefixPattern.hasMatch(path)) {
+    path = path.replaceAll(r'\', '/');
+  }
+  if (path.isEmpty ||
+      path == '.' ||
+      path == '..' ||
+      path == './' ||
+      path == '../' ||
+      path.replaceAll(r'\', '/').startsWith('//')) {
+    return null;
+  }
+  return isSupportedTerminalFilePath(path) ? path : './$path';
 }
 
 /// Applies pasted or rendered text at the terminal cursor within a wrapped line.

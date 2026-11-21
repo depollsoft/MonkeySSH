@@ -41,7 +41,8 @@ class Charset {
   }
 
   void restore() {
-    _charsetMap = _savedCharsetMap;
+    // A copy, or designations after DECRC would rewrite the saved ones.
+    _charsetMap = Map.from(_savedCharsetMap);
     _currentIndex = _savedIndex;
     _updateCache();
   }

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,11 @@ import 'terminal_view_test.mocks.dart';
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  goldenFileComparator = _AntialiasTolerantComparator(
+    (goldenFileComparator as LocalFileComparator)
+        .basedir
+        .resolve('terminal_view_test.dart'),
+  );
 
   testWidgets(
     'htop golden test',
@@ -484,4 +490,51 @@ void main() {
       expect(terminalOutput.join(), isEmpty);
     });
   });
+}
+
+/// Accepts a golden that differs only in antialiasing: every pixel within
+/// [_tolerance] levels per channel. macOS releases rasterize glyph edges a
+/// little differently, so an exact match passes only on the Mac that recorded
+/// the golden. The tolerance stays below the 10-level step of the 256-color
+/// gray ramp, so a wrong palette entry still fails.
+class _AntialiasTolerantComparator extends LocalFileComparator {
+  _AntialiasTolerantComparator(super.testFile);
+
+  static const _tolerance = 8;
+
+  @override
+  Future<bool> compare(Uint8List imageBytes, Uri golden) async {
+    final actual = await _decodeRgba(imageBytes);
+    final expected = await _decodeRgba(await getGoldenBytes(golden));
+    if (actual.width == expected.width &&
+        actual.height == expected.height &&
+        _withinTolerance(actual.pixels, expected.pixels)) {
+      return true;
+    }
+    // Throws with the usual failure images.
+    return super.compare(imageBytes, golden);
+  }
+
+  static bool _withinTolerance(Uint8List a, Uint8List b) {
+    for (var i = 0; i < a.length; i++) {
+      if ((a[i] - b[i]).abs() > _tolerance) return false;
+    }
+    return true;
+  }
+
+  static Future<({int width, int height, Uint8List pixels})> _decodeRgba(
+    List<int> png,
+  ) async {
+    final codec = await ui.instantiateImageCodec(Uint8List.fromList(png));
+    final image = (await codec.getNextFrame()).image;
+    codec.dispose();
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    final result = (
+      width: image.width,
+      height: image.height,
+      pixels: data!.buffer.asUint8List(),
+    );
+    image.dispose();
+    return result;
+  }
 }

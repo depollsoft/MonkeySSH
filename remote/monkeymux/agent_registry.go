@@ -129,7 +129,17 @@ var agentRegistry = map[string]agentDescriptor{
 		fileBacked:        true,
 		wrappedLaunch:     true,
 		hookIdentity: func(hook agentHookPayload, _ *agentIdentity) bool {
-			return hook.Event == "SessionStart" && (hook.Source == "startup" || hook.Source == "resume")
+			// /clear and /fork (Codex 0.155+) start a new thread in the same
+			// pane. compact keeps the thread, so it carries nothing new.
+			// Subagents report SubagentStart, not SessionStart.
+			if hook.Event != "SessionStart" {
+				return false
+			}
+			switch hook.Source {
+			case "startup", "resume", "clear", "fork":
+				return true
+			}
+			return false
 		},
 		hookNotifyArgument: true,
 		acpProviderIDs:     []string{"codex-acp"},
@@ -167,6 +177,13 @@ var agentRegistry = map[string]agentDescriptor{
 				}
 				return speed
 			},
+			// agy 1.3+ moves at most a third of its conversation viewport per
+			// report (ConversationModel.scrollWheel, still in 1.4.12). The
+			// viewport is the pane minus agy's input box and status line, four
+			// rows when idle.
+			rowCap: func(paneRows int) int {
+				return max((paneRows-4)/3, 1)
+			},
 		},
 	},
 	"cursor-agent": {
@@ -201,6 +218,23 @@ var agentRegistry = map[string]agentDescriptor{
 	},
 	"hermes": {
 		commandNames: []string{"hermes", "hermes-agent"},
+		// The Ink TUI ramps its wheel speed; see hermes_wheel.go. Its
+		// classic CLI does not track the mouse, so it is never governed.
+		// A few overlays, such as /agents, step once per report without
+		// the ramp. Hermes gives no sign of which view has the wheel, so
+		// there a fast drag moves fewer items than it asked for and a
+		// reversal moves two; the transcript is what a drag scrolls.
+		wheelProfile: &wheelAccelerationProfile{
+			// Hermes keeps ramping while reports are at most 40 whole
+			// milliseconds apart. A gap on that edge then reads as
+			// continuing the ramp, which can only under-scroll.
+			window:           41 * time.Millisecond,
+			processSpeed:     hermesWheelSpeedForProcessGroup,
+			deferredReversal: true,
+			// Hermes stays in precision mode while reports are under 80
+			// whole milliseconds apart (ui-tui/src/lib/precisionWheel.ts).
+			precisionSticky: 80 * time.Millisecond,
+		},
 	},
 	"openclaw": {
 		commandNames: []string{"openclaw"},

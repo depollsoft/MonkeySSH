@@ -58,7 +58,10 @@ class AgentRuntimeDefinition {
     this.homebrewFormula,
     this.posixInstallerUrl,
     this.windowsInstallerUrl,
+    this.installerEnvironment = const {},
+    this.installerPicksBinFromPath = false,
     this.selfUpdateArguments = const [],
+    this.backgroundUpdateExitCode,
     this.sharesCliInstallation = false,
     this.versionEnvironment = const {},
     this.updateEnvironment = const {},
@@ -68,6 +71,8 @@ class AgentRuntimeDefinition {
     this.officialVersionLookup,
     this.latestVersionUrlPlatformSuffix = false,
     this.legacyInstallation,
+    this.installerLayout,
+    this.retiredRegistry,
   });
 
   /// Stable runtime identifier.
@@ -113,8 +118,23 @@ class AgentRuntimeDefinition {
   /// Official PowerShell bootstrap script for native Windows hosts.
   final String? windowsInstallerUrl;
 
+  /// Environment applied to the official installer (for example to skip
+  /// interactive onboarding, which an SSH exec channel cannot answer).
+  final Map<String, String> installerEnvironment;
+
+  /// Whether the POSIX installer links its command into the first suitable
+  /// directory on PATH. It then runs with the user's own login PATH, without
+  /// the directories the app adds for its probes, so it picks one the user's
+  /// shell searches too.
+  final bool installerPicksBinFromPath;
+
   /// Arguments for the CLI's own non-interactive updater.
   final List<String> selfUpdateArguments;
+
+  /// Exit status with which the updater reports that it accepted the update
+  /// and is finishing it in the background. That is not a failure, and the
+  /// update must not be retried.
+  final int? backgroundUpdateExitCode;
 
   /// Whether this runtime has a built-in updater.
   bool get supportsSelfUpdate => selfUpdateArguments.isNotEmpty;
@@ -154,6 +174,22 @@ class AgentRuntimeDefinition {
   /// Installed versions below [belowVersion] cannot be updated in place; the
   /// user is shown [message] instead.
   final ({String belowVersion, String message})? legacyInstallation;
+
+  /// Layout of an installation the agent's own installer manages: the
+  /// executable resolves, through any symlinks, to `<root>/bin/<name>` and
+  /// `<root>/<marker>` exists. Such an installation is reported as [source]
+  /// rather than as a package-manager installation.
+  final ({String marker, String source})? installerLayout;
+
+  /// Set when [registry] stopped receiving this agent's releases at
+  /// `lastVersion`. A copy installed from it cannot update in place; the user
+  /// is told to uninstall it and install again with the official installer.
+  /// A copy whose version output has an `Install method: <installMethod>`
+  /// line came from the registry (through pipx or plain pip); another method
+  /// came from elsewhere, whatever the registry still lists. Without that
+  /// line, a registry listing counts only for a copy no newer than
+  /// `lastVersion`.
+  final ({String lastVersion, String installMethod})? retiredRegistry;
 
   /// Whether the launcher performs its own updates (see
   /// [syncUpdateEnvironment]).
@@ -221,6 +257,7 @@ class AgentRuntimeActionResult {
     required this.succeeded,
     required this.output,
     this.exitCode,
+    this.finishingInBackground = false,
   });
 
   /// Whether the remote command exited successfully.
@@ -231,4 +268,9 @@ class AgentRuntimeActionResult {
 
   /// Remote process exit code, when reported.
   final int? exitCode;
+
+  /// Whether the updater accepted the update and is still finishing it in
+  /// the background (see [AgentRuntimeDefinition.backgroundUpdateExitCode]).
+  /// A probe meanwhile can catch the installation half replaced.
+  final bool finishingInBackground;
 }

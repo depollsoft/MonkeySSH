@@ -204,7 +204,7 @@ class TerminalPainter {
       color = color.withValues(alpha: 0.5);
     }
 
-    final cacheKey = cellData.getHash() ^ _textScaler.hashCode;
+    final cacheKey = (cellData.paintKey, _textScaler);
     var paragraph = _paragraphCache.getLayoutFromCache(cacheKey);
 
     if (paragraph == null) {
@@ -230,14 +230,20 @@ class TerminalPainter {
       // in the terminal. As a workaround the regular space CodePoint 0x20 is
       // replaced with the CodePoint 0xA0, a non breaking space below which a
       // line can be drawn.
-      var char = String.fromCharCode(charCode);
-      if ((overline || strikethrough) && charCode == 0x20) {
-        char = String.fromCharCode(0xA0);
-      }
+      final base =
+          (overline || strikethrough) && charCode == 0x20 ? 0xA0 : charCode;
+      // A grapheme cluster is shaped as one run, so its marks, ZWJ sequence
+      // or variation selector make one glyph.
+      final extras = cellData.graphemeExtras;
+      final char = extras.isEmpty
+          ? String.fromCharCode(base)
+          : String.fromCharCodes([base, ...extras]);
 
       paragraph = _paragraphCache.performAndCacheLayout(
         char,
-        style,
+        requestsEmojiPresentation(extras)
+            ? withEmojiPresentation(style)
+            : style,
         _textScaler,
         cacheKey,
       );

@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
@@ -15,8 +16,115 @@ class _ParagraphCanvas extends Fake implements Canvas {
   }
 }
 
+/// Two different cells whose [CellData.getHash] is the same: it keeps 29 bits
+/// and its seed changes from run to run, so among this many cells with mixed
+/// colours two collide in every run.
+(CellData, CellData) _collidingCells() {
+  final random = math.Random(1);
+  final seen = <int, CellData>{};
+  for (var i = 0; i < 400000; i++) {
+    final cell = CellData(
+      foreground: CellColor.rgb | random.nextInt(1 << 24),
+      background: CellColor.rgb | random.nextInt(1 << 24),
+      flags: 0,
+      content:
+          (0x4E00 + random.nextInt(0x5200)) | (2 << CellContent.widthShift),
+    );
+    final other = seen.putIfAbsent(cell.getHash(), () => cell);
+    if (!identical(other, cell)) {
+      return (other, cell);
+    }
+  }
+  throw StateError('no collision');
+}
+
 void registerMonkeyTerminalPainterLifetimeTests() {
   group('monkey_terminal_painter_lifetime', () {
+    test('cells whose hashes collide get their own paragraphs', () {
+      // A cache keyed by the hash drew one cell with the other's glyph and
+      // colours, a different pair each run.
+      final (first, second) = _collidingCells();
+      final painter = MonkeyTerminalPainter(
+        theme: TerminalThemes.defaultTheme,
+        textStyle: const TerminalStyle(fontSize: 17),
+        textScaler: TextScaler.noScaling,
+      );
+      addTearDown(painter.dispose);
+      final canvas = _ParagraphCanvas();
+      painter
+        ..paintCellForeground(canvas, Offset.zero, first)
+        ..paintCellForeground(canvas, Offset.zero, second)
+        ..paintCellInlineUnderline(canvas, Offset.zero, first)
+        ..paintCellInlineUnderline(canvas, Offset.zero, second);
+      final drawn = canvas.paragraphs;
+      expect(drawn, hasLength(4));
+      expect(identical(drawn[0], drawn[1]), isFalse);
+      expect(identical(drawn[2], drawn[3]), isFalse);
+    });
+
+    test('grapheme clusters are drawn whole, outside style runs', () {
+      final painter = MonkeyTerminalPainter(
+        theme: TerminalThemes.defaultTheme,
+        textStyle: const TerminalStyle(fontSize: 17),
+        textScaler: TextScaler.noScaling,
+      );
+      addTearDown(painter.dispose);
+      BufferLine lineOf(String text) {
+        final terminal = Terminal()
+          ..resize(8, 1)
+          ..write(text);
+        return terminal.buffer.lines[0];
+      }
+
+      void paint(BufferLine line) {
+        final recorder = ui.PictureRecorder();
+        painter.paintLineForegrounds(Canvas(recorder), Offset.zero, line);
+        recorder.endRecording().dispose();
+      }
+
+      // A run would shape the base alone and lose the mark.
+      paint(lineOf('e\u0301'));
+      expect(painter.runParagraphCacheLength, 0);
+      paint(lineOf('e'));
+      expect(painter.runParagraphCacheLength, 1);
+
+      // Lines that differ only after a cluster's base need their own picture.
+      final before = painter.foregroundPictureCacheLength;
+      paint(lineOf('e\u0301\u0302'));
+      paint(lineOf('e\u0301\u0300'));
+      expect(painter.foregroundPictureCacheLength, before + 2);
+    });
+
+    test('a space with a mark joined to it is drawn', () async {
+      final painter = MonkeyTerminalPainter(
+        theme: TerminalThemes.defaultTheme,
+        textStyle: const TerminalStyle(fontSize: 17),
+        textScaler: TextScaler.noScaling,
+      );
+      addTearDown(painter.dispose);
+      final terminal = Terminal()
+        ..resize(4, 1)
+        ..write(' \u0301');
+      final line = terminal.buffer.lines[0];
+      final cell = CellData.empty();
+      line.getCellData(0, cell);
+      final canvas = _ParagraphCanvas();
+      painter.paintCellForeground(canvas, Offset.zero, cell);
+      expect(canvas.paragraphs, hasLength(1));
+
+      final recorder = ui.PictureRecorder();
+      painter.paintLineForegrounds(Canvas(recorder), Offset.zero, line);
+      final picture = recorder.endRecording();
+      addTearDown(picture.dispose);
+      final image = await picture.toImage(
+        (painter.cellSize.width * 4).ceil(),
+        painter.cellSize.height.ceil(),
+      );
+      addTearDown(image.dispose);
+      final bytes = (await image.toByteData())!.buffer.asUint8List();
+      expect(bytes.any((byte) => byte != 0), isTrue);
+    });
+
     test('painter disposal clears glyph, underline, and style-run caches', () {
       final painter = MonkeyTerminalPainter(
         theme: TerminalThemes.defaultTheme,

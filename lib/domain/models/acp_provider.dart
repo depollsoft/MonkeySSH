@@ -337,6 +337,7 @@ class AcpBuiltinProvider implements AcpProvider {
     this.launchProfileSupport,
     this.windowsLaunchPreamble,
     this.supportCheck,
+    this.defaultLaunchEnvironment = const <String, String>{},
   });
 
   /// Stable identifier for this provider.
@@ -384,6 +385,13 @@ class AcpBuiltinProvider implements AcpProvider {
   /// includes its ACP server.
   final AcpSupportCheck? supportCheck;
 
+  /// Environment variables every launch of this provider sets when the host
+  /// has not already set them, on POSIX and Windows alike.
+  ///
+  /// They apply to the installed adapter and to [adapterFallbackCommand],
+  /// after the user's profile is sourced, so a value the user exported wins.
+  final Map<String, String> defaultLaunchEnvironment;
+
   @override
   bool get isCustom => false;
 
@@ -401,7 +409,11 @@ class AcpBuiltinProvider implements AcpProvider {
           adapterFallbackCommand == other.adapterFallbackCommand &&
           launchProfileSupport == other.launchProfileSupport &&
           windowsLaunchPreamble == other.windowsLaunchPreamble &&
-          supportCheck == other.supportCheck;
+          supportCheck == other.supportCheck &&
+          _mapEquality.equals(
+            defaultLaunchEnvironment,
+            other.defaultLaunchEnvironment,
+          );
 
   @override
   int get hashCode => Object.hash(
@@ -416,6 +428,7 @@ class AcpBuiltinProvider implements AcpProvider {
     launchProfileSupport,
     windowsLaunchPreamble,
     supportCheck,
+    _mapEquality.hash(defaultLaunchEnvironment),
   );
 
   @override
@@ -536,7 +549,7 @@ final acpClaudeAgentProvider = AcpBuiltinProvider(
   ),
   adapterFallbackCommand: AcpLaunchCommand(
     executable: 'npx',
-    arguments: const ['--yes', '@agentclientprotocol/claude-agent-acp@0.70.0'],
+    arguments: const ['--yes', '@agentclientprotocol/claude-agent-acp@0.100.0'],
   ),
 );
 
@@ -552,8 +565,12 @@ final acpCodexProvider = AcpBuiltinProvider(
   ),
   adapterFallbackCommand: AcpLaunchCommand(
     executable: 'npx',
-    arguments: const ['--yes', '@agentclientprotocol/codex-acp@1.4.0'],
+    arguments: const ['--yes', '@agentclientprotocol/codex-acp@2.5.0'],
   ),
+  // codex-acp's "ChatGPT" method opens a browser on the remote host, which a
+  // phone over SSH can never finish. NO_BROWSER drops it; the device-code
+  // and API-key methods stay.
+  defaultLaunchEnvironment: const {'NO_BROWSER': '1'},
 );
 
 /// Built-in OpenCode ACP provider.
@@ -709,7 +726,7 @@ final acpMuseCodeProvider = AcpBuiltinProvider(
   ),
   adapterFallbackCommand: AcpLaunchCommand(
     executable: 'npx',
-    arguments: const ['--yes', '@bex-co/muse-code-acp@0.6.0'],
+    arguments: const ['--yes', '@bex-co/muse-code-acp@0.11.0'],
   ),
   windowsLaunchPreamble: _museWindowsExecutablePreamble,
 );
@@ -752,7 +769,7 @@ final acpPiProvider = AcpBuiltinProvider(
   ),
   adapterFallbackCommand: AcpLaunchCommand(
     executable: 'npx',
-    arguments: const ['--yes', 'pi-acp@0.0.33'],
+    arguments: const ['--yes', 'pi-acp@0.0.34'],
   ),
 );
 

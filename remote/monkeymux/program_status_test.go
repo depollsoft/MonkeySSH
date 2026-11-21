@@ -443,8 +443,8 @@ func TestProgramStatusReporterFollowsTheProgram(t *testing.T) {
 		t.Fatal("RIS then a query in one read left no reporter")
 	}
 	broadcast("\x1bc")
-	if reporter := reporterAfter("\x9d7501;?\x9c"); reporter != nil {
-		t.Fatalf("reporter after a C1 query MonkeyMux leaves unanswered = %#v, want none", reporter)
+	if reporter := reporterAfter("\x9d7501;?\x9c"); reporter == nil {
+		t.Fatal("a C1 query MonkeyMux answers left no reporter")
 	}
 }
 
@@ -618,8 +618,8 @@ func TestProgramStatusQueryIsAnsweredByMonkeyMux(t *testing.T) {
 }
 
 // MonkeyMux answers exactly the queries it strips: one split across reads is
-// answered once, and a C1-introduced one it leaves in the stream is left for
-// the attached terminal to answer.
+// answered once, in either OSC form; the attached terminal decodes UTF-8 and
+// could not answer a C1 one.
 func TestProgramStatusQueryIsAnsweredOnlyWhenStripped(t *testing.T) {
 	server := newMuxServer("program-status-query-split")
 	pty := &recordingPty{}
@@ -637,15 +637,15 @@ func TestProgramStatusQueryIsAnsweredOnlyWhenStripped(t *testing.T) {
 	}
 
 	pty.Reset()
-	c1Query := "\x9d7501;?\x9c"
-	server.handleWindowOutput("@1", []byte(c1Query))
+	server.handleWindowOutput("@1", []byte("a\x9d7501"))
+	server.handleWindowOutput("@1", []byte(";?\x9cb"))
 	waitForWindowReplies(t, window)
 	waitForTestAttachWrites(t, server)
-	if got := pty.String(); got != "" {
-		t.Fatalf("pty got %q, want no reply to a query left in the stream", got)
+	if got := pty.String(); got != string(programStatusQueryReply) {
+		t.Fatalf("pty got %q, want one reply to the split C1 query", got)
 	}
-	if got := attach.String(); !strings.Contains(got, c1Query) || strings.Contains(got, "\x1b]7501") {
-		t.Fatalf("attach output = %q, want only the C1 query forwarded", got)
+	if got := attach.String(); strings.Contains(got, "7501") || !strings.Contains(got, "ab") {
+		t.Fatalf("attach output = %q, want the C1 query stripped", got)
 	}
 }
 

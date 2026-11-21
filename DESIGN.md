@@ -245,7 +245,9 @@ quotes the machine; Inter explains.
   titles, dialog titles, list group headers.
 - **Body** (Inter 400, 16px, line-height ~1.5): Primary reading text in
   Terminal White. Secondary body is 14px in Muted Steel. Cap measure at 65–75ch
-  on wide screens.
+  on wide screens. Agent chat transcripts cap at about 100ch instead: they mix
+  prose with code, diffs and tool output, and a tablet's chat should fill most
+  of its width.
 - **Label** (Inter 600, 14px): Buttons, tabs, chips, emphasis. Weight carries
   emphasis — not size, not color.
 - **Mono** (JetBrains Mono 400, 13px, line-height ~1.4): Terminal output, code,
@@ -331,10 +333,15 @@ dark surfaces, use a tonal step or a Hairline border instead.
   below the contrast floor.
 
 ### Navigation
-- **Bottom Navigation:** Slate Surface background, Signal Teal active
-  icon/label + a teal-tinted indicator pill, Muted Steel for inactive. Labels
-  Inter 12px (600 active / 500 inactive). On wide screens, the remote-window
-  switcher promotes to a side sidebar.
+- **Bottom Navigation:** Slate Surface background, Signal Teal active icon on
+  a teal-tinted indicator pill, active label in Terminal White, Muted Steel for
+  inactive. Labels Inter 12px (600 active / 500 inactive). Every foreground is
+  lifted to WCAG AA against what is behind it, which some terminal-derived
+  themes need. On wide screens, the remote-window switcher promotes to a side
+  sidebar.
+- **Vertical bar (iPhone Duo):** where iOS 27.1 runs its vertical bar, the
+  same destinations sit in one Raised Slate capsule with a hairline border, and
+  screen actions become 44px round keys beside the status cluster.
 - **App Bar:** Background matches the scaffold (Void), flat (elevation 0, no
   scrolled-under tint), left-aligned title in **display mono** (JetBrains Mono
   600, ~20px).

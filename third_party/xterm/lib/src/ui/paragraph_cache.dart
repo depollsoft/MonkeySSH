@@ -19,11 +19,15 @@ class ParagraphCache {
   final int _maximumSize;
   // Insertion order is LRU to MRU. Removing/reinserting on a hit promotes it,
   // and keys.first finds the eviction candidate without scanning the cache.
-  final _cache = <int, Paragraph>{};
+  final _cache = <Object, Paragraph>{};
 
   /// Returns a [Paragraph] for the given [key]. [key] is the same as the
   /// key argument to [performAndCacheLayout].
-  Paragraph? getLayoutFromCache(int key) {
+  ///
+  /// Keys are compared by equality, so a key must hold everything the layout
+  /// depends on, such as a record of the cell's fields, never a hash of them:
+  /// two cells whose hashes collide would share a glyph.
+  Paragraph? getLayoutFromCache(Object key) {
     final paragraph = _cache.remove(key);
     if (paragraph != null) {
       _cache[key] = paragraph;
@@ -38,7 +42,7 @@ class ParagraphCache {
     String text,
     TextStyle style,
     TextScaler textScaler,
-    int key,
+    Object key,
   ) {
     final builder = ParagraphBuilder(style.getParagraphStyle());
     builder.pushStyle(style.getTextStyle(textScaler: textScaler));

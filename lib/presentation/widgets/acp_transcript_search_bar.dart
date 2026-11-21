@@ -19,10 +19,18 @@ import 'acp_chat_typography.dart';
 /// starts at the newest one.
 class AcpTranscriptSearchBar extends StatefulWidget {
   /// Creates a search bar bound to [controller].
-  const AcpTranscriptSearchBar({required this.controller, super.key});
+  const AcpTranscriptSearchBar({
+    required this.controller,
+    this.gutter = 0,
+    super.key,
+  });
 
   /// The search state to display and drive.
   final AcpTranscriptSearchController controller;
+
+  /// Extra side padding that lines the bar's contents up with a wide chat's
+  /// centred reading column while the bar itself spans the pane.
+  final double gutter;
 
   @override
   State<AcpTranscriptSearchBar> createState() => _AcpTranscriptSearchBarState();
@@ -156,10 +164,10 @@ class _AcpTranscriptSearchBarState extends State<AcpTranscriptSearchBar> {
               border: Border(top: BorderSide(color: scheme.outlineVariant)),
             ),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                FluttyTheme.spacingSm,
+              padding: EdgeInsets.fromLTRB(
+                FluttyTheme.spacingSm + widget.gutter,
                 FluttyTheme.spacingXs,
-                FluttyTheme.spacingXs,
+                FluttyTheme.spacingXs + widget.gutter,
                 FluttyTheme.spacingXs,
               ),
               child: Column(

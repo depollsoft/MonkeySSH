@@ -47,6 +47,7 @@ Widget _banner(
   ThemeData? theme,
   DateTime Function()? clock,
   String localDeviceLabel = 'Mac',
+  double gutter = 0,
 }) => MaterialApp(
   theme: theme ?? FluttyTheme.light,
   home: Scaffold(
@@ -56,6 +57,7 @@ Widget _banner(
       failed: failed,
       clock: clock ?? () => _now,
       localDeviceLabel: localDeviceLabel,
+      gutter: gutter,
       onTakeOver: onTakeOver ?? () {},
     ),
   ),
@@ -142,6 +144,26 @@ void main() {
       matchesSemantics(label: 'Active 3 min ago'),
     );
     handle.dispose();
+  });
+
+  testWidgets('lines its contents up with a centred reading column', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_banner(_writer()));
+    final flush = tester.getRect(find.text('controlled by iPad'));
+    final takeOver = tester.getRect(
+      find.widgetWithText(FilledButton, 'Take over'),
+    );
+    await tester.pumpWidget(_banner(_writer(), gutter: 40));
+
+    expect(
+      tester.getRect(find.text('controlled by iPad')).left,
+      flush.left + 40,
+    );
+    expect(
+      tester.getRect(find.widgetWithText(FilledButton, 'Take over')).right,
+      takeOver.right - 40,
+    );
   });
 
   testWidgets('the live region stays put as the activity time moves on', (

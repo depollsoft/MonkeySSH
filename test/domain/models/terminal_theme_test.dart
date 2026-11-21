@@ -546,4 +546,27 @@ void main() {
       }
     });
   });
+
+  group('legibleColor', () {
+    test('keeps a colour that already reaches the contrast', () {
+      expect(
+        legibleColor(Colors.black, background: Colors.white),
+        Colors.black,
+      );
+    });
+
+    test('measures a translucent colour as it shows over the background', () {
+      const background = Color(0xFFE0E0E0);
+      // Solid black would pass, but black54 shows as a mid grey here.
+      expect(
+        contrastRatio(Color.alphaBlend(Colors.black54, background), background),
+        lessThan(4.5),
+      );
+      final color = legibleColor(Colors.black54, background: background);
+      expect(
+        contrastRatio(Color.alphaBlend(color, background), background),
+        greaterThanOrEqualTo(4.5),
+      );
+    });
+  });
 }

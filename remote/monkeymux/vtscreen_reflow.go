@@ -1,87 +1,153 @@
 package main
 
 // vtLine is a main-screen line while it is reflowed: its cells, whether it
-// continues the line above it, and the cursor when it is on this line.
+// continues the line above it, and the anchors on it.
 type vtLine struct {
 	cells   []vtCell
 	wrapped bool
-	cursor  vtReflowCursor
+	anchors []vtReflowAnchor
+	// prompt is the line's semantic prompt row mark.
+	prompt uint8
 }
 
-// vtReflowCursor is the cursor's cell on a line being reflowed, carried along
-// like the client's CellAnchor. x may be the column past the last one, where
-// a deferred wrap leaves the cursor.
-type vtReflowCursor struct {
-	set bool
-	x   int
+// vtReflowAnchor is a cell on a line being reflowed, carried along like the
+// client's CellAnchor: the cursor's (vtReflowCursorAnchor), or a Kitty
+// placement's, by its index. x may be the column past the last one, where a
+// deferred wrap leaves the cursor.
+type vtReflowAnchor struct {
+	id int
+	x  int
+}
+
+// vtReflowCursorAnchor identifies the cursor's anchor.
+const vtReflowCursorAnchor = -1
+
+// vtReflowMarkAnchor is the anchor id of a prompt mark carried through a
+// reflow with the first cell of its row, with the mark below it: vtReflow adds
+// and removes them itself, so no other anchor id is this low.
+const vtReflowMarkAnchor = -2
+
+// vtStartsPrompt reports a mark the shell set as a prompt starting on its row
+// (SemanticPromptRow.startsPrompt in the client), which a reflow keeps with the
+// row's text, rather than one a row got by being reached inside a prompt.
+func vtStartsPrompt(mark uint8) bool {
+	return mark == vtPromptPrimary || mark == vtPromptSecondary
 }
 
 // vtReflow rewraps lines from oldWidth to newWidth. Each logical line, a line
 // and the wrapped lines after it, is joined and split again; every resulting
-// line has newWidth cells. The cursor moves with its cell.
+// line has newWidth cells. Each anchor moves with its cell.
 //
 // This is a port of reflow() in third_party/xterm/lib/src/core/reflow.dart,
 // including its corners, because the model has to land on the rows the
 // client shows: an empty line keeps its place inside a logical line, a
 // line that only grows keeps its cells past its content, and a wide glyph
-// that would straddle the new edge moves whole to the next line. The cursor
-// follows the rules for the CellAnchor the client puts on its cell.
+// that would straddle the new edge moves whole to the next line. The anchors
+// follow the rules for the client's CellAnchor.
 func vtReflow(lines []vtLine, oldWidth, newWidth int) []vtLine {
 	out := make([]vtLine, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		r := vtLineReflow{oldWidth: oldWidth, newWidth: newWidth}
+		first := lines[i].prompt
+		marked := first != vtPromptNone
 		r.add(lines[i])
 		for i+1 < len(lines) && lines[i+1].wrapped {
 			i++
-			r.add(lines[i])
+			line := lines[i]
+			marked = marked || line.prompt != vtPromptNone
+			if vtStartsPrompt(line.prompt) {
+				// A prompt the shell marked on a row inside the logical line
+				// (VS Code's A after output that wrapped, a secondary prompt
+				// after prompt text that did) travels with the first cell of
+				// that row, like any anchor.
+				line.anchors = append(line.anchors,
+					vtReflowAnchor{id: vtReflowMarkAnchor - int(line.prompt)})
+			}
+			r.add(line)
 		}
-		out = append(out, r.finish()...)
+		// The line keeps its prompt mark on its first row; the rows it wraps
+		// onto continue it when any of its rows was part of a prompt, and the
+		// row that now holds the start of a marked row's text takes its mark,
+		// unless a prompt starts on it already.
+		reflowed := r.finish()
+		for j := range reflowed {
+			switch {
+			case j == 0:
+				reflowed[j].prompt = first
+			case marked:
+				reflowed[j].prompt = vtPromptContinuation
+			default:
+				reflowed[j].prompt = vtPromptNone
+			}
+		}
+		for j := range reflowed {
+			reflowed[j].anchors = vtTakeMarkAnchors(reflowed[j].anchors, &reflowed[j].prompt)
+		}
+		out = append(out, reflowed...)
 	}
 	for i := range out {
-		out[i].cells = vtCloseSplitGlyphs(resizeVTRow(out[i].cells, newWidth))
-		out[i].cursor.clamp(newWidth)
+		out[i].cells = resizeVTRow(out[i].cells, newWidth)
+		vtClampAnchors(out[i].anchors, newWidth)
 	}
 	return out
 }
 
-// vtCloseSplitGlyphs blanks a wide glyph's half left alone at either edge of
-// a row: a first half in the last column, or a second half in the first. Only
-// a one-column screen splits a wide glyph so, and a glyph wider than its row
-// would make the next reflow read past the row's end.
-func vtCloseSplitGlyphs(row []vtCell) []vtCell {
-	if last := len(row) - 1; last >= 0 && row[last].width == 2 {
-		row[last] = blankedHalf(row[last])
+// vtTakeMarkAnchors removes the mark anchors from anchors, in place, and sets
+// the first of them as the line's mark unless a prompt starts on it already.
+func vtTakeMarkAnchors(anchors []vtReflowAnchor, mark *uint8) []vtReflowAnchor {
+	kept := anchors[:0]
+	for _, anchor := range anchors {
+		if anchor.id > vtReflowMarkAnchor {
+			kept = append(kept, anchor)
+			continue
+		}
+		if !vtStartsPrompt(*mark) {
+			*mark = uint8(vtReflowMarkAnchor - anchor.id)
+		}
 	}
-	if len(row) > 0 && row[0].width == 0 {
-		row[0] = blankedHalf(row[0])
-	}
-	return row
+	return kept
 }
 
-// clamp keeps the cursor within a line cut or grown to length, as resizing a
-// BufferLine repositions its anchors.
-func (c *vtReflowCursor) clamp(length int) {
-	if c.set && c.x > length {
-		c.x = length
+// vtClampAnchors keeps anchors within a line cut or grown to length, as
+// resizing a BufferLine repositions its anchors.
+func vtClampAnchors(anchors []vtReflowAnchor, length int) {
+	for i := range anchors {
+		anchors[i].x = min(anchors[i].x, length)
 	}
 }
 
 // vtLineReflow is the reflow of one logical line (_LineReflow in the client).
 // cells and filled are the line being built: filled counts the cells placed
 // in it, while cells may run further when the builder reuses a line that only
-// grows, whose cells past its content are kept. cursor is the cursor when it
-// has moved onto that line.
+// grows, whose cells past its content are kept. anchors are the anchors that
+// have moved onto that line.
 type vtLineReflow struct {
 	oldWidth int
 	newWidth int
 	lines    []vtLine
 	cells    []vtCell
 	filled   int
-	cursor   vtReflowCursor
+	anchors  []vtReflowAnchor
 }
 
 func (r *vtLineReflow) add(line vtLine) {
-	trimmed := vtTrimmedLength(line.cells, r.oldWidth)
+	if len(line.cells) == 1 && line.cells[0].width == 2 {
+		// The second half the client keeps past the row's end. Whatever
+		// followed the glyph, such as a cursor waiting to wrap, now follows
+		// that half.
+		line.cells = []vtCell{line.cells[0], vtOneColumnHalf(line.cells[0])}
+		if len(line.anchors) > 0 {
+			anchors := make([]vtReflowAnchor, len(line.anchors))
+			for i, anchor := range line.anchors {
+				if anchor.x >= 1 {
+					anchor.x++
+				}
+				anchors[i] = anchor
+			}
+			line.anchors = anchors
+		}
+	}
+	trimmed := vtTrimmedLength(line.cells, len(line.cells))
 	if trimmed == 0 {
 		// Cells still waiting in the builder come before an empty line, or
 		// an erased continuation row would land ahead of the text it
@@ -97,7 +163,7 @@ func (r *vtLineReflow) add(line vtLine) {
 		return
 	}
 	if r.newWidth >= r.oldWidth {
-		r.cells, r.filled, r.cursor = line.cells, trimmed, line.cursor
+		r.cells, r.filled, r.anchors = line.cells, trimmed, line.anchors
 		return
 	}
 	// The line stays first; addPart appends the lines its tail fills after it.
@@ -106,22 +172,40 @@ func (r *vtLineReflow) add(line vtLine) {
 	if trimmed > r.newWidth {
 		from := r.newWidth
 		if line.cells[r.newWidth-1].width == 2 {
-			from--
+			if r.newWidth == 1 {
+				// The glyph stays, as addPart keeps it on a line one
+				// column wide, with its second half; an anchor on that
+				// half stays past the line's end.
+				from = 2
+			} else {
+				from--
+			}
 		}
-		r.addPart(&line, from, trimmed)
+		if from < trimmed {
+			r.addPart(&line, from, trimmed)
+		}
 	}
 	line.cells = resizeVTRow(line.cells, r.newWidth)
-	line.cursor.clamp(r.newWidth)
+	if r.newWidth > 1 && line.cells[r.newWidth-1].width == 2 {
+		// The glyph moved on to the next line.
+		line.cells[r.newWidth-1] = vtCell{width: 1}
+	}
+	vtClampAnchors(line.anchors, r.newWidth)
 	r.lines[head] = line
 }
 
 // addPart appends cells [from, to) of line, starting a new line each time the
-// current one fills up. A cursor in the range moves with its cell, one at the
-// end of it with the last cell, and one past it to the same distance past the
-// appended cells.
+// current one fills up. An anchor in the range moves with its cell, one at
+// the end of it with the last cell, and one past it to the same distance past
+// the appended cells.
 func (r *vtLineReflow) addPart(line *vtLine, from, to int) {
 	src := line.cells
 	for left := to - from; left > 0; {
+		if r.filled == r.newWidth {
+			// A line one column wide holding a wide glyph fills a line two
+			// columns wide by itself when add reuses it.
+			r.lines = append(r.lines, r.take())
+		}
 		count := left
 		lineFilled := false
 		if remaining := r.newWidth - r.filled; count >= remaining {
@@ -138,32 +222,66 @@ func (r *vtLineReflow) addPart(line *vtLine, from, to int) {
 				count = 0
 			}
 		}
-		if c := line.cursor; c.set && c.x >= from && (c.x < from+count || (c.x == to && from+count == to)) {
-			r.cursor = vtReflowCursor{set: true, x: r.filled + c.x - from}
-			line.cursor = vtReflowCursor{}
+		end := from + count
+		// A line one column wide takes the wide glyph whole, as printing
+		// it there does: its second half goes with it rather than onto a
+		// line of its own, and an anchor on that half follows the glyph.
+		next := end
+		if r.newWidth == 1 && count == 1 && src[from].width == 2 &&
+			end < to && src[end].width == 0 {
+			next++
 		}
-		r.cells = append(r.cells[:r.filled], src[from:from+count]...)
+		line.anchors = r.takeAnchors(line.anchors, r.filled-from, func(x int) bool {
+			return x >= from && (x < next || (x == to && next == to))
+		})
+		r.cells = append(r.cells[:r.filled], src[from:end]...)
 		r.filled += count
-		r.cursor.clamp(r.filled)
-		from += count
-		left -= count
+		vtClampAnchors(r.anchors, r.filled)
+		left -= next - from
+		from = next
 		if lineFilled {
 			r.lines = append(r.lines, r.take())
 		}
 	}
-	if c := line.cursor; c.set && c.x >= to {
-		r.cursor = vtReflowCursor{set: true, x: r.filled + c.x - to}
-		line.cursor = vtReflowCursor{}
+	line.anchors = r.takeAnchors(line.anchors, r.filled-to, func(x int) bool {
+		return x >= to
+	})
+}
+
+// takeAnchors moves the anchors moved selects onto the line being built,
+// shifted by offset, and returns the ones left. anchors itself is left as it
+// was, and a new slice is made only when an anchor moves.
+func (r *vtLineReflow) takeAnchors(
+	anchors []vtReflowAnchor,
+	offset int,
+	moved func(x int) bool,
+) []vtReflowAnchor {
+	var left []vtReflowAnchor
+	for i, anchor := range anchors {
+		if !moved(anchor.x) {
+			if left != nil {
+				left = append(left, anchor)
+			}
+			continue
+		}
+		if left == nil {
+			left = append(make([]vtReflowAnchor, 0, len(anchors)), anchors[:i]...)
+		}
+		r.anchors = append(r.anchors, vtReflowAnchor{id: anchor.id, x: anchor.x + offset})
 	}
+	if left == nil {
+		return anchors
+	}
+	return left
 }
 
 func (r *vtLineReflow) take() vtLine {
-	line := vtLine{cells: r.cells, wrapped: len(r.lines) > 0, cursor: r.cursor}
-	r.cells, r.filled, r.cursor = nil, 0, vtReflowCursor{}
+	line := vtLine{cells: r.cells, wrapped: len(r.lines) > 0, anchors: r.anchors}
+	r.cells, r.filled, r.anchors = nil, 0, nil
 	return line
 }
 
-// finish returns the logical line's new lines. A cursor left on a line that
+// finish returns the logical line's new lines. An anchor left on a line that
 // never received a cell is dropped with it, as in the client.
 func (r *vtLineReflow) finish() []vtLine {
 	if r.filled > 0 {

@@ -45,6 +45,7 @@ class AcpWriterLeaseBanner extends StatefulWidget {
     this.failed = false,
     this.clock = DateTime.now,
     this.localDeviceLabel,
+    this.gutter = 0,
     super.key,
   });
 
@@ -72,6 +73,10 @@ class AcpWriterLeaseBanner extends StatefulWidget {
 
   /// This device's own label; defaults to [currentAcpDeviceLabel].
   final String? localDeviceLabel;
+
+  /// Extra side padding that lines the banner's contents up with a wide
+  /// chat's centred reading column while the banner itself spans the pane.
+  final double gutter;
 
   @override
   State<AcpWriterLeaseBanner> createState() => _AcpWriterLeaseBannerState();
@@ -249,8 +254,8 @@ class _AcpWriterLeaseBannerState extends State<AcpWriterLeaseBanner>
           border: Border(top: BorderSide(color: scheme.outlineVariant)),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: FluttyTheme.spacingMd,
+          padding: EdgeInsets.symmetric(
+            horizontal: FluttyTheme.spacingMd + widget.gutter,
             vertical: FluttyTheme.spacingSm,
           ),
           child: LayoutBuilder(

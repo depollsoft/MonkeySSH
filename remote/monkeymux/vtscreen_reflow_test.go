@@ -166,9 +166,8 @@ func TestVTScreenFrameReproducesSoftWraps(t *testing.T) {
 
 // On a one-row screen the row a frame wraps from has already scrolled into
 // the history, out of reach of anything that would erase a stand-in glyph
-// there. A wide glyph that did not fit is reproduced the way it arose; any
-// other wrap from a never-written cell is dropped rather than leave a space
-// the client would keep.
+// there. A wide glyph that did not fit is reproduced the way it arose; a
+// wrap from a never-written cell is reached by a tab, which writes nothing.
 func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 	s := newTerminalScreen(4, 1)
 	s.Write([]byte("abc界"))
@@ -191,8 +190,15 @@ func TestVTScreenFrameSoftWrapsOnOneRow(t *testing.T) {
 	if got := vtScrollbackLines(replica); len(got) != 1 || string(got[0]) != "abc" {
 		t.Fatalf("frame left a stand-in in the history: %q", got)
 	}
-	if replica.main.wrapped[0] {
-		t.Fatal("frame kept a wrap it could not reproduce faithfully")
+	if !replica.main.wrapped[0] {
+		t.Fatal("frame dropped the soft wrap")
+	}
+	s.Resize(8, 1)
+	replica.Resize(8, 1)
+	if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) ||
+		replica.scrollback.len() != 0 || s.scrollback.len() != 0 {
+		t.Fatalf("widened replica %q (history %d), model %q (history %d)",
+			got, replica.scrollback.len(), want, s.scrollback.len())
 	}
 }
 
@@ -334,9 +340,55 @@ func TestVTScreenExhaustedTabPendsLikeClient(t *testing.T) {
 	}
 }
 
-// A one-column screen splits a wide glyph across rows; the halves are blanked
-// so a later widening does not read past a row's end.
+// A one-column screen holds a wide glyph without its second half, as
+// printing it there does, and a reflow lays it out as the client's does: a
+// narrowing to one column keeps it on a row of its own, blanking the second
+// half it leaves on the next, and a widening gives it its second half back,
+// which fills a row of two columns.
 func TestVTScreenOneColumnReflowLeavesNoSplitGlyph(t *testing.T) {
+	cells := func(s *terminalScreen) []string {
+		var rows []string
+		var decoder vtLineDecoder
+		lines := make([][]vtCell, 0, s.scrollback.len()+len(s.main.rows))
+		for i := range s.scrollback.len() {
+			lines = append(lines, s.scrollback.at(i).decode(&decoder, s.width))
+		}
+		for _, row := range append(lines, s.main.rows...) {
+			var b strings.Builder
+			for _, cell := range row {
+				switch {
+				case cell.width == 0:
+					b.WriteString("<")
+				case cell.r == 0:
+					b.WriteString("_")
+				default:
+					b.WriteRune(cell.r)
+				}
+			}
+			rows = append(rows, b.String())
+		}
+		return rows
+	}
+	for _, c := range []struct {
+		size   [2]int
+		write  string
+		resize [2]int
+		want   []string
+	}{
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{2, 3}, []string{"\U0001F468<", "\U0001F469<", "__"}},
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{3, 3}, []string{"\U0001F468<_", "\U0001F469<_", "___"}},
+		{[2]int{1, 3}, "\U0001F468\U0001F469", [2]int{4, 3}, []string{"\U0001F468<\U0001F469<", "____", "____"}},
+		{[2]int{2, 4}, "a\U0001F468b", [2]int{1, 4}, []string{"a", "\U0001F468", "b", "_"}},
+	} {
+		s := newTerminalScreen(c.size[0], c.size[1])
+		s.Write([]byte(c.write))
+		s.Resize(c.resize[0], c.resize[1])
+		if got := cells(s); !slices.Equal(got, c.want) {
+			t.Fatalf("%q from %v to %v: %q, want %q", c.write, c.size, c.resize, got, c.want)
+		}
+		vtRoundTrip(t, s)
+	}
+
 	// Printing a wide glyph on one column, plain or in insert mode, has no
 	// room for its second half; it must not write past the row.
 	for _, seq := range []string{"界a", "\x1b[4h界a"} {
@@ -377,5 +429,50 @@ func TestVTScreenFrameRestoresTabPendingWrap(t *testing.T) {
 		if got, want := replica.TextRows(), s.TextRows(); !slices.Equal(got, want) || replica.scrollback.len() != s.scrollback.len() {
 			t.Fatalf("%q: replica %q (%d history), model %q (%d history)", tab, got, replica.scrollback.len(), want, s.scrollback.len())
 		}
+	}
+}
+
+// vtPromptMarks is the semantic prompt mark of every main-screen line, the
+// scrollback first.
+func vtPromptMarks(s *terminalScreen) []uint8 {
+	var marks []uint8
+	for i := range s.scrollback.len() {
+		marks = append(marks, s.scrollback.at(i).prompt)
+	}
+	return append(marks, s.main.prompt...)
+}
+
+// A prompt the shell marked on a row inside a logical line (a secondary
+// prompt after prompt text that wrapped, VS Code's A after output that did)
+// stays on the row that holds the start of that row's text, as in the client,
+// unless a prompt starts on that row already.
+func TestVTScreenReflowKeepsMarksInsideLogicalLines(t *testing.T) {
+	s := newTerminalScreen(6, 8)
+	s.Write([]byte(osc133("A;click_events=2") + "12345678" + osc133("P;k=s") + "> " + osc133("B") + "ab"))
+	if got := s.main.prompt[:3]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptSecondary, vtPromptNone}) {
+		t.Fatalf("marks before the resize: %v", got)
+	}
+	// The rows above the screen are in the scrollback.
+	s.Resize(3, 8)
+	want := []uint8{vtPromptPrimary, vtPromptContinuation, vtPromptSecondary, vtPromptContinuation, vtPromptNone}
+	if got := vtPromptMarks(s)[:5]; !slices.Equal(got, want) || s.TextRows()[0] != "78>" {
+		t.Fatalf("narrow: marks %v rows %q, want %v", got, s.TextRows(), want)
+	}
+
+	vscode := newTerminalScreen(6, 8)
+	vscode.Write([]byte("xxxxxxxx\x1b]633;A\x07$ \x1b]633;B\x07ls"))
+	if vscode.main.prompt[1] != vtPromptPrimary || !vscode.main.wrapped[1] {
+		t.Fatalf("VS Code prompt row: mark %d wrapped %v", vscode.main.prompt[1], vscode.main.wrapped[1])
+	}
+	vscode.Resize(12, 8)
+	if got := vscode.main.prompt[:2]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptNone}) || vscode.TextRows()[0] != "xxxxxxxx$ ls" {
+		t.Fatalf("widen: marks %v rows %q", got, vscode.TextRows())
+	}
+
+	joined := newTerminalScreen(6, 8)
+	joined.Write([]byte(osc133("A;click_events=2") + "1234567" + osc133("P;k=s") + "> " + osc133("B") + "ab"))
+	joined.Resize(12, 8)
+	if got := joined.main.prompt[:2]; !slices.Equal(got, []uint8{vtPromptPrimary, vtPromptNone}) || joined.TextRows()[0] != "1234567> ab" {
+		t.Fatalf("joined: marks %v rows %q", got, joined.TextRows())
 	}
 }

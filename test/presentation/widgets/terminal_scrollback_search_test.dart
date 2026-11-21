@@ -26,9 +26,11 @@ Future<void> _until(bool Function() condition) async {
   }
 }
 
+// Waits for every scheduled or running search, including refreshes, which
+// leave the status alone: a fixed delay lost the race on a busy machine.
 Future<void> _settle(TerminalScrollbackSearchController search) async {
-  await Future<void>.delayed(const Duration(milliseconds: 20));
-  await _until(() => search.status != TerminalSearchStatus.searching);
+  await Future<void>.delayed(Duration.zero);
+  await _until(() => !search.isBusy);
 }
 
 void main() {

@@ -24,6 +24,31 @@ const _kDefaultFontFamilyFallback = [
   'sans-serif',
 ];
 
+/// Colour emoji font families, the first that exists on the platform first.
+const terminalEmojiFontFamilies = [
+  'Apple Color Emoji',
+  'Noto Color Emoji',
+  'Segoe UI Emoji',
+];
+
+/// Whether a cell's grapheme cluster asks for emoji presentation: the code
+/// points after its base ([CellData.graphemeExtras]) include VS16.
+bool requestsEmojiPresentation(List<int> graphemeExtras) =>
+    graphemeExtras.contains(0xFE0F);
+
+/// [style] with the colour emoji fonts ahead of its own families, for a
+/// cluster that [requestsEmojiPresentation]. Font fallback otherwise only
+/// reaches an emoji font for a code point the terminal font lacks, so a
+/// terminal font with a text heart draws `♥️` as that heart.
+TextStyle withEmojiPresentation(TextStyle style) => style.copyWith(
+      fontFamily: terminalEmojiFontFamilies.first,
+      fontFamilyFallback: [
+        ...terminalEmojiFontFamilies.skip(1),
+        if (style.fontFamily != null) style.fontFamily!,
+        ...?style.fontFamilyFallback,
+      ],
+    );
+
 class TerminalStyle {
   const TerminalStyle({
     this.fontSize = _kDefaultFontSize,

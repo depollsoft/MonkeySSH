@@ -83,7 +83,7 @@ void main() {
       expect(acpMuseCodeProvider.adapterFallbackCommand!.argv, [
         'npx',
         '--yes',
-        '@bex-co/muse-code-acp@0.6.0',
+        '@bex-co/muse-code-acp@0.11.0',
       ]);
       expect(acpMuseCodeProvider.terminalAuthCommand!.argv, ['muse', 'login']);
       expect(

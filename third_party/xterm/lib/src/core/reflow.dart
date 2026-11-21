@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
@@ -71,6 +73,13 @@ class _LineReflow {
   /// Adds a line to the reflow operation. This method will try to reuse the
   /// given line if possible.
   void add(BufferLine line) {
+    if (line.restoreOneColumnHalf()) {
+      // Whatever followed the glyph, such as a cursor waiting to wrap, now
+      // follows its second half.
+      for (final anchor in line.anchors) {
+        if (anchor.x >= 1) anchor.reposition(anchor.x + 1);
+      }
+    }
     final trimmedLength = line.getTrimmedLength(oldWidth);
 
     // A fast path for empty lines. Cells still waiting in the builder come
@@ -98,10 +107,15 @@ class _LineReflow {
       _lines.add(line);
 
       if (trimmedLength > newWidth) {
+        var from = newWidth;
         if (line.getWidth(newWidth - 1) == 2) {
-          _addPart(line, from: newWidth - 1, to: trimmedLength);
-        } else {
-          _addPart(line, from: newWidth, to: trimmedLength);
+          // The glyph stays on a line one column wide, as [_addPart] keeps
+          // it there, with its second half; an anchor on that half stays
+          // past the line's end. A wider line passes it on.
+          from = newWidth == 1 ? 2 : newWidth - 1;
+        }
+        if (from < trimmedLength) {
+          _addPart(line, from: from, to: trimmedLength);
         }
       }
     }
@@ -113,7 +127,7 @@ class _LineReflow {
       line.truncate(newWidth);
     }
 
-    if (line.getWidth(newWidth - 1) == 2) {
+    if (newWidth > 1 && line.getWidth(newWidth - 1) == 2) {
       line.resetCell(newWidth - 1);
     }
   }
@@ -125,6 +139,11 @@ class _LineReflow {
     var cellsLeft = to - from;
 
     while (cellsLeft > 0) {
+      if (_builder.length >= newWidth) {
+        // A line one column wide holding a wide glyph fills a line two
+        // columns wide by itself when [setBuffer] reuses it.
+        _lines.add(_builder.take(wrapped: _lines.isNotEmpty));
+      }
       final bufferRemainingCells = newWidth - _builder.length;
 
       // How many cells we should copy in this iteration.
@@ -156,18 +175,32 @@ class _LineReflow {
         // terminal.
       }
 
+      // A line one column wide takes the wide glyph whole, as printing it
+      // there does: its second half goes with it rather than onto a line of
+      // its own, and an anchor on that half follows the glyph.
+      var copyEnd = from + cellsToCopy;
+      if (newWidth == 1 &&
+          cellsToCopy == 1 &&
+          line.getWidth(from) == 2 &&
+          copyEnd < to &&
+          line.getWidth(copyEnd) == 0) {
+        copyEnd++;
+      }
+
       for (var anchor in line.anchors.toList()) {
-        final copyEnd = from + cellsToCopy;
         final isExclusiveRangeEnd = anchor.x == to && anchor.x == copyEnd;
         if (anchor.x >= from && (anchor.x < copyEnd || isExclusiveRangeEnd)) {
-          _builder.addAnchor(anchor, anchor.x - from);
+          // One just past that second half lands just past the line's end
+          // too, as in the MonkeyMux model. Nothing clamps it later: resizing
+          // a line that is already one column long leaves its anchors alone.
+          _builder.addAnchor(anchor, min(anchor.x - from, cellsToCopy));
         }
       }
 
       _builder.add(line, from, cellsToCopy);
 
-      from += cellsToCopy;
-      cellsLeft -= cellsToCopy;
+      cellsLeft -= copyEnd - from;
+      from = copyEnd;
 
       // Create a new line if the buffer is filled up.
       if (lineFilled) {
@@ -206,6 +239,14 @@ List<BufferLine> reflow(
 
     final reflow = _LineReflow(oldWidth, newWidth);
 
+    final firstMark = line.semanticPrompt;
+    var marked = firstMark != SemanticPromptRow.none;
+
+    // A prompt the shell marked on a row inside the logical line (VS Code's A
+    // after output that wrapped, a secondary prompt after prompt text that
+    // did) travels with the first cell of that row, like any anchor.
+    final markAnchors = <(CellAnchor, SemanticPromptRow)>[];
+
     reflow.add(line);
 
     for (var offset = i + 1; offset < lines.length; offset++) {
@@ -217,10 +258,34 @@ List<BufferLine> reflow(
 
       i++;
 
+      final mark = nextLine.semanticPrompt;
+      marked |= mark != SemanticPromptRow.none;
+      if (mark.startsPrompt) {
+        markAnchors.add((nextLine.createAnchor(0), mark));
+      }
       reflow.add(nextLine);
     }
 
-    result.addAll(reflow.finish());
+    // The line keeps its shell-integration mark on its first row; the rows it
+    // wraps onto continue it when any of its rows was part of a prompt, and
+    // the row that now holds the start of a marked row's text takes its mark,
+    // unless a prompt starts on it already.
+    final reflowed = reflow.finish();
+    for (var row = 0; row < reflowed.length; row++) {
+      reflowed[row].semanticPrompt = row == 0
+          ? firstMark
+          : marked
+              ? SemanticPromptRow.continuation
+              : SemanticPromptRow.none;
+    }
+    for (final (anchor, mark) in markAnchors) {
+      final target = anchor.line;
+      anchor.dispose();
+      if (target != null && !target.semanticPrompt.startsPrompt) {
+        target.semanticPrompt = mark;
+      }
+    }
+    result.addAll(reflowed);
   }
 
   for (var line in result) {

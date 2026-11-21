@@ -148,6 +148,16 @@ void main() {
       expect(row(terminal, 1), 'a');
     });
 
+    // As in Ghostty and the MonkeyMux model: the glyph shown is repeated,
+    // whatever the character set is now, and nothing is left after RIS.
+    test('REP repeats the glyph shown and nothing after RIS', () {
+      final terminal = Terminal()..resize(10, 2);
+      terminal.write('\x1b(0q\x1b(B\x1b[2b');
+      expect(row(terminal, 0), '───');
+      terminal.write('x\x1bc\x1b[2b');
+      expect(row(terminal, 0), '');
+    });
+
     test('without autowrap output overwrites the last column', () {
       final terminal = Terminal()..resize(4, 2);
       terminal.write('\x1b[?7labcde');
@@ -168,13 +178,24 @@ void main() {
       expect(row(terminal, 0), ' \u754c');
     });
 
-    test('zero-width code points do not take a column', () {
+    test('zero-width code points join the glyph before them', () {
       final terminal = Terminal()..resize(10, 1);
       terminal.write('e\u0301f\u2764\uFE0Fx\u200D');
-      expect(terminal.buffer.cursorX, 4);
-      expect(row(terminal, 0), 'ef\u2764x');
+      // VS16 makes the heart an emoji, two columns wide.
+      expect(terminal.buffer.cursorX, 5);
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200D');
+      // REP repeats the last glyph printed, not what joined it.
       terminal.write('\x1b[b');
-      expect(row(terminal, 0), 'ef\u2764xx');
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200Dx');
+    });
+
+    test('zero-width code points take no column without clustering', () {
+      final terminal = Terminal()..resize(10, 1);
+      terminal.write('\x1b[?2027le\u0301f\u2764\uFE0Fx\u200D');
+      expect(terminal.buffer.cursorX, 4);
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200D');
+      terminal.write('\x1b[b');
+      expect(row(terminal, 0), 'e\u0301f\u2764\uFE0Fx\u200Dx');
     });
 
     test('vertical moves and VPA stay inside the scroll region', () {
@@ -242,6 +263,131 @@ void main() {
       }
     });
 
+    test('LF and IND below the scroll region stop at the last row', () {
+      for (final control in ['\n', '\x0b', '\x0c', '\x1bD', '\x1bE']) {
+        final terminal = Terminal()..resize(5, 6);
+        terminal.write('top\x1b[2;3r\x1b[5;1Hx');
+        terminal.write(control * 6);
+        expect(terminal.buffer.cursorY, 5, reason: control);
+        expect([row(terminal, 0), row(terminal, 4)], ['top', 'x'],
+            reason: control);
+        expect(terminal.buffer.scrollBack, 0, reason: control);
+      }
+    });
+
+    test('BS and CUB from a pending wrap count from the last column', () {
+      final terminal = Terminal()..resize(5, 2);
+      terminal.write('ABCDE\bX');
+      expect(row(terminal, 0), 'ABCXE');
+      terminal.write('\r\nABCDE\x1b[2DY');
+      expect(row(terminal, 1), 'ABYDE');
+    });
+
+    test('cursor moves, erases and line edits end a pending wrap', () {
+      // xterm resets its deferred wrap (ResetWrap) in CursorUp/Down, IND, RI,
+      // every EL and ED, ECH, DCH, IL and DL; the MonkeyMux screen model does the
+      // same. Keeping it put the next glyph on the following row in the app
+      // where the model overwrote the last column.
+      const sequences = {
+        'CUU': '\x1b[A',
+        'CUD': '\x1b[B',
+        'IND': '\x1bD',
+        'RI': '\x1bM',
+        'LF': '\n',
+        'EL 0': '\x1b[K',
+        'EL 1': '\x1b[1K',
+        'EL 2': '\x1b[2K',
+        'ED 0': '\x1b[J',
+        'ED 1': '\x1b[1J',
+        'ED 2': '\x1b[2J',
+        'ECH': '\x1b[X',
+        'DCH': '\x1b[P',
+        'IL': '\x1b[L',
+        'DL': '\x1b[M',
+      };
+      for (final entry in sequences.entries) {
+        final terminal = Terminal()..resize(5, 4);
+        terminal.write('\x1b[2;1HABCDE');
+        expect(terminal.buffer.isWrapPending, isTrue, reason: entry.key);
+        terminal.write(entry.value);
+        expect(terminal.buffer.isWrapPending, isFalse, reason: entry.key);
+        // IL and DL also move the cursor to the first column, in both.
+        final column = entry.key == 'IL' || entry.key == 'DL' ? 0 : 4;
+        expect(terminal.buffer.cursorX, column, reason: entry.key);
+      }
+    });
+
+    test('SOS and PM strings are skipped', () {
+      final terminal = Terminal()..resize(10, 1);
+      terminal.write('A\x1bXsos\x1b\\B\x1b^pm\x1b\\C');
+      expect(row(terminal, 0), 'ABC');
+      terminal.write('\x1b^pm\x07still pm\x1b\\D');
+      expect(row(terminal, 0), 'ABCD');
+    });
+
+    for (final save in ['\x1b7', '\x1b[s', '\x1b[?1048h']) {
+      final restore = {
+        '\x1b7': '\x1b8',
+        '\x1b[s': '\x1b[u',
+        '\x1b[?1048h': '\x1b[?1048l',
+      }[save]!;
+      test('restoring the cursor restores origin mode (${save.substring(1)})',
+          () {
+        final terminal = Terminal()..resize(10, 8);
+        terminal.write('\x1b[6;5H$save\x1b[5;7r\x1b[?6h$restore');
+        expect(terminal.originMode, isFalse);
+        expect(terminal.buffer.cursorY, 5);
+        expect(terminal.buffer.cursorX, 4);
+        terminal.write('\x1b[1;1HX');
+        expect(row(terminal, 0), 'X');
+      });
+    }
+
+    test('SCORC restores what DECSC saved, rendition included', () {
+      final terminal = Terminal()..resize(10, 3);
+      terminal.write('\x1b[2;2H\x1b[31m\x1b7\x1b[0m\x1b[3;3H\x1b[uY');
+      expect(row(terminal, 1), ' Y');
+      expect(foregroundAt(terminal, 1, 1), NamedColor.red | CellColor.named);
+    });
+
+    test('switching screens with 47 and 1047 leaves the cursor in place', () {
+      for (final mode in ['47', '1047']) {
+        final terminal = Terminal()..resize(10, 4);
+        terminal.write('abc\r\nabc\x1b[?${mode}h');
+        expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [3, 1],
+            reason: mode);
+        terminal.write('\x1b[2J\x1b[2;1Hdef\r\ndef\x1b[?${mode}l');
+        expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [3, 2],
+            reason: mode);
+        expect([row(terminal, 0), row(terminal, 1)], ['abc', 'abc'],
+            reason: mode);
+        terminal.write('\x1b[?${mode}h');
+        expect(row(terminal, 1), mode == '47' ? 'def' : '', reason: mode);
+      }
+      final terminal = Terminal()..resize(5, 3);
+      terminal.write('ABCDE\x1b[?47hZ');
+      expect([row(terminal, 0), row(terminal, 1)], ['', 'Z']);
+    });
+
+    test('1049 saves and restores the cursor without a screen change', () {
+      final terminal = Terminal()..resize(10, 3);
+      terminal.write('\x1b[2;3H\x1b7\x1b[3;5H\x1b[?1049lX');
+      expect(row(terminal, 1), '  X');
+      terminal.write('\x1b[?1049h\x1b[Hfoo\x1b[2;2H\x1b[?1049hY');
+      expect([row(terminal, 0), row(terminal, 1)], ['', ' Y']);
+    });
+
+    test('DECSET and DECRST 6 home the cursor; DECRC does not', () {
+      final terminal = Terminal()..resize(10, 8);
+      terminal.write('\x1b[3;6r\x1b[5;5H\x1b[?6h');
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [0, 2]);
+      terminal.write('\x1b[2;4H\x1b7\x1b[?6l');
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [0, 0]);
+      terminal.write('\x1b8');
+      expect(terminal.originMode, isTrue);
+      expect([terminal.buffer.cursorX, terminal.buffer.cursorY], [3, 3]);
+    });
+
     test('DECSTBM reads a zero bottom as the last row and homes the cursor',
         () {
       final terminal = Terminal()..resize(5, 4);
@@ -256,6 +402,44 @@ void main() {
       expect(terminal.buffer.cursorY, 2);
       terminal.write('\x1b[?6h\x1b[2;3r');
       expect(terminal.buffer.cursorY, 1);
+    });
+  });
+
+  group('insert mode', () {
+    test('a glyph pushes the rest of the row right', () {
+      final terminal = Terminal()..resize(10, 2);
+      terminal.write('abcdef\r\x1b[3C\x1b[4hXY\x1b[4lZ');
+      expect(terminal.lines[0].getText(), 'abcXYZef');
+    });
+
+    test('a pending wrap is taken before the insert', () {
+      final terminal = Terminal()..resize(5, 3);
+      terminal.write('\x1b[4habcdef');
+      expect(terminal.lines[0].getText(), 'abcde');
+      expect(terminal.lines[1].getText(), 'f');
+      expect(terminal.lines[1].isWrapped, isTrue);
+    });
+
+    test('a wide glyph pushes two cells and a zero-width one none', () {
+      final terminal = Terminal()..resize(8, 2);
+      terminal.write('abcdef\r\x1b[4h\u231Ae\u0301');
+      expect(terminal.lines[0].getText(), '\u231Ae\u0301abcde');
+      expect(terminal.buffer.cursorX, 3);
+    });
+
+    test('RIS and DECSTR end it', () {
+      for (final reset in ['\x1bc', '\x1b[!p']) {
+        final terminal = Terminal()..resize(5, 2);
+        terminal.write('\x1b[4h${reset}abc\rX');
+        expect(terminal.lines[0].getText(), 'Xbc', reason: reset);
+      }
+    });
+
+    test('ICH drops a pending wrap', () {
+      final terminal = Terminal()..resize(5, 3);
+      terminal.write('abcde\x1b[@f');
+      expect(terminal.lines[0].getText(), 'abcdf');
+      expect(terminal.buffer.cursorY, 0);
     });
   });
 }

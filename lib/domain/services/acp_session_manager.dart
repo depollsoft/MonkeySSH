@@ -2476,9 +2476,9 @@ class _SessionController {
           kind: AcpSessionErrorKind.timeout,
           message: 'Sign-in did not finish in time.',
         ),
-        AcpRemoteException(:final code, :final message) => AcpSessionError(
+        final AcpRemoteException remote => AcpSessionError(
           kind: AcpSessionErrorKind.authenticationRequired,
-          message: _safeAcpRemoteError(code, message),
+          message: _safeAcpRemoteError(remote),
         ),
         _ => _mapClientError(error),
       };
@@ -2696,7 +2696,7 @@ class _SessionController {
         _key,
         AcpSessionError(
           kind: AcpSessionErrorKind.protocol,
-          message: _safeAcpRemoteError(error.code, error.message),
+          message: _safeAcpRemoteError(error),
         ),
       );
     } on Object catch (error) {
@@ -4170,9 +4170,9 @@ class _SessionController {
         kind: AcpSessionErrorKind.authenticationRequired,
         message: 'The agent requires authentication.',
       ),
-    AcpRemoteException(:final code, :final message) => AcpSessionError(
+    final AcpRemoteException remote => AcpSessionError(
       kind: AcpSessionErrorKind.protocol,
-      message: _safeAcpRemoteError(code, message),
+      message: _safeAcpRemoteError(remote),
     ),
     AcpConnectionClosedException() => const AcpSessionError(
       kind: AcpSessionErrorKind.transport,
@@ -4219,18 +4219,61 @@ bool _isAcpAuthenticationRequired(String message) {
       normalized.contains('unauthorized');
 }
 
-String _safeAcpRemoteError(int code, String message) {
-  final compact = message
-      .replaceAll(RegExp(r'[\x00-\x1F\x7F]+'), ' ')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
-  if (compact.isEmpty) {
+/// JSON-RPC messages that only name the error class.
+///
+/// The ACP SDKs answer an exception a handler raised with one of these and
+/// put the actual reason in `data` (Python and TypeScript: `data.details`;
+/// Rust: a string). Hermes reports every gateway failure that way, so
+/// showing only the message left users with "Internal error".
+const _genericJsonRpcErrorMessages = <String>{
+  'error',
+  'internal error',
+  'invalid params',
+  'invalid request',
+  'method not found',
+  'parse error',
+  'remote error',
+  'server error',
+};
+
+String _compactAcpErrorText(String text) => text
+    .replaceAll(RegExp(r'[\x00-\x1F\x7F]+'), ' ')
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .trim();
+
+/// The agent's own explanation carried in a JSON-RPC error's [data], or
+/// `null` when it has none.
+String? _acpRemoteErrorDetail(Object? data) {
+  final raw = switch (data) {
+    final String text => text,
+    final Map<Object?, Object?> map => <Object?>[
+      map['details'],
+      map['detail'],
+      map['message'],
+    ].whereType<String>().firstWhereOrNull((value) => value.trim().isNotEmpty),
+    _ => null,
+  };
+  if (raw == null) return null;
+  final compact = _compactAcpErrorText(raw);
+  return compact.isEmpty ? null : compact;
+}
+
+String _safeAcpRemoteError(AcpRemoteException error) {
+  final code = error.code;
+  final message = _compactAcpErrorText(error.message);
+  final generic =
+      message.isEmpty ||
+      _genericJsonRpcErrorMessages.contains(
+        message.toLowerCase().replaceFirst(RegExp(r'\.$'), ''),
+      );
+  final text = (generic ? _acpRemoteErrorDetail(error.data) : null) ?? message;
+  if (text.isEmpty) {
     return 'The agent rejected the request ($code).';
   }
   const maxChars = 180;
-  final bounded = compact.length <= maxChars
-      ? compact
-      : '${compact.substring(0, maxChars - 1)}…';
+  final bounded = text.length <= maxChars
+      ? text
+      : '${text.substring(0, maxChars - 1)}…';
   return 'The agent rejected the request ($code): $bounded';
 }
 

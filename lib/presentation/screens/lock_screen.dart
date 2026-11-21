@@ -298,46 +298,19 @@ class _LockScreenState extends ConsumerState<LockScreen> {
       return Scaffold(
         body: DisplayFoldSpread(
           fold: fold,
-          leading: _LockPage(children: brand),
-          trailing: _LockPage(children: controls),
+          leading: _LockPage(brand: brand),
+          trailing: _LockPage(controls: controls),
         ),
       );
     }
 
-    final keyboardUp = mediaQuery.viewInsets.bottom > 0;
-    final page = SafeArea(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // With the keyboard up and no room for both, the brand gives way
-          // so Unlock stays in view: the number pad has no Return key.
-          // Propped up, the keyboard takes the whole bottom page.
-          final showsBrand =
-              !keyboardUp ||
-              constraints.maxHeight >= _brandExtent + _minPinPageExtent;
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: constraints.maxHeight > 48
-                    ? constraints.maxHeight - 48
-                    : 0,
-              ),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 360),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      if (showsBrand) ...[...brand, const SizedBox(height: 8)],
-                      ...controls,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
+    // With the keyboard up and no room for both, the brand gives way so
+    // Unlock stays in view: the number pad has no Return key. Propped up,
+    // the keyboard takes the whole bottom page.
+    final page = _LockPage(
+      brand: brand,
+      controls: controls,
+      keyboardUp: mediaQuery.viewInsets.bottom > 0,
     );
     if (fold != null) {
       // Propped up, the keyboard has taken the bottom page: the PIN keeps to
@@ -361,35 +334,54 @@ const double _minPinPageExtent = 240;
 /// under it, the name, and the gap before the prompt.
 const double _brandExtent = 112 + 32 + 32 + 8;
 
-/// One page of the lock screen spread across a fold: its content centred
-/// at the single-page width, scrolling when the page is short.
+/// One page of the lock screen: its content centred at the single-page
+/// width, scrolling when the page is short.
+///
+/// A page holding both [brand] and [controls] drops the brand when the
+/// keyboard is up ([keyboardUp]) and the page is too short for both.
 class _LockPage extends StatelessWidget {
-  const _LockPage({required this.children});
+  const _LockPage({
+    this.brand = const <Widget>[],
+    this.controls = const <Widget>[],
+    this.keyboardUp = false,
+  });
 
-  final List<Widget> children;
+  final List<Widget> brand;
+  final List<Widget> controls;
+  final bool keyboardUp;
 
   @override
   Widget build(BuildContext context) => SafeArea(
     child: LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            minHeight: constraints.maxHeight > 48
-                ? constraints.maxHeight - 48
-                : 0,
-          ),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 360),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: children,
+      builder: (context, constraints) {
+        final showsBrand =
+            !keyboardUp ||
+            constraints.maxHeight >= _brandExtent + _minPinPageExtent;
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: constraints.maxHeight > 48
+                  ? constraints.maxHeight - 48
+                  : 0,
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (showsBrand) ...brand,
+                    if (showsBrand && brand.isNotEmpty && controls.isNotEmpty)
+                      const SizedBox(height: 8),
+                    ...controls,
+                  ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     ),
   );
 }

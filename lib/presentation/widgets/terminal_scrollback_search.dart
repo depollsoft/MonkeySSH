@@ -286,6 +286,13 @@ class TerminalScrollbackSearchController extends ChangeNotifier
   /// Current state of the search.
   TerminalSearchStatus get status => _status;
 
+  /// Whether a search is scheduled or running: one the user asked for, a
+  /// refresh for new output, or the restart after a screen switch. A refresh
+  /// leaves [status] alone, so tests wait for this instead.
+  @visibleForTesting
+  bool get isBusy =>
+      _running || (_debounceTimer?.isActive ?? false) || _refreshTimer != null;
+
   /// Whether the last search ran on the alternate screen, which has no
   /// scrollback, so only the visible screen was searched.
   bool get searchesAlternateScreen => _searchesAlternateScreen;

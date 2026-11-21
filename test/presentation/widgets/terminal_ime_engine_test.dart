@@ -4531,6 +4531,36 @@ void main() {
         await _disposeImeHarness(driver, harness);
       });
 
+      test('sends BS for Backspace under DECBKM (${platform.name})', () async {
+        final driver = _ImeDriver(platform: platform);
+        addTearDown(driver.dispose);
+        final harness = await _createImeHarness(driver);
+        harness.terminal.write('\x1b[?67h');
+
+        // An IME deletion.
+        driver.updateEditingValue(_editingValue('hello', selectionOffset: 5));
+        await driver.flush();
+        harness.terminalOutput.clear();
+        driver.updateEditingValue(_editingValue('hell', selectionOffset: 4));
+        await driver.flush();
+        expect(harness.terminalOutput.join(), '\b');
+
+        // A Backspace key event from the IME, as Gboard sends it.
+        harness.terminalOutput.clear();
+        driver.engine
+          ..handleAndroidImeBackspace(
+            TerminalKeyEventType.press,
+            toolbarModifiers: null,
+          )
+          ..handleAndroidImeBackspace(
+            TerminalKeyEventType.release,
+            toolbarModifiers: null,
+          );
+        expect(harness.terminalOutput.join(), '\b');
+
+        await _disposeImeHarness(driver, harness);
+      });
+
       test('leaves an active composition alone on a shortcut Enter key '
           '(${platform.name})', () async {
         final driver = _ImeDriver(platform: platform);

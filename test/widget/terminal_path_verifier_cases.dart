@@ -19,6 +19,77 @@ class _MockSftpClient extends Mock implements SftpClient {
 
 void registerTerminalPathVerifierTests() {
   group('terminal path verification', () {
+    for (final (terminalPath, exactExists) in [
+      ('lib/main.dart!', true),
+      ('lib/src/missing.dart', false),
+    ]) {
+      test(
+        'exact hyperlink verification isolates cached heuristics for $terminalPath',
+        () async {
+          final sshClient = _MockSshClient();
+          final sftp = _MockSftpClient();
+          final session = SshSession(
+            connectionId: 7,
+            hostId: 1,
+            client: sshClient,
+            config: const SshConnectionConfig(
+              hostname: 'terminal.example.com',
+              port: 22,
+              username: 'root',
+            ),
+          );
+          final messages = <String>[];
+          final verifier = TerminalPathVerifier(
+            currentScope: () => '1:7:/project',
+            workingDirectory: () => '/project',
+            activeSession: () => session,
+            isMounted: () => true,
+            onCacheChanged: () {},
+            showMessage: messages.add,
+          );
+          addTearDown(() {
+            verifier
+              ..cancelPendingBatch()
+              ..disposeTerminalPathVerificationSftp();
+          });
+          when(sshClient.sftp).thenAnswer((_) async => sftp);
+          when(() => sftp.stat(any())).thenAnswer((invocation) async {
+            final requested = invocation.positionalArguments.single as String;
+            if (requested == '/project/lib/src' ||
+                requested == '/project/lib/main.dart' ||
+                exactExists && requested == '/project/$terminalPath') {
+              return SftpFileAttrs();
+            }
+            // ignore: only_throw_errors
+            throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+          });
+
+          final heuristicPath = await verifier.resolveVerifiedTerminalFilePath(
+            terminalPath,
+          );
+          expect(
+            heuristicPath,
+            exactExists ? '/project/lib/main.dart' : '/project/lib/src',
+          );
+          for (var attempt = 0; attempt < 2; attempt++) {
+            expect(
+              await verifier.resolveVerifiedTerminalFilePath(
+                terminalPath,
+                exact: true,
+              ),
+              exactExists ? '/project/$terminalPath' : isNull,
+            );
+          }
+          // Exact failures are reported by the explicit-link caller, not twice.
+          expect(messages, isEmpty);
+          expect(
+            await verifier.resolveVerifiedTerminalFilePath(terminalPath),
+            heuristicPath,
+          );
+        },
+      );
+    }
+
     test('path cache evicts oldest stores and retains reinserted paths', () {
       fakeAsync((async) {
         final sshClient = _MockSshClient();

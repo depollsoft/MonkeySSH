@@ -125,8 +125,8 @@ def classify(paths):
             or '/fastlane/' in path
         )
         result['tooling'] |= tooling
-        # ci.yml owns the pinned Flutter SDK and the terminal-test job itself,
-        # so changes to it must exercise the vendored suite too.
+        # ci.yml owns the pinned Flutter SDK and the terminal-test and esctest
+        # jobs themselves, so changes to it must exercise the vendored suite too.
         result['third_party'] |= (
             path.startswith('third_party/') or path == '.github/workflows/ci.yml'
         )

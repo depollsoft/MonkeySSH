@@ -6,7 +6,8 @@ import 'dart:ui';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, defaultTargetPlatform;
 import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -17,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:monkeyssh/app/routes.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/data/repositories/host_repository.dart';
 import 'package:monkeyssh/data/repositories/port_forward_repository.dart';
@@ -53,6 +55,8 @@ import 'package:monkeyssh/domain/services/app_review_prompt_service.dart';
 import 'package:monkeyssh/domain/services/device_debug_service.dart';
 import 'package:monkeyssh/domain/services/git_working_tree_service.dart';
 import 'package:monkeyssh/domain/services/host_cli_launch_preferences_service.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 import 'package:monkeyssh/domain/services/monetization_service.dart';
 import 'package:monkeyssh/domain/services/monkeymux_installer_service.dart';
@@ -79,6 +83,8 @@ import 'package:monkeyssh/presentation/widgets/acp_transcript_search_bar.dart';
 import 'package:monkeyssh/presentation/widgets/agent_tool_icon.dart';
 import 'package:monkeyssh/presentation/widgets/agent_usage_rings.dart';
 import 'package:monkeyssh/presentation/widgets/agent_worktree_removal.dart';
+import 'package:monkeyssh/presentation/widgets/display_fold.dart'
+    show displayFoldContentGutter;
 import 'package:monkeyssh/presentation/widgets/keyboard_toolbar.dart';
 import 'package:monkeyssh/presentation/widgets/monkey_terminal_view.dart';
 import 'package:monkeyssh/presentation/widgets/snippet_key_sender.dart';
@@ -387,6 +393,43 @@ class _FakeRemoteAdbCommandRunner implements RemoteAdbCommandRunner {
 }
 
 class _FakeSshSession extends Fake implements SshSession {}
+
+/// A clipboard whose program reads or paste snapshot wait until [release].
+class _BlockingKittyClipboardPlatform implements KittyClipboardPlatform {
+  Completer<void>? _readGate;
+  Completer<void>? _snapshotGate;
+
+  void blockRead() => _readGate = Completer<void>();
+
+  void blockSnapshot() => _snapshotGate = Completer<void>();
+
+  void release() {
+    _readGate?.complete();
+    _snapshotGate?.complete();
+  }
+
+  @override
+  Future<List<String>> availableTypes() async => const ['text/plain'];
+
+  @override
+  Future<Uint8List?> read(String mime) async {
+    await _readGate?.future;
+    return utf8.encode('clip');
+  }
+
+  @override
+  Future<List<String>?> write(List<KittyClipboardEntry> entries) async => [
+    for (final entry in entries) entry.mime,
+  ];
+
+  @override
+  Future<KittyClipboardPasteRead> readPasteSnapshot() async {
+    await _snapshotGate?.future;
+    return KittyClipboardPasteRead.snapshot(
+      KittyClipboardSnapshot({'text/plain': utf8.encode('caption')}),
+    );
+  }
+}
 
 class _MockTmuxService extends Mock implements TmuxService {
   String? detectedVersionValue;
@@ -1147,6 +1190,19 @@ void main() {
           ),
           396,
         );
+        // A key in the vertical bar sits just above the keyboard; its menu
+        // opens upward.
+        expect(
+          resolveTerminalOverflowMenuMaxHeight(
+            mediaQuery: const MediaQueryData(
+              size: Size(466, 678),
+              viewInsets: EdgeInsets.only(bottom: 336),
+            ),
+            isMobilePlatform: true,
+            anchorTop: 290,
+          ),
+          282,
+        );
         expect(
           resolveTerminalOverflowMenuMaxHeight(
             mediaQuery: mediaQuery,
@@ -1777,6 +1833,7 @@ void main() {
       List<Override> overrides = const [],
       bool appShortcuts = false,
       SystemVerticalBar? verticalBar,
+      ThemeData? theme,
     }) => ProviderScope(
       overrides: [
         databaseProvider.overrideWithValue(db),
@@ -1796,6 +1853,7 @@ void main() {
       child:
           child ??
           MaterialApp(
+            theme: theme,
             builder: (context, child) => _withAppScopes(
               child!,
               appShortcuts: appShortcuts,
@@ -2358,6 +2416,147 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets(
+      'pastes as a kitty paste event when the program set mode 5522',
+      (tester) async {
+        String b64(String value) => base64Encode(utf8.encode(value));
+        final png = Uint8List.fromList([
+          0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 7, //
+        ]);
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.getData') {
+              return {'text': 'caption'};
+            }
+            if (call.method == 'Clipboard.hasStrings') return {'value': true};
+            return null;
+          },
+        );
+        const pasteboard = MethodChannel('pasteboard');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          pasteboard,
+          (call) async => switch (call.method) {
+            'files' => <String>[],
+            'image' => png,
+            _ => null,
+          },
+        );
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger
+            ..setMockMethodCallHandler(SystemChannels.platform, null)
+            ..setMockMethodCallHandler(pasteboard, null);
+        });
+        await pumpScreen(tester);
+        await tester.pumpAndSettle();
+        session.terminal!.write('\x1b[?2004;5522h');
+        shellWrites.clear();
+
+        await tester.ensureVisible(find.byTooltip('Paste'));
+        await tester.tap(find.byTooltip('Paste'));
+        await tester.pumpAndSettle();
+
+        // The program gets the clipboard's types, not the text, and the image
+        // is not uploaded.
+        final event = utf8.decode(
+          shellWrites.expand((chunk) => chunk).toList(),
+        );
+        expect(event, startsWith('\x1b]5522;type=read:status=OK:pw='));
+        expect(event, contains(b64('image/png text/plain\n')));
+        expect(event, isNot(contains('caption')));
+        expect(event, isNot(contains('\x1b[200~')));
+
+        // It then reads the image with the event's one-time password.
+        final password = RegExp(':pw=([A-Za-z0-9+/=]+)')
+            .firstMatch(event)!
+            .group(1)!;
+        shellWrites.clear();
+        session.debugHandlePrivateOsc('5522', [
+          'type=read:pw=$password:name=${b64('Paste event')}',
+          b64('image/png'),
+        ]);
+        await tester.pumpAndSettle();
+        expect(
+          utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+          contains(';${base64Encode(png)}\x1b\\'),
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    for (final whileQueued in [false, true]) {
+      testWidgets(
+        'pastes normally when the program turns paste events off first, '
+        'whileQueued=$whileQueued',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async => call.method == 'files' ? <String>[] : null,
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpScreen(
+            tester,
+            sharedClipboard: true,
+            sharedClipboardLocalRead: true,
+          );
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          if (whileQueued) {
+            // The paste event waits behind the program's own clipboard read.
+            platform.blockRead();
+            session.debugHandlePrivateOsc('5522', [
+              'type=read:id=r',
+              b64('text/plain'),
+            ]);
+          } else {
+            platform.blockSnapshot();
+          }
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(written, contains('\x1b[200~caption\x1b[201~'));
+          expect(
+            find.text('Paste canceled because terminal input changed.'),
+            findsNothing,
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
 
     Future<void> openTerminalOverflowMenu(WidgetTester tester) async {
       await tester.tap(find.byIcon(Icons.more_vert));
@@ -5027,6 +5226,8 @@ void main() {
       RemoteFileService? remoteFileServiceOverride,
       Stream<TmuxWindowChangeEvent>? windowEvents,
       bool appShortcuts = false,
+      SystemVerticalBar? verticalBar,
+      ThemeData? theme,
     }) async {
       const tmuxSessionName = 'work';
       const windows = <TmuxWindow>[
@@ -5113,6 +5314,8 @@ void main() {
           ],
           initialTmuxSessionName: tmuxSessionName,
           appShortcuts: appShortcuts,
+          verticalBar: verticalBar,
+          theme: theme,
         ),
       );
 
@@ -5298,7 +5501,13 @@ void main() {
       await tester.pump();
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-    for (final interruption in ['none', 'typing', 'window', 'partial']) {
+    for (final interruption in [
+      'none',
+      'typing',
+      'window',
+      'windowBeforeConfirm',
+      'partial',
+    ]) {
       testWidgets('clipboard content URI upload handles $interruption', (
         tester,
       ) async {
@@ -5364,7 +5573,7 @@ void main() {
             null,
           );
         });
-        if (interruption == 'window') {
+        if (interruption.startsWith('window')) {
           await pumpTmuxScreen(
             tester,
             _MockTmuxService(),
@@ -5381,6 +5590,17 @@ void main() {
         await tester.tap(find.byTooltip('Paste'));
         await tester.pumpAndSettle();
         expect(find.text('Upload clipboard files?'), findsOneWidget);
+        if (interruption == 'windowBeforeConfirm') {
+          // The paste stays with the window it was asked for in, even when
+          // the upload is confirmed after the switch.
+          events.add(
+            const TmuxWindowListEvent([
+              TmuxWindow(index: 0, name: 'shell', isActive: false),
+              TmuxWindow(index: 1, name: 'agent', isActive: true),
+            ]),
+          );
+          await tester.pump();
+        }
         await tester.tap(find.text('Upload and paste'));
         await tester.pumpAndSettle();
         expect(uploaded, [
@@ -5418,7 +5638,7 @@ void main() {
         );
         expect(
           output,
-          interruption == 'typing' || interruption == 'window'
+          interruption == 'typing' || interruption.startsWith('window')
               ? isNot(contains('one.txt'))
               : contains('one.txt'),
         );
@@ -5430,6 +5650,85 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    for (final windowChange in ['none', 'away', 'awayAndBack']) {
+      testWidgets(
+        'a clipboard paste stops when the window changes while the clipboard '
+        'is read, windowChange=$windowChange',
+        (tester) async {
+          final events = StreamController<TmuxWindowChangeEvent>.broadcast();
+          addTearDown(events.close);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+          await pumpTmuxScreen(
+            tester,
+            _MockTmuxService(),
+            windowEvents: events.stream,
+          );
+          await tester.pumpAndSettle();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          if (windowChange != 'none') {
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: false),
+                TmuxWindow(index: 1, name: 'agent', isActive: true),
+              ]),
+            );
+            await tester.pump();
+          }
+          if (windowChange == 'awayAndBack') {
+            // Coming back does not revive the paste: another window was
+            // shown in between.
+            events.add(
+              const TmuxWindowListEvent([
+                TmuxWindow(index: 0, name: 'shell', isActive: true),
+                TmuxWindow(index: 1, name: 'agent', isActive: false),
+              ]),
+            );
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          expect(
+            utf8.decode(shellWrites.expand((chunk) => chunk).toList()),
+            windowChange == 'none'
+                ? contains('caption')
+                : isNot(contains('caption')),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
     }
 
     testWidgets('shows the detected tmux version in terminal info', (
@@ -6002,6 +6301,200 @@ void main() {
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]11;')));
       expect(shellTextAfterThemeChange, isNot(contains('\x1b]4;')));
     }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    for (final switchWindow in [false, true]) {
+      testWidgets(
+        'a kitty paste that falls back to a normal paste stays with its '
+        'MonkeyMux window, switchWindow=$switchWindow',
+        (tester) async {
+          String b64(String value) => base64Encode(utf8.encode(value));
+          final tmuxService = _MockTmuxService();
+          final monkeyMuxService = _MockMonkeyMuxService();
+          const sessionName = 'work';
+          TmuxWindow window(int index, {required bool active}) => TmuxWindow(
+            index: index,
+            id: '@$index',
+            name: index == 0 ? 'editor' : 'shell',
+            isActive: active,
+            terminalBracketedPasteMode: true,
+            terminalKittyPasteEventsMode: index == 0,
+          );
+          var windows = [window(0, active: true), window(1, active: false)];
+          host = _buildHost(
+            id: host.id,
+            tmuxSessionName: sessionName,
+            remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+          );
+          final muxFixture =
+              createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+                ..stubPrefetch()
+                ..stubForegroundClient()
+                ..stubWindows(() => windows)
+                ..stubWindowEvents()
+                ..stubPaneContext()
+                ..stubThemeRefresh();
+          when(
+            () => monkeyMuxService.refreshWindows(
+              session,
+              sessionName,
+              extraFlags: any(named: 'extraFlags'),
+            ),
+          ).thenAnswer((_) async => windows);
+          final filesGate = Completer<void>();
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => switch (call.method) {
+              'Clipboard.getData' => {'text': 'caption'},
+              'Clipboard.hasStrings' => {'value': true},
+              _ => null,
+            },
+          );
+          const pasteboard = MethodChannel('pasteboard');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            pasteboard,
+            (call) async {
+              if (call.method != 'files') {
+                return null;
+              }
+              await filesGate.future;
+              return <String>[];
+            },
+          );
+          addTearDown(() {
+            tester.binding.defaultBinaryMessenger
+              ..setMockMethodCallHandler(SystemChannels.platform, null)
+              ..setMockMethodCallHandler(pasteboard, null);
+          });
+
+          await muxFixture.pump(tester);
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+          await tester.pumpAndSettle();
+          final platform = _BlockingKittyClipboardPlatform();
+          session
+            ..clipboardSharingEnabled = true
+            ..localClipboardReadEnabled = true
+            ..kittyClipboard.platform = platform
+            ..terminal!.write('\x1b[?2004;5522h');
+          // The paste event waits behind the program's own clipboard read.
+          platform.blockRead();
+          session.debugHandlePrivateOsc('5522', [
+            'type=read:id=r',
+            b64('text/plain'),
+          ]);
+          await tester.pump();
+          shellWrites.clear();
+
+          await tester.ensureVisible(find.byTooltip('Paste'));
+          await tester.tap(find.byTooltip('Paste'));
+          await tester.pump();
+          await tester.pump();
+          // The program turns paste events off, so the paste falls back to
+          // text, and the user moves to the other window while the fallback
+          // reads the clipboard.
+          session.terminal!.write('\x1b[?5522l');
+          platform.release();
+          await tester.pump();
+          await tester.pump();
+          if (switchWindow) {
+            windows = [window(0, active: false), window(1, active: true)];
+            muxFixture.windowEvents.add(TmuxWindowListEvent(windows));
+            await tester.pump();
+          }
+          filesGate.complete();
+          await tester.pumpAndSettle();
+
+          final written = utf8.decode(
+            shellWrites.expand((chunk) => chunk).toList(),
+          );
+          expect(written, isNot(contains(':pw=')));
+          expect(
+            written,
+            switchWindow
+                ? isNot(contains('caption'))
+                : contains('\x1b[200~caption\x1b[201~'),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.android),
+      );
+    }
+
+    testWidgets(
+      'a MonkeyMux shell prompt gets its click while stale mouse reports stay '
+      'suppressed',
+      (tester) async {
+        final tmuxService = _MockTmuxService();
+        final monkeyMuxService = _MockMonkeyMuxService();
+        const sessionName = 'work';
+        const initialWindows = <TmuxWindow>[
+          TmuxWindow(
+            index: 0,
+            id: '@0',
+            name: 'shell',
+            isActive: true,
+            currentCommand: 'zsh',
+            panePid: 100,
+          ),
+        ];
+        host = _buildHost(
+          id: host.id,
+          tmuxSessionName: sessionName,
+          remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+        );
+        final muxFixture =
+            createMuxFixture(tmuxService, monkeyMuxService, sessionName)
+              ..stubPrefetch()
+              ..stubForegroundClient()
+              ..stubWindows(() => initialWindows)
+              ..stubWindowEvents()
+              ..stubPaneContext()
+              ..stubThemeRefresh();
+
+        await muxFixture.pump(tester);
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byKey(const ValueKey('tmux-handle-bar')), findsOneWidget);
+
+        // fish asks for clicks with click_events=1; mouse tracking stays off.
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07> \x1b]133;B\x07ls -la',
+        );
+        await tester.pumpAndSettle();
+        String written() => shellWrites.map(String.fromCharCodes).join();
+
+        // A mouse report nothing asked for is still dropped.
+        shellWrites.clear();
+        session.terminal!.onOutput!('\x1b[<0;3;1M\x1b[<0;3;1m');
+        await tester.pump();
+        expect(written(), isNot(contains('\x1b[<')));
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        final row = session.terminal!.buffer.absoluteCursorY;
+        final target = render.localToGlobal(
+          render.getOffset(CellOffset(3, row)) +
+              render.cellSize.center(Offset.zero),
+        );
+        final isDesktop = defaultTargetPlatform == TargetPlatform.macOS;
+        await tester.tapAt(
+          target,
+          kind: isDesktop ? PointerDeviceKind.mouse : PointerDeviceKind.touch,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        final screenRow = row - session.terminal!.buffer.scrollBack + 1;
+        expect(written(), contains('\x1b[<0;4;${screenRow}M'));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+      }),
+    );
 
     testWidgets(
       'keeps IME text when a MonkeyMux command exits in the active window',
@@ -8886,6 +9379,210 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
 
+    // Ctrl+U used to leave the popup over the cleared prompt, and, when it
+    // came before the shell echoed the last key, the typed prefix behind in
+    // the optimistic snapshot, so every later request completed a line nobody
+    // typed ("git chls ~/b"), also when the next keys came before the shell
+    // redrew the cleared line. A popup opened again after being hidden also
+    // stayed empty until something else rebuilt the screen.
+    for (final (echoedFirst, typedBeforeRedraw) in [
+      (true, false),
+      (false, false),
+      (true, true),
+    ]) {
+      testWidgets('completes the new line after Ctrl+U clears the old one, '
+          'echoed first: $echoedFirst, '
+          'typed before the redraw: $typedBeforeRedraw', (tester) async {
+        final completionService = _TestShellCompletionService(
+          cachedSuggestions: const <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'checkout',
+              replacement: 'checkout',
+              replacementStart: 4,
+              replacementEnd: 6,
+              kind: ShellCompletionSuggestionKind.history,
+              commitSuffix: ' ',
+            ),
+          ],
+          completionSuggestions:
+              const <String, List<ShellCompletionSuggestion>>{
+                '~/b': <ShellCompletionSuggestion>[
+                  ShellCompletionSuggestion(
+                    label: '~/bin/',
+                    replacement: '~/bin/',
+                    replacementStart: 3,
+                    replacementEnd: 6,
+                    kind: ShellCompletionSuggestionKind.directory,
+                  ),
+                ],
+              },
+        );
+
+        session.terminal!.write('root@host ~ % git c');
+        await pumpScreen(tester, shellCompletionService: completionService);
+        session.terminal!.textInput('h');
+        await tester.pump();
+        await tester.pump();
+        if (echoedFirst) {
+          session.terminal!.write('h');
+          await tester.pump();
+        }
+        expect(find.text('checkout'), findsOneWidget);
+
+        // Ctrl+U, then the shell redraws the empty prompt, before or after
+        // the next keys arrive (and echoes those).
+        session.terminal!.textInput('\x15');
+        await tester.pump();
+        if (!typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[K');
+          await tester.pump();
+          expect(find.text('checkout'), findsNothing);
+        }
+
+        for (final character in 'ls ~/b'.split('')) {
+          session.terminal!.textInput(character);
+          await tester.pump();
+        }
+        if (typedBeforeRedraw) {
+          session.terminal!.write('\rroot@host ~ % \x1b[Kls ~/b');
+          await tester.pump();
+        }
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.pump();
+
+        expect(
+          completionService.completeInvocations.last.commandLine,
+          'ls ~/b',
+        );
+        expect(find.text('~/bin/'), findsOneWidget);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+    }
+
+    // The keyboard can commit the end of a quickly typed or autocorrected word
+    // as a paste, which completion used to ignore.
+    testWidgets('completes after the keyboard commits text as a paste', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+        completionSuggestions: const <String, List<ShellCompletionSuggestion>>{
+          'sta': <ShellCompletionSuggestion>[
+            ShellCompletionSuggestion(
+              label: 'status',
+              replacement: 'status',
+              replacementStart: 4,
+              replacementEnd: 7,
+              kind: ShellCompletionSuggestionKind.command,
+              commitSuffix: ' ',
+            ),
+          ],
+        },
+      );
+
+      session.terminal!.write('\x1b[?2004hroot@host ~ % git s');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.paste('ta');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        contains('git sta'),
+      );
+      expect(find.text('status'), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // Input notifies listeners before the shell echoes it, so a Backspace
+    // followed by a key used to look like a line that stopped leading into
+    // the snapshot, which was dropped and seeded again from "cat ab".
+    testWidgets('completes edits typed before their echo', (tester) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % cat ab');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.textInput('c');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('cat abc')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'cat ac');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // An echo can show more than the snapshot while a Backspace for it is
+    // still pending ("git che" on the way to "git ch"), which is no reason to
+    // drop the snapshot and complete the echoed line.
+    testWidgets('keeps the snapshot through an echo a Backspace will undo', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % git c');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('h');
+      await tester.pump();
+      session.terminal!.write('h');
+      await tester.pump();
+      session.terminal!.textInput('e');
+      await tester.pump();
+      session.terminal!.keyInput(TerminalKey.backspace);
+      await tester.pump();
+      session.terminal!.write('e');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+      session.terminal!.write('\b \b');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.map((call) => call.commandLine),
+        isNot(contains('git che')),
+      );
+      expect(completionService.completeInvocations.last.commandLine, 'git ch');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    // The shell can echo a paste in pieces; a piece is a line on the way,
+    // not a sign the snapshot went stale.
+    testWidgets('keeps the snapshot through a paste echoed in pieces', (
+      tester,
+    ) async {
+      final completionService = _TestShellCompletionService(
+        cachedSuggestions: const <ShellCompletionSuggestion>[],
+      );
+
+      session.terminal!.write('root@host ~ % ');
+      await pumpScreen(tester, shellCompletionService: completionService);
+      session.terminal!.textInput('c');
+      await tester.pump();
+      session.terminal!.write('c');
+      await tester.pump();
+      session.terminal!.textInput('at abc');
+      await tester.pump();
+      session.terminal!.write('at a');
+      await tester.pump();
+      session.terminal!.textInput('d');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump();
+
+      expect(
+        completionService.completeInvocations.last.commandLine,
+        'cat abcd',
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
     testWidgets(
       'accepting a completion sends one Backspace per replaced character',
       (tester) async {
@@ -10599,6 +11296,134 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
     );
+
+    testWidgets('a native agent conversation hides the terminal it replaces', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      const bridgeId = '0123456789abcdef0123456789abcdef';
+      final key = fakeAcpKey(
+        hostId: host.id,
+        providerId: AcpBuiltinProviderIds.pi,
+        bridgeId: bridgeId,
+        acpSessionId: 'native-session',
+      );
+      final acpManager = FakeAcpSessionManager(
+        sessions: [fakeAcpSession(key: key, providerLabel: 'Pi')],
+      );
+      addTearDown(acpManager.dispose);
+      session.activeNativeAcpSessionKey = key;
+      addTearDown(() => session.activeNativeAcpSessionKey = null);
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work')).thenAnswer(
+        (_) async => const [
+          TmuxWindow(
+            index: 0,
+            id: '@1',
+            name: 'Pi',
+            isActive: true,
+            nativeAcpBridgeId: bridgeId,
+            nativeAcpProviderId: AcpBuiltinProviderIds.pi,
+          ),
+        ],
+      );
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+        acpSessionManager: acpManager,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsOneWidget);
+      expect(session.terminal!.visible, isFalse);
+      // The chat replaced the terminal before the attach was detected, and
+      // MonkeyMux still learns it once it is.
+      expect(hiddenStates.last, isTrue);
+
+      tester
+          .widget<AgentChatScreen>(find.byType(AgentChatScreen))
+          .onExitEmbedded!();
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentChatScreen), findsNothing);
+      expect(session.terminal!.visible, isTrue);
+      expect(hiddenStates.last, isFalse);
+    });
+
+    testWidgets('MonkeyMux learns the app went away before the attach landed', (
+      tester,
+    ) async {
+      final tmuxService = _MockTmuxService();
+      final monkeyMuxService = _MockMonkeyMuxService();
+      host = _buildHost(
+        id: host.id,
+        tmuxSessionName: 'work',
+        remoteMuxBackend: RemoteMuxBackend.monkeyMux,
+      );
+      final windows = Completer<List<TmuxWindow>>();
+      when(() => monkeyMuxService.hasForegroundClientOrThrow(session, 'work'))
+          .thenAnswer((_) async => true);
+      when(() => monkeyMuxService.listWindows(session, 'work'))
+          .thenAnswer((_) => windows.future);
+      when(() => monkeyMuxService.watchWindowChanges(session, 'work'))
+          .thenAnswer((_) => const Stream<TmuxWindowChangeEvent>.empty());
+      when(() => tmuxService.prefetchInstalledAgentTools(session))
+          .thenAnswer((_) async {});
+      final hiddenStates = <bool>[];
+      when(
+        () => monkeyMuxService.setClientHidden(
+          session,
+          'work',
+          hidden: any(named: 'hidden'),
+        ),
+      ).thenAnswer(
+        (invocation) =>
+            hiddenStates.add(invocation.namedArguments[#hidden] as bool),
+      );
+      await pumpScreen(
+        tester,
+        tmuxService: tmuxService,
+        monkeyMuxService: monkeyMuxService,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(session.remoteMuxBackend, isNot(RemoteMuxBackend.monkeyMux));
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      windows.complete(const [
+        TmuxWindow(index: 0, id: '@1', name: 'shell', isActive: true),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(session.remoteMuxBackend, RemoteMuxBackend.monkeyMux);
+      expect(hiddenStates, [true]);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(hiddenStates.last, isFalse);
+    });
 
     testWidgets('Pi handle follows live model-provider changes', (
       tester,
@@ -12731,6 +13556,377 @@ void main() {
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    // iPhone Duo's inner display held upright and propped up like a laptop.
+    void useProppedDisplay(WidgetTester tester, {bool keyboard = false}) {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      tester.view
+        // The keyboard covers the home indicator, and its inset reaches the
+        // top of the fold.
+        ..padding = FakeViewPadding(top: 82, bottom: keyboard ? 0 : 34)
+        ..viewPadding = const FakeViewPadding(top: 82, bottom: 34)
+        ..viewInsets = FakeViewPadding(bottom: keyboard ? 951 - 455.5 : 0);
+      if (keyboard) {
+        final controller = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: true);
+        addTearDown(() => controller.debugSetVisible(visible: null));
+      }
+    }
+
+    // The propped row's keys from left to right, keyboard key last.
+    List<Rect> proppedKeyRects(WidgetTester tester, List<String> tooltips) {
+      final rects = [
+        for (final tooltip in tooltips) tester.getRect(find.byTooltip(tooltip)),
+      ];
+      for (final (index, rect) in rects.indexed) {
+        final reason = tooltips[index];
+        expect(
+          find.descendant(
+            of: find.byType(AppBar),
+            matching: find.byTooltip(reason),
+          ),
+          findsNothing,
+          reason: reason,
+        );
+        expect(find.byTooltip(reason).hitTestable(), findsOneWidget);
+        expect(rect.center.dy, rects.first.center.dy, reason: reason);
+        if (index > 0) {
+          expect(
+            rect.left,
+            greaterThan(rects[index - 1].right),
+            reason: reason,
+          );
+        }
+      }
+      // The keyboard key is nearest the thumb.
+      expect(rects.last.right, 669 - 12);
+      return rects;
+    }
+
+    FocusNode keyFocus(WidgetTester tester, String tooltip) => Focus.of(
+      tester.element(
+        find.descendant(
+          of: find.byTooltip(tooltip),
+          matching: find.byWidgetPredicate(
+            (widget) => widget is Icon || widget is BackButtonIcon,
+          ),
+        ),
+      ),
+    );
+
+    testWidgets(
+      'stands the propped controls in a row of keys below the '
+      'fold, before the window navigator',
+      (tester) async {
+        useProppedDisplay(tester);
+        await pumpTmuxScreen(tester, _MockTmuxService());
+
+        // The title bar keeps only the host line.
+        final appBar = find.byType(AppBar);
+        expect(
+          find.descendant(
+            of: appBar,
+            matching: find.text('Terminal test host'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: appBar, matching: find.byType(IconButton)),
+          findsNothing,
+        );
+        // The navigator shows on its page, so Windows needs no key.
+        expect(find.byTooltip('tmux windows'), findsNothing);
+
+        final platform = Theme.of(tester.element(find.byType(TerminalScreen)))
+            .platform;
+        final target = platform == TargetPlatform.iOS ? 44.0 : 48.0;
+        const tooltips = [
+          'Browse files',
+          'Hide extra keys',
+          'Show menu',
+          'Show system keyboard',
+        ];
+        final keys = proppedKeyRects(tester, tooltips);
+        final handle = tester.getRect(
+          find.byKey(const ValueKey('tmux-handle-bar')),
+        );
+        for (final (index, key) in keys.indexed) {
+          expect(key.size, Size.square(target), reason: tooltips[index]);
+        }
+        // The row stays clear of the crease, and the navigator takes the rest
+        // of the page.
+        expect(keys.first.top, 495.5 + displayFoldContentGutter);
+        expect(handle.top, keys.first.bottom + displayFoldContentGutter);
+        expect(
+          tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+          lessThanOrEqualTo(455.5),
+        );
+
+        // VoiceOver and Tab reach the keys after the terminal and before the
+        // windows.
+        expect(
+          tester.semantics.simulatedAccessibilityTraversal(),
+          containsAllInOrder([
+            predicate<SemanticsNode>(
+              (node) => node.label.contains('Terminal test host'),
+            ),
+            for (final tooltip in tooltips)
+              isSemantics(tooltip: tooltip, isButton: true),
+            predicate<SemanticsNode>((node) => node.label.contains('shell')),
+          ]),
+        );
+        final files = keyFocus(tester, 'Browse files')..requestFocus();
+        await tester.pump();
+        files.previousFocus();
+        await tester.pump();
+        expect(
+          FocusManager.instance.primaryFocus?.context
+              ?.findAncestorWidgetOfExactType<MonkeyTerminalView>(),
+          isNotNull,
+          reason: 'the terminal comes before the keys',
+        );
+        final keyboardKey = keyFocus(tester, 'Show system keyboard')
+          ..requestFocus();
+        await tester.pump();
+        keyboardKey.nextFocus();
+        await tester.pump();
+        expect(
+          FocusManager.instance.primaryFocus?.context
+              ?.findAncestorWidgetOfExactType<ListTile>(),
+          isNotNull,
+          reason: 'a window row comes after the keys',
+        );
+        await tester.pump(const Duration(seconds: 3));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets('moves Back into the propped row of keys', (tester) async {
+      useProppedDisplay(tester);
+      await tester.pumpWidget(
+        buildScreen(
+          child: const MaterialApp(home: Scaffold(body: Text('hosts'))),
+        ),
+      );
+      // A pushed screen, so Back applies.
+      unawaited(
+        tester
+            .state<NavigatorState>(find.byType(Navigator))
+            .push(
+              MaterialPageRoute<void>(
+                builder: (_) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              ),
+            ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byType(BackButton),
+        ),
+        findsNothing,
+      );
+      final back = tester.getRect(find.byTooltip('Back'));
+      final files = tester.getRect(find.byTooltip('Browse files'));
+      // Back starts the row, as it heads the vertical bar.
+      expect(back.left, 12);
+      expect(back.center.dy, files.center.dy);
+      expect(back.top, greaterThanOrEqualTo(495.5));
+
+      await tester.tap(find.byTooltip('Back'));
+      for (var frame = 0; frame < 4; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+      expect(find.byType(TerminalScreen), findsNothing);
+      expect(find.text('hosts'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('offers Windows among the propped keys while the keyboard '
+        'covers the navigator', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+      final windowsAction = find.byTooltip('tmux windows');
+      expect(windowsAction, findsNothing);
+
+      // A window row takes keyboard focus.
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row has focus',
+      );
+
+      // Propped up, the keyboard covers the whole bottom page.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 951 - 455.5);
+      final keyboard = SystemKeyboardVisibilityController.instance
+        ..debugSetVisible(visible: true);
+      addTearDown(() => keyboard.debugSetVisible(visible: null));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      // The keys ride on the extra keys, one reach from the keyboard.
+      final keys = proppedKeyRects(tester, [
+        'tmux windows',
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      final toolbar = tester.getRect(find.byType(KeyboardToolbar));
+      expect(toolbar.bottom, 455.5);
+      expect(keys.first.bottom, toolbar.top - displayFoldContentGutter);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(keys.first.top),
+      );
+      expect(
+        Focus.of(tester.element(find.text('shell'))).canRequestFocus,
+        isFalse,
+      );
+      expect(find.semantics.byLabel(RegExp('shell')), findsNothing);
+      final focused = FocusManager.instance.primaryFocus?.context;
+      expect(focused?.findAncestorWidgetOfExactType<ListTile>(), isNull);
+      expect(
+        focused?.findAncestorWidgetOfExactType<MonkeyTerminalView>(),
+        isNotNull,
+        reason: 'the terminal has keyboard focus again',
+      );
+
+      // ⌃⌘S opens the windows as a sheet while their page is covered.
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(BottomSheet), findsNothing);
+
+      // So does the Windows key.
+      await tester.tap(windowsAction);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // With the keyboard gone the page shows the windows again.
+      tester.view.viewInsets = FakeViewPadding.zero;
+      keyboard.debugSetVisible(visible: false);
+      await tester.pump();
+      await tester.pump();
+      expect(windowsAction, findsNothing);
+      expect(
+        Focus.of(tester.element(find.text('shell'))).canRequestFocus,
+        isTrue,
+      );
+      expect(find.semantics.byLabel(RegExp('shell')), findsWidgets);
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('⌃⌘S moves focus into the navigator after a covered propped '
+        'session turns to a book', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(669, 951),
+        fold: const Rect.fromLTRB(0, 455.5, 669, 495.5),
+      );
+      await pumpTmuxScreen(tester, _MockTmuxService(), appShortcuts: true);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 951 - 455.5);
+      final keyboard = SystemKeyboardVisibilityController.instance
+        ..debugSetVisible(visible: true);
+      addTearDown(() => keyboard.debugSetVisible(visible: null));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byTooltip('tmux windows'), findsOneWidget);
+
+      // Turned on its side, with the keyboard still up.
+      tester.view
+        ..physicalSize = const Size(951, 669)
+        ..viewInsets = const FakeViewPadding(bottom: 300)
+        ..displayFeatures = const [
+          DisplayFeature(
+            bounds: Rect.fromLTWH(475, 0, 0, 669),
+            type: DisplayFeatureType.fold,
+            state: DisplayFeatureState.postureHalfOpened,
+          ),
+        ];
+      await tester.pump();
+
+      for (final key in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.keyS,
+      ]) {
+        await tester.sendKeyDownEvent(key);
+      }
+      for (final key in [
+        LogicalKeyboardKey.keyS,
+        LogicalKeyboardKey.metaLeft,
+        LogicalKeyboardKey.controlLeft,
+      ]) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(
+        FocusManager.instance.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<ListTile>(),
+        isNotNull,
+        reason: 'a window row on the book page has focus',
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('a flat fold keeps the single-page terminal layout', (
       tester,
     ) async {
@@ -12835,6 +14031,119 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+    testWidgets(
+      'gives a navigator pinned to its page full-size touch '
+      'targets',
+      (tester) async {
+        useFoldedDisplay(
+          tester,
+          size: const Size(951, 669),
+          fold: const Rect.fromLTWH(475, 0, 0, 669),
+        );
+        tester.view
+          ..padding = const FakeViewPadding(bottom: 20)
+          ..viewPadding = const FakeViewPadding(bottom: 20);
+        await pumpTmuxScreen(tester, _MockTmuxService());
+
+        final platform = Theme.of(tester.element(find.byType(TerminalScreen)))
+            .platform;
+        final target = platform == TargetPlatform.iOS ? 44.0 : 48.0;
+        final close = find.widgetWithIcon(IconButton, Icons.close);
+        expect(close, findsNWidgets(2));
+        for (final button in [close.first, close.last]) {
+          final size = tester.getSize(button);
+          expect(size.width, greaterThanOrEqualTo(target));
+          expect(size.height, greaterThanOrEqualTo(target));
+        }
+        for (final row in ['shell', 'agent', 'New window', 'AI Sessions']) {
+          expect(
+            tester
+                .getSize(
+                  find.ancestor(
+                    of: find.text(row),
+                    matching: find.byType(ListTile),
+                  ),
+                )
+                .height,
+            greaterThanOrEqualTo(target),
+            reason: row,
+          );
+        }
+        // The list scrolls its last rows clear of the home indicator.
+        expect(
+          tester
+              .widget<SingleChildScrollView>(
+                find.byKey(const ValueKey('tmux-window-list')),
+              )
+              .padding,
+          const EdgeInsets.only(bottom: 20),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      },
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets('names the host above a navigator pinned beside a vertical '
+        'bar', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTRB(455.5, 0, 495.5, 669),
+      );
+      tester.view
+        ..padding = const FakeViewPadding(right: 84, bottom: 20)
+        ..viewPadding = const FakeViewPadding(right: 84, bottom: 20);
+      final theme = FluttyTheme.fromTerminalTheme(
+        monkey_themes.TerminalThemes.resolveById(
+          brightness: Brightness.dark,
+          themeId: monkey_themes.TerminalThemes.defaultDarkThemeId,
+        ),
+        brightness: Brightness.dark,
+      );
+      await pumpTmuxScreen(
+        tester,
+        _MockTmuxService(),
+        theme: theme,
+        verticalBar: const SystemVerticalBar(
+          edge: SystemVerticalBarEdge.right,
+          itemColumn: Rect.fromLTRB(881, 124, 925, 635),
+        ),
+      );
+
+      expect(find.byType(AppBar), findsNothing);
+      final identity = find.bySemanticsLabel(
+        RegExp('^Terminal test host, Connected, '),
+      );
+      expect(tester.getSemantics(identity), isSemantics(isHeader: true));
+      final identityRect = tester.getRect(identity);
+      expect(identityRect.right, lessThanOrEqualTo(455.5));
+      expect(
+        identityRect.bottom,
+        lessThanOrEqualTo(
+          tester.getRect(find.byKey(const ValueKey('tmux-handle-bar'))).top,
+        ),
+      );
+      // The terminal's page keeps its full height.
+      final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
+      expect(terminalRect.left, greaterThanOrEqualTo(495.5));
+      expect(terminalRect.top, lessThanOrEqualTo(identityRect.top));
+      // The status glyph clears 3:1 against the navigator's fill, which
+      // the theme's own accent does not.
+      final glyph = tester.widget<Icon>(
+        find.descendant(
+          of: identity,
+          matching: find.byIcon(Icons.check_circle_outline),
+        ),
+      );
+      final fill = theme.colorScheme.surfaceContainerHighest;
+      expect(contrastRatio(theme.colorScheme.primary, fill), lessThan(3));
+      expect(contrastRatio(glyph.color!, fill), greaterThanOrEqualTo(3));
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     testWidgets('keeps the title on the navigator page of a book fold', (
       tester,
     ) async {
@@ -12905,10 +14214,27 @@ void main() {
 
       final terminalRect = tester.getRect(find.byType(MonkeyTerminalView));
       expect(terminalRect.bottom, lessThanOrEqualTo(475));
+      // The keys head the bottom page, and the deck takes the rest.
+      final keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Show system keyboard',
+      ]);
+      expect(keys.first.top, 475 + displayFoldContentGutter);
       final deck = find.text('tap to type');
       expect(deck, findsOneWidget);
-      expect(tester.getRect(deck).top, greaterThan(475));
-      expect(find.bySemanticsLabel('Show keyboard'), findsOneWidget);
+      expect(tester.getRect(deck).top, greaterThan(keys.first.bottom));
+      // The accessible name holds the visible text.
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Tap to type')),
+        isSemantics(
+          label: 'Tap to type',
+          hint: 'Shows the keyboard',
+          isButton: true,
+          hasTapAction: true,
+        ),
+      );
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
@@ -12928,10 +14254,63 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('tap to type'), findsNothing);
+      // The keys ride on the extra keys, above the fold.
+      final keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      expect(
+        keys.first.bottom,
+        lessThanOrEqualTo(tester.getRect(find.byType(KeyboardToolbar)).top),
+      );
       expect(
         tester.getRect(find.byType(MonkeyTerminalView)).bottom,
-        lessThanOrEqualTo(475),
+        lessThanOrEqualTo(keys.first.top),
       );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps Fn and the keyboard key above a keyboard that covers '
+        'the propped page', (tester) async {
+      useProppedDisplay(tester, keyboard: true);
+      await pumpScreen(tester);
+
+      var keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Hide extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      final toolbar = tester.getRect(find.byType(KeyboardToolbar));
+      expect(toolbar.bottom, 455.5);
+      expect(keys.first.bottom, toolbar.top - displayFoldContentGutter);
+
+      // Without the extra keys, the keys sit on the keyboard, clear of the
+      // crease.
+      await tester.tap(find.byTooltip('Hide extra keys'));
+      await tester.pump();
+      expect(find.byType(KeyboardToolbar), findsNothing);
+      keys = proppedKeyRects(tester, [
+        'Browse files',
+        'Show extra keys',
+        'Show menu',
+        'Hide system keyboard',
+      ]);
+      expect(keys.first.bottom, 455.5 - displayFoldContentGutter);
+      expect(
+        tester.getRect(find.byType(MonkeyTerminalView)).bottom,
+        lessThanOrEqualTo(keys.first.top),
+      );
+
+      tester.testTextInput.log.clear();
+      await tester.tap(find.byTooltip('Hide system keyboard'));
+      await tester.pump();
+      expect(
+        tester.testTextInput.log.map((call) => call.method),
+        contains('TextInput.hide'),
+      );
+      await tester.pump(const Duration(seconds: 3));
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     group('with a system vertical bar', () {
@@ -12951,16 +14330,41 @@ void main() {
         addTearDown(tester.view.reset);
       }
 
-      testWidgets('stands the bar controls in it and drops the title bar', (
-        tester,
-      ) async {
+      testWidgets('stands the bar controls in it and names the host in a '
+          'line in place of the title bar', (tester) async {
         useOuterDisplay(tester);
         await pumpScreen(tester, verticalBar: verticalBar);
 
         expect(find.byType(AppBar), findsNothing);
+        final identity = find.bySemanticsLabel(
+          'Terminal test host, Connected, '
+          'root@terminal.example.com · session #7',
+        );
+        expect(
+          tester.getSemantics(identity),
+          isSemantics(
+            label:
+                'Terminal test host, Connected, '
+                'root@terminal.example.com · session #7',
+            isHeader: true,
+          ),
+        );
+        final identityRect = tester.getRect(identity);
+        expect(identityRect.top, 0);
+        expect(identityRect.right, lessThanOrEqualTo(outerDisplay.width - 84));
         expect(
           tester.getRect(find.byType(MonkeyTerminalView)).top,
           lessThan(kToolbarHeight),
+        );
+        // The rail holds actions only; the line shows the status.
+        expect(
+          find.descendant(
+            of: find.byType(VerticalBarRail),
+            matching: find.bySemanticsLabel(
+              RegExp('Terminal connection status'),
+            ),
+          ),
+          findsNothing,
         );
         final column = verticalBar.itemColumn;
         for (final tooltip in [
@@ -12979,14 +14383,43 @@ void main() {
         );
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+      testWidgets('grows the host line with large text', (tester) async {
+        useOuterDisplay(tester);
+        tester.platformDispatcher.textScaleFactorTestValue = 3;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        await pumpScreen(tester, verticalBar: verticalBar);
+
+        final identity = find.bySemanticsLabel(
+          RegExp('^Terminal test host, Connected'),
+        );
+        final identityRect = tester.getRect(identity);
+        final text = tester.getRect(
+          find.descendant(
+            of: identity,
+            matching: find.textContaining(
+              'Terminal test host',
+              findRichText: true,
+            ),
+          ),
+        );
+        expect(identityRect.height, greaterThan(28));
+        expect(text.top, greaterThanOrEqualTo(identityRect.top));
+        expect(text.bottom, lessThanOrEqualTo(identityRect.bottom));
+        expect(
+          tester.getRect(find.byType(MonkeyTerminalView)).top,
+          greaterThanOrEqualTo(identityRect.bottom),
+        );
+        expect(tester.takeException(), isNull);
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
       testWidgets('moves controls the keyboard leaves no room for into the '
           'menu', (tester) async {
         useOuterDisplay(tester);
-        tester.view.viewInsets = const FakeViewPadding(bottom: 265);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 320);
         await pumpScreen(tester, verticalBar: verticalBar);
 
-        // Four controls fit above the keyboard: the keyboard key, the menu,
-        // the status, and the extra keys.
+        // Three controls fit above the keyboard: the keyboard key, the menu
+        // and the extra keys.
         expect(find.byTooltip('Browse files'), findsNothing);
         expect(find.byTooltip('Hide extra keys'), findsOneWidget);
 
@@ -13021,7 +14454,153 @@ void main() {
           );
         }
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('keeps every control in reach when one key fits in the '
+          'vertical bar', (tester) async {
+        useOuterDisplay(tester);
+        // A Live Activity's status cluster and a tall keyboard leave
+        // (678 - 336 - 8) - 264 = 70 pt: room for one key.
+        tester.view.viewInsets = const FakeViewPadding(bottom: 336);
+        final keyboard = SystemKeyboardVisibilityController.instance
+          ..debugSetVisible(visible: true);
+        addTearDown(() => keyboard.debugSetVisible(visible: null));
+        await tester.pumpWidget(
+          buildScreen(
+            child: MaterialApp(
+              builder: (context, child) => _withAppScopes(
+                child!,
+                appShortcuts: false,
+                verticalBar: const SystemVerticalBar(
+                  edge: SystemVerticalBarEdge.right,
+                  itemColumn: Rect.fromLTRB(396, 264, 440, 644),
+                ),
+              ),
+              home: const Scaffold(body: Text('hosts')),
+            ),
+          ),
+        );
+        // A pushed screen, so Back applies.
+        unawaited(
+          tester
+              .state<NavigatorState>(find.byType(Navigator))
+              .push(
+                MaterialPageRoute<void>(
+                  builder: (_) => TerminalScreen(
+                    hostId: host.id,
+                    connectionId: session.connectionId,
+                  ),
+                ),
+              ),
+        );
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 600));
+
+        expect(find.byType(AppBar), findsNothing);
+        final rail = find.byType(VerticalBarRail);
+        expect(
+          find.descendant(of: rail, matching: find.byTooltip('Show menu')),
+          findsOneWidget,
+        );
+        for (final tooltip in [
+          'Back',
+          'Hide system keyboard',
+          'Browse files',
+          'Hide extra keys',
+        ]) {
+          expect(
+            find.descendant(of: rail, matching: find.byTooltip(tooltip)),
+            findsNothing,
+            reason: tooltip,
+          );
+        }
+
+        await tester.tap(find.byTooltip('Show menu'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        // The menu opens upward from its key, clear of the keyboard.
+        for (final label in [
+          'Back',
+          'Browse Files',
+          'Hide Extra Keys',
+          'Hide Keyboard',
+        ]) {
+          expect(find.text(label).hitTestable(), findsOneWidget, reason: label);
+          expect(
+            tester.getRect(find.text(label)).bottom,
+            lessThanOrEqualTo(outerDisplay.height - 336),
+            reason: label,
+          );
+        }
+
+        await tester.tap(find.text('Back'));
+        for (var frame = 0; frame < 4; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+        expect(find.byType(TerminalScreen), findsNothing);
+        expect(find.text('hosts'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+      testWidgets('clears the bar once for the window navigator rows', (
+        tester,
+      ) async {
+        useOuterDisplay(tester);
+        await pumpTmuxScreen(
+          tester,
+          _MockTmuxService(),
+          verticalBar: verticalBar,
+        );
+        await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        // The navigator ends at the bar; its rows keep only their own
+        // 4 pt end padding.
+        final navigatorRight = outerDisplay.width - 84;
+        expect(
+          tester.getRect(find.byKey(const ValueKey('tmux-handle-bar'))).right,
+          navigatorRight,
+        );
+        expect(
+          tester
+              .getRect(find.widgetWithIcon(IconButton, Icons.close).first)
+              .right,
+          navigatorRight - 4,
+        );
+        expect(
+          tester.getRect(find.text('New window')).left,
+          lessThan(navigatorRight / 2),
+        );
+        await tester.pump(const Duration(seconds: 3));
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     });
+
+    testWidgets('keeps the window sidebar rows clear of only their own '
+        'padding beside a vertical bar', (tester) async {
+      useFoldedDisplay(
+        tester,
+        size: const Size(951, 669),
+        fold: const Rect.fromLTWH(475, 0, 0, 669),
+        state: DisplayFeatureState.postureFlat,
+      );
+      tester.view
+        ..padding = const FakeViewPadding(right: 84, bottom: 20)
+        ..viewPadding = const FakeViewPadding(right: 84, bottom: 20);
+      await pumpTmuxScreen(tester, _MockTmuxService());
+      await tester.tap(find.byKey(const ValueKey('tmux-handle-bar')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      // The bar's inset lies on the terminal's side, not the sidebar's.
+      expect(
+        tester
+            .getRect(find.widgetWithIcon(IconButton, Icons.close).first)
+            .right,
+        tmuxSidebarExpandedWidth - 4,
+      );
+      await tester.pump(const Duration(seconds: 3));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('touching the terminal dismisses the expanded tmux bar', (
       tester,
@@ -16958,6 +18537,188 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
+    testWidgets(
+      'a tap on a shell prompt input moves its cursor and shows the keyboard',
+      (tester) async {
+        await pumpScreen(tester);
+        // The shell asked for clicks to move its cursor with arrow keys.
+        session.terminal!.write(
+          'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+        );
+        await tester.pumpAndSettle();
+        expect(tester.testTextInput.isVisible, isFalse);
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x, int y) => render.localToGlobal(
+          render.getOffset(CellOffset(x, y)) +
+              render.cellSize.center(Offset.zero),
+        );
+        String written() => shellWrites.map(String.fromCharCodes).join();
+        // Test taps carry no timestamps, so later ones are spaced out to stay
+        // single taps.
+        Future<void> tapAt(Offset position, Duration at) async {
+          final gesture = await tester.createGesture();
+          await gesture.down(position, timeStamp: at);
+          await gesture.up(timeStamp: at);
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+
+        shellWrites.clear();
+        await tapAt(cell(2, 1), Duration.zero);
+        expect(written(), '\x1b[D' * 7);
+        expect(tester.testTextInput.isVisible, isTrue);
+
+        // Output above the prompt is not its input.
+        shellWrites.clear();
+        await tapAt(cell(1, 0), const Duration(seconds: 1));
+        expect(written(), isEmpty);
+
+        tester.testTextInput.updateEditingValue(
+          _editingValue('hello', selectionOffset: 5),
+        );
+        await tester.pump();
+        shellWrites.clear();
+        await tapAt(cell(4, 1), const Duration(seconds: 2));
+        expect(written(), '\x1b[D' * 5);
+        // The shell moves its cursor, so the IME's text before it is stale.
+        final client = tester.state(
+          find.byType(TerminalTextInputHandler),
+        ) as TextInputClient;
+        expect(
+          client.currentTextEditingValue,
+          const TextEditingValue(
+            text: _deleteDetectionMarker,
+            selection: TextSelection.collapsed(offset: 2),
+          ),
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets('a touch tap on a desktop terminal reaches the program once', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write(
+        'out\r\n\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi',
+      );
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      Offset cell(int x, int y) => render.localToGlobal(
+        render.getOffset(CellOffset(x, y)) +
+            render.cellSize.center(Offset.zero),
+      );
+      String written() => shellWrites.map(String.fromCharCodes).join();
+
+      shellWrites.clear();
+      await tester.tapAt(cell(2, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[D' * 7);
+
+      // With mouse tracking on, the tap is one click.
+      session.terminal!.write('\x1b[?1000h\x1b[?1006h');
+      await tester.pumpAndSettle();
+      shellWrites.clear();
+      await tester.tapAt(cell(4, 1));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(written(), '\x1b[<0;5;2M\x1b[<0;5;2m');
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('a mouse click on a shell prompt input keeps the IME in step', (
+      tester,
+    ) async {
+      await pumpScreen(tester);
+      session.terminal!.write('\x1b]133;A;cl=line\x07\$ \x1b]133;B\x07echo hi');
+      await tester.pumpAndSettle();
+
+      final render = tester
+          .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+          .renderTerminal;
+      final target = render.localToGlobal(
+        render.getOffset(const CellOffset(4, 0)) +
+            render.cellSize.center(Offset.zero),
+      );
+      await tester.tapAt(target);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.testTextInput.updateEditingValue(
+        _editingValue('hello', selectionOffset: 5),
+      );
+      await tester.pump();
+
+      // A trackpad or mouse on a tablet with the soft keyboard up.
+      shellWrites.clear();
+      await tester.tapAt(target, kind: PointerDeviceKind.mouse);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[D' * 5);
+      final client = tester.state(
+        find.byType(TerminalTextInputHandler),
+      ) as TextInputClient;
+      expect(
+        client.currentTextEditingValue,
+        const TextEditingValue(
+          text: _deleteDetectionMarker,
+          selection: TextSelection.collapsed(offset: 2),
+        ),
+      );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets(
+      'a tap that dismisses a selection leaves the prompt cursor alone',
+      (tester) async {
+        await pumpScreen(tester);
+        session.terminal!.write(
+          '\x1b]133;A;click_events=1\x07\$ \x1b]133;B\x07alpha beta',
+        );
+        await tester.pumpAndSettle();
+
+        final render = tester
+            .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+            .renderTerminal;
+        Offset cell(int x) => render.localToGlobal(
+          render.getOffset(CellOffset(x, 0)) +
+              render.cellSize.center(Offset.zero),
+        );
+        await tester.longPressAt(cell(3));
+        await tester.pumpAndSettle();
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+
+        shellWrites.clear();
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        // The next tap reports the click, as fish asks with click_events=1.
+        await tester.tapAt(cell(8));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;9;1M');
+
+        // So does a mouse click, unless it dismisses a selection made with
+        // the mouse.
+        final drag = await tester.startGesture(
+          cell(0),
+          kind: PointerDeviceKind.mouse,
+        );
+        await drag.moveTo(cell(6));
+        await drag.up();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(render.getSelectedContent()?.plainText, isNotEmpty);
+        shellWrites.clear();
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), isEmpty);
+
+        await tester.tapAt(cell(3), kind: PointerDeviceKind.mouse);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(shellWrites.map(String.fromCharCodes).join(), '\x1b[<0;4;1M');
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
     testWidgets('toolbar Ctrl state flows into the screen IME handler', (
       tester,
     ) async {
@@ -17706,6 +19467,142 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.android),
     );
+
+    for (final (link, remotePath) in <(String, String?)>[
+      (
+        '.github/workflows/deploy-pr-preview.yml#L223',
+        '/srv/project/.github/workflows/deploy-pr-preview.yml',
+      ),
+      ('README.md#overview', '/srv/project/README.md'),
+      ('README.md:12', '/srv/project/README.md'),
+      ('main.dart:12:3', '/srv/project/main.dart'),
+      ('.env:12', '/srv/project/.env'),
+      ('123.dart:12', '/srv/project/123.dart'),
+      ('file:///data/MSG.HL7', '/data/MSG.HL7'),
+      ('lib/my%20file.dart:12:3', '/srv/project/lib/my file.dart'),
+      ('file://build-host/var/log/app.log#L12', '/var/log/app.log'),
+      (r'C:\project\main.dart#L12', 'C:/project/main.dart'),
+      ('C:%5Cproject%5Cmain.dart#L12', 'C:/project/main.dart'),
+      ('lib/report.txt!', '/srv/project/lib/report.txt!'),
+      ('lib/a%3B', '/srv/project/lib/a;'),
+      ('lib/main.dart%3A12', '/srv/project/lib/main.dart:12'),
+      ('missing.dart', null),
+      ('README.md#unknown-cwd', null),
+      ('%5C%5Cother-host%5Cshare%5Cmain.dart', null),
+    ]) {
+      testWidgets(
+        'OSC 8 file hyperlink $link ${remotePath == null ? 'reports failure' : 'opens on the connected host'}',
+        (tester) async {
+          const workingDirectory = '/srv/project';
+          final hasWorkingDirectory = link != 'README.md#unknown-cwd';
+          final sftp = _MockSftpClient();
+          final openedPaths = <String>[];
+          when(() => sshClient.sftp()).thenAnswer((_) async => sftp);
+          when(() => sftp.stat(any())).thenAnswer((invocation) async {
+            if (invocation.positionalArguments.single == remotePath) {
+              return SftpFileAttrs();
+            }
+            // ignore: only_throw_errors
+            throw SftpStatusError(SftpStatusCode.noSuchFile, 'missing');
+          });
+
+          final router = GoRouter(
+            initialLocation:
+                '/terminal/${host.id}?connectionId=${session.connectionId}',
+            routes: [
+              GoRoute(
+                path: '/terminal/:hostId',
+                name: Routes.terminal,
+                builder: (context, state) => TerminalScreen(
+                  hostId: host.id,
+                  connectionId: session.connectionId,
+                ),
+              ),
+              GoRoute(
+                path: '/sftp/:hostId',
+                name: Routes.sftp,
+                builder: (context, state) {
+                  openedPaths.add(state.uri.queryParameters['path'] ?? '');
+                  expect(
+                    state.uri.queryParameters['connectionId'],
+                    session.connectionId.toString(),
+                  );
+                  return const Scaffold(body: Text('SFTP opened'));
+                },
+              ),
+            ],
+          );
+          addTearDown(router.dispose);
+          await tester.pumpWidget(
+            buildScreen(child: MaterialApp.router(routerConfig: router)),
+          );
+          await tester.pumpAndSettle();
+          if (hasWorkingDirectory) {
+            shellStdoutController.add(
+              Uint8List.fromList(
+                utf8.encode('\x1b]7;file://build-host$workingDirectory\x07'),
+              ),
+            );
+            await tester.pumpAndSettle();
+          }
+
+          session.terminal!
+            ..write('\x1b[?1003h\x1b[?1006h')
+            ..write('\x1b[4;2H\x1b]8;;$link\x07source\x1b]8;;\x07\x1b[K');
+          await tester.pumpAndSettle();
+          final view = tester.widget<MonkeyTerminalView>(
+            find.byType(MonkeyTerminalView),
+          );
+          expect(view.resolveLinkTap!(const CellOffset(3, 3)), link);
+          final render = tester
+              .state<MonkeyTerminalViewState>(find.byType(MonkeyTerminalView))
+              .renderTerminal;
+          shellWrites.clear();
+          await tester.tapAt(
+            render.localToGlobal(
+              render.getOffset(const CellOffset(3, 3)) +
+                  render.cellSize.center(Offset.zero),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          if (remotePath == null) {
+            expect(openedPaths, isEmpty);
+            expect(find.text('SFTP opened'), findsNothing);
+            final rejectedNetworkPath = link.startsWith('%5C%5C');
+            expect(
+              find.textContaining(
+                rejectedNetworkPath
+                    ? 'unsupported link scheme'
+                    : 'Could not open',
+              ),
+              findsOneWidget,
+            );
+            if (rejectedNetworkPath) {
+              verifyNever(() => sftp.stat(any()));
+            }
+          } else {
+            expect(openedPaths, [remotePath]);
+            expect(find.text('SFTP opened'), findsOneWidget);
+            verify(() => sftp.stat(remotePath)).called(1);
+          }
+          if (!link.startsWith('%5C%5C')) {
+            expect(
+              find.textContaining('unsupported link scheme'),
+              findsNothing,
+            );
+          }
+          expect(
+            shellWrites.map(String.fromCharCodes).join(),
+            isNot(contains('\x1b[<')),
+          );
+        },
+        variant: const TargetPlatformVariant({
+          TargetPlatform.android,
+          TargetPlatform.iOS,
+        }),
+      );
+    }
 
     testWidgets(
       'mobile path underline taps open SFTP while system selection is enabled',

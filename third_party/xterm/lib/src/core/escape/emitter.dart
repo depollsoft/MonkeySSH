@@ -46,6 +46,12 @@ class EscapeEmitter {
     return '\x1b[$mode;$value\$y';
   }
 
+  /// Response to DECRQM for a DEC private mode (`CSI ? Ps $ p` ->
+  /// `CSI ? Ps ; Pm $ y`), with [value] as in [modeReport].
+  String decModeReport(int mode, int value) {
+    return '\x1b[?$mode;$value\$y';
+  }
+
   /// Response to XTGETTCAP for a single capability
   /// (`DCS 1 + r <name>=<value> ST` when known, `DCS 0 + r <name> ST` when not).
   ///
@@ -76,8 +82,23 @@ class EscapeEmitter {
     return '\x1b[0n';
   }
 
+  /// Cursor position report (CPR) for the 1-based column [x] and row [y].
   String cursorPosition(int x, int y) {
     return '\x1b[$y;${x}R';
+  }
+
+  /// Extended cursor position report (DECXCPR) for the 1-based column [x] and
+  /// row [y]. xterm adds the page only at VT level 4 and above; this terminal
+  /// identifies as a VT220 (see [secondaryDeviceAttributes]), so it leaves the
+  /// page out, as xterm does at that level.
+  String extendedCursorPosition(int x, int y) {
+    return '\x1b[?$y;${x}R';
+  }
+
+  /// Visibility report: `CSI ? 999 ; 1 n` while the view may be visible,
+  /// `CSI ? 999 ; 2 n` when it is known to be hidden.
+  String visibilityReport(bool visible) {
+    return visible ? '\x1b[?999;1n' : '\x1b[?999;2n';
   }
 
   String bracketedPaste(String text) {

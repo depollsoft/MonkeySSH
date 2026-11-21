@@ -44,7 +44,7 @@ func assertInputActions(t *testing.T, routing attachInputRouting, want []attachI
 }
 
 func replayPrefixForTest(window *muxWindow) string {
-	return activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
+	return windowReplayTag(window) + activeWindowReplayPrefix + string(terminalTitleReplaySequence(window))
 }
 
 func replayPostHistorySuffixForTest(cursorVisible bool) string {
@@ -1186,6 +1186,7 @@ func TestWindowOutputSkipsClientsThatJoinedAfterObservation(t *testing.T) {
 		[]byte("once"),
 		[]byte("once"),
 		nil,
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1222,6 +1223,7 @@ func TestTerminalQueryRetryCanUseClientThatJoinedAfterObservation(t *testing.T) 
 		[]byte("\x1b[c"),
 		nil,
 		[]byte("\x1b[c"),
+		kittyClipboardDelivery{},
 		observedSequence,
 		0,
 	)
@@ -1269,6 +1271,7 @@ func TestLiveQueryWaitDoesNotHoldAttachLock(t *testing.T) {
 			[]byte("before\x1b[>qafter"),
 			[]byte("beforeafter"),
 			[]byte("\x1b[>q"),
+			kittyClipboardDelivery{},
 			primary.sequence,
 			0,
 		)
@@ -1421,7 +1424,7 @@ func TestEmptyForegroundRedrawFallbackPreservesQueryFailover(t *testing.T) {
 	fallback := string(
 		server.foregroundHistoryFallbackReplayLocked(
 			window,
-			redrawFallbackHistory(window),
+			window.redrawForwardingFallbackScreen,
 		),
 	)
 	server.mu.Unlock()
@@ -1905,8 +1908,10 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	)
 	client.clipViewport = true
 
-	server.handleWindowOutput("@1", []byte("\x1b["))
-	waitForRecordedOutput(t, conn, "\x1b[")
+	// A bare "\x1b[" could still become a visibility-report sequence, which
+	// is held until it ends (terminal_visibility.go), so split after a digit.
+	server.handleWindowOutput("@1", []byte("\x1b[0"))
+	waitForRecordedOutput(t, conn, "\x1b[0")
 
 	server.resizeForClient("primary", 100, 30, false)
 	server.mu.Lock()
@@ -1915,11 +1920,11 @@ func TestClippingResizeWaitsForTerminalSequenceBoundary(t *testing.T) {
 	if width != 100 || height != 30 {
 		t.Fatalf("desired size = %dx%d, want pending 100x30", width, height)
 	}
-	if got := conn.String(); got != "\x1b[" {
+	if got := conn.String(); got != "\x1b[0" {
 		t.Fatalf("mid-sequence output = %q, want no injected viewport CSI", got)
 	}
 
-	server.handleWindowOutput("@1", []byte("0mX"))
+	server.handleWindowOutput("@1", []byte("mX"))
 
 	waitForRecordedOutput(t, conn, "\x1b[0mX\x1b[?8;30;100t")
 	server.mu.Lock()
@@ -1996,7 +2001,7 @@ func TestWindowSwitchResetsParserBeforePendingViewport(t *testing.T) {
 	}
 
 	wantPrefix := terminalParserResetSequence + "\x1b[?8;30;100t" +
-		activeWindowReplayPrefix
+		windowReplayTag(second) + activeWindowReplayPrefix
 	waitForRecordedContains(t, conn, wantPrefix)
 }
 
@@ -2190,7 +2195,7 @@ func TestClientFocusBroadcastsSharedViewportToClippingClients(t *testing.T) {
 
 	const viewportResize = "\x1b[?8;28;72t"
 	waitForRecordedOutput(t, desktopConn, viewportResize)
-	waitForRecordedContains(t, phoneConn, viewportResize+activeWindowReplayPrefix)
+	waitForRecordedContains(t, phoneConn, viewportResize+windowReplayTag(window)+activeWindowReplayPrefix)
 	if got := phoneConn.String(); !strings.HasPrefix(got, viewportResize) {
 		t.Fatalf("focused client output = %q, want viewport resize first", got)
 	}
@@ -2248,6 +2253,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("new output"),
 		[]byte("new output"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -2265,6 +2271,7 @@ func TestClientFocusReplaySuppressesAlreadyReplayedShellOutput(t *testing.T) {
 		[]byte("next"),
 		[]byte("next"),
 		nil,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		2,
 	)
@@ -2316,6 +2323,7 @@ func TestClientFocusReplayStillDeliversReplayedTerminalQuery(t *testing.T) {
 		query,
 		nil,
 		query,
+		kittyClipboardDelivery{},
 		^uint64(0),
 		1,
 	)
@@ -5558,6 +5566,12 @@ func TestNaturalExitDeliversBufferedFinalOutput(t *testing.T) {
 }
 
 func TestCreateWindowClosesNonAgentWindowOnExit(t *testing.T) {
+	// The window runs the command in an interactive login $SHELL; the
+	// developer's own shell and startup files can outlast the deadline below.
+	setTestHomeDir(t, t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Setenv("ENV", "")
+	t.Setenv("BASH_ENV", "")
 	server := newMuxServer("test")
 	t.Cleanup(server.close)
 
@@ -6667,8 +6681,8 @@ func TestAttachWriteSkipsStaleActiveWindowOutput(t *testing.T) {
 
 	stale := []byte("stale old output")
 	fresh := []byte("fresh new output")
-	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, ^uint64(0), 0)
-	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@1", attach, stale, stale, stale, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
+	server.writeAttachOutputIfActive("@2", attach, fresh, fresh, fresh, nil, kittyClipboardDelivery{}, ^uint64(0), 0)
 
 	waitForRecordedOutput(t, attach, "fresh new output")
 }
@@ -7764,40 +7778,24 @@ func TestObserveKittyGraphicsPreservesSameChunkHardDeleteOrder(t *testing.T) {
 	}
 }
 
-func TestObserveKittyGraphicsAppliesDeleteAllInStreamOrder(t *testing.T) {
-	window := &muxWindow{}
-	window.observeKittyGraphicsLocked([]byte(
-		"\x1b_Ga=t,i=7,I=5,f=100;ROOT7\x1b\\" +
-			"\x1b_Ga=t,i=8,I=6,f=100;ROOT8\x1b\\" +
-			"\x1b_Ga=d,d=A\x1b\\" +
-			"\x1b_Ga=t,i=9,I=7,f=100;ROOT9\x1b\\"))
-
-	replay := string(window.kittyImageReplayLocked(nil))
-	if strings.Contains(replay, "ROOT7") || strings.Contains(replay, "ROOT8") {
-		t.Fatalf("d=A retained image data transmitted before it: %q", replay)
-	}
-	if !strings.Contains(replay, "ROOT9") {
-		t.Fatalf("d=A removed image data transmitted after it: %q", replay)
-	}
-	if len(window.kittyImageNumberToID) != 1 ||
-		window.kittyImageNumberToID["7"] != "9" {
-		t.Fatalf("d=A left stale image-number mappings: %#v", window.kittyImageNumberToID)
-	}
-}
-
-func TestObserveKittyGraphicsInvalidatesForPositionalHardDeletes(t *testing.T) {
-	for _, selector := range []string{"C", "P", "X", "Y"} {
+// TestObserveKittyGraphicsKeepsImagesForPositionalDeletes covers d=A and the
+// other positional hard deletes. The client frees only the images placed at
+// the cells they name, which MonkeyMux cannot see; an image shown only through
+// Unicode placeholders survives them. Dropping every retained image left such
+// placeholders blank after an attach, while keeping one too many costs only
+// replay bytes.
+func TestObserveKittyGraphicsKeepsImagesForPositionalDeletes(t *testing.T) {
+	for _, selector := range []string{"A", "C", "P", "Q", "X", "Y", "Z"} {
 		t.Run(selector, func(t *testing.T) {
 			window := &muxWindow{}
 			window.observeKittyGraphicsLocked([]byte(
-				"\x1b_Ga=t,i=7,I=5,f=100;ROOT\x1b\\" +
-					"\x1b_Ga=d,d=" + selector + ",x=1,y=1\x1b\\"))
+				"\x1b_Ga=t,i=7,f=100;ROOT7\x1b\\" +
+					"\x1b_Ga=d,d=" + selector + ",x=1,y=1,z=0\x1b\\" +
+					"\x1b_Ga=t,i=9,f=100;ROOT9\x1b\\"))
 
-			if got := window.kittyImageReplayLocked(nil); len(got) != 0 {
-				t.Fatalf("d=%s retained conservatively matched image data: %q", selector, got)
-			}
-			if len(window.kittyImageNumberToID) != 0 {
-				t.Fatalf("d=%s retained image-number mappings", selector)
+			replay := string(window.kittyImageReplayLocked(nil))
+			if !strings.Contains(replay, "ROOT7") || !strings.Contains(replay, "ROOT9") {
+				t.Fatalf("d=%s dropped retained image data: %q", selector, replay)
 			}
 		})
 	}
@@ -8633,6 +8631,57 @@ func TestStripLocallyAnsweredThemeQueriesPreservesSplitOsc8(t *testing.T) {
 	}
 }
 
+// The C1 OSC (0x9d) carries the queries and markers the stripper removes as
+// the 7-bit form does, ended by BEL, ST or the C1 ST (0x9c), and is held
+// whole when a read splits it: the client's terminal decodes UTF-8 and would
+// show the raw sequence as text. A 0x9d that continues a character is text,
+// also when it starts a read, and is neither stripped nor held back.
+func TestStripLocallyAnsweredThemeQueriesStripsC1Osc(t *testing.T) {
+	hint := []byte("\x1b]11;rgb:1111/2222/3333\x1b\\")
+	for _, terminator := range []string{"\a", "\x1b\\", "\x9c"} {
+		for _, payload := range []string{
+			"11;?",
+			"1337;MonkeyMuxPi=abc",
+			"1337;" + monkeyMuxAgentIdentityOSCPrefix + "invalid",
+			programStatusOscCode + ";?",
+		} {
+			sequence := "\x9d" + payload + terminator
+			for cut := 0; cut < len(sequence); cut++ {
+				window := &muxWindow{}
+				var got string
+				if cut == 0 {
+					got = string(window.stripLocallyAnsweredThemeQueriesLocked([]byte("a"+sequence+"b"), hint))
+				} else {
+					got = string(window.stripLocallyAnsweredThemeQueriesLocked([]byte("a"+sequence[:cut]), hint))
+					got += string(window.stripLocallyAnsweredThemeQueriesLocked([]byte(sequence[cut:]+"b"), hint))
+				}
+				if got != "ab" {
+					t.Fatalf("%q split at %d: forwarded %q, want it stripped", sequence, cut, got)
+				}
+				if payload == programStatusOscCode+";?" && window.programStatusQueries != 1 {
+					t.Fatalf("%q split at %d: %d queries to answer, want 1", sequence, cut, window.programStatusQueries)
+				}
+			}
+		}
+		// Other OSCs, and text, go on unchanged.
+		for _, data := range []string{
+			"\x9d2;title" + terminator + "c",
+			"\xe2\x80\x9d11;?" + terminator + "c",
+		} {
+			window := &muxWindow{}
+			if got := string(window.stripLocallyAnsweredThemeQueriesLocked([]byte(data), hint)); got != data {
+				t.Fatalf("forwarded %q, want %q unchanged", got, data)
+			}
+		}
+	}
+	window := &muxWindow{}
+	first := window.stripLocallyAnsweredThemeQueriesLocked([]byte("c\xe2\x80"), hint)
+	second := window.stripLocallyAnsweredThemeQueriesLocked([]byte("\x9d11;?"), hint)
+	if got := string(first) + string(second); got != "c\xe2\x80\x9d11;?" {
+		t.Fatalf("forwarded %q, want the character's last byte and what follows at once", got)
+	}
+}
+
 func TestCreateWindowClearsAttachBeforePromptOutput(t *testing.T) {
 	server := newMuxServer("test")
 	t.Cleanup(server.close)
@@ -8659,7 +8708,7 @@ func TestCreateWindowClearsAttachBeforePromptOutput(t *testing.T) {
 
 	waitForTestAttachWrites(t, server)
 	output := attach.String()
-	wantPrefix := replayPrefixForTest(&muxWindow{name: "sh", paneTitle: "sh"}) +
+	wantPrefix := replayPrefixForTest(&muxWindow{id: "@2", name: "sh", paneTitle: "sh"}) +
 		replayPostHistorySuffixForTest(true)
 	if !strings.HasPrefix(output, wantPrefix) {
 		t.Fatalf("attach output = %q, want replay prefix before prompt", output)
@@ -11073,6 +11122,52 @@ func TestMarkWindowClosedStopsBridgeThroughSeam(t *testing.T) {
 	}
 }
 
+// Confirming that a native window's bridge already exited takes up to a stop
+// retry window, so shutdown must stop the bridges together rather than add
+// those windows up one after another.
+func TestShutdownStopsNativeBridgesInParallel(t *testing.T) {
+	originalStop := stopNativeAcpBridgeForWindow
+	t.Cleanup(func() { stopNativeAcpBridgeForWindow = originalStop })
+	const bridges = 4
+	started := make(chan string, bridges)
+	release := make(chan struct{})
+	stopNativeAcpBridgeForWindow = func(id string) error {
+		started <- id
+		<-release
+		return nil
+	}
+
+	server := &muxServer{}
+	for i := range bridges {
+		server.windows = append(server.windows, &muxWindow{
+			id:                fmt.Sprintf("@%d", i+1),
+			nativeAcpBridgeID: fmt.Sprintf("bridge-%d", i+1),
+		})
+	}
+	done := make(chan struct{})
+	go func() { server.close(); close(done) }()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+		<-done
+	})
+
+	seen := map[string]bool{}
+	for range bridges {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("bridge stops started together = %v, want all %d", seen, bridges)
+		}
+	}
+	close(release)
+	released = true
+	<-done
+}
+
 func TestQuerySessionAtSocketReturnsZeroWindowServer(t *testing.T) {
 	socketPath := filepath.Join(shortUnixSocketDir(t), "s.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -12981,6 +13076,39 @@ func TestReplayOmitsTheAttachOscTailStillWithheldFromLiveOutput(t *testing.T) {
 		"\x1b\x1b]8;",
 	) {
 		t.Fatalf("replay+live stream = %q, want no duplicated ESC", got)
+	}
+}
+
+// The replay reads the C1 OSC as the live stream does: it leaves out what
+// the stripper removes or routes live, keeps a 0x9d that continues a
+// character, and is cut where the live stream still holds back a C1 OSC a
+// read split, so it ends where the live stream did.
+func TestReplayAgreesWithTheLiveStreamOnC1Osc(t *testing.T) {
+	for _, sequence := range []string{
+		"\x9d11;?\x9c",
+		"\x9d5522;type=read:id=r;Lg==\a",
+		"\x9d1337;MonkeyMuxPi=abc\x1b\\",
+		"\x9d" + programStatusOscCode + ";?\x9c",
+	} {
+		if got := string(stripTerminalQueriesFromReplay([]byte("a" + sequence + "b"))); got != "ab" {
+			t.Fatalf("replay of %q = %q, want it left out", sequence, got)
+		}
+	}
+	text := "a\xe2\x80\x9d11;?\ab"
+	if got := string(stripTerminalQueriesFromReplay([]byte(text))); got != text {
+		t.Fatalf("replay = %q, want the text %q", got, text)
+	}
+
+	server := &muxServer{}
+	window := &muxWindow{id: "@1"}
+	chunk := []byte("shown \x9d5522;type=re")
+	window.appendHistoryLocked(chunk)
+	if got := string(window.stripLocallyAnsweredThemeQueriesLocked(chunk, nil)); got != "shown " {
+		t.Fatalf("forwarded %q, want the split request held back", got)
+	}
+	replay := server.replayBytesLocked(window)
+	if !bytes.Contains(replay, []byte("shown ")) || bytes.Contains(replay, []byte("type=re")) {
+		t.Fatalf("replay = %q, want the delivered output without the held request", replay)
 	}
 }
 

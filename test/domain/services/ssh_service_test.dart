@@ -36,6 +36,8 @@ import 'package:monkeyssh/domain/services/diagnostics_log_service.dart';
 import 'package:monkeyssh/domain/services/host_key_verification.dart';
 import 'package:monkeyssh/domain/services/host_notification_prefs_reader.dart';
 import 'package:monkeyssh/domain/services/interactive_auth_prompt.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_protocol.dart';
+import 'package:monkeyssh/domain/services/kitty_clipboard_service.dart';
 import 'package:monkeyssh/domain/services/local_notification_service.dart';
 
 import 'package:monkeyssh/domain/services/port_forward_browser_service.dart';
@@ -43,6 +45,7 @@ import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/domain/services/ssh_exec_queue.dart';
 import 'package:monkeyssh/domain/services/ssh_service.dart';
 import 'package:monkeyssh/domain/services/telemetry_service.dart';
+import 'package:monkeyssh/domain/services/terminal_command_mark_tracker.dart';
 import 'package:monkeyssh/domain/services/terminal_notification.dart';
 import 'package:monkeyssh/domain/services/wifi_network_service.dart';
 import 'package:xterm/xterm.dart';
@@ -203,6 +206,173 @@ class _AuthenticationFixture {
               );
             });
             return fixture.client;
+          },
+    );
+    return fixture;
+  }
+}
+
+/// What the server does on one connection of a [_ReconnectFixture], after the
+/// host key is accepted. Throwing ends that connection.
+/// A destination behind a trusted jump host. The destination drops the
+/// connection after the user answers its password prompt, and [forward]
+/// answers each tunnel the jump host is asked to open.
+class _JumpReconnectFixture {
+  final jumpClient = _MockSshClient();
+  int forwardCount = 0;
+  late final SshService service;
+
+  static final jumpKey = _ed25519HostKeyBlob([5, 1]);
+  static final targetKey = _ed25519HostKeyBlob([5, 2]);
+
+  static Future<_JumpReconnectFixture> create({
+    required Future<SSHForwardChannel> Function(int forwardCount) forward,
+  }) async {
+    final fixture = _JumpReconnectFixture();
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final knownHostsRepository = KnownHostsRepository(db);
+    await _seedTrustedHost(
+      knownHostsRepository,
+      hostname: 'jump.example.com',
+      hostKeyBytes: jumpKey,
+    );
+    await _seedTrustedHost(
+      knownHostsRepository,
+      hostname: 'target.example.com',
+      hostKeyBytes: targetKey,
+    );
+
+    final jumpClient = fixture.jumpClient;
+    when(() => jumpClient.forwardLocal('target.example.com', 22))
+        .thenAnswer((_) => forward(++fixture.forwardCount));
+    when(() => jumpClient.isClosed).thenReturn(false);
+    when(jumpClient.close).thenAnswer((_) async {});
+    var clientIndex = 0;
+
+    fixture.service = SshService(
+      knownHostsRepository: knownHostsRepository,
+      interactiveAuthPromptHandler: (_) async => ['typed-secret'],
+      reconnectAfterDropWindow: const Duration(milliseconds: 50),
+      reconnectAfterDropRetryDelay: Duration.zero,
+      socketConnector: (host, port, {timeout}) async =>
+          _FakeHostKeySocket(jumpKey),
+      clientFactory:
+          (
+            socket, {
+            required username,
+            onVerifyHostKey,
+            onPasswordRequest,
+            onUserInfoRequest,
+            identities,
+            keepAliveInterval,
+          }) {
+            final isJump = clientIndex++ == 0;
+            final client = isJump ? jumpClient : _MockSshClient();
+            when(client.close).thenAnswer((_) async {});
+            when(() => client.authenticated).thenAnswer((_) async {
+              final bytes = await (socket as HostKeySource).hostKeyBytes;
+              await onVerifyHostKey!(
+                'ssh-ed25519',
+                _hostKeyCallbackFingerprint(bytes),
+              );
+              if (isJump) return;
+              await onPasswordRequest!();
+              return Future<void>.error(
+                SSHAuthAbortError('Connection closed before authentication'),
+              );
+            });
+            return client;
+          },
+    );
+    return fixture;
+  }
+
+  Future<SshConnectionResult> connect() => service.connect(
+    const SshConnectionConfig(
+      hostname: 'target.example.com',
+      port: 22,
+      username: 'target',
+      jumpHost: SshConnectionConfig(
+        hostname: 'jump.example.com',
+        port: 22,
+        username: 'jump',
+      ),
+    ),
+  );
+}
+
+typedef _ServerAuthStep = Future<void> Function(
+  SSHPasswordRequestHandler? onPasswordRequest,
+  SSHUserInfoRequestHandler? onUserInfoRequest,
+);
+
+/// A trusted host whose successive connections play [steps] in order.
+class _ReconnectFixture {
+  final clients = <_MockSshClient>[];
+  final socketTimeouts = <Duration?>[];
+  int socketCount = 0;
+  late final SshService service;
+
+  static const config = SshConnectionConfig(
+    hostname: 'reconnect.example.com',
+    port: 22,
+    username: 'tester',
+  );
+
+  static Future<_ReconnectFixture> create({
+    required List<_ServerAuthStep> steps,
+    InteractiveAuthPromptHandler? promptHandler,
+    Set<int> refusedSockets = const {},
+    Duration reconnectWindow = const Duration(seconds: 45),
+    Duration retryDelay = Duration.zero,
+  }) async {
+    final fixture = _ReconnectFixture();
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final knownHostsRepository = KnownHostsRepository(db);
+    final hostKeyBytes = _ed25519HostKeyBlob([3, 1, 4]);
+    await _seedTrustedHost(
+      knownHostsRepository,
+      hostname: config.hostname,
+      hostKeyBytes: hostKeyBytes,
+    );
+    fixture.service = SshService(
+      knownHostsRepository: knownHostsRepository,
+      interactiveAuthPromptHandler: promptHandler,
+      reconnectAfterDropWindow: reconnectWindow,
+      reconnectAfterDropRetryDelay: retryDelay,
+      socketConnector: (host, port, {timeout}) async {
+        fixture.socketCount++;
+        fixture.socketTimeouts.add(timeout);
+        if (refusedSockets.contains(fixture.socketCount)) {
+          throw const SocketException('Connection refused');
+        }
+        return _FakeHostKeySocket(hostKeyBytes);
+      },
+      clientFactory:
+          (
+            socket, {
+            required username,
+            onVerifyHostKey,
+            onPasswordRequest,
+            onUserInfoRequest,
+            identities,
+            keepAliveInterval,
+          }) {
+            final step = steps[fixture.clients.length];
+            final client = _MockSshClient();
+            fixture.clients.add(client);
+            when(client.close).thenAnswer((_) async {});
+            when(() => client.authenticated).thenAnswer((_) async {
+              final bytes = await (socket as HostKeySource).hostKeyBytes;
+              await onVerifyHostKey!(
+                'ssh-ed25519',
+                _hostKeyCallbackFingerprint(bytes),
+              );
+              await step(onPasswordRequest, onUserInfoRequest);
+            });
+            return client;
           },
     );
     return fixture;
@@ -442,6 +612,33 @@ void _stubSessionStreams(_MockExecSession session, {String stdout = ''}) {
   when(() => session.stderr).thenAnswer((_) => const Stream.empty());
   when(() => session.done).thenAnswer((_) => Future<void>.value());
   when(session.close).thenAnswer((_) {});
+}
+
+class _FakeKittyClipboardPlatform implements KittyClipboardPlatform {
+  final stored = <String, Uint8List>{};
+  Future<Uint8List?>? pendingRead;
+
+  @override
+  Future<List<String>> availableTypes() async => stored.keys.toList();
+
+  @override
+  Future<Uint8List?> read(String mime) async {
+    final pending = pendingRead;
+    pendingRead = null;
+    return pending ?? stored[mime];
+  }
+
+  @override
+  Future<List<String>?> write(List<KittyClipboardEntry> entries) async {
+    stored
+      ..clear()
+      ..addAll({for (final entry in entries) entry.mime: entry.data});
+    return [for (final entry in entries) entry.mime];
+  }
+
+  @override
+  Future<KittyClipboardPasteRead> readPasteSnapshot() async =>
+      KittyClipboardPasteRead.snapshot(KittyClipboardSnapshot(stored));
 }
 
 class _FakeHostKeySocket implements SSHSocket, HostKeySource {
@@ -2130,6 +2327,18 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       expect(promptState.status, TerminalShellStatus.prompt);
       expect(promptState.lastExitCode, isNull);
 
+      for (final mark in ['B', 'I']) {
+        expect(
+          applyTerminalShellIntegrationOsc(
+            [mark],
+            previousStatus: TerminalShellStatus.prompt,
+            previousExitCode: 3,
+          ),
+          (status: TerminalShellStatus.editingCommand, lastExitCode: null),
+          reason: mark,
+        );
+      }
+
       final runningState = applyTerminalShellIntegrationOsc(
         const ['C'],
         previousStatus: promptState.status,
@@ -2168,42 +2377,179 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
-    test(
-      'normalizes cursor position reports to terminal protocol coordinates',
-      () {
-        expect(
-          normalizeTerminalOutputForRemoteShell('before\x1b[0;0Rafter'),
-          'before\x1b[1;1Rafter',
+    test('reads the shell status a MonkeyMux replay ends with', () {
+      // The screen model's frames (remote/monkeymux/vtscreen_prompt.go)
+      // re-emit the marks of every prompt they paint, and end with the status
+      // and exit code the model has. A running command's C is emitted where
+      // its output begins, so the command mark lands on that row.
+      final fixture = File(
+        'remote/monkeymux/testdata/semantic_prompt_parity.json',
+      );
+      if (!fixture.existsSync()) {
+        markTestSkipped('fixture unavailable');
+        return;
+      }
+      final cases = jsonDecode(fixture.readAsStringSync()) as List<dynamic>;
+      const expected = <String, ({TerminalShellStatus status, int? exit, List<int> marks})>{
+        'a replayed screen keeps every earlier prompt': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [1],
+        ),
+        // A command without output started on the row its prompt's successor
+        // took, which the frame paints as a prompt: no mark comes back.
+        'a replayed prompt keeps the exit status of the last command': (
+          status: TerminalShellStatus.prompt,
+          exit: 1,
+          marks: [],
+        ),
+        'a replayed running command keeps the prompt above it': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [1],
+        ),
+        'a replayed alternate screen keeps the marks of both screens': (
+          status: TerminalShellStatus.editingCommand,
+          exit: null,
+          marks: [],
+        ),
+        // C arrived on the input row: the command starts there.
+        'a replayed program started on its input row keeps the prompt behind it':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [0],
+            ),
+        // The prompt is above the model's scrollback: the command starts
+        // on the first replayed line.
+        'a replayed running command whose prompt scrolled out keeps its mark': (
+          status: TerminalShellStatus.runningCommand,
+          exit: null,
+          marks: [0],
+        ),
+        'a replayed running command that wrote over its prompt row keeps running':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [0],
+            ),
+        // The C comes again where it was after the saved cursor's glyph
+        // is printed again as input: no mark on the cursor's row.
+        'a replayed running command keeps the saved cursor waiting to wrap on its input':
+            (
+              status: TerminalShellStatus.runningCommand,
+              exit: null,
+              marks: [1],
+            ),
+      };
+      final seen = <String>{};
+      for (final raw in cases) {
+        final testCase = raw as Map<String, dynamic>;
+        final frame = testCase['frame'] as String?;
+        if (frame == null) continue;
+        final name = testCase['name'] as String;
+        final size = (testCase['size'] as List).cast<int>();
+        // As many lines as the app keeps: more than the model's scrollback.
+        final terminal = Terminal(maxLines: 10000)..resize(size[0], size[1]);
+        final tracker = TerminalCommandMarkTracker()..attach(terminal);
+        // The status another window left behind.
+        ({TerminalShellStatus? status, int? lastExitCode}) state = (
+          status: TerminalShellStatus.runningCommand,
+          lastExitCode: 7,
         );
-        expect(normalizeTerminalOutputForRemoteShell('\x1b[4;7R'), '\x1b[5;8R');
-      },
-    );
+        terminal
+          ..onPrivateOSC = (code, args) {
+            tracker.handlePrivateOsc(code, args);
+            if (code != '133' && code != '633') return;
+            state = applyTerminalShellIntegrationOsc(
+              args,
+              previousStatus: state.status,
+              previousExitCode: state.lastExitCode,
+            );
+          }
+          ..write(frame);
+        final want = expected[name];
+        if (want == null) continue;
+        seen.add(name);
+        expect(state.status, want.status, reason: name);
+        expect(state.lastExitCode, want.exit, reason: name);
+        // On the main screen: the alternate screen a program shows has none.
+        if (terminal.isUsingAltBuffer) terminal.write('\x1b[?1049l');
+        expect(tracker.debugMarkRows, want.marks, reason: name);
+      }
+      expect(seen, expected.keys.toSet());
+    });
 
-    test('adapts insert mode output so xterm shifts existing cells', () {
+    test('passes insert mode through for the terminal to shift cells', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
-      final result = decoder.add(input: 'abcdef\r\x1b[3C\x1b[4hXY');
+      const input = 'abcdef\r\x1b[3C\x1b[4hXY';
+      final output = decoder.add(input: input);
 
-      terminal.write(result.output);
+      terminal.write(output);
 
       expect(decoder.pendingCodeUnits, 0);
-      expect(result.insertMode, isTrue);
+      expect(output, input);
       expect(terminal.lines[0].getText(0, 8), 'abcXYdef');
+    });
+
+    test('keeps the last cell of a full row in insert mode', () {
+      final terminal = Terminal(maxLines: 100)..resize(5, 2);
+      final decoder = TerminalXtermOutputDecoder();
+
+      terminal.write(decoder.add(input: '\x1b[4habcdef'));
+
+      expect(terminal.lines[0].getText(), 'abcde');
+      expect(terminal.lines[1].getText().trimRight(), 'f');
+    });
+
+    test('releases a sequence CAN or SUB cancels', () {
+      for (final cancel in ['\x18', '\x1a']) {
+        for (final start in [
+          '\x1b]0;tit',
+          '\x1b_Ga=q',
+          '\x1bP1\$r',
+          '\x1b[3',
+        ]) {
+          final terminal = Terminal(maxLines: 100);
+          final decoder = TerminalXtermOutputDecoder();
+
+          terminal.write(decoder.add(input: '$start${cancel}VISIBLE'));
+
+          expect(decoder.pendingCodeUnits, 0, reason: start);
+          expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
+        }
+      }
+    });
+
+    test('releases a string an escape sequence ends unfinished', () {
+      for (final start in ['\x1b]0;tit', '\x1b_Ga=q', '\x1bP1\$r']) {
+        final terminal = Terminal(maxLines: 100);
+        final decoder = TerminalXtermOutputDecoder();
+
+        terminal
+          ..write(decoder.add(input: '$start\x1b[31mVIS'))
+          ..write(decoder.add(input: '\x1b'))
+          ..write(decoder.add(input: '[0mIBLE'));
+
+        expect(decoder.pendingCodeUnits, 0, reason: start);
+        expect(terminal.lines[0].getText().trimRight(), 'VISIBLE');
+        expect(terminal.lines[0].getForeground(0), isNot(0), reason: start);
+      }
     });
 
     test('adapts split insert mode sequences across chunks', () {
       final terminal = Terminal(maxLines: 100);
       final decoder = TerminalXtermOutputDecoder();
       final first = decoder.add(input: 'abcdef\r\x1b[3C\x1b[');
-      terminal.write(first.output);
+      terminal.write(first);
 
       expect(decoder.pendingCodeUnits, '\x1b['.length);
       final second = decoder.add(input: '4hZ\x1b[4lQ');
-      terminal.write(second.output);
+      terminal.write(second);
 
       expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isFalse);
-      expect(second.output, '\x1b[4h\x1b[@Z\x1b[4lQ');
+      expect(second, '\x1b[4hZ\x1b[4lQ');
       expect(terminal.lines[0].getText(0, 7), 'abcZQef');
     });
 
@@ -2215,14 +2561,11 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         // Leave the final backslash for a separate call to split ST.
         for (var offset = 0; offset < apc.length - 1; offset += sliceSize) {
           final end = (offset + sliceSize).clamp(0, apc.length - 1);
-          expect(
-            decoder.add(input: apc.substring(offset, end)).output,
-            isEmpty,
-          );
+          expect(decoder.add(input: apc.substring(offset, end)), isEmpty);
           expect(decoder.pendingCodeUnits, end);
           expect(decoder.materializedSequenceCodeUnits, 0);
         }
-        expect(decoder.add(input: r'\').output, apc);
+        expect(decoder.add(input: r'\'), apc);
         expect(decoder.pendingCodeUnits, 0);
         expect(decoder.materializedSequenceCodeUnits, apc.length);
       }
@@ -2230,9 +2573,9 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
     test('retains a surrogate split across input chunks', () {
       final decoder = TerminalXtermOutputDecoder();
-      expect(decoder.add(input: '\x1b[4h\uD83D').output, '\x1b[4h');
+      expect(decoder.add(input: '\x1b[4h\uD83D'), '\x1b[4h');
       expect(decoder.pendingCodeUnits, 1);
-      expect(decoder.add(input: '\uDC4DZ').output, '\x1b[@\x1b[@👍\x1b[@Z');
+      expect(decoder.add(input: '\uDC4DZ'), '👍Z');
       expect(decoder.pendingCodeUnits, 0);
     });
 
@@ -2270,8 +2613,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
             final end = offset + sliceSize > stream.length
                 ? stream.length
                 : offset + sliceSize;
-            final result = decoder.add(input: stream.substring(offset, end));
-            terminal.write(result.output);
+            terminal.write(decoder.add(input: stream.substring(offset, end)));
           }
 
           expect(
@@ -2291,64 +2633,15 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
-    for (final (name, input, output) in [
-      (
-        'OSC payload',
-        '\x1b[4h\x1b]0;nano title\x07Z',
-        '\x1b[4h\x1b]0;nano title\x07\x1b[@Z',
-      ),
-      (
-        // A skin-tone modifier takes no cell of its own: like the MonkeyMux
-        // screen model and host width libraries, the buffer keeps the pair
-        // in the base emoji's two columns.
-        'emoji modifier',
-        '\x1b[4h\u{1F44D}\u{1F3FD}Z',
-        '\x1b[4h\x1b[@\x1b[@\u{1F44D}\u{1F3FD}\x1b[@Z',
-      ),
-    ]) {
-      test('insert mode preserves $name', () {
-        final decoder = TerminalXtermOutputDecoder();
-        final result = decoder.add(input: input);
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isTrue);
-        expect(result.output, output);
-      });
-    }
-
     test('strips private CSI modifier controls that xterm treats as SGR', () {
       final decoder = TerminalXtermOutputDecoder();
       final first = decoder.add(input: 'before\x1b[>4;');
       expect(decoder.pendingCodeUnits, '\x1b[>4;'.length);
       final second = decoder.add(input: '1mafter');
 
-      expect(first.output, 'before');
-      expect(second.output, 'after');
+      expect(first, 'before');
+      expect(second, 'after');
       expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isFalse);
-    });
-
-    test('clears tracked insert mode on terminal reset sequences', () {
-      final decoder = TerminalXtermOutputDecoder();
-      for (final reset in ['\x1bc', '\x1b[!p']) {
-        final result = decoder.add(input: '\x1b[4hA${reset}B');
-        expect(decoder.pendingCodeUnits, 0);
-        expect(result.insertMode, isFalse);
-        expect(result.output, '\x1b[4h\x1b[@A${reset}B');
-      }
-    });
-
-    test('does not inject insert blanks into DCS payloads', () {
-      final decoder = TerminalXtermOutputDecoder();
-      final first = decoder.add(input: '\x1b[4h\x1bP1+r');
-
-      expect(decoder.pendingCodeUnits, '\x1bP1+r'.length);
-      final second = decoder.add(input: 'abc\x1b\\Z');
-
-      expect(first.output, '\x1b[4h');
-      expect(first.insertMode, isTrue);
-      expect(decoder.pendingCodeUnits, 0);
-      expect(second.insertMode, isTrue);
-      expect(second.output, '\x1bP1+rabc\x1b\\\x1b[@Z');
     });
 
     test('insert mode shifts by the cell width the buffer uses', () {
@@ -2356,7 +2649,7 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       final terminal = Terminal(maxLines: 100)..resize(20, 2);
       final decoder = TerminalXtermOutputDecoder();
       terminal.write(
-        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}').output,
+        decoder.add(input: 'abcdef\r\x1b[4h\u231Ae\u0301\u{1F44D}'),
       );
 
       expect(terminal.buffer.cursorX, 5);
@@ -2514,97 +2807,6 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
 
       expect(light.response, '\x1b[?997;2n');
       expect(light.pendingInput, isEmpty);
-    });
-
-    test('answers DEC private mode report queries', () {
-      final result = buildTerminalWindowControlQueryResponses(
-        input:
-            'before\x1b[?1004\$p\x1b[?2004\$p\x1b[?1006\$p'
-            '\x1b[?2026\$pafter',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: true,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: true,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(
-        result.response,
-        '\x1b[?1004;1\$y'
-        '\x1b[?2004;2\$y'
-        '\x1b[?1006;1\$y'
-        '\x1b[?2026;2\$y',
-      );
-      expect(result.pendingInput, isEmpty);
-
-      final colorSchemeReset = buildTerminalWindowControlQueryResponses(
-        input: 'before\x1b[?2031\$pafter',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: false,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(colorSchemeReset.response, '\x1b[?2031;2\$y');
-    });
-
-    test('preserves split DEC private mode report queries across chunks', () {
-      final first = buildTerminalWindowControlQueryResponses(
-        input: 'before\x1b[?1004\$',
-        pendingInput: '',
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(first.response, isNull);
-      expect(first.pendingInput, '\x1b[?1004\$');
-
-      final second = buildTerminalWindowControlQueryResponses(
-        input: 'pafter',
-        pendingInput: first.pendingInput,
-        metrics: null,
-        modeState: const (
-          reportFocusMode: true,
-          bracketedPasteMode: false,
-          colorSchemeUpdatesMode: false,
-          isUsingAltBuffer: false,
-          mouseTrackingMode: false,
-          mouseDragTrackingMode: false,
-          mouseMoveTrackingMode: false,
-          sgrMouseReportMode: false,
-          synchronizedOutputMode: false,
-        ),
-      );
-
-      expect(second.response, '\x1b[?1004;1\$y');
-      expect(second.pendingInput, isEmpty);
     });
 
     test('extracts color scheme update mode changes', () {
@@ -3183,6 +3385,66 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       },
     );
 
+    // MonkeyMux tags each window replay with its window. The terminal keeps
+    // its images through a replay of the window it shows (a reopen) and
+    // drops them, before the replay's own, for another window.
+    test('MonkeyMux replay tags keep or drop the shown images', () async {
+      final session = _testSession(_MockSshClient());
+      final terminal = session.getOrCreateTerminal()..resize(20, 6);
+      int anchors() => [
+        for (var row = 0; row < terminal.mainBuffer.lines.length; row++)
+          ...terminal.mainBuffer.graphics.physicalPlacementAnchorsInLine(
+            terminal.mainBuffer.lines[row],
+          ),
+      ].length;
+      String tag(String window) =>
+          '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
+      final pixel = base64.encode([0, 0, 0]);
+
+      terminal
+        ..write(tag('@1'))
+        ..write('\x1b_Ga=T,f=24,s=1,v=1,i=1,c=2,r=1,C=1,q=2;$pixel\x1b\\');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 1);
+
+      terminal.write(tag('@1'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 1, reason: 'a reopen of the window shown keeps it');
+
+      terminal.write(tag('@2'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(anchors(), 0, reason: 'another window drops it');
+      expect(terminal.heldImageSignatures(), contains(1));
+    });
+
+    // The shell status and exit code are the window's: a replay of another
+    // window starts without them, since one without shell integration, or
+    // with no exit status yet, sends nothing that would replace them.
+    test('MonkeyMux replay tags of another window drop its shell status', () {
+      final session = _testSession(_MockSshClient());
+      final terminal = session.getOrCreateTerminal()..resize(20, 6);
+      String tag(String window) =>
+          '\x1b]$monkeyMuxReplayWindowOsc;window=srv:$window\x1b\\';
+
+      terminal.write(
+        '${tag('@1')}\x1b]133;A\x07\$ \x1b]133;B\x07false\r\n'
+        '\x1b]133;C\x07\x1b]133;D;7\x07\x1b]133;A\x07\$ \x1b]133;B\x07vi\r\n'
+        '\x1b]133;C\x07',
+      );
+      expect(session.shellStatus, TerminalShellStatus.runningCommand);
+      expect(session.lastExitCode, isNull);
+      terminal.write('\x1b]133;D;7\x07');
+      expect(session.lastExitCode, 7);
+
+      terminal.write(tag('@1'));
+      expect(session.shellStatus, TerminalShellStatus.prompt);
+      expect(session.lastExitCode, 7, reason: 'a reopen keeps them');
+
+      terminal.write('${tag('@2')}plain');
+      expect(session.shellStatus, isNull);
+      expect(session.lastExitCode, isNull);
+    });
+
     test('returns completed startup commands to a login shell without disconnecting', () async {
       final client = _MockSshClient();
       final startupShell = _MockExecSession();
@@ -3293,6 +3555,268 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
       await pumpEventQueue();
       expect(shellDoneEvents, hasLength(1));
     });
+
+    test('sends no kitty clipboard reply owed to a finished command to its login shell', () async {
+      final client = _MockSshClient();
+      final startupShell = _MockExecSession();
+      final loginShell = _MockExecSession();
+      final startupDone = Completer<void>();
+      final loginDone = Completer<void>();
+      final loginOpen = Completer<SSHSession>();
+      final startupWrites = <String>[];
+      final loginWrites = <String>[];
+      var executions = 0;
+      final session = _testSession(client, hostId: 2, hostname: 'example.com');
+      const pty = SSHPtyConfig(width: 120, height: 30);
+
+      when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+        (_) =>
+            ++executions == 1 ? Future.value(startupShell) : loginOpen.future,
+      );
+      for (final (shell, done, writes) in [
+        (startupShell, startupDone, startupWrites),
+        (loginShell, loginDone, loginWrites),
+      ]) {
+        when(() => shell.stdout).thenAnswer((_) => const Stream.empty());
+        when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => shell.done).thenAnswer((_) => done.future);
+        when(() => shell.write(any())).thenAnswer((invocation) {
+          writes.add(
+            utf8.decode(invocation.positionalArguments.single as List<int>),
+          );
+        });
+        when(shell.close).thenAnswer((_) {});
+      }
+      addTearDown(() async {
+        await session.closeShell(waitForStreams: false);
+        if (!startupDone.isCompleted) startupDone.complete();
+        if (!loginDone.isCompleted) loginDone.complete();
+      });
+
+      await session.getShell(
+        pty: pty,
+        command: 'monkeymux attach work',
+        returnToLoginShell: true,
+      );
+      String b64(String value) => base64Encode(utf8.encode(value));
+      final platform = _FakeKittyClipboardPlatform()
+        ..stored['text/plain'] = utf8.encode('clip');
+      final read = Completer<Uint8List?>();
+      platform.pendingRead = read.future;
+      session
+        ..clipboardSharingEnabled = true
+        ..localClipboardReadEnabled = true
+        ..kittyClipboard.platform = platform
+        ..debugHandlePrivateOsc('5522', ['type=read:id=r', b64('text/plain')]);
+      await pumpEventQueue();
+
+      // The attach ends; the read finishes while the login shell opens.
+      startupDone.complete();
+      await untilCalled(
+        () => client.execute(
+          any(that: contains('COLORTERM=truecolor')),
+          pty: pty,
+        ),
+      );
+      read.complete(utf8.encode('secret'));
+      await session.kittyClipboard.idle;
+      loginOpen.complete(loginShell);
+      expect(await session.getShell(), same(loginShell));
+      expect(startupWrites, isEmpty);
+      expect(loginWrites, isEmpty);
+
+      // The login shell's own requests are answered.
+      session.debugHandlePrivateOsc('5522', [
+        'type=read:id=n',
+        b64('text/plain'),
+      ]);
+      await session.kittyClipboard.idle;
+      expect(loginWrites.join(), contains(b64('clip')));
+    });
+
+    test(
+      'a login shell after a finished command starts in replace mode',
+      () async {
+        final client = _MockSshClient();
+        final startupShell = _MockExecSession();
+        final loginShell = _MockExecSession();
+        final startupOutput = StreamController<Uint8List>();
+        final startupDone = Completer<void>();
+        final loginDone = Completer<void>();
+        final loginOpen = Completer<SSHSession>();
+        var executions = 0;
+        final session = _testSession(
+          client,
+          hostId: 2,
+          hostname: 'example.com',
+        );
+        const pty = SSHPtyConfig(width: 120, height: 30);
+
+        when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer(
+          (_) =>
+              ++executions == 1 ? Future.value(startupShell) : loginOpen.future,
+        );
+        when(() => startupShell.stdout).thenAnswer((_) => startupOutput.stream);
+        when(() => loginShell.stdout).thenAnswer((_) => const Stream.empty());
+        for (final (shell, done) in [
+          (startupShell, startupDone),
+          (loginShell, loginDone),
+        ]) {
+          when(() => shell.stderr).thenAnswer((_) => const Stream.empty());
+          when(() => shell.done).thenAnswer((_) => done.future);
+          when(() => shell.write(any())).thenAnswer((_) {});
+          when(shell.close).thenAnswer((_) {});
+        }
+        addTearDown(() async {
+          await session.closeShell(waitForStreams: false);
+          await startupOutput.close();
+          if (!startupDone.isCompleted) startupDone.complete();
+          if (!loginDone.isCompleted) loginDone.complete();
+        });
+
+        await session.getShell(
+          pty: pty,
+          command: 'monkeymux attach work',
+          returnToLoginShell: true,
+        );
+        final terminal = session.getOrCreateTerminal();
+        startupOutput.add(utf8.encode('\x1b[4h'));
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(terminal.insertMode, isTrue);
+
+        startupDone.complete();
+        await untilCalled(
+          () => client.execute(
+            any(that: contains('COLORTERM=truecolor')),
+            pty: pty,
+          ),
+        );
+        loginOpen.complete(loginShell);
+        expect(await session.getShell(), same(loginShell));
+        expect(terminal.insertMode, isFalse);
+      },
+    );
+
+    // A MonkeyMux attach the server dropped ends without writing its exit
+    // sequences. The login shell that replaces it must not inherit the
+    // attach's modes, answers or half-written sequences: zsh echoed the focus
+    // report the screen sent on this transition as `^[[O` ahead of its first
+    // prompt.
+    for (final screenOwnsOutput in [false, true]) {
+      test('hands the login shell a terminal the ended command no longer holds'
+          '${screenOwnsOutput ? ' (screen output handler)' : ''}', () async {
+        final client = _MockSshClient();
+        final startupShell = _MockExecSession();
+        final loginShell = _MockExecSession();
+        final startupStdout = StreamController<Uint8List>();
+        final loginStdout = StreamController<Uint8List>();
+        final startupDone = Completer<void>();
+        final loginDone = Completer<void>();
+        final loginOpen = Completer<SSHSession>();
+        final loginWrites = <List<int>>[];
+        final session = _testSession(
+          client,
+          hostId: 2,
+          hostname: 'example.com',
+        );
+        const pty = SSHPtyConfig(width: 120, height: 30);
+
+        var executeCount = 0;
+        when(() => client.execute(any(), pty: any(named: 'pty')))
+            .thenAnswer((_) {
+              executeCount += 1;
+              return executeCount == 1
+                  ? Future.value(startupShell)
+                  : loginOpen.future;
+            });
+        when(() => startupShell.stdout).thenAnswer((_) => startupStdout.stream);
+        when(() => startupShell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => startupShell.done).thenAnswer((_) => startupDone.future);
+        when(() => startupShell.write(any())).thenAnswer((_) {});
+        when(startupShell.close).thenAnswer((_) {});
+        when(() => loginShell.stdout).thenAnswer((_) => loginStdout.stream);
+        when(() => loginShell.stderr).thenAnswer((_) => const Stream.empty());
+        when(() => loginShell.done).thenAnswer((_) => loginDone.future);
+        when(() => loginShell.write(any())).thenAnswer((invocation) {
+          loginWrites.add(
+            List<int>.from(invocation.positionalArguments.single as List<int>),
+          );
+        });
+        when(loginShell.close).thenAnswer((_) {});
+
+        addTearDown(() async {
+          await session.closeShell(waitForStreams: false);
+          await startupStdout.close();
+          await loginStdout.close();
+          if (!startupDone.isCompleted) {
+            startupDone.complete();
+          }
+          if (!loginDone.isCompleted) {
+            loginDone.complete();
+          }
+        });
+
+        await session.getShell(
+          pty: pty,
+          command: 'monkeymux attach work',
+          returnToLoginShell: true,
+        );
+        final terminal = session.getOrCreateTerminal();
+        // Stands in for the screen's handler, whose Enter pacer can hold
+        // replies and send them after the login shell has opened.
+        final screenOutput = <String>[];
+        final screenHandler = screenOutput.add;
+        if (screenOwnsOutput) {
+          terminal.onOutput = screenHandler;
+        }
+        var focusModeAtCompletion = true;
+        final commandCompletedSubscription = session.shellCommandCompletedStream
+            .listen((_) => focusModeAtCompletion = terminal.reportFocusMode);
+        addTearDown(commandCompletedSubscription.cancel);
+
+        // The attach's last output: an agent pane's screen and input modes,
+        // and a frame cut off by the drop partway through a title. The
+        // runtime holds an open synchronized frame until it ends, so its
+        // device attributes query (answered by the terminal) and its program
+        // status query (answered by the session) are only parsed once the
+        // attach is gone.
+        startupStdout.add(
+          Uint8List.fromList(
+            utf8.encode(
+              '\x1b[?1049h\x1b[?1004h\x1b[?1002h\x1b[?2004h'
+              '\x1b[?2026hagent\x1b[c\x1b]7501;?\x1b\\\x1b]0;agen',
+            ),
+          ),
+        );
+        startupDone.complete();
+        await untilCalled(
+          () => client.execute(
+            any(that: contains('COLORTERM=truecolor')),
+            pty: pty,
+          ),
+        );
+
+        expect(focusModeAtCompletion, isFalse);
+        expect(terminal.isUsingAltBuffer, isFalse);
+        expect(terminal.reportFocusMode, isFalse);
+        expect(terminal.mouseMode, MouseMode.none);
+        expect(terminal.bracketedPasteMode, isFalse);
+        if (screenOwnsOutput) {
+          expect(terminal.onOutput, same(screenHandler));
+        }
+        expect(screenOutput, isEmpty);
+
+        session.writeToShell('typed');
+        loginOpen.complete(loginShell);
+        expect(await session.getShell(), same(loginShell));
+        expect(loginWrites.map(utf8.decode).join(), 'typed');
+
+        loginStdout.add(Uint8List.fromList(utf8.encode('login prompt')));
+        await pumpEventQueue();
+        session.debugFlushPendingTerminalOutput();
+        expect(terminal.buffer.getText(), contains('login prompt'));
+      });
+    }
 
     test(
       'falls back to shell request when truecolor bootstrap is rejected',
@@ -3783,6 +4307,40 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         '\x1b]1337;ReportCellSize=17.00;8.00\x1b\\',
       );
     });
+
+    test(
+      'answers kitty clipboard requests under the OSC 52 settings',
+      () async {
+        final opened = await openShell();
+        final platform = _FakeKittyClipboardPlatform();
+        String b64(String value) => base64Encode(utf8.encode(value));
+        opened.session
+          ..kittyClipboard.platform = platform
+          ..debugHandlePrivateOsc('5522', ['type=read:id=r', b64('text/plain')])
+          ..debugHandlePrivateOsc('5522', const ['type=write:id=w']);
+        await opened.session.kittyClipboard.idle;
+        expect(opened.shellWrites.map(utf8.decode), [
+          '\x1b]5522;type=read:status=EPERM:id=r\x1b\\',
+          '\x1b]5522;type=write:status=EPERM:id=w\x1b\\',
+        ]);
+
+        opened.shellWrites.clear();
+        opened.session
+          ..clipboardSharingEnabled = true
+          ..debugHandlePrivateOsc('5522', const ['type=write:id=w'])
+          ..debugHandlePrivateOsc('5522', [
+            'type=wdata:mime=${b64('text/plain')}',
+            b64('copied'),
+          ])
+          ..debugHandlePrivateOsc('5522', const ['type=wdata']);
+        await opened.session.kittyClipboard.idle;
+        expect(
+          utf8.decode(opened.shellWrites.single),
+          '\x1b]5522;type=write:status=DONE:id=w\x1b\\',
+        );
+        expect(utf8.decode(platform.stored['text/plain']!), 'copied');
+      },
+    );
 
     test('answers OSC 7501 feature detection only in a plain shell', () async {
       final opened = await openShell();
@@ -8259,6 +8817,383 @@ LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*
         expect(promptCalls, 0);
       },
     );
+
+    for (final (label, reason) in <(String, SSHError?)>[
+      ('closes the stream', null),
+      ('resets the socket', SSHSocketError(const SocketException('reset'))),
+    ]) {
+      test('reconnects with the typed password when the server $label '
+          'while checking it', () async {
+        final challenges = <SshAuthChallenge>[];
+        final sentPasswords = <String?>[];
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (challenge) async {
+            challenges.add(challenge);
+            return ['typed-secret'];
+          },
+          steps: [
+            (onPassword, _) async {
+              sentPasswords.add(await onPassword!());
+              return Future<void>.error(
+                SSHAuthAbortError(
+                  'Connection closed before authentication',
+                  reason,
+                ),
+              );
+            },
+            (onPassword, _) async {
+              sentPasswords.add(await onPassword!());
+            },
+          ],
+        );
+
+        final result = await fixture.service.connect(_ReconnectFixture.config);
+
+        expect(result.success, isTrue);
+        expect(fixture.socketCount, 2);
+        expect(sentPasswords, ['typed-secret', 'typed-secret']);
+        expect(challenges, hasLength(1));
+        verify(fixture.clients.first.close).called(1);
+        verifyNever(fixture.clients.last.close);
+      });
+    }
+
+    test(
+      'offers the typed password to the reconnect once, then asks again',
+      () async {
+        var promptCalls = 0;
+        final sentAnswers = <Object?>[];
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (challenge) async {
+            promptCalls++;
+            return ['answer-$promptCalls'];
+          },
+          steps: [
+            (onPassword, _) async {
+              sentAnswers.add(await onPassword!());
+              return Future<void>.error(
+                SSHAuthAbortError('Connection closed before authentication'),
+              );
+            },
+            (onPassword, onUserInfo) async {
+              sentAnswers
+                ..add(await onPassword!())
+                // The server turned the replayed password down.
+                ..add(
+                  await onUserInfo!(
+                    SSHUserInfoRequest('', '', [
+                      SSHUserInfoPrompt('Password:', false),
+                    ]),
+                  ),
+                );
+            },
+          ],
+        );
+
+        final result = await fixture.service.connect(_ReconnectFixture.config);
+
+        expect(result.success, isTrue);
+        expect(sentAnswers, [
+          'answer-1',
+          'answer-1',
+          ['answer-2'],
+        ]);
+        expect(promptCalls, 2);
+      },
+    );
+
+    test('reconnects with a password typed after the server dropped the '
+        'connection', () async {
+      final prompted = Completer<void>();
+      final answer = Completer<List<String>?>();
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) {
+          prompted.complete();
+          return answer.future;
+        },
+        steps: [
+          (onPassword, _) async {
+            // LoginGraceTime runs out while the dialog is still open.
+            unawaited(Future.sync(onPassword!));
+            await prompted.future;
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+          },
+        ],
+      );
+
+      final connecting = fixture.service.connect(_ReconnectFixture.config);
+      await prompted.future;
+      await pumpEventQueue();
+      expect(fixture.socketCount, 1);
+
+      answer.complete(['late-secret']);
+      final result = await connecting;
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 2);
+      expect(sentPasswords, ['late-secret']);
+    });
+
+    test('reconnects a host with a stored password', () async {
+      final sentPasswords = <String?>[];
+      final fixture = await _ReconnectFixture.create(
+        steps: [
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (onPassword, _) async {
+            sentPasswords.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        const SshConnectionConfig(
+          hostname: 'reconnect.example.com',
+          port: 22,
+          username: 'tester',
+          password: 'stored-pass',
+        ),
+      );
+
+      expect(result.success, isTrue);
+      expect(sentPasswords, ['stored-pass', 'stored-pass']);
+    });
+
+    for (final (label, answer, step)
+        in <(String, List<String>?, _ServerAuthStep)>[
+          (
+            'the server disconnects with a reason',
+            ['typed-secret'],
+            (onPassword, _) async {
+              await onPassword!();
+              return Future<void>.error(
+                SSHAuthAbortError(
+                  'Connection closed before authentication',
+                  SSHDisconnectError(2, 'Too many authentication failures'),
+                ),
+              );
+            },
+          ),
+          (
+            'the host key is rejected',
+            ['typed-secret'],
+            (onPassword, _) async {
+              await onPassword!();
+              return Future<void>.error(
+                SSHAuthAbortError(
+                  'Connection closed before authentication',
+                  SSHHostkeyError('Hostkey verification failed'),
+                ),
+              );
+            },
+          ),
+          (
+            'nothing was asked',
+            ['typed-secret'],
+            (_, _) => Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            ),
+          ),
+          (
+            'the user declined the prompt',
+            null,
+            (onPassword, _) async {
+              expect(await onPassword!(), isNull);
+              return Future<void>.error(
+                SSHAuthAbortError('Connection closed before authentication'),
+              );
+            },
+          ),
+        ]) {
+      test('does not reconnect when $label', () async {
+        final fixture = await _ReconnectFixture.create(
+          promptHandler: (challenge) async => answer,
+          steps: [step],
+        );
+
+        final result = await fixture.service.connect(_ReconnectFixture.config);
+
+        expect(result.success, isFalse);
+        expect(fixture.socketCount, 1);
+      });
+    }
+
+    test('keeps trying to reach a server that restarts after the '
+        'password', () async {
+      final progress = <String>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async => ['typed-secret'],
+        // A Mac unlocked over SSH restarts sshd, refusing connections
+        // until it is back.
+        refusedSockets: {2, 3},
+        reconnectWindow: const Duration(seconds: 10),
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (_, _) async {},
+        ],
+      );
+
+      final result = await fixture.service.connect(
+        _ReconnectFixture.config,
+        onProgress: (update) => progress.add(update.message),
+      );
+
+      expect(result.success, isTrue);
+      expect(fixture.socketCount, 4);
+      expect(fixture.clients, hasLength(2));
+      expect(progress, contains('Waiting for the server to come back…'));
+      // The first connection gets the 30 s default; reconnect attempts get
+      // only what is left of the window.
+      expect(fixture.socketTimeouts.first, const Duration(seconds: 30));
+      expect(
+        fixture.socketTimeouts.skip(1),
+        everyElement(
+          allOf(
+            greaterThan(Duration.zero),
+            lessThanOrEqualTo(const Duration(seconds: 10)),
+          ),
+        ),
+      );
+    });
+
+    test('stops trying to reach the server when the window runs out', () async {
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async => ['typed-secret'],
+        refusedSockets: {2, 3},
+        // No time left for another attempt after the pause.
+        reconnectWindow: const Duration(seconds: 1),
+        retryDelay: const Duration(seconds: 2),
+        steps: [
+          (onPassword, _) async {
+            await onPassword!();
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(_ReconnectFixture.config);
+
+      expect(result.success, isFalse);
+      expect(fixture.socketCount, 2);
+    });
+
+    test('gives up on a tunnel that does not open within the window and '
+        'closes it when it opens late', () async {
+      final lateTunnel = Completer<SSHForwardChannel>();
+      final lateSocket = _FakeForwardHostKeySocket(
+        _JumpReconnectFixture.targetKey,
+      );
+      final fixture = await _JumpReconnectFixture.create(
+        forward: (count) => count == 1
+            ? Future.value(
+                _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+              )
+            : lateTunnel.future,
+      );
+
+      final result = await fixture.connect();
+
+      expect(result.success, isFalse);
+      expect(fixture.forwardCount, 2);
+      lateTunnel.complete(lateSocket);
+      await pumpEventQueue();
+      expect(lateSocket.destroyed, isTrue);
+    });
+
+    test('does not reconnect through a jump connection that dropped', () async {
+      final fixture = await _JumpReconnectFixture.create(
+        forward: (_) => Future.value(
+          _FakeForwardHostKeySocket(_JumpReconnectFixture.targetKey),
+        ),
+      );
+      when(() => fixture.jumpClient.isClosed).thenReturn(true);
+
+      final result = await fixture.connect();
+
+      expect(result.success, isFalse);
+      expect(fixture.forwardCount, 1);
+    });
+
+    test('does not offer a typed passphrase as the password', () async {
+      var promptCalls = 0;
+      final sentAnswers = <Object?>[];
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async {
+          promptCalls++;
+          return ['answer-$promptCalls'];
+        },
+        steps: [
+          (_, onUserInfo) async {
+            sentAnswers.add(
+              await onUserInfo!(
+                SSHUserInfoRequest('', '', [
+                  SSHUserInfoPrompt('Passphrase for key:', false),
+                ]),
+              ),
+            );
+            return Future<void>.error(
+              SSHAuthAbortError('Connection closed before authentication'),
+            );
+          },
+          (onPassword, _) async {
+            sentAnswers.add(await onPassword!());
+          },
+        ],
+      );
+
+      final result = await fixture.service.connect(_ReconnectFixture.config);
+
+      expect(result.success, isTrue);
+      expect(sentAnswers, [
+        ['answer-1'],
+        'answer-2',
+      ]);
+      expect(promptCalls, 2);
+    });
+
+    test('reconnects only once', () async {
+      var promptCalls = 0;
+      Future<void> answerThenDrop(
+        SSHPasswordRequestHandler? onPassword,
+        SSHUserInfoRequestHandler? _,
+      ) async {
+        await onPassword!();
+        return Future<void>.error(
+          SSHAuthAbortError('Connection closed before authentication'),
+        );
+      }
+
+      final fixture = await _ReconnectFixture.create(
+        promptHandler: (challenge) async {
+          promptCalls++;
+          return ['typed-secret'];
+        },
+        steps: [answerThenDrop, answerThenDrop],
+      );
+
+      final result = await fixture.service.connect(_ReconnectFixture.config);
+
+      expect(result.success, isFalse);
+      expect(fixture.socketCount, 2);
+      expect(promptCalls, 1);
+    });
 
     test('connect replaces a changed trusted host key after prompt', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());

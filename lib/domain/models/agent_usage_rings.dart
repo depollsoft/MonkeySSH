@@ -79,6 +79,7 @@ bool supportsAgentUsageRings(AgentLaunchTool tool, {String? modelProvider}) =>
     switch (tool) {
       AgentLaunchTool.claudeCode ||
       AgentLaunchTool.codex ||
+      AgentLaunchTool.museCode ||
       AgentLaunchTool.antigravity ||
       AgentLaunchTool.grokBuild => true,
       AgentLaunchTool.pi => _piUsageProviders.containsKey(modelProvider),
@@ -88,6 +89,7 @@ bool supportsAgentUsageRings(AgentLaunchTool tool, {String? modelProvider}) =>
 bool _usesAccountWindows(AgentLaunchTool tool, String? modelProvider) =>
     tool == AgentLaunchTool.claudeCode ||
     tool == AgentLaunchTool.codex ||
+    tool == AgentLaunchTool.museCode ||
     (tool == AgentLaunchTool.pi &&
         const {'anthropic', 'openai', 'openai-codex'}.contains(modelProvider));
 

@@ -14,7 +14,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: implementation_imports
-import 'package:xterm/src/utils/unicode_v11.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../data/database/database.dart';
@@ -42,6 +41,8 @@ import 'host_key_prompt_handler_provider.dart';
 import 'host_key_verification.dart';
 import 'host_notification_prefs_reader.dart';
 import 'interactive_auth_prompt.dart';
+import 'kitty_clipboard_protocol.dart';
+import 'kitty_clipboard_service.dart';
 import 'local_notification_service.dart';
 import 'openssh_key_generator.dart';
 import 'port_forward_browser_service.dart';
@@ -72,19 +73,6 @@ typedef TerminalWindowMetrics = ({
   int rows,
   int pixelWidth,
   int pixelHeight,
-});
-
-/// Terminal mode state used to answer DECRQM mode-status queries.
-typedef TerminalControlModeState = ({
-  bool reportFocusMode,
-  bool bracketedPasteMode,
-  bool colorSchemeUpdatesMode,
-  bool isUsingAltBuffer,
-  bool mouseTrackingMode,
-  bool mouseDragTrackingMode,
-  bool mouseMoveTrackingMode,
-  bool sgrMouseReportMode,
-  bool synchronizedOutputMode,
 });
 
 /// Upper bound on withheld synchronized-output bytes. A program that opens a
@@ -343,7 +331,6 @@ buildTerminalWindowControlQueryResponses({
   required String input,
   required String pendingInput,
   required TerminalWindowMetrics? metrics,
-  TerminalControlModeState? modeState,
   TerminalThemeData? theme,
 }) {
   final combinedInput = pendingInput + input;
@@ -355,22 +342,6 @@ buildTerminalWindowControlQueryResponses({
     final response = _buildTerminalWindowQueryResponse(primaryParam, metrics);
     if (response != null) {
       responses.write(response);
-    }
-  }
-
-  for (final match in _terminalModeReportQueryPattern.allMatches(
-    combinedInput,
-  )) {
-    final params = match.group(1)?.split(';') ?? const <String>[];
-    for (final param in params) {
-      final mode = int.tryParse(param);
-      if (mode == null) {
-        continue;
-      }
-      final response = _buildTerminalModeReportResponse(mode, modeState);
-      if (response != null) {
-        responses.write(response);
-      }
     }
   }
 
@@ -483,27 +454,10 @@ const terminalWin32InputModeEscapeKeyEvents =
 String encodeTerminalInputForWin32InputMode(String data) =>
     data == '\x1b' ? terminalWin32InputModeEscapeKeyEvents : data;
 
-/// Normalizes terminal-generated output before it is sent to the remote shell.
+/// Adapts remote terminal output so xterm.dart renders it correctly, retaining
+/// split escape sequences until complete.
 ///
-/// xterm.dart currently emits cursor-position reports using its internal
-/// zero-based cursor coordinates. The terminal DSR wire protocol is one-based,
-/// and TUIs such as Codex can stall or mis-detect terminal state after receiving
-/// `CSI 0;0 R`.
-String normalizeTerminalOutputForRemoteShell(String data) =>
-    data.replaceAllMapped(_terminalCursorPositionReportPattern, (match) {
-      final row = int.parse(match.group(1)!);
-      final column = int.parse(match.group(2)!);
-      return '\x1b[${row + 1};${column + 1}R';
-    });
-
-/// Adapts remote terminal output so xterm.dart renders it correctly.
-///
-/// xterm.dart 4.0.0 tracks IRM (`CSI 4 h/l`) but does not shift existing cells
-/// when printable characters arrive while the mode is active. Injecting ICH
-/// before each printable cell preserves behavior from editors such as nano,
-/// while the decoder retains split escape sequences until complete.
-///
-/// xterm.dart also treats private `CSI > ... m` keyboard modifier controls as
+/// xterm.dart treats private `CSI > ... m` keyboard modifier controls as
 /// SGR attributes. Dropping those controls prevents TUIs such as OpenCode from
 /// accidentally enabling underline/bold while painting spaces.
 class TerminalXtermOutputDecoder {
@@ -511,7 +465,6 @@ class TerminalXtermOutputDecoder {
   _TerminalSequenceState? _state;
   bool _previousEscape = false;
   String _pendingSurrogate = '';
-  bool _insertMode = false;
 
   /// Number of code units retained until a sequence or surrogate completes.
   int get pendingCodeUnits => _sequence.length + _pendingSurrogate.length;
@@ -520,18 +473,17 @@ class TerminalXtermOutputDecoder {
   @visibleForTesting
   int materializedSequenceCodeUnits = 0;
 
-  /// Discards partial output and resets insert mode for a new shell.
+  /// Discards partial output for a new shell.
   void reset() {
     _sequence.clear();
     _state = null;
     _previousEscape = false;
     _pendingSurrogate = '';
-    _insertMode = false;
     materializedSequenceCodeUnits = 0;
   }
 
   /// Adapts the next chunk of remote output.
-  ({String output, bool insertMode}) add({required String input}) {
+  String add({required String input}) {
     final combinedInput = _pendingSurrogate.isEmpty
         ? input
         : _pendingSurrogate + input;
@@ -551,7 +503,6 @@ class TerminalXtermOutputDecoder {
         _sequence.clear();
         if (!_shouldDropTerminalOutputSequenceForXterm(sequence)) {
           output.write(sequence);
-          _insertMode = _terminalInsertModeUpdate(sequence) ?? _insertMode;
         }
         continue;
       }
@@ -570,18 +521,20 @@ class TerminalXtermOutputDecoder {
       }
       final rune = _terminalRuneAt(combinedInput, cursor);
       final runeLength = _terminalRuneLength(rune);
-      if (_insertMode) {
-        for (var cell = 0; cell < unicodeV11.wcwidth(rune); cell++) {
-          output.write(_terminalInsertBlankCharacterSequence);
-        }
-      }
       output.write(combinedInput.substring(cursor, cursor + runeLength));
       cursor += runeLength;
     }
-    return (output: output.toString(), insertMode: _insertMode);
+    return output.toString();
   }
 
   void _scanSequenceCodeUnit(int codeUnit) {
+    // CAN and SUB cancel any sequence, as they do in the terminal's parser;
+    // holding on would keep the text after them back until a later BEL or ST.
+    if (codeUnit == _terminalCancelCodeUnit ||
+        codeUnit == _terminalSubstituteCodeUnit) {
+      _state = null;
+      return;
+    }
     switch (_state!) {
       case _TerminalSequenceState.escape:
         switch (codeUnit) {
@@ -606,6 +559,14 @@ class TerminalXtermOutputDecoder {
             (_previousEscape &&
                 codeUnit == _terminalStringTerminatorCodeUnit)) {
           _state = null;
+        } else if (_previousEscape) {
+          // ESC and anything but `\` ends the string unfinished and starts an
+          // escape sequence, as in the terminal's parser; holding on would
+          // keep the text after it back until a later BEL or ST.
+          _previousEscape = false;
+          _state = _TerminalSequenceState.escape;
+          _scanSequenceCodeUnit(codeUnit);
+          return;
         }
         _previousEscape = codeUnit == _terminalEscapeCodeUnit;
       case _TerminalSequenceState.intermediate:
@@ -617,15 +578,11 @@ class TerminalXtermOutputDecoder {
 enum _TerminalSequenceState { escape, csi, string, intermediate }
 
 final _terminalWindowQueryPattern = RegExp(r'\x1b\[([0-9;?]*)t');
-final _terminalModeReportQueryPattern = RegExp(r'\x1b\[\?([0-9;]+)\$p');
 final _terminalThemeModeQueryPattern = RegExp(r'\x1b\[\?996n');
 final _terminalControlQueryPrefixPattern = RegExp(r'^\x1b(?:$|\[[0-9;?\$]*)$');
 final _terminalPrivateModeSetResetPattern = RegExp(r'\x1b\[\?([0-9;]+)([hl])');
 final _terminalOscOrDcsSequencePattern = RegExp(
   r'\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)',
-);
-final _terminalCursorPositionReportPattern = RegExp(
-  r'\x1b\[([0-9]+);([0-9]+)R',
 );
 final _terminalCsiNumericParamsPattern = RegExp(r'^[0-9;]*$');
 
@@ -654,69 +611,11 @@ String? _buildTerminalWindowQueryResponse(
   }
 }
 
-String? _buildTerminalModeReportResponse(
-  int mode,
-  TerminalControlModeState? modeState,
-) {
-  if (modeState == null) {
-    return switch (mode) {
-      1016 ||
-      2026 ||
-      2027 ||
-      2031 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-      _ => null,
-    };
-  }
-
-  return switch (mode) {
-    1000 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1002 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseDragTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1003 => _formatTerminalModeReport(
-      mode,
-      modeState.mouseMoveTrackingMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1004 => _formatTerminalModeReport(
-      mode,
-      modeState.reportFocusMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1006 => _formatTerminalModeReport(
-      mode,
-      modeState.sgrMouseReportMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1049 => _formatTerminalModeReport(
-      mode,
-      modeState.isUsingAltBuffer ? _terminalModeSet : _terminalModeReset,
-    ),
-    2004 => _formatTerminalModeReport(
-      mode,
-      modeState.bracketedPasteMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2031 => _formatTerminalModeReport(
-      mode,
-      modeState.colorSchemeUpdatesMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    2026 => _formatTerminalModeReport(
-      mode,
-      modeState.synchronizedOutputMode ? _terminalModeSet : _terminalModeReset,
-    ),
-    1016 || 2027 => _formatTerminalModeReport(mode, _terminalModeNotRecognized),
-    _ => null,
-  };
-}
-
-const _terminalModeNotRecognized = 0;
-const _terminalModeSet = 1;
-const _terminalModeReset = 2;
-
 const _terminalEscape = '\x1b';
 const _terminalEscapeCodeUnit = 0x1B;
 const _terminalBellCodeUnit = 0x07;
+const _terminalCancelCodeUnit = 0x18;
+const _terminalSubstituteCodeUnit = 0x1A;
 const _terminalCsiIntroducerCodeUnit = 0x5B;
 const _terminalDcsIntroducerCodeUnit = 0x50;
 const _terminalOscIntroducerCodeUnit = 0x5D;
@@ -724,57 +623,12 @@ const _terminalSosIntroducerCodeUnit = 0x58;
 const _terminalPmIntroducerCodeUnit = 0x5E;
 const _terminalApcIntroducerCodeUnit = 0x5F;
 const _terminalStringTerminatorCodeUnit = 0x5C;
-const _terminalInsertMode = 4;
-const _terminalSetModeFinalCodeUnit = 0x68;
-const _terminalResetModeFinalCodeUnit = 0x6C;
-const _terminalSoftResetFinalCodeUnit = 0x70;
-const _terminalFullResetFinalCodeUnit = 0x63;
 const _terminalPrivateMarkerCodeUnit = 0x3E;
 const _terminalSelectGraphicRenditionFinalCodeUnit = 0x6D;
-const _terminalInsertBlankCharacterSequence = '\x1b[@';
 const _terminalTmuxPassthroughStart = '${_terminalEscape}Ptmux;';
-
-String _formatTerminalModeReport(int mode, int status) =>
-    '\x1b[?$mode;$status\$y';
 
 bool _isTerminalEscapeIntermediate(int codeUnit) =>
     codeUnit >= 0x20 && codeUnit <= 0x2F;
-
-bool? _terminalInsertModeUpdate(String sequence) {
-  if (sequence.length < 2 ||
-      sequence.codeUnitAt(0) != _terminalEscapeCodeUnit) {
-    return null;
-  }
-  if (sequence.length == 2 &&
-      sequence.codeUnitAt(1) == _terminalFullResetFinalCodeUnit) {
-    return false;
-  }
-  if (sequence.length < 4 ||
-      sequence.codeUnitAt(1) != _terminalCsiIntroducerCodeUnit) {
-    return null;
-  }
-
-  final finalCodeUnit = sequence.codeUnitAt(sequence.length - 1);
-  final params = sequence.substring(2, sequence.length - 1);
-  if (finalCodeUnit == _terminalSoftResetFinalCodeUnit &&
-      (params == '!' || params.endsWith('"'))) {
-    return false;
-  }
-  if (finalCodeUnit != _terminalSetModeFinalCodeUnit &&
-      finalCodeUnit != _terminalResetModeFinalCodeUnit) {
-    return null;
-  }
-
-  if (params.startsWith('?')) {
-    return null;
-  }
-  for (final param in params.split(';')) {
-    if (int.tryParse(param) == _terminalInsertMode) {
-      return finalCodeUnit == _terminalSetModeFinalCodeUnit;
-    }
-  }
-  return null;
-}
 
 bool _shouldDropTerminalOutputSequenceForXterm(String sequence) {
   if (sequence.length < 4 ||
@@ -1007,7 +861,10 @@ applyTerminalShellIntegrationOsc(
         status: TerminalShellStatus.prompt,
         lastExitCode: previousExitCode,
       );
+    // `I` is input too: OSC 133's input to the end of the line, and the end
+    // of a right prompt in OSC 633. MonkeyMux replays end on it.
     case 'B':
+    case 'I':
       return (status: TerminalShellStatus.editingCommand, lastExitCode: null);
     case 'C':
       return (status: TerminalShellStatus.runningCommand, lastExitCode: null);
@@ -1425,16 +1282,31 @@ class _InteractiveAuthHandlers {
   final SSHUserInfoRequestHandler? onUserInfoRequest;
 }
 
-/// Tracks whether an interactive authentication prompt is currently open so
-/// the authentication timeout can pause while the user types.
+/// Tracks the interactive authentication prompts of one connection attempt:
+/// whether one is open, so the authentication timeout can pause while the
+/// user types, and whether the last one was answered, so a connection the
+/// server drops while checking the answer can be retried without asking the
+/// user to type the password again.
 class _InteractiveAuthGate {
   int _activePrompts = 0;
+  Completer<void>? _idle;
+  bool _answeredLastPrompt = false;
+  String? _typedPassword;
+  String? _replayPassword;
 
   /// Invoked whenever a prompt opens or closes.
   void Function()? onActivityChanged;
 
   /// Whether at least one interactive prompt is currently awaiting input.
   bool get isPrompting => _activePrompts > 0;
+
+  /// Whether the last password or keyboard-interactive request was answered
+  /// rather than declined.
+  bool get answeredLastPrompt => _answeredLastPrompt;
+
+  /// Completes once no prompt is open.
+  Future<void> get idle =>
+      isPrompting ? (_idle ??= Completer<void>()).future : Future.value();
 
   /// Runs [action] while marking a prompt as active for its duration.
   Future<T> guard<T>(Future<T> Function() action) async {
@@ -1444,8 +1316,45 @@ class _InteractiveAuthGate {
       return await action();
     } finally {
       _activePrompts--;
+      if (_activePrompts == 0) {
+        _idle?.complete();
+        _idle = null;
+      }
       onActivityChanged?.call();
     }
+  }
+
+  /// Records that a request was answered. [typedPassword] is a password the
+  /// user typed, which [startRetry] offers to the next attempt.
+  void recordAnswer({String? typedPassword}) {
+    _answeredLastPrompt = true;
+    if (typedPassword != null) {
+      _typedPassword = typedPassword;
+    }
+  }
+
+  /// Records that the user declined a request.
+  void recordDeclined() => _answeredLastPrompt = false;
+
+  /// Prepares to authenticate again on a new connection. The first password
+  /// request of that attempt is answered with the password the user typed.
+  void startRetry() {
+    _answeredLastPrompt = false;
+    _replayPassword = _typedPassword;
+  }
+
+  /// Returns the password saved by [startRetry], once.
+  String? takeReplayPassword() {
+    final password = _replayPassword;
+    _replayPassword = null;
+    return password;
+  }
+
+  /// Drops the typed password once it can no longer be needed. The client's
+  /// auth callbacks keep this gate alive for as long as the connection.
+  void forgetTypedPassword() {
+    _typedPassword = null;
+    _replayPassword = null;
   }
 }
 
@@ -1460,6 +1369,8 @@ class SshService {
     this.interactiveAuthPromptHandler,
     WifiNetworkService? wifiNetworkService,
     this.wifiPermissionTimeout = const Duration(seconds: 15),
+    this.reconnectAfterDropWindow = const Duration(seconds: 45),
+    this.reconnectAfterDropRetryDelay = const Duration(seconds: 2),
     this.onNonFatalError,
     SshSocketConnector? socketConnector,
     SshClientFactory? clientFactory,
@@ -1506,6 +1417,16 @@ class SshService {
   /// connecting through the jump host. A prompt the user leaves open, or one
   /// the OS never answers, must not hold the connection.
   final Duration wifiPermissionTimeout;
+
+  /// How long reconnecting after the server dropped the connection during
+  /// sign-in keeps trying to reach it. A Mac unlocked over SSH after a
+  /// restart (FileVault) restarts every process, sshd and its network
+  /// included, and takes several seconds to accept connections again.
+  final Duration reconnectAfterDropWindow;
+
+  /// Pause between attempts to reach the server within
+  /// [reconnectAfterDropWindow].
+  final Duration reconnectAfterDropRetryDelay;
 
   /// Reports an error the connection recovered from but that points at a bug,
   /// such as the permissions channel never having been registered.
@@ -2119,6 +2040,95 @@ class SshService {
           parsedIdentities ?? await guard(_parseIdentities(config));
       cancellationToken?.throwIfCancelled();
 
+      /// A [timeout] shorter than the connection timeout also bounds opening
+      /// the tunnel through a jump host, which otherwise has no limit.
+      Future<SSHSocket> openEndpointSocket({Duration? timeout}) {
+        final tunnelClient = jumpClient;
+        if (tunnelClient != null) {
+          // Create forwarded connection through jump host.
+          // SSHForwardChannel implements SSHSocket.
+          report(
+            SshConnectionState.connecting,
+            'Opening tunnel to destination…',
+          );
+          final forwarding = tunnelClient.forwardLocal(
+            config.hostname,
+            config.port,
+          );
+          return guard(
+            timeout == null
+                ? forwarding
+                : forwarding.timeout(
+                    timeout,
+                    onTimeout: () {
+                      forwarding.then(_closeAbandonedSocket).ignore();
+                      throw TimeoutException(
+                        'Opening the tunnel timed out',
+                        timeout,
+                      );
+                    },
+                  ),
+            onAbandonedValue: _closeAbandonedSocket,
+          );
+        }
+
+        report(
+          SshConnectionState.connecting,
+          isJumpHost
+              ? 'Opening jump host connection…'
+              : 'Opening network connection…',
+        );
+        return guard(
+          _socketConnector(
+            config.hostname,
+            config.port,
+            timeout: timeout ?? config.connectionTimeout,
+          ),
+          onAbandonedValue: _closeAbandonedSocket,
+        );
+      }
+
+      // Keeps every attempt and pause inside [reconnectAfterDropWindow].
+      Future<SSHSocket> reopenEndpointSocket() async {
+        final elapsed = Stopwatch()..start();
+        for (var attempt = 1; ; attempt++) {
+          final remaining = reconnectAfterDropWindow - elapsed.elapsed;
+          try {
+            return await openEndpointSocket(
+              timeout: remaining < config.connectionTimeout
+                  ? remaining
+                  : config.connectionTimeout,
+            );
+          } on Object catch (error) {
+            if (error is! Exception && error is! SSHError) rethrow;
+            if (error is SshConnectionCancelledException ||
+                (jumpClient?.isClosed ?? false) ||
+                reconnectAfterDropWindow - elapsed.elapsed <=
+                    reconnectAfterDropRetryDelay) {
+              rethrow;
+            }
+            DiagnosticsLogService.instance.info(
+              'ssh.connect',
+              'auth_reconnect_retry',
+              fields: {
+                'isJumpHost': isJumpHost,
+                'attempt': attempt,
+                'errorType': error.runtimeType,
+              },
+            );
+            report(
+              SshConnectionState.connecting,
+              'Waiting for the server to come back…',
+            );
+            await guard(Future<void>.delayed(reconnectAfterDropRetryDelay));
+            // The timer can fire after the window has run out.
+            if (elapsed.elapsed >= reconnectAfterDropWindow) rethrow;
+          }
+        }
+      }
+
+      var reconnectedAfterDrop = false;
+
       Future<void> authenticate(
         SSHSocket socket,
         SSHHostkeyVerifyHandler verify,
@@ -2152,13 +2162,42 @@ class SshService {
         agentForwarding?.attachClient(createdClient);
         client = createdClient;
         unownedSocket = null;
-        await _awaitAuthentication(
-          createdClient,
-          authGate,
-          timeout: config.connectionTimeout,
-          isJumpHost: isJumpHost,
-          cancellationToken: cancellationToken,
-        );
+        try {
+          await _awaitAuthentication(
+            createdClient,
+            authGate,
+            timeout: config.connectionTimeout,
+            isJumpHost: isJumpHost,
+            cancellationToken: cancellationToken,
+          );
+          authGate.forgetTypedPassword();
+        } on SSHAuthAbortError catch (error) {
+          // A Mac unlocked over SSH after a restart (FileVault) drops the
+          // connection once the password is in, restarts every process and
+          // then accepts the key; sshd also drops it when LoginGraceTime runs
+          // out while the user types. Reconnect once rather than make the
+          // user do it. A prompt still open is waited for, so its answer is
+          // not lost.
+          if (reconnectedAfterDrop || !_isDroppedConnection(error)) rethrow;
+          await guard(authGate.idle);
+          // A dropped jump connection can't carry the reconnect.
+          if (!authGate.answeredLastPrompt || (jumpClient?.isClosed ?? false)) {
+            rethrow;
+          }
+          reconnectedAfterDrop = true;
+          DiagnosticsLogService.instance.info(
+            'ssh.connect',
+            'auth_reconnect_after_drop',
+            fields: {
+              'isJumpHost': isJumpHost,
+              'reasonType': error.reason?.runtimeType ?? 'none',
+            },
+          );
+          client = null;
+          await createdClient.close();
+          authGate.startRetry();
+          await authenticate(await reopenEndpointSocket(), verify);
+        }
       }
 
       SSHHostkeyVerifyHandler verifyProbedKey(VerifiedHostKey key) =>
@@ -2201,36 +2240,6 @@ class SshService {
           ..add(jumpResult.client!)
           ..addAll(jumpResult.dependentClients);
         jumpClient = jumpResult.client;
-      }
-
-      Future<SSHSocket> openEndpointSocket() {
-        if (jumpClient != null) {
-          // Create forwarded connection through jump host.
-          // SSHForwardChannel implements SSHSocket.
-          report(
-            SshConnectionState.connecting,
-            'Opening tunnel to destination…',
-          );
-          return guard(
-            jumpClient.forwardLocal(config.hostname, config.port),
-            onAbandonedValue: _closeAbandonedSocket,
-          );
-        }
-
-        report(
-          SshConnectionState.connecting,
-          isJumpHost
-              ? 'Opening jump host connection…'
-              : 'Opening network connection…',
-        );
-        return guard(
-          _socketConnector(
-            config.hostname,
-            config.port,
-            timeout: config.connectionTimeout,
-          ),
-          onAbandonedValue: _closeAbandonedSocket,
-        );
       }
 
       final knownHosts = knownHostsRepository!;
@@ -2363,7 +2372,16 @@ class SshService {
       DiagnosticsLogService.instance.warning(
         'ssh.connect',
         'connect_failed',
-        fields: {'isJumpHost': isJumpHost, 'errorType': e.runtimeType},
+        fields: {
+          'isJumpHost': isJumpHost,
+          'errorType': e.runtimeType,
+          if (e is SSHAuthAbortError)
+            'reasonType': e.reason?.runtimeType ?? 'none',
+          if (e case SSHAuthAbortError(
+            reason: SSHDisconnectError(:final reasonCode),
+          ))
+            'disconnectReasonCode': reasonCode,
+        },
       );
       return SshConnectionResult(success: false, error: error);
     } finally {
@@ -2393,23 +2411,35 @@ class SshService {
 
     SSHPasswordRequestHandler? onPasswordRequest;
     if (staticPassword != null) {
-      onPasswordRequest = () => staticPassword;
+      onPasswordRequest = () {
+        gate.recordAnswer();
+        return staticPassword;
+      };
     } else if (promptHandler != null) {
-      onPasswordRequest = () => gate.guard(() async {
-        final responses = await promptHandler(
-          SshAuthChallenge(
-            hostLabel: hostLabel,
-            username: config.username,
-            name: '',
-            instruction: '',
-            prompts: const [SshAuthPrompt(prompt: 'Password:', echo: false)],
-          ),
-        );
-        if (responses == null || responses.isEmpty) {
-          return null;
+      onPasswordRequest = () {
+        final replayed = gate.takeReplayPassword();
+        if (replayed != null) {
+          gate.recordAnswer(typedPassword: replayed);
+          return replayed;
         }
-        return responses.first;
-      });
+        return gate.guard(() async {
+          final responses = await promptHandler(
+            SshAuthChallenge(
+              hostLabel: hostLabel,
+              username: config.username,
+              name: '',
+              instruction: '',
+              prompts: const [SshAuthPrompt(prompt: 'Password:', echo: false)],
+            ),
+          );
+          if (responses == null || responses.isEmpty) {
+            gate.recordDeclined();
+            return null;
+          }
+          gate.recordAnswer(typedPassword: responses.first);
+          return responses.first;
+        });
+      };
     }
 
     SSHUserInfoRequestHandler? onUserInfoRequest;
@@ -2422,25 +2452,41 @@ class SshService {
         if (prompts.isEmpty) {
           return const <String>[];
         }
-        // Reuse the stored password only for a single hidden prompt that
-        // clearly asks for a password, so OTP/2FA/password-change challenges
-        // still reach the user instead of silently receiving the saved
+        // Reuse a stored or already typed password only for a single hidden
+        // prompt that clearly asks for a password, so OTP/2FA/password-change
+        // challenges still reach the user instead of silently receiving the
         // password (which the server would reject, breaking the login).
-        if (staticPassword != null &&
+        final isPasswordPrompt =
             prompts.length == 1 &&
             !prompts.first.echo &&
             _isPlainPasswordPrompt(
               request.name,
               request.instruction,
               prompts.first.promptText,
-            )) {
+            );
+        if (staticPassword != null && isPasswordPrompt) {
+          gate.recordAnswer();
           return <String>[staticPassword];
         }
         if (promptHandler == null) {
+          gate.recordDeclined();
           return null;
         }
-        return gate.guard(
-          () => promptHandler(
+        // Only a prompt that names a password trades a typed answer with a
+        // reconnect: one that asks for a passphrase may be for a key, not the
+        // account.
+        final isReplayable =
+            isPasswordPrompt &&
+            prompts.first.promptText.toLowerCase().contains('password');
+        if (isReplayable) {
+          final replayed = gate.takeReplayPassword();
+          if (replayed != null) {
+            gate.recordAnswer(typedPassword: replayed);
+            return <String>[replayed];
+          }
+        }
+        return gate.guard(() async {
+          final responses = await promptHandler(
             SshAuthChallenge(
               hostLabel: hostLabel,
               username: config.username,
@@ -2455,8 +2501,18 @@ class SshService {
                   )
                   .toList(growable: false),
             ),
-          ),
-        );
+          );
+          if (responses == null) {
+            gate.recordDeclined();
+          } else {
+            gate.recordAnswer(
+              typedPassword: isReplayable && responses.length == 1
+                  ? responses.single
+                  : null,
+            );
+          }
+          return responses;
+        });
       };
     }
 
@@ -2581,6 +2637,15 @@ class SshService {
 
   static void _closeAbandonedSocket(SSHSocket socket) {
     socket.destroy();
+  }
+
+  /// Whether the connection behind [error] ended without the server saying
+  /// why: the stream ended or the socket failed. A disconnect message (such
+  /// as sshd's "Too many authentication failures") or a rejected host key is
+  /// not a drop.
+  static bool _isDroppedConnection(SSHAuthAbortError error) {
+    final reason = error.reason;
+    return reason == null || reason is SSHSocketError;
   }
 
   HostKeyVerificationService _createHostKeyVerificationService(
@@ -3632,6 +3697,10 @@ String _sshEndpointKey(SshConnectionConfig config) {
       : '${_sshEndpointKey(jumpHost)}->$endpoint';
 }
 
+/// The private OSC with which a MonkeyMux server tags each window replay with
+/// the window it paints (`remote/monkeymux` `monkeyMuxReplayWindowOSC`).
+const monkeyMuxReplayWindowOsc = '7502';
+
 /// An active SSH session.
 class SshSession {
   /// Creates a new [SshSession].
@@ -3754,10 +3823,18 @@ class SshSession {
     _plainProgramStatus = null;
     _muxProgramStatus = null;
     _muxProgramStatusReporter = false;
+    _runtime._syncKittyGraphicsAvailability();
     if (hadProgramStatus) _notifyMetadataChanged();
   }
 
   RemoteMuxBackend? _remoteMuxBackend;
+
+  /// Kitty graphics acknowledgements stay off behind a multiplexer, which
+  /// routes only the replies it expects; see
+  /// [Terminal.kittyGraphicsTransmissionReplies].
+  bool get _kittyGraphicsTransmissionReplies =>
+      remoteMuxBackend != RemoteMuxBackend.monkeyMux &&
+      remoteMuxBackend != RemoteMuxBackend.tmux;
 
   bool _canTerminalResizeFromHost() =>
       remoteMuxBackend == RemoteMuxBackend.monkeyMux;
@@ -3795,6 +3872,13 @@ class SshSession {
   /// Whether the attached MonkeyMux server publishes its shared PTY grid size.
   bool monkeyMuxViewportClippingEnabled = false;
 
+  /// Whether no app screen shows this session's terminal: the app is in the
+  /// background, or each screen that shows the session is covered or shows
+  /// something in the terminal's place. Kept with the session, so a
+  /// multiplexer it attaches to later, or over a new control connection,
+  /// learns it.
+  bool terminalViewHidden = false;
+
   /// Whether OSC 52 clipboard sharing is enabled for this session.
   bool clipboardSharingEnabled;
 
@@ -3806,6 +3890,19 @@ class SshSession {
 
   final ClipboardSharingService _clipboardSharingService =
       const ClipboardSharingService();
+
+  /// Answers the kitty clipboard protocol (OSC 5522) under the same settings
+  /// as OSC 52, and sends paste events to programs that set mode 5522.
+  late final KittyClipboardHandler kittyClipboard = KittyClipboardHandler(
+    canWrite: () => clipboardSharingEnabled,
+    canRead: () => clipboardSharingEnabled && localClipboardReadEnabled,
+    sendReply: (data) {
+      if (!_runtime.hasShell) return false;
+      _runtime.writeToShell(data);
+      return true;
+    },
+    connectionId: () => connectionId,
+  );
 
   late final _SshSessionRuntime _runtime = _SshSessionRuntime(this);
 
@@ -4446,7 +4543,51 @@ class SshSession {
     _notifyMetadataChanged();
   }
 
+  /// The MonkeyMux window whose replay each terminal last received
+  /// (`OSC 7502 ; window=<server instance>:<window id>`).
+  static final _monkeyMuxReplayWindows = Expando<String>();
+
+  /// Deletes the terminal's physical image placements when a MonkeyMux replay
+  /// paints another window than the one it shows, wherever the change was
+  /// started (this app, another client, a window that exited). A reopen of
+  /// the same window keeps them, so a program that owns the screen keeps the
+  /// images it placed; a shell window's replay deletes them itself and places
+  /// its images again. The tag precedes the replay, so the delete is ordered
+  /// before the images it places.
+  void _handleMonkeyMuxReplayWindow(List<String> args) {
+    final terminal = this.terminal;
+    if (terminal == null) {
+      return;
+    }
+    String? window;
+    for (final arg in args) {
+      if (arg.startsWith('window=')) {
+        window = arg.substring('window='.length);
+      }
+    }
+    if (window == null || window.isEmpty) {
+      return;
+    }
+    final shown = _monkeyMuxReplayWindows[terminal];
+    if (shown != null && shown != window) {
+      terminal.deletePhysicalPlacements();
+      // The shell status and exit code were the other window's. This one's
+      // replay sets its own, unless it has no shell integration or exit
+      // status to send.
+      if (_shellStatus != null || _lastExitCode != null) {
+        _shellStatus = null;
+        _lastExitCode = null;
+        _notifyMetadataChanged();
+      }
+    }
+    _monkeyMuxReplayWindows[terminal] = window;
+  }
+
   void _handlePrivateOsc(String code, List<String> args) {
+    if (code == monkeyMuxReplayWindowOsc) {
+      _handleMonkeyMuxReplayWindow(args);
+      return;
+    }
     final hasThemeQuery = args.any((arg) => arg.trim() == '?');
     if (hasThemeQuery && code == '4') {
       _lastTerminalPaletteQueryAt = DateTime.now();
@@ -4602,6 +4743,11 @@ class SshSession {
 
     if (code == ClipboardSharingService.oscCode) {
       _handleOsc52(args);
+      return;
+    }
+
+    if (code == kittyClipboardOscCode) {
+      kittyClipboard.handleOsc(args);
       return;
     }
 
@@ -6761,6 +6907,7 @@ while($true){
     }
     await stopAllForwards();
     await closeShell();
+    kittyClipboard.dispose();
     _sftpClientFuture = null;
     discardSftpClient(_sftpClient);
     await _portForwardChanges.close();

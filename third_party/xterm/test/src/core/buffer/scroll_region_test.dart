@@ -174,5 +174,65 @@ void main() {
 
       expect(terminal.buffer.lines.length, 6);
     });
+
+    test('a region set on the alternate screen stays set on the main screen',
+        () {
+      // xterm keeps one scroll region for both screens, and leaving the
+      // alternate screen does not reset it; the MonkeyMux screen model does
+      // the same. A program that exits without `CSI r` leaves the region
+      // behind, and the shell's next line feed on the bottom row, outside the
+      // region, then moves nothing, while a region of the main screen's own
+      // scrolled the whole screen and put the prompt a row away from the
+      // model's.
+      final terminal = sixRowTerminal();
+
+      terminal.write('\x1b[?1049h\x1b[2;4r\x1b[?1049l');
+
+      expect(terminal.buffer.marginTop, 1);
+      expect(terminal.buffer.marginBottom, 3);
+
+      terminal.write('\r\n');
+
+      expect(terminal.buffer.cursorY, 5);
+      expect(visible(terminal), ['L0', 'L1', 'L2', 'L3', 'L4', 'L5']);
+      expect(terminal.buffer.lines.length, 6);
+    });
+  });
+
+  // A scroll, or a line insertion or deletion, brings in blank rows in the
+  // current background and nothing else of the rendition, as xterm.js,
+  // Ghostty and the MonkeyMux screen model do (BCE).
+  group('rows a scroll brings in', () {
+    for (final (name, sequence, row) in [
+      ('LF on the last row', '\x1b[3;1H\n', 2),
+      ('IND on the last row', '\x1b[3;1H\x1bD', 2),
+      ('RI on the first row', '\x1b[1;1H\x1bM', 0),
+      ('SU', '\x1b[S', 2),
+      ('SD', '\x1b[T', 0),
+      ('IL', '\x1b[2;1H\x1b[L', 1),
+      ('DL', '\x1b[2;1H\x1b[M', 2),
+      ('SU in a region', '\x1b[2;3r\x1b[S', 2),
+      ('LF on the bottom margin', '\x1b[2;3r\x1b[3;1H\n', 2),
+    ]) {
+      for (final alternate in [false, true]) {
+        test('$name${alternate ? ' on the alternate screen' : ''}', () {
+          final terminal = Terminal()..resize(4, 3);
+          if (alternate) terminal.write('\x1b[?1049h');
+          terminal.write('abc\r\ndef\r\nghi\x1b[7;32;41m$sequence');
+
+          final buffer = terminal.buffer;
+          final line = buffer.lines[buffer.scrollBack + row];
+          final cell = CellData.empty();
+          for (var x = 0; x < 4; x++) {
+            line.getCellData(x, cell);
+            expect(
+              [cell.content, cell.foreground, cell.background, cell.flags],
+              [0, 0, CellColor.named | 1, 0],
+              reason: 'column $x',
+            );
+          }
+        });
+      }
+    }
   });
 }

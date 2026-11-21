@@ -32,6 +32,28 @@ IOS_SCREENSHOTS = {
         'ipad_13': (2064, 2752),
     },
 }
+# iPhone Duo screenshots in product page order: scene, size, OCR markers.
+# Outer display shots are 1398x2034; inner display shots are 2853x2007 held
+# wide or 2007x2853 upright. Must match _duoScenes in
+# tool/store_screenshot_app.dart.
+DUO_SCREENSHOTS = (
+    ('duo_book_terminal', (2853, 2007), ['Claude Code', 'Copilot CLI']),
+    # The outer display cuts the Copilot window's name short ("Mobile Copil…").
+    ('duo_closed_terminal', (1398, 2034), ['Mobile Copil']),
+    ('duo_propped_terminal', (2007, 2853), ['Claude Code', 'Workspace']),
+    # With a vertical bar, Add Host is a + key in the bar, so check a host.
+    ('duo_book_home', (2853, 2007), ['Hosts', 'Build runner', 'Connections']),
+    ('duo_open_native', (2853, 2007), ['Message the agent', 'reconnect']),
+    ('duo_closed_windows', (1398, 2034), ['Workspace']),
+    ('duo_closed_hosts', (1398, 2034), ['Hosts', 'Build runner']),
+    (
+        'duo_closed_agent_management',
+        (1398, 2034),
+        ['Agent Management', 'PRO', 'Copilot CLI', 'Claude Code'],
+    ),
+)
+# Duo scenes that list MonkeyMux windows; together they must show every agent.
+DUO_WINDOW_SCENES = {'duo_book_terminal', 'duo_propped_terminal', 'duo_closed_windows'}
 ANDROID_SCREENSHOTS = {
     'phoneScreenshots': (1440, 2560),
     'sevenInchScreenshots': (1200, 1920),
@@ -82,7 +104,7 @@ def _parse_args() -> argparse.Namespace:
         choices=['ios', 'android', 'both'],
         nargs='?',
         default='both',
-        help='Which store screenshot set to validate.',
+        help='Which store screenshot set to validate. ios includes the iPhone Duo set.',
     )
     return parser.parse_args()
 
@@ -114,23 +136,33 @@ def _validate_file(path: Path, expected_size: tuple[int, int]) -> None:
     )
 
 
+# The demo image border, (64, 196, 255), is hue 198 degrees. Accept 188-208
+# degrees (iOS link blue is 211, ANSI cyan 180), saturation from 0.45 and
+# brightness from 0.75, in PIL's 0-255 HSV units.
+FRAME_HUE_RANGE = (round(188 / 360 * 255), round(208 / 360 * 255))
+FRAME_MIN_SATURATION = round(0.45 * 255)
+FRAME_MIN_VALUE = round(0.75 * 255)
+
+
 def _validate_copilot_image_frame(path: Path) -> None:
     """Reject accidental slivers while allowing one intentionally cropped edge."""
     with Image.open(path) as image:
         rgb = image.convert('RGB')
         width, height = rgb.size
-        channels = [
-            channel.point([
-                255 if abs(value - target) <= tolerance else 0
-                for value in range(256)
-            ])
-            for channel, target, tolerance in zip(
-                rgb.split(), (64, 196, 255), (18, 18, 12),
+        # The harness frames the demo image with a (64, 196, 255) border. The
+        # app scales the image to its cell box, which blends that thin border
+        # with the dark frame and light screenshot beside it: the hue stays,
+        # saturation and brightness drop. So match the border's hue band with
+        # floors on both, not one exact colour. PIL's HSV bands run 0-255.
+        hue, saturation, value = rgb.convert('HSV').split()
+        bands = [
+            band.point([255 if low <= level <= high else 0 for level in range(256)])
+            for band, (low, high) in zip(
+                (hue, saturation, value),
+                (FRAME_HUE_RANGE, (FRAME_MIN_SATURATION, 255), (FRAME_MIN_VALUE, 255)),
             )
         ]
-        mask = ImageChops.multiply(
-            ImageChops.multiply(channels[0], channels[1]), channels[2],
-        )
+        mask = ImageChops.multiply(ImageChops.multiply(bands[0], bands[1]), bands[2])
 
         horizontal_rows = [
             y
@@ -173,8 +205,7 @@ def _ocr_texts(paths: list[Path]) -> dict[Path, str]:
     return store_media._ocr_texts(paths)
 
 
-def _validate_ocr_content(paths: list[Path]) -> None:
-    texts = _ocr_texts(paths)
+def _reject_bad_ocr_content(texts: dict[Path, str]) -> None:
     for path, text in texts.items():
         for label, pattern in BAD_OCR_PATTERNS.items():
             if pattern.search(text):
@@ -183,21 +214,18 @@ def _validate_ocr_content(paths: list[Path]) -> None:
                     'regenerate store-quality screenshots before syncing metadata',
                 )
 
+
+def _validate_ocr_content(paths: list[Path]) -> None:
+    texts = _ocr_texts(paths)
+    _reject_bad_ocr_content(texts)
+
     monkeymux_texts: dict[str, list[tuple[Path, str]]] = {}
     for path, text in texts.items():
         # iOS names start with "01_", Android names are "1.png".
         scene = int(re.match(r'\d+', path.name).group())
         _require_ocr_markers(path, text, SCENE_MARKERS[scene])
         if scene == 1:
-            _validate_copilot_image_frame(path)
-            # Require labels unique to the embedded light-mode hosts screenshot
-            # (not words that also appear in the submitted Copilot prompt).
-            _require_ocr_markers(
-                path,
-                text,
-                ['Add Host', 'Build runner'],
-                require_any=True,
-            )
+            _validate_copilot_scene(path, text)
         elif scene == 4:
             monkeymux_texts.setdefault(_monkeymux_scene_group(path), []).append(
                 (path, text),
@@ -210,6 +238,34 @@ def _validate_ocr_content(paths: list[Path]) -> None:
         store_media.require_agent_family(
             ' '.join(text for _, text in grouped_texts), paths_description,
         )
+
+
+def _validate_copilot_scene(path: Path, text: str) -> None:
+    _validate_copilot_image_frame(path)
+    # Require labels unique to the embedded light-mode hosts screenshot
+    # (not words that also appear in the submitted Copilot prompt).
+    _require_ocr_markers(
+        path,
+        text,
+        ['Add Host', 'Build runner'],
+        require_any=True,
+    )
+
+
+def _validate_duo_ocr_content(paths: dict[str, Path]) -> None:
+    texts = _ocr_texts(list(paths.values()))
+    _reject_bad_ocr_content(texts)
+    for scene, _, markers in DUO_SCREENSHOTS:
+        path = paths[scene]
+        _require_ocr_markers(path, texts[path], markers)
+    _validate_copilot_scene(
+        paths['duo_closed_terminal'], texts[paths['duo_closed_terminal']],
+    )
+    window_paths = [paths[scene] for scene in sorted(DUO_WINDOW_SCENES)]
+    store_media.require_agent_family(
+        ' '.join(texts[path] for path in window_paths),
+        ', '.join(str(path.relative_to(ROOT)) for path in window_paths),
+    )
 
 
 def _monkeymux_scene_group(path: Path) -> str:
@@ -278,6 +334,13 @@ def _validate_ios() -> None:
                 _validate_file(path, expected_size)
                 paths.append(path)
     _validate_ocr_content(paths)
+
+    duo_paths = {}
+    for index, (scene, expected_size, _) in enumerate(DUO_SCREENSHOTS, start=1):
+        path = ROOT / f'ios/fastlane/screenshots/en-US/{index:02d}_iphone_duo.png'
+        _validate_file(path, expected_size)
+        duo_paths[scene] = path
+    _validate_duo_ocr_content(duo_paths)
 
 
 def _validate_android() -> None:

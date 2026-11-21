@@ -2,8 +2,11 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show SemanticsRole;
 
+import '../../domain/models/terminal_theme.dart' show legibleColor;
 import '../controllers/platform_display_features_controller.dart';
+import 'terminal_menu_style.dart';
 
 export '../controllers/platform_display_features_controller.dart'
     show SystemVerticalBar, SystemVerticalBarEdge;
@@ -47,6 +50,9 @@ const double verticalBarKeyboardGap = 8;
 /// The width the rail takes in the vertical bar, which leaves room for tab
 /// labels under their icons.
 const double verticalBarRailWidth = 72;
+
+/// The contrast an icon needs against what is behind it (WCAG AA).
+const double _iconContrast = 3;
 
 /// The part of the vertical bar's item column left for controls in a window
 /// described by [mediaQuery].
@@ -140,7 +146,12 @@ class _VerticalBarRailState extends State<VerticalBarRail> {
       id: id,
       child: ExcludeFocus(
         excluding: hidden,
-        child: ExcludeSemantics(excluding: hidden, child: control),
+        child: ExcludeSemantics(
+          excluding: hidden,
+          child: control is ButtonStyleButton
+              ? _VerticalBarTextKey(child: control)
+              : control,
+        ),
       ),
     );
   }
@@ -282,6 +293,55 @@ class VerticalBarButtonTheme extends StatelessWidget {
   }
 }
 
+/// Gives a text, filled, outlined or elevated button in the vertical bar the
+/// shape of the keys beside it: 44 pt tall, a stadium on the raised surface
+/// with a hairline border, as wide as its label up to the rail's width. A
+/// longer label shrinks to fit.
+///
+/// It themes one control, not the whole rail, because a menu that a rail
+/// control opens builds its rows from text buttons too.
+class _VerticalBarTextKey extends StatelessWidget {
+  const _VerticalBarTextKey({required this.child});
+
+  final ButtonStyleButton child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final fill = colorScheme.surfaceContainerHighest;
+    final style = TextButton.styleFrom(
+      minimumSize: const Size.square(verticalBarItemExtent),
+      maximumSize: const Size(verticalBarRailWidth, verticalBarItemExtent),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      visualDensity: VisualDensity.standard,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      elevation: 0,
+      backgroundColor: fill,
+      foregroundColor: legibleColor(colorScheme.onSurface, background: fill),
+      disabledBackgroundColor: fill.withAlpha(120),
+      disabledForegroundColor: colorScheme.onSurface.withAlpha(90),
+      textStyle: theme.textTheme.labelLarge,
+      shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
+      foregroundBuilder: (context, states, label) =>
+          FittedBox(fit: BoxFit.scaleDown, child: label),
+    );
+    return TextButtonTheme(
+      data: TextButtonThemeData(style: style),
+      child: FilledButtonTheme(
+        data: FilledButtonThemeData(style: style),
+        child: OutlinedButtonTheme(
+          data: OutlinedButtonThemeData(style: style),
+          child: ElevatedButtonTheme(
+            data: ElevatedButtonThemeData(style: style),
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// One destination in a [VerticalBarTabs] capsule.
 @immutable
 class VerticalBarTab {
@@ -306,13 +366,16 @@ class VerticalBarTab {
 /// destination's icon above its label.
 ///
 /// It follows [NavigationBarTheme], so the selected destination gets the same
-/// signal-teal indicator and label as the bottom navigation bar it replaces.
+/// signal-teal indicator as the bottom navigation bar it replaces. Its
+/// foregrounds are resolved against the capsule and the indicator, which sit
+/// behind them here instead of the bottom bar's surface.
 class VerticalBarTabs extends StatelessWidget {
   /// Creates a capsule of [tabs].
   const VerticalBarTabs({
     required this.tabs,
     required this.selectedIndex,
     required this.onSelected,
+    this.showsLabels = true,
     super.key,
   });
 
@@ -325,37 +388,61 @@ class VerticalBarTabs extends StatelessWidget {
   /// Called with the index of the destination the user picks.
   final ValueChanged<int> onSelected;
 
+  /// Whether each destination shows its name under its icon. Without, the
+  /// destinations shrink to a key's height for a short bar, and the name
+  /// stays in the long-press label and for VoiceOver.
+  final bool showsLabels;
+
   /// The height of one destination.
   static const double tabExtent = 58;
 
+  /// The height of one destination without its label.
+  static const double compactTabExtent = verticalBarItemExtent;
+
   /// The capsule's padding above and below its destinations.
-  static const double padding = 5;
+  static const double padding = 8;
+
+  /// The height of a capsule of [count] destinations.
+  static double extentFor(int count, {bool showsLabels = true}) =>
+      count * (showsLabels ? tabExtent : compactTabExtent) +
+      2 * padding +
+      2 * _borderWidth;
+
+  // The hairline's width, BorderSide's default.
+  static const double _borderWidth = 1;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    final colorScheme = Theme.of(context).colorScheme;
     final navigationTheme = NavigationBarTheme.of(context);
-    return Container(
-      width: verticalBarRailWidth,
-      padding: const EdgeInsets.symmetric(vertical: padding, horizontal: 2),
-      decoration: ShapeDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
-      ),
-      child: Material(
-        type: MaterialType.transparency,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final (index, tab) in tabs.indexed)
-              _VerticalBarTabButton(
-                tab: tab,
-                selected: index == selectedIndex,
-                navigationTheme: navigationTheme,
-                onPressed: () => onSelected(index),
-              ),
-          ],
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      role: SemanticsRole.tabBar,
+      child: Container(
+        width: verticalBarRailWidth,
+        padding: const EdgeInsets.symmetric(vertical: padding, horizontal: 2),
+        decoration: ShapeDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          shape: StadiumBorder(side: BorderSide(color: colorScheme.outline)),
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (index, tab) in tabs.indexed)
+                _VerticalBarTabButton(
+                  tab: tab,
+                  index: index,
+                  count: tabs.length,
+                  selected: index == selectedIndex,
+                  showsLabel: showsLabels,
+                  navigationTheme: navigationTheme,
+                  onPressed: () => onSelected(index),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -365,65 +452,161 @@ class VerticalBarTabs extends StatelessWidget {
 class _VerticalBarTabButton extends StatelessWidget {
   const _VerticalBarTabButton({
     required this.tab,
+    required this.index,
+    required this.count,
     required this.selected,
+    required this.showsLabel,
     required this.navigationTheme,
     required this.onPressed,
   });
 
   final VerticalBarTab tab;
+  final int index;
+  final int count;
   final bool selected;
+  final bool showsLabel;
   final NavigationBarThemeData navigationTheme;
   final VoidCallback onPressed;
 
+  // The label starts at iOS's smallest text size and follows the user's
+  // text size up to 13 pt. Larger, the last label meets the capsule's
+  // rounded end and the labels crowd the next destination; the long-press
+  // label shows the name at full size instead.
+  static const double _labelSize = 11;
+  static const double _labelMaxSize = 13;
+  static const double _labelLineHeight = 1.1;
+  static const double _labelGap = 3;
+  static const double _indicatorHeight = 28;
+
+  // The label's width: the capsule's inside, less a point either side. A
+  // label too long for it, such as "Connections", shrinks to fit.
+  static const double _labelWidth = verticalBarRailWidth - 6;
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final fill = colorScheme.surfaceContainerHighest;
     final states = <WidgetState>{if (selected) WidgetState.selected};
     final iconTheme = navigationTheme.iconTheme?.resolve(states);
-    final labelStyle = navigationTheme.labelTextStyle?.resolve(states);
+    final labelStyle =
+        navigationTheme.labelTextStyle?.resolve(states) ??
+        theme.textTheme.labelMedium;
+    final indicator =
+        navigationTheme.indicatorColor ?? colorScheme.secondaryContainer;
+    // The selected label takes the ink and leaves the signal to the
+    // indicator and its icon, so the capsule shows one teal mark.
+    // Theme foregrounds are tuned for the page; the capsule is the raised
+    // surface, where some terminal themes leave them too faint.
+    final labelColor = legibleColor(
+      selected
+          ? colorScheme.onSurface
+          : labelStyle?.color ?? colorScheme.onSurfaceVariant,
+      background: fill,
+    );
+    final iconColor = selected
+        ? legibleColor(
+            iconTheme?.color ?? colorScheme.primary,
+            background: Color.alphaBlend(indicator, fill),
+            minimumContrast: _iconContrast,
+          )
+        : labelColor;
+    final textScaler = MediaQuery.textScalerOf(context)
+        .clamp(maxScaleFactor: _labelMaxSize / _labelSize);
+    final localizations = MaterialLocalizations.of(context);
     return Semantics(
+      container: true,
+      role: SemanticsRole.tab,
       selected: selected,
       button: true,
-      label: tab.label,
+      label:
+          '${tab.label}\n'
+          '${localizations.tabLabel(tabIndex: index + 1, tabCount: count)}',
       onTap: onPressed,
       excludeSemantics: true,
-      child: InkWell(
-        onTap: onPressed,
-        customBorder: const StadiumBorder(),
-        child: SizedBox(
-          height: VerticalBarTabs.tabExtent,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                curve: Curves.easeOutCubic,
-                width: 44,
-                height: 28,
-                decoration: ShapeDecoration(
-                  color: selected
-                      ? navigationTheme.indicatorColor
-                      : Colors.transparent,
-                  shape: const StadiumBorder(),
+      // Stands in for UIKit's Large Content Viewer: a long press shows the
+      // name at the user's full text size, beside the rail.
+      child: Tooltip(
+        message: tab.label,
+        triggerMode: TooltipTriggerMode.longPress,
+        excludeFromSemantics: true,
+        positionDelegate: _besideRail,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const StadiumBorder(),
+          child: SizedBox(
+            width: double.infinity,
+            height: showsLabel
+                ? VerticalBarTabs.tabExtent
+                : VerticalBarTabs.compactTabExtent,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOutCubic,
+                  width: 44,
+                  height: _indicatorHeight,
+                  decoration: ShapeDecoration(
+                    color: selected ? indicator : Colors.transparent,
+                    shape: const StadiumBorder(),
+                  ),
+                  child: Icon(
+                    selected ? tab.selectedIcon : tab.icon,
+                    size: iconTheme?.size ?? 22,
+                    color: iconColor,
+                  ),
                 ),
-                child: Icon(
-                  selected ? tab.selectedIcon : tab.icon,
-                  size: iconTheme?.size ?? 22,
-                  color: iconTheme?.color,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                tab.label,
-                maxLines: 1,
-                overflow: TextOverflow.visible,
-                softWrap: false,
-                textScaler: MediaQuery.textScalerOf(context)
-                    .clamp(maxScaleFactor: 1.15),
-                style: labelStyle?.copyWith(fontSize: 10, height: 1.1),
-              ),
-            ],
+                if (showsLabel) ...[
+                  const SizedBox(height: _labelGap),
+                  // Every label's box is as tall, so the destinations keep
+                  // one rhythm when a long label shrinks.
+                  SizedBox(
+                    width: _labelWidth,
+                    height: textScaler.scale(_labelSize) * _labelLineHeight,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.topCenter,
+                      child: Text(
+                        tab.label,
+                        maxLines: 1,
+                        softWrap: false,
+                        textAlign: TextAlign.center,
+                        textScaler: textScaler,
+                        style: (labelStyle ?? const TextStyle()).copyWith(
+                          fontSize: _labelSize,
+                          height: _labelLineHeight,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.w500,
+                          color: labelColor,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Centres the tooltip on the destination, on the side of the rail away
+  /// from the screen's edge, where the thumb on the tab does not cover it.
+  static Offset _besideRail(TooltipPositionContext context) {
+    const gap = 8.0;
+    final TooltipPositionContext(:target, :targetSize, :tooltipSize) = context;
+    final overlay = context.overlaySize;
+    final left = target.dx > overlay.width / 2
+        ? target.dx - targetSize.width / 2 - gap - tooltipSize.width
+        : target.dx + targetSize.width / 2 + gap;
+    return Offset(
+      left.clamp(gap, math.max(gap, overlay.width - tooltipSize.width - gap)),
+      (target.dy - tooltipSize.height / 2).clamp(
+        gap,
+        math.max(gap, overlay.height - tooltipSize.height - gap),
       ),
     );
   }
@@ -480,23 +663,103 @@ class _VerticalBarRailPortalState extends State<VerticalBarRailPortal> {
   }
 }
 
-class _RouteFade extends StatelessWidget {
+/// Fades a route's rail in over the start of the route's entrance, and out
+/// over the start of its exit or of the entrance of a route above it, so the
+/// rails of two routes cross-fade within [_duration] while the pages slide.
+/// The rail takes taps once it is fully shown.
+///
+/// With reduced motion, the rail appears and disappears without a fade.
+class _RouteFade extends StatefulWidget {
   const _RouteFade({required this.route, required this.child});
 
   final ModalRoute<Object?>? route;
   final Widget child;
 
+  static const _duration = Duration(milliseconds: 150);
+
   @override
-  Widget build(BuildContext context) {
+  State<_RouteFade> createState() => _RouteFadeState();
+}
+
+class _RouteFadeState extends State<_RouteFade> {
+  // How far this route has come in, and how far a route above it has.
+  CurvedAnimation? _entered;
+  CurvedAnimation? _covered;
+  bool? _reduceMotion;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    if (reduceMotion != _reduceMotion) {
+      _reduceMotion = reduceMotion;
+      _updateAnimations();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_RouteFade oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.route != widget.route) _updateAnimations();
+  }
+
+  @override
+  void dispose() {
+    _disposeAnimations();
+    super.dispose();
+  }
+
+  void _disposeAnimations() {
+    _entered?.dispose();
+    _covered?.dispose();
+    _entered = _covered = null;
+  }
+
+  void _updateAnimations() {
+    _disposeAnimations();
+    final route = widget.route;
     final animation = route?.animation;
     final secondaryAnimation = route?.secondaryAnimation;
-    if (animation == null || secondaryAnimation == null) return child;
+    if (route == null || animation == null || secondaryAnimation == null) {
+      return;
+    }
+    // The fade takes the start of each transition, as a share of the
+    // route's own durations; a route pushed above it is assumed to take as
+    // long.
+    double share(Duration duration) => duration <= _RouteFade._duration
+        ? 1
+        : _RouteFade._duration.inMicroseconds / duration.inMicroseconds;
+    final forward = share(route.transitionDuration);
+    final reverse = share(route.reverseTransitionDuration);
+    final (Curve curve, Curve reverseCurve) = _reduceMotion!
+        // Shown as soon as an entrance starts, gone as soon as an exit does.
+        ? (const Threshold(0), const Threshold(1))
+        : (
+            Interval(0, forward, curve: Curves.easeOut),
+            Interval(1 - reverse, 1, curve: Curves.easeIn),
+          );
+    _entered = CurvedAnimation(
+      parent: animation,
+      curve: curve,
+      reverseCurve: reverseCurve,
+    );
+    _covered = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: curve,
+      reverseCurve: reverseCurve,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entered = _entered;
+    final covered = _covered;
+    if (entered == null || covered == null) return widget.child;
     return AnimatedBuilder(
-      animation: Listenable.merge([animation, secondaryAnimation]),
-      child: child,
+      animation: Listenable.merge([entered, covered]),
+      child: widget.child,
       builder: (context, child) {
-        final opacity = (animation.value * (1 - secondaryAnimation.value))
-            .clamp(0.0, 1.0);
+        final opacity = (entered.value * (1 - covered.value)).clamp(0.0, 1.0);
         return IgnorePointer(
           ignoring: opacity < 1,
           child: Opacity(opacity: opacity, child: child),
@@ -560,9 +823,10 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
 
   /// Fits [leading] and [actions] into [capacity] keys, the way native bars
   /// compress: the actions farthest from the thumb fold into a menu key in
-  /// their place. With one key left, [leading] folds into that menu too,
-  /// since a full-screen dialog or an unsaved-changes guard can leave no
-  /// edge swipe to go back with.
+  /// their place. A popup action always folds once there is a menu key, so
+  /// the bar never shows two keys that open menus. With one key left,
+  /// [leading] folds into that menu too, since a full-screen dialog or an
+  /// unsaved-changes guard can leave no edge swipe to go back with.
   static (List<Widget>, List<Widget>) _fit(
     BuildContext context,
     Widget? leading,
@@ -583,18 +847,24 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     if (slots >= 1 + kept.length) {
       // Fold the actions farthest from the thumb until the rest fit beside
       // the menu key, keeping the ones a menu cannot hold.
-      final folded = <int>{};
-      var shown = actions.length;
+      final folded = {
+        for (final (index, entry) in entries.indexed)
+          if (entry?.section ?? false) index,
+      };
+      var shown = actions.length - folded.length;
       for (var index = 0; index < actions.length; index += 1) {
         if (shown <= slots - 1) break;
-        if (entries[index] == null) continue;
+        if (entries[index] == null || folded.contains(index)) continue;
         folded.add(index);
         shown -= 1;
       }
       return (
         [?leading],
         [
-          _menuKey([for (final index in folded) entries[index]!]),
+          _menuKey(context, [
+            for (final (index, entry) in entries.indexed)
+              if (folded.contains(index)) entry!,
+          ]),
           for (final (index, action) in actions.indexed)
             if (!folded.contains(index)) action,
         ],
@@ -606,7 +876,7 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     return (
       const <Widget>[],
       [
-        _menuKey([?leadingEntry, ...entries.nonNulls]),
+        _menuKey(context, [?leadingEntry, ...entries.nonNulls]),
         ...kept,
       ],
     );
@@ -622,63 +892,125 @@ class VerticalBarAppBar extends StatelessWidget implements PreferredSizeWidget {
     if (onSelected is Function) Function.apply(onSelected, [value]);
   }
 
-  static Widget _menuKey(List<Widget> entries) => MenuAnchor(
-    menuChildren: entries,
-    builder: (context, controller, _) => IconButton(
-      icon: const Icon(Icons.more_vert),
-      tooltip: MaterialLocalizations.of(context).showMenuTooltip,
-      onPressed: () =>
-          controller.isOpen ? controller.close() : controller.open(),
-    ),
-  );
+  /// The menu key holding [entries], styled like the app's other menus: the
+  /// raised surface, a hairline, and 44 pt rows. A popup's items stand
+  /// between dividers. A menu taller than the room above the keyboard
+  /// scrolls there instead of running under it.
+  static Widget _menuKey(BuildContext context, List<_MenuEntry> entries) =>
+      MenuAnchor(
+        style: TerminalMenuStyles.menuStyle(context).copyWith(
+          side: WidgetStatePropertyAll(
+            BorderSide(color: Theme.of(context).colorScheme.outline),
+          ),
+        ),
+        reservedPadding: EdgeInsets.fromLTRB(
+          8,
+          8,
+          8,
+          8 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        menuChildren: [
+          for (final (index, entry) in entries.indexed) ...[
+            if (index > 0 && (entry.section || entries[index - 1].section))
+              const Divider(height: 1),
+            ...entry.rows,
+          ],
+        ],
+        builder: (context, controller, _) => IconButton(
+          icon: const Icon(Icons.more_vert),
+          tooltip: MaterialLocalizations.of(context).showMenuTooltip,
+          onPressed: () =>
+              controller.isOpen ? controller.close() : controller.open(),
+        ),
+      );
 
-  /// A menu entry that does what [action] does, for the kinds of action a
+  /// The menu rows that do what [action] does, for the kinds of action a
   /// menu can stand in for.
-  static Widget? _menuEntryFor(BuildContext context, Widget action) {
+  static _MenuEntry? _menuEntryFor(BuildContext context, Widget action) {
     final localizations = MaterialLocalizations.of(context);
+    final style = TerminalMenuStyles.itemButtonStyle(context);
+    _MenuEntry row({
+      required VoidCallback? onPressed,
+      required Widget? child,
+      Widget? leadingIcon,
+    }) => (
+      rows: [
+        MenuItemButton(
+          style: style,
+          onPressed: onPressed,
+          leadingIcon: leadingIcon,
+          child: child,
+        ),
+      ],
+      section: false,
+    );
     return switch (action) {
       // Back and Close pop through the route's guards, as their keys do.
-      BackButton(:final onPressed) => MenuItemButton(
+      BackButton(:final onPressed) => row(
         onPressed: onPressed ?? () => Navigator.maybePop(context),
         leadingIcon: const BackButtonIcon(),
         child: Text(localizations.backButtonTooltip),
       ),
-      CloseButton(:final onPressed) => MenuItemButton(
+      CloseButton(:final onPressed) => row(
         onPressed: onPressed ?? () => Navigator.maybePop(context),
         leadingIcon: const Icon(Icons.close),
         child: Text(localizations.closeButtonTooltip),
       ),
-      IconButton(:final onPressed, :final icon, :final tooltip) =>
-        MenuItemButton(
-          onPressed: onPressed,
-          leadingIcon: icon,
-          child: Text(tooltip ?? ''),
-        ),
-      ButtonStyleButton(:final onPressed, :final child) => MenuItemButton(
+      IconButton(:final onPressed, :final icon, :final tooltip) => row(
+        onPressed: onPressed,
+        leadingIcon: icon,
+        child: Text(tooltip ?? ''),
+      ),
+      ButtonStyleButton(:final onPressed, :final child) => row(
         onPressed: onPressed,
         child: child,
       ),
-      PopupMenuButton<Object?>() => SubmenuButton(
-        leadingIcon: action.icon ?? const Icon(Icons.more_horiz),
-        menuChildren: [
-          for (final item in action.itemBuilder(context))
-            if (item is PopupMenuItem<Object?>)
-              MenuItemButton(
-                onPressed: item.enabled
-                    ? () {
-                        item.onTap?.call();
-                        _selectPopupValue(action, item.value);
-                      }
-                    : null,
-                child: item.child,
-              )
-            else if (item is PopupMenuDivider)
-              const Divider(height: 1),
-        ],
-        child: Text(action.tooltip ?? localizations.showMenuTooltip),
-      ),
+      PopupMenuButton<Object?>() => _popupEntry(context, action, style),
       _ => null,
     };
+  }
+
+  /// [popup]'s items as rows of the menu, in place of a submenu or a second
+  /// menu key. A list tile item gives its row its icon and title, so the
+  /// row is as tall as the others.
+  static _MenuEntry _popupEntry(
+    BuildContext context,
+    PopupMenuButton<Object?> popup,
+    ButtonStyle style,
+  ) {
+    final rows = <Widget>[
+      for (final item in popup.itemBuilder(context))
+        if (item is PopupMenuItem<Object?>)
+          switch (item.child) {
+            final ListTile tile => MenuItemButton(
+              style: style,
+              onPressed: popup.enabled && item.enabled && tile.enabled
+                  ? () => _selectPopupItem(popup, item)
+                  : null,
+              leadingIcon: tile.leading,
+              trailingIcon: tile.trailing,
+              child: tile.title,
+            ),
+            final child => MenuItemButton(
+              style: style,
+              onPressed: popup.enabled && item.enabled
+                  ? () => _selectPopupItem(popup, item)
+                  : null,
+              child: child,
+            ),
+          }
+        else if (item is PopupMenuDivider)
+          const Divider(height: 1),
+    ];
+    return (rows: rows, section: rows.isNotEmpty);
+  }
+
+  static void _selectPopupItem(
+    PopupMenuButton<Object?> popup,
+    PopupMenuItem<Object?> item,
+  ) {
+    item.onTap?.call();
+    _selectPopupValue(popup, item.value);
   }
 
   Widget? _impliedLeading(BuildContext context) {
@@ -719,3 +1051,8 @@ AppBar _titleOnly(AppBar appBar) => AppBar(
   forceMaterialTransparency: appBar.forceMaterialTransparency,
   clipBehavior: appBar.clipBehavior,
 );
+
+/// The menu rows standing in for one action folded into a vertical bar menu
+/// key; a popup's items form a [section], set apart from the rows around
+/// them by dividers.
+typedef _MenuEntry = ({List<Widget> rows, bool section});

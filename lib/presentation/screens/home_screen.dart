@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math';
+import 'dart:ui' show DisplayFeature, DisplayFeatureState, DisplayFeatureType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -177,7 +178,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   // Breakpoint for switching between mobile and desktop layout
   static const double _mobileBreakpoint = 600;
 
-  // The phone layout's tabs, by _selectedIndex.
+  // Keeps the snippets panel, and the folder it shows, when folding or
+  // turning the device moves it into another layout.
+  final _snippetsPanelKey = GlobalKey<_SnippetsPanelState>();
+
+  // Home's tabs, by _selectedIndex.
   static const _homeTabs = <_HomeTab>[
     _HomeTab(Icons.dns_outlined, Icons.dns_rounded, 'Hosts'),
     _HomeTab(Icons.link_outlined, Icons.link, 'Connections'),
@@ -473,85 +478,171 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     });
 
     final mediaQuery = MediaQuery.of(context);
+    final verticalBar = SystemVerticalBarScope.maybeOf(context);
+    if (verticalBar != null) {
+      final layout = _buildVerticalBarLayout(
+        verticalBar,
+        _resolveSpreadFold(mediaQuery),
+      );
+      if (layout != null) return layout;
+    }
     final fold = resolveDisplayFold(mediaQuery);
     if (fold != null && fold.isVertical) {
-      return _buildBookLayout(mediaQuery, fold);
+      return _buildBookLayout(fold);
     }
-    final isWide = mediaQuery.size.width >= _mobileBreakpoint;
+    // Beside a vertical bar too short for the tabs, they run across the
+    // bottom instead.
+    final isWide =
+        verticalBar == null && mediaQuery.size.width >= _mobileBreakpoint;
 
-    return isWide
-        ? _buildDesktopLayout()
-        : _buildMobileLayout(
-            verticalBar: SystemVerticalBarScope.maybeOf(context),
-          );
+    return isWide ? _buildDesktopLayout() : _buildMobileLayout();
   }
 
-  /// Splits home across a fold held like a book: the phone layout on the
-  /// left page and live connections on the right page.
+  /// The tabs a layout lists, as indexes into [_homeTabs], and which of them
+  /// is selected.
   ///
-  /// Each iPhone Duo page is about the size of its outer display, so the
-  /// left page is exactly the closed-device layout minus its Connections
-  /// tab, which the right page now shows permanently.
-  Widget _buildBookLayout(MediaQueryData mediaQuery, DisplayFold fold) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final leadingPage = fold.leadingPage(mediaQuery.size);
-    final trailingPage = fold.trailingPage(mediaQuery.size);
+  /// With connections on a page of their own, the tabs skip that one while
+  /// the selection keeps its place for when the page goes away.
+  ({List<int> indexes, int selected}) _visibleTabs({
+    required bool showsConnectionsTab,
+  }) {
+    final indexes = showsConnectionsTab ? const [0, 1, 2, 3] : const [0, 2, 3];
+    return (
+      indexes: indexes,
+      selected: max(0, indexes.indexOf(_selectedIndex)),
+    );
+  }
 
-    return ColoredBox(
-      color: colorScheme.surface,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            width: leadingPage.width,
-            child: MediaQuery(
-              data: displayFoldPageMediaQuery(mediaQuery, leadingPage),
-              // The page takes the vertical bar only when the bar runs down
-              // its own edge rather than beside the other page.
-              child: _buildMobileLayout(
-                showsConnectionsTab: false,
-                showsSettings: false,
-                verticalBar: switch (SystemVerticalBarScope.maybeOf(context)) {
-                  final bar? when bar.edge == SystemVerticalBarEdge.left => bar,
-                  _ => null,
-                },
-              ),
+  /// Home on a display with a vertical bar, such as iPhone Duo's, in every
+  /// pose.
+  ///
+  /// As in native apps, Settings and the tab bar stand in the vertical bar
+  /// beside the status cluster, and the lists get the whole height; the panel
+  /// headers name the tab. The selected panel's add action is a key just
+  /// above the tabs, in reach of the thumb, in place of its header button.
+  /// Across a [fold], held like a book or open flat, the selected panel takes
+  /// the left page and live connections the right one, so the tabs skip
+  /// Connections. Each page is about the size of the outer display.
+  ///
+  /// Null when the bar is too short for even the tabs without labels; home
+  /// then lays out as it does without a vertical bar, with the tabs across
+  /// the bottom.
+  Widget? _buildVerticalBarLayout(SystemVerticalBar bar, DisplayFold? fold) {
+    final (:indexes, :selected) = _visibleTabs(
+      showsConnectionsTab: fold == null,
+    );
+    final panelIndex = indexes[selected];
+    // A tab bar stays put under the keyboard, as on any iPhone.
+    final column = resolveVerticalBarColumn(
+      bar,
+      MediaQuery.of(context),
+      avoidsKeyboard: false,
+    );
+    // A short bar, as beside a Live Activity in landscape, gives way in
+    // order so the tabs stay reachable: the add key first, whose button
+    // returns to the panel header, then the tab labels, then Settings. None
+    // of it depends on the tab, so switching to Connections, which has no
+    // add action, leaves the rest of the rail where it was.
+    final compactTabsExtent = VerticalBarTabs.extentFor(
+      indexes.length,
+      showsLabels: false,
+    );
+    if (compactTabsExtent > column.height) return null;
+    final room = column.height - verticalBarItemExtent - verticalBarItemGap;
+    final showsAddKey =
+        VerticalBarTabs.extentFor(indexes.length) +
+            verticalBarItemExtent +
+            verticalBarItemGap <=
+        room;
+    final showsLabels = VerticalBarTabs.extentFor(indexes.length) <= room;
+    final showsSettings = compactTabsExtent <= room;
+    final addAction = showsAddKey ? _addAction(panelIndex) : null;
+    // Without a tab bar across the bottom, the lists end above the home
+    // indicator themselves.
+    final content = SafeArea(
+      child: _buildContent(index: panelIndex, showsAddButtons: !showsAddKey),
+    );
+    return Scaffold(
+      resizeToAvoidBottomInset: false,
+      body: VerticalBarRailPortal(
+        rail: (context) => VerticalBarRail(
+          bar: bar,
+          avoidsKeyboard: false,
+          leading: [if (showsSettings) _buildSettingsButton()],
+          trailing: [
+            if (addAction != null) _buildAddKey(context, addAction),
+            VerticalBarTabs(
+              tabs: [
+                for (final index in indexes)
+                  VerticalBarTab(
+                    icon: _homeTabs[index].icon,
+                    selectedIcon: _homeTabs[index].selectedIcon,
+                    label: _homeTabs[index].label,
+                  ),
+              ],
+              selectedIndex: selected,
+              showsLabels: showsLabels,
+              onSelected: (tab) =>
+                  setState(() => _selectedIndex = indexes[tab]),
             ),
-          ),
-          SizedBox(width: fold.thickness),
-          SizedBox(
-            width: trailingPage.width,
-            child: MediaQuery(
-              data: displayFoldPageMediaQuery(mediaQuery, trailingPage),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border(
-                    left: BorderSide(color: colorScheme.outline.withAlpha(60)),
-                  ),
-                ),
-                // A bar matching the other page's keeps both panel headers on
-                // one line, with Settings at the top right of the spread as on
-                // the phone.
-                child: Scaffold(
-                  resizeToAvoidBottomInset: false,
-                  appBar: AppBar(
-                    automaticallyImplyLeading: false,
-                    actions: [_buildSettingsButton()],
-                  ),
-                  // Arrows, Return and Esc drive the list here too.
-                  body: const SafeArea(
-                    top: false,
-                    child: KeyboardListNavigation(
-                      autofocus: true,
-                      child: _ConnectionsPanel(),
-                    ),
-                  ),
-                ),
+          ],
+        ),
+        child: fold == null
+            ? content
+            : DisplayFoldSpread(
+                fold: fold,
+                leading: content,
+                trailing: _buildConnectionsPage(),
               ),
-            ),
-          ),
-        ],
       ),
+    );
+  }
+
+  /// Splits home across a fold held like a book on a display without a
+  /// vertical bar: the phone layout on the left page and live connections on
+  /// the right page.
+  Widget _buildBookLayout(DisplayFold fold) => ColoredBox(
+    color: Theme.of(context).colorScheme.surface,
+    child: DisplayFoldSpread(
+      fold: fold,
+      leading: _buildMobileLayout(
+        showsConnectionsTab: false,
+        showsSettings: false,
+      ),
+      // A bar matching the other page's keeps both panel headers on one
+      // line, with Settings at the top right of the spread as on the phone.
+      trailing: _buildConnectionsPage(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          actions: [_buildSettingsButton()],
+        ),
+      ),
+    ),
+  );
+
+  /// Live connections on a fold's right page, set off from the left page by
+  /// a hairline.
+  Widget _buildConnectionsPage({AppBar? appBar}) {
+    // Arrows, Return and Esc drive the list here too.
+    const connections = KeyboardListNavigation(
+      autofocus: true,
+      child: _ConnectionsPanel(),
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(
+            color: Theme.of(context).colorScheme.outline.withAlpha(60),
+          ),
+        ),
+      ),
+      child: appBar == null
+          ? const SafeArea(child: connections)
+          : Scaffold(
+              resizeToAvoidBottomInset: false,
+              appBar: appBar,
+              body: const SafeArea(top: false, child: connections),
+            ),
     );
   }
 
@@ -561,59 +652,44 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     onPressed: () => context.push('/settings'),
   );
 
-  /// The phone layout, with its bars in [verticalBar] when there is one: the
-  /// window's, or a fold page's own.
+  /// The add action of the panel at [index] in [_homeTabs], which the
+  /// vertical bar holds as a key in place of the panel header's button.
+  /// Connections has none.
+  _AddAction? _addAction(int index) => switch (index) {
+    0 => (tooltip: 'Add host', onPressed: () => _addHost(context)),
+    2 => (tooltip: 'Add key', onPressed: () => _addKey(context)),
+    3 => (
+      tooltip: 'Add snippet',
+      onPressed: () => _snippetsPanelKey.currentState?._addSnippet(),
+    ),
+    _ => null,
+  };
+
+  /// The key for [action], filled in the accent like the header button it
+  /// replaces: it is the screen's one primary action.
+  Widget _buildAddKey(BuildContext context, _AddAction action) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return IconButton(
+      icon: const Icon(Icons.add),
+      tooltip: action.tooltip,
+      onPressed: action.onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: colorScheme.primary,
+        foregroundColor: colorScheme.onPrimary,
+        shape: const CircleBorder(),
+      ),
+    );
+  }
+
+  /// The phone layout, with an app bar across the top and a tab bar across
+  /// the bottom.
   Widget _buildMobileLayout({
-    required SystemVerticalBar? verticalBar,
     bool showsConnectionsTab = true,
     bool showsSettings = true,
   }) {
-    // With connections on their own page, the tab bar skips that tab while
-    // the selection keeps its place for when the page goes away.
-    final tabIndexes = showsConnectionsTab
-        ? const [0, 1, 2, 3]
-        : const [0, 2, 3];
-    final selectedTab = max(0, tabIndexes.indexOf(_selectedIndex));
-    final tabs = [for (final index in tabIndexes) _homeTabs[index]];
-    void selectTab(int tab) => setState(() => _selectedIndex = tabIndexes[tab]);
-    final content = _buildContent(index: tabIndexes[selectedTab]);
-    final settingsButton = _buildSettingsButton();
-
-    final bar = verticalBar;
-    if (bar != null) {
-      // As in native apps on iPhone Duo, the tab bar and the bar's actions
-      // stand in the vertical bar beside the status cluster, and the list
-      // gets the whole height. The panel headers name the tab.
-      return Scaffold(
-        resizeToAvoidBottomInset: false,
-        body: VerticalBarRailPortal(
-          rail: (context) => VerticalBarRail(
-            bar: bar,
-            // A tab bar stays put under the keyboard, as on any iPhone.
-            avoidsKeyboard: false,
-            leading: [if (showsSettings) settingsButton],
-            trailing: [
-              VerticalBarTabs(
-                tabs: [
-                  for (final tab in tabs)
-                    VerticalBarTab(
-                      icon: tab.icon,
-                      selectedIcon: tab.selectedIcon,
-                      label: tab.label,
-                    ),
-                ],
-                selectedIndex: selectedTab,
-                onSelected: selectTab,
-              ),
-            ],
-          ),
-          // Without a tab bar across the bottom, the lists end above the
-          // home indicator themselves.
-          child: SafeArea(child: content),
-        ),
-      );
-    }
-
+    final (:indexes, :selected) = _visibleTabs(
+      showsConnectionsTab: showsConnectionsTab,
+    );
     return Scaffold(
       // This shell has no text input. Ignore stale IME insets left behind by
       // input-heavy routes.
@@ -634,26 +710,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             Text(ref.watch(appDisplayNameProvider)),
           ],
         ),
-        actions: [if (showsSettings) settingsButton],
+        actions: [if (showsSettings) _buildSettingsButton()],
       ),
       // Rows clear a side inset, such as iPhone Duo's status bar strip when
       // an app opts out of the vertical bar; the app bar and tab bar already
       // pad themselves.
-      body: SafeArea(top: false, bottom: false, child: content),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: _buildContent(index: indexes[selected]),
+      ),
       bottomNavigationBar: NavigationBar(
         // Keep destinations clear of edge-to-edge system navigation while an
         // IME inset temporarily reduces MediaQuery.padding.
         maintainBottomViewPadding: true,
-        selectedIndex: selectedTab,
-        onDestinationSelected: selectTab,
+        selectedIndex: selected,
+        onDestinationSelected: (tab) =>
+            setState(() => _selectedIndex = indexes[tab]),
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         height: 65,
         destinations: [
-          for (final tab in tabs)
+          for (final index in indexes)
             NavigationDestination(
-              icon: Icon(tab.icon),
-              selectedIcon: Icon(tab.selectedIcon),
-              label: tab.label,
+              icon: Icon(_homeTabs[index].icon),
+              selectedIcon: Icon(_homeTabs[index].selectedIcon),
+              label: _homeTabs[index].label,
             ),
         ],
       ),
@@ -796,24 +877,62 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
   }
 
-  Widget _buildContent({int? index}) => Column(
+  /// The panel at [index] in [_homeTabs], or the selected one. Without
+  /// [showsAddButtons], its header leaves out the add button, whose action
+  /// the vertical bar holds.
+  Widget _buildContent({int? index, bool showsAddButtons = true}) => Column(
     children: [
       const _TelemetryOptInPromptCard(),
       Expanded(
         child: switch (index ?? _selectedIndex) {
-          0 => const HostsPanel(),
+          0 => HostsPanel(showsAddButton: showsAddButtons),
           // Arrows, Return and Esc drive the list from a hardware keyboard.
           1 => const KeyboardListNavigation(
             autofocus: true,
             child: _ConnectionsPanel(),
           ),
-          2 => const _KeysPanel(),
-          3 => const SnippetsPanel(),
-          _ => const HostsPanel(),
+          2 => _KeysPanel(showsAddButton: showsAddButtons),
+          3 => SnippetsPanel(
+            key: _snippetsPanelKey,
+            showsAddButton: showsAddButtons,
+          ),
+          _ => HostsPanel(showsAddButton: showsAddButtons),
         },
       ),
     ],
   );
+}
+
+/// A panel's add action: what it is called and what it does.
+typedef _AddAction = ({String tooltip, VoidCallback onPressed});
+
+void _addHost(BuildContext context) => context.push('/hosts/add');
+
+void _addKey(BuildContext context) => context.push('/keys/add');
+
+/// The fold home's vertical bar layout splits into two pages at: a vertical
+/// one, half open like a book or open flat.
+///
+/// [resolveDisplayFold] takes a flat fold for a crease in one screen, but
+/// the open inner display is two outer displays wide, so home keeps the
+/// spread rather than stretching one list across it.
+DisplayFold? _resolveSpreadFold(MediaQueryData mediaQuery) {
+  final fold = resolveDisplayFold(
+    mediaQuery.copyWith(
+      displayFeatures: [
+        for (final feature in mediaQuery.displayFeatures)
+          if (feature.type == DisplayFeatureType.fold)
+            DisplayFeature(
+              bounds: feature.bounds,
+              type: feature.type,
+              state: DisplayFeatureState.postureHalfOpened,
+            )
+          else
+            feature,
+      ],
+    ),
+  );
+  return fold != null && fold.isVertical ? fold : null;
 }
 
 void _openTerminalRoute(BuildContext context, String route) {
@@ -1017,7 +1136,11 @@ class _TelemetryOptInPromptCard extends ConsumerWidget {
 /// Panel for displaying and managing hosts inline.
 class HostsPanel extends ConsumerWidget {
   /// Creates a [HostsPanel].
-  const HostsPanel({super.key});
+  const HostsPanel({super.key, this.showsAddButton = true});
+
+  /// Whether the header shows the Add Host button. Home leaves it out while
+  /// the vertical bar holds the action.
+  final bool showsAddButton;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1035,12 +1158,13 @@ class HostsPanel extends ConsumerWidget {
               tooltip: 'Import ssh_config',
               onTap: () => context.push('/hosts/import-ssh-config'),
             ),
-            _ActionButton(
-              icon: Icons.add,
-              label: 'Add Host',
-              onTap: () => context.push('/hosts/add'),
-              primary: true,
-            ),
+            if (showsAddButton)
+              _ActionButton(
+                icon: Icons.add,
+                label: 'Add Host',
+                onTap: () => _addHost(context),
+                primary: true,
+              ),
           ],
         ),
 
@@ -1134,6 +1258,8 @@ class HostsPanel extends ConsumerWidget {
     WidgetRef ref,
     List<Host> hosts,
   ) => ReorderableListView.builder(
+    // Keeps its place when home changes layout or tab and builds it anew.
+    key: const PageStorageKey('home-hosts'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     buildDefaultDragHandles: false,
     itemCount: hosts.length,
@@ -1937,6 +2063,7 @@ class _ConnectionsPanel extends ConsumerWidget {
                   ),
                 )
               : ListView.builder(
+                  key: const PageStorageKey('home-connections'),
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   itemCount: connectionIds.length + 1,
                   itemBuilder: (context, index) {
@@ -2158,7 +2285,10 @@ class _SmallIconButton extends StatelessWidget {
 }
 
 class _KeysPanel extends ConsumerWidget {
-  const _KeysPanel();
+  const _KeysPanel({this.showsAddButton = true});
+
+  /// Whether the header shows the Add Key button.
+  final bool showsAddButton;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -2171,12 +2301,13 @@ class _KeysPanel extends ConsumerWidget {
         PanelHeader(
           title: 'keys',
           actions: [
-            _ActionButton(
-              icon: Icons.add,
-              label: 'Add Key',
-              onTap: () => context.push('/keys/add'),
-              primary: true,
-            ),
+            if (showsAddButton)
+              _ActionButton(
+                icon: Icons.add,
+                label: 'Add Key',
+                onTap: () => _addKey(context),
+                primary: true,
+              ),
           ],
         ),
 
@@ -2223,6 +2354,7 @@ class _KeysPanel extends ConsumerWidget {
     WidgetRef ref,
     List<SshKey> keys,
   ) => ListView.builder(
+    key: const PageStorageKey('home-keys'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     itemCount: keys.length,
     itemBuilder: (context, index) {
@@ -2444,7 +2576,11 @@ class _KeyRow extends ConsumerWidget {
 /// Panel for displaying and managing snippets inline.
 class SnippetsPanel extends ConsumerStatefulWidget {
   /// Creates a [SnippetsPanel].
-  const SnippetsPanel({super.key});
+  const SnippetsPanel({super.key, this.showsAddButton = true});
+
+  /// Whether the header shows the Add Snippet button. Home leaves it out
+  /// while the vertical bar holds the action.
+  final bool showsAddButton;
 
   @override
   ConsumerState<SnippetsPanel> createState() => _SnippetsPanelState();
@@ -2466,8 +2602,8 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Header bar. A narrow panel, such as iPhone Duo's outer display
-        // beside its vertical bar, keeps only the primary action labelled,
-        // like the hosts header.
+        // beside its vertical bar, shows New Folder as an icon, like the
+        // hosts header's import.
         LayoutBuilder(
           builder: (context, constraints) => PanelHeader(
             title: 'snippets',
@@ -2484,14 +2620,15 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
                   label: 'New Folder',
                   onTap: () => unawaited(_createFolder(context)),
                 ),
-                const SizedBox(width: 8),
+                if (widget.showsAddButton) const SizedBox(width: 8),
               ],
-              _ActionButton(
-                icon: Icons.add,
-                label: 'Add Snippet',
-                onTap: () => _addSnippet(context),
-                primary: true,
-              ),
+              if (widget.showsAddButton)
+                _ActionButton(
+                  icon: Icons.add,
+                  label: 'Add Snippet',
+                  onTap: _addSnippet,
+                  primary: true,
+                ),
             ],
           ),
         ),
@@ -2520,7 +2657,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     );
   }
 
-  void _addSnippet(BuildContext context) {
+  void _addSnippet() {
     context.push(
       '/snippets/add',
       extra: SnippetEditPrefill(folderId: _selectedFolderId),
@@ -2807,7 +2944,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
                 ? 'Save commands you keep retyping — {{variables}} and all.'
                 : 'Nothing in this folder yet — add one or pick another above.',
             primaryLabel: 'Add Snippet',
-            onPrimary: () => _addSnippet(context),
+            onPrimary: _addSnippet,
           ),
         ),
       );
@@ -2818,6 +2955,7 @@ class _SnippetsPanelState extends ConsumerState<SnippetsPanel> {
     List<Snippet> visibleSnippets,
     Map<int, String> folderNames,
   ) => ReorderableListView.builder(
+    key: const PageStorageKey('home-snippets'),
     padding: const EdgeInsets.symmetric(vertical: 4),
     buildDefaultDragHandles: false,
     itemCount: visibleSnippets.length,

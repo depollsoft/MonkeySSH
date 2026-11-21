@@ -171,6 +171,7 @@ class TelemetryService {
     'user',
   };
   static const _allowedPasteSources = <String>{
+    'clipboard_event',
     'clipboard_files',
     'clipboard_image',
     'clipboard_text',

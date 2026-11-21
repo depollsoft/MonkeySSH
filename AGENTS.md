@@ -37,6 +37,13 @@ which runs `functions-test` only. `deploy-functions.yml` deploys them from `main
 through keyless Workload Identity Federation (`scripts/setup_functions_iam.sh`);
 never deploy them by hand. See "Deployment" in `docs/push-notifications.md`.
 
+`third_party` changes also run `esctest`: Thomas Dickey's esctest2 conformance
+suite against the vendored terminal, on Linux. It fails on a failure missing from
+`third_party/xterm/test/esctest/expected_failures.txt` and on a listed test that
+now passes, so an emulation fix deletes its tests from that list. Locally, in
+`third_party/xterm`: `test/esctest/fetch_esctest.sh DIR`, then
+`ESCTEST_DIR=DIR flutter test test/esctest` (`ESCTEST_UPDATE=1` rewrites the list).
+
 ## Workflow lockfile
 
 Every workflow is onboarded to `.github/workflows/actions.lock`
@@ -96,7 +103,7 @@ iPhone Duo layout facts (iOS 27.1 simulator, hinge moved through Device Hub): th
 - The system keyboard spans the whole outer display and covers the bottom of the bar; rails that hold keys end above it (`resolveVerticalBarColumn`).
 - Android foldables report folds through the engine; widget tests simulate one with `tester.view.displayFeatures` and a bar with `SystemVerticalBarScope`.
 
-Testing on the iPhone Duo simulator (Xcode 27.1): `simctl` and `devicectl` have no hinge or pose command (`devicectl` only streams the hinge angle). The device window in Device Hub has **Closed**, **Partially Open**, **Open** and **Rotate Right** buttons, and it also exposes the app's own accessibility tree, so a script can drive both through the macOS Accessibility API. That needs the Accessibility permission for the scripting process, and the Mac's screen unlocked (a locked screen hides every window from it). A shell started from an SSH login is attributed to `/usr/libexec/sshd-keygen-wrapper`; don't grant that, which would let every SSH login control the screen. Launch a small helper app through `open` instead (LaunchServices makes it its own responsible process) and grant only that. `xcrun devicectl device info displays --device <udid>` names the active display; `xcrun simctl io <udid> screenshot --display=<n>` captures it (1 is the outer display, 3 the inner one). Without the permission, `xcrun devicectl device appResize start --device <udid> --preferred-size 951x669` runs the app in a resizable scene at the inner display's size (capture `--display=5`), with no vertical bar or fold; inject the fold with `PlatformDisplayFeaturesController.debugSetState` from a scratch entry point.
+To test a fold layout without moving the simulator's hinge, inject the fold with `PlatformDisplayFeaturesController.debugSetState` from a scratch entry point.
 
 ## MonkeyMux Go tests on a Windows dev machine
 
@@ -187,9 +194,9 @@ python3 scripts/validate_play_store_metadata.py
 
 Regenerated store **media** (screenshots, App Previews, demo videos) is not committed. Publish it with `scripts/store_assets.sh publish` to the rolling `store-assets` GitHub Release; CI re-hosts the archive as Actions artifacts and Sync Store Metadata / production releases download it before Fastlane upload. Restore locally with `scripts/store_assets.sh download`.
 
-The screenshot set has eight scenes per device. Only entirely Pro-only features get screenshot badges. Native chat is available free, so its screenshots stay unbadged. Agent Management has a Pro caption outside the real app capture. Agent Management captures live version checks only, without installing or updating the developer's tools.
+The screenshot set has eight scenes per device. iPhone Duo has its own eight (`NN_iphone_duo.png`), taken on the iPhone Duo simulator in the book, propped, open and closed poses: 1398x2034 from the outer display, 2853x2007 or 2007x2853 from the inner one. The generator moves the hinge with `hingectl` from the user-level iphone-duo-simulator skill (`STORE_SCREENSHOT_DUO_HINGECTL`, default `~/.agents/skills/iphone-duo-simulator/scripts/hingectl`), which needs no Accessibility permission and works while the Mac's screen is locked. Without it, the generator presses Device Hub's buttons through an Accessibility helper (`STORE_SCREENSHOT_AX_HELPER`, default `~/Library/Application Support/SimAXHelper/ax.py`) and selects the simulator in Device Hub's sidebar, which needs Device Hub running and the screen unlocked; set `STORE_SCREENSHOT_DUO_HINGECTL` empty to use that path. Cursor Agent needs the login keychain unlocked, which a shell started from an SSH login does not get from the screen unlock; run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in that session first. Only entirely Pro-only features get screenshot badges. Native chat is available free, so its screenshots stay unbadged. Agent Management has a Pro caption outside the real app capture. Agent Management captures live version checks only, without installing or updating the developer's tools.
 
-Regenerate screenshots with `python3 scripts/generate_store_screenshots.py [ios|android|both]` and short demo videos with `python3 scripts/generate_store_demo_videos.py [ios|android|both]`, then publish:
+Regenerate screenshots with `python3 scripts/generate_store_screenshots.py [ios|android|both|duo]` (`ios` includes the Duo set) and short demo videos with `python3 scripts/generate_store_demo_videos.py [ios|android|both]`, then publish:
 
 ```bash
 ./scripts/store_assets.sh publish --generate all --platform both --sync

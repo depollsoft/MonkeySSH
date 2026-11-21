@@ -432,6 +432,50 @@ void main() {
         verify(handler.graphicsCommandEnd()).called(1);
       });
 
+      test('CAN and SUB cancel an OSC without running it', () {
+        for (final cancel in ['\x18', '\x1a']) {
+          final handler = MockEscapeHandler();
+          EscapeParser(handler)
+              .write('\x1b]2;cancelled${cancel}x\x1b]8;;https://e.x\x07');
+          verifyNever(handler.setTitle(any));
+          // The cancelling byte is consumed and parsing resumes in ground.
+          verify(handler.writeChar(0x78)).called(1);
+          verify(handler.unknownOSC('8', ['', 'https://e.x'])).called(1);
+        }
+      });
+
+      test('CAN, SUB and C1 controls discard a Kitty graphics APC', () {
+        for (final cancel in ['\x18', '\x1a', '\x9b']) {
+          // Cut short in the payload, then in the control keys.
+          for (final input in [
+            '\x1b_Ga=t,f=24,s=1,v=1,i=7;AAAA$cancel',
+            '\x1b_Ga=t,f=2$cancel',
+          ]) {
+            final handler = MockEscapeHandler();
+            EscapeParser(handler).write(input);
+            verifyNever(handler.graphicsCommandStart(captureAny));
+            verifyNever(handler.graphicsCommandEnd());
+            verify(handler.graphicsCommandAbort()).called(1);
+          }
+          final handler = MockEscapeHandler();
+          EscapeParser(handler).write('\x1b_Ga=t,f=2$cancel\x1b_Ga=d\x1b\\');
+          verify(handler.graphicsCommandAbort()).called(1);
+          final args = verify(
+            handler.graphicsCommandStart(captureAny),
+          ).captured.single;
+          expect(args, {'a': 'd'});
+        }
+      });
+
+      test('CAN and SUB end a skipped string', () {
+        for (final cancel in ['\x18', '\x1a']) {
+          final handler = MockEscapeHandler();
+          EscapeParser(handler).write('\x1b_Xskipped${cancel}hi');
+          verify(handler.writeChar(0x68)).called(1);
+          verify(handler.writeChar(0x69)).called(1);
+        }
+      });
+
       test('a trailing lone ESC is still buffered across writes', () {
         final handler = MockEscapeHandler();
         EscapeParser(handler)

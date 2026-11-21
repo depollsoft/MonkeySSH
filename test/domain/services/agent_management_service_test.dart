@@ -1464,6 +1464,81 @@ void main() {
     }
   });
 
+  group('Hermes releases', () {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (definition) => definition.id == 'cli:hermes',
+    );
+
+    // Hermes's --version reports how the running copy was installed.
+    for (final (listing, version, method, expectedSource, uninstall) in [
+      ('pipx', '0.19.0', 'pip', 'pipx', 'pipx uninstall hermes-agent'),
+      // Installed with plain pip: no pipx listing, but still PyPI's copy.
+      (null, '0.19.0', 'pip', 'pip', 'python3 -m pip uninstall hermes-agent'),
+      // Older copies print no install method; a pipx listing then decides.
+      ('pipx', '0.18.2', null, 'pipx', 'pipx uninstall hermes-agent'),
+      (null, '0.19.0', 'git', 'PATH', null),
+      // pipx still lists an old copy, but the installer's checkout runs.
+      ('pipx', '0.19.0', 'git', 'PATH', null),
+      ('pipx', '0.21.6', null, 'PATH', null),
+      // Homebrew's copy reports no method Hermes knows; the listing decides.
+      ('Homebrew', '0.22.4', 'unknown', 'Homebrew', null),
+      // Homebrew still lists a formula, but the installer's checkout runs.
+      ('Homebrew', '0.22.4', 'git', 'PATH', null),
+    ]) {
+      test(
+        '${listing ?? 'no'} listing, $version via ${method ?? 'unreported'} is $expectedSource',
+        () async {
+          final client = _MockSshClient();
+          final session = _remoteSession(client);
+          when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+          when(() => client.execute(any(), pty: any(named: 'pty'))).thenAnswer((
+            invocation,
+          ) async {
+            final script = invocation.positionalArguments.first as String;
+            if (script.contains('__monkeyssh_agent_path__')) {
+              return _execOutput(
+                '__monkeyssh_agent_runtime__=cli:hermes\n'
+                '__monkeyssh_agent_path__=/home/dev/.local/bin/hermes\n'
+                '__monkeyssh_agent_version__=Hermes Agent v$version '
+                'Install directory: /home/dev/.hermes/hermes-agent '
+                '${method == null ? '' : 'Install method: $method '}'
+                'Python: 3.12.4\n'
+                '__monkeyssh_agent_runtime_end__\n',
+              );
+            }
+            expect(script, contains('api.github.com/repos/NousResearch'));
+            return _execOutput(
+              '__monkeyssh_agent_runtime__=cli:hermes\n'
+              '${listing == null ? '' : '__monkeyssh_agent_source__=$listing\n'}'
+              '__monkeyssh_agent_latest__="tag_name": "v0.22.6"\n'
+              '__monkeyssh_agent_runtime_end__\n',
+            );
+          });
+          final runtime = await _unlockedManagementService(_MockDiscovery())
+              .inspect(session, definition);
+
+          expect(runtime.status, AgentRuntimeStatus.updateAvailable);
+          expect(runtime.installedVersion, version);
+          expect(runtime.latestVersion, '0.22.6');
+          expect(runtime.detectionSource, expectedSource);
+          expect(runtime.managedByPackageManager, uninstall == null);
+          if (uninstall == null) {
+            expect(runtime.message, isNull);
+          } else {
+            expect(runtime.message, contains('`$uninstall`'));
+          }
+          if (expectedSource == 'pip') {
+            // Hermes says pip for a uv tool or venv copy too.
+            expect(
+              runtime.message,
+              contains('`uv tool uninstall hermes-agent`'),
+            );
+          }
+        },
+      );
+    }
+  });
+
   group('Pi package migration', () {
     final definition = agentCliRuntimeDefinitions.singleWhere(
       (definition) => definition.id == 'cli:pi',
@@ -1471,36 +1546,50 @@ void main() {
     const package = '@earendil-works/pi-coding-agent';
 
     for (final windows in [false, true]) {
-      test('Pi installs use the current package, windows=$windows', () {
-        expect(definition.registry, AgentPackageRegistry.npm);
-        expect(definition.packageName, package);
-        for (final update in [false, true]) {
+      test(
+        'Pi installs with the pi.dev installer and updates itself, windows=$windows',
+        () {
+          // npm installations are still recognized under the current package.
+          expect(definition.registry, AgentPackageRegistry.npm);
+          expect(definition.packageName, package);
+          final install = buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: false,
+          )!;
+          final installScript = windows
+              ? decodeEncodedPowerShell(install)
+              : install;
+          expect(
+            installScript,
+            contains(
+              windows
+                  ? 'https://pi.dev/install.ps1'
+                  : 'https://pi.dev/install.sh',
+            ),
+          );
+          expect(installScript, isNot(contains('npm install')));
+          expect(
+            definition.officialVersionLookup?.url,
+            'https://pi.dev/api/latest-version',
+          );
           final command = buildAgentInstallCommand(
             definition,
             windows: windows,
-            update: update,
-            detectionSource: 'npm global',
+            update: true,
+            executablePath: windows ? r'C:\tools\pi.cmd' : '/usr/local/bin/pi',
           )!;
           final script = windows ? decodeEncodedPowerShell(command) : command;
-          expect(script, contains(package));
-          expect(script, isNot(contains('@mariozechner/')));
-        }
-        final command = buildAgentInstallCommand(
-          definition,
-          windows: windows,
-          update: true,
-          executablePath: windows ? r'C:\tools\pi.cmd' : '/usr/local/bin/pi',
-        )!;
-        final script = windows ? decodeEncodedPowerShell(command) : command;
-        expect(script, contains("'update' '--self'"));
-        expect(script, isNot(contains('npm install')));
-        expect(
-          agentAcpRuntimeDefinitions
-              .singleWhere((d) => d.id == 'acp:pi')
-              .packageName,
-          'pi-acp',
-        );
-      });
+          expect(script, contains("'update' '--self'"));
+          expect(script, isNot(contains('npm install')));
+          expect(
+            agentAcpRuntimeDefinitions
+                .singleWhere((d) => d.id == 'acp:pi')
+                .packageName,
+            'pi-acp',
+          );
+        },
+      );
 
       for (final batched in [false, true]) {
         test('Pi detects 0.85.1 from 0.85.0, windows=$windows, batched=$batched', () async {
@@ -1525,9 +1614,10 @@ void main() {
                 '__monkeyssh_agent_runtime_end__\n',
               );
             }
-            final currentPackage = script
-                .replaceAll(RegExp("'+"), "'")
-                .contains("npm view '$package'");
+            // `pi update` follows pi.dev, not npm's latest tag.
+            final currentPackage =
+                script.contains('https://pi.dev/api/latest-version') &&
+                !script.replaceAll(RegExp("'+"), "'").contains('npm view');
             return _execOutput(
               '__monkeyssh_agent_runtime__=cli:pi\n'
               '__monkeyssh_agent_source__=npm global\n'
@@ -1679,8 +1769,9 @@ void main() {
 case "$*" in
   *cursor.com/install*) echo 'DOWNLOAD_URL="https://downloads.cursor.com/lab/2026.09.08-6caf4ff/linux/arm64/agent-cli-package.tar.gz"';;
   *antigravity*/manifests/*) echo '{"version":"1.1.28","url":"https://example.test/1.1.28"}';;
-  *hermes_cli/__init__.py*) printf '__version__ = "0.21.1"\n__release_date__ = "2026.9.7"\n';;
+  *api.github.com/repos/NousResearch/hermes-agent/releases/latest*) printf '{\n  "url": "https://api.github.com/x",\n  "tag_name": "v0.21.1",\n  "name": "Hermes Agent v0.21.1"\n}\n';;
   *x.ai/cli/stable*) echo '1.0.24';;
+  *pi.dev/api/latest-version*) echo '{"ok":true,"version":"1.3.0","packageName":"@earendil-works/pi-coding-agent"}';;
   *registry.npmjs.org/*/latest*) echo '{"version":"1.2.0"}';;
   *) exit 1;;
 esac
@@ -1717,6 +1808,7 @@ esac
           '1.0.0',
           reason: definition.id,
         );
+        if (definition.officialVersionLookup != null) continue;
         expect(
           snapshots[definition.id]?.latestVersionOutput,
           '1.1.0',
@@ -1728,6 +1820,7 @@ esac
         'cli:antigravity': '1.1.28',
         'cli:hermes': '0.21.1',
         'cli:grok': '1.0.24',
+        'cli:pi': '1.3.0',
       }.entries) {
         expect(
           parseAgentVersion(snapshots[entry.key]?.latestVersionOutput ?? ''),
@@ -1748,7 +1841,9 @@ esac
       fallback.stdout as String,
     );
     for (final definition in agentRuntimeDefinitions.where(
-      (d) => d.registry == AgentPackageRegistry.npm,
+      (d) =>
+          d.registry == AgentPackageRegistry.npm &&
+          d.officialVersionLookup == null,
     )) {
       expect(
         parseAgentVersion(
@@ -1773,6 +1868,313 @@ esac
     for (final snapshot in offlineSnapshots.values) {
       expect(snapshot.latestVersionOutput, isNull);
     }
+  });
+
+  test('POSIX metadata reports a Pi installer launcher ahead of a leftover npm package', () async {
+    final root = await Directory.systemTemp.createTemp('monkeyssh-pi-layout-');
+    addTearDown(() => root.delete(recursive: true));
+    // The probe's login PATH puts ~/.cargo/bin ahead of the system
+    // directories, so these fakes win over a host's real npm and curl; ~/bin
+    // stays free for the symlinked-directory case below.
+    final bin = Directory('${root.path}/.cargo/bin')
+      ..createSync(recursive: true);
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    File('${bin.path}/npm').writeAsStringSync(
+      '#!/bin/sh\n[ "\$1" = list ] && echo "├── ${definition.packageName}@1.0.0"\n',
+    );
+    File(
+      '${bin.path}/curl',
+    ).writeAsStringSync('#!/bin/sh\necho \'{"ok":true,"version":"9.8.7"}\'\n');
+    // The installer's layout: ~/.local/bin/pi -> ../../.pi/agent/bin/pi.
+    final agent = Directory('${root.path}/.pi/agent');
+    Directory('${agent.path}/bin').createSync(recursive: true);
+    Directory('${agent.path}/install').createSync();
+    File('${agent.path}/bin/pi').writeAsStringSync('#!/bin/sh\necho 1.4.0\n');
+    final marker = File('${agent.path}/install/managed-install.json')
+      ..writeAsStringSync('{"kind":"pi-managed-install","schemaVersion":1}');
+    Directory('${root.path}/.local/bin').createSync(recursive: true);
+    Link('${root.path}/.local/bin/pi').createSync('../../.pi/agent/bin/pi');
+    await Process.run('chmod', [
+      '+x',
+      '${bin.path}/npm',
+      '${bin.path}/curl',
+      '${agent.path}/bin/pi',
+    ]);
+    final script = File('${root.path}/metadata.sh')
+      ..writeAsStringSync(
+        buildAgentMetadataProbeCommand([definition], windows: false),
+      );
+    Future<AgentMetadataSnapshot?> probe(String shell) async {
+      final result = await Process.run(
+        shell,
+        [script.path],
+        environment: {'HOME': root.path, 'PATH': '${bin.path}:/usr/bin:/bin'},
+        includeParentEnvironment: false,
+      );
+      expect(result.exitCode, 0, reason: '${result.stderr}');
+      return parseAgentMetadataProbeOutput(
+        result.stdout as String,
+      )[definition.id];
+    }
+
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+    ]) {
+      final managed = await probe(shell);
+      expect(managed?.detectionSource, 'Pi installer', reason: shell);
+      expect(managed?.installedVersionOutput, isNull, reason: shell);
+      expect(parseAgentVersion(managed?.latestVersionOutput ?? ''), '9.8.7');
+    }
+    // A symlinked bin directory: ~/bin -> .pi/agent/bin.
+    Link('${root.path}/.local/bin/pi').deleteSync();
+    Link('${root.path}/bin').createSync('.pi/agent/bin');
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+      if (File('/bin/dash').existsSync()) '/bin/dash',
+    ]) {
+      expect(
+        (await probe(shell))?.detectionSource,
+        'Pi installer',
+        reason: shell,
+      );
+    }
+    // Without the installer's marker, the same launcher is an npm package.
+    marker.deleteSync();
+    final npm = await probe('bash');
+    expect(npm?.detectionSource, 'npm global');
+    expect(npm?.installedVersionOutput, '1.0.0');
+  });
+
+  test(
+    'POSIX metadata reports Homebrew only for a copy in the formula keg',
+    () async {
+      final root = await Directory.systemTemp.createTemp('monkeyssh-brew-keg-');
+      addTearDown(() => root.delete(recursive: true));
+      // ~/.cargo/bin comes ahead of the host's real Homebrew in the login PATH.
+      final bin = Directory('${root.path}/.cargo/bin')
+        ..createSync(recursive: true);
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:hermes',
+      );
+      File('${bin.path}/brew').writeAsStringSync(
+        '#!/bin/sh\n[ "\$1 \$2" = "list --versions" ] && echo "hermes-agent 0.22.4"\n',
+      );
+      File('${bin.path}/pipx').writeAsStringSync('#!/bin/sh\nexit 1\n');
+      File('${bin.path}/curl')
+          .writeAsStringSync('#!/bin/sh\necho \'{"tag_name": "v0.22.6"}\'\n');
+      final keg = Directory('${root.path}/brew/Cellar/hermes-agent/0.22.4/bin')
+        ..createSync(recursive: true);
+      File('${keg.path}/hermes').writeAsStringSync('#!/bin/sh\nexit 0\n');
+      final local = Directory('${root.path}/.local/bin')
+        ..createSync(recursive: true);
+      final launcher = Link('${local.path}/hermes')
+        ..createSync('../../brew/Cellar/hermes-agent/0.22.4/bin/hermes');
+      await Process.run('chmod', [
+        '+x',
+        '${bin.path}/brew',
+        '${bin.path}/pipx',
+        '${bin.path}/curl',
+        '${keg.path}/hermes',
+      ]);
+      final script = File('${root.path}/metadata.sh')
+        ..writeAsStringSync(
+          buildAgentMetadataProbeCommand([definition], windows: false),
+        );
+      Future<AgentMetadataSnapshot?> probe(String shell) async {
+        final result = await Process.run(
+          shell,
+          [script.path],
+          environment: {'HOME': root.path, 'PATH': '${bin.path}:/usr/bin:/bin'},
+          includeParentEnvironment: false,
+        );
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        return parseAgentMetadataProbeOutput(
+          result.stdout as String,
+        )[definition.id];
+      }
+
+      for (final shell in [
+        'bash',
+        if (File('/bin/zsh').existsSync()) '/bin/zsh',
+        if (File('/bin/dash').existsSync()) '/bin/dash',
+      ]) {
+        final brewed = await probe(shell);
+        expect(brewed?.detectionSource, 'Homebrew', reason: shell);
+        expect(brewed?.installedVersionOutput, '0.22.4', reason: shell);
+      }
+      // A cask links its binary from the Caskroom instead (Muse ships as one).
+      final cask = Directory('${root.path}/brew/Caskroom/hermes-agent/0.22.4')
+        ..createSync(recursive: true);
+      File('${cask.path}/hermes').writeAsStringSync('#!/bin/sh\nexit 0\n');
+      await Process.run('chmod', ['+x', '${cask.path}/hermes']);
+      launcher
+        ..deleteSync()
+        ..createSync('../../brew/Caskroom/hermes-agent/0.22.4/hermes');
+      expect((await probe('bash'))?.detectionSource, 'Homebrew');
+      // Homebrew still lists the formula, but another copy runs: it must not
+      // be upgraded through brew.
+      launcher.deleteSync();
+      File('${local.path}/hermes')
+        ..writeAsStringSync('#!/bin/sh\nexit 0\n')
+        ..createSync();
+      await Process.run('chmod', ['+x', '${local.path}/hermes']);
+      final other = await probe('bash');
+      expect(other?.detectionSource, isNull);
+      expect(other?.installedVersionOutput, isNull);
+    },
+  );
+
+  test('the Pi installer sees the user own PATH', () async {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    final root = await Directory.systemTemp.createTemp('monkeyssh-pi-path-');
+    addTearDown(() => root.delete(recursive: true));
+    final home = '${root.path}/home';
+    final fakes = Directory('${root.path}/fakes')..createSync();
+    // The installer links `pi` into ~/.local/bin when that is on PATH, as
+    // pi.dev's does, records the PATH it saw and exits 3.
+    File('${fakes.path}/curl').writeAsStringSync(r'''
+#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  [ "$1" = -o ] && out=$2
+  shift
+done
+cat > "$out" <<'EOF'
+printf '%s' "$PATH" > "$HOME/installer-path"
+case ":$PATH:" in *":$HOME/.local/bin:"*) : > "$HOME/.local/bin/pi" ;; esac
+exit 3
+EOF
+''');
+    // Homebrew's bin is writable; a system-wide one is not, and one that
+    // already holds a `pi` (here a dangling link) is taken.
+    final brew = Directory('${root.path}/brew')..createSync();
+    final systemBrew = Directory('${root.path}/system-brew')..createSync();
+    final takenBrew = Directory('${root.path}/taken-brew')..createSync();
+    for (final dir in [brew, systemBrew, takenBrew]) {
+      File('${dir.path}/brew').writeAsStringSync('#!/bin/sh\nexit 0\n');
+    }
+    Link('${takenBrew.path}/pi').createSync('${root.path}/gone/pi');
+    await Process.run('chmod', [
+      '+x',
+      '${fakes.path}/curl',
+      '${brew.path}/brew',
+      '${systemBrew.path}/brew',
+      '${takenBrew.path}/brew',
+    ]);
+    await Process.run('chmod', ['555', systemBrew.path]);
+    addTearDown(() => Process.run('chmod', ['755', systemBrew.path]));
+    final command = buildAgentInstallCommand(
+      definition,
+      windows: false,
+      update: false,
+    )!;
+    // With the app's own PATH, a real curl ahead of the fake would fetch and
+    // run the real installer, so stop before running anything.
+    expect(command, isNot(contains(r'$HOME/.grok/bin')));
+    final script = File('${root.path}/install.sh')..writeAsStringSync(command);
+    const hostBrewScan =
+        'for d in /opt/homebrew/bin /usr/local/bin; do '
+        r'[ -x "$d/brew" ] && [ -w "$d" ] && [ ! -e "$d/pi" ] && '
+        r'[ ! -L "$d/pi" ] && echo 1; done';
+    final hostHomebrew = (await Process.run('sh', [
+      '-c',
+      hostBrewScan,
+    ])).stdout.toString().isNotEmpty;
+    Future<List<String>> install(
+      String shell, {
+      required List<Directory> brewDirs,
+      String profile = '',
+    }) async {
+      if (Directory(home).existsSync()) {
+        Directory(home).deleteSync(recursive: true);
+      }
+      Directory(home).createSync();
+      File('$home/.profile').writeAsStringSync(profile);
+      final result = await Process.run(
+        shell,
+        [script.path],
+        environment: {
+          'HOME': home,
+          'SHELL': shell,
+          'PATH': [
+            ...brewDirs.map((dir) => dir.path),
+            fakes.path,
+            '/usr/bin',
+            '/bin',
+          ].join(':'),
+        },
+        includeParentEnvironment: false,
+      );
+      expect(result.exitCode, 3, reason: '$shell ${result.stderr}');
+      return File('$home/installer-path').readAsStringSync().split(':');
+    }
+
+    for (final shell in [
+      'bash',
+      if (File('/bin/zsh').existsSync()) '/bin/zsh',
+      if (File('/bin/dash').existsSync()) '/bin/dash',
+    ]) {
+      // With Homebrew and a profile that never adds ~/.local/bin, the
+      // installer must not see the directories the app adds for its own
+      // probes, and the empty ~/.local/bin made for the profiles is gone.
+      final brewed = await install(shell, brewDirs: [systemBrew, brew]);
+      expect(brewed, isNot(contains('$home/.local/bin')), reason: shell);
+      expect(brewed, isNot(contains('$home/bin')), reason: shell);
+      expect(brewed.first, systemBrew.path, reason: shell);
+      expect(brewed, contains('/opt/homebrew/bin'), reason: shell);
+      expect(Directory('$home/.local/bin').existsSync(), isFalse);
+      // Debian and Ubuntu add ~/.local/bin once it exists, so `pi` goes there.
+      final debian = await install(
+        shell,
+        brewDirs: [brew],
+        profile:
+            r'if [ -d "$HOME/.local/bin" ]; then '
+            r'PATH="$HOME/.local/bin:$PATH"; fi'
+            '\n',
+      );
+      expect(debian.first, '$home/.local/bin', reason: shell);
+      expect(File('$home/.local/bin/pi').existsSync(), isTrue, reason: shell);
+      // Without a Homebrew bin the installer would take, ~/.local/bin comes
+      // last, so `pi` goes where the app finds it, not into ~/.pi/agent/bin.
+      // A real Homebrew in the system directories at the end of PATH is one
+      // the installer would take, so the host decides which result is right.
+      for (final unusable in [systemBrew, takenBrew]) {
+        final unbrewed = await install(shell, brewDirs: [unusable]);
+        expect(
+          unbrewed.last == '$home/.local/bin',
+          !hostHomebrew,
+          reason: '$shell ${unusable.path}',
+        );
+        expect(
+          File('$home/.local/bin/pi').existsSync(),
+          !hostHomebrew,
+          reason: shell,
+        );
+      }
+    }
+  });
+
+  test('Windows metadata checks the Pi installer layout before npm', () {
+    final definition = agentCliRuntimeDefinitions.singleWhere(
+      (d) => d.id == 'cli:pi',
+    );
+    final script = decodeEncodedPowerShell(
+      buildAgentMetadataProbeCommand([definition], windows: true),
+    );
+    final layout = script.indexOf(r"'install\managed-install.json'");
+    expect(layout, greaterThan(0));
+    expect(script, contains("'__monkeyssh_agent_source__=Pi installer'"));
+    expect(
+      script.indexOf(r'if($__flManaged){$__flLine=$null}'),
+      greaterThan(layout),
+    );
+    expect(script, contains('https://pi.dev/api/latest-version'));
+    expect(script, isNot(contains('npm view')));
   });
 
   test('reads ACP package versions without starting servers and handles a locked Cursor keychain', () async {
@@ -1856,7 +2258,7 @@ esac
       expect(
         posix,
         endsWith(
-          "npm install -g --foreground-scripts --ignore-scripts=false '@anthropic-ai/claude-code'@latest",
+          "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=@anthropic-ai/claude-code' '@anthropic-ai/claude-code'@latest",
         ),
       );
       final windows = buildAgentInstallCommand(
@@ -1875,8 +2277,11 @@ esac
     });
 
     test('enables lifecycle scripts for every managed npm install', () {
+      // Pi's npm package is only detected; new installs use its installer.
       final npmDefinitions = agentRuntimeDefinitions.where(
-        (definition) => definition.registry == AgentPackageRegistry.npm,
+        (definition) =>
+            definition.registry == AgentPackageRegistry.npm &&
+            definition.posixInstallerUrl == null,
       );
 
       for (final definition in npmDefinitions) {
@@ -1892,6 +2297,12 @@ esac
           ),
           reason: definition.id,
         );
+        // npm 12 runs a global package's install scripts only when named.
+        expect(
+          posix,
+          contains("'--allow-scripts=${definition.packageName}'"),
+          reason: definition.id,
+        );
 
         final windows = buildAgentInstallCommand(
           definition,
@@ -1901,7 +2312,7 @@ esac
         expect(
           decodeEncodedPowerShell(windows!),
           contains(
-            'npm install -g --foreground-scripts --ignore-scripts=false',
+            "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=${definition.packageName}'",
           ),
           reason: definition.id,
         );
@@ -1922,7 +2333,7 @@ esac
       expect(
         posix,
         endsWith(
-          "npm install -g --foreground-scripts --ignore-scripts=false '@opencode/cli'@latest",
+          "npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=@opencode/cli' '@opencode/cli'@latest",
         ),
       );
 
@@ -2093,26 +2504,102 @@ exit "$result"
     );
 
     test('keeps Homebrew updates with the detected package manager', () {
-      final definition = agentCliRuntimeDefinitions.firstWhere(
-        (runtime) => runtime.label == 'OpenCode',
+      // Homebrew owns its copy's files, and `hermes update` refuses one, so
+      // brew upgrades it even where the agent has its own updater.
+      for (final (id, formula) in [
+        ('cli:opencode', 'opencode-v2'),
+        ('cli:hermes', 'hermes-agent'),
+      ]) {
+        final definition = agentCliRuntimeDefinitions.singleWhere(
+          (runtime) => runtime.id == id,
+        );
+        for (final executablePath in [null, '/opt/homebrew/bin/agent']) {
+          expect(
+            buildAgentInstallCommand(
+              definition,
+              windows: false,
+              update: true,
+              detectionSource: 'Homebrew',
+              executablePath: executablePath,
+            ),
+            endsWith("brew upgrade '$formula'"),
+          );
+        }
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: false,
+            update: true,
+            detectionSource: 'PATH',
+            executablePath: '/home/dev/.local/bin/agent',
+          ),
+          isNot(contains('brew upgrade')),
+        );
+      }
+    });
+
+    test('OpenClaw installs with its installer and no onboarding', () {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (runtime) => runtime.id == 'cli:openclaw',
+      );
+      final posix = buildAgentInstallCommand(
+        definition,
+        windows: false,
+        update: false,
+      )!;
+      expect(
+        posix,
+        contains(
+          "OPENCLAW_NO_ONBOARD=1 OPENCLAW_NO_PROMPT=1 sh -c '__fl_file=",
+        ),
+      );
+      expect(posix, contains('https://openclaw.ai/install.sh'));
+      expect(posix, isNot(contains('npm install')));
+      final windows = decodeEncodedPowerShell(
+        buildAgentInstallCommand(definition, windows: true, update: false)!,
+      );
+      expect(
+        windows,
+        contains(
+          r"$env:OPENCLAW_NO_ONBOARD='1';$env:OPENCLAW_NO_PROMPT='1';"
+          r"$ErrorActionPreference='Stop';",
+        ),
+      );
+      expect(windows, contains('https://openclaw.ai/install.ps1'));
+      // npm installations keep their own repair and updater.
+      expect(
+        buildAgentInstallCommand(
+          definition,
+          windows: false,
+          update: false,
+          repair: true,
+        ),
+        allOf(contains('npm uninstall -g'), isNot(contains('openclaw.ai'))),
       );
       expect(
         buildAgentInstallCommand(
           definition,
           windows: false,
           update: true,
-          detectionSource: 'Homebrew',
+          detectionSource: 'npm global',
+          executablePath: '/usr/local/bin/openclaw',
         ),
-        endsWith("brew upgrade 'opencode-v2'"),
+        endsWith("'/usr/local/bin/openclaw' 'update' '--yes'"),
       );
     });
 
     test('builds pipx commands with a Python fallback', () {
-      final definition = agentCliRuntimeDefinitions.firstWhere(
-        (runtime) => runtime.label == 'Hermes',
+      const definition = AgentRuntimeDefinition(
+        id: 'cli:test-pipx',
+        label: 'Pipx agent',
+        kind: AgentRuntimeKind.cli,
+        executableNames: ['hermes'],
+        registry: AgentPackageRegistry.pipx,
+        packageName: 'hermes-agent',
+        packageExtras: ['acp'],
       );
-      // Native chat runs `hermes acp`, so installs carry the `acp` extra;
-      // pipx upgrade and reinstall take the installed package name.
+      // Installs carry the package's extras; pipx upgrade and reinstall take
+      // the installed package name.
       final install = buildAgentInstallCommand(
         definition,
         windows: false,
@@ -2146,6 +2633,59 @@ exit "$result"
       );
     });
 
+    test('Hermes installs with its installer and asks pipx copies to move', () {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (runtime) => runtime.id == 'cli:hermes',
+      );
+      expect(
+        buildAgentInstallCommand(definition, windows: false, update: false),
+        contains("'https://hermes-agent.nousresearch.com/install.sh'"),
+      );
+      expect(
+        decodeEncodedPowerShell(
+          buildAgentInstallCommand(definition, windows: true, update: false)!,
+        ),
+        contains("'https://hermes-agent.nousresearch.com/install.ps1'"),
+      );
+      for (final windows in [false, true]) {
+        // `hermes update` keeps an installer checkout current...
+        final update = buildAgentInstallCommand(
+          definition,
+          windows: windows,
+          update: true,
+          executablePath: '/home/dev/.local/bin/hermes',
+          detectionSource: 'PATH',
+        )!;
+        expect(
+          windows ? decodeEncodedPowerShell(update) : update,
+          contains("'update' '--yes'"),
+        );
+        // ...but refuses a pipx installation, and PyPI stopped at 0.19.0.
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: true,
+            executablePath: '/home/dev/.local/bin/hermes',
+            detectionSource: 'pipx',
+            installedVersion: '0.19.0',
+          ),
+          isNull,
+        );
+        expect(
+          buildAgentInstallCommand(
+            definition,
+            windows: windows,
+            update: true,
+            executablePath: '/home/dev/.local/bin/hermes',
+            detectionSource: 'pip',
+            installedVersion: '0.19.0',
+          ),
+          isNull,
+        );
+      }
+    });
+
     test('quotes apostrophes safely for POSIX shells', () {
       const definition = AgentRuntimeDefinition(
         id: 'test',
@@ -2158,7 +2698,7 @@ exit "$result"
       expect(
         buildAgentInstallCommand(definition, windows: false, update: false),
         endsWith(
-          r"npm install -g --foreground-scripts --ignore-scripts=false 'it'\''s-agent'@latest",
+          r"npm install -g --foreground-scripts --ignore-scripts=false '--allow-scripts=it'\''s-agent' 'it'\''s-agent'@latest",
         ),
       );
     });
@@ -2966,6 +3506,172 @@ exit "$result"
     });
 
     test(
+      'OpenClaw exit 75 means the update is finishing in the background',
+      () async {
+        final definition = agentCliRuntimeDefinitions.singleWhere(
+          (d) => d.id == 'cli:openclaw',
+        );
+        for (final (exitCode, succeeds) in [(75, true), (1, false)]) {
+          final client = _MockSshClient();
+          final discovery = _MockDiscovery();
+          final session = _remoteSession(client);
+          when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+          final scripts = <String>[];
+          when(() => client.execute(any(), pty: any(named: 'pty')))
+              .thenAnswer((invocation) async {
+                final script = invocation.positionalArguments.first as String;
+                scripts.add(script);
+                if (scripts.length == 1) {
+                  return _execOutput('Update accepted.\n', exitCode: exitCode);
+                }
+                return _execOutput(
+                  script.contains('__monkeyssh_agent_path__')
+                      ? '__monkeyssh_agent_runtime__=cli:openclaw\n'
+                            '__monkeyssh_agent_path__=/usr/local/bin/openclaw\n'
+                            '__monkeyssh_agent_version__=OpenClaw 2026.10.8\n'
+                            '__monkeyssh_agent_runtime_end__\n'
+                      : '',
+                );
+              });
+          when(() => discovery.invalidateSession(session)).thenReturn(null);
+          final result = await _unlockedManagementService(discovery)
+              .installOrUpdate(
+                session,
+                definition,
+                update: true,
+                current: AgentRuntimeInfo(
+                  definition: definition,
+                  status: AgentRuntimeStatus.updateAvailable,
+                  installedVersion: '2026.10.8',
+                  executablePath: '/usr/local/bin/openclaw',
+                  detectionSource: 'npm global',
+                ),
+              );
+          expect(scripts.first, endsWith("'update' '--yes'"));
+          expect(result.succeeded, succeeds, reason: 'exit $exitCode');
+          expect(result.exitCode, exitCode);
+          if (succeeds) {
+            expect(result.output, contains('finishing it in the background'));
+            // Nothing retries the accepted update, and nothing checks the
+            // installation while the background helper may be replacing it.
+            expect(scripts, hasLength(1));
+          } else {
+            expect(result.output, isNot(contains('in the background')));
+          }
+        }
+      },
+    );
+
+    test('holds a background update across probes until it lands', () async {
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:openclaw',
+      );
+      final client = _MockSshClient();
+      final discovery = _MockDiscovery();
+      final session = _remoteSession(client);
+      when(() => client.remoteVersion).thenReturn('SSH-2.0-OpenSSH_9.9');
+      var now = DateTime(2026, 11, 4, 12);
+      String probeFinding(String version) =>
+          '__monkeyssh_agent_runtime__=cli:openclaw\n'
+          '__monkeyssh_agent_path__=/usr/local/bin/openclaw\n'
+          '__monkeyssh_agent_version__=OpenClaw $version\n'
+          '__monkeyssh_agent_runtime_end__\n';
+      // The background helper is replacing the launcher: nothing is found.
+      var probe = '';
+      var updates = 0;
+      when(() => client.execute(any(), pty: any(named: 'pty')))
+          .thenAnswer((invocation) async {
+            final script = invocation.positionalArguments.first as String;
+            if (script.endsWith("'update' '--yes'")) {
+              updates++;
+              return _execOutput('Update accepted.\n', exitCode: 75);
+            }
+            return _execOutput(probe);
+          });
+      when(() => discovery.invalidateSession(session)).thenReturn(null);
+      final service = AgentManagementService(
+        discovery,
+        canManageAgents: () async => true,
+        now: () => now,
+      );
+      final current = AgentRuntimeInfo(
+        definition: definition,
+        status: AgentRuntimeStatus.updateAvailable,
+        installedVersion: '2026.10.8',
+        latestVersion: '2026.10.9',
+        executablePath: '/usr/local/bin/openclaw',
+        detectionSource: 'npm global',
+      );
+      AgentRuntimeInfo openClaw(List<AgentRuntimeInfo> runtimes) =>
+          runtimes.singleWhere((r) => r.definition.id == definition.id);
+      Future<void> acceptUpdate() async {
+        final result = await service.installOrUpdate(
+          session,
+          definition,
+          update: true,
+          current: current,
+        );
+        expect(result.finishingInBackground, isTrue);
+      }
+
+      await acceptUpdate();
+      // Every probe of the session holds the row, including a reopened
+      // screen's discovery, its cached opening state and the periodic check.
+      final discovered = <AgentRuntimeInfo>[];
+      final held = openClaw(
+        await service.refreshAll(session, onDiscovered: discovered.addAll),
+      );
+      expect(held.status, AgentRuntimeStatus.installed);
+      expect(held.installedVersion, '2026.10.8');
+      expect(held.executablePath, '/usr/local/bin/openclaw');
+      expect(held.message, contains('finishing its update in the background'));
+      expect(openClaw(discovered), same(held));
+      expect(openClaw(service.cachedState(session)!.runtimes), same(held));
+      expect(openClaw(await service.checkForUpdates(session)), same(held));
+      // The old version is still the old version.
+      probe = probeFinding('2026.10.8');
+      expect(openClaw(await service.refreshAll(session)), same(held));
+      // A second update waits for the first one.
+      final again = await service.installOrUpdate(
+        session,
+        definition,
+        update: true,
+        current: current,
+      );
+      expect(again.succeeded, isFalse);
+      expect(again.output, contains('still finishing its last update'));
+      expect(updates, 1);
+      // The new version ends the hold.
+      probe = probeFinding('2026.10.9');
+      expect(
+        openClaw(await service.refreshAll(session)).installedVersion,
+        '2026.10.9',
+      );
+      probe = '';
+      expect(
+        openClaw(await service.refreshAll(session)).status,
+        AgentRuntimeStatus.notInstalled,
+      );
+      // So do Re-check and ten minutes without the new version.
+      for (final end in <void Function()>[
+        () => service.releaseBackgroundUpdate(session, definition),
+        () => now = now.add(const Duration(minutes: 10)),
+      ]) {
+        await acceptUpdate();
+        expect(
+          openClaw(await service.refreshAll(session)).status,
+          AgentRuntimeStatus.installed,
+        );
+        end();
+        expect(
+          openClaw(await service.refreshAll(session)).status,
+          AgentRuntimeStatus.notInstalled,
+        );
+      }
+      expect(updates, 3);
+    });
+
+    test(
       'keeps completed metadata when a later registry lookup times out',
       () async {
         final client = _MockSshClient();
@@ -3152,6 +3858,65 @@ exit "$result"
         expect(snapshots['cli:opencode']!.needsRepair, isTrue, reason: shell);
         expect(snapshots['cli:claude']!.executablePath, isNull);
       }
+    }, skip: !Platform.isWindows);
+
+    // Named so the Windows CI step's --plain-name filter runs it too.
+    test('full Windows probe executes through cmd and PowerShell for the Pi installer layout', () async {
+      final root = await Directory.systemTemp.createTemp('agent-pi-layout-');
+      addTearDown(() => root.delete(recursive: true));
+      final agent = '${root.path}\\.pi\\agent';
+      final bin = Directory('$agent\\bin')..createSync(recursive: true);
+      Directory('$agent\\install').createSync();
+      File('${bin.path}\\pi.cmd')
+          .writeAsStringSync('@echo off\r\necho 1.4.0\r\n');
+      final marker = File('$agent\\install\\managed-install.json')
+        ..writeAsStringSync('{"kind":"pi-managed-install","schemaVersion":1}');
+      final definition = agentCliRuntimeDefinitions.singleWhere(
+        (d) => d.id == 'cli:pi',
+      );
+      final script =
+          decodeEncodedPowerShell(
+                buildAgentMetadataProbeCommand([definition], windows: true),
+              )
+              .replaceFirst(
+                powerShellProfilePathPreamble,
+                '\$env:Path=${powerShellSingleQuote(bin.path)} + \';\' + '
+                r"$env:SystemRoot + '\System32;' + $env:SystemRoot + '\System32\WindowsPowerShell\v1.0';",
+              )
+              // Offline: the latest-version lookup fails at once.
+              .replaceAll(
+                'https://pi.dev/api/latest-version',
+                'http://127.0.0.1:9/',
+              );
+      final command = buildCompactWindowsPowerShellCommand(script);
+      Future<String?> source(String shell) async {
+        final batch = File('${root.path}\\metadata.cmd');
+        await batch.writeAsString('@echo off\r\n$command\r\n');
+        final result = await Process.run(shell, [
+          if (shell == 'cmd.exe') ...[
+            '/d',
+            '/c',
+            batch.path,
+          ] else ...[
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            command,
+          ],
+        ]).timeout(const Duration(seconds: 60));
+        expect(result.exitCode, 0, reason: '${result.stderr}');
+        final snapshots = parseAgentMetadataProbeOutput(
+          result.stdout as String,
+        );
+        expect(snapshots.keys, ['cli:pi'], reason: '${result.stdout}');
+        return snapshots['cli:pi']!.detectionSource;
+      }
+
+      for (final shell in ['cmd.exe', 'powershell.exe']) {
+        expect(await source(shell), 'Pi installer', reason: shell);
+      }
+      marker.deleteSync();
+      expect(await source('powershell.exe'), isNull);
     }, skip: !Platform.isWindows);
 
     test('parses installed and missing runtimes independently', () {

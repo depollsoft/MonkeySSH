@@ -116,6 +116,32 @@ void registerMonkeyTerminalViewTouchScrollTests() {
         );
       });
 
+      // A Hermes TUI with HERMES_TUI_SCROLL_SPEED raised moves that many
+      // rows for one report, up to its cap of 20.
+      for (final rows in const <int>[7, 20]) {
+        test('detects $rows-row application scrolling', () {
+          final lines = <String>[for (var row = 0; row < 60; row++) 'row $row'];
+          expect(
+            resolveTerminalWheelRowsPerEvent(
+              before: <String>['header', ...lines.take(24), 'footer'],
+              after: <String>['header', ...lines.skip(rows).take(24), 'footer'],
+            ),
+            rows,
+          );
+        });
+      }
+
+      test('does not attribute more than 20 rows to one report', () {
+        final lines = <String>[for (var row = 0; row < 60; row++) 'row $row'];
+        expect(
+          resolveTerminalWheelRowsPerEvent(
+            before: <String>['header', ...lines.take(30), 'footer'],
+            after: <String>['header', ...lines.skip(21).take(30), 'footer'],
+          ),
+          isNull,
+        );
+      });
+
       test('does not infer a distance from an unrelated redraw', () {
         expect(
           resolveTerminalWheelRowsPerEvent(

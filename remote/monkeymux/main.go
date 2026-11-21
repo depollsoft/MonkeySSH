@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -48,6 +49,23 @@ type muxPty interface {
 	Fd() uintptr
 }
 
+// pixelSizedPty is a pty that can report a pixel size along with its grid
+// (the ws_xpixel and ws_ypixel of TIOCSWINSZ). Programs such as Copilot CLI
+// read it to size inline images. ConPTY has no pixel size.
+type pixelSizedPty interface {
+	ResizePixels(cols int, rows int, widthPx int, heightPx int) error
+}
+
+// maxCellPixelSize bounds the cell size a client may report. Real terminals
+// draw cells tens of pixels wide; anything larger is a bad reading.
+const maxCellPixelSize = 1024
+
+// validCellPixelSize reports whether width x height is a usable cell size.
+func validCellPixelSize(width int, height int) bool {
+	return width > 0 && height > 0 &&
+		width <= maxCellPixelSize && height <= maxCellPixelSize
+}
+
 // muxProcess is the child process attached to a window's pty.
 type muxProcess interface {
 	// Pid returns the process identifier, or 0 when it is unavailable.
@@ -63,7 +81,7 @@ type muxProcess interface {
 }
 
 const (
-	monkeyMuxVersion                  = "0.1.246"
+	monkeyMuxVersion                  = "0.1.259"
 	defaultColumns                    = 80
 	defaultRows                       = 24
 	maxTitleBytes                     = 160
@@ -73,7 +91,6 @@ const (
 	piSessionActivityMatchTolerance   = 15 * time.Second
 	agentSessionStartTolerance        = 2 * time.Second
 	oscBufferLimitBytes               = 4096
-	processMetadataTimeout            = 500 * time.Millisecond
 	processMetadataInterval           = 500 * time.Millisecond
 	agentSessionTitleRefreshInterval  = 2 * time.Second
 	runCommandOutputMaxBytes          = 8 * 1024 * 1024
@@ -82,6 +99,9 @@ const (
 	attachWriteTimeout                = time.Second
 	attachTransitionTimeout           = 3 * time.Second
 	terminalResponseMaxOutstanding    = 64
+	// terminalResponseMaxUndelivered bounds the replies owed to queries a
+	// reporting client has read but its terminal has not been written yet.
+	terminalResponseMaxUndelivered    = 4096
 	attachWriteChunkBytes             = 32 * 1024
 	terminalResponseFocusGrace        = 2 * time.Second
 	focusInputCarryDelay              = 75 * time.Millisecond
@@ -199,7 +219,61 @@ const terminalScreenClearSequence = "\x1b[H\x1b[2J\x1b[3J"
 
 const terminalAllScreensClearSequence = terminalScreenClearSequence + "\x1b[?1049h" + terminalScreenClearSequence + "\x1b[?1049l" + terminalScreenClearSequence
 
-const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?2031l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
+// monkeyMuxReplayWindowOSC tags each window replay, before its prefix, with
+// the window it paints as "window=<server instance>:<window id>". The app
+// keeps the tag its terminal last received and deletes its physical image
+// placements only when a replay names another window: a reopen of a window
+// whose program owns the screen keeps the images the program placed, and a
+// change to another window, wherever it was started, drops the old one's.
+// Other terminals ignore the unknown OSC.
+const monkeyMuxReplayWindowOSC = "7502"
+
+// monkeyMuxServerInstance tells this server's window ids from those of a
+// server started later, which reuses them for other windows.
+var monkeyMuxServerInstance = newMonkeyMuxServerInstance()
+
+func newMonkeyMuxServerInstance() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func windowReplayTag(window *muxWindow) string {
+	return "\x1b]" + monkeyMuxReplayWindowOSC + ";window=" + monkeyMuxServerInstance + ":" + window.id + "\x1b\\"
+}
+
+// stripWindowReplayTags drops every replay tag from captured history: a tag
+// replayed later would name the old server's window, and a ConPTY replay
+// starts with a synchronized-output mode before its tag.
+func stripWindowReplayTags(history []byte) []byte {
+	tag := []byte("\x1b]" + monkeyMuxReplayWindowOSC + ";")
+	if !bytes.Contains(history, tag) {
+		return history
+	}
+	out := make([]byte, 0, len(history))
+	for {
+		start := bytes.Index(history, tag)
+		if start < 0 {
+			return append(out, history...)
+		}
+		end := bytes.Index(history[start:], []byte("\x1b\\"))
+		if end < 0 {
+			return append(out, history...)
+		}
+		out = append(out, history[:start]...)
+		history = history[start+end+2:]
+	}
+}
+
+// processMetadataTimeout bounds each external probe for process and agent
+// session metadata (ps, lsof, sqlite3). A probe that runs out reads as
+// nothing found. Tests raise it: their probes run on loaded machines and
+// under the race detector, where a cold process launch can take longer.
+var processMetadataTimeout = 500 * time.Millisecond
+
+const activeWindowReplayPrefix = terminalParserResetSequence + "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1007l\x1b[?2004l\x1b[?5522l\x1b[?2031l\x1b[?67l\x1b[?5l\x1b[?12l\x1b[?1047l\x1b[?1049l\x1b[?1l\x1b[?6l\x1b[?7h\x1b[?2027h\x1b[4l\x1b>\x1b[r" + terminalCharacterSetResetSequence + "\x1b[0m" + terminalAllScreensClearSequence
 
 var (
 	preReplayPrivateModes = []string{
@@ -207,6 +281,7 @@ var (
 		"1049",
 		"6",
 		"7",
+		"2027",
 		"1",
 		"1000",
 		"1002",
@@ -215,10 +290,15 @@ var (
 		"1004",
 		"1007",
 		"2004",
+		"5522",
 		"2031",
+		"67",
+		"5",
+		"12",
 	}
 	postReplayPrivateModes = []string{
 		"7",
+		"2027",
 		"1",
 		"1000",
 		"1002",
@@ -227,10 +307,18 @@ var (
 		"1004",
 		"1007",
 		"2004",
+		"5522",
 		"2031",
+		"67",
+		"5",
+		"12",
 	}
-	groupedReplayPrivateModes = [][]string{
-		{"1047", "1049"},
+	// alternateScreenReplayPrivateModes are replayed as a group ahead of
+	// every other mode: entering the alternate screen with 1049 saves the
+	// cursor, origin mode included, which must be the state the main screen
+	// frame staged (RenderMainScreen) rather than the mode the window has now.
+	alternateScreenReplayPrivateModes = []string{"1047", "1049"}
+	groupedReplayPrivateModes         = [][]string{
 		{"1000", "1002", "1003"},
 	}
 	// conPtySwallowedThemeQueryKeys are the theme-query keys whose queries
@@ -249,7 +337,12 @@ var (
 		"1047": {},
 		"1049": {},
 		"2004": {},
+		"2027": {},
 		"2031": {},
+		"67":   {},
+		"5":    {},
+		"12":   {},
+		"5522": {},
 	}
 )
 
@@ -287,6 +380,8 @@ var capabilities = []string{
 	"acp-window-v1",
 	"native-acp-upgrade-handoff-v1",
 	"push-v1",
+	"client-visibility",
+	attachOutputDeliveryCapability,
 }
 
 var (
@@ -398,11 +493,58 @@ func (w *muxWindow) resizePty(width int, height int) {
 	}
 	w.resizeGeneration.Add(1)
 	w.ptyResizeMu.Lock()
-	if err := w.pty.Resize(width, height); err == nil {
+	if err := w.resizePtyGridLocked(width, height); err == nil {
 		w.ptyWidth = width
 		w.ptyHeight = height
 	}
 	w.ptyResizeMu.Unlock()
+}
+
+// resizePtyGridLocked sizes the pty to width x height cells and, when the
+// window knows its cell size, the pixels those cells cover. ptyResizeMu must
+// be held.
+func (w *muxWindow) resizePtyGridLocked(width int, height int) error {
+	if validCellPixelSize(w.cellWidthPx, w.cellHeightPx) {
+		if sized, ok := w.pty.(pixelSizedPty); ok {
+			return sized.ResizePixels(
+				width,
+				height,
+				width*w.cellWidthPx,
+				height*w.cellHeightPx,
+			)
+		}
+	}
+	return w.pty.Resize(width, height)
+}
+
+// setCellPixelSize records the cell size the pty reports from its next
+// resize on. It reports whether the size changed.
+func (w *muxWindow) setCellPixelSize(width int, height int) bool {
+	if w == nil {
+		return false
+	}
+	w.ptyResizeMu.Lock()
+	defer w.ptyResizeMu.Unlock()
+	if w.cellWidthPx == width && w.cellHeightPx == height {
+		return false
+	}
+	w.cellWidthPx, w.cellHeightPx = width, height
+	return true
+}
+
+// reportCellPixelSize gives the pty's current grid again with the window's
+// cell size, so the foreground program sees the new pixel size. It leaves the
+// resize generation alone: a redraw dance in flight still restores its size.
+func (w *muxWindow) reportCellPixelSize() {
+	if w == nil || w.pty == nil {
+		return
+	}
+	w.ptyResizeMu.Lock()
+	defer w.ptyResizeMu.Unlock()
+	if w.closedPty == w.pty || w.ptyWidth <= 0 || w.ptyHeight <= 0 {
+		return
+	}
+	_ = w.resizePtyGridLocked(w.ptyWidth, w.ptyHeight)
 }
 
 // ptySizeIs reports whether the PTY already holds this geometry, so callers can
@@ -430,7 +572,7 @@ func (w *muxWindow) resizePtyIfCurrent(
 	if w.resizeGeneration.Load() != generation {
 		return
 	}
-	if err := w.pty.Resize(width, height); err == nil {
+	if err := w.resizePtyGridLocked(width, height); err == nil {
 		w.ptyWidth = width
 		w.ptyHeight = height
 	}
@@ -514,9 +656,18 @@ type controlMessage struct {
 	Height         int    `json:"height,omitempty"`
 	PixelWidth     int    `json:"pixelWidth,omitempty"`
 	PixelHeight    int    `json:"pixelHeight,omitempty"`
-	Redraw         bool   `json:"redraw,omitempty"`
-	NoPrefix       bool   `json:"noPrefix,omitempty"`
-	ClipViewport   bool   `json:"clipViewport,omitempty"`
+	// CellWidth and CellHeight are the client terminal's cell size in pixels,
+	// read from its tty, in an attach hello, a resize or a cell_size request.
+	// Zero means unknown.
+	CellWidth  int `json:"cellWidth,omitempty"`
+	CellHeight int `json:"cellHeight,omitempty"`
+	// CellToken names one attach connection, in its hello and in its
+	// cell_size requests, because a reconnect can reuse a client id while the
+	// old attach is still registered.
+	CellToken    string `json:"cellToken,omitempty"`
+	Redraw       bool   `json:"redraw,omitempty"`
+	NoPrefix     bool   `json:"noPrefix,omitempty"`
+	ClipViewport bool   `json:"clipViewport,omitempty"`
 	// SuppressReplay selects a native ACP placeholder without redrawing it into
 	// the attached terminal because the app replaces that viewport natively.
 	SuppressReplay bool `json:"suppressReplay,omitempty"`
@@ -532,6 +683,15 @@ type controlMessage struct {
 	ImageIDs []string `json:"imageIds,omitempty"`
 	// Push carries the push_* operation fields (push_notify.go).
 	Push *pushControlRequest `json:"push,omitempty"`
+	// Hidden is client_visibility's state: true while the client's view of
+	// the attached terminal is hidden.
+	Hidden bool `json:"hidden,omitempty"`
+	// AttachToken names one attach connection, in its hello and in the
+	// attach_delivered reports its client sends over a control connection of
+	// its own; Delivered is how many bytes of that attach's output the
+	// client's terminal has been written (attach-output-delivery).
+	AttachToken string `json:"attachToken,omitempty"`
+	Delivered   uint64 `json:"delivered,omitempty"`
 }
 
 type controlResponse struct {
@@ -673,6 +833,9 @@ type restoreWindowState struct {
 	ApplicationKeypadKnown   bool                      `json:"applicationKeypadKnown,omitempty"`
 	TerminalProgress         *terminalProgressSnapshot `json:"terminalProgress,omitempty"`
 	Active                   bool                      `json:"active,omitempty"`
+	// HistoryGraphemeClusterOff records that grapheme clustering (mode
+	// 2027) was reset where HistoryBase64 starts.
+	HistoryGraphemeClusterOff bool `json:"historyGraphemeClusterOff,omitempty"`
 }
 
 type muxServer struct {
@@ -683,11 +846,19 @@ type muxServer struct {
 	height          int
 	publishedWidth  int
 	publishedHeight int
+	// cellWidthPx and cellHeightPx are the primary attach client's cell size in
+	// pixels. Like the grid, they stay after that client detaches. Guarded by mu.
+	cellWidthPx  int
+	cellHeightPx int
 
 	// detachedReplyClients holds removed attach clients whose input worker
 	// may still be writing received replies to windows; see
 	// terminalOwesRepliesLocked. Guarded by mu.
 	detachedReplyClients map[*attachClient]struct{}
+
+	// kittyClipboardWriteWindow is the window whose OSC 5522 write is open on
+	// the attached clients.
+	kittyClipboardWriteWindow string
 
 	mu                               sync.Mutex
 	resizeMu                         sync.Mutex
@@ -768,13 +939,18 @@ type muxServer struct {
 	// push holds push notification state, created on first use.
 	push     *pushNotifier
 	pushOnce sync.Once
+	// hiddenClientIDs names the attach clients whose view is hidden, each
+	// with the control connection that said so (terminal_visibility.go).
+	// Guarded by mu.
+	hiddenClientIDs map[string]*controlClient
 }
 
 type muxWindow struct {
 	agentSessionWatch         *agentSessionWatch
 	inputMu                   sync.Mutex
 	replies                   windowReplyQueue
-	wheelGovernor             wheelGovernor // guarded by s.mu; draining also requires inputMu
+	wheelGovernor             wheelGovernor       // guarded by s.mu; draining also requires inputMu
+	processWheelProfile       processWheelProfile // guards itself, so resolution can finish off s.mu
 	nativePaste               nativeConsolePasteFilter
 	nativeResponse            nativeConsoleResponseFilter
 	id                        string
@@ -820,9 +996,13 @@ type muxWindow struct {
 	pty                  muxPty
 	ptyResizeMu          sync.Mutex
 	// closedPty is the handle closePty already closed; guarded by ptyResizeMu.
-	closedPty                   muxPty
-	ptyWidth                    int
-	ptyHeight                   int
+	closedPty muxPty
+	ptyWidth  int
+	ptyHeight int
+	// cellWidthPx and cellHeightPx are the cell size in pixels the pty reports
+	// with its grid, or zero to report no pixel size. Guarded by ptyResizeMu.
+	cellWidthPx                 int
+	cellHeightPx                int
 	resizeGeneration            atomic.Uint64
 	proc                        muxProcess
 	history                     []byte
@@ -841,6 +1021,11 @@ type muxWindow struct {
 	// terminalOutputOscOverflow reports that the in-progress OSC payload
 	// exceeded its bound and is being discarded until its terminator.
 	terminalOutputOscOverflow bool
+	// attachUtf8Remaining is the continuation bytes a character split across
+	// the forwarded output's reads still owes, so that
+	// stripLocallyAnsweredThemeQueriesLocked does not take a 0x9b or 0x9d
+	// among them for CSI or OSC.
+	attachUtf8Remaining int
 	// notificationOscSeq counts background desktop notifications captured
 	// from this window. It never resets so clients can tell new arrivals
 	// from replays of already-seen state.
@@ -849,7 +1034,12 @@ type muxWindow struct {
 	// notifications, oldest first. Bounded; selecting the window clears it.
 	notificationOscs           []pendingWindowOscNotification
 	historyStartTerminalOutput terminalOutputParserSnapshot
+	// historyGraphemeClusterOff records that grapheme clustering (mode 2027)
+	// was reset where the history restored from a snapshot starts, for the
+	// screen model built from it.
+	historyGraphemeClusterOff  bool
 	terminalOutputForwarding   bool
+	kittyClipboard             kittyClipboardWindowState
 	lastActivity               time.Time
 	outputGeneration           uint64
 	lastProcessMetadataRefresh time.Time
@@ -908,6 +1098,9 @@ type muxWindow struct {
 	// redrawForwardingAnsweredCursor records that MonkeyMux answered a cursor
 	// position query from the screen model during the current pause.
 	redrawForwardingAnsweredCursor bool
+	// redrawForwardingClipboard holds the OSC 5522 packets forwarded during
+	// the pause apart from the redraw; see forwardKittyClipboardLocked.
+	redrawForwardingClipboard kittyClipboardDelivery
 	// pendingTerminalQueries holds capability/status queries (device attributes,
 	// DSR, XTVERSION) the child emitted while no terminal was showing this window
 	// — e.g. an agent (Copilot CLI) relaunched during an upgrade restore, which
@@ -952,10 +1145,25 @@ type muxWindow struct {
 	// reports the signatures of the images it still holds on a window switch so
 	// the replay can omit re-sending — and the client re-parsing — several
 	// megabytes of image data it already has. Kept in sync with kittyImages.
-	kittyImageToken          map[string]uint32
+	kittyImageToken map[string]uint32
+	// kittyImageEnd is where each retained root's transmission ended, as an
+	// offset in what the screen model has read, which tells a replay that
+	// makes a command again the image that command sent (vtKittyCommand).
+	kittyImageEnd            map[string]int64
 	kittyGraphicsPending     []byte
 	kittyGraphicsPendingScan int
 	kittyGraphicsPendingTerm int
+	// visibility holds visibility-report state (terminal_visibility.go).
+	visibility windowVisibility
+	// Kitty virtual and relative placements replayed after the images (see
+	// kitty_placements.go), and the screen they were last reconciled with.
+	kittyPlacements    []kittyRetainedPlacement
+	kittyPlacementsAlt bool
+	// The alternate-screen modes as of the last graphics observed, which
+	// place each command of the next chunk on the screen it ran on.
+	kittyScreenMode1047 bool
+	kittyScreenMode1049 bool
+	kittyTracking       kittyPlacementTracking
 }
 
 type terminalOutputParserState int
@@ -1054,8 +1262,11 @@ type attachWriteGate struct {
 type attachInputAction struct {
 	userInput      bool
 	bracketedPaste bool
-	windowID       string
-	data           []byte
+	// kittyClipboardReply marks an OSC 5522 reply for windowID, routed by its
+	// id rather than by the terminal-response tracking.
+	kittyClipboardReply bool
+	windowID            string
+	data                []byte
 }
 
 type attachInputRouting struct {
@@ -1094,6 +1305,9 @@ type attachClient struct {
 	id           string
 	width        int
 	height       int
+	cellWidth    int
+	cellHeight   int
+	cellToken    string
 	clipViewport bool
 	// capabilityHint holds this client's replies to static terminal capability
 	// queries. It is per client because the answer describes *this* terminal:
@@ -1129,6 +1343,7 @@ type attachClient struct {
 	focusClaim                            func(uint64)
 	inputPassthrough                      func([]byte)
 	inputDispatchMu                       sync.Mutex
+	kittyClipboardInput                   kittyClipboardInputState
 	inputQueueMu                          sync.Mutex
 	inputQueue                            []attachInputAction
 	inputQueueReady                       chan struct{}
@@ -1137,6 +1352,18 @@ type attachClient struct {
 	replayMu                              sync.Mutex
 	replayedWindowID                      string
 	replayedOutputGeneration              uint64
+
+	// deliveryToken is set for a client that reports the output its terminal
+	// has been written (attach-output-delivery). Its writer then records, in
+	// undeliveredQueries, the output offset just past each query it sends,
+	// and the replies the query is owed do not expire, or count as missing,
+	// until a report covers that offset: the client reads ahead of its
+	// terminal, so the socket taking a query says nothing about when the
+	// terminal sees it. undeliveredResponses sums their replies.
+	deliveryToken        string
+	outputOffset         uint64
+	undeliveredQueries   []undeliveredQuery
+	undeliveredResponses int
 
 	// replyTrackMu guards a per-window count of the replies this client still
 	// owes to queries: written to it but still queued, sent and awaited until
@@ -1433,22 +1660,40 @@ func attachCommand(args []string) {
 		fatal(err)
 	}
 
+	// Reading ahead of the terminal needs a server that waits for delivery
+	// before it times a reply; an older one gets the plain copy it expects.
+	reporter := openAttachDeliveryReporter(session)
 	conn, err := dialSession(session)
 	if err != nil {
 		fatal(err)
 	}
 	defer conn.Close()
+	outputLimit := 1
+	var outputDelivered func(uint64)
+	attachToken := ""
+	if reporter != nil {
+		defer reporter.close()
+		outputLimit = attachOutputBufferLimitBytes
+		outputDelivered = reporter.report
+		attachToken = reporter.token
+	}
 
+	cellWidth, cellHeight := terminalCellPixelSize()
+	cellToken := newCellSizeToken()
 	hello := controlMessage{
 		Role:           "attach",
 		Session:        session,
 		ClientID:       resolvedClientID,
 		Width:          width,
 		Height:         height,
+		CellWidth:      cellWidth,
+		CellHeight:     cellHeight,
+		CellToken:      cellToken,
 		Data:           string(themeHint),
 		CapabilityHint: string(capabilityHint),
 		NoPrefix:       *noPrefix,
 		ClipViewport:   *clipViewport,
+		AttachToken:    attachToken,
 	}
 	if !*quiet {
 		fmt.Fprintf(
@@ -1459,6 +1704,21 @@ func attachCommand(args []string) {
 	}
 	if err := json.NewEncoder(conn).Encode(hello); err != nil {
 		fatal(err)
+	}
+	if reporter != nil {
+		go func() {
+			select {
+			case <-reporter.failed:
+				// Without reports the server would wait for them forever, so
+				// hang up, but only this side: a session that is ending has
+				// closed the attach already, which may not be seen yet, and
+				// one that is not drops the client on this EOF and closes it.
+				// Either way the relay still reads everything the session
+				// sent, up to its own EOF.
+				closeAttachInput(conn)
+			case <-reporter.done:
+			}
+		}()
 	}
 
 	restoreRawTerminal := makeTerminalRaw()
@@ -1472,14 +1732,31 @@ func attachCommand(args []string) {
 	}
 	defer restoreTerminal()
 
+	explicitSize := *widthFlag > 0 && *heightFlag > 0
+	// The server writes the replay only after registering this attach, so the
+	// first output means a resize or cell_size for this client will not be
+	// dropped.
+	registered := make(chan struct{})
 	stopResize := forwardResizeSignals(
 		session,
 		resolvedClientID,
 		width,
 		height,
-		*widthFlag > 0 && *heightFlag > 0,
+		explicitSize,
+		registered,
 	)
 	defer stopResize()
+	if explicitSize {
+		stopCellSize := forwardCellSizeSignals(
+			session,
+			resolvedClientID,
+			cellToken,
+			cellWidth,
+			cellHeight,
+			registered,
+		)
+		defer stopCellSize()
+	}
 
 	// The attach lives for as long as the server keeps the connection open. The
 	// input relay (client stdin -> server) is best-effort: a stdin EOF must not
@@ -1494,8 +1771,8 @@ func attachCommand(args []string) {
 	}()
 
 	modes := newAttachModeTracker(os.Stdout)
-	attachOut := attachOutputWriter(modes)
-	_, copyErr := io.Copy(attachOut, conn)
+	attachOut := notifyFirstWrite(attachOutputWriter(modes), registered)
+	copyErr := relayAttachOutput(attachOut, conn, outputLimit, outputDelivered)
 	// Flush any partial sequence the output filter buffered so trailing bytes are
 	// not dropped when the session ends mid-sequence (no-op unless the writer
 	// buffers, e.g. the Windows win32-input-mode request stripper).
@@ -1516,6 +1793,42 @@ func attachCommand(args []string) {
 			fmt.Fprintf(os.Stderr, "\r\nmonkeymux: session %s ended\r\n", session)
 		}
 	}
+}
+
+// newCellSizeToken returns a random name for one attach connection, or ""
+// if the system has no randomness, which falls back to the client id.
+func newCellSizeToken() string {
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(token)
+}
+
+// firstWriteNotifier closes a channel at its first write and keeps the
+// wrapped writer's Flush.
+type firstWriteNotifier struct {
+	io.Writer
+	once  sync.Once
+	first chan struct{}
+}
+
+func notifyFirstWrite(writer io.Writer, first chan struct{}) io.Writer {
+	return &firstWriteNotifier{Writer: writer, first: first}
+}
+
+func (w *firstWriteNotifier) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		w.once.Do(func() { close(w.first) })
+	}
+	return w.Writer.Write(data)
+}
+
+func (w *firstWriteNotifier) Flush() error {
+	if flusher, ok := w.Writer.(interface{ Flush() error }); ok {
+		return flusher.Flush()
+	}
+	return nil
 }
 
 type runningSessionInfo struct {
@@ -1984,6 +2297,11 @@ func gcCommand() {
 			clearAbandonedTakeoverGuard(path)
 			continue
 		case ".sock":
+			// gcAcpArtifacts below judges ACP bridge sockets, which a refused
+			// dial alone does not prove abandoned.
+			if strings.HasPrefix(entry.Name(), "monkeymux-acp-") {
+				continue
+			}
 		default:
 			continue
 		}
@@ -3618,6 +3936,7 @@ func normalizeCapturedReplayHistory(history []byte) []byte {
 	if len(history) == 0 {
 		return nil
 	}
+	history = stripWindowReplayTags(history)
 	if bytes.HasPrefix(history, []byte(activeWindowReplayPrefix)) {
 		history = history[len(activeWindowReplayPrefix):]
 	}
@@ -6515,6 +6834,7 @@ func createWindowOptionsForRestore(
 		launchCommand:             state.LaunchCommand,
 		restoreCommand:            state.RestoreCommand,
 		history:                   history,
+		historyGraphemeClusterOff: len(history) > 0 && state.HistoryGraphemeClusterOff,
 		paneTitle:                 firstNonEmptyString(state.PaneTitle, state.Name),
 		agentTool:                 agentTool,
 		agentToolConfirmed:        agentToolConfirmed,
@@ -6559,6 +6879,7 @@ type createWindowOptions struct {
 	launchCommand             string
 	restoreCommand            string
 	history                   []byte
+	historyGraphemeClusterOff bool
 	paneTitle                 string
 	agentTool                 string
 	agentToolConfirmed        bool
@@ -6594,7 +6915,23 @@ func newWindowAgentTool(
 }
 
 func (s *muxServer) createWindow(options createWindowOptions) (*muxWindow, error) {
-	return s.createWindowWithStarter(options, startWindow)
+	return s.createWindowWithStarter(options, s.startWindowWithCellSize)
+}
+
+// startWindowWithCellSize starts a window whose pty already reports the pixel
+// size of its grid, so a program that reads it once at launch sees it.
+func (s *muxServer) startWindowWithCellSize(
+	cmd *exec.Cmd,
+	cols int,
+	rows int,
+) (muxPty, muxProcess, error) {
+	s.mu.Lock()
+	cellWidth, cellHeight := s.cellWidthPx, s.cellHeightPx
+	s.mu.Unlock()
+	if !validCellPixelSize(cellWidth, cellHeight) {
+		return startWindow(cmd, cols, rows)
+	}
+	return startWindowSized(cmd, cols, rows, cols*cellWidth, rows*cellHeight)
 }
 
 // createWindowWithStarter lets lifecycle tests gate startup without global hooks.
@@ -6730,6 +7067,7 @@ func (s *muxServer) createWindowWithStarter(
 		screenHeight:              rows,
 		proc:                      proc,
 		history:                   append([]byte(nil), options.history...),
+		historyGraphemeClusterOff: options.historyGraphemeClusterOff,
 		lastActivity:              time.Now(),
 		cursorVisible:             cursorVisible,
 		cursorVisibilityKnown:     options.cursorVisibilityKnown,
@@ -6737,10 +7075,16 @@ func (s *muxServer) createWindowWithStarter(
 		terminalProgress:          copyTerminalProgressSnapshot(options.terminalProgress),
 	}
 	s.windows = append(s.windows, window)
+	// The pty started with the cell size known then; a client may have
+	// reported another one while the program was starting.
+	if window.setCellPixelSize(s.cellWidthPx, s.cellHeightPx) {
+		window.reportCellPixelSize()
+	}
 	if s.activeID != "" && s.activeID != window.id {
 		s.lastActiveID = s.activeID
 	}
 	s.activeID = window.id
+	s.refreshWindowVisibilityLocked()
 	// Seed the Kitty image cache from any restored history so an image shown
 	// before a server restart can still be replayed on the next reattach.
 	if window.observeKittyGraphicsLocked(window.history) {
@@ -6982,6 +7326,8 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	window.programStatusStepping = true
 	window.terminalOutputForwarding =
 		s.activeID == windowID && s.attachCountLocked() > 0
+	window.visibility.potentiallyVisible = s.windowPotentiallyVisibleLocked(window)
+	window.kittyClipboard.route = s.kittyClipboardRouteLocked(window)
 	wasAlert := window.alert
 	wasNotificationOscSeq := window.notificationOscSeq
 	// PTY output may contain real work even during a resize redraw pause.
@@ -7008,6 +7354,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint = append([]byte(nil), s.themeHint...)
 		themeHintData = themeHintResponsesForKeys(themeHint, queryKeys)
 	}
+	window.snapshotKittyScreenLocked(chunk)
 	cursorReports, answered := window.appendHistoryReportingCursorLocked(
 		chunk,
 		cursorQueries,
@@ -7021,6 +7368,7 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	if window.observeKittyGraphicsLocked(chunk) {
 		s.enforceGlobalKittyImageBudgetLocked()
 	}
+	window.releaseKittyScreenSnapshotLocked()
 	if s.activeID == windowID {
 		attach = s.attachConn
 		shouldWrite = s.attachCountLocked() > 0
@@ -7053,6 +7401,9 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		themeHint,
 	)
 	programStatusReplies := window.takeProgramStatusRepliesLocked()
+	visibilityReplies := window.takeVisibilityRepliesLocked()
+	kittyClipboardReplies, clipboardDelivery :=
+		s.settleKittyClipboardOutputLocked(window, now)
 	if !shouldWrite {
 		// No terminal is showing this window, so its capability queries will not
 		// be forwarded and answered. Buffer them so they can be delivered — and
@@ -7140,6 +7491,12 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 		} else {
 			window.secondaryQueryPrimary = nil
 		}
+		if window.redrawForwardingPaused {
+			held := &window.redrawForwardingClipboard
+			held.packets = append(held.packets, clipboardDelivery.packets...)
+			held.tags = append(held.tags, clipboardDelivery.tags...)
+			clipboardDelivery = kittyClipboardDelivery{}
+		}
 		if len(forwarded) > 0 && window.redrawForwardingPaused {
 			window.redrawForwardingBuffer = append(
 				window.redrawForwardingBuffer,
@@ -7174,6 +7531,12 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	if len(programStatusReplies) > 0 {
 		s.queueWindowReply(window, programStatusReplies)
 	}
+	if len(visibilityReplies) > 0 {
+		s.queueWindowReply(window, visibilityReplies)
+	}
+	if len(kittyClipboardReplies) > 0 {
+		s.queueWindowReply(window, kittyClipboardReplies)
+	}
 	if len(themeHintData) > 0 {
 		s.queueWindowReply(window, themeHintData)
 	}
@@ -7193,18 +7556,19 @@ func (s *muxServer) handleWindowOutput(windowID string, chunk []byte) {
 	}
 
 	if shouldWrite {
-		if len(forwarded) > 0 {
-			s.writeAttachOutputIfActive(
-				windowID,
-				attach,
-				forwarded,
-				failoverForwarded,
-				secondaryForwarded,
-				terminalQueries,
-				maxAttachSequence,
-				outputGeneration,
-			)
-		}
+		s.writeAttachOutputIfActive(
+			windowID,
+			attach,
+			forwarded,
+			failoverForwarded,
+			secondaryForwarded,
+			terminalQueries,
+			clipboardDelivery,
+			maxAttachSequence,
+			outputGeneration,
+		)
+	} else {
+		s.settleKittyClipboardDelivery(windowID, clipboardDelivery.tags, nil)
 	}
 	s.mu.Lock()
 	window = s.windowByIDLocked(windowID)
@@ -7275,10 +7639,12 @@ func (s *muxServer) retireWindowLocked(window *muxWindow) {
 	window.releaseRedrawForwardingStateLocked()
 	window.clearKittyGraphicsPendingLocked()
 	window.clearKittyImagesLocked()
+	window.forgetKittyClipboardRequestsLocked()
 	window.history = nil
 	window.screen = nil
 	window.oscBuffer = nil
 	window.attachOscBuffer = nil
+	window.attachUtf8Remaining = 0
 	window.csiBuffer = nil
 	window.pendingTerminalQueries = nil
 	window.pendingTerminalQueriesInFlight = nil
@@ -7362,6 +7728,7 @@ func (s *muxServer) markWindowClosed(windowID string) {
 			}
 		}
 	}
+	s.refreshWindowVisibilityLocked()
 	snapshots := s.snapshotsLocked()
 	// Commit an idle shutdown under the same lock that retired the last
 	// window, so a start admitted before this point keeps the server and one
@@ -7449,10 +7816,15 @@ func newAttachClient(conn net.Conn, hello controlMessage) *attachClient {
 		clipViewport:    hello.ClipViewport,
 		prefixEnabled:   !hello.NoPrefix,
 		capabilityHint:  hintDataFromString(hello.CapabilityHint, capabilityHintLimitBytes),
+		deliveryToken:   strings.TrimSpace(hello.AttachToken),
 		queueReady:      make(chan struct{}, 1),
 		inputQueueReady: make(chan struct{}, 1),
 		done:            make(chan struct{}),
 	}
+	if validCellPixelSize(hello.CellWidth, hello.CellHeight) {
+		client.cellWidth, client.cellHeight = hello.CellWidth, hello.CellHeight
+	}
+	client.cellToken = strings.TrimSpace(hello.CellToken)
 	go client.writeLoop()
 	return client
 }
@@ -7477,9 +7849,10 @@ func (c *attachClient) writeLoop() {
 			}
 		}
 		if write.responseWindowID != "" && write.responseCount > 0 {
-			c.expectTerminalResponses(
+			c.expectTerminalResponsesUntilDelivered(
 				write.responseWindowID,
 				write.responseCount,
+				c.outputOffset+uint64(len(write.data)),
 			)
 			select {
 			case <-c.done:
@@ -7495,6 +7868,7 @@ func (c *attachClient) writeLoop() {
 			c.close()
 			return
 		}
+		c.outputOffset += uint64(len(write.data))
 	}
 }
 
@@ -7852,6 +8226,14 @@ func (c *attachClient) deliversReplies() bool {
 	return !c.isClosed() || len(c.routedReplies) > 0
 }
 
+// undeliveredQuery is a query a reporting client has read but not yet
+// written to its terminal: where it ends in the output, and how many replies
+// it is owed.
+type undeliveredQuery struct {
+	end       uint64
+	responses int
+}
+
 func (c *attachClient) isClosed() bool {
 	select {
 	case <-c.done:
@@ -7881,8 +8263,10 @@ func (c *attachClient) trackRepliesLocked(routed []attachInputAction) {
 	}
 	c.awaitedRepliesUntil = c.terminalResponseUntil
 	// Bracketed paste input renews the client's wait before it checks the
-	// deadline, so a paste in progress keeps the replies owed.
-	c.awaitedRepliesHeld = c.inputBracketedPasteActive
+	// deadline, so a paste in progress keeps the replies owed, as does a query
+	// the client's terminal has not been written yet.
+	c.awaitedRepliesHeld = c.inputBracketedPasteActive ||
+		len(c.undeliveredQueries) > 0
 	for _, action := range routed {
 		if !action.userInput && action.windowID != "" {
 			c.routedReplies = addReplyCount(c.routedReplies, action.windowID, 1)
@@ -7930,6 +8314,19 @@ func addReplyCount(counts map[string]int, windowID string, delta int) map[string
 }
 
 func (c *attachClient) expectTerminalResponses(windowID string, count int) {
+	c.expectTerminalResponsesUntilDelivered(windowID, count, 0)
+}
+
+// expectTerminalResponsesUntilDelivered expects count replies for windowID to
+// a query that ends at output offset deliveredAt. For a client that reports
+// delivery, the replies stay expected past the usual grace until a report
+// covers that offset; zero, or a client that does not report, starts the
+// grace now as expectTerminalResponses does.
+func (c *attachClient) expectTerminalResponsesUntilDelivered(
+	windowID string,
+	count int,
+	deliveredAt uint64,
+) {
 	if c == nil || windowID == "" {
 		return
 	}
@@ -7945,8 +8342,7 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 	var passthrough func([]byte)
 	inputLocked := false
 	c.activityMu.Lock()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		if len(c.terminalResponseCarry) > 0 ||
 			len(c.terminalResponsePasteStartCarry) > 0 {
 			c.inputMu.Lock()
@@ -7967,11 +8363,14 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 		}
 		c.resetTerminalResponseStateLocked()
 	}
-	outstanding := len(c.terminalResponseWindows)
-	if c.terminalResponseActiveWindow != "" {
-		outstanding++
+	deferred := c.deliveryToken != "" && deliveredAt > 0
+	tooMany := count > terminalResponseMaxOutstanding-c.deliveredResponsesLocked()
+	if deferred {
+		// Replies to a query the terminal does not have yet cannot be missing;
+		// they are checked against the outstanding limit once it is delivered.
+		tooMany = count > terminalResponseMaxUndelivered-c.undeliveredResponses
 	}
-	if count > terminalResponseMaxOutstanding-outstanding {
+	if tooMany {
 		c.activityMu.Unlock()
 		if inputLocked {
 			c.inputMu.Unlock()
@@ -7985,6 +8384,13 @@ func (c *attachClient) expectTerminalResponses(windowID string, count int) {
 			c.terminalResponseWindows,
 			windowID,
 		)
+	}
+	if deferred {
+		c.undeliveredQueries = append(
+			c.undeliveredQueries,
+			undeliveredQuery{end: deliveredAt, responses: count},
+		)
+		c.undeliveredResponses += count
 	}
 	if len(c.terminalResponseCarry) > 0 ||
 		len(c.terminalResponsePasteStartCarry) > 0 {
@@ -8094,8 +8500,7 @@ func (c *attachClient) routeInputLocked(
 		return
 	}
 	now := time.Now()
-	if !c.terminalResponseUntil.IsZero() &&
-		now.After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(now) {
 		combined := make(
 			[]byte,
 			0,
@@ -8604,6 +9009,59 @@ func (c *attachClient) hasExpectedTerminalResponseLocked() bool {
 		len(c.terminalResponseWindows) > 0
 }
 
+// terminalResponsesExpiredLocked reports whether the replies this client owes
+// have run past their grace, so input is the user's again. Never while a query
+// it sent has not reached the terminal: the reply cannot have come yet.
+func (c *attachClient) terminalResponsesExpiredLocked(now time.Time) bool {
+	return !c.terminalResponseUntil.IsZero() &&
+		now.After(c.terminalResponseUntil) &&
+		len(c.undeliveredQueries) == 0
+}
+
+// deliveredResponsesLocked counts the expected replies to queries the
+// terminal has been written. A reply can come before the report that its
+// query was delivered, hence the floor.
+func (c *attachClient) deliveredResponsesLocked() int {
+	outstanding := len(c.terminalResponseWindows)
+	if c.terminalResponseActiveWindow != "" {
+		outstanding++
+	}
+	return max(outstanding-c.undeliveredResponses, 0)
+}
+
+// markOutputDelivered records that the client's terminal has been written the
+// first offset bytes of its attach output. The queries that ends deliver get
+// their reply grace from now, and count toward the outstanding limit.
+func (c *attachClient) markOutputDelivered(offset uint64) {
+	c.activityMu.Lock()
+	delivered := 0
+	for delivered < len(c.undeliveredQueries) &&
+		c.undeliveredQueries[delivered].end <= offset {
+		c.undeliveredResponses -= c.undeliveredQueries[delivered].responses
+		delivered++
+	}
+	if delivered == 0 {
+		c.activityMu.Unlock()
+		return
+	}
+	c.undeliveredQueries = c.undeliveredQueries[delivered:]
+	if len(c.undeliveredQueries) == 0 {
+		c.undeliveredQueries = nil
+	}
+	if c.deliveredResponsesLocked() > terminalResponseMaxOutstanding {
+		// As desynchronized as a client that does not report would be when
+		// writing the query that took it past the limit.
+		c.activityMu.Unlock()
+		c.close()
+		return
+	}
+	if c.hasExpectedTerminalResponseLocked() {
+		c.renewTerminalResponseDeadlineLocked()
+	}
+	c.trackRepliesLocked(nil)
+	c.activityMu.Unlock()
+}
+
 func (c *attachClient) resetTerminalResponseStateLocked() {
 	c.terminalResponseCarry = nil
 	c.terminalResponseCarryGeneration++
@@ -8678,8 +9136,7 @@ func (c *attachClient) resolveAmbiguousTerminalResponseInput(
 	c.terminalResponseCarry = nil
 	c.terminalResponsePasteStartCarry = nil
 	c.terminalResponseCarryGeneration++
-	if !c.terminalResponseUntil.IsZero() &&
-		time.Now().After(c.terminalResponseUntil) {
+	if c.terminalResponsesExpiredLocked(time.Now()) {
 		c.resetTerminalResponseStateLocked()
 	}
 	c.trackRepliesLocked(nil)
@@ -8771,6 +9228,96 @@ func (s *muxServer) primaryAttachSizeLocked() (int, int) {
 	return width, height
 }
 
+// refreshCellPixelSizeLocked adopts the primary attach client's cell size
+// and gives it to every window, so each pty reports it from its next resize.
+// A client that reports none leaves the last known size. It reports whether
+// the size changed. s.mu must be held.
+func (s *muxServer) refreshCellPixelSizeLocked() bool {
+	width, height := s.cellWidthPx, s.cellHeightPx
+	if client := s.primaryAttachClientLocked(); client != nil &&
+		validCellPixelSize(client.cellWidth, client.cellHeight) {
+		width, height = client.cellWidth, client.cellHeight
+	}
+	if width == s.cellWidthPx && height == s.cellHeightPx {
+		return false
+	}
+	s.cellWidthPx, s.cellHeightPx = width, height
+	for _, window := range s.windows {
+		window.setCellPixelSize(width, height)
+	}
+	return true
+}
+
+// applyCellPixelSizeLocked adopts the primary client's cell size and, when it
+// changed, reports it to the active window's program at the grid its pty
+// already has. Background windows report it at their next resize. s.mu must
+// be held.
+func (s *muxServer) applyCellPixelSizeLocked() {
+	if !s.refreshCellPixelSizeLocked() {
+		return
+	}
+	window := s.windowByIDLocked(s.activeID)
+	if window == nil || window.closed {
+		return
+	}
+	window.reportCellPixelSize()
+}
+
+// attachClientByCellTokenLocked finds the attach connection whose hello
+// carried token. s.mu must be held.
+func (s *muxServer) attachClientByCellTokenLocked(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	for _, client := range s.attachClients {
+		if client.cellToken == token {
+			return client
+		}
+	}
+	return nil
+}
+
+// recordAttachClientCellSize records a client's cell size for the resize that
+// follows it.
+func (s *muxServer) recordAttachClientCellSize(
+	clientID string,
+	width int,
+	height int,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if client := s.attachClientByIDLocked(clientID); client != nil {
+		client.cellWidth, client.cellHeight = width, height
+	}
+}
+
+// updateAttachClientCellSize records a client's cell size and, for the
+// primary client, reports it to the active window. A token names the exact
+// attach connection; without one the newest attach with clientID is used.
+func (s *muxServer) updateAttachClientCellSize(
+	clientID string,
+	token string,
+	width int,
+	height int,
+) {
+	s.resizeMu.Lock()
+	defer s.resizeMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	client := s.attachClientByCellTokenLocked(token)
+	if client == nil && strings.TrimSpace(token) == "" {
+		client = s.attachClientByIDLocked(clientID)
+	}
+	if client == nil {
+		return
+	}
+	client.cellWidth, client.cellHeight = width, height
+	if s.attachConn == client.conn {
+		s.applyCellPixelSizeLocked()
+	}
+}
+
 func (s *muxServer) hasViewportClippingClientLocked() bool {
 	for _, client := range s.attachClients {
 		if client.clipViewport {
@@ -8792,6 +9339,23 @@ func terminalViewportTransitionSafe(window *muxWindow) bool {
 
 func (s *muxServer) primaryAttachClientLocked() *attachClient {
 	return s.attachClients[s.attachConn]
+}
+
+// attachClientByDeliveryToken finds the attach connection whose hello carried
+// token.
+func (s *muxServer) attachClientByDeliveryToken(token string) *attachClient {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, client := range s.attachClients {
+		if client.deliveryToken == token {
+			return client
+		}
+	}
+	return nil
 }
 
 func (s *muxServer) attachClientByIDLocked(clientID string) *attachClient {
@@ -8958,6 +9522,7 @@ func (s *muxServer) focusAttachClientLocked(
 	s.nextFocusSequence++
 	registered.focusSequence.Store(s.nextFocusSequence)
 	s.attachConn = registered.conn
+	s.applyCellPixelSizeLocked()
 	targetWidth, targetHeight := s.primaryAttachSizeLocked()
 	sizeChanged :=
 		targetWidth != s.publishedWidth ||
@@ -9041,6 +9606,8 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		return
 	}
 	delete(s.attachClients, client.conn)
+	s.forgetClientVisibilityLocked(client.id)
+	s.refreshWindowVisibilityLocked()
 	// Its read loop has ended, so the replies it holds can only go down; its
 	// input worker forgets it once they have.
 	if client.holdsReceivedReplies() {
@@ -9064,6 +9631,7 @@ func (s *muxServer) removeAttachClient(client *attachClient) {
 		}
 		if replacement != nil {
 			s.attachConn = replacement.conn
+			s.applyCellPixelSizeLocked()
 		}
 	}
 	width, height = s.primaryAttachSizeLocked()
@@ -9159,6 +9727,8 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 	client.focusSequence.Store(s.nextFocusSequence)
 	s.attachClients[conn] = client
 	s.attachConn = conn
+	s.applyCellPixelSizeLocked()
+	s.refreshWindowVisibilityLocked()
 	if themeHint := hintDataFromString(hello.Data, themeHintLimitBytes); len(themeHint) > 0 {
 		s.themeHint = append(s.themeHint[:0], themeHint...)
 	}
@@ -9242,7 +9812,11 @@ func (s *muxServer) handleAttach(conn net.Conn, reader *bufio.Reader, hello cont
 		n, err := reader.Read(buf)
 		if n > 0 {
 			client.inputDispatchMu.Lock()
-			routing := client.routeInput(buf[:n])
+			input, clipboardReplies := client.splitKittyClipboardRepliesLocked(buf[:n], time.Now())
+			routing := client.routeInput(input)
+			if len(clipboardReplies) > 0 {
+				routing.actions = append(clipboardReplies, routing.actions...)
+			}
 			if routing.claimsFocus {
 				s.promoteAttachClient(client)
 			}
@@ -9263,12 +9837,19 @@ func (s *muxServer) runAttachInputActions(client *attachClient) {
 		client.discardInputActions()
 		s.mu.Lock()
 		delete(s.detachedReplyClients, client)
+		s.failKittyClipboardRequestsLocked(client)
 		s.mu.Unlock()
 	}()
 	for {
 		action, ok := client.nextInputAction()
 		if !ok {
 			return
+		}
+		if action.kittyClipboardReply {
+			if reply := s.takeKittyClipboardReply(client, action.windowID, action.data); reply != nil {
+				_ = s.writeWindow(action.windowID, reply)
+			}
+			continue
 		}
 		if action.userInput {
 			if s.handleAttachInputSerialized(
@@ -9438,10 +10019,20 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 		if shouldShutdown {
 			go s.closeIfIdle()
 		}
+	case attachDeliveredRequest:
+		// A client reports after every write to its terminal, so this is not
+		// answered: the reply would only be read and dropped.
+		if attach := s.attachClientByDeliveryToken(request.AttachToken); attach != nil {
+			attach.markOutputDelivered(request.Delivered)
+		}
 	case "resize":
 		if request.Width <= 0 || request.Height <= 0 {
 			client.sendError(request, errors.New("invalid terminal size"))
 			return
+		}
+		if validCellPixelSize(request.CellWidth, request.CellHeight) {
+			// Recorded before the resize, which applies it with the grid.
+			s.recordAttachClientCellSize(request.ClientID, request.CellWidth, request.CellHeight)
 		}
 		s.resizeForClient(
 			request.ClientID,
@@ -9450,6 +10041,18 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			request.Redraw,
 		)
 		client.send(controlResponse{ID: request.ID, Type: "resized", Status: "ok"})
+	case "cell_size":
+		if !validCellPixelSize(request.CellWidth, request.CellHeight) {
+			client.sendError(request, errors.New("invalid cell size"))
+			return
+		}
+		s.updateAttachClientCellSize(
+			request.ClientID,
+			request.CellToken,
+			request.CellWidth,
+			request.CellHeight,
+		)
+		client.send(controlResponse{ID: request.ID, Type: "cell_size", Status: "ok"})
 	case "focus_client":
 		if strings.TrimSpace(request.ClientID) == "" {
 			client.sendError(request, errors.New("missing client id"))
@@ -9532,6 +10135,15 @@ func (s *muxServer) handleControlRequest(client *controlClient, request controlM
 			return
 		}
 		client.send(controlResponse{ID: request.ID, Type: "input_injected", Status: "ok"})
+	case "client_visibility":
+		if strings.TrimSpace(request.ClientID) == "" {
+			client.sendError(request, errors.New("missing client id"))
+			return
+		}
+		s.mu.Lock()
+		s.setClientHiddenLocked(request.ClientID, request.Hidden, client)
+		s.mu.Unlock()
+		client.send(controlResponse{ID: request.ID, Type: "client_visibility", Status: "ok"})
 	case "focus_changed":
 		s.focusAttachClientByID(request.ClientID, request.Width, request.Height, false)
 		s.sendThemeHint(request.Data)
@@ -9561,6 +10173,7 @@ func (s *muxServer) removeControl(client *controlClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.controls, client)
+	s.releaseClientVisibilityLocked(client)
 }
 
 func (s *muxServer) hasAttachClientByID(clientID string) bool {
@@ -9992,11 +10605,16 @@ func (s *muxServer) restoreSnapshot() *serverRestore {
 		}
 		s.snapshotAgentIdentityLocked(window, &state)
 		if isShellRestoreWindow(state) && len(window.history) > 0 {
-			history, historyStart := window.historyTailWithParserLocked()
-			history = terminalHistoryAtGroundBoundaries(history, historyStart)
+			tail, historyStart := window.historyTailWithParserLocked()
+			history := terminalHistoryAtGroundBoundaries(tail, historyStart)
 			if len(history) > 0 {
 				state.HistoryBase64 = base64.StdEncoding.EncodeToString(history)
 				state.HistoryStartsAtGround = true
+				skipped := advanceReplayStartToTerminalGround(tail, 0, historyStart)
+				screen := window.screenLocked()
+				state.HistoryGraphemeClusterOff = !screen.GraphemeClusterAt(
+					screen.Written() - int64(len(tail)-skipped),
+				)
 			}
 		}
 		restore.Windows = append(restore.Windows, state)
@@ -10176,6 +10794,7 @@ func (s *muxServer) selectWindowWithoutReplay(windowID string) error {
 	if s.activeID != windowID {
 		s.lastActiveID = s.activeID
 		s.activeID = windowID
+		s.refreshWindowVisibilityLocked()
 	}
 	window.alert = false
 	window.notificationOscs = nil
@@ -10270,6 +10889,7 @@ func (s *muxServer) selectWindowWithSkip(
 	if s.activeID != windowID {
 		s.lastActiveID = s.activeID
 		s.activeID = windowID
+		s.refreshWindowVisibilityLocked()
 	}
 	window.alert = false
 	window.notificationOscs = nil
@@ -10429,6 +11049,7 @@ func (s *muxServer) closeWindow(windowID string) (bool, error) {
 	process = window.proc
 	windowPty = window.pty
 	s.reindexWindowsLocked()
+	s.refreshWindowVisibilityLocked()
 	snapshots = s.snapshotsLocked()
 	shouldShutdown = openCount <= 1 || len(snapshots) == 0
 	s.mu.Unlock()
@@ -10661,6 +11282,7 @@ func (s *muxServer) resizeActiveLocked(width int, height int) {
 }
 
 func (s *muxServer) resizeWindowLocked(window *muxWindow, width int, height int) {
+	s.refreshCellPixelSizeLocked()
 	if window == nil || window.closed || window.pty == nil {
 		return
 	}
@@ -10942,6 +11564,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		return
 	}
 	replay = window.redrawForwardingReplay
+	clipboard := window.redrawForwardingClipboard
 	buffered = window.redrawForwardingBuffer
 	failoverBuffered = window.redrawForwardingFailoverBuffer
 	secondaryBuffered = window.redrawForwardingSecondaryBuffer
@@ -10972,7 +11595,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 			// its picture instead of a bounded tail of the bytes.
 			frame := s.foregroundHistoryFallbackReplayLocked(
 				window,
-				window.screenLocked().RenderFrame(),
+				window.screenLocked(),
 			)
 			replay = nil
 			buffered = append(append([]byte(nil), frame...), queryData...)
@@ -10995,7 +11618,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		window.terminalOutputIsGroundLocked() && !visibleRedraw {
 		frame := s.foregroundHistoryFallbackReplayLocked(
 			window,
-			window.screenLocked().RenderFrame(),
+			window.screenLocked(),
 		)
 		replay = nil
 		buffered = append(append([]byte(nil), frame...), queryData...)
@@ -11021,7 +11644,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		if window.redrawForwardingFallbackScreen != nil {
 			fallbackReplay = s.foregroundHistoryFallbackReplayLocked(
 				window,
-				window.redrawForwardingFallbackScreen.RenderFrame(),
+				window.redrawForwardingFallbackScreen,
 			)
 		}
 		if len(fallbackReplay) > 0 {
@@ -11046,7 +11669,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 					// do, so the response wait still has something to wait for.
 					screen := window.redrawForwardingFallbackScreen.Clone()
 					screen.Write(secondaryBuffered)
-					frame := s.foregroundHistoryFallbackReplayLocked(window, screen.RenderFrame())
+					frame := s.foregroundHistoryFallbackReplayLocked(window, screen)
 					buffered = append(append([]byte(nil), frame...), queryData...)
 					failoverBuffered = append(append([]byte(nil), frame...), queryData...)
 					secondaryBuffered = append([]byte(nil), frame...)
@@ -11064,6 +11687,13 @@ func (s *muxServer) resumePausedAttachForwarding(
 				secondaryBuffered = append([]byte(nil), fallbackReplay...)
 			}
 		}
+	}
+	// The clipboard packets were held apart from the redraw, so they reach
+	// the client that takes the primary output whatever replaced or trimmed
+	// the redraw. They go first, where the pause began.
+	if len(clipboard.packets) > 0 {
+		buffered = append(append([]byte(nil), clipboard.packets...), buffered...)
+		failoverBuffered = append(append([]byte(nil), clipboard.packets...), failoverBuffered...)
 	}
 	window.releaseRedrawForwardingStateLocked()
 	refreshPendingFocus = s.pendingFocusRefreshConn != nil &&
@@ -11114,6 +11744,7 @@ func (s *muxServer) resumePausedAttachForwarding(
 		initialOutput,
 		clients,
 		queryData,
+		clipboard.tags,
 		func(*attachClient) ([]byte, []byte) {
 			return failoverOutput, secondaryOutput
 		},
@@ -11177,18 +11808,36 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 	window *muxWindow,
 	clientHas map[string]uint32,
 ) ([]byte, []byte) {
+	replay, followUp := s.replayBytesWithImagesLocked(window, clientHas)
+	// Kept virtual and relative placements go last, after every image they
+	// show and the frame whose placeholder cells position them.
+	return replay, append(followUp, window.kittyPlacementReplayLocked()...)
+}
+
+func (s *muxServer) replayBytesWithImagesLocked(
+	window *muxWindow,
+	clientHas map[string]uint32,
+) ([]byte, []byte) {
 	history, historyStart := window.historyTailWithParserLocked()
 	if window.retainsConPtyNormalScreenLocked() {
 		// Keep the full bounded screen history: differential updates may leave
 		// the composer untouched beyond the short shell scrollback limit.
 		start := advanceReplayStartToTerminalGround(history, 0, historyStart)
+		mode := window.graphemeModeBeforeHistoryLocked(
+			window.screenLocked().Written() - int64(len(history)-start),
+		)
 		history = stripTerminalQueriesFromReplay(history[start:])
 		history = window.withheldAttachOscSuffixTrimmedLocked(history)
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
-		replayHistory := append(images, history...)
+		var replayHistory []byte
+		if window.screenLocked().KittyPlacedImages() {
+			// Its output places its images again, as a shell's does.
+			replayHistory = append(replayHistory, kittyVisiblePlacementsDelete...)
+		}
+		replayHistory = append(append(append(replayHistory, images...), mode...), history...)
 		return wrapSynchronizedTerminalOutput(
 				nil,
-				buildWindowReplay(window, replayHistory, s.keyboardModesUsed),
+				buildWindowReplay(window, nil, replayHistory, s.keyboardModesUsed),
 			),
 			// The raw history tail is bounded, so a transmission it once
 			// carried can have been evicted while its placeholder cells
@@ -11211,28 +11860,300 @@ func (s *muxServer) replayBytesWithImageFollowUpLocked(
 		// survive eviction from the rolling visible history and are store-only
 		// (a=T downgraded to a=t) so they produce no visible output themselves.
 		images, replayed := window.kittyImageReplaySelectionLocked(clientHas)
-		return buildWindowReplay(window, images, s.keyboardModesUsed),
+		// The images the main screen behind an alternate-screen application
+		// places again have to reach it before its frame, inside the replay,
+		// so they share what the replay may carry.
+		mainScreen, mainImages := window.mainScreenReplayLocked(
+			maxReplayedKittyImageBytes - len(images),
+		)
+		return buildWindowReplay(window, mainScreen, images, s.keyboardModesUsed),
 			window.kittyPlaceholderImageFollowUpLocked(
 				replayed,
 				nil,
 				clientHas,
-				maxKittyImageRepairBytes-len(images),
+				maxKittyImageRepairBytes-len(images)-mainImages,
 			)
 	}
-	history = trimReplayHistoryForAttachWithParser(history, historyStart)
+	history, images := window.shellReplayHistoryLocked(history, historyStart, clientHas)
 	history = stripTerminalQueriesFromReplay(history)
 	history = window.withheldAttachOscSuffixTrimmedLocked(history)
 	// The replayed tail is cut to windowReplayLimitBytes, which can drop a
 	// transmission whose placeholder cells are still inside the tail. Ids the
 	// tail still transmits are excluded, so this is a no-op for the ordinary
 	// shell window that replays its images intact.
-	return buildWindowReplay(window, history, s.keyboardModesUsed),
+	return buildWindowReplay(window, nil, history, s.keyboardModesUsed),
 		window.kittyPlaceholderImageFollowUpLocked(
 			nil,
 			history,
 			clientHas,
-			maxKittyImageRepairBytes,
+			maxKittyImageRepairBytes-images,
 		)
+}
+
+// shellReplayHistoryLocked returns the output a shell window's replay
+// paints from retained, the output the window keeps, which began in the
+// parser state retainedState, and how many bytes it adds for images. It is
+// the end of the output (trimReplayHistoryForAttachWithParser), unless that
+// end cuts off a command that placed an image (KittyCutCommand), such as a
+// transmission whose first chunks it leaves out. The replay then starts
+// with that command, at the column it ran at: from the output while the
+// output holds all of it, else made again from the retained image if that
+// fits in maxReplayedKittyImageBytes. The image lands on the first row the
+// replay paints, and the cursor moves past it as before, so the output that
+// followed it stays below it. The images that display commands in the
+// replay show without the replay sending them go first, within the same
+// budget, and the client's data of those it cannot send is deleted, so
+// that their commands fail rather than show another window's image. Before
+// all of it, the client's own placements go (kittyVisiblePlacementsDelete),
+// once the window has placed any.
+func (w *muxWindow) shellReplayHistoryLocked(
+	retained []byte,
+	retainedState terminalOutputParserSnapshot,
+	clientHas map[string]uint32,
+) ([]byte, int) {
+	tail := trimReplayHistoryForAttachWithParser(retained, retainedState)
+	from := len(retained) - len(tail)
+	screen := w.screenLocked()
+	end := screen.Written()
+	// The model read retained last, so an offset in what it read is this
+	// far into retained.
+	at := func(offset int64) int { return len(retained) - int(end-offset) }
+	cut := end - int64(min(len(retained), windowReplayLimitBytes))
+	var restore []byte
+	images := 0
+	// One at a column the model lost stays out rather than land elsewhere.
+	if command, ok := screen.KittyCutCommand(cut, end-int64(len(tail))); ok && command.col >= 0 {
+		column := appendVTCSICount(nil, command.col+1, 'G')
+		if start := at(command.start); start >= 0 {
+			images = from - start
+			restore = column
+			from = start
+		} else if root := w.kittyCommandRootLocked(command); len(root) > 0 &&
+			len(root) <= maxReplayedKittyImageBytes {
+			images = len(root)
+			restore = append(append(root, column...), command.place...)
+			from = at(command.end)
+		}
+	}
+	history := append(restore, retained[from:]...)
+	// What the display commands in it show must be this window's image:
+	// sent first, or else gone, so that the command fails.
+	needed := w.kittyShownImagesLocked(history, clientHas, end-int64(len(retained)-from))
+	var roots []string
+	for _, image := range needed {
+		if image.root != "" {
+			roots = append(roots, image.root)
+		}
+	}
+	shown, served := w.kittyImageTransmissionsOntoLocked(
+		roots,
+		maxReplayedKittyImages,
+		maxReplayedKittyImageBytes-images,
+		false,
+	)
+	var replay []byte
+	if screen.KittyPlacedImages() {
+		replay = append(replay, kittyVisiblePlacementsDelete...)
+	}
+	for _, image := range needed {
+		if image.root == "" || !slices.Contains(served, image.root) {
+			replay = image.appendDataDelete(replay)
+		}
+	}
+	replay = append(replay, shown...)
+	replay = append(replay, w.graphemeModeBeforeHistoryLocked(end-int64(len(retained)-from))...)
+	return append(replay, history...), images + len(shown)
+}
+
+// graphemeModeBeforeHistoryLocked returns what a replay of the window's
+// retained output from offset at of what the screen model read (Written)
+// needs before that output so the client reads it in the grapheme
+// clustering mode (2027) in force there, or nil when that is the mode
+// terminalModePreReplaySequence leaves, the window's current one. Output a
+// later switch followed would otherwise be laid out at the other mode's
+// widths. terminalModePostReplaySequence sets the current mode again after.
+func (w *muxWindow) graphemeModeBeforeHistoryLocked(at int64) []byte {
+	current := true
+	if enabled, ok := w.privateModes["2027"]; ok {
+		current = enabled
+	}
+	if on := w.screenLocked().GraphemeClusterAt(at); on != current {
+		return appendVTGraphemeMode(nil, on)
+	}
+	return nil
+}
+
+// kittyVisiblePlacementsDelete deletes the placements on the screen shown,
+// keeping the images (a=d,d=a). A client reopened on a shell window, or a
+// ConPTY one showing its normal screen, keeps its placements through the
+// replay prefix's ED 2, and the replayed output places its images again:
+// one sent by number or with no id gets a new id each time, and a display
+// command without a placement id adds a placement, so the client's copy
+// would stay beside the new one, pushed up the screen by the output. The
+// replay places again every image within its reach
+// (shellReplayHistoryLocked); one beyond it is left out, as it is when the
+// app changes windows. The prefix's ED 3 has already taken the placements
+// in the scrollback.
+const kittyVisiblePlacementsDelete = "\x1b_Ga=d,d=a,q=2\x1b\\"
+
+// kittyCommandRootLocked returns the retained image that a transmission
+// which placed one sent, to send again store-only, or nil. Only the image
+// whose transmission ended where the command did will do: the window may
+// have sent another under its id or number since, on the alternate screen,
+// whose store the client keeps apart, or too large to keep.
+func (w *muxWindow) kittyCommandRootLocked(command vtKittyCommand) []byte {
+	if !command.transmits {
+		return nil
+	}
+	for id, end := range w.kittyImageEnd {
+		if end != command.end || w.kittyImages[id] == nil {
+			continue
+		}
+		root := append([]byte(nil), w.kittyImageRootReplayOnLocked(id, false)...)
+		root = append(root, w.kittyImageNumberReplayLocked(id)...)
+		return append(root, w.kittyImageAnimations[id]...)
+	}
+	return nil
+}
+
+// kittyAlternateScreenAt returns whether the client shows the alternate
+// screen at an offset of history, a shell window's, which it replays from
+// its main screen: also what a program cut off from the start of history
+// wrote to its alternate screen. Setting mode 1047 or 1049 enters it, and
+// resetting either leaves it, as RIS does. Ask for offsets in increasing
+// order.
+func kittyAlternateScreenAt(history []byte) func(offset int) bool {
+	changes := kittyScreenModeChanges(history)
+	for index := 0; ; {
+		at := bytes.Index(history[index:], []byte("\x1bc"))
+		if at < 0 {
+			break
+		}
+		index += at + 2
+		// RIS, at its final byte.
+		changes = append(changes, kittyScreenModeChange{offset: index - 1})
+	}
+	slices.SortStableFunc(changes, func(a, b kittyScreenModeChange) int { return a.offset - b.offset })
+	alternate, next := false, 0
+	return func(offset int) bool {
+		for ; next < len(changes) && changes[next].offset < offset; next++ {
+			alternate = changes[next].set
+		}
+		return alternate
+	}
+}
+
+// clientHolds reports whether clientHas, the images a client reports holding,
+// has the image id with the signature token.
+func clientHolds(clientHas map[string]uint32, id string, token uint32) bool {
+	held, ok := clientHas[id]
+	return ok && held == token
+}
+
+// kittyShownImageRootLocked returns the retained main-screen image to send
+// for image, which a display command at the cursor or relative to a parent
+// shows: for an id, the one kept under it; for a number, the one it named
+// before replayedFrom, where the replayed output began in what the model
+// read, since a later one may be another image. It is "" when none will do.
+func (w *muxWindow) kittyShownImageRootLocked(image kittyShownImage, replayedFrom int64) string {
+	root := image.id
+	if root == "" {
+		root = w.kittyImageNumberToID[image.number]
+		if end, ok := w.kittyImageEnd[root]; !ok || end > replayedFrom {
+			return ""
+		}
+	}
+	if w.kittyImages[root] == nil || w.kittyTracking.rootAlt[root] {
+		return ""
+	}
+	return root
+}
+
+// kittyShownImage is an image a display command in a replay shows without
+// the replay sending it first: named by its id, or by its number (I=).
+type kittyShownImage struct {
+	id, number string
+	// root is the retained image to send for it, "" when none will do.
+	root string
+}
+
+// appendDataDelete deletes the client's data of the image, with its
+// placements (a=d,d=I or d=N), so that a display command naming it fails
+// rather than show an image another window sent under that id or number.
+func (image kittyShownImage) appendDataDelete(out []byte) []byte {
+	if image.id != "" {
+		out = append(out, "\x1b_Ga=d,d=I,i="...)
+		out = append(out, image.id...)
+	} else {
+		out = append(out, "\x1b_Ga=d,d=N,I="...)
+		out = append(out, image.number...)
+	}
+	return append(out, ",q=2\x1b\\"...)
+}
+
+// kittyShownImagesLocked returns the images that display commands (a=p) in
+// history show without history sending them first, which the client may
+// not hold: another window may have sent a different image under the same
+// id or number since. One clientHas reports the client holding is left
+// out. Each comes with the retained image to send before history when a
+// placement at the cursor or relative to a parent shows it
+// (kittyShownImageRootLocked), whatever other commands show it and in
+// whatever order. An image only virtual placements show gets none: the
+// follow-up sends it and places them again
+// (replayBytesWithImageFollowUpLocked). Only the commands that run on the
+// main screen count (kittyAlternateScreenAt).
+func (w *muxWindow) kittyShownImagesLocked(
+	history []byte,
+	clientHas map[string]uint32,
+	replayedFrom int64,
+) []kittyShownImage {
+	events, _ := scanKittyTransmissions(history)
+	alternate := kittyAlternateScreenAt(history)
+	var sent []string
+	var shown []kittyShownImage
+	// shownAt is where each image is in shown: any later command showing it
+	// counts too, whatever its kind.
+	shownAt := map[string]int{}
+	for _, event := range events {
+		if alternate(event.offset) {
+			continue
+		}
+		image := kittyShownImage{
+			id:     kittyIDValue(event.control["i"]),
+			number: kittyIDValue(event.control["I"]),
+		}
+		key := "i" + image.id
+		if image.id == "" {
+			key = "I" + image.number
+		}
+		at, known := shownAt[key]
+		switch {
+		case image.id == "" && image.number == "" || slices.Contains(sent, key):
+		case !event.placement:
+			if len(event.buf) > 0 && !event.animation {
+				sent = append(sent, key)
+			}
+		case event.control["a"] != "p":
+		case image.id != "" && clientHolds(clientHas, image.id, w.kittyImageToken[image.id]):
+			sent = append(sent, key)
+		case kittyNonZero(event.control["U"]):
+			// The follow-up places a virtual placement again, after its image.
+			if !known {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
+			}
+		case known && shown[at].root != "":
+		default:
+			image.root = w.kittyShownImageRootLocked(image, replayedFrom)
+			if known {
+				shown[at].root = image.root
+			} else {
+				shownAt[key] = len(shown)
+				shown = append(shown, image)
+			}
+		}
+	}
+	return shown
 }
 
 // releaseRedrawForwardingStateLocked drops every buffer a redraw pause retains
@@ -11250,44 +12171,115 @@ func (w *muxWindow) releaseRedrawForwardingStateLocked() {
 	w.redrawForwardingStartParser = terminalOutputParserSnapshot{}
 	w.redrawForwardingQueryBuffer = nil
 	w.redrawForwardingAnsweredCursor = false
+	w.redrawForwardingClipboard = kittyClipboardDelivery{}
 	w.redrawForwardingPrimaryConn = nil
 	w.redrawForwardingPrimaryNeedsFailover = false
 }
 
-// foregroundHistoryFallbackReplayLocked renders the snapshot taken when the
-// redraw pause began into a full replay. The frame bytes are the pre-resize
-// history, but the surrounding mode, cursor, and retained-image state is read
-// now, so state the window learned *during* the pause (a mode change, a new
-// image upload) is carried into the fallback instead of being dropped with the
-// discarded redraw.
+// foregroundHistoryFallbackReplayLocked renders screen, the snapshot taken
+// when the redraw pause began or the model as it is now, into a full replay.
+// The frame is the screen's, but the surrounding mode, cursor, and
+// retained-image state is read now, so state the window learned *during* the
+// pause (a mode change, a new image upload) is carried into the fallback
+// instead of being dropped with the discarded redraw.
 func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	window *muxWindow,
-	history []byte,
+	screen *terminalScreen,
 ) []byte {
-	if window == nil || len(history) == 0 {
+	if window == nil || screen == nil {
 		return nil
 	}
 	images, replayed := window.kittyImageReplaySelectionLocked(nil)
 	// The frame is rendered from the screen model, which drops the APC image
 	// transmissions, so every image its placeholder cells reference must travel
-	// with it — not just the few most recently mutated ones.
-	images = append(
-		images,
-		window.kittyPlaceholderImageReplayLocked(
-			replayed,
-			nil,
-			maxKittyImageRepairBytes-len(images),
-		)...,
+	// with it — not just the few most recently mutated ones — and so must the
+	// images its direct placements show.
+	frameImages, served := window.kittyFrameImageReplayLocked(
+		replayed,
+		nil,
+		maxKittyImageRepairBytes-len(images),
+		screen.KittyPlacementImageIDs(),
 	)
-	history = window.withheldAttachOscSuffixTrimmedLocked(history)
-	replayHistory := make([]byte, 0, len(images)+len(history))
+	images = append(images, frameImages...)
+	// A direct placement whose image did not fit is left out rather than
+	// placed where the client may hold another window's image of that id.
+	// The client's own copies of the rest go first, before the images.
+	carried := kittyCarriedImages(replayed, served)
+	var deletes []byte
+	if !screen.AlternateScreenActive() {
+		deletes = screen.KittyMainPlacementDeletes(carried)
+	}
+	frame := window.withheldAttachOscSuffixTrimmedLocked(screen.RenderFrameReplacing(carried))
+	mainScreen, _ := window.mainScreenReplayLocked(maxKittyImageRepairBytes - len(images))
+	placements := window.kittyPlacementReplayLocked()
+	replayHistory := make([]byte, 0, len(deletes)+len(images)+len(frame)+len(placements))
+	replayHistory = append(replayHistory, deletes...)
 	replayHistory = append(replayHistory, images...)
-	replayHistory = append(replayHistory, history...)
-	return buildWindowReplay(window, replayHistory, s.keyboardModesUsed)
+	replayHistory = append(replayHistory, frame...)
+	replayHistory = append(replayHistory, placements...)
+	return buildWindowReplay(window, mainScreen, replayHistory, s.keyboardModesUsed)
 }
 
+// kittyCarriedImages reports whether a replay carries an image: one of the
+// recency selection, replayed, or one of served.
+func kittyCarriedImages(replayed map[string]struct{}, served []string) func(string) bool {
+	return func(imageID string) bool {
+		if _, ok := replayed[imageID]; ok {
+			return true
+		}
+		return slices.Contains(served, imageID)
+	}
+}
+
+// mainScreenReplayLocked paints the main screen an alternate-screen
+// application hides, for buildWindowReplay to send before it enters the
+// alternate screen again, and returns it with how many of its bytes are
+// image data; it is nil while the main screen shows. Each screen keeps its
+// own images on the client, so the images its direct placements show are
+// sent store-only while it is the screen shown, as many as fit in budget,
+// after deleting the client's own copies of their placements, as the
+// fallback frame does (KittyMainPlacementDeletes); a placement whose image
+// does not fit is left out. So is one whose image the
+// window last transmitted on the alternate screen: the client keeps that data
+// apart from the main screen's, and the main screen's store may hold another
+// window's image under the same id, which a placement made again would show.
+// Sending an image replaces every placement it had there, so the screen's
+// kept placements follow.
+func (w *muxWindow) mainScreenReplayLocked(budget int) ([]byte, int) {
+	if !w.alternateScreenModeActiveLocked() {
+		return nil, 0
+	}
+	screen := w.screenLocked()
+	if !screen.AlternateScreenActive() {
+		return nil, 0
+	}
+	want := screen.KittyPlacementImageIDsOn(false)
+	var ids []string
+	for _, id := range w.kittyImageOrder {
+		if !slices.Contains(want, id) {
+			continue
+		}
+		if alt, ok := w.kittyTracking.rootAlt[id]; ok && !alt {
+			ids = append(ids, id)
+		}
+	}
+	images, sent := w.kittyImageTransmissionsOntoLocked(ids, 0, budget, false)
+	carried := kittyCarriedImages(nil, sent)
+	out := screen.KittyMainPlacementDeletes(carried)
+	out = append(out, images...)
+	out = append(out, screen.RenderMainScreenReplacing(carried)...)
+	if len(images) > 0 {
+		out = append(out, w.kittyPlacementReplayOnLocked(false)...)
+	}
+	return out, len(images)
+}
+
+// buildWindowReplay is the replay that paints window on a client: history on
+// the screen it shows, after mainScreen (mainScreenReplayLocked) when that is
+// the alternate screen.
 func buildWindowReplay(
 	window *muxWindow,
+	mainScreen []byte,
 	history []byte,
 	restoreKeyboardModes bool,
 ) []byte {
@@ -11303,23 +12295,21 @@ func buildWindowReplay(
 	// again: the redraw or frame that follows paints only the alternate
 	// screen, and the application's exit would otherwise return to a blank
 	// main screen and lose the shell output and scrollback the model kept.
-	var mainScreen []byte
-	if window.alternateScreenModeActiveLocked() {
-		mainScreen = window.screenLocked().RenderMainScreen()
-	}
 	preModes := terminalModePreReplaySequence(window)
 	preHistoryClear := terminalPreHistoryClearSequence(window)
 	postModes := terminalModePostReplaySequence(window)
 	postParser := []byte(terminalParserResetSequence)
 	postCharset := window.screenLocked().CharsetSequence()
 	cursor := cursorVisibilityReplaySequence(window.cursorVisibleForReplayLocked())
+	tag := windowReplayTag(window)
 	replay := make(
 		[]byte,
 		0,
-		len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
+		len(tag)+len(activeWindowReplayPrefix)+len(keyboardModes)+len(title)+len(mainScreen)+
 			len(preModes)+len(preHistoryClear)+len(history)+
 			len(postParser)+len(postModes)+len(postCharset)+len(cursor),
 	)
+	replay = append(replay, tag...)
 	replay = append(replay, activeWindowReplayPrefix...)
 	replay = append(replay, keyboardModes...)
 	replay = append(replay, title...)
@@ -11463,6 +12453,7 @@ func privateModesForRestore(privateModes map[string]bool) map[string]bool {
 	}
 	for _, mode := range []string{
 		"1", "1000", "1002", "1003", "1004", "1006", "1007", "2004", "2031",
+		"67", "5522",
 	} {
 		delete(copied, mode)
 	}
@@ -11516,12 +12507,23 @@ func terminalModeReplaySequence(
 	privateModes []string,
 	includeApplicationKeypad bool,
 ) []byte {
-	var replay []byte
+	replay := appendGroupedPrivateModeReplay(
+		nil,
+		window,
+		privateModes,
+		alternateScreenReplayPrivateModes,
+	)
 	for _, mode := range privateModes {
 		if groupedReplayPrivateMode(mode) {
 			continue
 		}
 		enabled, ok := window.privateModes[mode]
+		if mode == "6" && ok && window.screen != nil {
+			// DECRC restores origin mode without a DECSET, so the model knows
+			// whether it is on and the tracked flag may not. Only a window
+			// that set the mode can have it restored.
+			enabled = window.screen.originMode
+		}
 		if !ok {
 			continue
 		}
@@ -11598,6 +12600,9 @@ func appendPrivateModeReplay(replay []byte, mode string, enabled bool) []byte {
 }
 
 func groupedReplayPrivateMode(mode string) bool {
+	if containsString(alternateScreenReplayPrivateModes, mode) {
+		return true
+	}
 	for _, group := range groupedReplayPrivateModes {
 		if containsString(group, mode) {
 			return true
@@ -11732,10 +12737,12 @@ func (s *muxServer) writeAttachOutputIfActive(
 	failoverPrimaryData []byte,
 	secondaryData []byte,
 	queryData []byte,
+	clipboard kittyClipboardDelivery,
 	maxAttachSequence uint64,
 	outputGeneration uint64,
 ) {
 	if len(primaryData) == 0 {
+		s.settleKittyClipboardDelivery(windowID, clipboard.tags, nil)
 		return
 	}
 	s.attachMu.Lock()
@@ -11744,6 +12751,7 @@ func (s *muxServer) writeAttachOutputIfActive(
 	if s.activeID != windowID {
 		s.mu.Unlock()
 		s.attachMu.Unlock()
+		s.settleKittyClipboardDelivery(windowID, clipboard.tags, nil)
 		return
 	}
 	clients := make([]*attachClient, 0, len(s.attachClients))
@@ -11764,10 +12772,16 @@ func (s *muxServer) writeAttachOutputIfActive(
 			break
 		}
 	}
+	// A replay never carries clipboard packets, so output it already covered
+	// still delivers them, whole sequences that are safe after it.
+	replayed := queryData
+	if len(clipboard.packets) > 0 {
+		replayed = append(append([]byte(nil), clipboard.packets...), queryData...)
+	}
 	data := primaryData
 	if primaryClient != nil &&
 		primaryClient.suppressesReplayedOutput(windowID, outputGeneration) {
-		data = queryData
+		data = replayed
 	}
 	// Every client can answer a query, but only the ones attached before this
 	// output was produced are missing it.
@@ -11789,10 +12803,11 @@ func (s *muxServer) writeAttachOutputIfActive(
 		data,
 		fallbacks,
 		queryData,
+		clipboard.tags,
 		func(client *attachClient) ([]byte, []byte) {
 			if client.sequence > maxAttachSequence ||
 				client.suppressesReplayedOutput(windowID, outputGeneration) {
-				return queryData, nil
+				return replayed, nil
 			}
 			return failoverPrimaryData, secondaryData
 		},
@@ -11806,7 +12821,10 @@ func (s *muxServer) writeAttachOutputIfActive(
 // order; primaryClient itself is skipped) whose failover write succeeds takes
 // over, and every other client gets its secondary output. fallbackData picks
 // both per client; an empty failover means the client already holds the
-// output and counts as delivered without a write.
+// output and counts as delivered without a write. The OSC 5522 requests
+// named by clipboardTags, whose packets only the primary and failover
+// output carry, are handed to each client before its write can start, and
+// belong to the one that takes the output.
 //
 // With queries pending, the primary's write is awaited before any fallback
 // is released: the conditional query writes are queued behind gates while
@@ -11819,6 +12837,7 @@ func (s *muxServer) deliverWithQueryFallback(
 	primaryData []byte,
 	fallbacks []*attachClient,
 	queryData []byte,
+	clipboardTags []string,
 	fallbackData func(client *attachClient) (failover []byte, secondary []byte),
 ) {
 	if len(queryData) > 0 {
@@ -11832,6 +12851,7 @@ func (s *muxServer) deliverWithQueryFallback(
 		var primaryCompletion <-chan error
 		primaryQueued := false
 		if primaryClient != nil {
+			s.handKittyClipboardRequests(windowID, clipboardTags, primaryClient)
 			primaryCompletion, primaryQueued =
 				primaryClient.enqueueWrite(
 					primaryData,
@@ -11881,19 +12901,28 @@ func (s *muxServer) deliverWithQueryFallback(
 		s.attachMu.Unlock()
 		primaryDelivered := primaryQueued &&
 			primaryClient.waitForWrite(primaryCompletion)
+		var delivered *attachClient
+		if primaryDelivered {
+			delivered = primaryClient
+		}
 		for _, fallback := range gated {
 			tryFallback := !primaryDelivered
+			if tryFallback {
+				s.handKittyClipboardRequests(windowID, clipboardTags, fallback.client)
+			}
 			fallback.queryGate.deliver.Store(tryFallback)
 			close(fallback.queryGate.done)
 			if tryFallback &&
 				fallback.client.waitForWrite(fallback.queryCompletion) {
 				primaryDelivered = true
+				delivered = fallback.client
 			}
 			if fallback.secondaryOutputGate != nil {
 				fallback.secondaryOutputGate.deliver.Store(!tryFallback)
 				close(fallback.secondaryOutputGate.done)
 			}
 		}
+		s.settleKittyClipboardDelivery(windowID, clipboardTags, delivered)
 		if !primaryDelivered {
 			s.redeliverTerminalQueries(
 				windowID,
@@ -11906,6 +12935,7 @@ func (s *muxServer) deliverWithQueryFallback(
 	}
 	var deliveredPrimary *attachClient
 	if primaryClient != nil {
+		s.handKittyClipboardRequests(windowID, clipboardTags, primaryClient)
 		if _, queued := primaryClient.enqueue(primaryData, false); queued {
 			deliveredPrimary = primaryClient
 		}
@@ -11918,6 +12948,7 @@ func (s *muxServer) deliverWithQueryFallback(
 			continue
 		}
 		failover, _ := fallbackData(client)
+		s.handKittyClipboardRequests(windowID, clipboardTags, client)
 		if _, queued := client.enqueue(failover, false); queued {
 			deliveredPrimary = client
 		}
@@ -11931,6 +12962,7 @@ func (s *muxServer) deliverWithQueryFallback(
 		}
 	}
 	s.attachMu.Unlock()
+	s.settleKittyClipboardDelivery(windowID, clipboardTags, deliveredPrimary)
 }
 
 func (s *muxServer) enqueuePrimaryAttachLocked(
@@ -12782,11 +13814,21 @@ func (s *muxServer) writeWindowDataLocked(
 		s.mu.Unlock()
 		return nil, fmt.Errorf("window %q not found", window.id)
 	}
+	var profile *wheelAccelerationProfile
+	if response || bracketedPaste {
+		profile = window.wheelAccelerationProfileLocked()
+	} else {
+		var present bool
+		if profile, present = s.awaitWheelProfileLocked(window, data); !present {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("window %q not found", window.id)
+		}
+	}
 	win32InputMode := window.win32InputMode
-	profile := window.wheelAccelerationProfileLocked()
 	if window.wheelGovernor.profile != profile {
 		window.wheelGovernor.reset(profile)
 	}
+	window.wheelGovernor.paneRows = window.screenHeight
 	if !response {
 		if bracketedPaste {
 			// A paste must reach the pty untouched; treat it as opaque so the
@@ -13090,7 +14132,10 @@ func (w *muxWindow) screenLocked() *terminalScreen {
 		// A window that already holds retained output (restored from a
 		// snapshot, or created before the model existed) is bootstrapped from
 		// that history, skipping any control sequence eviction left open.
+		// It starts in the grapheme clustering mode in force where that
+		// history does, as a replay of it does (graphemeModeBeforeHistoryLocked).
 		if len(w.history) > 0 {
+			w.screen.StartGraphemeCluster(!w.historyGraphemeClusterOff)
 			start := advanceReplayStartToTerminalGround(
 				w.history,
 				0,
@@ -13143,6 +14188,9 @@ func (w *muxWindow) appendHistoryReportingCursorLocked(
 		report, ok := screen.CursorPositionReport()
 		if !ok {
 			break
+		}
+		if string(chunk[query[0]:query[1]]) == extendedCursorPositionQuery {
+			report = extendedCursorPositionReport(report)
 		}
 		reports = append(reports, report...)
 		answered++
@@ -13848,17 +14896,27 @@ func (w *muxWindow) terminalOutputIsGroundLocked() bool {
 }
 
 func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []byte) []byte {
+	utf8Remaining := w.attachUtf8Remaining
+	if w.kittyClipboard.discarding {
+		// What follows the dropped packet starts afresh.
+		utf8Remaining = 0
+	}
+	chunk = w.skipDiscardedKittyClipboardOscLocked(chunk)
 	if len(chunk) == 0 && len(w.attachOscBuffer) == 0 {
+		w.attachUtf8Remaining = utf8Remaining
 		return chunk
 	}
 	data := chunk
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(chunk, utf8Remaining)
 	if len(w.attachOscBuffer) > 0 {
 		combined := make([]byte, 0, len(w.attachOscBuffer)+len(chunk))
 		combined = append(combined, w.attachOscBuffer...)
 		combined = append(combined, chunk...)
 		data = combined
+		leadingUtf8Prefix = 0
 		w.attachOscBuffer = nil
 	}
+	w.attachUtf8Remaining = nextQueryUtf8Remaining(data, utf8Remaining, leadingUtf8Prefix)
 
 	var responses map[string][]byte
 	answerable := func(queryKeys []string) bool {
@@ -13882,28 +14940,80 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 	var output []byte
 	copyStart := 0
 	for i := 0; i < len(data); {
-		if data[i] != '\x1b' {
+		csiParams := -1
+		payloadStart := -1
+		switch {
+		case data[i] == 0x9b || data[i] == 0x9d:
+			// The C1 forms of CSI and OSC, unless the byte continues a
+			// character.
+			if i >= leadingUtf8Prefix && !isUtf8ContinuationAt(data, i) {
+				if data[i] == 0x9b {
+					csiParams = i + 1
+				} else {
+					payloadStart = i + 1
+				}
+			}
+		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == '[':
+			csiParams = i + 2
+		case data[i] == '\x1b' && i+1 < len(data) && data[i+1] == ']':
+			payloadStart = i + 2
+		}
+		if csiParams >= 0 {
+			// Visibility reports belong to MonkeyMux (terminal_visibility.go):
+			// the mode, its query and its DECRQM never reach the terminal,
+			// in either CSI form.
+			end := csiSequenceEnd(data, csiParams)
+			if end < 0 {
+				if visibilityCsiMayFollow(data[i:]) &&
+					w.storeAttachPartialOscLocked(data[i:]) {
+					if output == nil {
+						return data[:i]
+					}
+					output = append(output, data[copyStart:i]...)
+					return output
+				}
+				i++
+				continue
+			}
+			if replacement, ok := visibilityCsiReplacement(data[i : end+1]); ok {
+				if output == nil {
+					output = make([]byte, 0, len(data))
+				}
+				output = append(output, data[copyStart:i]...)
+				output = append(output, replacement...)
+				copyStart = end + 1
+				i = end + 1
+				continue
+			}
 			i++
 			continue
 		}
-		if i+1 >= len(data) {
-			if w.storeAttachPartialOscLocked(data[i:]) {
+		if payloadStart < 0 {
+			if data[i] == '\x1b' && i+1 >= len(data) && w.storeAttachPartialOscLocked(data[i:]) {
 				if output == nil {
 					return data[:i]
 				}
 				output = append(output, data[copyStart:i]...)
 				return output
 			}
-			break
-		}
-		if data[i+1] != ']' {
 			i++
 			continue
 		}
-		payloadStart := i + 2
+		if resume, cancelled := kittyClipboardOscCancelled(data[payloadStart:]); cancelled {
+			// The terminal abandons the packet there and goes on with what
+			// follows as ordinary output.
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			copyStart = payloadStart + resume
+			i = copyStart
+			continue
+		}
 		payloadEnd, terminatorLength, ok := findOscTerminator(data[payloadStart:])
 		if !ok {
-			if w.storeAttachPartialOscLocked(data[i:]) {
+			if w.storeAttachPartialOscLocked(data[i:]) ||
+				w.discardKittyClipboardOscLocked(data[payloadStart:]) {
 				if output == nil {
 					return data[:i]
 				}
@@ -13914,6 +15024,19 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 		}
 		sequenceEnd := payloadStart + payloadEnd + terminatorLength
 		payload := data[payloadStart : payloadStart+payloadEnd]
+		if isKittyClipboardOscPayload(payload) {
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			output = append(output, w.forwardKittyClipboardLocked(
+				payload,
+				data[payloadStart+payloadEnd:sequenceEnd],
+			)...)
+			copyStart = sequenceEnd
+			i = sequenceEnd
+			continue
+		}
 		privatePiIdentity := bytes.HasPrefix(payload, []byte("1337;MonkeyMuxPi=")) ||
 			bytes.HasPrefix(payload, []byte("1337;"+monkeyMuxAgentIdentityOSCPrefix))
 		queryKeys := themeQueryKeysFromOscPayload(string(payload))
@@ -13942,7 +15065,7 @@ func (w *muxWindow) stripLocallyAnsweredThemeQueriesLocked(chunk []byte, hint []
 }
 
 func (w *muxWindow) storeAttachPartialOscLocked(data []byte) bool {
-	if len(data) > oscBufferLimitBytes {
+	if len(data) > attachPartialOscLimitBytes(data) {
 		w.attachOscBuffer = nil
 		return false
 	}
@@ -14002,11 +15125,32 @@ func stripTerminalQueriesFromReplay(data []byte) []byte {
 			i++
 			continue
 		}
+		if replacement, ok := visibilityCsiReplacement(data[i:sequenceEnd]); ok {
+			if output == nil {
+				output = make([]byte, 0, len(data))
+			}
+			output = append(output, data[copyStart:i]...)
+			output = append(output, replacement...)
+			copyStart = sequenceEnd
+			i = sequenceEnd
+			continue
+		}
 		shouldStrip := isQuery ||
 			isReplayUnsafeOscNotificationSequence(data[i:sequenceEnd]) ||
+			isKittyClipboardOscSequence(data[i:sequenceEnd]) ||
 			((lastReset < 0 || i < lastReset) &&
 				isKeyboardModeSequence(data[i:sequenceEnd]))
 		if !shouldStrip {
+			if silenced := silencedKittyReplayCommand(
+				data[i:sequenceEnd],
+			); silenced != nil {
+				if output == nil {
+					output = make([]byte, 0, len(data)+4)
+				}
+				output = append(output, data[copyStart:i]...)
+				output = append(output, silenced...)
+				copyStart = sequenceEnd
+			}
 			i = sequenceEnd
 			continue
 		}
@@ -14154,6 +15298,9 @@ func terminalResponseSequenceExpectationCount(sequence []byte) int {
 // resize and draw nothing until the answer arrives.
 const cursorPositionQuery = "\x1b[6n"
 
+// extendedCursorPositionQuery is DECXCPR, answered as CSI ? row ; col R.
+const extendedCursorPositionQuery = "\x1b[?6n"
+
 // redrawHeldCursorQueriesLocked returns the byte ranges of the cursor position
 // queries in chunk that MonkeyMux answers itself from the screen model, because
 // a redraw pause is holding this window's output from the attached terminal.
@@ -14198,7 +15345,8 @@ func (w *muxWindow) redrawHeldCursorQueriesLocked(chunk []byte) [][2]int {
 			continue
 		}
 		if isQuery {
-			if string(chunk[i:end]) != cursorPositionQuery {
+			if query := string(chunk[i:end]); query != cursorPositionQuery &&
+				query != extendedCursorPositionQuery {
 				break
 			}
 			queries = append(queries, [2]int{i, end})
@@ -14296,6 +15444,11 @@ func (w *muxWindow) secondaryAttachOutputLocked(chunk []byte) []byte {
 			}
 			output = append(output, data[copyStart:i]...)
 			copyStart = sequenceEnd
+		} else if isKittyClipboardOscSequence(data[i:sequenceEnd]) {
+			// Clipboard requests go to the primary client alone, which
+			// answers them.
+			output = append(output, data[copyStart:i]...)
+			copyStart = sequenceEnd
 		}
 		i = sequenceEnd
 	}
@@ -14325,8 +15478,15 @@ type kittyGraphicsEvent struct {
 	buf         []byte
 	animation   bool
 	delete      bool
-	clearCache  bool
 	mappingOnly bool
+	// control holds the keys of a delete or a placement event; placement
+	// marks a display command, or the relative placement an a=T root makes.
+	control   map[string]string
+	placement bool
+	// offset and end are where the command starts and ends in the scanned
+	// data.
+	offset int
+	end    int
 }
 
 // scanKittyTransmissions parses complete Kitty graphics events from the front of
@@ -14370,26 +15530,39 @@ func scanKittyTransmissions(
 			return events, i
 		}
 		if isDelete {
-			selector := parseKittyControl(kittyControl(data, i, end))["d"]
-			clearCache := selector == "A" ||
-				selector == "C" ||
-				selector == "P" ||
-				selector == "X" ||
-				selector == "Y"
-			if id != "" || imageNumber != "" || clearCache {
-				events = append(events, kittyGraphicsEvent{
-					id: id, imageNumber: imageNumber, delete: true, clearCache: clearCache,
-				})
-			}
+			args := parseKittyControl(kittyControl(data, i, end))
+			events = append(events, kittyGraphicsEvent{
+				id: id, imageNumber: imageNumber, delete: true, control: args,
+				offset: i, end: end,
+			})
 		} else if buf != nil {
+			args := parseKittyControl(kittyControl(data, i, kittyApcEnd(data, i)))
 			events = append(events, kittyGraphicsEvent{
 				id: id, imageNumber: imageNumber, buf: buf, animation: isAnimation,
+				control: args, offset: i, end: end,
 			})
+			if !isAnimation {
+				// An a=T root placed relative to a parent replays as an
+				// a=p after the image, since the root itself replays as a=t.
+				// Only a root with an explicit image id can be placed again
+				// by id.
+				if args["a"] == "T" && kittyNonZero(args["P"]) &&
+					!kittyNonZero(args["U"]) && kittyIDValue(args["i"]) != "" {
+					events = append(events, kittyGraphicsEvent{
+						control: args, placement: true, offset: i,
+					})
+				}
+			}
 		} else {
 			args := parseKittyControl(kittyControl(data, i, end))
 			if args["a"] == "p" && args["i"] != "" && args["I"] != "" {
 				events = append(events, kittyGraphicsEvent{
 					id: args["i"], imageNumber: args["I"], mappingOnly: true,
+					offset: i,
+				})
+			} else if args["a"] == "p" {
+				events = append(events, kittyGraphicsEvent{
+					control: args, placement: true, offset: i,
 				})
 			}
 		}
@@ -14428,16 +15601,9 @@ func assembleKittyTransmission(
 	}
 	switch action {
 	case "d":
-		selector := args["d"]
-		freeImageData := selector == "A" ||
-			selector == "C" ||
-			selector == "I" ||
-			selector == "N" ||
-			selector == "P" ||
-			selector == "X" ||
-			selector == "Y"
-		return apcEnd, nil, args["i"], args["I"],
-			freeImageData, false, true
+		// Every delete reaches the retained placements; which ones also free
+		// retained image data is decided when the event is applied.
+		return apcEnd, nil, args["i"], args["I"], true, false, true
 	case "t", "T":
 		// An image transmission; assemble continuation chunks below.
 		buf = append(buf, rewriteKittyReplayCommand(data[start:apcEnd], true)...)
@@ -14517,7 +15683,7 @@ func (w *muxWindow) observeKittyGraphicsLocked(chunk []byte) bool {
 	}
 
 	events, consumed := scanKittyTransmissions(data)
-	changed := w.applyKittyGraphicsEventsLocked(events)
+	changed := w.applyKittyGraphicsEventsLocked(events, data)
 
 	remainder := data[consumed:]
 	if len(remainder) > maxKittyGraphicsPendingBytes {
@@ -14528,6 +15694,7 @@ func (w *muxWindow) observeKittyGraphicsLocked(chunk []byte) bool {
 	}
 	if len(remainder) == 0 {
 		w.clearKittyGraphicsPendingLocked()
+		w.kittyTracking.modeCarry = kittyPartialModeChange(data)
 		return changed
 	}
 	w.kittyGraphicsPending = append(w.kittyGraphicsPending[:0], remainder...)
@@ -14635,21 +15802,32 @@ func resyncKittyGraphicsData(data []byte, scan int) []byte {
 
 func (w *muxWindow) applyKittyGraphicsEventsLocked(
 	events []kittyGraphicsEvent,
+	data []byte,
 ) bool {
 	changed := false
+	screen := w.newKittyScreenTrackerLocked(data)
+	defer screen.finish()
+	// data ends with the output the screen model read last, when it has one.
+	var modelOffset int64
+	if w.screen != nil {
+		modelOffset = w.screen.Written() - int64(len(data))
+	}
 	for _, event := range events {
+		if event.placement {
+			if w.observeKittyPlacementLocked(
+				event.control,
+				screen.at(event.offset),
+			) {
+				changed = true
+			}
+			continue
+		}
 		if event.delete {
-			if event.clearCache {
-				if w.clearKittyImagesLocked() {
-					changed = true
-				}
-				continue
-			}
-			id := event.id
-			if id == "" && event.imageNumber != "" {
-				id = w.kittyImageNumberToID[event.imageNumber]
-			}
-			if w.removeKittyImageLocked(id) {
+			if w.applyKittyImageDeleteLocked(
+				event,
+				screen.at(event.offset),
+				w.kittyScreenAtLocked(data, event.offset, event.end),
+			) {
 				changed = true
 			}
 			continue
@@ -14700,7 +15878,24 @@ func (w *muxWindow) applyKittyGraphicsEventsLocked(
 			animation := rewriteKittyImageReferenceToID(event.buf, id)
 			changed = w.appendKittyImageAnimationLocked(id, animation) || changed
 		} else {
+			// A retransmission replaces the image and every placement of it.
+			w.dropKittyImagePlacementsLocked(id)
+			w.noteKittyRootScreenLocked(id, screen.at(event.offset))
 			w.storeKittyImageLocked(id, event.buf)
+			if w.screen != nil && w.kittyImages[id] != nil {
+				if w.kittyImageEnd == nil {
+					w.kittyImageEnd = map[string]int64{}
+				}
+				w.kittyImageEnd[id] = modelOffset + int64(event.end)
+			}
+			if event.control["a"] == "T" && !kittyNonZero(event.control["U"]) &&
+				!kittyNonZero(event.control["P"]) {
+				w.noteKittyPhysicalPlacementLocked(
+					id,
+					kittyIDValue(event.control["p"]),
+					screen.at(event.offset),
+				)
+			}
 			changed = true
 		}
 	}
@@ -14754,10 +15949,12 @@ func (w *muxWindow) removeKittyImageLocked(id string) bool {
 	if _, ok := w.kittyImages[id]; !ok {
 		return false
 	}
+	w.dropKittyImagePlacementsLocked(id)
 	delete(w.kittyImages, id)
 	delete(w.kittyImageAnimations, id)
 	delete(w.kittyImageSeq, id)
 	delete(w.kittyImageToken, id)
+	delete(w.kittyImageEnd, id)
 	for number, mappedID := range w.kittyImageNumberToID {
 		if mappedID == id {
 			delete(w.kittyImageNumberToID, number)
@@ -14806,6 +16003,10 @@ func (w *muxWindow) clearKittyImagesLocked() bool {
 	w.kittyImageOrder = nil
 	w.kittyImageSeq = nil
 	w.kittyImageToken = nil
+	w.kittyImageEnd = nil
+	w.kittyPlacements = nil
+	w.kittyTracking.physical = nil
+	w.kittyTracking.rootAlt = nil
 	return changed
 }
 
@@ -14817,12 +16018,7 @@ func (w *muxWindow) enforceKittyImageCapsLocked() {
 	for len(w.kittyImageOrder) > 0 &&
 		(len(w.kittyImageOrder) > maxRetainedKittyImages ||
 			(total > maxRetainedKittyImageBytes && len(w.kittyImageOrder) > 1)) {
-		oldest := w.kittyImageOrder[0]
-		for _, id := range w.kittyImageOrder[1:] {
-			if w.kittyImageSeq[id] < w.kittyImageSeq[oldest] {
-				oldest = id
-			}
-		}
+		oldest := w.kittyEvictionCandidateLocked()
 		total -= len(w.kittyImages[oldest]) + len(w.kittyImageAnimations[oldest])
 		w.removeKittyImageLocked(oldest)
 	}
@@ -14867,17 +16063,23 @@ func (s *muxServer) enforceGlobalKittyImageBudgetLocked() {
 		var victimWin *muxWindow
 		var victimID string
 		var victimSeq uint64
+		victimTransient := false
 		found := false
 		for _, w := range s.windows {
 			for id, seq := range w.kittyImageSeq {
-				if _, ok := w.kittyImages[id]; !ok {
+				root, ok := w.kittyImages[id]
+				if !ok {
 					continue
 				}
-				if !found || seq < victimSeq {
+				// Transient images (Kitty usage hint N=1) go first.
+				transient := kittyRootTransient(root)
+				if !found || (transient && !victimTransient) ||
+					(transient == victimTransient && seq < victimSeq) {
 					found = true
 					victimSeq = seq
 					victimWin = w
 					victimID = id
+					victimTransient = transient
 				}
 			}
 		}
@@ -15000,12 +16202,37 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 	clientHas map[string]uint32,
 	budget int,
 ) []byte {
-	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
-		return nil
+	// A frame painted from the model places its direct placements again; a
+	// history replay carries them in its own bytes instead.
+	var direct []string
+	if w != nil && w.usesForegroundRedrawReplayLocked() {
+		direct = w.screenLocked().KittyPlacementImageIDs()
 	}
-	wanted := w.screenLocked().PlaceholderImageIDs()
+	out, _ := w.kittyFrameImageReplayLocked(replayed, clientHas, budget, direct)
+	return out
+}
+
+// kittyFrameImageReplayLocked is kittyPlaceholderImageReplayLocked for a
+// frame whose direct placements show the images direct, and returns the ids
+// it sends too.
+func (w *muxWindow) kittyFrameImageReplayLocked(
+	replayed map[string]struct{},
+	clientHas map[string]uint32,
+	budget int,
+	direct []string,
+) ([]byte, []string) {
+	if w == nil || budget <= 0 || len(w.kittyImages) == 0 {
+		return nil, nil
+	}
+	// The images kept virtual and relative placements show come back too, or
+	// the placements replayed after them would have nothing to place.
+	wanted := append(
+		w.screenLocked().PlaceholderImageIDs(),
+		w.kittyPlacementImageIDsLocked()...,
+	)
+	wanted = append(wanted, direct...)
 	if len(wanted) == 0 {
-		return nil
+		return nil, nil
 	}
 	want := make(map[string]struct{}, len(wanted))
 	for _, id := range wanted {
@@ -15029,10 +16256,9 @@ func (w *muxWindow) kittyPlaceholderImageReplayLocked(
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		return nil
+		return nil, nil
 	}
-	out, _ := w.kittyImageTransmissionsForBoundedLocked(ids, 0, budget)
-	return out
+	return w.kittyImageTransmissionsForBoundedLocked(ids, 0, budget)
 }
 
 // kittyPlaceholderImageFollowUpLocked returns the store-only transmissions to
@@ -15147,6 +16373,22 @@ func (w *muxWindow) kittyImageTransmissionsForBoundedLocked(
 	maxImages int,
 	budget int,
 ) ([]byte, []string) {
+	return w.kittyImageTransmissionsOntoLocked(
+		ids,
+		maxImages,
+		budget,
+		w.alternateScreenModeActiveLocked(),
+	)
+}
+
+// kittyImageTransmissionsOntoLocked is kittyImageTransmissionsForBoundedLocked
+// for transmissions sent while the main screen or the alternate one shows.
+func (w *muxWindow) kittyImageTransmissionsOntoLocked(
+	ids []string,
+	maxImages int,
+	budget int,
+	alt bool,
+) ([]byte, []string) {
 	if len(ids) == 0 || budget <= 0 || len(w.kittyImages) == 0 {
 		return nil, nil
 	}
@@ -15167,7 +16409,7 @@ func (w *muxWindow) kittyImageTransmissionsForBoundedLocked(
 		if !ok {
 			continue
 		}
-		buf = w.kittyImageRootReplayLocked(id)
+		buf = w.kittyImageRootReplayOnLocked(id, alt)
 		mappings := w.kittyImageNumberReplayLocked(id)
 		animation := w.kittyImageAnimations[id]
 		imageBytes := len(buf) + len(mappings) + len(animation)
@@ -15187,6 +16429,12 @@ func (w *muxWindow) kittyImageTransmissionsForBoundedLocked(
 }
 
 func (w *muxWindow) kittyImageRootReplayLocked(id string) []byte {
+	return w.kittyImageRootReplayOnLocked(id, w.alternateScreenModeActiveLocked())
+}
+
+// kittyImageRootReplayOnLocked is kittyImageRootReplayLocked for a root sent
+// while the main screen or the alternate one shows.
+func (w *muxWindow) kittyImageRootReplayOnLocked(id string, alt bool) []byte {
 	buf := w.kittyImages[id]
 	if len(buf) == 0 {
 		return buf
@@ -15195,7 +16443,15 @@ func (w *muxWindow) kittyImageRootReplayLocked(id string) []byte {
 	if apcEnd < 0 {
 		return buf
 	}
-	number := parseKittyControl(kittyControl(buf, 0, apcEnd))["I"]
+	control := parseKittyControl(kittyControl(buf, 0, apcEnd))
+	// The client keeps placements per screen, and the root is replayed onto
+	// the screen alt names: the virtual placement it made for itself goes
+	// only onto the screen it was made on (kittyRootIsVirtual). On the other
+	// the root only stores the image.
+	if kittyNonZero(control["U"]) && w.kittyTracking.rootAlt[id] != alt {
+		buf = withoutKittyControlKey(buf, "U")
+	}
+	number := control["I"]
 	if number == "" || w.kittyImageNumberToID[number] == id {
 		return buf
 	}
@@ -15399,14 +16655,11 @@ func parseKittyControl(control string) map[string]string {
 // for roots, downgrades a=T to store-only a=t so replay never draws or moves
 // the cursor before the foreground app redraws its placements.
 func rewriteKittyReplayCommand(seq []byte, storeOnly bool) []byte {
-	if len(seq) < 5 {
+	controlStart, controlEnd, ok := kittyCommandControl(seq)
+	if !ok {
 		return append([]byte(nil), seq...)
 	}
-	controlEnd := len(seq) - 2 // before ST
-	if semi := bytes.IndexByte(seq, ';'); semi >= 0 && semi < controlEnd {
-		controlEnd = semi
-	}
-	parts := strings.Split(string(seq[3:controlEnd]), ",")
+	parts := strings.Split(string(seq[controlStart:controlEnd]), ",")
 	foundQuiet := false
 	for index, part := range parts {
 		key, _, _ := strings.Cut(part, "=")
@@ -15424,7 +16677,7 @@ func rewriteKittyReplayCommand(seq []byte, storeOnly bool) []byte {
 		parts = append(parts, "q=2")
 	}
 	out := make([]byte, 0, len(seq)+4)
-	out = append(out, seq[:3]...)
+	out = append(out, seq[:controlStart]...)
 	out = append(out, strings.Join(parts, ",")...)
 	out = append(out, seq[controlEnd:]...)
 	return out
@@ -16094,7 +17347,11 @@ func trailingUtf8ContinuationCount(data []byte) int {
 	for index := len(data) - 1; index >= 0 && len(data)-index <= 4; index-- {
 		remaining := utf8ContinuationCount(data[index])
 		if remaining == 0 {
-			continue
+			if data[index]&0xc0 == 0x80 {
+				continue
+			}
+			// Any other byte ends a character before it, valid or not.
+			return 0
 		}
 		available := len(data) - index - 1
 		if available < remaining {
@@ -16192,9 +17449,25 @@ func isTerminalResponseKitty(payload []byte) bool {
 		return false
 	}
 	response := payload[separator+1:]
-	return bytes.HasPrefix(response, []byte("OK")) ||
-		bytes.HasPrefix(response, []byte("ERROR")) ||
-		bytes.HasPrefix(response, []byte("ENOTSUP"))
+	return bytes.HasPrefix(response, []byte("OK")) || isKittyErrorCode(response)
+}
+
+// isKittyErrorCode reports a Kitty graphics error reply: an errno-style code
+// (E and capitals, such as EINVAL, ENOENT or ENOPARENT), then the end or a
+// colon and its message.
+func isKittyErrorCode(response []byte) bool {
+	if len(response) < 2 || response[0] != 'E' {
+		return false
+	}
+	for _, b := range response[1:] {
+		if b == ':' {
+			return true
+		}
+		if b < 'A' || b > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func isReplayUnsafeOscQuery(payload []byte) bool {
@@ -16808,67 +18081,98 @@ func leadingShellToken(value string) string {
 	return fields[0]
 }
 
+// observeTerminalModesLocked tracks the modes a replay restores from a chunk
+// of the window's output. Called before observeTerminalOutputStateLocked
+// takes in the chunk, so terminalOutputUtf8Remaining tells whether it starts
+// inside a character.
 func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
 	data := chunk
+	leadingUtf8Prefix := leadingUtf8ContinuationPrefix(chunk, w.terminalOutputUtf8Remaining)
 	if len(w.csiBuffer) > 0 {
 		combined := make([]byte, 0, len(w.csiBuffer)+len(chunk))
 		combined = append(combined, w.csiBuffer...)
 		combined = append(combined, chunk...)
 		data = combined
+		leadingUtf8Prefix = 0
 		w.csiBuffer = nil
 	}
 
-	for len(data) > 0 {
-		escapeIndex := bytes.IndexByte(data, '\x1b')
-		if escapeIndex < 0 {
+	for index := 0; index < len(data); index++ {
+		paramsStart := index + 1
+		eightBit := false
+		switch {
+		case data[index] == 0x9b:
+			if index < leadingUtf8Prefix || isUtf8ContinuationAt(data, index) {
+				continue
+			}
+			eightBit = true
+		case data[index] != '\x1b':
+			continue
+		case index+1 >= len(data):
+			w.storePartialCsiLocked(data[index:])
 			return
-		}
-		if escapeIndex+1 >= len(data) {
-			w.storePartialCsiLocked(data[escapeIndex:])
-			return
-		}
-		switch data[escapeIndex+1] {
-		case '[':
-		case 'c':
-			w.resetTerminalModesLocked(true)
-			data = data[escapeIndex+2:]
-			continue
-		case '=':
-			w.applicationKeypadEnabled = true
-			w.applicationKeypadKnown = true
-			data = data[escapeIndex+2:]
-			continue
-		case '>':
-			w.applicationKeypadEnabled = false
-			w.applicationKeypadKnown = true
-			data = data[escapeIndex+2:]
-			continue
 		default:
-			data = data[escapeIndex+1:]
-			continue
+			switch data[index+1] {
+			case '[':
+				paramsStart = index + 2
+			case 'c':
+				w.resetTerminalModesLocked(true)
+				index++
+				continue
+			case '=':
+				w.applicationKeypadEnabled = true
+				w.applicationKeypadKnown = true
+				index++
+				continue
+			case '>':
+				w.applicationKeypadEnabled = false
+				w.applicationKeypadKnown = true
+				index++
+				continue
+			default:
+				continue
+			}
 		}
 
-		end := csiSequenceEnd(data, escapeIndex+2)
+		end := csiSequenceEnd(data, paramsStart)
 		if end < 0 {
-			w.storePartialCsiLocked(data[escapeIndex:])
+			w.storePartialCsiLocked(data[index:])
 			return
 		}
 		final := data[end]
+		params := string(data[paramsStart:end])
+		index = end
+		switch final {
+		case 'n', 'p':
+			w.observeVisibilityCsiLocked(params, final)
+		}
+		if eightBit {
+			// A terminal that decodes UTF-8 does not read a raw 0x9b as CSI,
+			// so it changes none of the attached terminal's modes. The
+			// visibility mode is MonkeyMux's own, and its parsers do.
+			if (final == 'h' || final == 'l') && strings.HasPrefix(params, "?") {
+				for _, mode := range csiModeParams(params[1:]) {
+					if isVisibilityReportsMode(mode) {
+						w.setVisibilityReportsLocked(final == 'h')
+					}
+				}
+			}
+			continue
+		}
 		switch final {
 		case 'u':
-			w.observeKittyKeyboardLocked(string(data[escapeIndex+2 : end]))
+			w.observeKittyKeyboardLocked(params)
 		case 'm':
-			w.observeModifyOtherKeysLocked(string(data[escapeIndex+2 : end]))
+			w.observeModifyOtherKeysLocked(params)
 		case 'p':
-			if string(data[escapeIndex+2:end]) == "!" {
+			if params == "!" {
 				w.resetTerminalModesLocked(false)
 			}
 		}
 		if final == 'h' || final == 'l' {
-			params := string(data[escapeIndex+2 : end])
 			enabled := final == 'h'
 			if strings.HasPrefix(params, "?") {
 				for _, mode := range csiModeParams(strings.TrimPrefix(params, "?")) {
@@ -16883,7 +18187,6 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 				}
 			}
 		}
-		data = data[end+1:]
 	}
 }
 
@@ -16892,18 +18195,20 @@ func (w *muxWindow) observeTerminalModesLocked(chunk []byte) {
 // so the next replay does not re-enable what the terminal already reset.
 // DECSTR returns IRM, DECOM, DECAWM, DECCKM, DECKPAM, DECTCEM, bracketed paste
 // and focus reporting to their power-up values; RIS also leaves the alternate
-// screen and resets mouse reporting and the keyboard encodings. Neither
-// touches colour-scheme updates (2031), which the client keeps outside its
-// terminal state, or ConPTY's win32-input-mode.
+// screen and resets mouse reporting, the keyboard encodings, DECBKM, reverse
+// video, cursor blink and visibility reports, and turns grapheme clustering
+// (2027) back on. Neither touches colour-scheme updates (2031), which the
+// client keeps outside its terminal state, or ConPTY's win32-input-mode.
 func (w *muxWindow) resetTerminalModesLocked(full bool) {
 	modes := []string{"1", "6", "7", "1004", "2004"}
 	if full {
-		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049")
+		modes = append(modes, "1000", "1002", "1003", "1006", "1007", "1047", "1049", "67", "5", "12", "5522", "2027")
 		w.resetKeyboardModesLocked()
+		w.resetVisibilityReportsLocked()
 	}
 	for _, mode := range modes {
 		if _, ok := w.privateModes[mode]; ok {
-			w.setPrivateModeLocked(mode, mode == "7")
+			w.setPrivateModeLocked(mode, mode == "7" || mode == "2027")
 		}
 	}
 	w.setPrivateModeLocked("25", true)
@@ -17073,6 +18378,10 @@ func (w *muxWindow) storePartialPendingTerminalQueryLocked(data []byte) {
 }
 
 func (w *muxWindow) setPrivateModeLocked(mode string, enabled bool) {
+	if isVisibilityReportsMode(mode) {
+		w.setVisibilityReportsLocked(enabled)
+		return
+	}
 	if mode == "25" {
 		w.cursorVisible = enabled
 		w.cursorVisibilityKnown = true
@@ -17208,10 +18517,10 @@ func (w *muxWindow) observeTerminalMetadataLocked(chunk []byte) []string {
 			return observedThemeQueries
 		}
 		payload := data[payloadStart : payloadStart+payloadEnd]
-		// MonkeyMux answers 7-bit OSC 7501 queries (C1 ones are left for the
-		// attached terminal), and the asker becomes the window's reporter.
-		// Noted here, in byte order with RIS and the reports around it.
-		if payloadStart-sequenceStart == 2 && isProgramStatusQueryPayload(payload) {
+		// MonkeyMux answers OSC 7501 queries in either form, and the asker
+		// becomes the window's reporter. Noted here, in byte order with RIS
+		// and the reports around it.
+		if isProgramStatusQueryPayload(payload) {
 			w.noteProgramStatusReporterLocked()
 		}
 		observedThemeQueries = appendThemeQueryKeys(
@@ -17785,10 +19094,19 @@ func (s *muxServer) beginShutdownLocked(flushAttach bool) func() {
 		// Codex gets its separate graceful lock-release deadline. Other agents
 		// still need forced cleanup when they ignore the initial terminal hangup.
 		killSurvivingWindowProcesses(otherWindows, foregroundGroups, windowHangupGrace)
+		// Bridges stop independently, and confirming that one already exited
+		// takes up to a retry window, so stop them in parallel: shutdown then
+		// costs the slowest bridge, not the sum of all of them.
 		for _, window := range windows {
-			if window.nativeAcpBridgeID != "" {
-				_ = stopNativeAcpBridgeForWindow(window.nativeAcpBridgeID)
+			bridgeID := window.nativeAcpBridgeID
+			if bridgeID == "" {
+				continue
 			}
+			teardowns.Add(1)
+			go func() {
+				defer teardowns.Done()
+				_ = stopNativeAcpBridgeForWindow(bridgeID)
+			}()
 		}
 		teardowns.Wait()
 		// Closing the ptys ends the reader goroutines and the hangup above ends the
@@ -18560,13 +19878,47 @@ func sendResize(session string, clientID string, width int, height int) {
 	_ = enc.Encode(controlMessage{Role: "control", Session: session})
 	_ = dec.Decode(&controlResponse{})
 	_ = dec.Decode(&controlResponse{})
+	cellWidth, cellHeight := terminalCellPixelSize()
 	_ = enc.Encode(controlMessage{
-		ID:       strconv.FormatInt(time.Now().UnixNano(), 10),
-		Type:     "resize",
-		ClientID: clientID,
-		Width:    width,
-		Height:   height,
-		Session:  session,
+		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+		Type:       "resize",
+		ClientID:   clientID,
+		Width:      width,
+		Height:     height,
+		CellWidth:  cellWidth,
+		CellHeight: cellHeight,
+		Session:    session,
+	})
+}
+
+// sendCellSize reports this client terminal's cell size in pixels. A server
+// older than cell_size answers with an error, which is not read.
+func sendCellSize(
+	session string,
+	clientID string,
+	token string,
+	width int,
+	height int,
+) {
+	conn, err := dialSession(session)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(socketTimeout))
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+	_ = enc.Encode(controlMessage{Role: "control", Session: session})
+	_ = dec.Decode(&controlResponse{})
+	_ = dec.Decode(&controlResponse{})
+	_ = enc.Encode(controlMessage{
+		ID:         strconv.FormatInt(time.Now().UnixNano(), 10),
+		Type:       "cell_size",
+		ClientID:   clientID,
+		CellToken:  token,
+		CellWidth:  width,
+		CellHeight: height,
+		Session:    session,
 	})
 }
 

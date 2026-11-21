@@ -29,6 +29,19 @@ void main() {
       expect(terminalCellEndColumn(terminal.buffer.lines[0], 1), 3);
       expect(terminalCellEndColumn(terminal.buffer.lines[0], 4), 5);
     });
+
+    test('keeps a grapheme cluster whole and in its cell', () {
+      // e + combining acute (1 cell), a family ZWJ sequence (2 cells), x.
+      final terminal = Terminal()
+        ..resize(20, 2)
+        ..write('é👨‍👩‍👧x');
+      final line = terminal.buffer.lines[0];
+      final row = terminalRowTextWithColumns(line);
+      expect(row.text, 'é👨‍👩‍👧x');
+      expect(row.text, line.getText());
+      // é: two code units in cell 0; the family: eight code units in cell 1.
+      expect(row.columns, [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 3]);
+    });
   });
 
   group('readTerminalTextLines', () {

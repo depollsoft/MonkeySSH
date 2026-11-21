@@ -21,6 +21,12 @@ const terminalCapabilityHintTerminalVersionKey = 'xtversion';
 /// Hint key for the device status report reply (`CSI 5 n`).
 const terminalCapabilityHintDeviceStatusKey = 'dsr';
 
+/// Hint key whose presence tells MonkeyMux this client answers the kitty
+/// clipboard protocol (OSC 5522), so the server forwards its windows'
+/// clipboard requests here instead of refusing them. The reply is the DECRQM
+/// report for paste events mode 5522 (recognized, reset).
+const terminalCapabilityHintKittyClipboardKey = 'osc5522';
+
 /// Builds the terminal capability hint sent to MonkeyMux attach/control
 /// channels.
 ///
@@ -47,6 +53,7 @@ String buildTerminalCapabilityHintReports() {
         .tertiaryDeviceAttributes(),
     terminalCapabilityHintTerminalVersionKey: emitter.terminalVersion(),
     terminalCapabilityHintDeviceStatusKey: emitter.operatingStatus(),
+    terminalCapabilityHintKittyClipboardKey: '\x1b[?5522;2\$y',
   });
 }
 

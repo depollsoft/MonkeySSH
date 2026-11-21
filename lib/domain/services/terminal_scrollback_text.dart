@@ -100,12 +100,15 @@ void _writeRowText(BufferLine row, StringBuffer out, List<int>? columns) {
       columns?.add(pendingBlankStart + blank);
     }
     pendingBlankCount = 0;
-    out.writeCharCode(codePoint);
-    if (columns != null) {
-      columns.add(column);
-      if (codePoint > 0xFFFF) {
-        // A supplementary code point is two UTF-16 code units.
+    // The rest of the cell's grapheme cluster belongs to the same column.
+    for (final cellCodePoint in [codePoint, ...row.getGraphemeExtras(column)]) {
+      out.writeCharCode(cellCodePoint);
+      if (columns != null) {
         columns.add(column);
+        if (cellCodePoint > 0xFFFF) {
+          // A supplementary code point is two UTF-16 code units.
+          columns.add(column);
+        }
       }
     }
   }

@@ -33,6 +33,15 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// A stand-in for an agent process that tests inspect while it runs,
+	// under whatever name they started this executable with.
+	if os.Getenv("MONKEYMUX_TEST_STAND_IN") != "" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	// Probes against real ps, lsof and sqlite3 must not fail a test because
+	// the machine was busy (see processMetadataTimeout).
+	processMetadataTimeout = 30 * time.Second
 	os.Exit(m.Run())
 }
 
@@ -171,7 +180,11 @@ func TestPrepareAgentLaunch(t *testing.T) {
 				prefix = []string{"--plugin-dir", filepath.Join(directory, "monkeymux-cursor-plugin")}
 			case "codex":
 				hook := shellQuote(executable) + " agent-identity-hook --tool codex"
-				prefix = []string{"-c", codexIdentityHookConfig(hook), "-c", codexIdentityHookTrustConfig(hook)}
+				prefix = []string{
+					"-c", codexIdentityHookConfig(hook),
+					"-c", codexIdentityHookTrustConfig(hook),
+					"-c", "features.daemon_auto_start=false",
+				}
 			}
 			assignFlag := agentLaunchSessionIDFlag(tool, args)
 			if assignFlag != "" {
