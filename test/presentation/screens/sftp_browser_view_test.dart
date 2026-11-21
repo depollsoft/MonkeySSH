@@ -1,7 +1,11 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:monkeyssh/app/theme.dart';
 import 'package:monkeyssh/data/database/database.dart';
 import 'package:monkeyssh/domain/services/settings_service.dart';
 import 'package:monkeyssh/presentation/screens/sftp_browser_view.dart';
@@ -158,6 +162,23 @@ void main() {
       expect(await store.load(3), const SftpBrowserViewSettings());
     });
 
+    test(
+      'shared transactions keep overlapping saves in submission order',
+      () async {
+        final otherStore = SettingsSftpBrowserViewStore(SettingsService(db));
+        const latest = SftpBrowserViewSettings(showHidden: false);
+        await Future.wait([
+          store.save(1, const SftpBrowserViewSettings(descending: true)),
+          store.save(
+            1,
+            const SftpBrowserViewSettings(sortField: SftpSortField.size),
+          ),
+          otherStore.save(1, latest),
+        ]);
+        expect(await store.load(1), latest);
+      },
+    );
+
     test('keeps the filter per host with its folder', () async {
       await store.saveFilter(1, (directory: '/srv', query: 'log'));
       await store.saveFilter(2, (directory: '/tmp', query: 'x'));
@@ -181,41 +202,142 @@ void main() {
     });
   });
 
-  testWidgets('the sort button marks any view that is not the default', (
+  group('countSftpFilterMatches and filename highlights', () {
+    test('counts eligible entries, matches and hidden matches separately', () {
+      expect(
+        countSftpFilterMatches(_entries, const SftpBrowserViewSettings(), 'c'),
+        (matched: 2, total: 6, hiddenMatched: 0),
+      );
+      expect(
+        countSftpFilterMatches(
+          _entries,
+          const SftpBrowserViewSettings(showHidden: false),
+          'env',
+        ),
+        (matched: 0, total: 4, hiddenMatched: 1),
+      );
+    });
+
+    test('splits case-insensitive matches into highlighted spans', () {
+      const base = TextStyle(fontWeight: FontWeight.w400);
+      const match = TextStyle(fontWeight: FontWeight.w700);
+      final spans = buildHighlightedSftpFilenameSpans(
+        filename: 'CHANGELOG.log',
+        query: 'log',
+        baseStyle: base,
+        matchStyle: match,
+      ).cast<TextSpan>();
+
+      expect(
+        [for (final s in spans) (s.text, s.style == match)],
+        [('CHANGE', false), ('LOG', true), ('.', false), ('log', true)],
+      );
+    });
+  });
+
+  testWidgets('sort/view pill reflects active sort, order and hidden state', (
     tester,
   ) async {
-    Future<bool> badgeShown(SftpBrowserViewSettings settings) async {
-      final controller = TextEditingController();
+    Future<void> pumpToolbar(
+      SftpBrowserViewSettings settings, {
+      String query = '',
+      int? matchCount,
+      int? totalCount,
+      double width = 390,
+      ValueChanged<String>? onFilterChanged,
+    }) async {
+      final controller = TextEditingController(text: query);
+      final focus = FocusNode();
       addTearDown(controller.dispose);
+      addTearDown(focus.dispose);
       await tester.pumpWidget(
         MaterialApp(
+          theme: FluttyTheme.dark,
           home: Scaffold(
-            body: SftpBrowserToolbar(
-              filterController: controller,
-              onFilterChanged: (_) {},
-              settings: settings,
-              onShowViewOptions: () {},
+            body: SizedBox(
+              width: width,
+              child: SftpBrowserToolbar(
+                filterController: controller,
+                filterFocus: focus,
+                onCloseFilter: () {
+                  controller.clear();
+                  onFilterChanged?.call('');
+                },
+                onFilterChanged: onFilterChanged ?? (_) {},
+                settings: settings,
+                onShowViewOptions: () {},
+                matchCount: matchCount,
+                totalCount: totalCount,
+              ),
             ),
           ),
         ),
       );
-      return tester.widget<Badge>(find.byType(Badge)).isLabelVisible;
     }
 
-    expect(await badgeShown(const SftpBrowserViewSettings()), isFalse);
-    expect(
-      await badgeShown(
-        const SftpBrowserViewSettings(sortField: SftpSortField.size),
+    await pumpToolbar(const SftpBrowserViewSettings());
+    expect(find.text('name'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+    expect(find.byIcon(Icons.visibility_off_outlined), findsNothing);
+
+    await pumpToolbar(
+      const SftpBrowserViewSettings(
+        sortField: SftpSortField.size,
+        descending: true,
+        showHidden: false,
       ),
-      isTrue,
     );
+    expect(find.text('size'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_downward), findsOneWidget);
+    expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
+
+    // Shows match count when filtering and adapts cleanly on narrow widths.
+    String? latestQuery;
+    await pumpToolbar(
+      const SftpBrowserViewSettings(),
+      query: 'log',
+      matchCount: 0,
+      totalCount: 6,
+      onFilterChanged: (q) => latestQuery = q,
+    );
+    final countText = tester.widget<Text>(
+      find.byKey(const ValueKey('sftpFilterMatchCount')),
+    );
+    expect(countText.data, '0/6');
+
+    // Escape clears a non-empty filter query.
+    await tester.tap(find.byKey(const ValueKey('sftpFilterField')));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(latestQuery, '');
+
+    // Narrow viewport collapses sort label without overflow.
+    await pumpToolbar(
+      const SftpBrowserViewSettings(),
+      width: 290,
+      query: 'log',
+      matchCount: 1,
+      totalCount: 6,
+    );
+    expect(find.byIcon(Icons.tune), findsOneWidget);
+    expect(find.text('1/6'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('sort and view exposes a screen-reader tap action', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(sftpFilterToolbarPreview());
+    final button = find.bySemanticsLabel(RegExp('Sort and view:'));
     expect(
-      await badgeShown(const SftpBrowserViewSettings(descending: true)),
+      tester
+          .getSemantics(button)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
       isTrue,
     );
-    expect(
-      await badgeShown(const SftpBrowserViewSettings(showHidden: false)),
-      isTrue,
-    );
+    semantics.dispose();
   });
 }

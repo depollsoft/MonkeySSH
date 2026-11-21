@@ -74,17 +74,24 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   }
 
   Future<void> _showViewOptions() async {
-    final next = await showSftpBrowserViewOptions(context, _viewSettings);
-    if (next == null || !mounted) return;
-    await _applyViewSettings(next);
+    await showSftpBrowserViewOptions(
+      context,
+      _viewSettings,
+      onChanged: (next) => unawaited(_applyViewSettings(next)),
+    );
   }
 
-  /// Shows [next] now and saves it for this host.
+  Future<void> _toggleSortDirection() => _applyViewSettings(
+    _viewSettings.copyWith(descending: !_viewSettings.descending),
+  );
+
+  /// Shows [next] now and submits the save to the shared settings store.
   Future<void> _applyViewSettings(SftpBrowserViewSettings next) async {
     _viewSettingsChangedLocally = true;
     _update(() => _viewSettings = next);
+    final store = ref.read(sftpBrowserViewStoreProvider);
     try {
-      await ref.read(sftpBrowserViewStoreProvider).save(widget.hostId, next);
+      await store.save(widget.hostId, next);
     } on Exception catch (error) {
       DiagnosticsLogService.instance.warning(
         'sftp.view',
@@ -110,6 +117,10 @@ extension _SftpScreenBatchActions on _SftpScreenState {
   /// restarts. Runs inside setState.
   void _syncFilterWithDirectory(String path) {
     if (_filterDirectory == path) return;
+    if (_filterDirectory != null) {
+      _showFilterToolbar = false;
+      _filterFocus.unfocus();
+    }
     // Leaving the folder a filter was applied to forgets it; a filter saved
     // for a folder not opened yet (the browser restarts at its start folder)
     // waits until that folder is opened.
@@ -149,7 +160,24 @@ extension _SftpScreenBatchActions on _SftpScreenState {
     _onFilterChanged('');
   }
 
+  void _toggleFilterToolbar() {
+    if (_filterToolbarVisible) {
+      _hideFilterToolbar();
+    } else {
+      _update(() => _showFilterToolbar = true);
+      _filterFocus.requestFocus();
+    }
+  }
+
+  void _hideFilterToolbar() {
+    _update(() => _showFilterToolbar = false);
+    _filterFocus.unfocus();
+    _clearFilter();
+    _filterToggleFocus.requestFocus();
+  }
+
   void _startBatchSelection([SftpName? file]) {
+    _filterFocus.unfocus();
     _clearHighlightedFile();
     _update(() {
       _isBatchSelecting = true;

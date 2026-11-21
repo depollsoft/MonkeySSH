@@ -1598,8 +1598,8 @@ void main() {
       // The scaffold's own button: the old one may still be animating out.
       Widget? uploadButton() => tester
           .widget<Scaffold>(
-            find.ancestor(
-              of: find.byType(SftpBrowserToolbar),
+            find.descendant(
+              of: find.byType(SftpScreen),
               matching: find.byType(Scaffold),
             ),
           )
