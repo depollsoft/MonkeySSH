@@ -679,6 +679,11 @@ class SftpBrowserToolbar extends StatefulWidget {
   State<SftpBrowserToolbar> createState() => _SftpBrowserToolbarState();
 }
 
+const _toolbarControlHeight = 48.0;
+const _toolbarControlRadius = BorderRadius.all(
+  Radius.circular(FluttyTheme.radiusSm),
+);
+
 class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
   late final FocusNode _focusNode = FocusNode(
     debugLabel: 'sftp-filter-field',
@@ -745,11 +750,12 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
         border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 6, 6),
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 8, 6),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final compact = constraints.maxWidth < 340 || textScale > 1.35;
             return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
                   child: ValueListenableBuilder<TextEditingValue>(
@@ -765,9 +771,18 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                             onPressed: _openFilter,
                             style: TextButton.styleFrom(
                               foregroundColor: muted,
-                              minimumSize: const Size(44, 44),
+                              backgroundColor: inputFill,
+                              minimumSize: const Size(
+                                48,
+                                _toolbarControlHeight,
+                              ),
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: _toolbarControlRadius,
+                              ),
+                              side: BorderSide(color: scheme.outline),
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
+                                horizontal: 12,
+                                vertical: 6,
                               ),
                             ),
                             icon: const Icon(Icons.search, size: 18),
@@ -830,24 +845,18 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                             ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 10,
-                              vertical: 9,
+                              vertical: 6,
                             ),
                             border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(
-                                FluttyTheme.radiusSm,
-                              ),
+                              borderRadius: _toolbarControlRadius,
                               borderSide: BorderSide(color: restingBorderColor),
                             ),
                             enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(
-                                FluttyTheme.radiusSm,
-                              ),
+                              borderRadius: _toolbarControlRadius,
                               borderSide: BorderSide(color: restingBorderColor),
                             ),
                             focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(
-                                FluttyTheme.radiusSm,
-                              ),
+                              borderRadius: _toolbarControlRadius,
                               borderSide: BorderSide(
                                 color: scheme.primary,
                                 width: 1.5,
@@ -859,12 +868,12 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                               color: hasQuery ? scheme.primary : muted,
                             ),
                             prefixIconConstraints: const BoxConstraints(
-                              minWidth: 34,
-                              minHeight: 36,
+                              minWidth: 40,
+                              minHeight: _toolbarControlHeight,
                             ),
                             suffixIconConstraints: const BoxConstraints(
                               minWidth: 44,
-                              minHeight: 44,
+                              minHeight: _toolbarControlHeight,
                             ),
                             helper: compact ? count : null,
                             suffixIcon: Row(
@@ -884,7 +893,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                                       : 'Close filter',
                                   constraints: const BoxConstraints.tightFor(
                                     width: 44,
-                                    height: 44,
+                                    height: _toolbarControlHeight,
                                   ),
                                   padding: EdgeInsets.zero,
                                   icon: Icon(
@@ -902,7 +911,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                     },
                   ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 _SortViewPill(
                   key: const ValueKey('sftpSortViewButton'),
                   settings: settings,
@@ -917,13 +926,13 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                         },
                 ),
                 if (widget.onStartSelection != null) ...[
-                  const SizedBox(width: 2),
+                  const SizedBox(width: 4),
                   IconButton(
                     tooltip: 'Select files',
                     onPressed: widget.onStartSelection,
                     constraints: const BoxConstraints.tightFor(
                       width: 44,
-                      height: 44,
+                      height: _toolbarControlHeight,
                     ),
                     padding: EdgeInsets.zero,
                     icon: Icon(
@@ -1016,53 +1025,60 @@ class _SortViewPill extends StatelessWidget {
       child: Semantics(
         button: true,
         label: tooltip,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            child: Center(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: bgColor,
-                  borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-                  border: Border.all(color: borderColor),
+        child: Material(
+          color: bgColor,
+          shape: RoundedRectangleBorder(
+            borderRadius: _toolbarControlRadius,
+            side: BorderSide(color: borderColor),
+          ),
+          child: InkWell(
+            borderRadius: _toolbarControlRadius,
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minWidth: 48,
+                minHeight: _toolbarControlHeight,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
                 ),
-                child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: compact ? 8 : 9,
-                    vertical: 8,
-                  ),
-                  child: ExcludeSemantics(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (compact)
-                          Icon(Icons.tune, size: 16, color: fgColor)
-                        else
-                          Text(
-                            settings.sortField.label.toLowerCase(),
-                            style: FluttyTheme.monoStyle.copyWith(
-                              fontSize: 12,
-                              fontWeight: isCustom
-                                  ? FontWeight.w600
-                                  : FontWeight.w500,
-                              color: fgColor,
-                            ),
-                          ),
-                        const SizedBox(width: 2),
-                        Icon(directionIcon, size: 13, color: fgColor),
-                        if (!settings.showHidden) ...[
-                          const SizedBox(width: 4),
-                          Icon(
-                            Icons.visibility_off_outlined,
-                            size: 13,
+                child: ExcludeSemantics(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        compact ? Icons.tune : Icons.sort,
+                        size: 18,
+                        color: fgColor,
+                      ),
+                      if (!compact) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          settings.sortField.label.toLowerCase(),
+                          style: FluttyTheme.monoStyle.copyWith(
+                            fontSize: 12,
+                            fontWeight: isCustom
+                                ? FontWeight.w600
+                                : FontWeight.w500,
                             color: fgColor,
                           ),
-                        ],
+                        ),
                       ],
-                    ),
+                      const SizedBox(width: 2),
+                      Icon(directionIcon, size: 13, color: fgColor),
+                      if (!settings.showHidden) ...[
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.visibility_off_outlined,
+                          size: 13,
+                          color: fgColor,
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),

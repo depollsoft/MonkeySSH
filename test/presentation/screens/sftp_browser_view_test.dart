@@ -336,10 +336,15 @@ void main() {
     );
     final field = find.byKey(const ValueKey('sftpFilterField'));
     final filter = find.widgetWithText(TextButton, 'Filter');
+    final sort = find.byKey(const ValueKey('sftpSortViewButton'));
     expect(field, findsNothing);
+    final sortBounds = tester.getRect(sort);
+    expect(tester.getRect(filter).height, sortBounds.height);
     await tester.tap(filter);
     await tester.pumpAndSettle();
     expect(tester.widget<TextField>(field).focusNode!.hasFocus, isTrue);
+    expect(tester.getRect(field).height, sortBounds.height);
+    expect(tester.getRect(sort), sortBounds);
 
     await tester.testTextInput.receiveAction(TextInputAction.search);
     await tester.pumpAndSettle();
