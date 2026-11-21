@@ -63,6 +63,12 @@ class _SwipeSnackBarState extends State<_SwipeSnackBar> {
     final theme = SnackBarTheme.of(context);
     if (theme.dismissDirection != null) return widget.original;
 
+    final hitTestBehavior =
+        widget.original.hitTestBehavior ??
+        (widget.original.margin != null || theme.insetPadding != null
+            ? HitTestBehavior.deferToChild
+            : HitTestBehavior.opaque);
+
     // Let the two axis-specific recognizers compete normally with each other
     // and with the action button. Keep Material's semantic dismiss action.
     return SnackBarTheme(
@@ -71,13 +77,13 @@ class _SwipeSnackBarState extends State<_SwipeSnackBar> {
         child: Dismissible(
           key: const ValueKey(DismissDirection.horizontal),
           resizeDuration: null,
-          behavior: HitTestBehavior.deferToChild,
+          behavior: hitTestBehavior,
           onDismissed: _dismiss,
           child: Dismissible(
             key: const ValueKey(DismissDirection.down),
             direction: DismissDirection.down,
             resizeDuration: null,
-            behavior: HitTestBehavior.deferToChild,
+            behavior: hitTestBehavior,
             onDismissed: _dismiss,
             child: widget.original,
           ),

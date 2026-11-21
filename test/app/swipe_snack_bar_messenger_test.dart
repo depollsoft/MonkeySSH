@@ -72,6 +72,44 @@ void main() {
     expect(actionTapped, isTrue);
     expect(await alert.closed, SnackBarClosedReason.action);
   });
+
+  for (final usesDefaultMargin in [true, false]) {
+    testWidgets(
+      usesDefaultMargin
+          ? 'the default bottom margin accepts a downward swipe'
+          : 'an explicit bottom margin lets touches pass through',
+      (tester) async {
+        final messenger = await _pumpMessenger(tester);
+        final alert = messenger.showSnackBar(
+          SnackBar(
+            content: const Text('Notification'),
+            margin: usesDefaultMargin
+                ? null
+                : const EdgeInsets.fromLTRB(15, 0, 15, 20),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final snackBarBottom = tester.getBottomLeft(find.byType(SnackBar)).dy;
+        await tester.dragFrom(
+          Offset(
+            tester.getCenter(find.text('Notification')).dx,
+            snackBarBottom - 2,
+          ),
+          const Offset(0, 80),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Notification'),
+          usesDefaultMargin ? findsNothing : findsOneWidget,
+        );
+        if (usesDefaultMargin) {
+          expect(await alert.closed, SnackBarClosedReason.swipe);
+        }
+      },
+    );
+  }
 }
 
 Future<ScaffoldMessengerState> _pumpMessenger(WidgetTester tester) async {
