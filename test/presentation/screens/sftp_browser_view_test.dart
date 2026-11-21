@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -278,7 +280,6 @@ void main() {
       find.byKey(const ValueKey('sftpFilterMatchCount')),
     );
     expect(countText.data, '0/6');
-    expect(countText.style?.color, FluttyTheme.dark.colorScheme.error);
 
     // Escape clears a non-empty filter query.
     await tester.tap(find.byKey(const ValueKey('sftpFilterField')));
@@ -288,9 +289,32 @@ void main() {
     expect(latestQuery, '');
 
     // Narrow viewport collapses sort label without overflow.
-    await pumpToolbar(const SftpBrowserViewSettings(), width: 290);
+    await pumpToolbar(
+      const SftpBrowserViewSettings(),
+      width: 290,
+      query: 'log',
+      matchCount: 1,
+      totalCount: 6,
+    );
     expect(find.byIcon(Icons.tune), findsOneWidget);
+    expect(find.text('1/6'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('sort and view exposes a screen-reader tap action', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(sftpFilterToolbarPreview());
+    final button = find.bySemanticsLabel(RegExp('Sort and view:'));
+    expect(
+      tester
+          .getSemantics(button)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    semantics.dispose();
   });
 
   testWidgets('filter opens focused and collapses when dismissed empty', (

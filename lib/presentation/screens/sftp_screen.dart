@@ -2966,24 +2966,29 @@ class _HiddenItemsFooter extends StatelessWidget {
         constraints: const BoxConstraints(minHeight: 44),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          child: Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 6,
             children: [
               Icon(Icons.visibility_off_outlined, size: 15, color: muted),
-              const SizedBox(width: 6),
-              Text(
-                '$hiddenCount $noun · ',
+              Text.rich(
+                TextSpan(
+                  text: '$hiddenCount $noun · ',
+                  children: const [
+                    TextSpan(
+                      text: 'Show hidden files',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ],
+                ),
+                textAlign: TextAlign.center,
                 style: FluttyTheme.monoStyle.copyWith(
                   fontSize: 12,
                   color: muted,
-                ),
-              ),
-              Text(
-                'show',
-                style: FluttyTheme.monoStyle.copyWith(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: scheme.primary,
                 ),
               ),
             ],

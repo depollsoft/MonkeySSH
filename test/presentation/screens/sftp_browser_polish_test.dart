@@ -423,6 +423,8 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('Largest'));
     await tester.pump();
+    await tester.tap(find.text('Size'));
+    await tester.pump();
     await tester.tap(find.text('Show hidden files'));
     await tester.pumpAndSettle();
 

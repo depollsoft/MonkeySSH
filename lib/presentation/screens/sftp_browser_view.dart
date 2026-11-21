@@ -465,13 +465,8 @@ class _SftpBrowserViewOptionsSheetState
                         label: field.label,
                         selected: _settings.sortField == field,
                         showCheck: true,
-                        onTap: () => _update(
-                          _settings.sortField == field
-                              ? _settings.copyWith(
-                                  descending: !_settings.descending,
-                                )
-                              : _settings.copyWith(sortField: field),
-                        ),
+                        onTap: () =>
+                            _update(_settings.copyWith(sortField: field)),
                       ),
                   ];
                   if (useWrap) {
@@ -689,6 +684,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
     debugLabel: 'sftp-filter-field',
     onKeyEvent: _handleKeyEvent,
   )..addListener(_onFilterFocusChanged);
+  final _filterButtonFocus = FocusNode(debugLabel: 'sftp-filter-button');
   bool _filterRequested = false;
 
   void _openFilter() {
@@ -705,6 +701,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
   void _closeFilter() {
     setState(() => _filterRequested = false);
     _focusNode.unfocus();
+    _filterButtonFocus.requestFocus();
     if (widget.filterController.text.isNotEmpty) {
       widget.filterController.clear();
       widget.onFilterChanged('');
@@ -714,6 +711,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
   @override
   void dispose() {
     _focusNode.dispose();
+    _filterButtonFocus.dispose();
     super.dispose();
   }
 
@@ -763,6 +761,7 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                         return Align(
                           alignment: AlignmentDirectional.centerStart,
                           child: TextButton.icon(
+                            focusNode: _filterButtonFocus,
                             onPressed: _openFilter,
                             style: TextButton.styleFrom(
                               foregroundColor: muted,
@@ -780,12 +779,29 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                           ),
                         );
                       }
-                      final showCount =
+                      final hasCount =
                           hasQuery &&
-                          !compact &&
                           widget.matchCount != null &&
                           widget.totalCount != null;
-                      final zeroMatches = widget.matchCount == 0;
+                      final count = hasCount
+                          ? Semantics(
+                              container: true,
+                              liveRegion: true,
+                              label:
+                                  '${widget.matchCount} of ${widget.totalCount} items match',
+                              child: ExcludeSemantics(
+                                child: Text(
+                                  '${widget.matchCount}/${widget.totalCount}',
+                                  key: const ValueKey('sftpFilterMatchCount'),
+                                  style: FluttyTheme.monoStyle.copyWith(
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: muted,
+                                  ),
+                                ),
+                              ),
+                            )
+                          : null;
                       final restingBorderColor = hasQuery
                           ? scheme.primary.withValues(alpha: 0.7)
                           : scheme.outline;
@@ -847,47 +863,28 @@ class _SftpBrowserToolbarState extends State<SftpBrowserToolbar> {
                               minHeight: 36,
                             ),
                             suffixIconConstraints: const BoxConstraints(
-                              minWidth: 36,
-                              minHeight: 36,
+                              minWidth: 44,
+                              minHeight: 44,
                             ),
+                            helper: compact ? count : null,
                             suffixIcon: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (showCount)
-                                  Semantics(
-                                    container: true,
-                                    liveRegion: true,
-                                    label:
-                                        '${widget.matchCount} of ${widget.totalCount} items match',
-                                    child: ExcludeSemantics(
-                                      child: Padding(
-                                        padding: const EdgeInsets.only(
-                                          left: 4,
-                                          right: 2,
-                                        ),
-                                        child: Text(
-                                          '${widget.matchCount}/${widget.totalCount}',
-                                          key: const ValueKey(
-                                            'sftpFilterMatchCount',
-                                          ),
-                                          style: FluttyTheme.monoStyle.copyWith(
-                                            fontSize: 11.5,
-                                            fontWeight: FontWeight.w600,
-                                            color: zeroMatches
-                                                ? scheme.error
-                                                : muted,
-                                          ),
-                                        ),
-                                      ),
+                                if (!compact && count != null)
+                                  Padding(
+                                    padding: const EdgeInsetsDirectional.only(
+                                      start: 4,
+                                      end: 2,
                                     ),
+                                    child: count,
                                   ),
                                 IconButton(
                                   tooltip: hasText
                                       ? 'Clear filter'
                                       : 'Close filter',
-                                  constraints: const BoxConstraints(
-                                    minWidth: 36,
-                                    minHeight: 36,
+                                  constraints: const BoxConstraints.tightFor(
+                                    width: 44,
+                                    height: 44,
                                   ),
                                   padding: EdgeInsets.zero,
                                   icon: Icon(
@@ -1015,28 +1012,29 @@ class _SortViewPill extends StatelessWidget {
 
     return Tooltip(
       message: tooltip,
+      excludeFromSemantics: true,
       child: Semantics(
         button: true,
         label: tooltip,
-        child: ExcludeSemantics(
-          child: InkWell(
-            borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-            onTap: onTap,
-            onLongPress: onLongPress,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-              child: Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: bgColor,
-                    borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
-                    border: Border.all(color: borderColor),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+          onTap: onTap,
+          onLongPress: onLongPress,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            child: Center(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: bgColor,
+                  borderRadius: BorderRadius.circular(FluttyTheme.radiusSm),
+                  border: Border.all(color: borderColor),
+                ),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: compact ? 8 : 9,
+                    vertical: 8,
                   ),
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: compact ? 8 : 9,
-                      vertical: 8,
-                    ),
+                  child: ExcludeSemantics(
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
