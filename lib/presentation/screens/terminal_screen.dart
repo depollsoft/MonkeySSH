@@ -1040,7 +1040,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int? _pendingTerminalTargetTapPointer;
   Offset? _pendingTerminalTargetTapDownPosition;
   Duration? _pendingTerminalTargetTapDownTimestamp;
-  String? _recentlyOpenedTerminalTargetTap;
+  bool _terminalTargetTapOpenedByPointer = false;
   final Set<_TerminalExclusiveAction> _exclusiveTerminalActions =
       <_TerminalExclusiveAction>{};
   int? _pendingTerminalDoubleTapPointer;
@@ -14304,7 +14304,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       scrollResetGeneration: _terminalScrollResetGeneration,
       resolveLinkTap: _resolveTerminalLinkTap,
       onLinkTapDown: _handleTerminalLinkTapDown,
-      onLinkTap: _handleTerminalLinkTap,
+      onLinkTap: _handleTerminalGestureLinkTap,
       suppressLongPressDragSelection: isMobile,
       liveOutputAutoScroll: _terminalLiveOutputAutoScrollEnabled,
       useSystemSelection: isMobile || _isNativeSelectionMode,
@@ -15139,12 +15139,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         }
       }
     }
-    _clearPendingTerminalTargetTap();
-    if (_recentlyOpenedTerminalTargetTap == target) {
-      _recentlyOpenedTerminalTargetTap = null;
-      return null;
-    }
+    // Leave the pointer-level pending tap alone. With system selection the
+    // selection recognizer wins the arena, so that tap is the only one that
+    // opens the link; this resolver still runs when the losing tap recognizer
+    // reports its tap down 100 ms into the press.
     return target;
+  }
+
+  /// Opens a link for the terminal's own tap recognizer, unless the pointer
+  /// listener already opened a target for the same touch. The two can resolve
+  /// different targets (the listener also looks at neighbouring cells), so the
+  /// check does not compare them.
+  void _handleTerminalGestureLinkTap(String link) {
+    if (_terminalTargetTapOpenedByPointer) {
+      _terminalTargetTapOpenedByPointer = false;
+      return;
+    }
+    _clearPendingTerminalTargetTap();
+    _handleTerminalLinkTap(link);
   }
 
   String? _resolveTerminalExternalLinkAtOffset(
@@ -15573,6 +15585,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   void _handleTerminalTargetPointerDown(PointerDownEvent event) {
     _clearPendingTerminalTargetTap();
+    _terminalTargetTapOpenedByPointer = false;
     final terminalViewState = _terminalViewKey.currentState;
     if (terminalViewState == null) {
       _clearHoveredTerminalPathUnderline();
@@ -15634,12 +15647,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     _clearPendingTerminalTargetTap();
-    _recentlyOpenedTerminalTargetTap = pendingTarget;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_recentlyOpenedTerminalTargetTap == pendingTarget) {
-        _recentlyOpenedTerminalTargetTap = null;
-      }
-    });
+    // The recognizer's tap up, if it comes, arrives in this same pointer-up
+    // dispatch; the next pointer down clears the flag in case no frame does.
+    _terminalTargetTapOpenedByPointer = true;
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _terminalTargetTapOpenedByPointer = false,
+    );
     _handleTerminalLinkTap(pendingTarget);
     return true;
   }
