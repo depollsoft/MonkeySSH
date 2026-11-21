@@ -27,6 +27,7 @@ import 'auth_lifecycle_controller.dart';
 import 'notification_navigation.dart';
 import 'push_notification_bridge.dart';
 import 'router.dart';
+import 'swipe_snack_bar_messenger.dart';
 import 'theme.dart';
 
 /// The root widget of the Flutty application.
@@ -86,8 +87,10 @@ class FluttyApp extends ConsumerWidget {
             // Duo), and hardware keyboard shortcuts reach every route.
             builder: (context, child) => PlatformDisplayFeaturesMediaQuery(
               child: PlatformKeyboardInsetMediaQuery(
-                child: AppShortcutsHost(
-                  child: child ?? const SizedBox.shrink(),
+                child: SwipeSnackBarMessenger(
+                  child: AppShortcutsHost(
+                    child: child ?? const SizedBox.shrink(),
+                  ),
                 ),
               ),
             ),
