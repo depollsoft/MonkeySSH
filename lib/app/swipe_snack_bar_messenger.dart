@@ -73,19 +73,22 @@ class _SwipeSnackBarState extends State<_SwipeSnackBar> {
     // and with the action button. Keep Material's semantic dismiss action.
     return SnackBarTheme(
       data: theme.copyWith(dismissDirection: DismissDirection.none),
-      child: ClipRect(
-        child: Dismissible(
-          key: const ValueKey(DismissDirection.horizontal),
-          resizeDuration: null,
-          behavior: hitTestBehavior,
-          onDismissed: _dismiss,
+      child: Semantics(
+        container: true,
+        child: ClipRect(
           child: Dismissible(
-            key: const ValueKey(DismissDirection.down),
-            direction: DismissDirection.down,
+            key: const ValueKey(DismissDirection.horizontal),
             resizeDuration: null,
             behavior: hitTestBehavior,
             onDismissed: _dismiss,
-            child: widget.original,
+            child: Dismissible(
+              key: const ValueKey(DismissDirection.down),
+              direction: DismissDirection.down,
+              resizeDuration: null,
+              behavior: hitTestBehavior,
+              onDismissed: _dismiss,
+              child: widget.original,
+            ),
           ),
         ),
       ),

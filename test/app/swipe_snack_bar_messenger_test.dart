@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:monkeyssh/app/swipe_snack_bar_messenger.dart';
 
@@ -110,6 +111,32 @@ void main() {
       },
     );
   }
+
+  testWidgets('swipe semantics stay separate from the page', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final messenger = await _pumpMessenger(tester);
+    final alert = messenger.showSnackBar(
+      const SnackBar(content: Text('Notification')),
+    );
+    await tester.pumpAndSettle();
+
+    final page = tester.getSemantics(find.text('Page content'));
+    for (SemanticsNode? node = page; node != null; node = node.parent) {
+      final data = node.getSemanticsData();
+      expect(data.hasAction(SemanticsAction.scrollLeft), isFalse);
+      expect(data.hasAction(SemanticsAction.scrollDown), isFalse);
+    }
+
+    final notification = tester.getSemantics(find.text('Notification'));
+    expect(
+      notification.getSemanticsData().hasAction(SemanticsAction.dismiss),
+      isTrue,
+    );
+    notification.owner!.performAction(notification.id, SemanticsAction.dismiss);
+    await tester.pumpAndSettle();
+    expect(await alert.closed, SnackBarClosedReason.dismiss);
+    semantics.dispose();
+  });
 }
 
 Future<ScaffoldMessengerState> _pumpMessenger(WidgetTester tester) async {
@@ -123,7 +150,7 @@ Future<ScaffoldMessengerState> _pumpMessenger(WidgetTester tester) async {
       ),
       builder: (context, child) =>
           SwipeSnackBarMessenger(key: messengerKey, child: child!),
-      home: const Scaffold(),
+      home: const Scaffold(body: Text('Page content')),
     ),
   );
   return messengerKey.currentState!;
