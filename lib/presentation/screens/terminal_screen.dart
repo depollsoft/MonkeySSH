@@ -6336,23 +6336,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   ({int width, int height})? _localTerminalCellPixelSize() {
+    // Match MonkeyMux's Unix cellPixelSizeOf (integer division of viewport
+    // pixels by cell grid) so control-channel resize/focus cell sizes agree
+    // with the helper's SIGWINCH tty readings.
+    final cellSize = _localTerminalViewportCellSize();
+    final pixelSize = _localTerminalViewportPixelSize();
+    if (pixelSize != null &&
+        cellSize.columns > 0 &&
+        cellSize.rows > 0 &&
+        pixelSize.width > 0 &&
+        pixelSize.height > 0) {
+      final width = pixelSize.width ~/ cellSize.columns;
+      final height = pixelSize.height ~/ cellSize.rows;
+      if (width > 0 && height > 0) {
+        return (width: width, height: height);
+      }
+    }
     final cellPixelSize = _terminalViewKey.currentState?.viewportCellPixelSize;
     if (cellPixelSize != null &&
         cellPixelSize.width > 0 &&
         cellPixelSize.height > 0) {
       return cellPixelSize;
-    }
-    final metrics = _activeSession()?.terminalWindowMetrics;
-    if (metrics != null &&
-        metrics.columns > 0 &&
-        metrics.rows > 0 &&
-        metrics.pixelWidth > 0 &&
-        metrics.pixelHeight > 0) {
-      final width = (metrics.pixelWidth / metrics.columns).round();
-      final height = (metrics.pixelHeight / metrics.rows).round();
-      if (width > 0 && height > 0) {
-        return (width: width, height: height);
-      }
     }
     return null;
   }

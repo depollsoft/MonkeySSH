@@ -1647,6 +1647,7 @@ func attachCommand(args []string) {
 	if *heightFlag > 0 {
 		height = *heightFlag
 	}
+	cellWidth, cellHeight := terminalCellPixelSize()
 	if err := ensureServer(
 		session,
 		createWindowOptions{
@@ -1655,6 +1656,8 @@ func attachCommand(args []string) {
 			command:        *command,
 			themeHint:      themeHint,
 			capabilityHint: capabilityHint,
+			cellWidth:      cellWidth,
+			cellHeight:     cellHeight,
 		},
 		policy,
 		*restoreYolo,
@@ -1683,7 +1686,7 @@ func attachCommand(args []string) {
 		attachToken = reporter.token
 	}
 
-	cellWidth, cellHeight := terminalCellPixelSize()
+	cellWidth, cellHeight = terminalCellPixelSize()
 	cellToken := newCellSizeToken()
 	hello := controlMessage{
 		Role:           "attach",
@@ -1868,12 +1871,15 @@ func newSessionCommand(args []string) {
 	}
 
 	width, height := terminalSize()
+	cellWidth, cellHeight := terminalCellPixelSize()
 	if err := ensureServer(
 		target,
 		createWindowOptions{
-			cwd:  *cwd,
-			name: *name,
-			args: append([]string(nil), fs.Args()...),
+			cwd:        *cwd,
+			name:       *name,
+			args:       append([]string(nil), fs.Args()...),
+			cellWidth:  cellWidth,
+			cellHeight: cellHeight,
 		},
 		serverUpdatePolicyPrompt,
 		false,
@@ -2177,6 +2183,8 @@ func serveCommand(args []string) {
 	argsBase64 := fs.String("args-base64", "", "base64-encoded initial argv")
 	width := fs.Int("width", defaultColumns, "initial terminal columns")
 	height := fs.Int("height", defaultRows, "initial terminal rows")
+	cellWidth := fs.Int("cell-width", 0, "initial terminal cell pixel width")
+	cellHeight := fs.Int("cell-height", 0, "initial terminal cell pixel height")
 	themeHintBase64 := fs.String("theme-hint-base64", "", "base64-encoded terminal theme reports")
 	capabilityHintBase64 := fs.String("capability-hint-base64", "", "base64-encoded terminal capability reports")
 	_ = fs.Parse(args)
@@ -2206,6 +2214,8 @@ func serveCommand(args []string) {
 		args:           initialArgs,
 		themeHint:      themeHint,
 		capabilityHint: capabilityHint,
+		cellWidth:      *cellWidth,
+		cellHeight:     *cellHeight,
 	}, restore, *width, *height); err != nil {
 		fatal(err)
 	}
@@ -2442,6 +2452,13 @@ func ensureServer(
 	}
 	if width > 0 && height > 0 {
 		serveArgs = append(serveArgs, "--width", strconv.Itoa(width), "--height", strconv.Itoa(height))
+	}
+	if validCellPixelSize(initialWindow.cellWidth, initialWindow.cellHeight) {
+		serveArgs = append(
+			serveArgs,
+			"--cell-width", strconv.Itoa(initialWindow.cellWidth),
+			"--cell-height", strconv.Itoa(initialWindow.cellHeight),
+		)
 	}
 	var restore *serverRestore
 	var previousPID pidRecord
@@ -6462,6 +6479,10 @@ func serveSession(
 	_ = os.Chmod(socket, 0o600)
 
 	server := newMuxServerWithSize(session, width, height)
+	if validCellPixelSize(initialWindow.cellWidth, initialWindow.cellHeight) {
+		server.cellWidthPx = initialWindow.cellWidth
+		server.cellHeightPx = initialWindow.cellHeight
+	}
 	server.themeHint = append([]byte(nil), initialWindow.themeHint...)
 	server.capabilityHint = append([]byte(nil), initialWindow.capabilityHint...)
 	server.listener = listener
@@ -6892,6 +6913,8 @@ type createWindowOptions struct {
 	agentSessionDir           string
 	agentSessionPath          string
 	agentSessionIdentityExact bool
+	cellWidth                 int
+	cellHeight                int
 	nativeAcpBridgeID         string
 	nativeAcpProviderID       string
 	cursorVisible             bool
@@ -12414,27 +12437,38 @@ func (s *muxServer) foregroundHistoryFallbackReplayLocked(
 	// The frame is rendered from the screen model, which drops the APC image
 	// transmissions, so every image its placeholder cells reference must travel
 	// with it — not just the few most recently mutated ones — and so must the
-	// images its direct placements show, plus any store-only images uploaded
-	// during an active redraw pause whose placement has not arrived yet.
-	neededIDs := screen.KittyPlacementImageIDs()
-	if window.redrawForwardingPaused && screen == window.screenLocked() {
-		for _, id := range window.kittyImageOrder {
-			if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq {
-				neededIDs = append(neededIDs, id)
-			}
-		}
-	}
+	// images its direct placements show. Reserve the repair budget for visible
+	// frame images first before spending any leftover headroom on unplaced
+	// store-only uploads completed during an active redraw pause.
 	frameImages, served := window.kittyFrameImageReplayLocked(
 		replayed,
 		nil,
 		maxKittyImageRepairBytes-len(images),
-		neededIDs,
+		screen.KittyPlacementImageIDs(),
 	)
 	images = append(images, frameImages...)
 	// A direct placement whose image did not fit is left out rather than
 	// placed where the client may hold another window's image of that id.
 	// The client's own copies of the rest go first, before the images.
 	carried := kittyCarriedImages(replayed, served)
+	if window.redrawForwardingPaused && screen == window.screenLocked() {
+		var unplacedPauseIDs []string
+		for _, id := range window.kittyImageOrder {
+			if window.kittyImageSeq[id] > window.redrawForwardingStartKittySeq &&
+				!carried(id) {
+				unplacedPauseIDs = append(unplacedPauseIDs, id)
+			}
+		}
+		if len(unplacedPauseIDs) > 0 && len(images) < maxKittyImageRepairBytes {
+			pauseImages, _ := window.kittyFrameImageReplayLocked(
+				replayed,
+				nil,
+				maxKittyImageRepairBytes-len(images),
+				unplacedPauseIDs,
+			)
+			images = append(images, pauseImages...)
+		}
+	}
 	var deletes []byte
 	if !screen.AlternateScreenActive() {
 		deletes = screen.KittyMainPlacementDeletes(carried)

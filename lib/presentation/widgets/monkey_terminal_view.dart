@@ -3340,8 +3340,8 @@ class MonkeyRenderTerminal extends RenderBox
 
   ({int width, int height})? get viewportCellPixelSize {
     final cellSize = _painter.cellSize;
-    final width = cellSize.width.round();
-    final height = cellSize.height.round();
+    final width = cellSize.width.floor();
+    final height = cellSize.height.floor();
     if (width <= 0 || height <= 0) {
       return null;
     }
